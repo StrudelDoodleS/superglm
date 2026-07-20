@@ -267,6 +267,7 @@ class ModelMetrics:
         sample_weight=None,
         offset=None,
         *,
+        _fit_data_matches: bool | None = None,
         _mu: NDArray | None = None,
         _null_mu: NDArray | None = None,
         _fit_stats=None,
@@ -279,7 +280,27 @@ class ModelMetrics:
         self._result = model.result
         fit_X = getattr(model, "_fit_X_ref", None)
         self._X = fit_X if X is None else X
-        self._uses_fit_rows = X is None or X is fit_X
+        same_fit_object = X is None or X is fit_X
+        if _fit_data_matches is None:
+            fit_data_guard = getattr(model, "_fit_data_guard", None)
+            if fit_data_guard is None:
+                _fit_data_matches = same_fit_object
+            else:
+                _fit_data_matches = bool(
+                    same_fit_object
+                    and fit_data_guard.matches(
+                        self._X,
+                        y,
+                        sample_weight,
+                        offset,
+                        fit_weights=getattr(model, "_fit_weights", None),
+                        fit_offset=getattr(model, "_fit_offset", None),
+                    )
+                )
+        self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
+        self._uses_compact_fit_inference = bool(
+            self._dm is None and "_fit_inference_info" in model.__dict__
+        )
 
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
@@ -667,7 +688,7 @@ class ModelMetrics:
 
         uses_fitted_rank = self._working_weights_match_fit(W)
         scop_inference = getattr(self._result, "scop_inference", None)
-        if scop_inference is not None:
+        if scop_inference is not None or self._uses_compact_fit_inference:
             fit_inference = self._model._fit_inference_info
             inverse = fit_inference["XtWX_inv"]
             augmented = fit_inference["XtWX_inv_aug"]
@@ -688,7 +709,10 @@ class ModelMetrics:
                     )
                     self.__dict__["_coefficient_estimable"] = np.ones(len(beta), dtype=bool)
                 X_a = EvaluationDesign(self._model, self._X, selected_columns)
-            if "_coefficient_estimable" not in self.__dict__:
+            compact_estimable = fit_inference.get("coefficient_estimable")
+            if compact_estimable is not None:
+                self.__dict__["_coefficient_estimable"] = compact_estimable
+            elif "_coefficient_estimable" not in self.__dict__:
                 if rank_info is not None:
                     self.__dict__["_coefficient_estimable"] = rank_info.coefficient_estimable()
                 else:
@@ -814,7 +838,10 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.empty((0, 0))
 
-        if getattr(self._result, "scop_inference", None) is not None:
+        if (
+            getattr(self._result, "scop_inference", None) is not None
+            or self._uses_compact_fit_inference
+        ):
             return self._model._fit_inference_info["R_a"]
 
         if self._working_weights_match_fit(W):
@@ -835,7 +862,10 @@ class ModelMetrics:
         if X_a.shape[1] == 0:
             return np.array([]), np.array([])
 
-        if getattr(self._result, "scop_inference", None) is not None:
+        if (
+            getattr(self._result, "scop_inference", None) is not None
+            or self._uses_compact_fit_inference
+        ):
             inference = self._model._fit_inference_info
             return inference["edf"], inference["edf1"]
 

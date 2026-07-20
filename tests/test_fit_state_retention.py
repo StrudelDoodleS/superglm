@@ -90,6 +90,38 @@ def test_fit_reml_can_release_fit_state_after_eager_inference():
     assert model.term_inference("age", with_se=True).ci_lower is not None
 
 
+def test_ordinary_metrics_use_compact_inference_after_fit_state_release():
+    X, y, sample_weight = _sample_data(n=240)
+    retained = _model(retain_fit_state=True).fit(X, y, sample_weight=sample_weight)
+    released = _model(retain_fit_state=False).fit(X, y, sample_weight=sample_weight)
+
+    retained_metrics = retained.metrics(X, y, sample_weight=sample_weight)
+    released_metrics = released.metrics(X, y, sample_weight=sample_weight)
+    compact = released.__dict__["_fit_inference_info"]
+
+    _, _, inverse, augmented, _ = released_metrics._active_info
+
+    assert released._dm is None
+    np.testing.assert_allclose(inverse, compact["XtWX_inv"], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(augmented, compact["XtWX_inv_aug"], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        released_metrics.leverage,
+        retained_metrics.leverage,
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    for name, expected in retained_metrics.coefficient_se.items():
+        np.testing.assert_allclose(
+            released_metrics.coefficient_se[name],
+            expected,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+    np.testing.assert_allclose(released_metrics._active_R_factor, compact["R_a"])
+    np.testing.assert_allclose(released_metrics._influence_edf[0], compact["edf"])
+    np.testing.assert_allclose(released_metrics._influence_edf[1], compact["edf1"])
+
+
 def test_scop_metrics_use_compact_inference_after_fit_state_release():
     rng = np.random.default_rng(20260718)
     x = np.linspace(0.0, 1.0, 120)
