@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 
 
@@ -81,9 +82,12 @@ def term_weights_from_fit(model, name: str, term: EditableTerm) -> NDArray:
 def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) -> NDArray:
     """Compute editable-term exposure weights from row-level feature data."""
     fallback = np.ones(term.size, dtype=np.float64)
-    if X_ref is None or name not in X_ref:
+    if X_ref is None:
         return fallback
-    values = X_ref[name]
+    frame = as_eager_frame(X_ref)
+    if name not in frame.columns:
+        return fallback
+    values = frame.column_array(name)
     weights = (
         np.ones(len(values), dtype=np.float64)
         if sample_weight is None

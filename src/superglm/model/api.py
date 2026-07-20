@@ -1333,7 +1333,7 @@ class SuperGLM:
     def export_rating_tables(
         self,
         file_path,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,
@@ -1345,7 +1345,7 @@ class SuperGLM:
 
     def rating_table_payload(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,

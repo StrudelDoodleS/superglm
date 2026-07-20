@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from superglm import (
@@ -148,6 +149,10 @@ def editor_frame():
     return X, y
 
 
+def _to_polars(frame: pd.DataFrame) -> pl.DataFrame:
+    return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
+
+
 @pytest.fixture
 def editor_model(editor_frame):
     X, y = editor_frame
@@ -165,6 +170,114 @@ def editor_model(editor_frame):
     )
     model.fit(X, y)
     return model
+
+
+def test_polars_editor_loading_edits_and_artifact_validation_match_pandas(
+    editor_model,
+    editor_frame,
+):
+    from superglm.editor.metrics import compute_dataset_metrics
+    from superglm.editor.payloads import session_payload
+
+    X, y = editor_frame
+    X_polars = _to_polars(X)
+    polars_model = editor_model.clone_unfitted().fit(X_polars, y)
+    pandas_session = EditorSession.from_model(
+        editor_model,
+        terms=["x_spline", "region"],
+        train_data=(X, y),
+    )
+    polars_session = EditorSession.from_model(
+        polars_model,
+        terms=["x_spline", "region"],
+        train_data=(X_polars, y),
+    )
+
+    assert polars_session._evaluation_data["train"].X is X_polars
+    assert session_payload(polars_session) == session_payload(pandas_session)
+    for name in ("x_spline", "region"):
+        np.testing.assert_allclose(
+            polars_session.terms[name].weights,
+            pandas_session.terms[name].weights,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    for session in (pandas_session, polars_session):
+        session.select_indices("x_spline", [2, 3])
+        session.shift("x_spline", 0.04)
+        session.undo()
+        session.redo()
+        session.select_levels("region", ["B"])
+        session.shift("region", 0.03)
+    assert session_payload(polars_session) == session_payload(pandas_session)
+    np.testing.assert_allclose(
+        polars_session.edited_offset(["x_spline", "region"]),
+        pandas_session.edited_offset(["x_spline", "region"]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    pandas_edited = pandas_session.to_model()
+    polars_edited = polars_session.to_model()
+    assert polars_edited._fit_X_ref is X_polars
+    np.testing.assert_allclose(
+        polars_edited.predict(X_polars),
+        pandas_edited.predict(X),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+    pandas_dataset = coerce_dataset("validation", (X, y))
+    polars_dataset = coerce_dataset("validation", (X_polars, y))
+    assert polars_dataset is not None
+    assert polars_dataset.X is X_polars
+    assert polars_dataset.n_obs == len(X_polars)
+    assert compute_dataset_metrics(polars_edited, polars_dataset) == pytest.approx(
+        compute_dataset_metrics(pandas_edited, pandas_dataset)
+    )
+
+    data, validation = serialize_validated_model(
+        polars_edited,
+        dataset=polars_dataset,
+        max_rows=19,
+    )
+    assert data
+    assert validation.prediction_rows == 19
+
+
+def test_polars_editor_category_collapse_matches_pandas_and_retains_native_frame(
+    editor_model,
+    editor_frame,
+):
+    from superglm.editor.payloads import session_payload
+
+    X, y = editor_frame
+    X_polars = _to_polars(X)
+    polars_model = editor_model.clone_unfitted().fit(X_polars, y)
+    pandas_session = EditorSession.from_model(
+        editor_model,
+        terms=["region"],
+        train_data=(X, y),
+    )
+    polars_session = EditorSession.from_model(
+        polars_model,
+        terms=["region"],
+        train_data=(X_polars, y),
+    )
+
+    for session in (pandas_session, polars_session):
+        session.select_levels("region", ["B", "C"])
+        session.replace_with_collapsed_levels("region", method="fit")
+
+    assert polars_session.model._fit_X_ref is X_polars
+    assert session_payload(polars_session) == session_payload(pandas_session)
+    np.testing.assert_allclose(
+        polars_session.model.predict(X_polars),
+        pandas_session.model.predict(X),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_serialize_validated_model_round_trip_predictions(editor_model, editor_frame):
