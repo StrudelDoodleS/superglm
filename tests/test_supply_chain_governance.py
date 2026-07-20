@@ -116,7 +116,10 @@ def test_release_workflow_uses_trusted_publishing_and_least_privilege():
     assert "needs: publish" in release_job
     assert "contents: write" in release_job
     assert "id-token: write" not in release_job
+    assert "gh release view" in release_job
     assert "gh release create" in release_job
+    assert "gh release upload" in release_job
+    assert "--clobber" in release_job
     assert "--verify-tag" in release_job
     assert "--generate-notes" in release_job
 
