@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from superglm import Constraint, SuperGLM
@@ -64,6 +65,80 @@ def test_runtime_feature_means_chunk_high_cardinality_support() -> None:
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
     assert max(spec.call_sizes) <= _RUNTIME_MEAN_CHUNK_SIZE
     assert len(spec.call_sizes) == 3
+
+
+def test_runtime_feature_means_accept_retained_polars_frame() -> None:
+    from superglm.model.runtime_canonicalize import _runtime_training_feature_column_means
+
+    values = np.repeat(np.array([-2.0, 1.5, 4.0]), [50, 30, 20])
+
+    class Spec:
+        @staticmethod
+        def transform(x):
+            x = np.asarray(x, dtype=float)
+            return np.column_stack((x, x**2))
+
+    model = SimpleNamespace(_fit_X_ref=pl.DataFrame({"x": values}))
+
+    actual = _runtime_training_feature_column_means(model, "x", Spec())
+
+    expected = np.mean(np.column_stack((values, values**2)), axis=0)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-13)
+
+
+def test_polars_spline_fit_publishes_same_runtime_canonical_state_as_pandas() -> None:
+    x = np.linspace(0.0, 1.0, 160)
+    y = 0.2 + np.sin(4.0 * x)
+    pandas_X = pd.DataFrame({"x": x})
+    polars_X = pl.DataFrame({"x": x})
+
+    def fitted(X) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Spline(n_knots=7, penalty="ssp")},
+        ).fit(X, y)
+
+    pandas_model = fitted(pandas_X)
+    polars_model = fitted(polars_X)
+
+    np.testing.assert_allclose(
+        polars_model.result.beta, pandas_model.result.beta, rtol=0.0, atol=0.0
+    )
+    assert polars_model.result.intercept == pandas_model.result.intercept
+    polars_state = polars_model._runtime_canonical_state
+    pandas_state = pandas_model._runtime_canonical_state
+    assert polars_state["diagnostics"] == pandas_state["diagnostics"]
+    assert polars_state["intercept_shift"] == pandas_state["intercept_shift"]
+    assert polars_state["solver_to_public_complete"] is pandas_state["solver_to_public_complete"]
+    np.testing.assert_allclose(
+        polars_state["solver_to_public"],
+        pandas_state["solver_to_public"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_polars_discrete_spline_fit_freezes_fast_prediction_metadata() -> None:
+    x = np.linspace(0.0, 1.0, 160)
+    X = pl.DataFrame({"x": x})
+    y = 0.2 + np.sin(4.0 * x)
+
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        discrete=True,
+        n_bins=32,
+        features={"x": Spline(n_knots=7, penalty="ssp")},
+    ).fit(X, y)
+
+    assert model._fast_prediction_state["features"]["x"] is not None
+    np.testing.assert_allclose(
+        model._predict_fast_discrete(X),
+        model._predict_fast_discrete(pd.DataFrame({"x": x})),
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def _feature_beta(model: SuperGLM, feature_name: str) -> np.ndarray:

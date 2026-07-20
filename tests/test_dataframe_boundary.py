@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from superglm import Numeric, Spline, SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
 from superglm._frame import EagerFrame
 from superglm.model.base import auto_detect, model_build_design_matrix
 from superglm.model.input_validation import validate_fit_input
@@ -181,3 +181,105 @@ def test_dataframe_boundary_does_not_leak_adapter_into_matrix_execution_state() 
     # the private adapter itself must never become published model state.
     assert model._fit_state.projections["_fit_X_ref"] is X
     assert not any(isinstance(value, EagerFrame) for value in model._fit_state.projections.values())
+
+
+def _mixed_prediction_frames() -> tuple[pd.DataFrame, pl.DataFrame, np.ndarray]:
+    n_rows = 120
+    row = np.arange(n_rows)
+    numeric = np.linspace(-1.5, 1.5, n_rows)
+    smooth = np.linspace(0.0, 3.0, n_rows)
+    category = np.array(["a", "b", "c"])[row % 3]
+    data = {"numeric": numeric, "smooth": smooth, "category": category}
+    y = 1.5 + 0.25 * numeric + 0.2 * np.sin(smooth) + 0.15 * (category == "b")
+    return pd.DataFrame(data), pl.DataFrame(data), y
+
+
+def _mixed_prediction_model() -> SuperGLM:
+    return SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "numeric": Numeric(),
+            "smooth": Spline(n_knots=6, penalty="ssp"),
+            "category": Categorical(base="first"),
+        },
+        interactions=[("numeric", "category"), ("smooth", "category")],
+    )
+
+
+def test_dataframe_boundary_predicts_mixed_terms_identically() -> None:
+    pandas_X, polars_X, y = _mixed_prediction_frames()
+    model = _mixed_prediction_model().fit(pandas_X, y)
+
+    pandas_eta = model._predict_eta_exact(pandas_X)
+    polars_eta = model._predict_eta_exact(polars_X)
+    pandas_mu = model.predict(pandas_X)
+    polars_mu = model.predict(polars_X)
+
+    np.testing.assert_allclose(polars_eta, pandas_eta, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(polars_mu, pandas_mu, rtol=0.0, atol=0.0)
+
+
+def test_dataframe_boundary_fast_discrete_tensor_prediction_is_backend_neutral() -> None:
+    n_rows = 100
+    phase = np.linspace(0.0, 2.0 * np.pi, n_rows)
+    data = {
+        "left": np.linspace(-2.0, 2.0, n_rows),
+        "right": np.sin(phase) + 0.1 * np.cos(3.0 * phase),
+    }
+    pandas_X = pd.DataFrame(data)
+    polars_X = pl.DataFrame(data)
+    y = 2.0 + 0.2 * data["left"] - 0.1 * data["right"]
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        discrete=True,
+        n_bins={"left": 18, "right": 16},
+        features={
+            "left": Spline(n_knots=6, penalty="ssp"),
+            "right": Spline(n_knots=5, penalty="ssp"),
+        },
+        interactions=[("left", "right")],
+    ).fit(pandas_X, y)
+
+    pandas_eta = model._predict_eta_fast_discrete(pandas_X)
+    polars_eta = model._predict_eta_fast_discrete(polars_X)
+    pandas_mu = model._predict_fast_discrete(pandas_X)
+    polars_mu = model._predict_fast_discrete(polars_X)
+
+    np.testing.assert_allclose(polars_eta, pandas_eta, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(polars_mu, pandas_mu, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        model._predict_eta_exact(polars_X),
+        model._predict_eta_exact(pandas_X),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_dataframe_boundary_prediction_extracts_shared_parents_once(monkeypatch) -> None:
+    pandas_X, polars_X, y = _mixed_prediction_frames()
+    model = _mixed_prediction_model().fit(pandas_X, y)
+    calls: Counter[object] = Counter()
+    original = EagerFrame._extract_column
+
+    def counted_extract(frame: EagerFrame, name: object):
+        calls[name] += 1
+        return original(frame, name)
+
+    monkeypatch.setattr(EagerFrame, "_extract_column", counted_extract)
+
+    model.predict(polars_X)
+
+    assert calls == Counter({"numeric": 1, "smooth": 1, "category": 1})
+
+
+def test_dataframe_boundary_prediction_rejects_missing_and_unseen_categorical_data() -> None:
+    pandas_X, polars_X, y = _mixed_prediction_frames()
+    model = _mixed_prediction_model().fit(pandas_X, y)
+
+    with np.testing.assert_raises_regex(ValueError, "missing required columns.*smooth"):
+        model.predict(polars_X.drop("smooth"))
+
+    with np.testing.assert_raises_regex(ValueError, "unseen categorical levels.*unseen"):
+        model.predict(polars_X.with_columns(pl.lit("unseen").alias("category")))

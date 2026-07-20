@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.solvers.pirls import PIRLSResult
@@ -109,13 +110,16 @@ def _runtime_training_feature_column_means(
     model,
     feature_name: str,
     spec: Any,
+    frame: EagerFrame | None = None,
 ) -> NDArray[np.float64]:
     """Compute exact public runtime column means on the stored training rows."""
     X_ref = model._fit_X_ref
     if X_ref is None:
         raise RuntimeError("Training feature reference is required for runtime canonicalization")
 
-    values = np.asarray(X_ref[feature_name], dtype=np.float64)
+    if frame is None:
+        frame = as_eager_frame(X_ref)
+    values = frame.column_array(feature_name, dtype=np.float64)
     support, counts = np.unique(values, return_counts=True)
     total: NDArray[np.float64] | None = None
     compensation: NDArray[np.float64] | None = None
@@ -228,6 +232,7 @@ def _compile_runtime_terms(
     """Compile spline-backed term state and apply the Task 2 public mutations."""
     term_states: dict[str, dict[str, Any]] = {}
     public_intercept_shift = 0.0
+    fit_frame: EagerFrame | None = None
 
     for term_name, spec, term_kind in _iter_spline_backed_terms(model):
         group_indices = _feature_group_indices(model, term_name)
@@ -238,9 +243,16 @@ def _compile_runtime_terms(
         mode = _group_mode(model, group_indices, spec)
         can_materialize = _can_materialize_public_term(term_kind, spec, mode, groups)
         if can_materialize:
+            if fit_frame is None and model._fit_X_ref is not None:
+                fit_frame = as_eager_frame(model._fit_X_ref)
             groups = _replace_group_column_means(
                 groups,
-                _runtime_training_feature_column_means(model, term_name, spec),
+                _runtime_training_feature_column_means(
+                    model,
+                    term_name,
+                    spec,
+                    fit_frame,
+                ),
             )
 
         shift = _term_shift_from_groups(solver, groups)
@@ -278,16 +290,17 @@ def _live_public_runtime_state(
     X_ref = model._fit_X_ref
     if X_ref is None:
         raise RuntimeError("Training feature reference is required for runtime diagnostics")
+    frame = as_eager_frame(X_ref)
 
     plan = base._build_prediction_plan(model)
     beta_all = public_result.beta
-    eta = np.full(len(X_ref), public_result.intercept, dtype=np.float64)
+    eta = np.full(len(frame), public_result.intercept, dtype=np.float64)
     contributions: dict[str, NDArray[np.float64]] = {}
 
     for term in plan["features"]:
         if term["name"] in model._interaction_specs:
             continue
-        values = np.asarray(X_ref[term["name"]])
+        values = frame.column_array(term["name"])
         beta = beta_all[term["beta_idx"]]
         contribution = np.asarray(
             base._score_feature(term["spec"], values, beta),
@@ -305,8 +318,8 @@ def _live_public_runtime_state(
         contribution = np.asarray(
             base._score_interaction(
                 spec,
-                np.asarray(X_ref[left_name]),
-                np.asarray(X_ref[right_name]),
+                frame.column_array(left_name),
+                frame.column_array(right_name),
                 beta,
             ),
             dtype=np.float64,

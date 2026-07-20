@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame
+from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributions import Distribution, clip_mu
 from superglm.dm_builder import (
     add_interaction,
@@ -112,27 +112,32 @@ def _compile_feature_fast_discrete_metadata(
     model,
     name: str,
     spec: FeatureSpec,
+    frame: EagerFrame | None,
 ) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized main-effect fast predictor."""
     if not should_discretize(spec, model._discrete):
         return None
-    if model._fit_X_ref is None:
+    if frame is None:
         return None
     n_bins = resolve_discrete_n_bins(name, spec, model._n_bins)
     return {
         "kind": "feature",
         "discretizer": _fit_discretizer_metadata(
-            np.asarray(model._fit_X_ref[name], dtype=np.float64),
+            frame.column_array(name, dtype=np.float64),
             n_bins,
         ),
     }
 
 
-def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, Any] | None:
+def _compile_interaction_fast_discrete_metadata(
+    model,
+    spec: Any,
+    frame: EagerFrame | None,
+) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized tensor fast predictor."""
     if not should_discretize_tensor_interaction(spec, model._specs, model._discrete):
         return None
-    if model._fit_X_ref is None:
+    if frame is None:
         return None
     left_name, right_name = spec.parent_names
     left_bins = resolve_discrete_n_bins(left_name, model._specs[left_name], model._n_bins)
@@ -140,11 +145,11 @@ def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, A
     return {
         "kind": "interaction",
         "left_discretizer": _fit_discretizer_metadata(
-            np.asarray(model._fit_X_ref[left_name], dtype=np.float64),
+            frame.column_array(left_name, dtype=np.float64),
             left_bins,
         ),
         "right_discretizer": _fit_discretizer_metadata(
-            np.asarray(model._fit_X_ref[right_name], dtype=np.float64),
+            frame.column_array(right_name, dtype=np.float64),
             right_bins,
         ),
         "left_marginal": copy.deepcopy(spec._marginal1),
@@ -155,13 +160,37 @@ def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, A
 
 def _compile_fast_prediction_state(model) -> dict[str, dict[str, dict[str, Any] | None]]:
     """Freeze fit-time fast prediction metadata on the model."""
+    needs_fit_frame = any(
+        should_discretize(model._specs[name], model._discrete) for name in model._feature_order
+    ) or any(
+        should_discretize_tensor_interaction(
+            model._interaction_specs[name],
+            model._specs,
+            model._discrete,
+        )
+        for name in model._interaction_order
+    )
+    fit_frame = (
+        as_eager_frame(model._fit_X_ref)
+        if needs_fit_frame and model._fit_X_ref is not None
+        else None
+    )
     return {
         "features": {
-            name: _compile_feature_fast_discrete_metadata(model, name, model._specs[name])
+            name: _compile_feature_fast_discrete_metadata(
+                model,
+                name,
+                model._specs[name],
+                fit_frame,
+            )
             for name in model._feature_order
         },
         "interactions": {
-            name: _compile_interaction_fast_discrete_metadata(model, model._interaction_specs[name])
+            name: _compile_interaction_fast_discrete_metadata(
+                model,
+                model._interaction_specs[name],
+                fit_frame,
+            )
             for name in model._interaction_order
         },
     }
@@ -241,12 +270,12 @@ def freeze_prediction_plan(model) -> None:
 
 def _score_feature_fast_discrete(
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta: NDArray,
 ) -> NDArray[np.floating]:
     """Approximate one canonical main-effect term via discretized support points."""
     support, bin_idx = _discretize_against_fit_metadata(
-        np.asarray(X[term["name"]], dtype=np.float64),
+        X.column_array(term["name"], dtype=np.float64),
         term["fast_discrete"]["discretizer"],
     )
     values = _score_feature(term["spec"], support, beta)
@@ -256,7 +285,7 @@ def _score_feature_fast_discrete(
 def _score_interaction_fast_discrete(
     model,
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta: NDArray,
 ) -> NDArray[np.floating]:
     """Approximate one canonical tensor term via discretized support pairs."""
@@ -264,11 +293,11 @@ def _score_interaction_fast_discrete(
     metadata = term["fast_discrete"]
     left_name, right_name = term["parent_names"]
     left_support, idx1 = _discretize_against_fit_metadata(
-        np.asarray(X[left_name], dtype=np.float64),
+        X.column_array(left_name, dtype=np.float64),
         metadata["left_discretizer"],
     )
     right_support, idx2 = _discretize_against_fit_metadata(
-        np.asarray(X[right_name], dtype=np.float64),
+        X.column_array(right_name, dtype=np.float64),
         metadata["right_discretizer"],
     )
     B1_unique = np.asarray(
@@ -302,19 +331,19 @@ def _score_interaction_fast_discrete(
 
 def _score_prediction_term_exact(
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta_all: NDArray,
 ) -> NDArray[np.floating]:
     """Score one canonical term exactly on the requested rows."""
     beta = beta_all[term["beta_idx"]]
     if term["kind"] == "feature":
-        return _score_feature(term["spec"], np.asarray(X[term["name"]]), beta)
+        return _score_feature(term["spec"], X.column_array(term["name"]), beta)
 
     left_name, right_name = term["parent_names"]
     return _score_interaction(
         term["spec"],
-        np.asarray(X[left_name]),
-        np.asarray(X[right_name]),
+        X.column_array(left_name),
+        X.column_array(right_name),
         beta,
     )
 
@@ -322,7 +351,7 @@ def _score_prediction_term_exact(
 def _score_prediction_term_fast_discrete(
     model,
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta_all: NDArray,
 ) -> NDArray[np.floating]:
     """Score one canonical term via the fast discrete approximation when available."""
@@ -337,29 +366,37 @@ def _score_prediction_term_fast_discrete(
 
 def _predict_eta(
     model,
-    X: pd.DataFrame,
+    X,
     offset: NDArray | None,
     *,
     fast_discrete: bool,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor on exact or fast-discrete blocks."""
+    frame = as_eager_frame(X)
     plan = _prediction_plan(model)
+    required_columns = tuple(
+        dict.fromkeys(
+            [term["name"] for term in plan["features"]]
+            + [parent for term in plan["interactions"] for parent in term["parent_names"]]
+        )
+    )
+    frame.require_columns(required_columns)
     beta_all = model.result.beta
-    eta = np.full(len(X), model.result.intercept, dtype=np.float64)
+    eta = np.full(len(frame), model.result.intercept, dtype=np.float64)
 
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
 
     for term in plan["features"]:
         if fast_discrete:
-            eta += scorer(model, term, X, beta_all)
+            eta += scorer(model, term, frame, beta_all)
         else:
-            eta += scorer(term, X, beta_all)
+            eta += scorer(term, frame, beta_all)
 
     for term in plan["interactions"]:
         if fast_discrete:
-            eta += scorer(model, term, X, beta_all)
+            eta += scorer(model, term, frame, beta_all)
         else:
-            eta += scorer(term, X, beta_all)
+            eta += scorer(term, frame, beta_all)
 
     if offset is not None:
         eta = eta + np.asarray(offset, dtype=np.float64)
