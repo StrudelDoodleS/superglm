@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="SuperGLM" width="300">
+  <img src="https://raw.githubusercontent.com/StrudelDoodleS/superglm/master/docs/images/logo.png" alt="SuperGLM" width="300">
 </p>
 
 [![CI](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml/badge.svg)](https://github.com/StrudelDoodleS/superglm/actions/workflows/ci.yml)
@@ -13,17 +13,19 @@ estimators for Poisson, Gamma, NB2, Tweedie, Binomial, and Gaussian models.
 
 ## Installation
 
-Current installation path:
+Install SuperGLM from PyPI:
 
 ```bash
-pip install git+https://github.com/StrudelDoodleS/superglm.git
+pip install superglm
 ```
 
-With optional dependencies:
+Plotly-based interactive charts are optional:
 
 ```bash
-pip install "superglm[all] @ git+https://github.com/StrudelDoodleS/superglm.git"
+pip install "superglm[plotting]"
 ```
+
+The local model editor is included in the normal installation.
 
 ## Recommended Workflow
 
