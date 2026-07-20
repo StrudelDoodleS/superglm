@@ -550,6 +550,42 @@ def test_shape_repair_rejects_mutated_retained_fit_data_atomically(mutated_input
     np.testing.assert_array_equal(model.result.beta, original_beta)
 
 
+@pytest.mark.parametrize("changed_input", ["sample_weight", "offset"])
+def test_shape_repair_rejects_scoring_geometry_that_differs_from_fit(changed_input):
+    rng = np.random.default_rng(20260720)
+    x = np.linspace(0.0, 1.0, 220)
+    X = pd.DataFrame({"x": x})
+    y = -((x - 0.35) ** 2) + 0.01 * rng.normal(size=x.size)
+    sample_weight = 1.0 + x
+    offset = 0.05 * np.sin(2.0 * np.pi * x)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=9, constraint=Constraint.postfit.convex)},
+    ).fit(X, y, sample_weight=sample_weight, offset=offset)
+    original_dict = model.__dict__
+    original_result = model.result
+    original_beta = model.result.beta.copy()
+    repair_weight = sample_weight.copy()
+    repair_offset = offset.copy()
+    if changed_input == "sample_weight":
+        repair_weight[0] += 1.0
+    else:
+        repair_offset[0] += 1.0
+
+    with pytest.raises(RuntimeError, match="sample_weight and offset must match the fitted data"):
+        model.apply_shape_postfit(
+            X,
+            sample_weight=repair_weight,
+            offset=repair_offset,
+        )
+
+    assert model.__dict__ is original_dict
+    assert model.result is original_result
+    assert not hasattr(model, "_shape_repairs")
+    np.testing.assert_array_equal(model.result.beta, original_beta)
+
+
 def test_repeated_shape_repair_skips_fitted_state_revision(monkeypatch):
     x = np.linspace(0.0, 1.0, 200)
     X = pd.DataFrame({"x": x})

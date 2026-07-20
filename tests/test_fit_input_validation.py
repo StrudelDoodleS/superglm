@@ -188,6 +188,22 @@ def test_intercept_only_fit_allows_zero_column_dataframe() -> None:
     np.testing.assert_allclose(model.predict(X), np.mean(y))
 
 
+def test_intercept_only_fit_ignores_unused_complex_column() -> None:
+    X = pd.DataFrame({"unused": np.arange(6, dtype=float) + 1.0j})
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+    )
+
+    model.fit(X, y)
+
+    assert model._dm.shape == (len(X), 0)
+    assert model.result.beta.shape == (0,)
+    np.testing.assert_allclose(model.predict(X), np.mean(y))
+
+
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
 def test_auto_detect_validates_complex_additional_column_before_build(
     entrypoint: str,

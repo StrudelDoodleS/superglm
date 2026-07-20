@@ -76,7 +76,7 @@ def validate_fit_input(
     missing = [name for name in required if name not in X.columns]
     if missing:
         raise ValueError(f"X is missing required columns: {missing}")
-    columns_to_check = tuple(X.columns) if check_all_columns or not required else required
+    columns_to_check = tuple(X.columns) if check_all_columns else required
     for name in columns_to_check:
         column = X[name]
         dtype_kind = getattr(column.dtype, "kind", None)

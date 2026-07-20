@@ -655,6 +655,19 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
     from superglm.model.fit_data_guard import require_unchanged_fit_data
 
     require_unchanged_fit_data(model, X, y_ref)
+    fit_data_guard = model._fit_data_guard
+    if not fit_data_guard.matches(
+        X,
+        y_ref,
+        sample_weight,
+        offset,
+        fit_weights=getattr(model, "_fit_weights", None),
+        fit_offset=getattr(model, "_fit_offset", None),
+    ):
+        raise RuntimeError(
+            "post-fit sample_weight and offset must match the fitted data; "
+            "refit before repairing with different scoring geometry"
+        )
     if not any(_repair_changes_coefficients(model, repair) for repair in pending_repairs):
         # Shape-feasible terms are an exact publication no-op: no metadata,
         # revision, convergence flag, accepted REML state, or result identity changes.
