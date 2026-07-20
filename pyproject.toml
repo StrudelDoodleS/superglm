@@ -81,7 +81,6 @@ only-include = [
     "LICENSE",
     "README.md",
     "pyproject.toml",
-    "run_test.py",
 ]
 
 # ── ruff ────────────────────────────────────────────────────────

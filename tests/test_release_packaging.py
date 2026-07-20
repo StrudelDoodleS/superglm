@@ -49,7 +49,14 @@ def test_sdist_uses_a_small_explicit_allowlist() -> None:
     for required in ("src", "LICENSE", "README.md", "pyproject.toml"):
         assert f'"{required}"' in sdist
 
-    for repository_only in ("benchmarks", "docs", "scratch", "tests", "uv.lock"):
+    for repository_only in (
+        "benchmarks",
+        "docs",
+        "run_test.py",
+        "scratch",
+        "tests",
+        "uv.lock",
+    ):
         assert f'"{repository_only}"' not in sdist
 
 

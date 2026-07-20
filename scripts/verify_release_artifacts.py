@@ -77,10 +77,11 @@ def _wheel_names(wheel: Path) -> set[str]:
 
 def _sdist_names(sdist: Path) -> set[str]:
     with tarfile.open(sdist) as archive:
-        links = [member.name for member in archive.getmembers() if member.issym() or member.islnk()]
+        members = archive.getmembers()
+        links = [member.name for member in members if member.issym() or member.islnk()]
         if links:
             raise ValueError(f"Unexpected links in {sdist}: {links[:20]}")
-        return {member.name for member in archive.getmembers()}
+        return {member.name for member in members}
 
 
 def _reject_repository_only_sdist_entries(names: set[str], sdist: Path) -> None:
