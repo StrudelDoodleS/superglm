@@ -119,9 +119,17 @@ def test_release_workflow_uses_trusted_publishing_and_least_privilege():
     assert "gh release view" in release_job
     assert "gh release create" in release_job
     assert "gh release upload" in release_job
+    assert "GH_REPO: ${{ github.repository }}" in release_job
     assert "--clobber" in release_job
     assert "--verify-tag" in release_job
     assert "--generate-notes" in release_job
+
+
+def test_release_workflow_uses_node24_artifact_actions():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
+    assert workflow.count("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c") == 2
 
 
 def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
