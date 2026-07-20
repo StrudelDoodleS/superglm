@@ -227,6 +227,33 @@ def test_auto_detect_validates_complex_additional_column_before_build(
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_auto_detect_refit_validates_new_complex_column_from_constructor_intent(
+    entrypoint: str,
+) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    X = pd.DataFrame({"x": x})
+    y = 0.5 + 0.3 * x
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, splines=[]).fit(X, y)
+    result_before = model.result
+    revision_before = model._fit_revision
+    config_before = model._config
+    specs_before = model._specs
+    prediction_before = model.predict(X)
+
+    X_bad = X.copy()
+    X_bad["new_complex"] = np.linspace(0.0, 1.0, len(X)) + 1.0j
+
+    with pytest.raises(ValueError, match="X column 'new_complex' must be real-valued"):
+        _call_entrypoint(model, entrypoint, X_bad, y)
+
+    assert model.result is result_before
+    assert model._fit_revision == revision_before
+    assert model._config is config_before
+    assert model._specs is specs_before
+    np.testing.assert_array_equal(model.predict(X), prediction_before)
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
 @pytest.mark.parametrize(
     ("family", "y", "message"),
     [

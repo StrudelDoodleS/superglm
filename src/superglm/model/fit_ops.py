@@ -264,15 +264,17 @@ def _auto_detect_specs_if_needed(model, X, sample_weight) -> None:
 
 def _required_fit_columns(model) -> tuple[str, ...]:
     """Return configured columns that must exist before feature construction."""
-    names = [*model._feature_order, *(model._splines or [])]
-    for interaction_name in model._interaction_order:
-        names.extend(model._interaction_specs[interaction_name].parent_names)
+    config = model._config
+    configured_feature_names = [name for name, _ in config.feature_templates]
+    names = [*configured_feature_names, *(config.splines or ())]
+    for _, interaction in config.interaction_templates:
+        names.extend(interaction.parent_names)
     # Preserve the interaction API's more specific configuration error for an
     # explicit feature mapping, which defines a closed feature universe.  The
     # spline shorthand only names columns to smooth; every other X column is
     # still eligible for auto-detection when the fit workspace is built.
-    configured_features = set(model._feature_order) if model._splines is None else set()
-    for left, right in model._pending_interactions:
+    configured_features = set(configured_feature_names) if config.splines is None else set()
+    for left, right in config.interactions:
         if configured_features:
             if left not in configured_features:
                 raise ValueError(f"Parent feature not found: {left}")
@@ -284,6 +286,7 @@ def _required_fit_columns(model) -> tuple[str, ...]:
 
 def _validate_entrypoint_input(model, X, y, sample_weight, offset):
     distribution = resolve_distribution(configured_family(model))
+    config = model._config
     validated = validate_fit_input(
         X,
         y,
@@ -291,7 +294,7 @@ def _validate_entrypoint_input(model, X, y, sample_weight, offset):
         offset,
         family=distribution,
         required_columns=_required_fit_columns(model),
-        check_all_columns=model._splines is not None and not model._specs,
+        check_all_columns=config.splines is not None and not config.feature_templates,
     )
     return validated.X, validated.y, validated.sample_weight, validated.offset
 
