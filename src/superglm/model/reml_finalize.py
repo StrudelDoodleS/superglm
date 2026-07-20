@@ -21,7 +21,9 @@ from superglm.reml.observed_geometry import (
 from superglm.reml.penalty_algebra import (
     build_penalty_context,
     build_penalty_matrix,
+    build_tensor_pair_logdet_summaries,
     compute_penalty_nullity,
+    evaluate_tensor_pair_logdet_summaries,
 )
 from superglm.reml.result import _map_beta_between_bases
 from superglm.reml.scale import (
@@ -251,6 +253,16 @@ def finalize_reml_fit(
     )
 
     terminal_evaluation: REMLObjectiveEvaluation | None = None
+    terminal_tensor_pair_evaluations = None
+    if use_direct and model._discrete:
+        tensor_pair_summaries = build_tensor_pair_logdet_summaries(
+            model._dm.group_matrices,
+            reml_penalties,
+        )
+        terminal_tensor_pair_evaluations = evaluate_tensor_pair_logdet_summaries(
+            tensor_pair_summaries,
+            lambdas,
+        )
     if qp_passthrough:
         # Lambda selection ran on the unconstrained surrogate, but the state
         # published below is the constrained Fisher/QP refit. Its determinant,
@@ -283,6 +295,7 @@ def finalize_reml_fit(
             hessian_rank=final_pirls.reml_hessian_rank,
             S_override=S_final,
             reml_penalties=reml_penalties,
+            tensor_pair_evaluations=terminal_tensor_pair_evaluations,
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
@@ -354,10 +367,50 @@ def finalize_reml_fit(
             hessian_rank=terminal_geometry.hessian_rank,
             S_override=S_final,
             reml_penalties=reml_penalties,
+            tensor_pair_evaluations=terminal_tensor_pair_evaluations,
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
             raise RuntimeError("terminal observed REML evaluation omitted its scale state")
+        terminal_evaluation = terminal_value
+        best.objective = terminal_evaluation.value
+
+    if use_direct and terminal_evaluation is None:
+        # The optimizer's retained objective belongs to its retained
+        # coefficient state.  The authoritative final refit above can move
+        # those coefficients even at unchanged lambdas, so Fisher paths must
+        # evaluate LAML once more from the state that will be published.
+        if final_xtwx is None:  # pragma: no cover - final direct-refit contract
+            raise RuntimeError("terminal Fisher REML refit omitted its working Gram")
+        if final_pirls.log_det_H is None or final_pirls.reml_hessian_rank is None:
+            raise RuntimeError("terminal Fisher REML refit omitted its retained geometry")
+        S_final = build_penalty_matrix(
+            model._dm.group_matrices,
+            model._groups,
+            lambdas,
+            model._dm.p,
+            reml_penalties=reml_penalties,
+        )
+        terminal_value = reml_laml_objective(
+            model._dm,
+            model._distribution,
+            model._link,
+            model._groups,
+            y,
+            final_pirls,
+            lambdas,
+            sample_weight,
+            offset_arr,
+            XtWX=final_xtwx,
+            log_det_H=final_pirls.log_det_H,
+            hessian_rank=final_pirls.reml_hessian_rank,
+            S_override=S_final,
+            reml_penalties=reml_penalties,
+            tensor_pair_evaluations=terminal_tensor_pair_evaluations,
+            return_evaluation=True,
+        )
+        if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
+            raise RuntimeError("terminal Fisher REML evaluation omitted its scale state")
         terminal_evaluation = terminal_value
         best.objective = terminal_evaluation.value
 

@@ -1684,6 +1684,113 @@ def test_fit_reml_terminal_observed_state_owns_objective_rank_and_scale() -> Non
     assert result.phi == evaluation.profiled_scale.phi
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+def test_fit_reml_terminal_fisher_state_owns_objective(discrete: bool) -> None:
+    """The published Fisher refit must own the reported LAML objective."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+    from superglm.reml.penalty_algebra import build_penalty_matrix
+
+    rng = np.random.default_rng(7302)
+    n = 300
+    x = np.sort(rng.uniform(-2.0, 2.0, n))
+    y = rng.poisson(np.exp(-0.4 + 3.0 * np.sin(2.3 * x))).astype(float)
+    sample_weight = np.ones(n)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=discrete,
+        features={"x": Spline(n_knots=12, penalty="ssp")},
+    )
+
+    model.fit_reml(
+        pd.DataFrame({"x": x}),
+        y,
+        sample_weight=sample_weight,
+        max_reml_iter=10,
+        reml_tol=1e-2,
+        max_pirls_iter=100,
+        pirls_tol=1e-3,
+    )
+
+    result = model._solver_result
+    penalty = build_penalty_matrix(
+        model._dm.group_matrices,
+        model._groups,
+        model._reml_lambdas,
+        model._dm.p,
+        reml_penalties=model._reml_penalties,
+    )
+    evaluation = reml_laml_objective(
+        model._dm,
+        model._distribution,
+        model._link,
+        model._groups,
+        y,
+        result,
+        model._reml_lambdas,
+        sample_weight,
+        np.zeros(n),
+        log_det_H=result.log_det_H,
+        hessian_rank=result.reml_hessian_rank,
+        S_override=penalty,
+        reml_penalties=model._reml_penalties,
+        return_evaluation=True,
+    )
+
+    assert isinstance(evaluation, REMLObjectiveEvaluation)
+    assert model._reml_result.converged
+    assert result.converged
+    assert model._reml_result.curvature_source == "fisher"
+    assert model._reml_result.objective == pytest.approx(evaluation.value, rel=2e-12)
+
+
+def test_fit_reml_terminal_discrete_tensor_keeps_closed_form_penalty_logdet(
+    monkeypatch,
+) -> None:
+    """Terminal publication must not rematerialize a discrete tensor log-determinant."""
+    import pandas as pd
+
+    import superglm.reml.multi_penalty as multi_penalty
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    dense_logdet = multi_penalty.similarity_transform_logdet
+    dense_logdet_calls = 0
+
+    def count_dense_logdet(*args, **kwargs):
+        nonlocal dense_logdet_calls
+        dense_logdet_calls += 1
+        return dense_logdet(*args, **kwargs)
+
+    monkeypatch.setattr(multi_penalty, "similarity_transform_logdet", count_dense_logdet)
+
+    rng = np.random.default_rng(77)
+    n = 260
+    x1 = rng.uniform(0.0, 1.0, n)
+    x2 = rng.uniform(0.0, 1.0, n)
+    eta = 0.2 + np.sin(2.0 * np.pi * x1) + 0.3 * np.cos(2.0 * np.pi * x2)
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        discrete=True,
+        features={"x1": Spline(n_knots=5), "x2": Spline(n_knots=5)},
+        interactions=[("x1", "x2")],
+    )
+
+    model.fit_reml(
+        pd.DataFrame({"x1": x1, "x2": x2}),
+        y,
+        max_reml_iter=3,
+        reml_tol=1e-12,
+    )
+
+    assert dense_logdet_calls == 0
+
+
 def test_qp_passthrough_terminal_state_owns_fisher_objective_and_scale() -> None:
     """A constrained terminal refit must replace unconstrained LAML provenance."""
     import pandas as pd
