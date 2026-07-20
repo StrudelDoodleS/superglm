@@ -683,6 +683,62 @@ class TestREMLSelectionPenaltyRejected:
 
 
 class TestREMLFallbacks:
+    def test_fit_reml_intercept_only_matches_plain_fit(self, caplog):
+        """A no-term REML request should use the ordinary intercept-only solver."""
+        X = pd.DataFrame(index=pd.RangeIndex(12))
+        y = np.array([1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 5.5, 6.0, 7.0, 8.0, 9.5])
+
+        expected = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={},
+        ).fit(X, y)
+        actual = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            actual.fit_reml(X, y)
+
+        assert "no REML-eligible groups found" in caplog.text
+        assert actual._reml_result is None
+        assert actual.result.converged
+        assert actual.result.beta.shape == (0,)
+        np.testing.assert_allclose(actual.result.intercept, expected.result.intercept)
+        np.testing.assert_allclose(actual.predict(X), expected.predict(X))
+        np.testing.assert_allclose(actual.result.deviance, expected.result.deviance)
+
+    def test_fit_reml_without_reml_groups_uses_ordinary_solver_dispatch(self, monkeypatch):
+        """The no-REML fallback must not bypass fit()'s direct-solver routing."""
+        rng = np.random.default_rng(314)
+        X = pd.DataFrame({"x": rng.normal(size=80)})
+        y = 1.25 + 2.5 * X["x"].to_numpy() + rng.normal(scale=0.2, size=len(X))
+
+        expected = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y)
+
+        def fail_if_pirls_runs(*args, **kwargs):
+            pytest.fail("the no-REML fallback bypassed ordinary coefficient-solver dispatch")
+
+        monkeypatch.setattr("superglm.model.fit_ops.fit_pirls", fail_if_pirls_runs)
+
+        actual = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit_reml(X, y)
+
+        assert actual._reml_result is None
+        np.testing.assert_allclose(actual.result.beta, expected.result.beta)
+        np.testing.assert_allclose(actual.result.intercept, expected.result.intercept)
+        np.testing.assert_allclose(actual.predict(X), expected.predict(X))
+        np.testing.assert_allclose(actual.result.deviance, expected.result.deviance)
+
     def test_fit_reml_nb_auto_theta_without_smooths_falls_back_to_fit(self, caplog):
         """NB2 auto-theta should still work when fit_reml() has no smooth terms to optimize."""
         rng = np.random.default_rng(42)

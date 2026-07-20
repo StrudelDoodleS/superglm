@@ -562,6 +562,65 @@ def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> No
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
 
+def _solve_coefficients(
+    model,
+    y,
+    sample_weight,
+    offset,
+    *,
+    penalty,
+    lambda2,
+    has_lambda1_targets,
+    max_iter,
+    tol,
+    record_diagnostics,
+    convergence,
+):
+    """Apply the ordinary fit policy for selecting the coefficient solver."""
+    has_constraints = any(group.constraints is not None for group in model._groups)
+    has_scop = any(group.monotone_engine == "scop" for group in model._groups)
+    uses_direct_solver = (
+        has_constraints
+        or has_scop
+        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
+    )
+
+    if uses_direct_solver:
+        result, _ = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambda2,
+            offset=offset,
+            max_iter=max_iter,
+            tol=tol,
+            record_diagnostics=record_diagnostics,
+            direct_solve=model._direct_solve,
+            convergence=convergence,
+        )
+        return result
+
+    return fit_pirls(
+        X=model._dm,
+        y=y,
+        weights=sample_weight,
+        family=model._distribution,
+        link=model._link,
+        groups=model._groups,
+        penalty=penalty,
+        offset=offset,
+        max_iter_outer=max_iter,
+        tol=tol,
+        active_set=model._active_set,
+        lambda2=lambda2,
+        record_diagnostics=record_diagnostics,
+        convergence=convergence,
+    )
+
+
 def fit(
     model,
     X,
@@ -682,47 +741,19 @@ def _fit_in_workspace(
     if len(_monotone_engines) > 1:
         raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
 
-    # Direct IRLS when lambda1=0 (no L1 penalty → no BCD needed),
-    # or when any group has monotone constraints (constrained QP / SCOP Newton).
-    _has_constraints = any(g.constraints is not None for g in model._groups)
-    _has_scop = any(g.monotone_engine == "scop" for g in model._groups)
-    if (
-        _has_constraints
-        or _has_scop
-        or (penalty.lambda1 is not None and (penalty.lambda1 == 0 or not has_lambda1_targets))
-    ):
-        model._result, _ = fit_irls_direct(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            lambda2=lambda2,
-            offset=offset,
-            max_iter=max_iter,
-            tol=tol,
-            record_diagnostics=record_diagnostics,
-            direct_solve=model._direct_solve,
-            convergence=convergence,
-        )
-    else:
-        model._result = fit_pirls(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
-            penalty=penalty,
-            offset=offset,
-            max_iter_outer=max_iter,
-            tol=tol,
-            active_set=model._active_set,
-            lambda2=lambda2,
-            record_diagnostics=record_diagnostics,
-            convergence=convergence,
-        )
+    model._result = _solve_coefficients(
+        model,
+        y,
+        sample_weight,
+        offset,
+        penalty=penalty,
+        lambda2=lambda2,
+        has_lambda1_targets=has_lambda1_targets,
+        max_iter=max_iter,
+        tol=tol,
+        record_diagnostics=record_diagnostics,
+        convergence=convergence,
+    )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
     scale_known = getattr(model._distribution, "scale_known", True)
@@ -1071,19 +1102,18 @@ def _fit_reml_in_workspace(
 
     if not reml_groups and not _has_monotone:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
-        model._result = fit_pirls(
-            X=model._dm,
-            y=y,
-            weights=sample_weight,
-            family=model._distribution,
-            link=model._link,
-            groups=model._groups,
+        model._result = _solve_coefficients(
+            model,
+            y,
+            sample_weight,
+            offset,
             penalty=penalty,
-            offset=offset,
-            active_set=model._active_set,
             lambda2=configured_smoothing,
+            has_lambda1_targets=model_has_lambda1_targets(model),
             tol=pirls_tol,
-            max_iter_outer=max_pirls_iter,
+            max_iter=max_pirls_iter,
+            record_diagnostics=False,
+            convergence=model._convergence,
         )
         eta = model._dm.matvec(model._result.beta) + model._result.intercept
         if offset is not None:
