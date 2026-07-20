@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike, as_eager_frame
+
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
 
@@ -120,7 +122,7 @@ def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
 
 def discretization_impact(
     model: SuperGLM,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     *,
@@ -163,6 +165,7 @@ def discretization_impact(
     -------
     DiscretizationResult
     """
+    frame = as_eager_frame(X)
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
     sample_weight = (
@@ -191,7 +194,7 @@ def discretization_impact(
             name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
 
-    eta_orig = predict_eta_exact(model, X, offset=offset)
+    eta_orig = predict_eta_exact(model, frame, offset=offset)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
 
     # For each target feature, compute the delta (binned - smooth)
@@ -201,7 +204,7 @@ def discretization_impact(
     for name in target_features:
         spec = model._specs[name]
         groups = [g for g in model._groups if g.feature_name == name]
-        x_raw = np.asarray(X[name], dtype=np.float64)
+        x_raw = frame.column_array(name, dtype=np.float64)
 
         # Per-observation smooth log-relativity for this feature
         beta_feature = np.concatenate([beta[g.sl] for g in groups])

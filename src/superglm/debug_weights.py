@@ -16,11 +16,13 @@ Usage (at work, where you have the data):
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.solvers.pirls import _positive_working_weight_stats
 
 logger = logging.getLogger(__name__)
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 def compare_irls_weights(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
@@ -105,9 +107,17 @@ def compare_irls_weights(
     elif isinstance(link, IdentityLink):
         sm_family.link = sm.families.links.Identity()
 
+    frame = as_eager_frame(X)
+
     # Build design matrix — intercept-only for comparison
     # Use the raw X columns as numeric features
-    X_sm = sm.add_constant(X.select_dtypes(include=[np.number]).values)
+    numeric_columns = tuple(name for name in frame.columns if frame.column_kind(name) == "numeric")
+    numeric_values = (
+        np.column_stack([frame.column_array(name) for name in numeric_columns])
+        if numeric_columns
+        else np.empty((len(frame), 0), dtype=np.float64)
+    )
+    X_sm = sm.add_constant(numeric_values)
 
     freq_weights = sample_weight if sample_weight is not None else np.ones(len(y))
     sm_offset = offset if offset is not None else None
@@ -214,7 +224,7 @@ def compare_irls_weights(
 
 def inspect_worst_observations(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     iteration: int = 1,
@@ -240,6 +250,7 @@ def inspect_worst_observations(
         Rows for the top-5 and bottom-5 W observations, showing their
         feature values, y, sample_weight, and which end of W they're on.
     """
+    frame = as_eager_frame(X)
     log = model.result.iteration_log
     if log is None:
         raise RuntimeError("No iteration diagnostics. Refit with fit(record_diagnostics=True).")
@@ -261,10 +272,14 @@ def inspect_worst_observations(
     rows = []
     exp = sample_weight if sample_weight is not None else np.ones(len(y))
     for i in all_idx:
-        row = {"obs_index": int(i), "y": float(y[i]), "sample_weight": float(exp[i])}
+        row: dict[object, Any] = {
+            "obs_index": int(i),
+            "y": float(y[i]),
+            "sample_weight": float(exp[i]),
+        }
         # Add feature values
-        for col in X.columns:
-            row[col] = X.iloc[i][col]
+        for col in frame.columns:
+            row[col] = frame.column_array(col)[i]
         row["W_group"] = "top_5" if i in top_idx else "bottom_5"
         rows.append(row)
 

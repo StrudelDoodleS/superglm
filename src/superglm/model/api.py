@@ -709,7 +709,7 @@ class SuperGLM:
 
     def metrics(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -719,7 +719,7 @@ class SuperGLM:
 
     def drop1(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -731,7 +731,7 @@ class SuperGLM:
 
     def refit_unpenalised(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -1044,7 +1044,7 @@ class SuperGLM:
 
     def plot_diagnostics(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -1241,7 +1241,7 @@ class SuperGLM:
 
     def apply_shape_postfit(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
@@ -1267,7 +1267,7 @@ class SuperGLM:
 
     def term_importance(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
     ) -> pd.DataFrame:
         """Weighted variance of each term's contribution to eta.
@@ -1280,13 +1280,13 @@ class SuperGLM:
 
     def term_drop_diagnostics(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
         mode: str = "refit",
-        X_val: pd.DataFrame | None = None,
+        X_val: FrameLike | None = None,
         y_val: NDArray | None = None,
     ) -> pd.DataFrame:
         """Drop-term diagnostics: AIC/BIC deltas or holdout loss deltas.
@@ -1312,7 +1312,7 @@ class SuperGLM:
 
     def spline_redundancy(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
     ) -> dict:
         """Spline redundancy diagnostics: knot spacing, basis correlation, effective rank."""
@@ -1322,7 +1322,7 @@ class SuperGLM:
 
     def discretization_impact(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,

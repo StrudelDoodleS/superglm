@@ -7,10 +7,9 @@ import logging
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame, as_eager_frame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributions import Distribution, clip_mu
 from superglm.dm_builder import (
     add_interaction,
@@ -403,16 +402,14 @@ def _predict_eta(
     return stabilize_eta(eta, model._link)
 
 
-def predict_eta_exact(
-    model, X: pd.DataFrame, offset: NDArray | None = None
-) -> NDArray[np.floating]:
+def predict_eta_exact(model, X: FrameLike, offset: NDArray | None = None) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the exact canonical contract."""
     return _predict_eta(model, X, offset, fast_discrete=False)
 
 
 def predict_eta_fast_discrete(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     offset: NDArray | None = None,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the fast discrete contract."""
@@ -424,12 +421,12 @@ def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
     return clip_mu(model._link.inverse(eta), model._distribution)
 
 
-def predict_exact(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+def predict_exact(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean through the exact canonical contract."""
     return _eta_to_mu(model, predict_eta_exact(model, X, offset))
 
 
-def predict_fast_discrete(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+def predict_fast_discrete(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean through the fast discrete contract."""
     return _eta_to_mu(model, predict_eta_fast_discrete(model, X, offset))
 
@@ -786,6 +783,6 @@ def rebuild_dm_with_lambdas(
     )
 
 
-def predict(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+def predict(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean for new data."""
     return predict_exact(model, X, offset)
