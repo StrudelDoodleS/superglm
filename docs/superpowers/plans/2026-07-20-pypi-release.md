@@ -22,8 +22,8 @@ Publishing and create the GitHub Release only after PyPI succeeds.
 
 1. Move FastAPI and Uvicorn to runtime dependencies; remove `editor` and `all`;
    leave `ipykernel` only in the docs group.
-2. Add PyPI classifiers, keywords, project links, SPDX license metadata, and
-   explicit sdist contents.
+2. Add PyPI classifiers, keywords, project links, SPDX license metadata, and an
+   explicit minimal sdist allowlist.
 3. Regenerate the lockfile with uv.
 4. Update installation examples and make the README logo PyPI-safe.
 5. Run the focused metadata tests.

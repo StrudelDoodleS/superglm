@@ -19,8 +19,9 @@ successful upload will create and claim the pending `superglm` PyPI project.
   metadata.
 - Replace Git-only installation instructions with PyPI-first instructions and
   use a PyPI-safe absolute logo URL.
-- Restrict the sdist to release inputs, source, tests, and top-level legal/readme
-  files so generated notebooks and benchmark records are not shipped.
+- Restrict the sdist to package source and top-level build/legal/readme files.
+  The repository tests depend on benchmark, documentation, and CI files, so do
+  not ship a misleading partial test suite or generated notebook records.
 
 ## Release flow
 

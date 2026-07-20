@@ -46,10 +46,10 @@ def test_sdist_uses_a_small_explicit_allowlist() -> None:
     sdist = _toml_section("tool.hatch.build.targets.sdist")
 
     assert "only-include = [" in sdist
-    for required in ("src", "tests", "LICENSE", "README.md", "pyproject.toml"):
+    for required in ("src", "LICENSE", "README.md", "pyproject.toml"):
         assert f'"{required}"' in sdist
 
-    for repository_only in ("benchmarks", "docs", "scratch", "uv.lock"):
+    for repository_only in ("benchmarks", "docs", "scratch", "tests", "uv.lock"):
         assert f'"{repository_only}"' not in sdist
 
 

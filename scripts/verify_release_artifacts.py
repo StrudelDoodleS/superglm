@@ -17,6 +17,7 @@ REPOSITORY_ONLY_SDIST_ENTRIES = {
     "package-lock.json",
     "package.json",
     "scratch",
+    "tests",
     "uv.lock",
 }
 
