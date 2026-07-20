@@ -83,10 +83,13 @@ def test_release_workflow_publishes_checked_artifacts_from_version_tags():
     assert 'expected_tag = f"v{project_version}"' in workflow
     assert "source_version != project_version" in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"' in workflow
+    assert "persist-credentials: false" in workflow
+    assert "enable-cache: false" in workflow
 
     assert "uv build --out-dir dist" in workflow
     assert "twine check dist/*" in workflow
     assert "check-wheel-contents dist/*.whl" in workflow
+    assert "python scripts/verify_release_artifacts.py dist" in workflow
     assert workflow.count("name: release-distributions") == 3
 
 
@@ -176,6 +179,8 @@ def test_ci_browser_suites_run_in_separate_pytest_processes():
 
 def test_security_archive_check_requires_modular_editor_assets():
     workflow = _read(".github/workflows/security.yml")
+    release_workflow = _read(".github/workflows/release.yml")
+    verifier = _read("scripts/verify_release_artifacts.py")
     editor_root = ROOT / "src/superglm/editor/app"
     current_assets = {
         f"superglm/editor/app/{path.relative_to(editor_root).as_posix()}"
@@ -183,7 +188,7 @@ def test_security_archive_check_requires_modular_editor_assets():
         if path.is_file() and (path.name == "index.html" or path.suffix in {".js", ".css"})
     }
     derivation_markers = (
-        'editor_root = Path("src/superglm/editor/app")',
+        'editor_root = source_root / "src/superglm/editor/app"',
         'for path in editor_root.rglob("*")',
         'path.name == "index.html"',
         'path.suffix in {".js", ".css"}',
@@ -202,10 +207,12 @@ def test_security_archive_check_requires_modular_editor_assets():
     assert all(asset.startswith("superglm/editor/app/") for asset in current_assets)
     assert representative_assets <= current_assets
     for marker in derivation_markers:
-        assert marker in workflow
-    assert 'for wheel in Path("dist").glob("*.whl")' in workflow
-    assert 'for sdist in Path("dist").glob("*.tar.gz")' in workflow
-    assert '"superglm/editor/app/index.html"' not in workflow
+        assert marker in verifier
+    assert 'glob("*.whl")' in verifier
+    assert 'glob("*.tar.gz")' in verifier
+    assert '"superglm/editor/app/index.html"' not in verifier
+    for consumer in (workflow, release_workflow):
+        assert "python scripts/verify_release_artifacts.py dist" in consumer
 
 
 def test_docs_workflow_scopes_write_permission_to_deploy_job():
@@ -263,4 +270,5 @@ def test_security_policy_and_codeowners_cover_governance_surfaces():
     assert ".github/CODEOWNERS" in codeowners
     assert "SECURITY.md" in codeowners
     assert "pyproject.toml" in codeowners
+    assert "scripts/verify_release_artifacts.py" in codeowners
     assert "src/superglm/" in codeowners
