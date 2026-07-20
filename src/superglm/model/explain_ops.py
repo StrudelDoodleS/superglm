@@ -72,6 +72,7 @@ def metrics(model, X, y, sample_weight=None, offset=None):
         y,
         sample_weight,
         offset,
+        _fit_data_matches=same_fit_refs,
         _mu=model._fit_mu if use_fit_mu else None,
         _null_mu=model._fit_null_mu if same_fit_refs else None,
         _fit_stats=model._fit_stats if same_fit_refs else None,

@@ -141,7 +141,14 @@ class TestMetricsCaching:
         independent = model.metrics(X.copy(), y.copy(), sample_weight=w.copy())
 
         assert refreshed is not cached
+        assert not refreshed._uses_fit_design
         assert refreshed.log_likelihood == pytest.approx(independent.log_likelihood)
+        np.testing.assert_allclose(refreshed.leverage, independent.leverage)
+        np.testing.assert_allclose(refreshed._active_info[2], independent._active_info[2])
+        np.testing.assert_array_equal(
+            refreshed._current_coefficient_estimable,
+            independent._current_coefficient_estimable,
+        )
 
     def test_mutated_fit_weights_invalidate_identity_cache(self, fitted_poisson):
         model, X, y, w = fitted_poisson
