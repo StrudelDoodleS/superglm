@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from superglm._frame import as_eager_frame
+
 
 def resolve_ci(ci):
     """Normalize the ``ci`` parameter to an interval string or None."""
@@ -111,6 +113,7 @@ def plot(
     if mode == "interaction":
         if engine not in ("matplotlib", "plotly"):
             raise ValueError(f"Unknown engine {engine!r}. Expected 'matplotlib' or 'plotly'.")
+        frame = None if X is None else as_eager_frame(X)
         return plot_interaction(
             model,
             interaction_name,
@@ -118,7 +121,7 @@ def plot(
             with_ci=(interval is not None),
             figsize=figsize,
             n_points=n_points,
-            X=X,
+            X=frame,
             sample_weight=sample_weight,
             **kwargs,
         )
@@ -151,10 +154,11 @@ def plot(
     if engine == "plotly":
         from superglm.plotting.main_effects_plotly import plot_main_effects_plotly
 
+        frame = None if X is None else as_eager_frame(X)
         return plot_main_effects_plotly(
             model,
             term_inferences,
-            X=X,
+            X=frame,
             sample_weight=sample_weight,
             interval=interval,
             show_exposure=show_density,
@@ -170,10 +174,11 @@ def plot(
         )
 
     if mode == "single_main":
+        frame = None if X is None else as_eager_frame(X)
         return plot_term(
             term_inferences[0],
             model=model,
-            X=X,
+            X=frame,
             sample_weight=sample_weight,
             interval=interval,
             show_exposure=show_density,
@@ -184,9 +189,10 @@ def plot(
             grouped_level_display=grouped_level_display,
         )
 
+    frame = None if X is None else as_eager_frame(X)
     return plot_relativities(
         term_inferences,
-        X=X,
+        X=frame,
         sample_weight=sample_weight,
         interval=interval,
         show_exposure=show_density,
@@ -275,11 +281,12 @@ def plot_data(
             raise ValueError(
                 f"plot_data() supports one interaction at a time. Got {len(names)}: {names}."
             )
+        frame = None if X is None else as_eager_frame(X)
         return build_interaction_plot_data(
             model,
             names[0],
             n_points=n_points,
-            X=X,
+            X=frame,
             sample_weight=sample_weight,
         )
 
@@ -297,10 +304,11 @@ def plot_data(
         )
         for name in names
     ]
+    frame = None if X is None else as_eager_frame(X)
     return build_main_effect_plot_data(
         model,
         term_inferences,
-        X=X,
+        X=frame,
         sample_weight=sample_weight,
         show_density=show_density,
         show_knots=show_knots,

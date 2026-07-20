@@ -11,6 +11,29 @@ from superglm import Categorical, Numeric, OrderedCategorical, Spline, SuperGLM
 PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
 
 
+def _to_polars(frame):
+    pl = pytest.importorskip("polars")
+    return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
+
+
+def _assert_plot_payload_equal(actual, expected):
+    if isinstance(expected, pd.DataFrame):
+        pd.testing.assert_frame_equal(actual, expected)
+    elif isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_plot_payload_equal(actual[key], expected[key])
+    elif isinstance(expected, list | tuple):
+        assert type(actual) is type(expected)
+        assert len(actual) == len(expected)
+        for actual_item, expected_item in zip(actual, expected, strict=True):
+            _assert_plot_payload_equal(actual_item, expected_item)
+    elif isinstance(expected, np.ndarray):
+        np.testing.assert_array_equal(actual, expected)
+    else:
+        assert actual == expected
+
+
 @pytest.fixture
 def sample_data():
     rng = np.random.default_rng(42)
@@ -142,6 +165,83 @@ class TestPlotData:
         payload = fitted_model.plot_data()
         assert payload["kind"] == "main_effects"
         assert [term["name"] for term in payload["terms"]] == list(fitted_model._feature_order)
+
+    def test_polars_payload_matches_pandas_without_whole_frame_conversion(
+        self, fitted_model, sample_data, monkeypatch
+    ):
+        pl = pytest.importorskip("polars")
+        X, _, sample_weight = sample_data
+        expected = fitted_model.plot_data(
+            ["age", "region", "density"],
+            X=X,
+            sample_weight=sample_weight,
+            show_knots=True,
+            show_bases=True,
+        )
+        X_pl = _to_polars(X)
+
+        monkeypatch.setattr(
+            pl.DataFrame,
+            "to_pandas",
+            lambda *_args, **_kwargs: pytest.fail("plot support converted the whole frame"),
+        )
+        actual = fitted_model.plot_data(
+            ["age", "region", "density"],
+            X=X_pl,
+            sample_weight=sample_weight,
+            show_knots=True,
+            show_bases=True,
+        )
+
+        _assert_plot_payload_equal(actual, expected)
+
+    def test_polars_support_renders_with_matplotlib_and_plotly(
+        self, fitted_model, sample_data, monkeypatch
+    ):
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+
+        pl = pytest.importorskip("polars")
+        X, _, sample_weight = sample_data
+        X_pl = _to_polars(X)
+        monkeypatch.setattr(
+            pl.DataFrame,
+            "to_pandas",
+            lambda *_args, **_kwargs: pytest.fail("renderer converted the whole frame"),
+        )
+
+        pandas_figure = fitted_model.plot(
+            ["age", "region", "density"],
+            X=X,
+            sample_weight=sample_weight,
+        )
+        polars_figure = fitted_model.plot(
+            ["age", "region", "density"],
+            X=X_pl,
+            sample_weight=sample_weight,
+        )
+        assert isinstance(polars_figure, Figure)
+        assert len(polars_figure.get_axes()) == len(pandas_figure.get_axes())
+        plt.close(pandas_figure)
+        plt.close(polars_figure)
+
+        if PLOTLY_AVAILABLE:
+            import plotly.graph_objects as go
+
+            pandas_plotly = fitted_model.plot(
+                ["age", "region", "density"],
+                engine="plotly",
+                X=X,
+                sample_weight=sample_weight,
+            )
+            polars_plotly = fitted_model.plot(
+                ["age", "region", "density"],
+                engine="plotly",
+                X=X_pl,
+                sample_weight=sample_weight,
+            )
+            assert isinstance(polars_plotly, go.Figure)
+            assert len(polars_plotly.data) == len(pandas_plotly.data)
 
 
 # ── terms=["a", "b"]: subset of main effects ──────────────────

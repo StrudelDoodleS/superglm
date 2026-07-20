@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.inference.term import SmoothCurve, TermInference
 
@@ -93,7 +94,7 @@ def resolve_grouped_level_display(mode: str, model: Any, ti: TermInference) -> s
 
 def grouped_level_exposure(
     display: GroupedTermDisplay | None,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
 ) -> NDArray | None:
     """Aggregate exposure for displayed categorical levels."""
@@ -102,7 +103,10 @@ def grouped_level_exposure(
     raw = (
         pd.DataFrame(
             {
-                "level": X[display.term.name].astype(str),
+                "level": pd.Series(
+                    X.column_array(display.term.name),
+                    name=display.term.name,
+                ).astype(str),
                 "sample_weight": sample_weight,
             }
         )

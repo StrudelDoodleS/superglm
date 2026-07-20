@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -91,16 +92,16 @@ def _resolve_comparable_terms(
 
 
 def _shared_continuous_domain(
-    X: pd.DataFrame, term: str, n_points: int
+    X: EagerFrame, term: str, n_points: int
 ) -> dict[str, NDArray[np.float64]]:
     """Build a shared continuous x-grid from the passed comparison data."""
-    values = np.asarray(X[term], dtype=np.float64)
+    values = X.column_array(term, dtype=np.float64)
     return {"x": np.linspace(float(values.min()), float(values.max()), n_points)}
 
 
 def _shared_level_domain(
     models: Mapping[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     term: str,
 ) -> dict[str, list[str]]:
     """Build a shared categorical/ordered level domain."""
@@ -112,7 +113,11 @@ def _shared_level_domain(
             break
 
     observed_levels = [
-        str(level) for level in pd.Series(X[term]).astype(str).drop_duplicates().tolist()
+        str(level)
+        for level in pd.Series(X.column_array(term), name=term)
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
     ]
     if ordered_levels is None:
         return {"levels": observed_levels}
@@ -126,7 +131,7 @@ def _shared_level_domain(
 
 def _support_payload(
     family: str,
-    X: pd.DataFrame,
+    X: EagerFrame,
     term: str,
     sample_weight: NDArray[np.float64] | None,
     domain: dict[str, Any],
@@ -136,13 +141,13 @@ def _support_payload(
         sample_weight = np.ones(len(X), dtype=np.float64)
 
     if family == "continuous":
-        values = np.asarray(X[term], dtype=np.float64)
+        values = X.column_array(term, dtype=np.float64)
         weights = np.asarray(sample_weight, dtype=np.float64)
         grid = np.asarray(domain["x"], dtype=np.float64)
         density = _exposure_kde(values, weights, grid)
         return {"x": grid, "density": density}
 
-    level_series = pd.Series(X[term]).astype(str)
+    level_series = pd.Series(X.column_array(term), name=term).astype(str)
     grouped = (
         pd.DataFrame({"level": level_series, "sample_weight": sample_weight})
         .groupby("level", sort=False)["sample_weight"]
@@ -157,13 +162,14 @@ def _build_term_comparison_data(
     *,
     models: Mapping[str, Any],
     terms: str | list[str] | tuple[str, ...] | None,
-    X: pd.DataFrame,
+    X: FrameLike | EagerFrame,
     sample_weight: NDArray | None = None,
     support_by_label: Mapping[str, dict[str, Any]] | None = None,
     n_points: int = 200,
 ) -> dict[str, Any]:
     """Build normalized per-term comparison data for labeled fitted models."""
     normalized_models = _normalize_models(models)
+    frame = as_eager_frame(X)
     resolved_terms, skipped = _resolve_comparable_terms(normalized_models, terms=terms)
     if not resolved_terms:
         raise ValueError("No comparable main-effect terms were found for the supplied models.")
@@ -171,12 +177,20 @@ def _build_term_comparison_data(
     sample_weight_arr = (
         None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
     )
+    normalized_support = (
+        None
+        if support_by_label is None
+        else {
+            label: {**support_data, "X": as_eager_frame(support_data["X"])}
+            for label, support_data in support_by_label.items()
+        }
+    )
     payload_terms: list[dict[str, Any]] = []
 
     for term in resolved_terms:
         family = _comparison_family(next(iter(normalized_models.values()))._specs[term])
         if family == "continuous":
-            domain = _shared_continuous_domain(X, term, n_points)
+            domain = _shared_continuous_domain(frame, term, n_points)
             x = np.asarray(domain["x"], dtype=np.float64)
             series = {
                 label: {
@@ -187,7 +201,7 @@ def _build_term_comparison_data(
                 for label, model in normalized_models.items()
             }
         else:
-            domain = _shared_level_domain(normalized_models, X, term)
+            domain = _shared_level_domain(normalized_models, frame, term)
             levels = np.asarray(domain["levels"], dtype=object)
             series = {
                 label: {
@@ -202,11 +216,11 @@ def _build_term_comparison_data(
         for entry in series.values():
             entry["response"] = np.exp(entry["link"])
 
-        if support_by_label is None:
-            support = _support_payload(family, X, term, sample_weight_arr, domain)
+        if normalized_support is None:
+            support = _support_payload(family, frame, term, sample_weight_arr, domain)
         else:
             support_series: dict[str, Any] = {}
-            for label, support_data in support_by_label.items():
+            for label, support_data in normalized_support.items():
                 support_series[label] = _support_payload(
                     family,
                     support_data["X"],
@@ -237,7 +251,7 @@ def plot_term_comparison(
     *,
     models: Mapping[str, Any],
     terms: str | list[str] | tuple[str, ...] | None = None,
-    X: pd.DataFrame,
+    X: FrameLike,
     sample_weight: NDArray | None = None,
     support_by_label: Mapping[str, dict[str, Any]] | None = None,
     engine: str = "plotly",
