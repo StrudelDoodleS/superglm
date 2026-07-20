@@ -23,10 +23,17 @@ from superglm.group_matrix import (
 )
 from superglm.links import IdentityLink
 from superglm.model import state_ops
+from superglm.model.fit_state import FittedStateRevision
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
-from superglm.solvers.centered_system import build_centered_system, refresh_centered_rhs
+from superglm.solvers.centered_system import (
+    TabmatCenteringState,
+    build_centered_system,
+    grouped_augmented_factor_rhs,
+    penalty_factor,
+    refresh_centered_rhs,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.rank import (
@@ -41,6 +48,41 @@ from superglm.types import GroupSlice
 
 def _dense_design_matrix(X: np.ndarray) -> DesignMatrix:
     return DesignMatrix([DenseGroupMatrix(X)], n=X.shape[0], p=X.shape[1])
+
+
+def _publish_result_revision(model, **changes) -> None:
+    revision = FittedStateRevision.start(model)
+    for result_name in ("_result", "_solver_result"):
+        result = getattr(revision.model, result_name)
+        for name, value in changes.items():
+            setattr(result, name, value)
+    revision.commit()
+
+
+def _count_tabmat_split_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    import tabmat
+
+    calls = {"standardize": 0, "sandwich": 0, "transpose_matvec": 0}
+    original_standardize = tabmat.SplitMatrix.standardize
+    original_sandwich = tabmat.SplitMatrix.sandwich
+    original_transpose_matvec = tabmat.SplitMatrix.transpose_matvec
+
+    def counted_standardize(self, *args, **kwargs):
+        calls["standardize"] += 1
+        return original_standardize(self, *args, **kwargs)
+
+    def counted_sandwich(self, *args, **kwargs):
+        calls["sandwich"] += 1
+        return original_sandwich(self, *args, **kwargs)
+
+    def counted_transpose_matvec(self, *args, **kwargs):
+        calls["transpose_matvec"] += 1
+        return original_transpose_matvec(self, *args, **kwargs)
+
+    monkeypatch.setattr(tabmat.SplitMatrix, "standardize", counted_standardize)
+    monkeypatch.setattr(tabmat.SplitMatrix, "sandwich", counted_sandwich)
+    monkeypatch.setattr(tabmat.SplitMatrix, "transpose_matvec", counted_transpose_matvec)
+    return calls
 
 
 def _fitted_discrete_tensor_state():
@@ -153,6 +195,645 @@ def test_centered_rhs_is_stable_with_large_feature_and_response_means() -> None:
         system.hessian,
     ):
         assert not values.flags.writeable
+
+
+def test_mixed_categorical_centering_uses_tabmat_without_materializing_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(154)
+    n = 600
+    n_levels = 120
+    dense = rng.normal(size=(n, 2))
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = rng.uniform(0.25, 2.0, size=n)
+    z = rng.normal(size=n)
+    X = np.column_stack((dense, categorical.toarray()))
+    mean_x = np.average(X, axis=0, weights=W)
+    mean_z = float(np.average(z, weights=W))
+    X_centered = X - mean_x
+    calls = _count_tabmat_split_calls(monkeypatch)
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("certified Tabmat centering must not materialize rows"),
+    )
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_split=dm.tabmat_split,
+    )
+
+    assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
+    np.testing.assert_allclose(system.mean_x, mean_x, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        system.data_gram,
+        X_centered.T @ (W[:, None] * X_centered),
+        rtol=1e-12,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        system.rhs,
+        X_centered.T @ (W * (z - mean_z)),
+        rtol=1e-12,
+        atol=1e-11,
+    )
+
+
+def test_unsafe_mixed_tabmat_centering_falls_back_to_stable_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(155)
+    n = 600
+    n_levels = 120
+    dense = np.column_stack((1e12 + np.arange(n, dtype=float), rng.normal(size=n)))
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = rng.uniform(0.25, 2.0, size=n)
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty)
+    calls = _count_tabmat_split_calls(monkeypatch)
+    tabmat_state = TabmatCenteringState()
+    original_row_subset = dm.row_subset
+    row_subset_calls = 0
+
+    def counted_row_subset(rows):
+        nonlocal row_subset_calls
+        row_subset_calls += 1
+        return original_row_subset(rows)
+
+    monkeypatch.setattr(dm, "row_subset", counted_row_subset)
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_split,
+        tabmat_state=tabmat_state,
+    )
+    second = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_split,
+        tabmat_state=tabmat_state,
+    )
+
+    assert calls == {"standardize": 1, "sandwich": 0, "transpose_matvec": 0}
+    assert tabmat_state.eligible is False
+    assert row_subset_calls == 2
+    np.testing.assert_array_equal(system.mean_x, expected.mean_x)
+    np.testing.assert_array_equal(system.data_gram, expected.data_gram)
+    np.testing.assert_array_equal(system.rhs, expected.rhs)
+    np.testing.assert_array_equal(second.data_gram, expected.data_gram)
+
+
+def test_categorical_only_centering_keeps_packed_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(156)
+    n = 600
+    n_levels = 120
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix([categorical], n=n, p=n_levels)
+    calls = _count_tabmat_split_calls(monkeypatch)
+
+    monkeypatch.setattr(
+        dm,
+        "row_subset",
+        lambda _rows: pytest.fail("packed categorical centering must not materialize rows"),
+    )
+    system = build_centered_system(
+        dm=dm,
+        W=np.ones(n),
+        z_off=rng.normal(size=n),
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_split=dm.tabmat_split,
+    )
+
+    assert calls == {"standardize": 0, "sandwich": 0, "transpose_matvec": 0}
+    assert np.all(np.isfinite(system.data_gram))
+
+
+@pytest.mark.parametrize("weight_layout", ["strided", "readonly"])
+def test_tabmat_centering_normalizes_weight_buffers(
+    weight_layout: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(157)
+    n = 600
+    n_levels = 120
+    dense = rng.normal(size=(n, 2))
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    rng.shuffle(codes)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    base_weights = rng.uniform(0.25, 2.0, size=n)
+    if weight_layout == "strided":
+        storage = np.empty(2 * n)
+        storage[::2] = base_weights
+        W = storage[::2]
+        assert not W.flags.c_contiguous
+    else:
+        W = base_weights.copy()
+        W.setflags(write=False)
+        assert not W.flags.writeable
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=base_weights, z_off=z, penalty=penalty)
+    calls = _count_tabmat_split_calls(monkeypatch)
+
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=dm.tabmat_split,
+    )
+
+    assert calls == {"standardize": 1, "sandwich": 1, "transpose_matvec": 1}
+    np.testing.assert_allclose(system.mean_x, expected.mean_x, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(system.data_gram, expected.data_gram, rtol=1e-12, atol=1e-11)
+    np.testing.assert_allclose(system.rhs, expected.rhs, rtol=1e-12, atol=1e-11)
+
+
+def test_tabmat_split_uses_uniform_float64_solver_dtype() -> None:
+    rng = np.random.default_rng(158)
+    n = 600
+    n_levels = 120
+    dense = rng.normal(size=(n, 2)).astype(np.float32)
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = rng.uniform(0.25, 2.0, size=n)
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty)
+    split = dm.tabmat_split
+
+    assert split is not None
+    assert all(component.dtype == np.dtype(np.float64) for component in split.matrices)
+    system = build_centered_system(
+        dm=dm,
+        W=W,
+        z_off=z,
+        penalty=penalty,
+        tabmat_split=split,
+    )
+    np.testing.assert_allclose(system.data_gram, expected.data_gram, rtol=1e-12, atol=1e-11)
+    np.testing.assert_allclose(system.rhs, expected.rhs, rtol=1e-12, atol=1e-11)
+
+
+def test_nonfinite_tabmat_raw_moments_fall_back_without_floating_point_error() -> None:
+    rng = np.random.default_rng(159)
+    n = 600
+    n_levels = 120
+    dense = (1e155 + 1e145 * rng.normal(size=n))[:, None]
+    codes = np.resize(np.arange(n_levels, dtype=np.intp), n)
+    categorical = CategoricalGroupMatrix(codes, n_levels=n_levels)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(dense), categorical],
+        n=n,
+        p=dense.shape[1] + n_levels,
+    )
+    W = np.ones(n)
+    z = rng.normal(size=n)
+    penalty = np.zeros((dm.p, dm.p))
+    expected = build_centered_system(dm=dm, W=W, z_off=z, penalty=penalty)
+    tabmat_state = TabmatCenteringState(eligible=True)
+
+    with np.errstate(over="raise", invalid="raise"):
+        system = build_centered_system(
+            dm=dm,
+            W=W,
+            z_off=z,
+            penalty=penalty,
+            tabmat_split=dm.tabmat_split,
+            tabmat_state=tabmat_state,
+        )
+
+    assert tabmat_state.eligible is False
+    assert np.all(np.isfinite(system.data_gram))
+    np.testing.assert_array_equal(system.data_gram, expected.data_gram)
+    np.testing.assert_array_equal(system.rhs, expected.rhs)
+
+
+def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw-rounding rank ambiguity is repaired by the shared observation-factor policy."""
+    import superglm.solvers.centered_system as centered_system_module
+
+    rng = np.random.default_rng(20260809)
+    n_bins = 64
+    n_cycles = 4
+    n = n_bins * n_cycles
+    support = rng.normal(size=(64, 3))
+    support -= np.mean(support, axis=0)
+    bin_idx = np.arange(n, dtype=np.intp) % n_bins
+    cycle = np.arange(n, dtype=np.intp) // n_bins
+    # These balanced patterns are exactly centered and orthogonal within
+    # every bin. The separation lies just above the factor-rank boundary, but
+    # its Gram eigenvalue rounds to an exact zero on the reference platform.
+    x = np.where(cycle % 2, 1.0, -1.0)
+    orthogonal_direction = np.where(cycle % 4 < 2, 1.0, -1.0)
+    separation = 3.02e-8
+    x_alias = x + separation * orthogonal_direction
+    weights = np.ones(n)
+    discrete = DiscretizedSSPGroupMatrix(
+        support,
+        np.eye(3),
+        bin_idx,
+    )
+    dm = DesignMatrix(
+        [DenseGroupMatrix(x), DenseGroupMatrix(x_alias), discrete],
+        n=n,
+        p=5,
+    )
+    groups = [
+        GroupSlice(name="x", start=0, end=1),
+        GroupSlice(name="x_alias", start=1, end=2),
+        GroupSlice(name="s", start=2, end=5),
+    ]
+    y = (
+        0.4
+        + 1.7 * x
+        + 0.5 * separation * orthogonal_direction
+        + discrete.matvec(np.array([0.3, -0.2, 0.1]))
+    )
+    preliminary = build_centered_system(
+        dm=dm,
+        W=weights,
+        z_off=y,
+        penalty=np.zeros((dm.p, dm.p)),
+        tabmat_state=TabmatCenteringState(),
+    )
+    preliminary_rank = decompose_gram(preliminary.data_gram)
+    # BLAS eigensolvers can report this cutoff-boundary Gram as rank 4 or 5;
+    # both outcomes lie inside the shared factor-certification band.
+    assert preliminary_rank.rank in {4, 5}
+    assert needs_factor_certification(preliminary_rank)
+    factor, factor_rhs = grouped_augmented_factor_rhs(
+        dm,
+        weights,
+        np.zeros((dm.p, dm.p)),
+        response=y - preliminary.mean_z,
+        center=preliminary.mean_x,
+    )
+    certified = decompose_factor(factor, retain_factor_solve=True)
+    assert certified.rank == 5
+    certified_beta = certified.solve_factor_rhs(factor_rhs)
+    certified_prediction = preliminary.mean_z + dm.matvec(certified_beta)
+    np.testing.assert_allclose(certified_prediction, y, rtol=2e-12, atol=2e-11)
+    factor_passes = 0
+    original_chunks = centered_system_module.iter_grouped_design_chunks
+
+    def counted_chunks(design):
+        nonlocal factor_passes
+        factor_passes += 1
+        yield from original_chunks(design)
+
+    monkeypatch.setattr(centered_system_module, "iter_grouped_design_chunks", counted_chunks)
+
+    hybrid, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+    )
+    assert factor_passes == 1
+    factor_passes = 0
+    monkeypatch.setattr(
+        centered_system_module,
+        "_try_mixed_discrete_centering",
+        lambda **_kwargs: (False, None),
+    )
+    stable, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+    )
+    assert factor_passes == 1
+
+    assert hybrid.rank_info is not None
+    assert stable.rank_info is not None
+    assert hybrid.rank_info.data.rank == stable.rank_info.data.rank == 5
+    hybrid_prediction = hybrid.intercept + dm.matvec(hybrid.beta)
+    stable_prediction = stable.intercept + dm.matvec(stable.beta)
+    np.testing.assert_allclose(hybrid_prediction, stable_prediction, rtol=2e-12, atol=2e-11)
+    np.testing.assert_allclose(hybrid_prediction, y, rtol=2e-12, atol=2e-11)
+    np.testing.assert_allclose(stable_prediction, y, rtol=2e-12, atol=2e-11)
+    assert hybrid.deviance == pytest.approx(stable.deviance, rel=2e-12, abs=2e-11)
+
+
+def test_equal_rank_factor_certificate_controls_retained_subspace() -> None:
+    """Equal certified ranks can still retain different cutoff-boundary directions."""
+    rng = np.random.default_rng(4274)
+    right, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    half_left, _ = np.linalg.qr(rng.normal(size=(8, 3)))
+    left = np.vstack((half_left, -half_left)) / np.sqrt(2.0)
+    design = left @ np.diag([1.0, 1.55e-8, 1.30e-8]) @ right.T
+    dm = _dense_design_matrix(design)
+    weights = np.ones(len(design))
+    groups = [GroupSlice(name="x", start=0, end=3)]
+    y = 0.4 + design @ (1.0e8 * right[:, 1])
+    centered = build_centered_system(
+        dm=dm,
+        W=weights,
+        z_off=y,
+        penalty=np.zeros((3, 3)),
+    )
+    gram_rank = decompose_gram(centered.data_gram)
+    factor, factor_rhs = grouped_augmented_factor_rhs(
+        dm,
+        weights,
+        centered.penalty,
+        response=y - centered.mean_z,
+        center=centered.mean_x,
+    )
+    factor_rank = decompose_factor(factor, retain_factor_solve=True)
+    assert gram_rank.rank == factor_rank.rank == 2
+    assert needs_factor_certification(gram_rank)
+    gram_null = gram_rank.null_basis()
+    factor_null = factor_rank.null_basis()
+    gram_null_projector = gram_null @ np.linalg.pinv(gram_null)
+    factor_null_projector = factor_null @ np.linalg.pinv(factor_null)
+    assert np.linalg.norm(gram_null_projector - factor_null_projector, ord=2) > 0.1
+    gram_beta = gram_rank.solve(centered.rhs)
+    factor_beta = factor_rank.solve_factor_rhs(factor_rhs)
+    gram_prediction = centered.mean_z + dm.matvec(gram_beta) - centered.mean_x @ gram_beta
+    factor_prediction = centered.mean_z + dm.matvec(factor_beta) - centered.mean_x @ factor_beta
+    assert (
+        np.linalg.norm(gram_prediction - factor_prediction)
+        / np.linalg.norm(factor_prediction - centered.mean_z)
+        > 0.1
+    )
+
+    automatic, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+        direct_solve="auto",
+    )
+
+    assert automatic.rank_info is not None
+    assert automatic.rank_info.data.rank == 2
+    automatic_prediction = automatic.intercept + dm.matvec(automatic.beta)
+    np.testing.assert_allclose(automatic_prediction, factor_prediction, rtol=1e-10, atol=1e-10)
+
+
+def test_exact_gaussian_alias_reuses_factor_certificate_across_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact Gaussian working rows keep one factor pass across iterations."""
+    import superglm.solvers.centered_system as centered_system_module
+
+    x = np.linspace(-2.0, 2.0, 32)
+    dm = DesignMatrix(
+        [DenseGroupMatrix(x), DenseGroupMatrix(x.copy())],
+        n=len(x),
+        p=2,
+    )
+    groups = [
+        GroupSlice(name="x", start=0, end=1),
+        GroupSlice(name="duplicate", start=1, end=2),
+    ]
+    y = 1.0 + 3.0 * x + 0.03 * np.sin(5.0 * x)
+    factor_passes = 0
+    original_chunks = centered_system_module.iter_grouped_design_chunks
+
+    def counted_chunks(design):
+        nonlocal factor_passes
+        factor_passes += 1
+        yield from original_chunks(design)
+
+    monkeypatch.setattr(centered_system_module, "iter_grouped_design_chunks", counted_chunks)
+    result, _ = fit_irls_direct(
+        dm,
+        y,
+        np.ones(len(x)),
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        tol=1e-12,
+    )
+
+    assert result.n_iter == 2
+    assert result.rank_info is not None
+    assert result.rank_info.data.rank == result.rank_info.augmented.rank == 1
+    assert result.rank_info.coefficient.rank == 1
+    assert factor_passes == 1
+    expected = np.linalg.lstsq(np.column_stack((np.ones(len(x)), x)), y, rcond=None)[0]
+    prediction = result.intercept + dm.matvec(result.beta)
+    np.testing.assert_allclose(prediction, expected[0] + expected[1] * x, rtol=1e-12, atol=1e-12)
+
+
+def test_streamed_factor_rhs_includes_penalty_rows_without_normal_equation_loss() -> None:
+    rng = np.random.default_rng(20260810)
+    n = 384
+    weights = rng.uniform(0.2, 2.0, size=n)
+    X = rng.normal(size=(n, 4))
+    X[:, 1] = X[:, 0] + 4.0e-8 * rng.normal(size=n)
+    dm = _dense_design_matrix(X)
+    mean_x = weights @ X / np.sum(weights)
+    response = rng.normal(size=n)
+    response -= float(weights @ response / np.sum(weights))
+    penalty = np.diag([0.0, 0.0, 0.4, 1.7])
+
+    factor, factor_rhs = grouped_augmented_factor_rhs(
+        dm,
+        weights,
+        penalty,
+        response=response,
+        center=mean_x,
+    )
+    decomposition = decompose_factor(factor, retain_factor_solve=True)
+    actual = decomposition.solve_factor_rhs(factor_rhs)
+
+    dense_factor = np.sqrt(weights)[:, None] * (X - mean_x)
+    smooth_factor = penalty_factor(penalty)
+    augmented_factor = np.vstack((dense_factor, smooth_factor))
+    augmented_rhs = np.concatenate((np.sqrt(weights) * response, np.zeros(smooth_factor.shape[0])))
+    expected = np.linalg.lstsq(
+        augmented_factor,
+        augmented_rhs,
+        rcond=SHARED_RANK_POLICY.factor_rcond,
+    )[0]
+    np.testing.assert_allclose(actual, expected, rtol=2e-9, atol=2e-10)
+    np.testing.assert_allclose(
+        augmented_factor @ actual,
+        augmented_factor @ expected,
+        rtol=2e-10,
+        atol=1e-9,
+    )
+
+
+def test_direct_qr_solves_factor_rhs_without_normal_equation_loss() -> None:
+    """The explicit factor route must not square its accurately formed RHS."""
+    n = 1024
+    row = np.arange(n, dtype=np.intp)
+    x = np.where(row % 2, 1.0, -1.0)
+    orthogonal = np.where(row % 4 < 2, 1.0, -1.0)
+    x_alias = x + 3.03e-8 * orthogonal
+    dm = DesignMatrix(
+        [DenseGroupMatrix(x), DenseGroupMatrix(x_alias)],
+        n=n,
+        p=2,
+    )
+    groups = [
+        GroupSlice(name="x", start=0, end=1),
+        GroupSlice(name="x_alias", start=1, end=2),
+    ]
+    y = 0.4 + 1.7 * x
+
+    result, _ = fit_irls_direct(
+        dm,
+        y,
+        np.ones(n),
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        direct_solve="qr",
+        tol=1e-12,
+    )
+
+    assert result.rank_info is not None
+    assert result.rank_info.augmented.rank == 2
+    prediction = result.intercept + dm.matvec(result.beta)
+    np.testing.assert_allclose(prediction, y, rtol=2e-12, atol=2e-11)
+
+
+def test_direct_qr_solves_from_factor_rhs_at_rank_boundary() -> None:
+    n = 512
+    cycle = np.arange(n, dtype=np.intp)
+    x = np.where(cycle % 2, 1.0, -1.0)
+    orthogonal_direction = np.where(cycle % 4 < 2, 1.0, -1.0)
+    x_alias = x + 3.03e-8 * orthogonal_direction
+    third = np.sin(0.37 * cycle)
+    X = np.column_stack((x, x_alias, third))
+    dm = _dense_design_matrix(X)
+    weights = np.ones(n)
+    groups = [GroupSlice(name="numeric", start=0, end=dm.p)]
+    y = 0.4 + 1.7 * x + 0.3 * third
+
+    mean_x = np.mean(X, axis=0)
+    mean_y = float(np.mean(y))
+    factor_decomposition = decompose_factor(X - mean_x, retain_factor_solve=True)
+    factor_beta = factor_decomposition.solve_factor_rhs(y - mean_y)
+    np.testing.assert_allclose(
+        mean_y + (X - mean_x) @ factor_beta,
+        y,
+        rtol=2e-12,
+        atol=2e-11,
+    )
+
+    result, _ = fit_irls_direct(
+        dm,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        direct_solve="qr",
+        tol=1e-12,
+    )
+
+    assert result.rank_info is not None
+    assert result.rank_info.data.rank == dm.p
+    prediction = result.intercept + dm.matvec(result.beta)
+    np.testing.assert_allclose(prediction, y, rtol=2e-12, atol=2e-11)
+
+
+def test_tall_factor_decomposition_does_not_request_quadratic_left_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers.rank as rank_module
+
+    rng = np.random.default_rng(20260812)
+    factor = rng.normal(size=(256, 7))
+    original_svd = rank_module.np.linalg.svd
+    full_matrix_requests: list[bool] = []
+
+    def checked_svd(values, *, full_matrices=True):
+        full_matrix_requests.append(full_matrices)
+        return original_svd(values, full_matrices=full_matrices)
+
+    monkeypatch.setattr(rank_module.np.linalg, "svd", checked_svd)
+    decomposition = decompose_factor(factor)
+
+    assert decomposition.rank == factor.shape[1]
+    assert full_matrix_requests == [False]
+
+
+def test_retained_representative_factor_rhs_uses_one_rank_svd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers.rank as rank_module
+
+    x = np.linspace(-2.0, 2.0, 128)
+    third = np.sin(x)
+    factor = np.column_stack((x, x, third))
+    response = 1.5 * x - 0.4 * third
+    original_svd = rank_module.np.linalg.svd
+    svd_shapes: list[tuple[int, int]] = []
+
+    def counted_svd(values, *, full_matrices=True):
+        svd_shapes.append(values.shape)
+        return original_svd(values, full_matrices=full_matrices)
+
+    monkeypatch.setattr(rank_module.np.linalg, "svd", counted_svd)
+    decomposition = decompose_factor(factor, retain_factor_solve=True)
+    actual = decomposition.solve_factor_rhs(response)
+
+    assert decomposition.rank == 2
+    np.testing.assert_array_equal(decomposition.active_columns, [0, 2])
+    np.testing.assert_allclose(actual, [1.5, 0.0, -0.4], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(factor @ actual, response, rtol=1e-12, atol=1e-12)
+    assert svd_shapes == [factor.shape]
 
 
 def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
@@ -696,6 +1377,8 @@ def test_factor_alias_log_pdet_matches_gram(columns: np.ndarray) -> None:
     gram_decomposition = decompose_gram(factor.T @ factor)
 
     assert factor_decomposition.rank == gram_decomposition.rank == 1
+    assert gram_decomposition.resolution_limited
+    assert needs_factor_certification(gram_decomposition)
     assert factor_decomposition.log_pdet == pytest.approx(gram_decomposition.log_pdet)
 
 
@@ -734,6 +1417,28 @@ def test_resolution_limited_gram_truncation_requests_factor_certification() -> N
     assert gram_decomposition.resolution_limited
     assert factor_decomposition.rank == 2
     assert needs_factor_certification(gram_decomposition)
+
+
+def test_negative_roundoff_eigenvalue_requests_factor_certification() -> None:
+    eps = np.finfo(float).eps
+    rounded_gram = np.array([[1.0, 1.0], [1.0, 1.0 - 2.0 * eps]])
+
+    decomposition = decompose_gram(rounded_gram)
+
+    assert decomposition.rank == 1
+    assert decomposition.resolution_limited
+    assert needs_factor_certification(decomposition)
+
+
+def test_factor_certificate_does_not_request_recursion() -> None:
+    factor = np.array([[1.0, 1.0], [0.0, 1.0e-9]])
+
+    decomposition = decompose_factor(factor)
+
+    assert decomposition.method == "qr_svd"
+    assert decomposition.rank == 1
+    assert decomposition.resolution_limited
+    assert not needs_factor_certification(decomposition)
 
 
 def test_column_rescaling_preserves_rank_and_fitted_projection() -> None:
@@ -840,7 +1545,7 @@ def test_pirls_selection_state_distinguishes_selected_zero_from_zeroed_group() -
     ],
 )
 def test_pirls_pure_l2_penalty_preserves_selected_zero_group(penalty) -> None:
-    """Pure L2 shrinkage cannot deselect an exactly zero fitted group."""
+    """Pure L2 keeps a zero group selected while contributing ridge curvature."""
     x = np.linspace(-1.0, 1.0, 40)[:, None]
     groups = [GroupSlice(name="x", start=0, end=1)]
 
@@ -858,7 +1563,12 @@ def test_pirls_pure_l2_penalty_preserves_selected_zero_group(penalty) -> None:
     assert result.beta[0] == pytest.approx(0.0, abs=1e-14)
     assert result.rank_info is not None
     assert result.rank_info.selected_group_names == ("x",)
-    assert result.rank_info.group_edf == {"x": pytest.approx(1.0)}
+    data_curvature = float(x[:, 0] @ x[:, 0])
+    expected_inverse = 1.0 / (data_curvature + 1.0)
+    expected_edf = data_curvature * expected_inverse
+    assert result.rank_info.group_edf == {"x": pytest.approx(expected_edf)}
+    assert result.rank_info.augmented.pseudo_inverse()[0, 0] == pytest.approx(expected_inverse)
+    assert result.effective_df == pytest.approx(1.0 + expected_edf)
 
 
 @pytest.mark.parametrize(
@@ -1090,8 +1800,7 @@ def test_scaled_alias_summary_suppresses_both_coefficients(alias_scale: float) -
         assert not rows[name].estimable
         assert np.isnan(rows[name].se)
 
-    model.result.rank_info = None
-    model._solver_pirls_result().rank_info = None
+    _publish_result_revision(model, rank_info=None)
     model._summary_cache = None
     legacy_rows = {row.name: row for row in model.summary()._coef_rows}
     for name in ("x", "scaled_duplicate"):
@@ -1173,8 +1882,7 @@ def test_true_legacy_inference_matches_profiled_rank_state() -> None:
     model.fit(frame, y, sample_weight=weights)
     baseline = state_ops.fit_inference_info(model)
 
-    model.result.rank_info = None
-    model._solver_pirls_result().rank_info = None
+    _publish_result_revision(model, rank_info=None)
     legacy = state_ops.fit_inference_info(model)
 
     np.testing.assert_allclose(legacy["XtWX_inv_aug"], baseline["XtWX_inv_aug"], rtol=1e-9)

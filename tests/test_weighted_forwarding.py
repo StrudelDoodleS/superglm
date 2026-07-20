@@ -65,7 +65,7 @@ class TestWeightedNBTheta:
             features={"x": Numeric()},
         )
         m2.fit(df, y, sample_weight=w)
-        theta_auto = m2.family.theta
+        theta_auto = m2.theta_
 
         assert theta_auto == pytest.approx(theta_explicit, rel=0.01)
 

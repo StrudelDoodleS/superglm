@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from superglm.model.fit_state import configured_penalty
 from superglm.reml.direct import optimize_direct_reml
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective
@@ -69,7 +70,15 @@ def model_reml_laml_objective(
 
 
 def model_reml_direct_gradient(
-    model, result, XtWX_S_inv, lambdas, reml_groups, penalty_ranks, phi_hat=1.0
+    model,
+    result,
+    XtWX_S_inv,
+    lambdas,
+    reml_groups,
+    penalty_ranks,
+    phi_hat=1.0,
+    *,
+    inverse_phi=None,
 ):
     """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
     return reml_direct_gradient(
@@ -80,6 +89,7 @@ def model_reml_direct_gradient(
         reml_groups,
         penalty_ranks,
         phi_hat=phi_hat,
+        inverse_phi=inverse_phi,
         reml_penalties=getattr(model, "_reml_penalties", None),
     )
 
@@ -97,6 +107,9 @@ def model_reml_direct_hessian(
     phi_hat=1.0,
     dH_extra=None,
     dH2_cross=None,
+    *,
+    inverse_phi=None,
+    d_inverse_phi_d_penalized_deviance=None,
 ):
     """Outer Hessian of the REML criterion w.r.t. log-lambdas."""
     return reml_direct_hessian(
@@ -111,6 +124,8 @@ def model_reml_direct_hessian(
         pirls_result=pirls_result,
         n_obs=n_obs,
         phi_hat=phi_hat,
+        inverse_phi=inverse_phi,
+        d_inverse_phi_d_penalized_deviance=(d_inverse_phi_d_penalized_deviance),
         dH_extra=dH_extra,
         dH2_cross=dH2_cross,
         reml_penalties=getattr(model, "_reml_penalties", None),
@@ -136,6 +151,8 @@ def model_optimize_direct_reml(
     estimated_names=None,
     pirls_tol=1e-6,
     max_pirls_iter=100,
+    debug_recorder=None,
+    trace_run=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     result = optimize_direct_reml(
@@ -163,6 +180,8 @@ def model_optimize_direct_reml(
         estimated_names=estimated_names,
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
+        debug_recorder=debug_recorder,
+        trace_run=trace_run,
     )
     if model._discrete:
         from superglm.model.base import rebuild_dm_with_lambdas
@@ -240,7 +259,7 @@ def model_optimize_efs_reml(
         model._distribution,
         model._link,
         model._groups,
-        model.penalty,
+        configured_penalty(model),
         model._active_set,
         y,
         sample_weight,
@@ -289,7 +308,7 @@ def model_run_reml_once(
         model._distribution,
         model._link,
         model._groups,
-        model.penalty,
+        configured_penalty(model),
         model._active_set,
         y,
         sample_weight,

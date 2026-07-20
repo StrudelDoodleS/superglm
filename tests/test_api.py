@@ -205,10 +205,11 @@ class TestPenaltyResolution:
         model = SuperGLM(penalty=None)
         assert isinstance(model.penalty, GroupLasso)
 
-    def test_object_passed_through(self):
+    def test_object_is_defensively_owned(self):
         p = GroupLasso(lambda1=0.02)
         model = SuperGLM(penalty=p)
-        assert model.penalty is p
+        assert model.penalty is not p
+        assert model.penalty.lambda1 == pytest.approx(0.02)
 
     def test_object_with_selection_penalty_raises(self):
         with pytest.raises(ValueError, match="Cannot set 'selection_penalty'"):
@@ -231,8 +232,8 @@ class TestPenaltyResolution:
             n_knots=10,
         )
         model.fit(X, y, sample_weight=sample_weight)
-        assert model.penalty.lambda1 is not None
-        assert model.penalty.lambda1 > 0
+        assert model.penalty.lambda1 is None
+        assert model.selection_penalty_ > 0
 
     def test_string_penalty_features(self):
         model = SuperGLM(penalty="group_lasso", selection_penalty=0.05, penalty_features=["region"])

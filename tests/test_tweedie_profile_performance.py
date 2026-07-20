@@ -115,9 +115,9 @@ def _counted_production_profile(fixture: _PhiFixture) -> _CountedProfile:
     real_evaluate = tweedie_module._evaluate_tweedie_density
     calls: list[bool] = []
 
-    def counted_evaluate(prepared, phi, *, compute_score=False):
+    def counted_evaluate(prepared, phi, *, compute_score=False, **kwargs):
         calls.append(bool(compute_score))
-        return real_evaluate(prepared, phi, compute_score=compute_score)
+        return real_evaluate(prepared, phi, compute_score=compute_score, **kwargs)
 
     started = time.perf_counter()
     with patch.object(tweedie_module, "_evaluate_tweedie_density", counted_evaluate):
@@ -158,9 +158,18 @@ def _bounded_value_only_reference(fixture: _PhiFixture) -> _BoundedReference:
         cached = cache.get(key)
         if cached is not None:
             return cached[0]
-        evaluation = real_evaluate(prepared, float(np.exp(key)), compute_score=False)
-        nll = -float(np.mean(evaluation.logpdf))
-        cache[key] = (nll, evaluation.diagnostics)
+        try:
+            evaluation = real_evaluate(prepared, float(np.exp(key)), compute_score=False)
+        except FloatingPointError:
+            nll = np.inf
+            diagnostics = tweedie_module._TweedieLogpdfDiagnostics(
+                n_positive=int(prepared.positive_indices.size),
+                n_series=int(prepared.positive_indices.size),
+            )
+        else:
+            nll = -float(np.mean(evaluation.logpdf))
+            diagnostics = evaluation.diagnostics
+        cache[key] = (nll, diagnostics)
         return nll
 
     optimizer = minimize_scalar(
@@ -298,7 +307,7 @@ def test_zero_heavy_exact_mle_p_phi_recovery():
 @pytest.mark.parametrize(
     ("p", "phi", "seed", "expect_fallback"),
     [
-        pytest.param(1.05, 2.5, 7105, True, id="near-one"),
+        pytest.param(1.05, 2.5, 7105, False, id="near-one"),
         pytest.param(1.95, 1.2, 7195, False, id="near-two"),
     ],
 )
@@ -547,9 +556,9 @@ def _run_end_to_end_profile_once(
     inner_density_passes = 0
     local_optimizer_successes: list[bool] = []
 
-    def counted_evaluate(prepared, phi, *, compute_score=False):
+    def counted_evaluate(prepared, phi, *, compute_score=False, **kwargs):
         density_calls.append(bool(compute_score))
-        return real_evaluate(prepared, phi, compute_score=compute_score)
+        return real_evaluate(prepared, phi, compute_score=compute_score, **kwargs)
 
     profile_target = (
         partial(
@@ -886,3 +895,66 @@ def test_end_to_end_analytic_inner_vs_bounded_inner_benchmark_report():
         assert production["p_hat"] == pytest.approx(reference["p_hat"], abs=5e-3)
         assert production["phi_hat"] == pytest.approx(reference["phi_hat"], rel=5e-3)
         assert production["nll"] == pytest.approx(reference["nll"], abs=1e-7)
+
+
+def test_ten_thousand_row_likelihood_pair_is_vectorized(monkeypatch) -> None:
+    n = 10_000
+    y = np.geomspace(0.01, 100.0, n)
+    mu = y * np.exp(np.linspace(-0.2, 0.2, n))
+    null_mu = np.full(n, 1.0)
+    weights = np.geomspace(0.5, 2.0, n)
+    real_series = tweedie_module.tweedie_log_series
+    batch_sizes: list[int] = []
+
+    def counted_series(log_t, a, **kwargs):
+        batch_sizes.append(len(log_t))
+        return real_series(log_t, a, **kwargs)
+
+    monkeypatch.setattr(tweedie_module, "tweedie_log_series", counted_series)
+
+    fitted, null = tweedie_module._tweedie_logpdf_pair(
+        y,
+        mu,
+        null_mu,
+        0.8,
+        1.5,
+        weights=weights,
+    )
+
+    assert fitted.shape == null.shape == (n,)
+    assert len(batch_sizes) <= 1
+    assert all(size > 1 for size in batch_sizes)
+
+
+def test_fit_stat_pair_passes_strict_general_power_series_budget(monkeypatch) -> None:
+    p = 1.4
+    y = np.ones(16)
+    mu = np.linspace(0.9, 1.1, len(y))
+    null_mu = np.full_like(y, 1.0)
+    phi = 1.0 / (0.6 * 10_000.0)
+    real_series = tweedie_module.tweedie_log_series
+    budgets: list[int | None] = []
+
+    def force_wright_failure(a, b, z):
+        del a, b
+        return np.full_like(z, np.nan, dtype=np.float64)
+
+    def counted_series(log_t, a, **kwargs):
+        budgets.append(kwargs.get("max_total_terms"))
+        return real_series(log_t, a, **kwargs)
+
+    monkeypatch.setattr(tweedie_module, "wright_bessel", force_wright_failure)
+    monkeypatch.setattr(tweedie_module, "tweedie_log_series", counted_series)
+
+    fitted, null = tweedie_module._tweedie_logpdf_pair(
+        y,
+        mu,
+        null_mu,
+        phi,
+        p,
+    )
+
+    assert np.all(np.isfinite(fitted))
+    assert np.all(np.isfinite(null))
+    assert budgets and all(budget is not None for budget in budgets)
+    assert max(budgets) <= 4_096
