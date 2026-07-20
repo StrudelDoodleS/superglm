@@ -2,5 +2,6 @@
 .github/CODEOWNERS @StrudelDoodleS
 SECURITY.md @StrudelDoodleS
 pyproject.toml @StrudelDoodleS
+scripts/verify_release_artifacts.py @StrudelDoodleS
 uv.lock @StrudelDoodleS
 src/superglm/ @StrudelDoodleS

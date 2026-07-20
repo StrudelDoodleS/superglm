@@ -1,0 +1,149 @@
+name: Publish release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          enable-cache: false
+          version: "0.11.29"
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+
+      - name: Verify release tag and source version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          project_version = tomllib.loads(
+              Path("pyproject.toml").read_text(encoding="utf-8")
+          )["project"]["version"]
+          source = Path("src/superglm/__init__.py").read_text(encoding="utf-8")
+          match = re.search(r'^__version__ = "([^"]+)"$', source, flags=re.MULTILINE)
+          if match is None:
+              raise SystemExit("Could not read superglm.__version__")
+          source_version = match.group(1)
+          expected_tag = f"v{project_version}"
+          if os.environ["RELEASE_TAG"] != expected_tag:
+              raise SystemExit(
+                  f"Tag {os.environ['RELEASE_TAG']!r} does not match {expected_tag!r}"
+              )
+          if source_version != project_version:
+              raise SystemExit(
+                  f"Source version {source_version!r} does not match {project_version!r}"
+              )
+          PY
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"
+
+      - name: Build wheel and source distribution
+        run: uv build --out-dir dist
+
+      - name: Check package metadata
+        run: uvx --from 'twine==6.2.0' twine check dist/*
+
+      - name: Check wheel contents
+        run: uvx --from 'check-wheel-contents==0.6.3' check-wheel-contents dist/*.whl
+
+      - name: Inspect release archives
+        run: python scripts/verify_release_artifacts.py dist
+
+      - name: Smoke-test the installed wheel
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/superglm-release"
+          uv pip install --python "$RUNNER_TEMP/superglm-release/bin/python" dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/superglm-release/bin/python" - <<'PY'
+          import os
+
+          import superglm
+          from superglm.editor.server import create_editor_app
+
+          assert f"v{superglm.__version__}" == os.environ["RELEASE_TAG"]
+          assert callable(create_editor_app)
+          PY
+
+      - name: Upload checked distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/superglm
+    permissions:
+      id-token: write
+    steps:
+      - name: Download checked distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-distributions
+          path: dist
+
+      - name: Publish distributions with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download published distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-distributions
+          path: dist
+
+      - name: Create release page
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --title "SuperGLM ${GITHUB_REF_NAME#v}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

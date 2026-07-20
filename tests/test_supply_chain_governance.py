@@ -6,6 +6,7 @@ WORKFLOW_FILES = (
     ".github/workflows/ci.yml",
     ".github/workflows/dev-ci.yml",
     ".github/workflows/docs.yml",
+    ".github/workflows/release.yml",
     ".github/workflows/scorecard.yml",
     ".github/workflows/security.yml",
 )
@@ -71,6 +72,66 @@ def test_security_workflow_avoids_hash_unpinned_pip_installs():
     assert "python -m pip" not in workflow
 
 
+def test_release_workflow_publishes_checked_artifacts_from_version_tags():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert "name: Publish release" in workflow
+    assert 'tags: ["v*.*.*"]' in workflow
+    assert "workflow_dispatch:" not in workflow
+    assert 'version: "0.11.29"' in workflow
+    assert "Verify release tag and source version" in workflow
+    assert 'expected_tag = f"v{project_version}"' in workflow
+    assert "source_version != project_version" in workflow
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"' in workflow
+    assert "persist-credentials: false" in workflow
+    assert "enable-cache: false" in workflow
+
+    assert "uv build --out-dir dist" in workflow
+    assert "twine check dist/*" in workflow
+    assert "check-wheel-contents dist/*.whl" in workflow
+    assert "python scripts/verify_release_artifacts.py dist" in workflow
+    assert workflow.count("name: release-distributions") == 3
+
+
+def test_release_workflow_uses_trusted_publishing_and_least_privilege():
+    workflow = _read(".github/workflows/release.yml")
+    header = _workflow_header(workflow)
+    publish_job = workflow.split("  publish:", maxsplit=1)[1].split(
+        "  github-release:", maxsplit=1
+    )[0]
+    release_job = workflow.split("  github-release:", maxsplit=1)[1]
+
+    assert "permissions:" in header
+    assert "contents: read" in header
+    assert "id-token: write" not in header
+    assert "contents: write" not in header
+
+    assert "needs: build" in publish_job
+    assert "name: pypi" in publish_job
+    assert "url: https://pypi.org/p/superglm" in publish_job
+    assert "id-token: write" in publish_job
+    assert "contents: write" not in publish_job
+    assert "pypa/gh-action-pypi-publish@" in publish_job
+
+    assert "needs: publish" in release_job
+    assert "contents: write" in release_job
+    assert "id-token: write" not in release_job
+    assert "gh release view" in release_job
+    assert "gh release create" in release_job
+    assert "gh release upload" in release_job
+    assert "GH_REPO: ${{ github.repository }}" in release_job
+    assert "--clobber" in release_job
+    assert "--verify-tag" in release_job
+    assert "--generate-notes" in release_job
+
+
+def test_release_workflow_uses_node24_artifact_actions():
+    workflow = _read(".github/workflows/release.yml")
+
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
+    assert workflow.count("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c") == 2
+
+
 def test_scorecard_workflow_uploads_sarif_on_master_and_schedule():
     workflow = _read(".github/workflows/scorecard.yml")
 
@@ -129,6 +190,8 @@ def test_ci_browser_suites_run_in_separate_pytest_processes():
 
 def test_security_archive_check_requires_modular_editor_assets():
     workflow = _read(".github/workflows/security.yml")
+    release_workflow = _read(".github/workflows/release.yml")
+    verifier = _read("scripts/verify_release_artifacts.py")
     editor_root = ROOT / "src/superglm/editor/app"
     current_assets = {
         f"superglm/editor/app/{path.relative_to(editor_root).as_posix()}"
@@ -136,7 +199,7 @@ def test_security_archive_check_requires_modular_editor_assets():
         if path.is_file() and (path.name == "index.html" or path.suffix in {".js", ".css"})
     }
     derivation_markers = (
-        'editor_root = Path("src/superglm/editor/app")',
+        'editor_root = source_root / "src/superglm/editor/app"',
         'for path in editor_root.rglob("*")',
         'path.name == "index.html"',
         'path.suffix in {".js", ".css"}',
@@ -155,10 +218,12 @@ def test_security_archive_check_requires_modular_editor_assets():
     assert all(asset.startswith("superglm/editor/app/") for asset in current_assets)
     assert representative_assets <= current_assets
     for marker in derivation_markers:
-        assert marker in workflow
-    assert 'for wheel in Path("dist").glob("*.whl")' in workflow
-    assert 'for sdist in Path("dist").glob("*.tar.gz")' in workflow
-    assert '"superglm/editor/app/index.html"' not in workflow
+        assert marker in verifier
+    assert 'glob("*.whl")' in verifier
+    assert 'glob("*.tar.gz")' in verifier
+    assert '"superglm/editor/app/index.html"' not in verifier
+    for consumer in (workflow, release_workflow):
+        assert "python scripts/verify_release_artifacts.py dist" in consumer
 
 
 def test_docs_workflow_scopes_write_permission_to_deploy_job():
@@ -216,4 +281,5 @@ def test_security_policy_and_codeowners_cover_governance_surfaces():
     assert ".github/CODEOWNERS" in codeowners
     assert "SECURITY.md" in codeowners
     assert "pyproject.toml" in codeowners
+    assert "scripts/verify_release_artifacts.py" in codeowners
     assert "src/superglm/" in codeowners
