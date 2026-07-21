@@ -188,6 +188,62 @@ def test_ci_browser_suites_run_in_separate_pytest_processes():
         assert "pytest tests/editor/ tests/test_editor_browser.py" not in workflow, path
 
 
+def test_master_ci_runs_complete_supported_python_matrix_efficiently():
+    workflow = _read(".github/workflows/ci.yml")
+    header = _workflow_header(workflow)
+
+    compatibility_job = workflow.split("  test-compatibility:", maxsplit=1)[1].split(
+        "  test-coverage:", maxsplit=1
+    )[0]
+    coverage_shard_job = workflow.split("  test-coverage:", maxsplit=1)[1].split(
+        "  coverage:", maxsplit=1
+    )[0]
+    coverage_job = workflow.split("  coverage:", maxsplit=1)[1].split("  lint:", maxsplit=1)[0]
+
+    assert '      - ".test_durations"' in header
+
+    assert "fail-fast: false" in compatibility_job
+    for version in ("3.10", "3.11", "3.12", "3.14"):
+        assert f'"{version}"' in compatibility_job
+    assert '"3.13"' not in compatibility_job
+    assert "uv run --with pyarrow pytest tests/" in compatibility_job
+    assert '-m "not browser"' in compatibility_job
+    assert "--splits" not in compatibility_job
+    assert "--cov" not in compatibility_job
+    assert "ruff check" not in compatibility_job
+
+    assert "fail-fast: false" in coverage_shard_job
+    assert "uv python install 3.13" in coverage_shard_job
+    for group, label in enumerate(("A", "B", "C", "D"), start=1):
+        assert f"- group: {group}" in coverage_shard_job
+        assert f"label: {label}" in coverage_shard_job
+    assert "uv run --with pyarrow pytest tests/" in coverage_shard_job
+    assert '-m "not browser"' in coverage_shard_job
+    assert "--splits 4" in coverage_shard_job
+    assert "--group ${{ matrix.group }}" in coverage_shard_job
+    assert "--splitting-algorithm least_duration" in coverage_shard_job
+    assert "--cov=superglm" in coverage_shard_job
+    assert "--cov-branch" in coverage_shard_job
+    assert "--cov-report=" in coverage_shard_job
+    assert "COVERAGE_FILE: .coverage.${{ matrix.group }}" in coverage_shard_job
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in coverage_shard_job
+    assert "name: coverage-py313-${{ matrix.group }}" in coverage_shard_job
+    assert "path: .coverage.${{ matrix.group }}" in coverage_shard_job
+    assert "if-no-files-found: error" in coverage_shard_job
+    assert "include-hidden-files: true" in coverage_shard_job
+
+    assert "needs: test-coverage" in coverage_job
+    assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in coverage_job
+    assert "pattern: coverage-py313-*" in coverage_job
+    assert "merge-multiple: true" in coverage_job
+    assert "uv run coverage combine coverage-data" in coverage_job
+    assert "uv run coverage xml -o coverage.xml" in coverage_job
+    assert "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f" in coverage_job
+
+    assert workflow.count("uv run ruff check src/ tests/") == 1
+    assert workflow.count("uv run ruff format --check src/ tests/") == 1
+
+
 def test_dev_ci_parallelizes_complete_python314_suite():
     workflow = _read(".github/workflows/dev-ci.yml")
 

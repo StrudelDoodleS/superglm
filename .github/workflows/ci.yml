@@ -13,17 +13,19 @@ on:
       - "jsconfig.json"
       - "tests/editor_frontend/**"
       - ".github/workflows/**"
+      - ".test_durations"
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  test-compatibility:
+    name: Python ${{ matrix.python-version }} · complete non-browser suite
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -37,14 +39,86 @@ jobs:
       - name: Install dependencies
         run: uv sync --python ${{ matrix.python-version }} --extra dev
 
-      - name: Lint
-        run: uv run ruff check src/ tests/
+      - name: Run complete compatibility suite
+        run: uv run --with pyarrow pytest tests/ -q -m "not browser"
 
-      - name: Test
-        run: uv run pytest tests/ -q -m "not browser" --cov=superglm --cov-branch --cov-report=xml --cov-report=term
+  test-coverage:
+    name: Python 3.13 · coverage shard ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: 1
+            label: A
+          - group: 2
+            label: B
+          - group: 3
+            label: C
+          - group: 4
+            label: D
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --python 3.13 --extra dev
+
+      - name: Run duration-balanced coverage shard
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.group }}
+        run: >-
+          uv run --with pyarrow pytest tests/ -q -m "not browser"
+          --splits 4 --group ${{ matrix.group }}
+          --splitting-algorithm least_duration
+          --cov=superglm --cov-branch --cov-report=
+
+      - name: Upload coverage database
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: coverage-py313-${{ matrix.group }}
+          path: .coverage.${{ matrix.group }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  coverage:
+    name: Python 3.13 · combined branch coverage
+    needs: test-coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      - name: Install coverage tooling
+        run: uv sync --python 3.13 --extra dev
+
+      - name: Download coverage databases
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: coverage-py313-*
+          path: coverage-data
+          merge-multiple: true
+
+      - name: Combine coverage databases
+        run: |
+          uv run coverage combine coverage-data
+          uv run coverage xml -o coverage.xml
+          uv run coverage report
 
       - name: Upload coverage
-        if: matrix.python-version == '3.13'
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
