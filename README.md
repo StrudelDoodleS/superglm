@@ -62,6 +62,18 @@ print(model.summary())
 
 ## Choosing A Fit Path
 
+Selection strength is explicit:
+
+```python
+SuperGLM()                                  # no sparse selection
+SuperGLM(selection_penalty="auto")         # calibrate from the fit data
+SuperGLM(selection_penalty=0.05)           # fixed selection strength
+```
+
+`None` and `0.0` disable sparse selection. Automatic calibration occurs only
+when requested with `"auto"`. REML accepts only `None` or `0.0`; use spline
+`select=True` when smooth terms should be eligible to shrink inside REML.
+
 ### `fit_reml()` with `selection_penalty=0`
 
 This is the recommended path for spline-heavy GAM-style pricing models. Use it

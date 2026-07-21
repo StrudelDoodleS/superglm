@@ -20,6 +20,11 @@ def _notebook_source() -> str:
     )
 
 
+def _notebook_all_source() -> str:
+    notebook = json.loads((_ROOT / "docs/notebooks/tweedie_profile_estimation.ipynb").read_text())
+    return "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+
+
 def test_tweedie_notebook_first_code_cell_executes_supported_public_imports():
     path = _ROOT / "docs/notebooks/tweedie_profile_estimation.ipynb"
     notebook = json.loads(path.read_text())
@@ -49,6 +54,10 @@ def test_tweedie_family_guide_documents_current_profile_contract():
     assert '`phi_method="mle"` and `method="auto"` are the defaults' in tweedie
     assert '`phi_method="pearson"` is an explicit fast plug-in' in tweedie
     assert "`result.ci()` is explicit and potentially expensive" in tweedie
+    assert "ci_alpha=0.05" in tweedie
+    assert "detached returned result" in tweedie
+    assert "cached for `model.summary(alpha=0.05)`" in tweedie
+    assert "summaries and exports display it after this explicit call" not in tweedie
     assert "φ / wᵢ" in tweedie
     assert "does not enter the linear predictor or automatically scale" in tweedie
     assert "Use an explicit offset" in tweedie
@@ -61,16 +70,31 @@ def test_tweedie_family_guide_documents_current_profile_contract():
 
 def test_tweedie_notebook_removes_stale_pearson_default_claims():
     source = _notebook_source()
+    all_source = _notebook_all_source()
 
     assert "default Pearson profile" not in source
     assert "Pearson moments by default" not in source
     assert "Exact joint ML is the default" in source
     assert "Pearson plug-in is explicit" in source
     assert "`result.ci()`" in source
+    assert "ci_alpha=0.05" in all_source
+    assert "detached returned result" in source
+    assert "model's independently owned summary cache" in source
+    assert "preceding `result.ci()` call populated the cache" not in source
     assert "Zero-weight observations must be removed" in source
     assert "REML selects spline smoothing penalties" in source
     assert "saddlepoint fallback" in source
     assert "near `p=1` and `p=2`" in source
+
+
+def test_selection_penalty_docs_make_calibration_explicit():
+    readme = (_ROOT / "README.md").read_text()
+    fitting = (_ROOT / "docs/guide/fitting.md").read_text()
+
+    for document in (readme, fitting):
+        assert 'SuperGLM(selection_penalty="auto")' in document
+        assert "`None` and `0.0` disable sparse selection" in document
+        assert "REML accepts only `None` or `0.0`" in document
 
 
 def test_tweedie_profile_api_docstrings_use_prior_weight_convention():

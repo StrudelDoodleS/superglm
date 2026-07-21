@@ -11,6 +11,21 @@ model or a fixed-penalty sparse model.
 | Sparse screening / compression | `fit()` with `selection_penalty > 0` | Fixed-penalty sparse model rather than REML smoothness selection |
 | Regularisation path analysis | `fit_path()` | Warm-started lambda path for fixed-penalty models |
 
+## Selection Penalty Intent
+
+Selection calibration is never implicit:
+
+```python
+SuperGLM()                                  # no sparse selection
+SuperGLM(selection_penalty="auto")         # calibrate from the fit data
+SuperGLM(selection_penalty=0.05)           # fixed selection strength
+```
+
+`None` and `0.0` disable sparse selection. The string `"auto"` is the only
+automatic-calibration setting. REML accepts only `None` or `0.0`; its outer
+optimizer owns spline smoothing, while `select=True` supplies REML-native term
+shrinkage.
+
 ## Default REML Path
 
 This is the intended path for spline-based GAM-style pricing models.

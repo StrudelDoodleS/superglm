@@ -96,8 +96,15 @@ Or estimate the power via profile likelihood:
 
 ```python
 model = SuperGLM(family=Tweedie(p=1.5), selection_penalty=0.01)
-result = model.estimate_p(df, y, sample_weight=exposure, p_bounds=(1.1, 1.9))
+result = model.estimate_p(
+    df,
+    y,
+    sample_weight=exposure,
+    p_bounds=(1.1, 1.9),
+    ci_alpha=0.05,
+)
 print(result.p_hat)  # estimated Tweedie power
+print(model.summary(alpha=0.05))
 ```
 
 `phi_method="mle"` and `method="auto"` are the defaults. For ordinary MLE
@@ -144,8 +151,11 @@ ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
 !!! note
     `result.ci()` is explicit and potentially expensive: each new boundary probe
     can require a full model refit. It is available only for MLE dispersion
-    profiles. The interval is cached, so summaries and exports display it after
-    this explicit call without evaluating the profile again.
+    profiles. It updates the detached returned result, not the model's
+    independently owned published profile state. Pass `ci_alpha=0.05` to
+    `estimate_p()` when the interval should be computed transactionally and
+    cached for `model.summary(alpha=0.05)`. Omitting `ci_alpha` retains the lazy,
+    no-extra-CI-work path.
 
 ### Search trace and profile plots
 

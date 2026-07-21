@@ -17,14 +17,16 @@ Both accept **pandas DataFrame**, **eager Polars DataFrame**, or **ndarray** inp
   are *not* inferred from values — specify ``categorical_features``
   explicitly.  Unspecified columns default to ``Numeric``.
 
-**Penalty default**: ``penalty=None`` means *no feature-selection penalty*.
-Set ``selection_penalty`` to a positive value and the wrapper auto-upgrades
-to ``"group_lasso"``.
+**Penalty default**: ``penalty=None`` and ``selection_penalty=None`` mean no
+feature-selection penalty. Set ``selection_penalty="auto"`` for explicit
+calibration, or use a positive value for a fixed strength; either setting
+auto-upgrades a missing penalty to ``"group_lasso"``.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
+from numbers import Real
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -301,18 +303,15 @@ def _resolve_wrapper_penalty(
     selection_penalty,
     spline_penalty,
 ):
-    """Resolve penalty defaults with auto-upgrade.
+    """Select the wrapper's implicit penalty type without resolving strength.
 
-    When ``penalty is None`` and a positive ``selection_penalty`` is given,
-    the penalty is auto-upgraded to ``"group_lasso"`` for convenience.
-    When neither is set, the wrapper defaults to an unpenalised fit
-    (``selection_penalty=0``).
+    Strength normalization and validation belong to the shared core boundary.
     """
     if penalty is None:
-        if selection_penalty is not None and selection_penalty > 0:
+        if isinstance(selection_penalty, str) and selection_penalty == "auto":
             penalty = "group_lasso"
-        elif selection_penalty is None:
-            selection_penalty = 0.0
+        elif isinstance(selection_penalty, Real) and selection_penalty > 0:
+            penalty = "group_lasso"
 
     return penalty, selection_penalty, spline_penalty
 
@@ -592,10 +591,12 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         For binary classification use ``SuperGLMClassifier``.
     penalty : str, Penalty, or None
         Penalty type.  ``None`` (default) means no feature-selection
-        penalty.  Set ``selection_penalty`` to a positive value to
-        auto-upgrade to ``"group_lasso"``.
-    selection_penalty : float or None
-        Group penalty strength (feature selection).
+        penalty when ``selection_penalty`` is also ``None`` or zero.
+        Explicit automatic or positive selection strength auto-upgrades to
+        ``"group_lasso"``.
+    selection_penalty : float, {"auto"}, or None
+        Group penalty strength. ``None`` and zero disable feature selection;
+        ``"auto"`` explicitly calibrates the strength from the fit data.
     spline_penalty : float or None
         Within-group spline smoothing.  Defaults to 0.1.
     features : dict[str, FeatureSpec] or None
@@ -627,7 +628,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self,
         family: str | Distribution = "poisson",
         penalty: str | Penalty | None = None,
-        selection_penalty: float | None = None,
+        selection_penalty: float | Literal["auto"] | None = None,
         spline_penalty: float | None = None,
         features: dict | None = None,
         spline_features: list[str | int] | None = None,
@@ -717,9 +718,12 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     ----------
     penalty : str, Penalty, or None
         Penalty type.  ``None`` (default) means no feature-selection
-        penalty.  Setting ``selection_penalty`` auto-upgrades to
+        penalty when ``selection_penalty`` is also ``None`` or zero.
+        Explicit automatic or positive selection strength auto-upgrades to
         ``"group_lasso"``.
-    selection_penalty, spline_penalty : float or None
+    selection_penalty : float, {"auto"}, or None
+        See ``SuperGLMRegressor``.
+    spline_penalty : float or None
         See ``SuperGLMRegressor``.
     features : dict[str, FeatureSpec] or None
         Native-style feature specs.  Mutually exclusive with shorthand
@@ -747,7 +751,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     def __init__(
         self,
         penalty: str | Penalty | None = None,
-        selection_penalty: float | None = None,
+        selection_penalty: float | Literal["auto"] | None = None,
         spline_penalty: float | None = None,
         features: dict | None = None,
         spline_features: list[str | int] | None = None,

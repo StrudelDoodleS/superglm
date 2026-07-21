@@ -469,13 +469,37 @@ class TestPenaltyDefault:
         m = SuperGLMRegressor()
         m.fit(X, y, sample_weight=w)
         assert m.coef_ is not None
+        assert m.selection_penalty is None
+        assert m._model.selection_penalty is None
+        assert m._model.selection_penalty_ == 0.0
 
-    def test_selection_penalty_auto_upgrades(self, sample_data):
+    def test_positive_selection_penalty_upgrades_to_group_lasso(self, sample_data):
         """Positive selection_penalty with penalty=None → group_lasso."""
         X, y, w = sample_data
         m = SuperGLMRegressor(selection_penalty=0.05)
         m.fit(X, y, sample_weight=w)
+        assert type(m._model.penalty).__name__ == "GroupLasso"
         assert m._model.penalty.lambda1 == 0.05
+
+    def test_explicit_auto_selection_penalty_upgrades_and_resolves(self, sample_data):
+        X, y, w = sample_data
+        m = SuperGLMRegressor(selection_penalty="auto")
+
+        m.fit(X, y, sample_weight=w)
+
+        assert type(m._model.penalty).__name__ == "GroupLasso"
+        assert m._model.selection_penalty == "auto"
+        assert m._model.selection_penalty_ > 0.0
+
+    def test_invalid_selection_penalty_uses_core_validation(self, sample_data):
+        X, y, w = sample_data
+        m = SuperGLMRegressor(selection_penalty="automatic")
+
+        with pytest.raises(
+            ValueError,
+            match="selection_penalty must be None, 'auto', or a finite non-negative number",
+        ):
+            m.fit(X, y, sample_weight=w)
 
     def test_explicit_penalty_respected(self, sample_data):
         X, y, w = sample_data
