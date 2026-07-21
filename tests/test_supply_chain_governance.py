@@ -188,6 +188,44 @@ def test_ci_browser_suites_run_in_separate_pytest_processes():
         assert "pytest tests/editor/ tests/test_editor_browser.py" not in workflow, path
 
 
+def test_dev_ci_parallelizes_complete_python314_suite():
+    workflow = _read(".github/workflows/dev-ci.yml")
+
+    assert "  quick-check:" not in workflow
+    assert "  py314-full:" not in workflow
+    for job in ("quality", "docs", "frontend", "browser", "type-check", "pytest-3.14"):
+        assert f"  {job}:" in workflow
+
+    pytest_job = workflow.split("  pytest-3.14:", maxsplit=1)[1]
+    assert "fail-fast: false" in pytest_job
+    assert "group: [1, 2, 3, 4]" in pytest_job
+    assert "uv python install 3.14" in pytest_job
+    assert "uv sync --python 3.14 --extra dev" in pytest_job
+    assert "uv run --with pyarrow pytest tests/" in pytest_job
+    assert '-m "not browser"' in pytest_job
+    assert "--splits 4" in pytest_job
+    assert "--group ${{ matrix.group }}" in pytest_job
+    assert "--splitting-algorithm least_duration" in pytest_job
+    assert "--maxfail=1" in pytest_job
+
+
+def test_dev_ci_keeps_browser_and_non_test_checks_independent():
+    workflow = _read(".github/workflows/dev-ci.yml")
+
+    quality_job = workflow.split("  quality:", maxsplit=1)[1].split("  docs:", maxsplit=1)[0]
+    docs_job = workflow.split("  docs:", maxsplit=1)[1].split("  frontend:", maxsplit=1)[0]
+    frontend_job = workflow.split("  frontend:", maxsplit=1)[1].split("  browser:", maxsplit=1)[0]
+    browser_job = workflow.split("  browser:", maxsplit=1)[1].split("  pytest-3.14:", maxsplit=1)[0]
+
+    assert "ruff check src/ tests/" in quality_job
+    assert "ruff format --check src/ tests/" in quality_job
+    assert "mkdocs build --strict" in docs_job
+    assert "npm run check:frontend" in frontend_job
+    assert "playwright install --with-deps chromium" in browser_job
+    assert "pytest tests/test_editor_browser.py" in browser_job
+    assert "pytest tests/editor/" in browser_job
+
+
 def test_pre_push_pytest_uses_uv_dev_environment():
     config = _read(".pre-commit-config.yaml")
     pytest_hook = config.split("- id: pytest", maxsplit=1)[1]
