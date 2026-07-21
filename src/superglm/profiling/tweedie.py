@@ -5327,6 +5327,25 @@ class _TweedieProfileCIEvaluationRuntimeError(
     """RuntimeError-compatible fixed-p CI evaluation failure."""
 
 
+def _validate_profile_ci_alpha(alpha: object) -> float:
+    """Validate and normalize one profile-CI significance level."""
+    if isinstance(alpha, (bool, np.bool_)):
+        raise ValueError("alpha must be finite and strictly between 0 and 1")
+    try:
+        values = np.asarray(alpha)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("alpha must be finite and strictly between 0 and 1") from exc
+    if values.ndim != 0 or np.iscomplexobj(values):
+        raise ValueError("alpha must be finite and strictly between 0 and 1")
+    try:
+        alpha_value = float(values)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("alpha must be finite and strictly between 0 and 1") from exc
+    if not np.isfinite(alpha_value) or not 0.0 < alpha_value < 1.0:
+        raise ValueError("alpha must be finite and strictly between 0 and 1")
+    return alpha_value
+
+
 def _validate_profile_ci_inputs(
     p_hat: float,
     nll_hat: float,
@@ -5335,12 +5354,7 @@ def _validate_profile_ci_inputs(
     p_range: tuple[float, float],
 ) -> tuple[float, float, float, float, tuple[float, float]]:
     """Validate and normalize scalar profile-CI inputs without evaluating it."""
-    try:
-        alpha_value = float(alpha)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("alpha must be finite and strictly between 0 and 1") from exc
-    if not np.isfinite(alpha_value) or not 0.0 < alpha_value < 1.0:
-        raise ValueError("alpha must be finite and strictly between 0 and 1")
+    alpha_value = _validate_profile_ci_alpha(alpha)
 
     normalized: dict[str, float] = {}
     for name, value in (("p_hat", p_hat), ("nll_hat", nll_hat), ("ll_scale", ll_scale)):

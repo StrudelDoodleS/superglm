@@ -24,6 +24,7 @@ def estimate_p(
     fit_mode="fit",
     phi_method="mle",
     method="auto",
+    ci_alpha=None,
     progress_callback=None,
     **kwargs,
 ):
@@ -35,10 +36,17 @@ def estimate_p(
         capture_fit_state,
     )
     from superglm.model.fit_workspace import FitWorkspace
-    from superglm.profiling.tweedie import estimate_tweedie_p
+    from superglm.profiling.tweedie import _validate_profile_ci_alpha, estimate_tweedie_p
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
     _validate_profile_selection_mode(model, resolved_mode)
+    resolved_ci_alpha = None if ci_alpha is None else _validate_profile_ci_alpha(ci_alpha)
+    if resolved_ci_alpha is not None and phi_method == "pearson":
+        raise RuntimeError(
+            "Tweedie likelihood-ratio profile CI requires exact MLE dispersion "
+            "profiling (phi_method='mle'); use bootstrap/sandwich inference for "
+            "Pearson plug-in profiles."
+        )
 
     X_ref = X
     y_ref = y
@@ -125,6 +133,8 @@ def estimate_p(
     if not model._retain_fit_state:
         final_model._retain_fit_state = False
         fit_ops._maybe_release_fit_state(final_model)
+    if resolved_ci_alpha is not None:
+        result.ci(alpha=resolved_ci_alpha)
     # Install last on the private candidate too: any state carrying this
     # result has already been synchronized and, if requested, compacted.
     installed_result = _installed_tweedie_profile_copy(result)
@@ -174,6 +184,17 @@ def _installed_tweedie_profile_copy(result):
         if field_name in _TWEEDIE_PROFILE_SHARED_RUNTIME_FIELDS:
             continue
         setattr(installed, field_name, copy.deepcopy(getattr(result, field_name)))
+    ci_cache = getattr(installed, "_ci_cache", None)
+    if ci_cache is not None:
+        owned_ci_cache = {}
+        details_cache = getattr(installed, "_ci_details_cache", None)
+        for alpha, interval in ci_cache.items():
+            owned_interval = (float(interval[0]), float(interval[1]))
+            owned_ci_cache[alpha] = owned_interval
+            details = None if details_cache is None else details_cache.get(alpha)
+            if details is not None and is_dataclass(details):
+                details_cache[alpha] = replace(details, interval=owned_interval)
+        installed._ci_cache = owned_ci_cache
     return installed
 
 

@@ -848,6 +848,7 @@ class SuperGLM:
         fit_mode: str = "fit",
         phi_method: str = "mle",
         method: str = "auto",
+        ci_alpha: float | None = None,
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
@@ -883,6 +884,11 @@ class SuperGLM:
             ``"grid_refine"`` does a coarse grid + local Brent refinement.
             ``"profile_opt"`` uses a general-purpose optimizer on
             logit-transformed p.
+        ci_alpha : float, optional
+            Significance level for an explicitly requested likelihood-ratio
+            profile confidence interval. For example, ``0.05`` computes a 95%
+            interval and caches it for ``model.summary(alpha=0.05)``. The
+            default ``None`` performs no confidence-interval evaluations.
         """
         return profile_ops.estimate_p(
             self,
@@ -893,6 +899,7 @@ class SuperGLM:
             fit_mode=fit_mode,
             phi_method=phi_method,
             method=method,
+            ci_alpha=ci_alpha,
             **kwargs,
         )
 
