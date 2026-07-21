@@ -180,3 +180,41 @@ def test_release_manager_policy_requires_fresh_sha_bound_assessment() -> None:
     assert ".github/workflows/release.yml" in policy
     assert "scripts/bump_version.py" in policy
     assert "uv lock" in policy
+
+
+def test_repository_guidance_tracks_release_impact_without_implicit_publish() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert "AGENTS.md" not in {line.strip() for line in ignored}
+    assert "release_manager" in agents
+    assert "release:none" in agents
+    assert "release:patch" in agents
+    assert "release:minor" in agents
+    assert "Normal pull requests must not edit package version fields" in agents
+    assert "Only an explicit user request" in agents
+    assert "does not authorize publication" in agents
+
+
+def test_pull_request_template_collects_exactly_one_advisory_impact() -> None:
+    template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+
+    for impact in ("release:none", "release:patch", "release:minor"):
+        assert template.count(f"`{impact}`") == 1
+    assert "Select exactly one" in template
+    assert "Rationale" in template
+    assert "Compatibility and migration" in template
+    assert "Validation" in template
+
+
+def test_release_documentation_explains_the_three_gated_invocations() -> None:
+    documentation = (ROOT / "docs/development/releases.md").read_text(encoding="utf-8")
+    mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+
+    assert ".codex/agents/release_manager.toml" in documentation
+    assert "assess changes since the latest PyPI release" in documentation
+    assert "prepare the approved 0.x.y release PR" in documentation
+    assert "publish v0.x.y" in documentation
+    assert "does not merge the release PR" in documentation
+    assert "Trusted Publishing" in documentation
+    assert "development/releases.md" in mkdocs
