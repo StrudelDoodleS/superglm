@@ -201,6 +201,8 @@ def test_pull_request_template_collects_exactly_one_advisory_impact() -> None:
 
     for impact in ("release:none", "release:patch", "release:minor"):
         assert template.count(f"`{impact}`") == 1
+    assert "- [ ]" not in template
+    assert "Release impact: `replace-me`" in template
     assert "Select exactly one" in template
     assert "Rationale" in template
     assert "Compatibility and migration" in template
