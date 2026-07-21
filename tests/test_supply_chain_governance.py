@@ -188,6 +188,14 @@ def test_ci_browser_suites_run_in_separate_pytest_processes():
         assert "pytest tests/editor/ tests/test_editor_browser.py" not in workflow, path
 
 
+def test_pre_push_pytest_uses_uv_dev_environment():
+    config = _read(".pre-commit-config.yaml")
+    pytest_hook = config.split("- id: pytest", maxsplit=1)[1]
+
+    assert 'entry: uv run --extra dev python -m pytest tests/ -q -m "not slow"' in pytest_hook
+    assert "language: system" in pytest_hook
+
+
 def test_security_archive_check_requires_modular_editor_assets():
     workflow = _read(".github/workflows/security.yml")
     release_workflow = _read(".github/workflows/release.yml")
