@@ -6,9 +6,13 @@
 
 Release impact: `replace-me`
 
+Release version: `replace-me`
+
 <!--
 Select exactly one value above. The final release assessment is based on the
 actual diff, not this declaration alone.
+
+Use `none` when no release is warranted; otherwise record the exact next 0.x.y version.
 
 - `release:none` — no independent packaged-runtime or public-contract impact
 - `release:patch` — compatible, limited, corrective, performance, or memory improvement

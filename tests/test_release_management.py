@@ -164,10 +164,26 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "release:minor",
         "needs-human-decision",
         "Never upload distributions directly",
-        "Never merge the release pull request",
+        "Never merge the assessed pull request",
         "Never move, overwrite, or recreate a published tag",
     ):
         assert marker in policy
+
+
+def test_release_manager_prepares_the_assessed_feature_pr() -> None:
+    policy = (ROOT / ".codex/agents/release_manager.toml").read_text(encoding="utf-8")
+
+    for marker in (
+        "specific open pull request",
+        "exact base SHA",
+        "exact head SHA",
+        "assessed feature branch",
+        "does not create a second release pull request",
+        "source version on the pull-request base",
+        "latest published PyPI version",
+    ):
+        assert marker in policy
+    assert "dedicated release worktree" not in policy
 
 
 def test_release_manager_policy_requires_fresh_sha_bound_assessment() -> None:
@@ -182,7 +198,7 @@ def test_release_manager_policy_requires_fresh_sha_bound_assessment() -> None:
     assert "uv lock" in policy
 
 
-def test_repository_guidance_tracks_release_impact_without_implicit_publish() -> None:
+def test_repository_guidance_tracks_release_bearing_prs_without_implicit_publish() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
@@ -191,32 +207,36 @@ def test_repository_guidance_tracks_release_impact_without_implicit_publish() ->
     assert "release:none" in agents
     assert "release:patch" in agents
     assert "release:minor" in agents
-    assert "Normal pull requests must not edit package version fields" in agents
+    assert "same pull request" in agents
+    assert "Only one release-bearing pull request" in agents
     assert "Only an explicit user request" in agents
     assert "does not authorize publication" in agents
 
 
-def test_pull_request_template_collects_exactly_one_advisory_impact() -> None:
+def test_pull_request_template_records_impact_and_intended_version() -> None:
     template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
 
     for impact in ("release:none", "release:patch", "release:minor"):
         assert template.count(f"`{impact}`") == 1
     assert "- [ ]" not in template
     assert "Release impact: `replace-me`" in template
+    assert "Release version: `replace-me`" in template
+    assert "Use `none` when no release is warranted" in template
     assert "Select exactly one" in template
     assert "Rationale" in template
     assert "Compatibility and migration" in template
     assert "Validation" in template
 
 
-def test_release_documentation_explains_the_three_gated_invocations() -> None:
+def test_release_documentation_explains_release_bearing_invocations() -> None:
     documentation = (ROOT / "docs/development/releases.md").read_text(encoding="utf-8")
     mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
 
     assert ".codex/agents/release_manager.toml" in documentation
-    assert "assess changes since the latest PyPI release" in documentation
-    assert "prepare the approved 0.x.y release PR" in documentation
+    assert "assess PR #" in documentation
+    assert "prepare the approved 0.x.y on PR #" in documentation
     assert "publish v0.x.y" in documentation
-    assert "does not merge the release PR" in documentation
+    assert "does not merge the feature PR" in documentation
+    assert "one release-bearing pull request" in documentation
     assert "Trusted Publishing" in documentation
     assert "development/releases.md" in mkdocs

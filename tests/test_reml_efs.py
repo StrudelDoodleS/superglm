@@ -9,8 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import Numeric, SuperGLM
 from superglm.features.spline import Spline
+from superglm.model import base
 
 
 def _poisson_data(seed: int = 42, n: int = 800) -> tuple[pd.DataFrame, np.ndarray]:
@@ -33,6 +34,29 @@ def _gamma_data(seed: int = 123, n: int = 600) -> tuple[pd.DataFrame, np.ndarray
 
 
 class TestREMLSelectionPenaltyContract:
+    @pytest.mark.parametrize("selection_penalty", ["auto", 1e-8, 0.01])
+    def test_rejects_selection_before_design_work(self, monkeypatch, selection_penalty):
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=selection_penalty,
+            features={"x": Numeric()},
+        )
+        build_called = False
+
+        def unexpected_build(*args, **kwargs):
+            nonlocal build_called
+            build_called = True
+            raise AssertionError("design work must not start")
+
+        monkeypatch.setattr(base, "model_build_design_matrix", unexpected_build)
+
+        with pytest.raises(ValueError, match="does not support selection penalties"):
+            model.fit_reml(X, y)
+
+        assert build_called is False
+
     @pytest.mark.parametrize("selection_penalty", [1e-8, 0.01])
     def test_poisson_rejects_positive_selection_penalty(self, selection_penalty):
         X, y = _poisson_data()
@@ -45,7 +69,7 @@ class TestREMLSelectionPenaltyContract:
             },
         )
 
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=20)
 
     def test_gamma_rejects_positive_selection_penalty(self):
@@ -59,7 +83,7 @@ class TestREMLSelectionPenaltyContract:
             },
         )
 
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=12, verbose=True)
 
     def test_select_true_still_rejects_if_selection_penalty_positive(self):
@@ -70,5 +94,5 @@ class TestREMLSelectionPenaltyContract:
             features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
 
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X[["x1"]], y, max_reml_iter=20)

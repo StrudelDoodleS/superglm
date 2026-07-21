@@ -6,6 +6,8 @@ sparsity). At alpha=0 this is pure group lasso; at alpha=1 pure lasso.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -18,8 +20,9 @@ class SparseGroupLasso:
 
     Parameters
     ----------
-    lambda1 : float or None
-        Regularisation strength. If None, auto-calibrated at fit time.
+    lambda1 : float, {"auto"}, or None
+        Regularisation strength. ``None`` disables selection and ``"auto"``
+        explicitly requests automatic calibration.
     alpha : float
         Mixing parameter in [0, 1]. 0 = pure group lasso, 1 = pure L1.
     flavor : Flavor or None
@@ -28,7 +31,7 @@ class SparseGroupLasso:
 
     def __init__(
         self,
-        lambda1: float | None = None,
+        lambda1: float | Literal["auto"] | None = None,
         alpha: float = 0.5,
         flavor: Flavor | None = None,
         features: str | list[str] | None = None,

@@ -2787,7 +2787,7 @@ class TestSCOPEFSRegression:
             selection_penalty=0.01,
             features={"x1": PSpline(n_knots=8), "x2": PSpline(n_knots=8)},
         )
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(df[["x1", "x2"]], y)
 
     @pytest.mark.slow

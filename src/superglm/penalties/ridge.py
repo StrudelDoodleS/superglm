@@ -6,6 +6,8 @@ you want all features retained.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -18,11 +20,16 @@ class Ridge:
 
     Parameters
     ----------
-    lambda1 : float or None
-        Regularisation strength. If None, auto-calibrated at fit time.
+    lambda1 : float, {"auto"}, or None
+        Regularisation strength. ``None`` disables shrinkage and ``"auto"``
+        explicitly requests automatic calibration.
     """
 
-    def __init__(self, lambda1: float | None = None, features: str | list[str] | None = None):
+    def __init__(
+        self,
+        lambda1: float | Literal["auto"] | None = None,
+        features: str | list[str] | None = None,
+    ):
         self.lambda1 = lambda1
         self.flavor = None  # Ridge doesn't support flavors
         self.features = normalize_penalty_features(features)
