@@ -408,7 +408,7 @@ class TestSelectLambdaMax:
             family="poisson",
             features={"signal": Spline(n_knots=10, select=True)},
             spline_penalty=1.0,
-            selection_penalty=1.0,  # set to prevent auto-calibration
+            selection_penalty=1.0,  # fixed strength; lambda_max is inspected separately below
         )
         m.fit(X, y, sample_weight=sample_weight)
         lmax = m._compute_lambda_max(y.astype(np.float64), sample_weight)
