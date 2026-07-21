@@ -8,6 +8,7 @@
         - fit_reml
         - fit_path
         - predict
+        - design_summary
         - relativities
         - term_inference
         - plot

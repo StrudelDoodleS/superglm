@@ -93,6 +93,7 @@ nav:
     - Interactions: guide/interactions.md
     - REML & Solvers: guide/optimization.md
   - Development:
+    - Data and Solver Boundaries: development/data-and-solver-boundaries.md
     - Editor Frontend for Python Developers: editor_frontend.md
   - Examples:
     - MTPL2 Frequency Walkthrough: notebooks/mtpl2_frequency_walkthrough.ipynb
