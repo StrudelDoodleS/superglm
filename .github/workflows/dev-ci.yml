@@ -121,13 +121,13 @@ jobs:
       matrix:
         include:
           - group: 1
-            label: Python 3.14 · wide-Poisson exact/discrete agreement
+            label: Python 3.14 · non-browser regression suite · balanced A
           - group: 2
-            label: Python 3.14 · remaining suite · duration-balanced A
+            label: Python 3.14 · non-browser regression suite · balanced B
           - group: 3
-            label: Python 3.14 · remaining suite · duration-balanced B
+            label: Python 3.14 · non-browser regression suite · balanced C
           - group: 4
-            label: Python 3.14 · remaining suite · duration-balanced C
+            label: Python 3.14 · non-browser regression suite · balanced D
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0

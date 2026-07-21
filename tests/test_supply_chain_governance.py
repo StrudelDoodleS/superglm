@@ -203,10 +203,10 @@ def test_dev_ci_parallelizes_complete_python314_suite():
     for group in range(1, 5):
         assert f"- group: {group}" in pytest_job
     for label in (
-        "Python 3.14 · wide-Poisson exact/discrete agreement",
-        "Python 3.14 · remaining suite · duration-balanced A",
-        "Python 3.14 · remaining suite · duration-balanced B",
-        "Python 3.14 · remaining suite · duration-balanced C",
+        "Python 3.14 · non-browser regression suite · balanced A",
+        "Python 3.14 · non-browser regression suite · balanced B",
+        "Python 3.14 · non-browser regression suite · balanced C",
+        "Python 3.14 · non-browser regression suite · balanced D",
     ):
         assert f"label: {label}" in pytest_job
     assert "uv python install 3.14" in pytest_job
