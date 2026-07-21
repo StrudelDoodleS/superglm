@@ -12,6 +12,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.plotting.common import (
     _EXP_EDGE,
     _EXP_EDGE_LW,
@@ -46,7 +47,7 @@ def plot_relativities(
     terms: list[TermInference],
     *,
     model=None,
-    X: pd.DataFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
@@ -64,7 +65,7 @@ def plot_relativities(
     ----------
     terms : list[TermInference]
         Per-term inference objects from :meth:`SuperGLM.term_inference`.
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data for sample_weight density overlays.
     sample_weight : array-like, optional
         Exposure / frequency weights.
@@ -96,11 +97,12 @@ def plot_relativities(
     """
     if not with_ci:
         interval = None
+    frame = None if X is None else as_eager_frame(X)
 
     return _plot_relativities_new(
         terms,
         model=model,
-        X=X,
+        X=frame,
         sample_weight=sample_weight,
         ncols=ncols,
         figsize=figsize,
@@ -210,14 +212,14 @@ def _plot_spline_panel(ax, ti: TermInference, interval: str | None, show_knots: 
 def _plot_density_strip(
     ax_d,
     feature_name: str,
-    X: pd.DataFrame,
+    X: EagerFrame,
     sample_weight: NDArray,
     x_grid: NDArray,
     show_knots: bool,
     knots: NDArray | None,
 ):
     """Render the sample_weight density strip beneath a spline panel."""
-    x_vals = X[feature_name].to_numpy(dtype=np.float64)
+    x_vals = X.column_array(feature_name, dtype=np.float64)
     density = _exposure_kde(x_vals, sample_weight, x_grid)
 
     ax_d.fill_between(x_grid, 0.0, density, color=_EXP_FILL, alpha=0.95, linewidth=0)
@@ -304,7 +306,7 @@ def plot_term(
     ti: TermInference,
     *,
     model=None,
-    X: pd.DataFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
     interval: str | None = "pointwise",
     show_exposure: bool = True,
@@ -323,7 +325,7 @@ def plot_term(
     ----------
     ti : TermInference
         Inference result from :meth:`SuperGLM.term_inference`.
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data for sample_weight overlays.
     sample_weight : array-like, optional
         Exposure / frequency weights.
@@ -345,17 +347,18 @@ def plot_term(
     """
     import matplotlib.pyplot as plt
 
+    frame = None if X is None else as_eager_frame(X)
     weighted = sample_weight is not None
     if sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    elif X is not None and show_exposure:
+    elif frame is not None and show_exposure:
         # Fall back to uniform weights (observation counts) when no
         # sample_weight is provided.
-        sample_weight = np.ones(len(X), dtype=np.float64)
+        sample_weight = np.ones(len(frame), dtype=np.float64)
 
     density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
     weight_label = "Weight" if weighted else "Count"
-    has_density = show_exposure and X is not None and sample_weight is not None
+    has_density = show_exposure and frame is not None and sample_weight is not None
 
     display: GroupedTermDisplay | None = None
     if ti.kind == "categorical":
@@ -363,7 +366,7 @@ def plot_term(
         ti = display.term
 
     if ti.kind in ("spline", "polynomial"):
-        needs_strip = has_density and ti.name in X.columns
+        needs_strip = has_density and ti.name in frame.columns
         fig, ax, ax_den = _make_continuous_figure(needs_strip, figsize)
 
         _plot_spline_panel(ax, ti, interval, show_knots)
@@ -371,13 +374,13 @@ def plot_term(
 
         if ax_den is not None:
             knots = ti.spline.interior_knots if ti.spline is not None else None
-            _plot_density_strip(ax_den, ti.name, X, sample_weight, ti.x, show_knots, knots)
+            _plot_density_strip(ax_den, ti.name, frame, sample_weight, ti.x, show_knots, knots)
             ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "numeric":
-        needs_strip = has_density and ti.name in X.columns
-        if X is not None and ti.name in X.columns:
-            x_vals = X[ti.name].to_numpy(dtype=np.float64)
+        needs_strip = has_density and ti.name in frame.columns
+        if frame is not None and ti.name in frame.columns:
+            x_vals = frame.column_array(ti.name, dtype=np.float64)
             x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
         else:
             x_grid = np.linspace(0.0, 1.0, 200)
@@ -386,7 +389,7 @@ def plot_term(
         _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
 
         if ax_den is not None:
-            _plot_density_strip(ax_den, ti.name, X, sample_weight, x_grid, False, None)
+            _plot_density_strip(ax_den, ti.name, frame, sample_weight, x_grid, False, None)
             ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "categorical" and ti.smooth_curve is not None:
@@ -397,7 +400,7 @@ def plot_term(
             ax,
             ti,
             interval,
-            X=X,
+            X=frame,
             sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
             display=display,
@@ -411,7 +414,7 @@ def plot_term(
             ax,
             ti,
             interval,
-            X=X,
+            X=frame,
             sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
             display=display,
@@ -523,7 +526,7 @@ def _plot_ordered_spline_panel(
     ti: TermInference,
     interval: str | None,
     *,
-    X: pd.DataFrame | None = None,
+    X: EagerFrame | None = None,
     sample_weight: NDArray | None = None,
     weight_label: str = "Weight",
     display: GroupedTermDisplay | None = None,
@@ -544,7 +547,12 @@ def _plot_ordered_spline_panel(
         exp_vals = grouped_level_exposure(display, X, sample_weight)
         if exp_vals is None:
             level_exp = (
-                pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
+                pd.DataFrame(
+                    {
+                        "level": X.column_array(ti.name),
+                        "sample_weight": sample_weight,
+                    }
+                )
                 .groupby("level", sort=False)["sample_weight"]
                 .sum()
             )
@@ -631,7 +639,7 @@ def _plot_categorical_panel_vertical(
     ti: TermInference,
     interval: str | None,
     *,
-    X: pd.DataFrame | None = None,
+    X: EagerFrame | None = None,
     sample_weight: NDArray | None = None,
     weight_label: str = "Weight",
     display: GroupedTermDisplay | None = None,
@@ -650,7 +658,12 @@ def _plot_categorical_panel_vertical(
         exp_vals = grouped_level_exposure(display, X, sample_weight)
         if exp_vals is None:
             level_exp = (
-                pd.DataFrame({"level": X[ti.name], "sample_weight": sample_weight})
+                pd.DataFrame(
+                    {
+                        "level": X.column_array(ti.name),
+                        "sample_weight": sample_weight,
+                    }
+                )
                 .groupby("level", sort=False)["sample_weight"]
                 .sum()
             )
@@ -711,7 +724,7 @@ def _plot_relativities_new(
     terms: list[TermInference],
     *,
     model=None,
-    X: pd.DataFrame | None = None,
+    X: EagerFrame | None = None,
     sample_weight: NDArray | None = None,
     ncols: int = 2,
     figsize: tuple[float, float] | None = None,
@@ -847,7 +860,7 @@ def _plot_relativities_new(
 
         elif display_ti.kind == "numeric":
             if X is not None and display_ti.name in X.columns:
-                x_vals = X[display_ti.name].to_numpy(dtype=np.float64)
+                x_vals = X.column_array(display_ti.name, dtype=np.float64)
                 x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
             else:
                 x_grid = np.linspace(0.0, 1.0, 200)

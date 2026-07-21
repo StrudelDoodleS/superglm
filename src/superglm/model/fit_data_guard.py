@@ -2,25 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
 
-
-def _frame_digest(frame: pd.DataFrame) -> bytes:
-    """Hash frame contents for a mutation-resistant fit-time fingerprint."""
-    digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
-    metadata = tuple((repr(name), str(dtype)) for name, dtype in frame.dtypes.items())
-    digest.update(repr((frame.shape, metadata)).encode("utf-8"))
-    row_hashes = pd.util.hash_pandas_object(frame, index=True, categorize=True).to_numpy(
-        dtype=np.uint64,
-        copy=False,
-    )
-    digest.update(np.ascontiguousarray(row_hashes).data)
-    return digest.digest()
+from superglm._frame import EagerFrame, FrameBackend, FrameLike, as_eager_frame
 
 
 def _same_numeric_vector(value, snapshot: NDArray[np.float64]) -> bool:
@@ -35,6 +22,7 @@ def _same_numeric_vector(value, snapshot: NDArray[np.float64]) -> bool:
 class FitDataGuard:
     """Fit-time snapshots sufficient to reject mutated identity-cache inputs."""
 
+    x_backend: FrameBackend
     x_digest: bytes
     y_snapshot: NDArray[np.float64]
     x_columns: tuple[object, ...] | None = None
@@ -42,27 +30,27 @@ class FitDataGuard:
     @classmethod
     def capture(
         cls,
-        X: pd.DataFrame,
+        X: EagerFrame | FrameLike,
         y: NDArray,
         *,
         columns: tuple[object, ...] | None = None,
     ) -> FitDataGuard:
+        frame = as_eager_frame(X)
         x_columns = None if columns is None else tuple(columns)
-        guarded_X = X if x_columns is None else X.loc[:, list(x_columns)]
-        x_digest = _frame_digest(guarded_X)
         y_snapshot = np.array(y, dtype=np.float64, copy=True)
         y_snapshot.setflags(write=False)
         return cls(
-            x_digest=x_digest,
+            x_backend=frame.backend,
+            x_digest=frame.digest(x_columns),
             y_snapshot=y_snapshot,
             x_columns=x_columns,
         )
 
-    def _matches_frame(self, X: pd.DataFrame) -> bool:
+    def _matches_frame(self, X: EagerFrame | FrameLike) -> bool:
         try:
-            guarded_X = X if self.x_columns is None else X.loc[:, list(self.x_columns)]
-            return _frame_digest(guarded_X) == self.x_digest
-        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+            frame = as_eager_frame(X)
+            return frame.backend == self.x_backend and frame.digest(self.x_columns) == self.x_digest
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False
 
     def matches(
@@ -76,8 +64,6 @@ class FitDataGuard:
         fit_offset: NDArray | None,
     ) -> bool:
         """Return whether all identity-matched inputs retain their fit-time values."""
-        if not isinstance(X, pd.DataFrame):
-            return False
         if not _same_numeric_vector(y, self.y_snapshot):
             return False
         if sample_weight is not None and (
@@ -101,8 +87,6 @@ class FitDataGuard:
         catches both pandas mutations and writable NumPy aliases into a frame's
         backing storage.
         """
-        if not isinstance(X, pd.DataFrame):
-            return False
         if not _same_numeric_vector(y, self.y_snapshot):
             return False
         if not self._matches_frame(X):

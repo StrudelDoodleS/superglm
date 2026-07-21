@@ -249,7 +249,7 @@ class ModelMetrics:
     ----------
     model : SuperGLM
         A fitted model.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix used for fitting (or evaluation).
     y : array-like
         Response variable.

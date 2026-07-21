@@ -247,7 +247,7 @@ def score_test_zi(
     ----------
     model : SuperGLM
         A fitted Poisson model.
-    X : pd.DataFrame
+    X : pandas or eager Polars DataFrame
         Design matrix.
     y : array-like
         Observed response values.
@@ -315,7 +315,7 @@ def dispersion_test(
     ----------
     model : SuperGLM
         A fitted Poisson model.
-    X : pd.DataFrame
+    X : pandas or eager Polars DataFrame
         Design matrix.
     y : array-like
         Observed response values.
@@ -397,7 +397,7 @@ def vuong_test(
     ----------
     model_a, model_b : SuperGLM
         Two fitted SuperGLM models.
-    X : pd.DataFrame
+    X : pandas or eager Polars DataFrame
         Design matrix (same for both models).
     y : array-like
         Observed response values.

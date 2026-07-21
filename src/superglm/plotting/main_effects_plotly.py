@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.inference.term import TermInference
 from superglm.plotting.common import (
     _EXP_EDGE_LW,
@@ -138,7 +139,7 @@ def plot_main_effects_plotly(
     model,
     terms: list[TermInference],
     *,
-    X: pd.DataFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
     interval: str | None = "pointwise",
     ci_style: str = "band",
@@ -167,7 +168,7 @@ def plot_main_effects_plotly(
         Fitted model instance.
     terms : list of TermInference
         Per-term inference objects from ``model.term_inference()``.
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data for exposure/weight density overlays.
     sample_weight : array-like, optional
         Observation weights for density calculation.
@@ -204,6 +205,7 @@ def plot_main_effects_plotly(
             "plotly is required for engine='plotly'. Install it with: pip install plotly"
         ) from None
 
+    frame = None if X is None else as_eager_frame(X)
     if not terms:
         return go.Figure()
 
@@ -217,12 +219,12 @@ def plot_main_effects_plotly(
     style_cfg = _resolve_plotly_style(style)
 
     weighted = sample_weight is not None
-    if X is not None and sample_weight is None:
-        sample_weight = np.ones(len(X), dtype=np.float64)
+    if frame is not None and sample_weight is None:
+        sample_weight = np.ones(len(frame), dtype=np.float64)
     elif sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
 
-    density_available = X is not None and sample_weight is not None
+    density_available = frame is not None and sample_weight is not None
     density_visible = density_available and show_exposure
     needs_lower_panel = density_available
 
@@ -248,7 +250,7 @@ def plot_main_effects_plotly(
                 term_idx,
                 entries,
                 link_variants,
-                X=X,
+                X=frame,
                 sample_weight=sample_weight,
                 interval=interval,
                 ci_style=ci_style,
@@ -604,7 +606,7 @@ def _add_term_traces(
     entries: list[_TraceEntry],
     link_variants: list[_LinkVariant],
     *,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
     interval: str | None,
     ci_style: str,
@@ -1235,7 +1237,7 @@ def _add_continuous_density_trace(
     entries: list[_TraceEntry],
     link_variants: list[_LinkVariant],
     *,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
     density_visible: bool,
     style_cfg: dict[str, Any],
@@ -1246,7 +1248,7 @@ def _add_continuous_density_trace(
     if X is None or sample_weight is None or ti.name not in X.columns:
         return
 
-    x_vals = X[ti.name].to_numpy(dtype=np.float64)
+    x_vals = X.column_array(ti.name, dtype=np.float64)
     density = _exposure_kde(x_vals, sample_weight, np.asarray(ti.x))
     fig.add_trace(
         go.Scatter(
@@ -1276,7 +1278,7 @@ def _add_numeric_density_trace(
     entries: list[_TraceEntry],
     link_variants: list[_LinkVariant],
     *,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
     density_visible: bool,
     style_cfg: dict[str, Any],
@@ -1287,7 +1289,7 @@ def _add_numeric_density_trace(
     if X is None or sample_weight is None or ti.name not in X.columns:
         return
 
-    x_vals = X[ti.name].to_numpy(dtype=np.float64)
+    x_vals = X.column_array(ti.name, dtype=np.float64)
     x_grid = np.linspace(float(x_vals.min()), float(x_vals.max()), 200)
     density = _exposure_kde(x_vals, sample_weight, x_grid)
     fig.add_trace(
@@ -1318,7 +1320,7 @@ def _add_categorical_density_trace(
     entries: list[_TraceEntry],
     link_variants: list[_LinkVariant],
     *,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
     density_visible: bool,
     style_cfg: dict[str, Any],
@@ -1340,7 +1342,12 @@ def _add_categorical_density_trace(
     weights = grouped_level_exposure(display, X, sample_weight)
     if weights is None:
         exp = (
-            pd.DataFrame({"level": X[ti.name].astype(str), "sample_weight": sample_weight})
+            pd.DataFrame(
+                {
+                    "level": pd.Series(X.column_array(ti.name), name=ti.name).astype(str),
+                    "sample_weight": sample_weight,
+                }
+            )
             .groupby("level", sort=False)["sample_weight"]
             .sum()
         )

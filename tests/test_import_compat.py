@@ -6,6 +6,9 @@ entry points and submodule import paths that the codebase still treats as
 supported.
 """
 
+import inspect
+import subprocess
+import sys
 
 # ── Old paths (must keep working after moves) ──────────────────
 
@@ -54,6 +57,71 @@ def test_toplevel_reexports():
 
     for name in superglm.__all__:
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
+
+
+def test_public_model_signatures_do_not_expose_private_frame_adapter():
+    from superglm import SuperGLM
+
+    for name, method in inspect.getmembers(SuperGLM, inspect.isfunction):
+        if not name.startswith("_"):
+            assert "EagerFrame" not in str(inspect.signature(method)), name
+
+
+def test_public_plotting_signatures_do_not_expose_private_frame_adapter():
+    import superglm.plotting as plotting
+
+    for name in plotting.__all__:
+        assert "EagerFrame" not in str(inspect.signature(getattr(plotting, name))), name
+
+
+def test_pandas_fit_does_not_import_optional_polars_backend():
+    script = r"""
+import importlib.abc
+import importlib.util
+import sys
+
+class RejectPolars(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "polars" or fullname.startswith("polars."):
+            raise AssertionError(f"unexpected optional import: {fullname}")
+        return None
+
+sys.meta_path.insert(0, RejectPolars())
+
+# Tabmat probes optional dataframe packages with find_spec before importing
+# them. Simulate the answer from an environment where Polars is not installed;
+# the rejecting finder above still fails any actual import attempt.
+real_find_spec = importlib.util.find_spec
+def optional_polars_is_absent(name, package=None):
+    if name == "polars" or name.startswith("polars."):
+        return None
+    return real_find_spec(name, package)
+importlib.util.find_spec = optional_polars_is_absent
+
+import numpy as np
+import pandas as pd
+from superglm import Numeric, SuperGLM
+
+X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
+y = np.array([0.1, 1.1, 2.1, 3.1])
+model = SuperGLM(
+    family="gaussian",
+    selection_penalty=0.0,
+    features={"x": Numeric()},
+).fit(X, y)
+prediction = model.predict(X)
+assert prediction.shape == (4,)
+assert not any(name == "polars" or name.startswith("polars.") for name in sys.modules)
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 # ── Supported canonical paths ───────────────────────────────────

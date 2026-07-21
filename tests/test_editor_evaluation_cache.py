@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from superglm import Numeric, SuperGLM
-from superglm.editor.evaluation import EvaluationDataset
+from superglm.editor.evaluation import EvaluationDataset, coerce_dataset
 from superglm.editor.evaluation_cache import (
     EvaluationCache,
     EvaluationKey,
@@ -32,6 +33,29 @@ def test_evaluation_key_is_frozen():
 
     with pytest.raises(FrozenInstanceError):
         key.split = "test"  # type: ignore[misc]
+
+
+def test_polars_evaluation_dataset_keeps_native_frame_and_uses_its_row_count():
+    X = pl.DataFrame({"x": [1.0, 2.0, 3.0]})
+    dataset = coerce_dataset("validation", (X, np.array([1.0, 2.0, 3.0])))
+
+    assert dataset is not None
+    assert dataset.X is X
+    assert dataset.n_obs == X.height
+
+    class ArrayConversionForbidden:
+        def __array__(self):
+            raise AssertionError("n_obs must come from the native frame")
+
+    assert (
+        EvaluationDataset(
+            "validation",
+            "Validation",
+            X,
+            ArrayConversionForbidden(),
+        ).n_obs
+        == X.height
+    )
 
 
 def test_evaluation_cache_preserves_original_and_bounds_current_revisions():

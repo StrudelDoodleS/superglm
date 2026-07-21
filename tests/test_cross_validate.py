@@ -4,6 +4,7 @@ import inspect
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from superglm import (
@@ -63,6 +64,20 @@ class SimpleGroupKFold:
             test_mask = np.isin(groups, test_groups)
             yield np.where(~test_mask)[0], np.where(test_mask)[0]
             current += size
+
+
+class RecordingTwoFold:
+    """Deterministic splitter recording the native frame it receives."""
+
+    def __init__(self) -> None:
+        self.frame_types: list[type] = []
+
+    def split(self, X, y=None, groups=None):
+        del y, groups
+        self.frame_types.append(type(X))
+        midpoint = len(X) // 2
+        yield np.arange(midpoint, len(X)), np.arange(midpoint)
+        yield np.arange(midpoint), np.arange(midpoint, len(X))
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -237,6 +252,89 @@ class TestSplitters:
 
 
 class TestDataForwarding:
+    def test_polars_splitter_and_scorer_receive_native_frames(self):
+        x = np.linspace(-1.0, 1.0, 60)
+        X = pl.DataFrame({"x": x})
+        y = 0.5 + 0.3 * x
+        splitter = RecordingTwoFold()
+        scorer_types: list[type] = []
+
+        def native_scorer(model, X_val, y_val, *, sample_weight=None, offset=None):
+            del sample_weight
+            scorer_types.append(type(X_val))
+            return float(np.mean(np.abs(y_val - model.predict(X_val, offset=offset))))
+
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        result = cross_validate(model, X, y, cv=splitter, scoring=native_scorer)
+
+        assert splitter.frame_types == [pl.DataFrame]
+        assert scorer_types == [pl.DataFrame, pl.DataFrame]
+        assert len(result.fold_scores) == 2
+
+    def test_polars_and_pandas_cross_validation_outputs_are_numerically_equal(self):
+        rng = np.random.default_rng(20260725)
+        x = np.linspace(-1.0, 1.0, 90)
+        z = rng.normal(size=len(x))
+        y = 0.5 + 0.3 * x - 0.15 * z
+        weights = rng.uniform(0.5, 1.5, len(x))
+        pandas_X = pd.DataFrame({"x": x, "z": z})
+        polars_X = pl.DataFrame({"x": x, "z": z})
+
+        def evaluated(X):
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0.0,
+                features={"x": Numeric(), "z": Numeric()},
+            )
+            return cross_validate(
+                model,
+                X,
+                y,
+                cv=SimpleKFold(3),
+                sample_weight=weights,
+                scoring=("deviance", "nll"),
+                return_estimators=True,
+                return_oof=True,
+            )
+
+        pandas_result = evaluated(pandas_X)
+        polars_result = evaluated(polars_X)
+
+        columns = [
+            column
+            for column in pandas_result.fold_scores.columns
+            if column not in {"fit_time_s", "score_time_s"}
+        ]
+        pd.testing.assert_frame_equal(
+            polars_result.fold_scores[columns],
+            pandas_result.fold_scores[columns],
+            check_exact=True,
+        )
+        assert polars_result.mean_scores == pandas_result.mean_scores
+        assert polars_result.pooled_scores == pandas_result.pooled_scores
+        assert polars_result.std_scores == pandas_result.std_scores
+        np.testing.assert_allclose(
+            polars_result.oof_predictions,
+            pandas_result.oof_predictions,
+            rtol=0.0,
+            atol=0.0,
+        )
+        for polars_indices, pandas_indices in zip(
+            polars_result.fold_indices,
+            pandas_result.fold_indices,
+            strict=True,
+        ):
+            np.testing.assert_array_equal(polars_indices[0], pandas_indices[0])
+            np.testing.assert_array_equal(polars_indices[1], pandas_indices[1])
+        assert all(
+            isinstance(estimator._fit_X_ref, pl.DataFrame) for estimator in polars_result.estimators
+        )
+
     def test_sample_weight_affects_score(self, poisson_data, base_model):
         """Weighted deviance differs from unweighted."""
         df, y, sw = poisson_data
@@ -507,6 +605,48 @@ class TestScoring:
 
 
 class TestReturnOptions:
+    def test_polars_plot_terms_by_fold_keeps_fold_support_native(self, monkeypatch):
+        x = np.linspace(0.0, 1.0, 60)
+        X = pl.DataFrame({"x": x})
+        y = 0.5 + np.sin(3.0 * x)
+        weights = np.linspace(0.5, 1.5, len(x))
+        result = cross_validate(
+            SuperGLM(
+                family="gaussian",
+                selection_penalty=0.0,
+                features={"x": Spline(n_knots=5)},
+            ),
+            X,
+            y,
+            cv=SimpleKFold(3),
+            sample_weight=weights,
+            return_estimators=True,
+        )
+        captured = {}
+
+        def fake_plot_term_comparison(**kwargs):
+            captured.update(kwargs)
+            return "figure"
+
+        monkeypatch.setattr(
+            "superglm.plotting.comparison.plot_term_comparison",
+            fake_plot_term_comparison,
+        )
+
+        figure = result.plot_terms_by_fold(X, sample_weight=weights, terms=["x"])
+
+        assert figure == "figure"
+        assert captured["X"] is X
+        assert all(
+            isinstance(payload["X"], pl.DataFrame)
+            for payload in captured["support_by_label"].values()
+        )
+        assert sorted(len(payload["X"]) for payload in captured["support_by_label"].values()) == [
+            40,
+            40,
+            40,
+        ]
+
     def test_return_oof(self, poisson_data, base_model):
         """return_oof=True fills correct indices."""
         df, y, sw = poisson_data
@@ -677,6 +817,35 @@ class TestReturnOptions:
 
 
 class TestErrorHandling:
+    def test_polars_fold_failure_honours_error_score_without_mutating_model(self):
+        X = pl.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+        y = np.linspace(0.0, 1.0, 20)
+
+        class EmptyTrainingFold:
+            @staticmethod
+            def split(X, y=None, groups=None):
+                del y, groups
+                yield np.array([], dtype=int), np.arange(len(X))
+
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        state_before = model.__dict__.copy()
+
+        result = cross_validate(
+            model,
+            X,
+            y,
+            cv=EmptyTrainingFold(),
+            error_score=np.nan,
+        )
+
+        assert np.isnan(result.fold_scores.loc[0, "deviance"])
+        assert model.__dict__.keys() == state_before.keys()
+        assert all(model.__dict__[name] is value for name, value in state_before.items())
+
     def test_error_score_nan(self, poisson_data):
         """Fold failure fills scores with NaN when error_score=np.nan."""
         df, y, sw = poisson_data

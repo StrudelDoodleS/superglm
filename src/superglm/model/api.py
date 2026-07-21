@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -351,13 +352,19 @@ class SuperGLM:
         return base.clone_without_features(self, drop, lambda1=lambda1, lambda2=lambda2)
 
     def _auto_detect_features(self, X, sample_weight=None):
-        return base.auto_detect(self, X, sample_weight)
+        return base.auto_detect(self, as_eager_frame(X), sample_weight)
 
     def _add_interaction(self, feat1, feat2, name=None, **kwargs):
         return base.model_add_interaction(self, feat1, feat2, name=name, **kwargs)
 
     def _build_design_matrix(self, X, y, sample_weight, offset):
-        return base.model_build_design_matrix(self, X, y, sample_weight, offset)
+        return base.model_build_design_matrix(
+            self,
+            as_eager_frame(X),
+            y,
+            sample_weight,
+            offset,
+        )
 
     def _compute_lambda_max(self, y, weights):
         return base.compute_lambda_max(self, y, weights)
@@ -369,7 +376,7 @@ class SuperGLM:
 
     def fit(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -383,8 +390,9 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
-            Feature matrix with columns matching registered features.
+        X : pandas or eager Polars DataFrame
+            Feature matrix with columns matching registered features. Lazy frames
+            must be collected before fitting.
         y : array-like
             Response variable.
         sample_weight : array-like, optional
@@ -449,7 +457,7 @@ class SuperGLM:
 
     def fit_path(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -475,7 +483,7 @@ class SuperGLM:
 
     def fit_reml(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -500,8 +508,8 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
-            Feature matrix.
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
         y : array-like
             Response variable.
         sample_weight : array-like, optional
@@ -681,6 +689,24 @@ class SuperGLM:
         """Per-group diagnostic dict for programmatic / audit access."""
         return report_ops.diagnostics(self)
 
+    def design_summary(self) -> pd.DataFrame:
+        """Describe fitted design storage and static route eligibility.
+
+        The summary does not build an accelerated matrix or prove that an
+        eligible kernel executed. Fit and REML traces remain authoritative for
+        actual dispatch.
+        """
+        if self._result is None:
+            raise RuntimeError("Model must be fitted before calling design_summary().")
+        if self._dm is None:
+            raise RuntimeError(
+                "retain_fit_state=False discarded the fitted design; refit with "
+                "retain_fit_state=True before calling design_summary()."
+            )
+        from superglm.model.design_summary import build_design_summary
+
+        return build_design_summary(self)
+
     def summary(self, alpha: float = 0.05, detail: str = "compact"):
         """Rich model summary with coefficient table (statsmodels-style)."""
         return report_ops.summary(self, alpha, detail=detail)
@@ -701,7 +727,7 @@ class SuperGLM:
 
     def metrics(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -711,7 +737,7 @@ class SuperGLM:
 
     def drop1(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -723,7 +749,7 @@ class SuperGLM:
 
     def refit_unpenalised(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -813,7 +839,7 @@ class SuperGLM:
 
     def estimate_p(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -827,8 +853,8 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
-            Feature matrix.
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
         y : array-like
             Response variable.
         sample_weight : array-like, optional
@@ -871,7 +897,7 @@ class SuperGLM:
 
     def estimate_theta(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -888,7 +914,7 @@ class SuperGLM:
         *,
         kind: str = "global",
         ci: str | bool | None = "pointwise",
-        X: pd.DataFrame | None = None,
+        X: FrameLike | None = None,
         sample_weight: NDArray | None = None,
         show_density: bool = True,
         show_knots: bool = False,
@@ -928,7 +954,7 @@ class SuperGLM:
             implemented).
         ci : {None, False, "pointwise", "simultaneous", "both"}
             Confidence interval style.  ``None`` or ``False`` disables bands.
-        X : DataFrame, optional
+        X : pandas or eager Polars DataFrame, optional
             Training data for density overlays.
         sample_weight : array-like, optional
             Frequency weights / sample_weight for density overlays.
@@ -1036,7 +1062,7 @@ class SuperGLM:
 
     def plot_diagnostics(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
@@ -1058,7 +1084,7 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : pd.DataFrame
+        X : pandas or eager Polars DataFrame
             Design matrix.
         y : NDArray
             Response vector.
@@ -1105,7 +1131,7 @@ class SuperGLM:
         *,
         kind: str = "global",
         ci: str | bool | None = "pointwise",
-        X: pd.DataFrame | None = None,
+        X: FrameLike | None = None,
         sample_weight: NDArray | None = None,
         show_density: bool = True,
         show_knots: bool = False,
@@ -1160,29 +1186,29 @@ class SuperGLM:
 
     # ── Prediction ────────────────────────────────────────────────
 
-    def _predict_eta_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private exact canonical predictor on the link scale."""
         return base.predict_eta_exact(self, X, offset)
 
-    def _predict_eta_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private fast discrete predictor on the link scale."""
         return base.predict_eta_fast_discrete(self, X, offset)
 
-    def _predict_exact(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private exact canonical predictor on the response scale."""
         return base.predict_exact(self, X, offset)
 
-    def _predict_fast_discrete(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def _predict_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Private fast discrete predictor on the response scale."""
         return base.predict_fast_discrete(self, X, offset)
 
-    def predict(self, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+    def predict(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
         """Predict the response mean for new data.
 
         Parameters
         ----------
-        X : pd.DataFrame
-            Input features with the same columns used during fitting.
+        X : pandas or eager Polars DataFrame
+            Eager input features with the same columns used during fitting.
         offset : NDArray or None
             Optional offset added to the linear predictor before
             applying the inverse link.
@@ -1198,7 +1224,7 @@ class SuperGLM:
 
     def monotonize(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
@@ -1215,7 +1241,7 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
+        X : pandas or eager Polars DataFrame
             Training data (used to compute density-based grid weights).
         sample_weight : array-like, optional
             Frequency weights.
@@ -1233,7 +1259,7 @@ class SuperGLM:
 
     def apply_shape_postfit(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
@@ -1246,7 +1272,7 @@ class SuperGLM:
 
     def apply_monotone_postfit(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
@@ -1259,7 +1285,7 @@ class SuperGLM:
 
     def term_importance(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
     ) -> pd.DataFrame:
         """Weighted variance of each term's contribution to eta.
@@ -1272,13 +1298,13 @@ class SuperGLM:
 
     def term_drop_diagnostics(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
         mode: str = "refit",
-        X_val: pd.DataFrame | None = None,
+        X_val: FrameLike | None = None,
         y_val: NDArray | None = None,
     ) -> pd.DataFrame:
         """Drop-term diagnostics: AIC/BIC deltas or holdout loss deltas.
@@ -1304,7 +1330,7 @@ class SuperGLM:
 
     def spline_redundancy(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
     ) -> dict:
         """Spline redundancy diagnostics: knot spacing, basis correlation, effective rank."""
@@ -1314,7 +1340,7 @@ class SuperGLM:
 
     def discretization_impact(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,
@@ -1325,7 +1351,7 @@ class SuperGLM:
     def export_rating_tables(
         self,
         file_path,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,
@@ -1337,7 +1363,7 @@ class SuperGLM:
 
     def rating_table_payload(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,

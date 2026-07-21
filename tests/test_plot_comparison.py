@@ -9,6 +9,27 @@ import pytest
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 
 
+def _to_polars(frame):
+    pl = pytest.importorskip("polars")
+    return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
+
+
+def _assert_nested_equal(actual, expected):
+    if isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_nested_equal(actual[key], expected[key])
+    elif isinstance(expected, list | tuple):
+        assert type(actual) is type(expected)
+        assert len(actual) == len(expected)
+        for actual_item, expected_item in zip(actual, expected, strict=True):
+            _assert_nested_equal(actual_item, expected_item)
+    elif isinstance(expected, np.ndarray):
+        np.testing.assert_array_equal(actual, expected)
+    else:
+        assert actual == expected
+
+
 @pytest.fixture
 def comparison_data():
     rng = np.random.default_rng(42)
@@ -104,6 +125,78 @@ def test_build_term_comparison_data_can_store_per_label_support(fitted_compariso
     assert bonus_support["mode"] == "by_label"
     assert set(bonus_support["series"]) == {"ordered", "categorical"}
     assert len(bonus_support["series"]["ordered"]["density"]) == 5
+
+
+def test_polars_comparison_payload_and_support_match_pandas(fitted_comparison_models, monkeypatch):
+    from superglm.plotting.comparison import _build_term_comparison_data
+
+    pl = pytest.importorskip("polars")
+    X, sample_weight, models = fitted_comparison_models
+    pandas_support = {
+        "ordered": {"X": X.iloc[:120], "sample_weight": sample_weight[:120]},
+        "categorical": {"X": X.iloc[120:], "sample_weight": sample_weight[120:]},
+    }
+    expected = _build_term_comparison_data(
+        models=models,
+        terms=["VehAge", "BonusBand"],
+        X=X,
+        sample_weight=sample_weight,
+        support_by_label=pandas_support,
+        n_points=41,
+    )
+    X_pl = _to_polars(X)
+    polars_support = {
+        "ordered": {"X": X_pl[:120], "sample_weight": sample_weight[:120]},
+        "categorical": {"X": X_pl[120:], "sample_weight": sample_weight[120:]},
+    }
+    monkeypatch.setattr(
+        pl.DataFrame,
+        "to_pandas",
+        lambda *_args, **_kwargs: pytest.fail("comparison converted the whole frame"),
+    )
+
+    actual = _build_term_comparison_data(
+        models=models,
+        terms=["VehAge", "BonusBand"],
+        X=X_pl,
+        sample_weight=sample_weight,
+        support_by_label=polars_support,
+        n_points=41,
+    )
+
+    _assert_nested_equal(actual, expected)
+
+
+def test_polars_comparison_renders_same_trace_count(fitted_comparison_models, monkeypatch):
+    pytest.importorskip("plotly")
+    from superglm import plot_term_comparison
+
+    pl = pytest.importorskip("polars")
+    X, sample_weight, models = fitted_comparison_models
+    X_pl = _to_polars(X)
+    monkeypatch.setattr(
+        pl.DataFrame,
+        "to_pandas",
+        lambda *_args, **_kwargs: pytest.fail("comparison renderer converted the whole frame"),
+    )
+
+    expected = plot_term_comparison(
+        models=models,
+        terms=["VehAge", "BonusBand"],
+        X=X,
+        sample_weight=sample_weight,
+        n_points=31,
+    )
+    actual = plot_term_comparison(
+        models=models,
+        terms=["VehAge", "BonusBand"],
+        X=X_pl,
+        sample_weight=sample_weight,
+        n_points=31,
+    )
+
+    assert len(actual.data) == len(expected.data)
+    assert [trace.type for trace in actual.data] == [trace.type for trace in expected.data]
 
 
 def test_plot_term_comparison_builds_dropdown_and_scale_toggle(fitted_comparison_models):

@@ -37,6 +37,7 @@ from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize, minimize_scalar
 from scipy.special import expit, ive, logit, wright_bessel
 
+from superglm._frame import as_eager_frame
 from superglm._tweedie_profile_kernel import (
     PROFILE_KERNEL_NONFINITE,
     PROFILE_KERNEL_OK,
@@ -5145,7 +5146,7 @@ def estimate_tweedie_p(
     model : SuperGLM
         A configured but *unfitted* model with features already added.
         Must have a Tweedie family (e.g. ``families.tweedie(p=1.5)``).
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix.
     y : array-like
         Response variable.
@@ -5200,6 +5201,7 @@ def estimate_tweedie_p(
     """
     from superglm.distributions import Tweedie
 
+    X = as_eager_frame(X)
     y_arr = np.asarray(y)
     if sample_weight is not None:
         sample_weight = _validate_strict_prior_weights(sample_weight, len(y_arr))

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike
 from superglm.plotting.comparison import _build_term_comparison_data
 
 
@@ -92,7 +93,7 @@ def _summarize_against_fold_mean(
 def build_cv_curve_similarity(
     *,
     models: list[Any],
-    X: pd.DataFrame,
+    X: FrameLike,
     sample_weight: NDArray | None = None,
     n_points: int = 200,
 ) -> dict[str, Any]:

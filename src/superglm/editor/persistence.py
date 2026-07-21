@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from superglm._frame import as_eager_frame
 from superglm.editor.apply import materialize_edit_request
 from superglm.editor.io import (
     jsonable,
@@ -54,9 +55,12 @@ def _spread_row_indices(n_rows: int, max_rows: int) -> np.ndarray:
 
 def _slice_rows(values: Any, indices: np.ndarray):
     """Take only selected rows from pandas or array-like inputs."""
-    iloc = getattr(values, "iloc", None)
-    if iloc is not None:
-        return iloc[indices]
+    try:
+        frame = as_eager_frame(values)
+    except ValueError:
+        pass
+    else:
+        return frame.take_rows(indices)
     return np.asarray(values)[indices]
 
 

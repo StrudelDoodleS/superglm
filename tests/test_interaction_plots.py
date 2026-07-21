@@ -111,6 +111,17 @@ def _fit_poly_poly(data):
     return m
 
 
+def _fit_spline_spline(data):
+    X, y = data
+    m = SuperGLM(
+        features={"age": Spline(n_knots=5), "bm": Spline(n_knots=5)},
+        interactions=[("age", "bm")],
+        selection_penalty=0.01,
+    )
+    m.fit(X, y)
+    return m
+
+
 # ── matplotlib tests ──────────────────────────────────────────────
 
 
@@ -383,6 +394,80 @@ class TestInteractionPlotAPI:
         assert len(payload["grid_axes"]["bm"]) == 41
         assert payload["density"] is not None
         assert {"age", "bm", "density", "hdr_mass"} <= set(payload["density"].columns)
+
+    def test_polars_tensor_payload_and_renderers_match_pandas(self, interaction_data, monkeypatch):
+        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+
+        pl = pytest.importorskip("polars")
+        X, _ = interaction_data
+        X_pl = pl.DataFrame({name: X[name].to_numpy() for name in X.columns})
+        sample_weight = np.linspace(0.5, 1.5, len(X))
+        model = _fit_spline_spline(interaction_data)
+        expected = model.plot_data(
+            "age:bm",
+            X=X,
+            sample_weight=sample_weight,
+            n_points=31,
+        )
+        monkeypatch.setattr(
+            pl.DataFrame,
+            "to_pandas",
+            lambda *_args, **_kwargs: pytest.fail("interaction converted the whole frame"),
+        )
+        actual = model.plot_data(
+            "age:bm",
+            X=X_pl,
+            sample_weight=sample_weight,
+            n_points=31,
+        )
+
+        assert actual["kind"] == expected["kind"]
+        assert actual["plot_kind"] == expected["plot_kind"]
+        pd.testing.assert_frame_equal(actual["effect"], expected["effect"])
+        pd.testing.assert_frame_equal(actual["density"], expected["density"])
+        for name in ("age", "bm"):
+            np.testing.assert_array_equal(actual["grid_axes"][name], expected["grid_axes"][name])
+
+        pandas_mpl = plot_interaction(
+            model,
+            "age:bm",
+            X=X,
+            sample_weight=sample_weight,
+            n_points=31,
+        )
+        polars_mpl = plot_interaction(
+            model,
+            "age:bm",
+            X=X_pl,
+            sample_weight=sample_weight,
+            n_points=31,
+        )
+        assert isinstance(polars_mpl, Figure)
+        assert len(polars_mpl.axes[0].collections) == len(pandas_mpl.axes[0].collections)
+        plt.close(pandas_mpl)
+        plt.close(polars_mpl)
+
+        pandas_plotly = plot_interaction(
+            model,
+            "age:bm",
+            engine="plotly",
+            X=X,
+            sample_weight=sample_weight,
+            n_points=31,
+        )
+        polars_plotly = plot_interaction(
+            model,
+            "age:bm",
+            engine="plotly",
+            X=X_pl,
+            sample_weight=sample_weight,
+            n_points=31,
+        )
+        assert len(polars_plotly.data) == len(pandas_plotly.data)
+        assert [trace.type for trace in polars_plotly.data] == [
+            trace.type for trace in pandas_plotly.data
+        ]
 
     def test_model_plot_forwards_interaction_view(self, interaction_data):
         import plotly.graph_objects as go

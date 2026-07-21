@@ -6,6 +6,20 @@
 pip install superglm
 ```
 
+The normal install includes pandas, and model-data entry points accept either a
+`pandas.DataFrame` or an eager Polars DataFrame. Polars is an optional input
+backend and is installed separately:
+
+```bash
+pip install polars
+```
+
+Pass eager frames to SuperGLM. A `polars.LazyFrame` must be materialized by the
+caller with `LazyFrame.collect()` before fitting or prediction. SuperGLM keeps
+the input backend native while compiling features; it does not convert a whole
+Polars frame to pandas. Outputs remain pandas DataFrames where the existing
+reporting, inference, plotting-data, and export APIs are table-oriented.
+
 ## With optional dependencies
 
 ```bash

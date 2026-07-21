@@ -28,6 +28,16 @@ def test_editor_dependencies_are_part_of_the_normal_install() -> None:
     assert "ipykernel" not in optional
 
 
+def test_dataframe_boundary_dependencies_are_explicit() -> None:
+    project = _toml_section("project")
+    optional = _toml_section("project.optional-dependencies")
+
+    assert '"narwhals>=2.17.0"' in project
+    assert "polars" not in project
+    assert '"polars>=1.42.1"' in optional
+    assert "pyarrow" not in project
+
+
 def test_project_exposes_useful_pypi_metadata() -> None:
     project = _toml_section("project")
     urls = _toml_section("project.urls")
@@ -69,3 +79,31 @@ def test_installation_docs_are_pypi_first() -> None:
     assert "pip install git+" not in readme
     assert "pip install git+" not in installation
     assert '<img src="https://raw.githubusercontent.com/' in readme
+
+
+def test_dataframe_boundary_documentation_is_discoverable() -> None:
+    installation = (ROOT / "docs/getting-started/installation.md").read_text(encoding="utf-8")
+    quickstart = (ROOT / "docs/getting-started/quickstart.md").read_text(encoding="utf-8")
+    model_api = (ROOT / "docs/api/model.md").read_text(encoding="utf-8")
+    mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+    developer_path = ROOT / "docs/development/data-and-solver-boundaries.md"
+
+    assert developer_path.exists()
+    developer = developer_path.read_text(encoding="utf-8")
+    assert "pandas.DataFrame" in installation
+    assert "eager Polars DataFrame" in installation
+    assert "pip install polars" in installation
+    assert "LazyFrame.collect()" in installation
+    assert "Outputs remain pandas" in installation
+    assert "import polars as pl" in quickstart
+    assert "model = SuperGLM" in quickstart
+    assert "model.predict(X)" in quickstart
+    assert "design_summary" in model_api
+    assert "development/data-and-solver-boundaries.md" in mkdocs
+    assert "User layer" in developer
+    assert "Developer layer" in developer
+    assert "Where to make a change" in developer
+    assert "future AFT" in developer
+    assert "adds no AFT API" in developer
+    assert "construction-time eligibility" in developer
+    assert "traces" in developer

@@ -6,6 +6,7 @@ import pytest
 from scipy.stats import nbinom
 
 from superglm import NegativeBinomial, Spline, SuperGLM, SuperGLMRegressor
+from superglm._frame import EagerFrame
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
 from superglm.penalties.group_lasso import GroupLasso
@@ -287,7 +288,8 @@ class TestNB2AutoTheta:
         def fake_profile(model_arg, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
             assert model_arg is not model
             assert model_arg.family.theta == "auto"
-            assert X_arg is X
+            assert isinstance(X_arg, EagerFrame)
+            assert X_arg.native is X
             np.testing.assert_array_equal(y_arg, y)
             return result
 

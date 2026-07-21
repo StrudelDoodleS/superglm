@@ -43,6 +43,14 @@ class WeightedMoments:
     xt_rhs: tuple[NDArray, ...]
 
 
+@dataclass(frozen=True)
+class OrdinaryPartitionDecision:
+    """Construction-time ordinary Tabmat partition and its stable reason."""
+
+    indices: tuple[int, ...]
+    reason: str
+
+
 class MatrixExecutionPlan:
     """Partition ordinary and compressed groups behind one moment interface.
 
@@ -85,8 +93,10 @@ class MatrixExecutionPlan:
         self.p = int(starts[-1])
         self.shape = (self.n, self.p)
 
-        ordinary_indices = self._eligible_ordinary_indices()
+        ordinary_decision = self._ordinary_partition_decision()
+        ordinary_indices = ordinary_decision.indices
         self._ordinary_indices = frozenset(ordinary_indices)
+        self._ordinary_partition_reason = ordinary_decision.reason
         ordinary_columns = (
             np.concatenate(
                 [
@@ -132,7 +142,7 @@ class MatrixExecutionPlan:
         )
         self._layout_frozen = True
 
-    def _eligible_ordinary_indices(self) -> tuple[int, ...]:
+    def _ordinary_partition_decision(self) -> OrdinaryPartitionDecision:
         from ..group_matrix import (
             CategoricalGroupMatrix,
             DenseGroupMatrix,
@@ -146,9 +156,9 @@ class MatrixExecutionPlan:
             if isinstance(group, ordinary_types)
         )
         if self._ordinary_tabmat_policy is False:
-            return ()
+            return OrdinaryPartitionDecision((), "policy-disabled")
         if self._ordinary_tabmat_policy is True:
-            return candidates
+            return OrdinaryPartitionDecision(candidates, "policy-forced")
 
         # The measured automatic crossover is deliberately narrow.  Multiple
         # categoricals (especially a <=100-level block materialized dense), one
@@ -156,23 +166,33 @@ class MatrixExecutionPlan:
         # counterexamples.  Compressed designs likewise favor their specialized
         # grouped assembler over a partial Tabmat partition.
         if len(candidates) != len(self.group_matrices):
-            return ()
+            return OrdinaryPartitionDecision((), "contains-compressed-group")
         categorical_groups = tuple(
             group for group in self.group_matrices if isinstance(group, CategoricalGroupMatrix)
         )
-        has_one_native_categorical = (
-            len(categorical_groups) == 1 and categorical_groups[0].n_levels > 100
-        )
+        if len(categorical_groups) != 1 or categorical_groups[0].n_levels <= 100:
+            return OrdinaryPartitionDecision((), "categorical-layout")
         dense_width = sum(
             group.shape[1] for group in self.group_matrices if isinstance(group, DenseGroupMatrix)
         )
+        if dense_width < 3:
+            return OrdinaryPartitionDecision((), "dense-width")
         has_sparse = any(isinstance(group, SparseGroupMatrix) for group in self.group_matrices)
-        certified_layout = (
-            dense_width >= 3 and not has_sparse and self.n >= _MIN_AUTO_TABMAT_MOMENT_ROWS
-        )
-        if not has_one_native_categorical or not certified_layout:
-            return ()
-        return candidates
+        if has_sparse:
+            return OrdinaryPartitionDecision((), "contains-sparse-group")
+        if self.n < _MIN_AUTO_TABMAT_MOMENT_ROWS:
+            return OrdinaryPartitionDecision((), "row-threshold")
+        return OrdinaryPartitionDecision(candidates, "auto-certified")
+
+    @property
+    def ordinary_indices(self) -> tuple[int, ...]:
+        """Return the immutable ordinary Tabmat group indices without building it."""
+        return tuple(sorted(self._ordinary_indices))
+
+    @property
+    def ordinary_partition_reason(self) -> str:
+        """Return the stable construction-time reason for the ordinary partition."""
+        return self._ordinary_partition_reason
 
     def _get_ordinary_split(self):
         if not self._ordinary_split_built:

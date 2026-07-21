@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.inference._term_helpers import _resolve_group_lambda
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
 def term_importance(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     sample_weight: NDArray | None = None,
 ) -> pd.DataFrame:
     """Weighted variance of each term's contribution to eta.
@@ -35,7 +36,7 @@ def term_importance(
     ----------
     model : SuperGLM
         A fitted model.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
     sample_weight, sample_weight : array-like, optional
         Frequency weights for weighted variance.
@@ -49,8 +50,9 @@ def term_importance(
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling term_importance().")
 
+    frame = as_eager_frame(X)
     beta = model.result.beta
-    weights = sample_weight if sample_weight is not None else np.ones(len(X))
+    weights = sample_weight if sample_weight is not None else np.ones(len(frame))
     w_sum = np.sum(weights)
     group_edf = model._group_edf or {}
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
@@ -84,14 +86,14 @@ def term_importance(
         ispec = model._interaction_specs.get(g.feature_name) if spec is None else None
 
         if spec is not None:
-            B_g = spec.transform(np.asarray(X[g.feature_name]))
+            B_g = spec.transform(frame.column_array(g.feature_name))
             eta_g = B_g @ b_g
         elif ispec is not None:
             p1, p2 = ispec.parent_names
-            B_g = ispec.transform(np.asarray(X[p1]), np.asarray(X[p2]))
+            B_g = ispec.transform(frame.column_array(p1), frame.column_array(p2))
             eta_g = B_g @ b_g
         else:
-            eta_g = np.zeros(len(X))
+            eta_g = np.zeros(len(frame))
 
         # Centered weighted variance
         wmean = np.sum(weights * eta_g) / w_sum
@@ -119,13 +121,13 @@ def term_importance(
 
 def term_drop_diagnostics(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
     *,
     mode: str = "refit",
-    X_val: pd.DataFrame | None = None,
+    X_val: FrameLike | None = None,
     y_val: NDArray | None = None,
 ) -> pd.DataFrame:
     """Drop-term diagnostics wrapper.
@@ -143,7 +145,7 @@ def term_drop_diagnostics(
     elif mode == "holdout":
         if X_val is None or y_val is None:
             raise ValueError("mode='holdout' requires X_val and y_val.")
-        return _drop_term_holdout(model, X_val, y_val, sample_weight)
+        return _drop_term_holdout(model, as_eager_frame(X_val), y_val, sample_weight)
     else:
         raise ValueError(f"mode must be 'refit' or 'holdout', got {mode!r}")
 
@@ -170,7 +172,12 @@ def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
     return result
 
 
-def _drop_term_holdout(model, X_val, y_val, sample_weight) -> pd.DataFrame:
+def _drop_term_holdout(
+    model,
+    X_val: EagerFrame,
+    y_val,
+    sample_weight,
+) -> pd.DataFrame:
     """Holdout-based drop-term diagnostics (zero each term, compute loss delta)."""
 
     if model._result is None:
@@ -202,11 +209,11 @@ def _drop_term_holdout(model, X_val, y_val, sample_weight) -> pd.DataFrame:
         blocks = []
         for name in model._feature_order:
             spec = model._specs[name]
-            blocks.append(spec.transform(np.asarray(X_val[name])))
+            blocks.append(spec.transform(X_val.column_array(name)))
         for iname in model._interaction_order:
             ispec = model._interaction_specs[iname]
             p1, p2 = ispec.parent_names
-            blocks.append(ispec.transform(np.asarray(X_val[p1]), np.asarray(X_val[p2])))
+            blocks.append(ispec.transform(X_val.column_array(p1), X_val.column_array(p2)))
 
         from superglm.distributions import clip_mu
         from superglm.links import stabilize_eta

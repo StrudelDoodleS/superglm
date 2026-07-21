@@ -10,6 +10,9 @@ These tests ensure the fast cached-W path (used when discrete=True,
 selection_penalty=0) is trustworthy before merge.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,6 +22,12 @@ from superglm.distributions import clip_mu
 from superglm.features.categorical import Categorical
 from superglm.features.spline import CubicRegressionSpline, Spline
 from superglm.links import stabilize_eta
+
+_WIDE_POISSON_ORACLE = json.loads(
+    (Path(__file__).parent / "fixtures" / "wide_poisson_exact_oracle.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -42,6 +51,22 @@ def _make_gamma_data(n, seed=42):
     y = rng.gamma(shape=5.0, scale=mu / 5.0)
     y = np.maximum(y, 1e-4)
     return pd.DataFrame({"x1": x1, "x2": x2}), y, np.ones(n)
+
+
+def _make_wide_poisson_data():
+    """Return the deterministic 20-smooth/17-noise POI authority fixture."""
+    rng = np.random.default_rng(123)
+    n = 50_000
+    X = pd.DataFrame({f"x{i}": rng.uniform(0, 1, n) for i in range(20)})
+    eta = (
+        0.2
+        + 0.8 * np.sin(2 * np.pi * X["x0"])
+        + 0.6 * np.cos(2 * np.pi * X["x1"])
+        + 0.4 * (X["x2"] - 0.5)
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    features = {f"x{i}": CubicRegressionSpline(n_knots=20) for i in range(20)}
+    return X, y, features
 
 
 def _make_mtpl2_style_data(n, seed=42):
@@ -196,45 +221,47 @@ class TestExactVsDiscreteAgreement:
         corr = float(np.corrcoef(mu_exact, mu_disc)[0, 1])
         assert corr >= 0.999, f"Gamma n={n} mu corr {corr:.6f}"
 
-    @pytest.mark.slow
     def test_wide_poisson_poi_quality(self):
-        """Wide model (20 features, 17 noise): POI deviance within 0.1% of exact.
+        """Wide POI fit agrees with the frozen exact-fit authority."""
+        oracle_fixture = _WIDE_POISSON_ORACLE["fixture"]
+        oracle_exact = _WIDE_POISSON_ORACLE["exact"]
+        assert oracle_fixture == {
+            "rng_seed": 123,
+            "n_rows": 50_000,
+            "n_features": 20,
+            "n_signal_features": 3,
+            "n_noise_features": 17,
+            "n_knots": 20,
+            "design_columns": 420,
+            "smoothing_parameters": 20,
+            "prediction_indices": oracle_fixture["prediction_indices"],
+        }
 
-        The POI Newton optimizer may settle at a slightly different REML
-        stationary point than the exact Newton path, especially when many
-        features are noise (flat REML surface).  This test encodes the
-        accepted tolerance: deviance within 0.1% relative, predictions
-        correlated >= 0.999.
-        """
-        from superglm.features.spline import CubicRegressionSpline
+        X, y, features = _make_wide_poisson_data()
+        model = _fit_reml("poisson", features, True, X, y, np.ones(len(y)))
 
-        rng = np.random.default_rng(123)
-        n = 50_000
-        X = pd.DataFrame({f"x{i}": rng.uniform(0, 1, n) for i in range(20)})
-        eta = (
-            0.2
-            + 0.8 * np.sin(2 * np.pi * X["x0"])
-            + 0.6 * np.cos(2 * np.pi * X["x1"])
-            + 0.4 * (X["x2"] - 0.5)
-        )
-        y = rng.poisson(np.exp(eta)).astype(float)
-        features = {f"x{i}": CubicRegressionSpline(n_knots=20) for i in range(20)}
+        result = model._reml_result
+        profile = model._reml_profile
+        assert result.converged
+        assert model._dm.p == oracle_fixture["design_columns"]
+        assert len(result.lambdas) == oracle_fixture["smoothing_parameters"]
+        assert profile["reml_w_correction_s"] == 0.0
+        assert profile["reml_n_analytical_iters"] > 0
+        assert profile["reml_n_linesearch_full_evals"] > 0
+        assert profile["reml_n_outer_iter"] == result.n_reml_iter
+        assert 1 <= result.n_reml_iter <= 15
 
-        exact = _fit_reml("poisson", features, False, X, y, np.ones(n))
-        disc = _fit_reml("poisson", features, True, X, y, np.ones(n))
+        assert model.result.deviance == pytest.approx(oracle_exact["deviance"], rel=1e-3)
+        assert model.result.effective_df == pytest.approx(oracle_exact["effective_df"], abs=0.25)
+        assert result.objective is not None
+        assert result.objective == pytest.approx(oracle_exact["objective"], rel=1e-3)
 
-        assert exact._reml_result.converged
-        assert disc._reml_result.converged
-
-        # Deviance: within 0.1% relative (POI may find nearby stationary point)
-        dev_rel = abs(exact.result.deviance - disc.result.deviance) / abs(exact.result.deviance)
-        assert dev_rel <= 1e-3, f"Wide Poisson deviance rel diff {dev_rel:.6f}"
-
-        # Predictions: corr >= 0.999
-        mu_exact = _predict_mu(exact, X)
-        mu_disc = _predict_mu(disc, X)
-        corr = float(np.corrcoef(mu_exact, mu_disc)[0, 1])
-        assert corr >= 0.999, f"Wide Poisson mu corr {corr:.6f}"
+        prediction_indices = np.asarray(oracle_fixture["prediction_indices"], dtype=np.intp)
+        expected_predictions = np.asarray(oracle_exact["prediction_probe"], dtype=np.float64)
+        actual_predictions = _predict_mu(model, X)[prediction_indices]
+        assert actual_predictions.shape == expected_predictions.shape == (64,)
+        correlation = float(np.corrcoef(actual_predictions, expected_predictions)[0, 1])
+        assert correlation >= 0.999, f"Wide Poisson exact-oracle correlation {correlation:.6f}"
 
 
 # ══════════════════════════════════════════════════════════════════

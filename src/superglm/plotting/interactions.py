@@ -5,9 +5,9 @@ from __future__ import annotations
 import inspect
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.plotting.common import (
     _PLOTLY_CAT_BAR_COLOR,
     _PLOTLY_DENSITY_SCALE,
@@ -36,7 +36,7 @@ def plot_interaction(
     interaction_view: str = "surface",
     surface_opacity: float = 0.96,
     show_main_effect_walls: bool = False,
-    X: pd.DataFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
 ):
     """Plot an interaction surface/effect.
@@ -73,7 +73,7 @@ def plot_interaction(
     show_main_effect_walls : bool
         For Plotly 3D surface plots: project parent main-effect curves on the
         surface walls (default False).
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data. When provided with *sample_weight*, overlays an
         sample_weight-weighted density on surface plots (projected on the floor
         for 3D plotly, contour overlay for matplotlib).
@@ -92,22 +92,23 @@ def plot_interaction(
     ispec = model._interaction_specs[name]
     parent_names = ispec.parent_names
     raw = _reconstruct_interaction(model, name, n_points=n_points)
+    frame = None if X is None else as_eager_frame(X)
 
     density_data = None
-    if X is not None and sample_weight is None:
-        sample_weight = np.ones(len(X), dtype=np.float64)
-    if X is not None and sample_weight is not None:
+    if frame is not None and sample_weight is None:
+        sample_weight = np.ones(len(frame), dtype=np.float64)
+    if frame is not None and sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
         p0, p1 = parent_names[0], parent_names[1]
         if (
-            p0 in X.columns
-            and p1 in X.columns
-            and pd.api.types.is_numeric_dtype(X[p0])
-            and pd.api.types.is_numeric_dtype(X[p1])
+            p0 in frame.columns
+            and p1 in frame.columns
+            and frame.column_kind(p0) == "numeric"
+            and frame.column_kind(p1) == "numeric"
         ):
             density_data = (
-                np.asarray(X[p0], dtype=np.float64),
-                np.asarray(X[p1], dtype=np.float64),
+                frame.column_array(p0, dtype=np.float64),
+                frame.column_array(p1, dtype=np.float64),
                 sample_weight,
             )
 

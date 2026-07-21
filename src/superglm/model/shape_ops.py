@@ -6,6 +6,7 @@ import copy
 
 import numpy as np
 
+from superglm._frame import as_eager_frame
 from superglm.model.fit_state import FittedStateRevision
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
@@ -655,6 +656,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
     from superglm.model.fit_data_guard import require_unchanged_fit_data
 
     require_unchanged_fit_data(model, X, y_ref)
+    frame = as_eager_frame(X)
     fit_data_guard = model._fit_data_guard
     if not fit_data_guard.matches(
         X,
@@ -714,7 +716,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
 
     for name, spec, kind, groups in pending_repairs:
         beta = work_model.result.beta
-        x_col = np.asarray(X[name], dtype=np.float64)
+        x_col = frame.column_array(name, dtype=np.float64)
         grid_weights = _grid_weights(spec, x_col, scoring_weights_arr, n_grid)
 
         repair_result = _repairer(kind).repair(

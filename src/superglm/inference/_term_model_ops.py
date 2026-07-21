@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike
 from superglm.inference._term_covariance import feature_se_from_cov
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import _safe_exp
@@ -202,7 +203,7 @@ def relativities(
 
 def drop1(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
@@ -294,7 +295,7 @@ def drop1(
 
 def refit_unpenalised(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     offset: NDArray | None = None,
