@@ -38,6 +38,7 @@ def estimate_p(
     from superglm.profiling.tweedie import estimate_tweedie_p
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
+    _validate_profile_selection_mode(model, resolved_mode)
 
     X_ref = X
     y_ref = y
@@ -269,6 +270,7 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
     from superglm.profiling.nb import estimate_nb_theta
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
+    _validate_profile_selection_mode(model, resolved_mode)
     progress_callback = kwargs.pop("progress_callback", None)
 
     X_ref = X
@@ -392,6 +394,16 @@ def _resolve_profile_fit_mode(model, fit_mode: str) -> str:
         if meta is not None and meta.get("method") == "fit_reml":
             return "fit_reml"
     return "fit"
+
+
+def _validate_profile_selection_mode(model, resolved_mode: str) -> None:
+    """Fail REML profile requests before allocating a profile workspace."""
+    if resolved_mode != "fit_reml":
+        return
+    from superglm.model.base import validate_selection_penalty_for_reml
+    from superglm.model.fit_state import configured_penalty
+
+    validate_selection_penalty_for_reml(configured_penalty(model))
 
 
 def _tweedie_estimate_payload(result):

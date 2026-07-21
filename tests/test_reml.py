@@ -656,7 +656,7 @@ class TestREMLSelectionPenaltyRejected:
                 "x2": Spline(n_knots=6, penalty="ssp"),
             },
         )
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=10)
 
     def test_fit_reml_rejects_selection_penalty_gamma(self):
@@ -678,7 +678,7 @@ class TestREMLSelectionPenaltyRejected:
                 "x2": Spline(n_knots=6, penalty="ssp"),
             },
         )
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=12, verbose=True)
 
 

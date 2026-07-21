@@ -1408,7 +1408,7 @@ class TestSelectionPenaltyRejectedInREML:
             },
             interactions=[("x1", "x2")],
         )
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=30)
 
     @pytest.mark.slow
@@ -1432,7 +1432,7 @@ class TestSelectionPenaltyRejectedInREML:
                 "x2": Spline(kind="cr", n_knots=6),
             },
         )
-        with pytest.raises(ValueError, match="selection_penalty=0"):
+        with pytest.raises(ValueError, match="does not support selection penalties"):
             model.fit_reml(X, y, max_reml_iter=30)
 
     @pytest.mark.slow

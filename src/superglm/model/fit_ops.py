@@ -1041,21 +1041,18 @@ def _fit_reml_in_workspace(
     from superglm.model.base import (
         model_build_design_matrix,
         model_has_lambda1_targets,
+        resolve_selection_penalty_for_reml,
     )
 
-    _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    penalty = configured_penalty(model)
+    resolve_selection_penalty_for_reml(penalty)
 
     # Clear stale results from previous fit
     _clear_profile_results(model)
     model._reml_result = None
     model._reml_profile = None
 
-    penalty = configured_penalty(model)
-    # REML has one selection regime: no L1 selection.  Resolve that before
-    # auto-theta profiling so the profile and final refit use identical
-    # optimization geometry.
-    if penalty.lambda1 is None:
-        penalty.lambda1 = 0.0
+    _auto_detect_specs_if_needed(model, X, sample_weight_ref)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 
@@ -1073,15 +1070,6 @@ def _fit_reml_in_workspace(
 
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
     _clear_fit_inference_caches(model)
-
-    # lambda1=None means "no L1 selection" in the REML path — default to 0
-    # so the direct IRLS optimizer (Newton REML) is used instead of BCD+EFS.
-    if penalty.lambda1 > 0 and model_has_lambda1_targets(model):
-        raise ValueError(
-            "fit_reml() requires selection_penalty=0. "
-            "Use fit() / fit_path() for sparse selection, or use select=True on spline terms "
-            "when you want REML-managed shrinkage."
-        )
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
     _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)

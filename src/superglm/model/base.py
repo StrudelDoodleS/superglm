@@ -812,6 +812,23 @@ def resolve_selection_penalty_for_fit(model, penalty: Penalty, y, weights) -> fl
     return resolved
 
 
+def validate_selection_penalty_for_reml(penalty: Penalty) -> None:
+    """Reject selection intent before any REML or profile work starts."""
+    intent = normalize_selection_penalty(penalty.lambda1)
+    if intent == "auto" or (intent is not None and intent > 0.0):
+        raise ValueError(
+            "fit_reml() does not support selection penalties; use None or 0.0, "
+            "or use fit()/fit_path() for sparse selection."
+        )
+
+
+def resolve_selection_penalty_for_reml(penalty: Penalty) -> float:
+    """Resolve REML's validated no-selection setting to numeric zero."""
+    validate_selection_penalty_for_reml(penalty)
+    penalty.lambda1 = 0.0
+    return 0.0
+
+
 def model_has_lambda1_targets(model) -> bool:
     """Whether the lambda1 penalty applies to any fitted group."""
     return penalty_has_targets(configured_penalty(model), model._groups)

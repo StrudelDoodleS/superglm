@@ -319,6 +319,29 @@ class TestNB2ProfileTheta:
 
 
 class TestNB2AutoTheta:
+    def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):
+        from superglm.profiling import nb as nb_module
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            selection_penalty="auto",
+            features={"x": Numeric()},
+        )
+        profile_calls = []
+
+        def unexpected_profile(*args, **kwargs):
+            profile_calls.append(True)
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(nb_module, "estimate_nb_theta", unexpected_profile)
+
+        with pytest.raises(ValueError, match="does not support selection penalties"):
+            model.estimate_theta(X, y, fit_mode="reml")
+
+        assert profile_calls == []
+
     def test_estimate_theta_inherit_preserves_reml_final_refit(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 80)})
         y = np.resize(np.array([1.0, 2.0, 3.0, 4.0]), len(X))

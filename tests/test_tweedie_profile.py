@@ -2326,6 +2326,26 @@ def test_public_tweedie_profile_entry_points_default_to_mle_and_auto(function):
 
 
 class TestEstimatePFitMode:
+    def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=24, seed=20260721)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty="auto",
+            features={"x1": Numeric()},
+        )
+        profile_calls = []
+
+        def unexpected_profile(*args, **kwargs):
+            profile_calls.append(True)
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", unexpected_profile)
+
+        with pytest.raises(ValueError, match="does not support selection penalties"):
+            model.estimate_p(X, y, fit_mode="reml")
+
+        assert profile_calls == []
+
     @pytest.mark.parametrize("already_fitted", [False, True])
     def test_profile_publication_preserves_subclass_configuration_aliases(
         self, monkeypatch, already_fitted

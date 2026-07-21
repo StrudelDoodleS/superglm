@@ -500,11 +500,12 @@ class SuperGLM:
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
-        ``fit_reml()`` is the smoothness-selection path and requires
-        ``selection_penalty=0``. It optimizes a Laplace approximate REML
-        objective over per-term smoothing parameters. If you want sparse/group
-        selection, use ``fit()`` / ``fit_path()`` instead. If you want REML to
-        shrink spline null spaces, use ``select=True`` on the spline terms.
+        ``fit_reml()`` is the smoothness-selection path and does not support a
+        selection penalty: configure ``selection_penalty=None`` or ``0.0``.
+        It optimizes a Laplace approximate REML objective over per-term
+        smoothing parameters. For sparse/group selection, use ``fit()`` or
+        ``fit_path()``. To let REML shrink spline null spaces, use
+        ``select=True`` on the spline terms instead.
 
         Parameters
         ----------
