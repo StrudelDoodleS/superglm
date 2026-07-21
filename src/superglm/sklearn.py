@@ -35,6 +35,8 @@ from sklearn.utils.validation import check_is_fitted
 from superglm._frame import (
     EagerFrame,
     FrameLike,
+    _is_polars_lazy_frame,
+    _is_recognized_dataframe,
     as_eager_frame,
     is_supported_eager_frame,
 )
@@ -100,19 +102,28 @@ def _normalize_X(
     Returns ``(frame, column_names, synthetic_names)``.
     *synthetic_names* is True when column names were auto-generated.
     """
-    if is_supported_eager_frame(X):
-        frame = as_eager_frame(X)
+    frame = as_eager_frame(X) if isinstance(X, pd.DataFrame) else None
+    if frame is None and not isinstance(X, np.ndarray):
+        # Preserve the established ndarray/sparse route without paying native
+        # dataframe dispatch on every sklearn fit and prediction.
+        import scipy.sparse
+
+        if scipy.sparse.issparse(X):
+            X = X.toarray()
+        elif _is_polars_lazy_frame(X):
+            as_eager_frame(X)  # raises with explicit collection guidance
+        elif not isinstance(X, np.ndarray):
+            if is_supported_eager_frame(X):
+                frame = as_eager_frame(X)
+            elif _is_recognized_dataframe(X):
+                as_eager_frame(X)  # rejects unsupported dataframe backends
+
+    if frame is not None:
         if fitting and frame.backend == "pandas":
             native = cast(pd.DataFrame, frame.native).copy()
             frame = as_eager_frame(native)
         columns = cast(list[str], list(frame.columns))
         return frame.native, columns, False
-
-    # Densify sparse matrices (e.g. from ColumnTransformer)
-    import scipy.sparse
-
-    if scipy.sparse.issparse(X):
-        X = X.toarray()
 
     arr = np.asarray(X)
     if arr.ndim == 1:
@@ -408,7 +419,11 @@ def _fit_common(
     )
 
     # ── Normalise inputs ──────────────────────────────────────
-    input_is_named_frame = is_supported_eager_frame(X)
+    # ndarray is the established sklearn fast path.  Do not make it pay even
+    # the optional-backend probe used to distinguish native named frames.
+    input_is_named_frame = isinstance(X, pd.DataFrame) or (
+        not isinstance(X, np.ndarray) and is_supported_eager_frame(X)
+    )
     X_native, columns, synthetic = _normalize_X(
         X,
         feature_names=wrapper.feature_names,

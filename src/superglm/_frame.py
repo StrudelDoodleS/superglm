@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import narwhals.stable.v2 as nw
 import numpy as np
 import pandas as pd
+from narwhals.dependencies import get_polars, is_into_dataframe
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
@@ -30,6 +32,7 @@ class EagerFrame:
     backend: FrameBackend
     _frame: nw.DataFrame | None
     _arrays: dict[object, NDArray] = field(default_factory=dict, repr=False)
+    _schema: Mapping[str, Any] | None = field(default=None, init=False, repr=False)
 
     @property
     def _polars_frame(self) -> nw.DataFrame:
@@ -37,6 +40,13 @@ class EagerFrame:
         if self.backend != "polars" or self._frame is None:
             raise RuntimeError("Narwhals dataframe state is available only for Polars inputs")
         return self._frame
+
+    @property
+    def _polars_schema(self) -> Mapping[str, Any]:
+        """Return the operation-local Polars schema without repeated full scans."""
+        if self._schema is None:
+            self._schema = self._polars_frame.schema
+        return self._schema
 
     @property
     def columns(self) -> tuple[object, ...]:
@@ -75,9 +85,13 @@ class EagerFrame:
             return "unsupported"
 
         polars_name = cast(str, name)
-        dtype = self._polars_frame.schema[polars_name]
+        dtype = self._polars_schema[polars_name]
         if isinstance(dtype, nw.Boolean):
             return "boolean"
+        if isinstance(dtype, nw.Decimal):
+            # pandas stores Decimal values as object/categorical candidates;
+            # preserve that established design structure across backends.
+            return "categorical"
         if isinstance(dtype, nw.dtypes.NumericType):
             return "numeric"
         if isinstance(dtype, nw.String | nw.Categorical | nw.Enum):
@@ -88,17 +102,29 @@ class EagerFrame:
         """Return a backend-neutral display name for one logical dtype."""
         if self.backend == "pandas":
             return str(cast(pd.DataFrame, self.native)[cast(Any, name)].dtype)
-        return str(self._polars_frame.schema[cast(str, name)])
+        return str(self._polars_schema[cast(str, name)])
 
     def _extract_column(self, name: object) -> NDArray:
         if self.backend == "pandas":
             return np.asarray(cast(pd.DataFrame, self.native)[cast(Any, name)])
-        return np.asarray(self._polars_frame[cast(str, name)].to_numpy())
+        column = cast(Any, self.native).get_column(cast(str, name))
+        return np.asarray(column.to_numpy())
 
     def column_array(self, name: object, *, dtype=None) -> NDArray:
         """Return one logical column, extracting its native data at most once."""
         if name not in self._arrays:
-            self._arrays[name] = self._extract_column(name)
+            if self.backend == "polars" and self.column_kind(name) == "unsupported":
+                raise ValueError(
+                    f"X column {name!r} has unsupported dtype {self.column_dtype(name)!r}; "
+                    "convert it to numeric, boolean, string, categorical, or enum data"
+                )
+            values = self._extract_column(name)
+            if values.ndim != 1:
+                raise ValueError(
+                    f"X column {name!r} must yield one-dimensional scalar values; "
+                    f"got shape {values.shape}"
+                )
+            self._arrays[name] = values
         values = self._arrays[name]
         return values if dtype is None else np.asarray(values, dtype=dtype)
 
@@ -143,7 +169,7 @@ class EagerFrame:
         self.require_columns(selected)
         digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
         metadata = tuple(
-            (repr(name), str(self._polars_frame.schema[cast(str, name)])) for name in selected
+            (repr(name), str(self._polars_schema[cast(str, name)])) for name in selected
         )
         digest.update(repr(((len(self), len(selected)), metadata)).encode("utf-8"))
         if selected:
@@ -165,6 +191,13 @@ def as_eager_frame(value: Any) -> EagerFrame:
             backend="pandas",
             _frame=None,
         )
+    polars = get_polars()
+    if polars is not None and isinstance(value, polars.LazyFrame):
+        raise ValueError(
+            "X must be an eager Polars DataFrame; call collect() on the LazyFrame first"
+        )
+    if polars is None or not isinstance(value, polars.DataFrame):
+        raise ValueError("X must be a pandas or eager Polars DataFrame")
     try:
         frame = cast(
             nw.DataFrame,
@@ -177,33 +210,29 @@ def as_eager_frame(value: Any) -> EagerFrame:
             ),
         )
     except TypeError as exc:
-        try:
-            maybe_lazy = nw.from_native(
-                value,
-                eager_only=False,
-                pass_through=False,
-                series_only=False,
-                allow_series=False,
-            )
-        except TypeError:
-            maybe_lazy = None
-        if isinstance(maybe_lazy, nw.LazyFrame) and maybe_lazy.implementation.is_polars():
-            raise ValueError(
-                "X must be an eager Polars DataFrame; call collect() on the LazyFrame first"
-            ) from exc
         raise ValueError("X must be a pandas or eager Polars DataFrame") from exc
     if frame.implementation.is_polars():
         return EagerFrame(native=cast(FrameLike, value), backend="polars", _frame=frame)
     raise ValueError("X must be a pandas or eager Polars DataFrame")
 
 
+def _is_polars_lazy_frame(value: object) -> bool:
+    """Identify a loaded Polars LazyFrame without importing Polars."""
+    polars = get_polars()
+    return polars is not None and isinstance(value, polars.LazyFrame)
+
+
+def _is_recognized_dataframe(value: object) -> bool:
+    """Identify dataframe objects understood by Narwhals, supported or not."""
+    return is_into_dataframe(value)
+
+
 def is_supported_eager_frame(value: object) -> bool:
     """Return whether *value* is a supported eager native dataframe."""
-    try:
-        as_eager_frame(value)
-    except ValueError:
-        return False
-    return True
+    if isinstance(value, EagerFrame | pd.DataFrame):
+        return True
+    polars = get_polars()
+    return polars is not None and isinstance(value, polars.DataFrame)
 
 
 __all__ = [

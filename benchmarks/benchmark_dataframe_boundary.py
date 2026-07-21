@@ -68,6 +68,7 @@ class PreparedScenario:
     operation: str
     X: object
     y: np.ndarray
+    seed: int
     sample_weight: np.ndarray | None = None
     offset: np.ndarray | None = None
     kwargs: Mapping[str, object] | None = None
@@ -94,7 +95,8 @@ def _frame(data: Mapping[str, object], backend: str):
 
 def _ordinary_mixed_fit(backend: str, scale: float) -> PreparedScenario:
     n = _rows(6_000, scale, 720)
-    rng = np.random.default_rng(2101)
+    seed = 2101
+    rng = np.random.default_rng(seed)
     numeric = {f"x{index}": rng.normal(size=n) for index in range(4)}
     codes = np.resize(np.arange(180, dtype=np.int64), n)
     rng.shuffle(codes)
@@ -110,12 +112,13 @@ def _ordinary_mixed_fit(backend: str, scale: float) -> PreparedScenario:
         features=features,
         direct_solve="gram",
     )
-    return PreparedScenario(model, "fit", X, y)
+    return PreparedScenario(model, "fit", X, y, seed=seed)
 
 
 def _ordinary_scalar_fit(backend: str, scale: float) -> PreparedScenario:
     n = _rows(60_000, scale, 1_000)
-    rng = np.random.default_rng(2102)
+    seed = 2102
+    rng = np.random.default_rng(seed)
     data = {f"x{index}": rng.normal(size=n) for index in range(16)}
     beta = np.linspace(-0.12, 0.15, len(data))
     design = np.column_stack(tuple(data.values()))
@@ -126,12 +129,19 @@ def _ordinary_scalar_fit(backend: str, scale: float) -> PreparedScenario:
         features={name: Numeric() for name in data},
         direct_solve="gram",
     )
-    return PreparedScenario(model, "fit", _frame(data, backend), y.astype(np.float64))
+    return PreparedScenario(
+        model,
+        "fit",
+        _frame(data, backend),
+        y.astype(np.float64),
+        seed=seed,
+    )
 
 
 def _discrete_four_spline_fit(backend: str, scale: float) -> PreparedScenario:
     n = _rows(10_000, scale, 600)
-    rng = np.random.default_rng(2103)
+    seed = 2103
+    rng = np.random.default_rng(seed)
     data = {f"x{index}": rng.uniform(-1.0, 1.0, n) for index in range(4)}
     y = (
         0.2
@@ -148,12 +158,19 @@ def _discrete_four_spline_fit(backend: str, scale: float) -> PreparedScenario:
         discrete=True,
         n_bins=128,
     )
-    return PreparedScenario(model, "fit", _frame(data, backend), y.astype(np.float64))
+    return PreparedScenario(
+        model,
+        "fit",
+        _frame(data, backend),
+        y.astype(np.float64),
+        seed=seed,
+    )
 
 
 def _spline_reml(backend: str, scale: float) -> PreparedScenario:
     n = _rows(2_500, scale, 500)
-    rng = np.random.default_rng(2104)
+    seed = 2104
+    rng = np.random.default_rng(seed)
     x = rng.uniform(-1.0, 1.0, n)
     z = rng.normal(size=n)
     y = 0.25 + np.sin(np.pi * x) + 0.18 * z + rng.normal(scale=0.18, size=n)
@@ -167,6 +184,7 @@ def _spline_reml(backend: str, scale: float) -> PreparedScenario:
         "fit_reml",
         _frame({"x": x, "z": z}, backend),
         y.astype(np.float64),
+        seed=seed,
         kwargs={"max_reml_iter": 8, "max_pirls_iter": 40},
     )
 
@@ -174,7 +192,8 @@ def _spline_reml(backend: str, scale: float) -> PreparedScenario:
 def _predict_exact(backend: str, scale: float) -> PreparedScenario:
     n_train = _rows(4_000, scale, 600)
     n_predict = _rows(60_000, scale, 1_000)
-    rng = np.random.default_rng(2105)
+    seed = 2105
+    rng = np.random.default_rng(seed)
     train_x = rng.normal(size=n_train)
     train_codes = np.resize(np.arange(140, dtype=np.int64), n_train)
     rng.shuffle(train_codes)
@@ -193,13 +212,14 @@ def _predict_exact(backend: str, scale: float) -> PreparedScenario:
     predict_levels = np.asarray([f"level_{code:03d}" for code in predict_codes], dtype=object)
     X = _frame({"x": predict_x, "category": predict_levels}, backend)
     model.predict(X)
-    return PreparedScenario(model, "predict", X, y)
+    return PreparedScenario(model, "predict", X, y, seed=seed)
 
 
 def _predict_fast_discrete(backend: str, scale: float) -> PreparedScenario:
     n_train = _rows(4_000, scale, 600)
     n_predict = _rows(60_000, scale, 1_000)
-    rng = np.random.default_rng(2106)
+    seed = 2106
+    rng = np.random.default_rng(seed)
     x1 = rng.uniform(-1.0, 1.0, n_train)
     x2 = rng.uniform(-1.0, 1.0, n_train)
     y = np.sin(np.pi * x1) + 0.4 * x2**2 + rng.normal(scale=0.2, size=n_train)
@@ -222,7 +242,13 @@ def _predict_fast_discrete(backend: str, scale: float) -> PreparedScenario:
         backend,
     )
     model._predict_fast_discrete(X)
-    return PreparedScenario(model, "predict_fast_discrete", X, y.astype(np.float64))
+    return PreparedScenario(
+        model,
+        "predict_fast_discrete",
+        X,
+        y.astype(np.float64),
+        seed=seed,
+    )
 
 
 SCENARIOS: dict[str, ScenarioFactory] = {
@@ -320,6 +346,18 @@ def _matrix_metadata(model: SuperGLM) -> dict[str, object]:
         "group_shapes": [list(matrix.shape) for matrix in matrices],
         "compressed": [isinstance(matrix, COMPRESSED_TYPES) for matrix in matrices],
         "tabmat_built": bool(getattr(dm, "_tabmat_built", False)),
+    }
+
+
+def _scenario_dimensions(prepared: PreparedScenario) -> dict[str, int | None]:
+    input_shape = prepared.X.shape
+    design = getattr(prepared.model, "_dm", None)
+    return {
+        "input_rows": int(input_shape[0]),
+        "input_columns": int(input_shape[1]),
+        "response_rows": int(prepared.y.shape[0]),
+        "design_rows": None if design is None else int(design.shape[0]),
+        "design_columns": None if design is None else int(design.shape[1]),
     }
 
 
@@ -426,6 +464,8 @@ def _worker_record(name: str, backend: str, scale: float, repeat: int) -> dict[s
     return {
         "scenario": name,
         "repeat": repeat,
+        "scenario_seed": prepared.seed,
+        "dimensions": _scenario_dimensions(prepared),
         "wall_time_s": wall_time_s,
         "python_peak_bytes": int(python_peak),
         "rss_before_bytes": rss_before,
@@ -502,6 +542,10 @@ def _summaries(samples: Sequence[Mapping[str, object]]) -> dict[str, object]:
                 raise ValueError(f"kernel call counts changed across repeats for {name}")
             if not _numerically_equal(record["numerical"], first["numerical"]):
                 raise ValueError(f"numerical results changed across repeats for {name}")
+            if record["scenario_seed"] != first["scenario_seed"]:
+                raise ValueError(f"scenario seed changed across repeats for {name}")
+            if record["dimensions"] != first["dimensions"]:
+                raise ValueError(f"scenario dimensions changed across repeats for {name}")
         wall = [float(record["wall_time_s"]) for record in records]
         python_peaks = [int(record["python_peak_bytes"]) for record in records]
         rss_deltas = [
@@ -521,6 +565,8 @@ def _summaries(samples: Sequence[Mapping[str, object]]) -> dict[str, object]:
             "kernel_calls": records[-1]["kernel_calls"],
             "matrix": records[-1]["matrix"],
             "numerical": records[-1]["numerical"],
+            "scenario_seed": records[-1]["scenario_seed"],
+            "dimensions": records[-1]["dimensions"],
         }
     return summaries
 
@@ -537,7 +583,7 @@ def _selected_scenarios(value: str | None) -> tuple[str, ...]:
 
 def _run_suite(args: argparse.Namespace) -> dict[str, object]:
     names = _selected_scenarios(args.scenario)
-    warmups = 0 if args.smoke else args.warmups
+    warmups = 1 if args.smoke else args.warmups
     repeats = 1 if args.smoke else args.repeats
     scale = min(args.scale, 0.08) if args.smoke else args.scale
     for warmup in range(warmups):
@@ -601,26 +647,67 @@ def _compare(left_path: Path, right_path: Path, *, backends: bool) -> int:
         after_time = float(after["median_wall_time_s"])
         change = 100.0 * (after_time / before_time - 1.0)
         threshold = 3.0 if name.startswith("predict") else 5.0
+        matrix_equal = before["matrix"] == after["matrix"]
+        kernel_calls_equal = before["kernel_calls"] == after["kernel_calls"]
+        numerical_equal = _numerically_equal(before["numerical"], after["numerical"])
+        seed_equal = before.get("scenario_seed") == after.get("scenario_seed")
+        dimensions_equal = before.get("dimensions") == after.get("dimensions")
         if not backends and change > threshold:
             failures.append(f"{name}: wall time regressed {change:.2f}%")
-        if before["matrix"] != after["matrix"]:
+        if not matrix_equal:
             failures.append(f"{name}: matrix structure or dispatch state changed")
-        if before["kernel_calls"] != after["kernel_calls"]:
+        if not kernel_calls_equal:
             failures.append(f"{name}: actual kernel call counts changed")
-        if not _numerically_equal(before["numerical"], after["numerical"]):
+        if not numerical_equal:
             failures.append(f"{name}: numerical record changed")
+        if not seed_equal:
+            failures.append(f"{name}: scenario seed changed")
+        if not dimensions_equal:
+            failures.append(f"{name}: scenario dimensions changed")
         before_memory = before["median_python_peak_bytes"]
         after_memory = after["median_python_peak_bytes"]
         memory_change = 100.0 * (after_memory / before_memory - 1.0)
         if not backends and after_memory - before_memory > max(1_048_576, 0.05 * before_memory):
             failures.append(f"{name}: traced peak grew {memory_change:.2f}%")
+        before_rss = before["median_rss_delta_bytes"]
+        after_rss = after["median_rss_delta_bytes"]
+        rss_change = None
+        if before_rss is not None and after_rss is not None:
+            rss_change = None if before_rss == 0 else 100.0 * (after_rss / before_rss - 1.0)
+            if not backends and after_rss - before_rss > max(1_048_576, 0.05 * before_rss):
+                detail = f"{rss_change:.2f}%" if rss_change is not None else f"{after_rss} bytes"
+                failures.append(f"{name}: RSS delta grew {detail}")
         rows.append(
             {
                 "scenario": name,
                 "before_s": before_time,
                 "after_s": after_time,
                 "change_pct": change,
+                "before_mad_wall_time_s": before["mad_wall_time_s"],
+                "after_mad_wall_time_s": after["mad_wall_time_s"],
+                "before_raw_wall_time_s": before["raw_wall_time_s"],
+                "after_raw_wall_time_s": after["raw_wall_time_s"],
+                "before_python_peak_bytes": before_memory,
+                "after_python_peak_bytes": after_memory,
                 "python_peak_change_pct": memory_change,
+                "before_rss_delta_bytes": before_rss,
+                "after_rss_delta_bytes": after_rss,
+                "rss_delta_change_pct": rss_change,
+                "before_kernel_calls": before["kernel_calls"],
+                "after_kernel_calls": after["kernel_calls"],
+                "kernel_calls_equal": kernel_calls_equal,
+                "before_matrix": before["matrix"],
+                "after_matrix": after["matrix"],
+                "matrix_equal": matrix_equal,
+                "before_numerical": before["numerical"],
+                "after_numerical": after["numerical"],
+                "numerical_equal": numerical_equal,
+                "before_scenario_seed": before.get("scenario_seed"),
+                "after_scenario_seed": after.get("scenario_seed"),
+                "scenario_seed_equal": seed_equal,
+                "before_dimensions": before.get("dimensions"),
+                "after_dimensions": after.get("dimensions"),
+                "dimensions_equal": dimensions_equal,
             }
         )
     print(json.dumps({"comparisons": rows, "failures": failures}, indent=2))

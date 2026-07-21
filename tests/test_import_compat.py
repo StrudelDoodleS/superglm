@@ -6,6 +6,7 @@ entry points and submodule import paths that the codebase still treats as
 supported.
 """
 
+import inspect
 import subprocess
 import sys
 
@@ -56,6 +57,21 @@ def test_toplevel_reexports():
 
     for name in superglm.__all__:
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
+
+
+def test_public_model_signatures_do_not_expose_private_frame_adapter():
+    from superglm import SuperGLM
+
+    for name, method in inspect.getmembers(SuperGLM, inspect.isfunction):
+        if not name.startswith("_"):
+            assert "EagerFrame" not in str(inspect.signature(method)), name
+
+
+def test_public_plotting_signatures_do_not_expose_private_frame_adapter():
+    import superglm.plotting as plotting
+
+    for name in plotting.__all__:
+        assert "EagerFrame" not in str(inspect.signature(getattr(plotting, name))), name
 
 
 def test_pandas_fit_does_not_import_optional_polars_backend():

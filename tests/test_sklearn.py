@@ -2,12 +2,14 @@
 
 import pickle
 
+import narwhals.stable.v2 as nw
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
 from sklearn.utils.validation import check_is_fitted
 
+import superglm.sklearn as sklearn_module
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
 
 
@@ -49,6 +51,18 @@ class TestFitPredict:
 
 
 class TestPolarsNamedFrame:
+    def test_lazy_polars_requires_explicit_collection(self):
+        X = pl.DataFrame({"x": [1.0, 2.0, 3.0]}).lazy()
+
+        with pytest.raises(ValueError, match=r"eager.*collect\(\)"):
+            SuperGLMRegressor().fit(X, np.array([1.0, 2.0, 3.0]))
+
+    def test_other_narwhals_dataframe_backends_are_not_coerced_to_ndarray(self):
+        X = nw.from_native(pd.DataFrame({"x": [1.0, 2.0, 3.0]}))
+
+        with pytest.raises(ValueError, match="pandas or eager Polars DataFrame"):
+            SuperGLMRegressor().fit(X, np.array([1.0, 2.0, 3.0]))
+
     @pytest.mark.parametrize(
         "offset",
         ["off1", ["off1", "off2"]],
@@ -311,6 +325,38 @@ class TestNdarrayInput:
         m = SuperGLMRegressor(selection_penalty=0.01)
         m.fit(X, y)
         assert list(m.feature_names_in_) == ["x0", "x1", "x2"]
+
+    def test_ndarray_normalization_bypasses_named_frame_probe(self, array_data, monkeypatch):
+        X, y = array_data
+        monkeypatch.setattr(
+            sklearn_module,
+            "is_supported_eager_frame",
+            lambda _value: pytest.fail("ndarray normalization must bypass dataframe probing"),
+        )
+        monkeypatch.setattr(
+            sklearn_module,
+            "_is_polars_lazy_frame",
+            lambda _value: pytest.fail("ndarray normalization must bypass Polars probing"),
+        )
+        monkeypatch.setattr(
+            sklearn_module,
+            "_is_recognized_dataframe",
+            lambda _value: pytest.fail("ndarray normalization must bypass Narwhals probing"),
+        )
+
+        native, columns, synthetic = sklearn_module._normalize_X(
+            X,
+            feature_names=None,
+            resolved_columns=None,
+            fitting=True,
+        )
+
+        assert isinstance(native, pd.DataFrame)
+        assert columns == ["x0", "x1", "x2"]
+        assert synthetic is True
+
+        model = SuperGLMRegressor(selection_penalty=0.0).fit(X, y)
+        assert model.predict(X).shape == (len(X),)
 
     def test_ndarray_integer_spline_features(self, array_data):
         X, y = array_data

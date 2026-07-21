@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -1340,7 +1340,7 @@ class SuperGLM:
 
     def discretization_impact(
         self,
-        X: EagerFrame | FrameLike,
+        X: FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,

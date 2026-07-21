@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import date
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
 import polars as pl
+import pytest
 
 from superglm import (
     Categorical,
@@ -110,6 +113,22 @@ def test_dataframe_boundary_compiles_mixed_auto_detected_terms_identically() -> 
     _assert_compiled_models_equal(pandas_model, polars_model)
 
 
+def test_dataframe_boundary_auto_detects_decimal_columns_like_pandas_objects() -> None:
+    values = [Decimal(value) for value in ("1.0", "2.0", "1.0", "3.0")]
+    pandas_X = pd.DataFrame({"x": values})
+    polars_X = pl.DataFrame({"x": values}, schema={"x": pl.Decimal(10, 1)})
+    y = np.array([1.0, 2.0, 1.5, 2.5])
+
+    def make_model() -> SuperGLM:
+        return SuperGLM(family="gaussian", selection_penalty=0.0, splines=[])
+
+    pandas_model = _compile_without_solving(make_model(), pandas_X, y)
+    polars_model = _compile_without_solving(make_model(), polars_X, y)
+
+    _assert_compiled_models_equal(pandas_model, polars_model)
+    assert isinstance(polars_model._specs["x"], Categorical)
+
+
 def test_dataframe_boundary_compiles_discrete_tensor_identically() -> None:
     n_rows = 96
     phase = np.linspace(0.0, 2.0 * np.pi, n_rows)
@@ -166,6 +185,55 @@ def test_dataframe_boundary_extracts_each_polars_column_once_per_compile(monkeyp
     _compile_without_solving(model, X, y)
 
     assert calls == Counter({"left": 1, "right": 1})
+
+
+@pytest.mark.parametrize(
+    ("X", "dtype_name"),
+    [
+        (pl.DataFrame({"x": [{"a": 1}, {"a": 2}, {"a": 3}]}), "Struct"),
+        (
+            pl.DataFrame({"x": [{"a": 1, "b": 2}, {"a": 2, "b": 3}, {"a": 3, "b": 4}]}),
+            "Struct",
+        ),
+        (pl.DataFrame({"x": [[1, 2], [3, 4], [5, 6]]}), "List"),
+        (
+            pl.DataFrame({"x": [[1, 2], [3, 4], [5, 6]]}).with_columns(
+                pl.col("x").cast(pl.Array(pl.Int64, 2))
+            ),
+            "Array",
+        ),
+        (pl.DataFrame({"x": [date(2024, 1, day) for day in (1, 2, 3)]}), "Date"),
+    ],
+    ids=["one-field-struct", "two-field-struct", "list", "array", "temporal"],
+)
+def test_dataframe_boundary_rejects_unsupported_polars_dtype_before_fit_state(
+    X: pl.DataFrame,
+    dtype_name: str,
+) -> None:
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+
+    with pytest.raises(ValueError, match=r"X column 'x'.*unsupported dtype") as exc_info:
+        model.fit(X, np.array([1.0, 2.0, 3.0]))
+
+    assert dtype_name in str(exc_info.value)
+    assert model._fit_state is None
+
+
+def test_dataframe_boundary_preserves_explicit_pandas_temporal_numeric_feature() -> None:
+    X = pd.DataFrame({"x": pd.date_range("2024-01-01", periods=4)})
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+
+    np.testing.assert_allclose(model.predict(X), y, rtol=1e-12, atol=1e-12)
 
 
 def test_dataframe_boundary_does_not_leak_adapter_into_matrix_execution_state() -> None:

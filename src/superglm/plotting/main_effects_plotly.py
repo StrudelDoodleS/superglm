@@ -139,7 +139,7 @@ def plot_main_effects_plotly(
     model,
     terms: list[TermInference],
     *,
-    X: FrameLike | EagerFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
     interval: str | None = "pointwise",
     ci_style: str = "band",

@@ -7,7 +7,7 @@ import inspect
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.plotting.common import (
     _PLOTLY_CAT_BAR_COLOR,
     _PLOTLY_DENSITY_SCALE,
@@ -36,7 +36,7 @@ def plot_interaction(
     interaction_view: str = "surface",
     surface_opacity: float = 0.96,
     show_main_effect_walls: bool = False,
-    X: FrameLike | EagerFrame | None = None,
+    X: FrameLike | None = None,
     sample_weight: NDArray | None = None,
 ):
     """Plot an interaction surface/effect.

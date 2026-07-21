@@ -39,6 +39,22 @@ def test_pandas_fast_path_does_not_enter_narwhals(monkeypatch: pytest.MonkeyPatc
     np.testing.assert_array_equal(frame.column_array("x"), [1.0, 2.0])
 
 
+def test_unrelated_inputs_do_not_enter_narwhals_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = np.ones((2, 1))
+
+    monkeypatch.setattr(
+        frame_module.nw,
+        "from_native",
+        lambda *_args, **_kwargs: pytest.fail("non-frame inputs must bypass Narwhals dispatch"),
+    )
+
+    assert not is_supported_eager_frame(X)
+    with pytest.raises(ValueError, match="pandas or eager Polars DataFrame"):
+        as_eager_frame(X)
+
+
 def test_pandas_string_extraction_keeps_the_array_protocol_fast_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -63,6 +79,48 @@ def test_as_eager_frame_wraps_eager_polars_once() -> None:
     assert frame.columns == ("x", "label")
     assert len(frame) == 2
     assert as_eager_frame(frame) is frame
+
+
+def test_polars_schema_is_cached_across_classification_and_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pl.DataFrame({f"x{index}": [index, index + 1] for index in range(12)})
+    frame = as_eager_frame(X)
+    frame_type = type(frame._polars_frame)
+    schema_property = frame_type.schema
+    calls = 0
+
+    def counted_schema(self):
+        nonlocal calls
+        calls += 1
+        return schema_property.__get__(self, frame_type)
+
+    monkeypatch.setattr(frame_type, "schema", property(counted_schema))
+
+    for name in frame.columns:
+        assert frame.column_kind(name) == "numeric"
+        assert frame.column_dtype(name) == "Int64"
+    frame.digest()
+
+    assert calls == 1
+
+
+def test_polars_column_extraction_bypasses_narwhals_column_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pl.DataFrame({f"x{index}": [index, index + 1] for index in range(12)})
+    frame = as_eager_frame(X)
+
+    monkeypatch.setattr(
+        type(frame._polars_frame),
+        "__getitem__",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Polars extraction must use native constant-time column lookup"
+        ),
+    )
+
+    for index, name in enumerate(frame.columns):
+        np.testing.assert_array_equal(frame.column_array(name), [index, index + 1])
 
 
 @pytest.mark.parametrize("value", [np.ones((2, 1)), {"x": [1.0, 2.0]}, object()])
