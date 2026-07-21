@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._frame import FrameBackend, FrameLike, as_eager_frame
+from superglm._frame import EagerFrame, FrameBackend, FrameLike, as_eager_frame
 
 
 def _same_numeric_vector(value, snapshot: NDArray[np.float64]) -> bool:
@@ -30,7 +30,7 @@ class FitDataGuard:
     @classmethod
     def capture(
         cls,
-        X: FrameLike,
+        X: EagerFrame | FrameLike,
         y: NDArray,
         *,
         columns: tuple[object, ...] | None = None,
@@ -46,7 +46,7 @@ class FitDataGuard:
             x_columns=x_columns,
         )
 
-    def _matches_frame(self, X: FrameLike) -> bool:
+    def _matches_frame(self, X: EagerFrame | FrameLike) -> bool:
         try:
             frame = as_eager_frame(X)
             return frame.backend == self.x_backend and frame.digest(self.x_columns) == self.x_digest

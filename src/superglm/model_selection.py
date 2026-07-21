@@ -234,7 +234,7 @@ def cross_validate(
     model : SuperGLM
         An unfitted (or fitted) model. A fresh clone is created for each fold;
         the input model is never mutated.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix.
     y : array-like
         Response variable.

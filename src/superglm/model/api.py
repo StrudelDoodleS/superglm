@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import FrameLike, as_eager_frame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
 from superglm.penalties.base import Penalty
@@ -954,7 +954,7 @@ class SuperGLM:
             implemented).
         ci : {None, False, "pointwise", "simultaneous", "both"}
             Confidence interval style.  ``None`` or ``False`` disables bands.
-        X : DataFrame, optional
+        X : pandas or eager Polars DataFrame, optional
             Training data for density overlays.
         sample_weight : array-like, optional
             Frequency weights / sample_weight for density overlays.
@@ -1084,7 +1084,7 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : pd.DataFrame
+        X : pandas or eager Polars DataFrame
             Design matrix.
         y : NDArray
             Response vector.
@@ -1224,7 +1224,7 @@ class SuperGLM:
 
     def monotonize(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
@@ -1241,7 +1241,7 @@ class SuperGLM:
 
         Parameters
         ----------
-        X : DataFrame
+        X : pandas or eager Polars DataFrame
             Training data (used to compute density-based grid weights).
         sample_weight : array-like, optional
             Frequency weights.
@@ -1272,7 +1272,7 @@ class SuperGLM:
 
     def apply_monotone_postfit(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         sample_weight: NDArray | None = None,
         offset: NDArray | None = None,
         *,
@@ -1340,7 +1340,7 @@ class SuperGLM:
 
     def discretization_impact(
         self,
-        X: FrameLike,
+        X: EagerFrame | FrameLike,
         y: NDArray,
         sample_weight: NDArray | None = None,
         **kwargs,

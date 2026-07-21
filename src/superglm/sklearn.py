@@ -6,7 +6,7 @@ Two wrappers are provided:
   Rejects ``family="binomial"``; use the classifier for that.
 - ``SuperGLMClassifier`` — binary classification (Binomial)
 
-Both accept **DataFrame** or **ndarray** input:
+Both accept **pandas DataFrame**, **eager Polars DataFrame**, or **ndarray** input:
 
 - **DataFrame mode** (preferred): feature types are auto-detected from dtype.
   Object/category columns become ``Categorical``, columns in
@@ -24,7 +24,7 @@ to ``"group_lasso"``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -103,9 +103,10 @@ def _normalize_X(
     if is_supported_eager_frame(X):
         frame = as_eager_frame(X)
         if fitting and frame.backend == "pandas":
-            native = frame.native.copy()
+            native = cast(pd.DataFrame, frame.native).copy()
             frame = as_eager_frame(native)
-        return frame.native, list(frame.columns), False
+        columns = cast(list[str], list(frame.columns))
+        return frame.native, columns, False
 
     # Densify sparse matrices (e.g. from ColumnTransformer)
     import scipy.sparse
@@ -130,7 +131,7 @@ def _normalize_X(
             cols = [f"x{i}" for i in range(arr.shape[1])]
             synthetic = True
     else:
-        cols = resolved_columns
+        cols = cast(list[str], resolved_columns)
         if arr.shape[1] != len(cols):
             raise ValueError(f"X has {arr.shape[1]} columns but model was fit with {len(cols)}.")
         synthetic = False
@@ -189,9 +190,9 @@ def _resolve_offset(
         raw_refs = list(offset_param)
 
     if fitting:
-        resolved = _resolve_refs(raw_refs, columns, synthetic, "offset")
+        resolved = cast(list[str], _resolve_refs(raw_refs, columns, synthetic, "offset"))
     else:
-        resolved = stored_cols
+        resolved = cast(list[str], stored_cols)
 
     missing = [c for c in resolved if c not in X.columns]
     if missing:
@@ -596,7 +597,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         Columns to treat as numeric (by name or index).
         Unspecified columns default to numeric.
     feature_names : list of str or None
-        Column names for ndarray input.  Ignored for DataFrames.
+        Column names for ndarray input.  Ignored for native DataFrames.
     n_knots : int or list of int
         Interior knots for spline features.
     degree : int

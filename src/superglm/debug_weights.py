@@ -46,7 +46,7 @@ def compare_irls_weights(
     ----------
     model : SuperGLM
         A fitted superglm model (must already be fitted).
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature data used for fitting.
     y : array-like
         Response variable.
@@ -235,7 +235,7 @@ def inspect_worst_observations(
     ----------
     model : SuperGLM
         A fitted model with ``record_diagnostics=True``.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Original feature data.
     y : array-like
         Response variable.

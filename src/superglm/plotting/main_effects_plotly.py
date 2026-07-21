@@ -168,7 +168,7 @@ def plot_main_effects_plotly(
         Fitted model instance.
     terms : list of TermInference
         Per-term inference objects from ``model.term_inference()``.
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data for exposure/weight density overlays.
     sample_weight : array-like, optional
         Observation weights for density calculation.

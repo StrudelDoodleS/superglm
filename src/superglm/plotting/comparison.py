@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -225,7 +225,7 @@ def _build_term_comparison_data(
                     family,
                     support_data["X"],
                     term,
-                    support_data.get("sample_weight"),
+                    cast(NDArray | None, support_data.get("sample_weight")),
                     domain,
                 )
             support = {"mode": "by_label", "series": support_series}

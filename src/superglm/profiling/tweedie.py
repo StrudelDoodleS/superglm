@@ -5146,7 +5146,7 @@ def estimate_tweedie_p(
     model : SuperGLM
         A configured but *unfitted* model with features already added.
         Must have a Tweedie family (e.g. ``families.tweedie(p=1.5)``).
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix.
     y : array-like
         Response variable.

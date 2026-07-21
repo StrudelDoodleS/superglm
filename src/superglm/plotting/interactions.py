@@ -73,7 +73,7 @@ def plot_interaction(
     show_main_effect_walls : bool
         For Plotly 3D surface plots: project parent main-effect curves on the
         surface walls (default False).
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data. When provided with *sample_weight*, overlays an
         sample_weight-weighted density on surface plots (projected on the floor
         for 3D plotly, contour overlay for matplotlib).

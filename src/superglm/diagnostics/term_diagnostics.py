@@ -36,7 +36,7 @@ def term_importance(
     ----------
     model : SuperGLM
         A fitted model.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
     sample_weight, sample_weight : array-like, optional
         Frequency weights for weighted variance.

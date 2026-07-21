@@ -367,7 +367,7 @@ def estimate_nb_theta(
     model : SuperGLM
         A configured but *unfitted* model with features already added.
         Must have a NegativeBinomial family (e.g. ``families.nb2(theta=1.0)``).
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix.
     y : array-like
         Response variable (counts).

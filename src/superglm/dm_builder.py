@@ -182,7 +182,7 @@ def auto_detect_features(
     specs: dict[str, FeatureSpec],
     feature_order: list[str],
 ) -> None:
-    """Auto-detect feature types from DataFrame columns.
+    """Auto-detect feature types from native dataframe columns.
 
     Mutates ``specs`` and ``feature_order`` in place.
     """

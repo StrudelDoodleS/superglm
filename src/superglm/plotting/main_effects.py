@@ -65,7 +65,7 @@ def plot_relativities(
     ----------
     terms : list[TermInference]
         Per-term inference objects from :meth:`SuperGLM.term_inference`.
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data for sample_weight density overlays.
     sample_weight : array-like, optional
         Exposure / frequency weights.
@@ -325,7 +325,7 @@ def plot_term(
     ----------
     ti : TermInference
         Inference result from :meth:`SuperGLM.term_inference`.
-    X : DataFrame, optional
+    X : pandas or eager Polars DataFrame, optional
         Training data for sample_weight overlays.
     sample_weight : array-like, optional
         Exposure / frequency weights.

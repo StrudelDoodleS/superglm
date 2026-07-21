@@ -402,7 +402,11 @@ def _predict_eta(
     return stabilize_eta(eta, model._link)
 
 
-def predict_eta_exact(model, X: FrameLike, offset: NDArray | None = None) -> NDArray[np.floating]:
+def predict_eta_exact(
+    model,
+    X: EagerFrame | FrameLike,
+    offset: NDArray | None = None,
+) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the exact canonical contract."""
     return _predict_eta(model, X, offset, fast_discrete=False)
 
@@ -673,7 +677,7 @@ def clone_without_features(
 
 
 def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:
-    """Auto-detect feature types from DataFrame columns."""
+    """Auto-detect feature types from native dataframe columns."""
     spline_cols = model._splines or []
     knots_map = resolve_knots(model, spline_cols)
     auto_detect_features(

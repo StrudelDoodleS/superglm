@@ -141,7 +141,7 @@ def discretization_impact(
     ----------
     model : SuperGLM
         A fitted SuperGLM model.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Data used for analysis (typically training data).
     y : NDArray
         Response variable.
