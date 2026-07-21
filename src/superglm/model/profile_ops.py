@@ -192,7 +192,7 @@ def _installed_tweedie_profile_copy(result):
             owned_interval = (float(interval[0]), float(interval[1]))
             owned_ci_cache[alpha] = owned_interval
             details = None if details_cache is None else details_cache.get(alpha)
-            if details is not None and is_dataclass(details):
+            if details_cache is not None and details is not None and is_dataclass(details):
                 details_cache[alpha] = replace(details, interval=owned_interval)
         installed._ci_cache = owned_ci_cache
     return installed

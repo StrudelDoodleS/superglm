@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -49,7 +49,7 @@ SelectionPenalty = float | Literal["auto"] | None
 
 _SELECTION_PENALTY_ERROR = "selection_penalty must be None, 'auto', or a finite non-negative number"
 
-_PENALTY_SHORTCUTS: dict[str, type[Penalty]] = {
+_PENALTY_SHORTCUTS: dict[str, type[Any]] = {
     "group_lasso": GroupLasso,
     "group_elastic_net": GroupElasticNet,
     "sparse_group_lasso": SparseGroupLasso,
@@ -447,16 +447,19 @@ def resolve_penalty(
     """Convert string shorthand / None to a Penalty object."""
     resolved_lambda1 = normalize_selection_penalty(lambda1)
     if penalty is None:
-        return GroupLasso(lambda1=resolved_lambda1, features=penalty_features)
+        return cast(Penalty, GroupLasso(lambda1=resolved_lambda1, features=penalty_features))
     if isinstance(penalty, str):
         if penalty not in _PENALTY_SHORTCUTS:
             raise ValueError(
                 f"Unknown penalty '{penalty}'. "
                 f"Use one of {list(_PENALTY_SHORTCUTS)} or pass a Penalty object."
             )
-        return _PENALTY_SHORTCUTS[penalty](
-            lambda1=resolved_lambda1,
-            features=penalty_features,
+        return cast(
+            Penalty,
+            _PENALTY_SHORTCUTS[penalty](
+                lambda1=resolved_lambda1,
+                features=penalty_features,
+            ),
         )
     if lambda1 is not None:
         raise ValueError(
@@ -469,7 +472,7 @@ def resolve_penalty(
             "Set features on the Penalty object instead."
         )
     owned_penalty = copy.deepcopy(penalty)
-    owned_penalty.lambda1 = normalize_selection_penalty(owned_penalty.lambda1)
+    cast(Any, owned_penalty).lambda1 = normalize_selection_penalty(owned_penalty.lambda1)
     return owned_penalty
 
 
@@ -484,7 +487,7 @@ def normalize_selection_penalty(value: object) -> SelectionPenalty:
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(_SELECTION_PENALTY_ERROR)
     try:
-        numeric = float(value)
+        numeric = float(cast(Any, value))
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(_SELECTION_PENALTY_ERROR) from exc
     if not np.isfinite(numeric) or numeric < 0.0:
@@ -808,7 +811,7 @@ def resolve_selection_penalty_for_fit(model, penalty: Penalty, y, weights) -> fl
         resolved = 0.0
     else:
         resolved = float(intent)
-    penalty.lambda1 = resolved
+    cast(Any, penalty).lambda1 = resolved
     return resolved
 
 
@@ -825,7 +828,7 @@ def validate_selection_penalty_for_reml(penalty: Penalty) -> None:
 def resolve_selection_penalty_for_reml(penalty: Penalty) -> float:
     """Resolve REML's validated no-selection setting to numeric zero."""
     validate_selection_penalty_for_reml(penalty)
-    penalty.lambda1 = 0.0
+    cast(Any, penalty).lambda1 = 0.0
     return 0.0
 
 
