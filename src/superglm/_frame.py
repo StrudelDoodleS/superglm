@@ -28,16 +28,27 @@ class EagerFrame:
 
     native: FrameLike
     backend: FrameBackend
-    _frame: nw.DataFrame
+    _frame: nw.DataFrame | None
     _arrays: dict[object, NDArray] = field(default_factory=dict, repr=False)
+
+    @property
+    def _polars_frame(self) -> nw.DataFrame:
+        """Return the Narwhals view used only by the Polars backend."""
+        if self.backend != "polars" or self._frame is None:
+            raise RuntimeError("Narwhals dataframe state is available only for Polars inputs")
+        return self._frame
 
     @property
     def columns(self) -> tuple[object, ...]:
         """Return column names in native order."""
-        return tuple(self._frame.columns)
+        if self.backend == "pandas":
+            return tuple(cast(pd.DataFrame, self.native).columns)
+        return tuple(self._polars_frame.columns)
 
     def __len__(self) -> int:
-        return len(self._frame)
+        if self.backend == "pandas":
+            return len(cast(pd.DataFrame, self.native))
+        return len(self._polars_frame)
 
     def require_columns(self, names: tuple[object, ...]) -> None:
         """Raise once with every required column absent from the frame."""
@@ -64,7 +75,7 @@ class EagerFrame:
             return "unsupported"
 
         polars_name = cast(str, name)
-        dtype = self._frame.schema[polars_name]
+        dtype = self._polars_frame.schema[polars_name]
         if isinstance(dtype, nw.Boolean):
             return "boolean"
         if isinstance(dtype, nw.dtypes.NumericType):
@@ -77,12 +88,12 @@ class EagerFrame:
         """Return a backend-neutral display name for one logical dtype."""
         if self.backend == "pandas":
             return str(cast(pd.DataFrame, self.native)[cast(Any, name)].dtype)
-        return str(self._frame.schema[cast(str, name)])
+        return str(self._polars_frame.schema[cast(str, name)])
 
     def _extract_column(self, name: object) -> NDArray:
         if self.backend == "pandas":
             return np.asarray(cast(pd.DataFrame, self.native)[cast(Any, name)].to_numpy(copy=False))
-        return np.asarray(self._frame[cast(str, name)].to_numpy())
+        return np.asarray(self._polars_frame[cast(str, name)].to_numpy())
 
     def column_array(self, name: object, *, dtype=None) -> NDArray:
         """Return one logical column, extracting its native data at most once."""
@@ -132,7 +143,7 @@ class EagerFrame:
         self.require_columns(selected)
         digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
         metadata = tuple(
-            (repr(name), str(self._frame.schema[cast(str, name)])) for name in selected
+            (repr(name), str(self._polars_frame.schema[cast(str, name)])) for name in selected
         )
         digest.update(repr(((len(self), len(selected)), metadata)).encode("utf-8"))
         if selected:
@@ -152,7 +163,7 @@ def as_eager_frame(value: Any) -> EagerFrame:
         return EagerFrame(
             native=value,
             backend="pandas",
-            _frame=nw.from_native(value, eager_only=True),
+            _frame=None,
         )
     try:
         frame = cast(

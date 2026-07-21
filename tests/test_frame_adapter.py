@@ -7,6 +7,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
+import superglm._frame as frame_module
 from superglm._frame import as_eager_frame, is_supported_eager_frame
 
 
@@ -20,6 +21,22 @@ def test_as_eager_frame_wraps_pandas_once() -> None:
     assert frame.columns == ("x", "label")
     assert len(frame) == 2
     assert as_eager_frame(frame) is frame
+
+
+def test_pandas_fast_path_does_not_enter_narwhals(monkeypatch: pytest.MonkeyPatch) -> None:
+    X = pd.DataFrame({"x": [1.0, 2.0], "label": ["a", "b"]})
+
+    monkeypatch.setattr(
+        frame_module.nw,
+        "from_native",
+        lambda *_args, **_kwargs: pytest.fail("pandas must not pay Narwhals dispatch"),
+    )
+
+    frame = as_eager_frame(X)
+
+    assert frame.columns == ("x", "label")
+    assert len(frame) == 2
+    np.testing.assert_array_equal(frame.column_array("x"), [1.0, 2.0])
 
 
 def test_as_eager_frame_wraps_eager_polars_once() -> None:
