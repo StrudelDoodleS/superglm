@@ -93,6 +93,7 @@ nav:
     - Interactions: guide/interactions.md
     - REML & Solvers: guide/optimization.md
   - Development:
+    - Releases: development/releases.md
     - Data and Solver Boundaries: development/data-and-solver-boundaries.md
     - Editor Frontend for Python Developers: editor_frontend.md
   - Examples:

@@ -395,3 +395,11 @@ def test_security_policy_and_codeowners_cover_governance_surfaces():
     assert "pyproject.toml" in codeowners
     assert "scripts/verify_release_artifacts.py" in codeowners
     assert "src/superglm/" in codeowners
+    for release_surface in (
+        ".codex/agents/",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        "AGENTS.md",
+        "docs/development/releases.md",
+        "scripts/bump_version.py",
+    ):
+        assert release_surface in codeowners
