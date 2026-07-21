@@ -689,6 +689,24 @@ class SuperGLM:
         """Per-group diagnostic dict for programmatic / audit access."""
         return report_ops.diagnostics(self)
 
+    def design_summary(self) -> pd.DataFrame:
+        """Describe fitted design storage and static route eligibility.
+
+        The summary does not build an accelerated matrix or prove that an
+        eligible kernel executed. Fit and REML traces remain authoritative for
+        actual dispatch.
+        """
+        if self._result is None:
+            raise RuntimeError("Model must be fitted before calling design_summary().")
+        if self._dm is None:
+            raise RuntimeError(
+                "retain_fit_state=False discarded the fitted design; refit with "
+                "retain_fit_state=True before calling design_summary()."
+            )
+        from superglm.model.design_summary import build_design_summary
+
+        return build_design_summary(self)
+
     def summary(self, alpha: float = 0.05, detail: str = "compact"):
         """Rich model summary with coefficient table (statsmodels-style)."""
         return report_ops.summary(self, alpha, detail=detail)

@@ -713,7 +713,7 @@ def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None
 
 def model_build_design_matrix(
     model,
-    X: EagerFrame,
+    X: EagerFrame | FrameLike,
     y: NDArray,
     sample_weight: NDArray,
     offset: NDArray | None,
@@ -723,9 +723,10 @@ def model_build_design_matrix(
     Sets model._dm, model._groups, model._distribution, model._link.
     Returns (y, sample_weight, offset) as float64 arrays.
     """
+    frame = as_eager_frame(X)
     pending_interactions = list(model._pending_interactions)
     result = build_design_matrix(
-        X,
+        frame,
         y,
         sample_weight,
         offset,
