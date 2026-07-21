@@ -4,10 +4,15 @@ import pickle
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 from sklearn.utils.validation import check_is_fitted
 
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
+
+
+def _to_polars(frame: pd.DataFrame) -> pl.DataFrame:
+    return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
 
 
 @pytest.fixture
@@ -41,6 +46,122 @@ class TestFitPredict:
         assert hasattr(model, "intercept_")
         assert model.n_features_in_ == 3
         assert list(model.feature_names_in_) == ["age", "region", "density"]
+
+
+class TestPolarsNamedFrame:
+    @pytest.mark.parametrize(
+        "offset",
+        ["off1", ["off1", "off2"]],
+        ids=["one_offset", "multiple_offsets"],
+    )
+    def test_polars_shorthand_fit_predict_matches_pandas(self, sample_data, offset):
+        X, y, sample_weight = sample_data
+        X = X.assign(
+            off1=0.3 * np.log(sample_weight),
+            off2=0.7 * np.log(sample_weight),
+        )
+        X_polars = _to_polars(X)
+        kwargs = {
+            "spline_features": ["age"],
+            "categorical_features": ["region"],
+            "offset": offset,
+            "n_knots": 8,
+            "selection_penalty": 0.0,
+        }
+        pandas_model = SuperGLMRegressor(**kwargs).fit(X, y, sample_weight=sample_weight)
+        polars_model = SuperGLMRegressor(**kwargs).fit(
+            X_polars,
+            y,
+            sample_weight=sample_weight,
+        )
+
+        assert isinstance(polars_model._model._fit_X_ref, pl.DataFrame)
+        expected_features = 4 if offset == "off1" else 3
+        assert polars_model.n_features_in_ == pandas_model.n_features_in_ == expected_features
+        np.testing.assert_array_equal(
+            polars_model.feature_names_in_,
+            pandas_model.feature_names_in_,
+        )
+        np.testing.assert_allclose(polars_model.coef_, pandas_model.coef_, rtol=0.0, atol=0.0)
+        assert polars_model.intercept_ == pandas_model.intercept_
+        np.testing.assert_allclose(
+            polars_model.predict(X_polars),
+            pandas_model.predict(X),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_polars_auto_detection_and_integer_shorthands_match_pandas(self, sample_data):
+        X, y, _ = sample_data
+        X_polars = _to_polars(X)
+        auto_pandas = SuperGLMRegressor(
+            spline_features=["age"],
+            n_knots=7,
+            selection_penalty=0.0,
+        ).fit(X, y)
+        auto_polars = SuperGLMRegressor(
+            spline_features=["age"],
+            n_knots=7,
+            selection_penalty=0.0,
+        ).fit(X_polars, y)
+        integer_pandas = SuperGLMRegressor(
+            spline_features=[0],
+            categorical_features=[1],
+            numeric_features=[2],
+            n_knots=7,
+            selection_penalty=0.0,
+        ).fit(X, y)
+        integer_polars = SuperGLMRegressor(
+            spline_features=[0],
+            categorical_features=[1],
+            numeric_features=[2],
+            n_knots=7,
+            selection_penalty=0.0,
+        ).fit(X_polars, y)
+
+        assert auto_polars._feature_types == auto_pandas._feature_types
+        assert integer_polars._feature_types == integer_pandas._feature_types
+        np.testing.assert_allclose(auto_polars.predict(X_polars), auto_pandas.predict(X))
+        np.testing.assert_allclose(integer_polars.predict(X_polars), integer_pandas.predict(X))
+
+    def test_polars_explicit_features_and_offset_only_model_match_pandas(self, sample_data):
+        from superglm import Categorical, Numeric, Spline
+
+        X, y, _ = sample_data
+        X_polars = _to_polars(X)
+        features = {
+            "age": Spline(kind="bs", k=7),
+            "region": Categorical(base="first"),
+            "density": Numeric(),
+        }
+        pandas_model = SuperGLMRegressor(features=features, selection_penalty=0.0).fit(X, y)
+        polars_model = SuperGLMRegressor(features=features, selection_penalty=0.0).fit(X_polars, y)
+        np.testing.assert_allclose(polars_model.predict(X_polars), pandas_model.predict(X))
+
+        offset_X = pd.DataFrame(
+            {
+                "off1": np.linspace(-0.2, 0.2, len(y)),
+                "off2": np.linspace(0.1, -0.1, len(y)),
+            }
+        )
+        offset_polars = _to_polars(offset_X)
+        pandas_offset_model = SuperGLMRegressor(
+            family="poisson",
+            offset=["off1", "off2"],
+        ).fit(offset_X, y)
+        polars_offset_model = SuperGLMRegressor(
+            family="poisson",
+            offset=["off1", "off2"],
+        ).fit(offset_polars, y)
+
+        assert polars_offset_model.n_features_in_ == 0
+        assert polars_offset_model.feature_names_in_.size == 0
+        np.testing.assert_allclose(
+            polars_offset_model.predict(offset_polars),
+            pandas_offset_model.predict(offset_X),
+            rtol=0.0,
+            atol=0.0,
+        )
 
 
 class TestAutoDetect:
@@ -449,6 +570,25 @@ class TestSparseMatrixInput:
         m.fit(X_sparse, y)
         preds = m.predict(X_sparse)
         assert preds.shape == (n,)
+
+    @pytest.mark.parametrize("input_kind", ["ndarray", "csr", "csc"])
+    def test_ndarray_and_sparse_modes_keep_synthetic_pandas_boundary(self, input_kind):
+        import scipy.sparse
+
+        rng = np.random.default_rng(20260720)
+        X = rng.normal(size=(80, 3))
+        y = rng.poisson(np.exp(0.2 * X[:, 0])).astype(np.float64)
+        values = {
+            "ndarray": X,
+            "csr": scipy.sparse.csr_matrix(X),
+            "csc": scipy.sparse.csc_matrix(X),
+        }[input_kind]
+        model = SuperGLMRegressor(selection_penalty=0.0).fit(values, y)
+
+        assert isinstance(model._model._fit_X_ref, pd.DataFrame)
+        assert model._model._fit_X_ref.columns.tolist() == ["x0", "x1", "x2"]
+        with pytest.raises(ValueError, match="string ref.*ndarray"):
+            SuperGLMRegressor(spline_features=["age"]).fit(values, y)
 
 
 # ── Native features= API ────────────────────────────────────────

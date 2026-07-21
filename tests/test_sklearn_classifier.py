@@ -2,10 +2,15 @@
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 from numpy.testing import assert_allclose
 
 from superglm.sklearn import SuperGLMClassifier
+
+
+def _to_polars(frame: pd.DataFrame) -> pl.DataFrame:
+    return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
 
 
 @pytest.fixture
@@ -93,6 +98,77 @@ class TestClassifierContract:
         clf = SuperGLMClassifier(selection_penalty=0)
         clf.fit(X, y)
         assert clf.n_features_in_ == 2
+
+
+class TestPolarsClassifier:
+    def test_polars_auto_detect_predict_proba_and_decision_match_pandas(self, binary_data):
+        X, y = binary_data
+        X_polars = _to_polars(X)
+        pandas_model = SuperGLMClassifier(selection_penalty=0.0).fit(X, y)
+        polars_model = SuperGLMClassifier(selection_penalty=0.0).fit(X_polars, y)
+
+        assert isinstance(polars_model._model._fit_X_ref, pl.DataFrame)
+        assert polars_model.n_features_in_ == pandas_model.n_features_in_ == 2
+        np.testing.assert_array_equal(
+            polars_model.feature_names_in_,
+            pandas_model.feature_names_in_,
+        )
+        np.testing.assert_allclose(polars_model.coef_, pandas_model.coef_, rtol=0.0, atol=0.0)
+        assert polars_model.intercept_ == pandas_model.intercept_
+        np.testing.assert_array_equal(polars_model.predict(X_polars), pandas_model.predict(X))
+        np.testing.assert_allclose(
+            polars_model.predict_proba(X_polars),
+            pandas_model.predict_proba(X),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            polars_model.decision_function(X_polars),
+            pandas_model.decision_function(X),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_polars_classifier_explicit_features_integer_refs_and_offsets(self, binary_data):
+        from superglm import Categorical, Numeric
+
+        X, y = binary_data
+        X = X.assign(
+            off1=np.linspace(-0.1, 0.1, len(X)),
+            off2=np.linspace(0.05, -0.05, len(X)),
+        )
+        X_polars = _to_polars(X)
+        explicit = {
+            "features": {"x1": Numeric(), "x2": Categorical(base="first")},
+            "offset": ["off1", "off2"],
+            "selection_penalty": 0.0,
+        }
+        shorthand = {
+            "numeric_features": [0],
+            "categorical_features": [1],
+            "offset": [2, 3],
+            "selection_penalty": 0.0,
+        }
+
+        for kwargs in (explicit, shorthand):
+            pandas_model = SuperGLMClassifier(**kwargs).fit(X, y)
+            polars_model = SuperGLMClassifier(**kwargs).fit(X_polars, y)
+            np.testing.assert_array_equal(
+                polars_model.feature_names_in_,
+                np.array(["x1", "x2"]),
+            )
+            np.testing.assert_allclose(
+                polars_model.predict_proba(X_polars),
+                pandas_model.predict_proba(X),
+                rtol=0.0,
+                atol=0.0,
+            )
+            np.testing.assert_allclose(
+                polars_model.decision_function(X_polars),
+                pandas_model.decision_function(X),
+                rtol=0.0,
+                atol=0.0,
+            )
 
 
 class TestClassifierWithSampleWeight:
