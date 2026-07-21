@@ -36,14 +36,22 @@ baseline.
 
 ## Release impact and publishing
 
-Normal pull requests must not edit package version fields. Every pull request
-must declare exactly one advisory impact in its body with a rationale:
+Every pull request must declare exactly one advisory impact in its body with a
+rationale:
 
 - `release:none`
 - `release:patch`
 - `release:minor`
 
+`release:none` leaves package version fields unchanged. `release:patch`
+includes the exact next patch version in the same pull request, and
+`release:minor` includes the exact next minor version in the same pull request.
 The code diff is authoritative; declarations and labels are evidence only.
+
+Only one release-bearing pull request may advance from a published version at
+a time. Concurrent patch or minor pull requests must rebase after the preceding
+candidate is published and recompute their version. A merge never authorizes a
+tag or publication.
 
 Only an explicit user request to assess, prepare, or publish a release may
 spawn the project-scoped `release_manager` specialist from
@@ -52,13 +60,14 @@ such as “finish”, “merge”, “ship”, or “deploy” do not authorize 
 
 Use these three separate gates:
 
-1. “Use the release_manager agent to assess changes since the latest PyPI
-   release.” Assessment is read-only.
-2. “Use the release_manager agent to prepare the approved 0.x.y release PR.”
-   Preparation requires an exact approved version and assessment ID. It does not authorize publication.
+1. “Use the release_manager agent to assess PR #N as a release candidate.”
+   Assessment is read-only and bound to the exact base and head SHAs.
+2. “Use the release_manager agent to prepare the approved 0.x.y on PR #N.”
+   Preparation requires an exact approved version and assessment ID, updates
+   that same pull request, and does not authorize publication.
 3. “Use the release_manager agent to publish v0.x.y.” Publication requires a
    new explicit instruction naming the exact tag.
 
-The specialist does not merge the release PR, upload distributions directly,
-move an existing tag, or bypass `.github/workflows/release.yml` and PyPI Trusted
-Publishing.
+The specialist does not merge the feature PR, create a second release PR,
+upload distributions directly, move an existing tag, or bypass
+`.github/workflows/release.yml` and PyPI Trusted Publishing.
