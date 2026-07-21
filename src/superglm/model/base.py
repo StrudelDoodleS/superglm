@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -44,6 +44,10 @@ from superglm.solvers.pirls import PIRLSResult
 from superglm.types import FeatureSpec, FitStats, GroupSlice
 
 logger = logging.getLogger(__name__)
+
+SelectionPenalty = float | Literal["auto"] | None
+
+_SELECTION_PENALTY_ERROR = "selection_penalty must be None, 'auto', or a finite non-negative number"
 
 _PENALTY_SHORTCUTS: dict[str, type[Penalty]] = {
     "group_lasso": GroupLasso,
@@ -437,19 +441,23 @@ def predict_fast_discrete(model, X: FrameLike, offset: NDArray | None = None) ->
 
 def resolve_penalty(
     penalty: Penalty | str | None,
-    lambda1: float | None,
+    lambda1: SelectionPenalty,
     penalty_features: str | list[str] | None = None,
 ) -> Penalty:
     """Convert string shorthand / None to a Penalty object."""
+    resolved_lambda1 = normalize_selection_penalty(lambda1)
     if penalty is None:
-        return GroupLasso(lambda1=lambda1, features=penalty_features)
+        return GroupLasso(lambda1=resolved_lambda1, features=penalty_features)
     if isinstance(penalty, str):
         if penalty not in _PENALTY_SHORTCUTS:
             raise ValueError(
                 f"Unknown penalty '{penalty}'. "
                 f"Use one of {list(_PENALTY_SHORTCUTS)} or pass a Penalty object."
             )
-        return _PENALTY_SHORTCUTS[penalty](lambda1=lambda1, features=penalty_features)
+        return _PENALTY_SHORTCUTS[penalty](
+            lambda1=resolved_lambda1,
+            features=penalty_features,
+        )
     if lambda1 is not None:
         raise ValueError(
             "Cannot set 'selection_penalty' when passing a Penalty object directly. "
@@ -460,7 +468,28 @@ def resolve_penalty(
             "Cannot set 'penalty_features' when passing a Penalty object directly. "
             "Set features on the Penalty object instead."
         )
-    return penalty
+    owned_penalty = copy.deepcopy(penalty)
+    owned_penalty.lambda1 = normalize_selection_penalty(owned_penalty.lambda1)
+    return owned_penalty
+
+
+def normalize_selection_penalty(value: object) -> SelectionPenalty:
+    """Normalize explicit selection intent without choosing a fitted value."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value == "auto":
+            return value
+        raise ValueError(_SELECTION_PENALTY_ERROR)
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(_SELECTION_PENALTY_ERROR)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(_SELECTION_PENALTY_ERROR) from exc
+    if not np.isfinite(numeric) or numeric < 0.0:
+        raise ValueError(_SELECTION_PENALTY_ERROR)
+    return numeric
 
 
 def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
@@ -482,7 +511,7 @@ def init_model(
     family: str | Distribution = "poisson",
     link: str | Link | None = None,
     penalty: Penalty | str | None = None,
-    lambda1: float | None = None,
+    lambda1: SelectionPenalty = None,
     lambda2: float = 0.1,
     penalty_features: str | list[str] | None = None,
     features: dict[str, FeatureSpec] | None = None,

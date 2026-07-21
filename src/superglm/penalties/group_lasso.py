@@ -5,6 +5,8 @@ For group size 1, this reduces to standard L1 soft-thresholding (lasso).
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -17,9 +19,9 @@ class GroupLasso:
 
     Parameters
     ----------
-    lambda1 : float or None
-        Regularisation strength. If None, auto-calibrated at fit time
-        to 10% of lambda_max.
+    lambda1 : float, {"auto"}, or None
+        Regularisation strength. ``None`` disables selection and ``"auto"``
+        explicitly requests calibration to 10% of lambda_max.
     flavor : Flavor or None
         Optional modifier (e.g. Adaptive) that adjusts group weights
         based on an initial estimate.
@@ -27,7 +29,7 @@ class GroupLasso:
 
     def __init__(
         self,
-        lambda1: float | None = None,
+        lambda1: float | Literal["auto"] | None = None,
         flavor: Flavor | None = None,
         features: str | list[str] | None = None,
     ):

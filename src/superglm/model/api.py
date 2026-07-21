@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 from numpy.typing import NDArray
@@ -54,7 +54,7 @@ class SuperGLM:
         family: str | Distribution = "poisson",
         link: str | Link | None = None,
         penalty: Penalty | str | None = None,
-        selection_penalty: float | None = None,
+        selection_penalty: float | Literal["auto"] | None = None,
         spline_penalty: float | None = None,
         penalty_features: str | list[str] | None = None,
         # Feature configuration
@@ -94,10 +94,10 @@ class SuperGLM:
             Penalty type. One of ``"group_lasso"``, ``"sparse_group_lasso"``,
             ``"group_elastic_net"``, ``"ridge"``, or a Penalty object.
             Defaults to ``GroupLasso``.
-        selection_penalty : float, optional
+        selection_penalty : float, {"auto"}, or None, optional
             Regularisation strength for the group penalty (feature selection).
-            ``None`` (default) auto-calibrates to 10% of lambda_max at fit
-            time. Set to ``0.0`` for unpenalised / REML-only fits.
+            ``None`` (default) and ``0.0`` disable selection. ``"auto"``
+            explicitly requests calibration to 10% of lambda_max at fit time.
         spline_penalty : float, optional
             Within-group ridge shrinkage for spline smoothing.
             Defaults to 0.1.
@@ -287,14 +287,14 @@ class SuperGLM:
             self._config_revision += 1
 
     @property
-    def selection_penalty(self) -> float | None:
+    def selection_penalty(self) -> float | Literal["auto"] | None:
         """Configured selection-penalty intent."""
         return configured_penalty(self).lambda1
 
     @selection_penalty.setter
-    def selection_penalty(self, value: float | None) -> None:
+    def selection_penalty(self, value: float | Literal["auto"] | None) -> None:
         penalty = copy.deepcopy(configured_penalty(self))
-        penalty.lambda1 = value
+        penalty.lambda1 = base.normalize_selection_penalty(value)
         self.penalty = penalty
 
     @property
