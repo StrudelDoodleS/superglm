@@ -113,7 +113,7 @@ jobs:
       - name: Workspace browser tests
         run: uv run pytest tests/editor/ -m browser --run-browser -q
 
-  pytest-3.14:
+  pytest-314:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

@@ -193,10 +193,10 @@ def test_dev_ci_parallelizes_complete_python314_suite():
 
     assert "  quick-check:" not in workflow
     assert "  py314-full:" not in workflow
-    for job in ("quality", "docs", "frontend", "browser", "type-check", "pytest-3.14"):
+    for job in ("quality", "docs", "frontend", "browser", "type-check", "pytest-314"):
         assert f"  {job}:" in workflow
 
-    pytest_job = workflow.split("  pytest-3.14:", maxsplit=1)[1]
+    pytest_job = workflow.split("  pytest-314:", maxsplit=1)[1]
     assert "fail-fast: false" in pytest_job
     assert "group: [1, 2, 3, 4]" in pytest_job
     assert "uv python install 3.14" in pytest_job
@@ -215,7 +215,7 @@ def test_dev_ci_keeps_browser_and_non_test_checks_independent():
     quality_job = workflow.split("  quality:", maxsplit=1)[1].split("  docs:", maxsplit=1)[0]
     docs_job = workflow.split("  docs:", maxsplit=1)[1].split("  frontend:", maxsplit=1)[0]
     frontend_job = workflow.split("  frontend:", maxsplit=1)[1].split("  browser:", maxsplit=1)[0]
-    browser_job = workflow.split("  browser:", maxsplit=1)[1].split("  pytest-3.14:", maxsplit=1)[0]
+    browser_job = workflow.split("  browser:", maxsplit=1)[1].split("  pytest-314:", maxsplit=1)[0]
 
     assert "ruff check src/ tests/" in quality_job
     assert "ruff format --check src/ tests/" in quality_job

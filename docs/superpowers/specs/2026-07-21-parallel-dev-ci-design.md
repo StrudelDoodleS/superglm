@@ -20,7 +20,7 @@ Remove `quick-check` and redistribute its responsibilities into independent jobs
 - `frontend`: frontend dependency and module checks;
 - `browser`: legacy and workspace browser tests;
 - `type-check`: the existing advisory Astral ty check;
-- `pytest-3.14`: four duration-balanced matrix shards covering the complete non-browser
+- `pytest-314`: four duration-balanced matrix shards covering the complete non-browser
   suite exactly once.
 
 The pytest shards use Python 3.14 and retain PyArrow so optional dataframe coverage is
