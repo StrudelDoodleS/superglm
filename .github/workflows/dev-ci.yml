@@ -114,11 +114,20 @@ jobs:
         run: uv run pytest tests/editor/ -m browser --run-browser -q
 
   pytest-314:
+    name: ${{ matrix.label }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        include:
+          - group: 1
+            label: Python 3.14 · wide-Poisson exact/discrete agreement
+          - group: 2
+            label: Python 3.14 · remaining suite · duration-balanced A
+          - group: 3
+            label: Python 3.14 · remaining suite · duration-balanced B
+          - group: 4
+            label: Python 3.14 · remaining suite · duration-balanced C
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -132,7 +141,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --python 3.14 --extra dev
 
-      - name: Full tests, shard ${{ matrix.group }}/4
+      - name: Run ${{ matrix.label }}
         run: >-
           uv run --with pyarrow pytest tests/ -q -m "not browser" --maxfail=1
           --splits 4 --group ${{ matrix.group }}

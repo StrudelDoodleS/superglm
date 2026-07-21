@@ -197,8 +197,18 @@ def test_dev_ci_parallelizes_complete_python314_suite():
         assert f"  {job}:" in workflow
 
     pytest_job = workflow.split("  pytest-314:", maxsplit=1)[1]
+    assert "name: ${{ matrix.label }}" in pytest_job
     assert "fail-fast: false" in pytest_job
-    assert "group: [1, 2, 3, 4]" in pytest_job
+    assert "include:" in pytest_job
+    for group in range(1, 5):
+        assert f"- group: {group}" in pytest_job
+    for label in (
+        "Python 3.14 · wide-Poisson exact/discrete agreement",
+        "Python 3.14 · remaining suite · duration-balanced A",
+        "Python 3.14 · remaining suite · duration-balanced B",
+        "Python 3.14 · remaining suite · duration-balanced C",
+    ):
+        assert f"label: {label}" in pytest_job
     assert "uv python install 3.14" in pytest_job
     assert "uv sync --python 3.14 --extra dev" in pytest_job
     assert "uv run --with pyarrow pytest tests/" in pytest_job
