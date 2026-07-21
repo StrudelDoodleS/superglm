@@ -11,6 +11,8 @@ ridge denominator (Parikh & Boyd, 2014, §2.2).
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -25,9 +27,9 @@ class GroupElasticNet:
 
     Parameters
     ----------
-    lambda1 : float or None
-        Regularisation strength. If None, auto-calibrated at fit time
-        to 10% of lambda_max.
+    lambda1 : float, {"auto"}, or None
+        Regularisation strength. ``None`` disables selection and ``"auto"``
+        explicitly requests calibration to 10% of lambda_max.
     alpha : float
         Mixing parameter in [0, 1]. 1 = pure group lasso, 0 = pure ridge.
     flavor : Flavor or None
@@ -37,7 +39,7 @@ class GroupElasticNet:
 
     def __init__(
         self,
-        lambda1: float | None = None,
+        lambda1: float | Literal["auto"] | None = None,
         alpha: float = 0.5,
         flavor: Flavor | None = None,
         features: str | list[str] | None = None,

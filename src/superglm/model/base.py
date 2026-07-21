@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -45,7 +45,11 @@ from superglm.types import FeatureSpec, FitStats, GroupSlice
 
 logger = logging.getLogger(__name__)
 
-_PENALTY_SHORTCUTS: dict[str, type[Penalty]] = {
+SelectionPenalty = float | Literal["auto"] | None
+
+_SELECTION_PENALTY_ERROR = "selection_penalty must be None, 'auto', or a finite non-negative number"
+
+_PENALTY_SHORTCUTS: dict[str, type[Any]] = {
     "group_lasso": GroupLasso,
     "group_elastic_net": GroupElasticNet,
     "sparse_group_lasso": SparseGroupLasso,
@@ -437,19 +441,26 @@ def predict_fast_discrete(model, X: FrameLike, offset: NDArray | None = None) ->
 
 def resolve_penalty(
     penalty: Penalty | str | None,
-    lambda1: float | None,
+    lambda1: SelectionPenalty,
     penalty_features: str | list[str] | None = None,
 ) -> Penalty:
     """Convert string shorthand / None to a Penalty object."""
+    resolved_lambda1 = normalize_selection_penalty(lambda1)
     if penalty is None:
-        return GroupLasso(lambda1=lambda1, features=penalty_features)
+        return cast(Penalty, GroupLasso(lambda1=resolved_lambda1, features=penalty_features))
     if isinstance(penalty, str):
         if penalty not in _PENALTY_SHORTCUTS:
             raise ValueError(
                 f"Unknown penalty '{penalty}'. "
                 f"Use one of {list(_PENALTY_SHORTCUTS)} or pass a Penalty object."
             )
-        return _PENALTY_SHORTCUTS[penalty](lambda1=lambda1, features=penalty_features)
+        return cast(
+            Penalty,
+            _PENALTY_SHORTCUTS[penalty](
+                lambda1=resolved_lambda1,
+                features=penalty_features,
+            ),
+        )
     if lambda1 is not None:
         raise ValueError(
             "Cannot set 'selection_penalty' when passing a Penalty object directly. "
@@ -460,7 +471,28 @@ def resolve_penalty(
             "Cannot set 'penalty_features' when passing a Penalty object directly. "
             "Set features on the Penalty object instead."
         )
-    return penalty
+    owned_penalty = copy.deepcopy(penalty)
+    cast(Any, owned_penalty).lambda1 = normalize_selection_penalty(owned_penalty.lambda1)
+    return owned_penalty
+
+
+def normalize_selection_penalty(value: object) -> SelectionPenalty:
+    """Normalize explicit selection intent without choosing a fitted value."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value == "auto":
+            return value
+        raise ValueError(_SELECTION_PENALTY_ERROR)
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(_SELECTION_PENALTY_ERROR)
+    try:
+        numeric = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(_SELECTION_PENALTY_ERROR) from exc
+    if not np.isfinite(numeric) or numeric < 0.0:
+        raise ValueError(_SELECTION_PENALTY_ERROR)
+    return numeric
 
 
 def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
@@ -482,7 +514,7 @@ def init_model(
     family: str | Distribution = "poisson",
     link: str | Link | None = None,
     penalty: Penalty | str | None = None,
-    lambda1: float | None = None,
+    lambda1: SelectionPenalty = None,
     lambda2: float = 0.1,
     penalty_features: str | list[str] | None = None,
     features: dict[str, FeatureSpec] | None = None,
@@ -768,6 +800,36 @@ def compute_lambda_max(model, y, weights):
             continue
         lmax = max(lmax, np.linalg.norm(grad[g.sl]) / g.weight)
     return lmax / n
+
+
+def resolve_selection_penalty_for_fit(model, penalty: Penalty, y, weights) -> float:
+    """Resolve one ordinary-fit selection setting on attempt-owned state."""
+    intent = normalize_selection_penalty(penalty.lambda1)
+    if intent == "auto":
+        resolved = float(compute_lambda_max(model, y, weights) * 0.1)
+    elif intent is None:
+        resolved = 0.0
+    else:
+        resolved = float(intent)
+    cast(Any, penalty).lambda1 = resolved
+    return resolved
+
+
+def validate_selection_penalty_for_reml(penalty: Penalty) -> None:
+    """Reject selection intent before any REML or profile work starts."""
+    intent = normalize_selection_penalty(penalty.lambda1)
+    if intent == "auto" or (intent is not None and intent > 0.0):
+        raise ValueError(
+            "fit_reml() does not support selection penalties; use None or 0.0, "
+            "or use fit()/fit_path() for sparse selection."
+        )
+
+
+def resolve_selection_penalty_for_reml(penalty: Penalty) -> float:
+    """Resolve REML's validated no-selection setting to numeric zero."""
+    validate_selection_penalty_for_reml(penalty)
+    cast(Any, penalty).lambda1 = 0.0
+    return 0.0
 
 
 def model_has_lambda1_targets(model) -> bool:

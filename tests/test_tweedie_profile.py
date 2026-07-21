@@ -2325,7 +2325,34 @@ def test_public_tweedie_profile_entry_points_default_to_mle_and_auto(function):
     assert signature.parameters["method"].default == "auto"
 
 
+@pytest.mark.parametrize("function", [SuperGLM.estimate_p, profile_ops_module.estimate_p])
+def test_public_tweedie_profile_entry_points_default_to_lazy_ci(function):
+    signature = inspect.signature(function)
+
+    assert signature.parameters["ci_alpha"].default is None
+
+
 class TestEstimatePFitMode:
+    def test_reml_mode_rejects_selection_before_profile_work(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=24, seed=20260721)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty="auto",
+            features={"x1": Numeric()},
+        )
+        profile_calls = []
+
+        def unexpected_profile(*args, **kwargs):
+            profile_calls.append(True)
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", unexpected_profile)
+
+        with pytest.raises(ValueError, match="does not support selection penalties"):
+            model.estimate_p(X, y, fit_mode="reml")
+
+        assert profile_calls == []
+
     @pytest.mark.parametrize("already_fitted", [False, True])
     def test_profile_publication_preserves_subclass_configuration_aliases(
         self, monkeypatch, already_fitted
@@ -2741,6 +2768,139 @@ class TestEstimatePFitMode:
         summary = model.summary(alpha=0.05)
         assert summary._info["tweedie_p_ci"] is installed_interval
         assert summary._info["tweedie_p_ci_status"] == "available"
+
+    def test_explicit_ci_alpha_populates_returned_and_installed_summary_caches(
+        self,
+        monkeypatch,
+    ):
+        X, y, _ = _tweedie_data(n=48, seed=20260805)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        result = _deterministic_profile_result()
+        ci_calls = []
+        expected_interval = (1.31, 1.62)
+
+        def compute_ci(*, alpha=0.05):
+            alpha_value = float(alpha)
+            ci_calls.append(alpha_value)
+            result._ci_cache[alpha_value] = expected_interval
+            result._ci_details_cache[alpha_value] = tweedie_module.TweedieProfileCIDetails(
+                alpha=alpha_value,
+                cutoff=1.92,
+                p_range=(1.01, 1.99),
+                lower=tweedie_module.TweedieProfileCIEndpoint(
+                    value=expected_interval[0],
+                    status="root_found",
+                    at_range_boundary=False,
+                    lr_statistic=1.92,
+                ),
+                upper=tweedie_module.TweedieProfileCIEndpoint(
+                    value=expected_interval[1],
+                    status="root_found",
+                    at_range_boundary=False,
+                    lr_statistic=1.92,
+                ),
+                interval=expected_interval,
+                n_new_evaluations=0,
+                evaluations=(),
+                warnings=(),
+            )
+            return expected_interval
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        monkeypatch.setattr(result, "ci", compute_ci)
+
+        returned = model.estimate_p(X, y, ci_alpha=0.05)
+        installed = model._tweedie_profile_result
+
+        assert returned is result
+        assert ci_calls == [0.05]
+        assert returned._ci_cache[0.05] == pytest.approx(expected_interval)
+        assert installed._ci_cache[0.05] == pytest.approx(expected_interval)
+        assert returned._ci_cache is not installed._ci_cache
+        assert returned._ci_cache[0.05] is not installed._ci_cache[0.05]
+        assert installed._ci_details_cache[0.05].interval is installed._ci_cache[0.05]
+
+        returned._ci_cache[0.05] = (1.8, 1.9)
+        summary = model.summary(alpha=0.05)
+        assert summary._info["tweedie_p_ci"] == pytest.approx(expected_interval)
+        assert summary._info["tweedie_p_ci_status"] == "available"
+        other_alpha = model.summary(alpha=0.10)
+        assert other_alpha._info["tweedie_p_ci"] is None
+        assert other_alpha._info["tweedie_p_ci_status"] == "not computed"
+
+    @pytest.mark.parametrize(
+        "ci_alpha",
+        [0.0, 1.0, np.nan, np.inf, True, np.array([0.05, 0.10])],
+    )
+    def test_invalid_ci_alpha_is_rejected_before_profile_work(
+        self,
+        monkeypatch,
+        ci_alpha,
+    ):
+        X, y, _ = _tweedie_data(n=24, seed=20260806)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        profile_calls = []
+
+        def unexpected_profile(*args, **kwargs):
+            profile_calls.append(True)
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", unexpected_profile)
+
+        with pytest.raises(ValueError, match="alpha must be finite and strictly between 0 and 1"):
+            model.estimate_p(X, y, ci_alpha=ci_alpha)
+
+        assert profile_calls == []
+
+    def test_pearson_ci_request_is_rejected_before_profile_work(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=24, seed=20260807)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        profile_calls = []
+
+        def unexpected_profile(*args, **kwargs):
+            profile_calls.append(True)
+            raise AssertionError("profile work must not start")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", unexpected_profile)
+
+        with pytest.raises(RuntimeError, match="requires exact MLE dispersion profiling"):
+            model.estimate_p(X, y, phi_method="pearson", ci_alpha=0.05)
+
+        assert profile_calls == []
+
+    def test_ci_failure_preserves_previously_fitted_revision(self, monkeypatch):
+        X, y, _ = _tweedie_data(n=48, seed=20260808)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+        model.fit(X, y)
+        snapshot = _snapshot_fitted_model(model, X)
+        result = _deterministic_profile_result()
+
+        def failing_ci(*, alpha=0.05):
+            raise RuntimeError(f"CI failed at alpha={alpha}")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", lambda *args, **kwargs: result)
+        monkeypatch.setattr(result, "ci", failing_ci)
+
+        with pytest.raises(RuntimeError, match="CI failed"):
+            model.estimate_p(X, y, ci_alpha=0.05)
+
+        _assert_fitted_model_unchanged(model, X, snapshot)
 
     def test_progress_payload_ignores_stale_pearson_lr_cache(self):
         result = SimpleNamespace(
@@ -3465,6 +3625,37 @@ class TestProfileFitParity:
         assert captured["active_set"] is True
         assert captured["convergence"] == "coefficients"
         assert captured["penalty"] is ctx.penalty
+
+    @pytest.mark.parametrize(
+        ("selection_penalty", "expects_auto"),
+        [
+            pytest.param(None, False, id="none-disabled"),
+            pytest.param(0.0, False, id="zero-disabled"),
+            pytest.param("auto", True, id="explicit-auto"),
+        ],
+    )
+    def test_profile_context_resolves_selection_intent_numerically(
+        self,
+        selection_penalty,
+        expects_auto,
+    ):
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 24)})
+        y = np.linspace(0.5, 2.0, len(X))
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=selection_penalty,
+            features={"x": Numeric()},
+        )
+
+        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+
+        assert isinstance(ctx.penalty.lambda1, float)
+        if expects_auto:
+            assert ctx.penalty.lambda1 > 0.0
+            assert ctx.use_direct is False
+        else:
+            assert ctx.penalty.lambda1 == pytest.approx(0.0)
+            assert ctx.use_direct is True
 
     def test_direct_profile_forwards_model_controls_and_lambda2(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 12)})

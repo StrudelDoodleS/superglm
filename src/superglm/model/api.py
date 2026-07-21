@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 from numpy.typing import NDArray
@@ -54,7 +54,7 @@ class SuperGLM:
         family: str | Distribution = "poisson",
         link: str | Link | None = None,
         penalty: Penalty | str | None = None,
-        selection_penalty: float | None = None,
+        selection_penalty: float | Literal["auto"] | None = None,
         spline_penalty: float | None = None,
         penalty_features: str | list[str] | None = None,
         # Feature configuration
@@ -94,10 +94,10 @@ class SuperGLM:
             Penalty type. One of ``"group_lasso"``, ``"sparse_group_lasso"``,
             ``"group_elastic_net"``, ``"ridge"``, or a Penalty object.
             Defaults to ``GroupLasso``.
-        selection_penalty : float, optional
+        selection_penalty : float, {"auto"}, or None, optional
             Regularisation strength for the group penalty (feature selection).
-            ``None`` (default) auto-calibrates to 10% of lambda_max at fit
-            time. Set to ``0.0`` for unpenalised / REML-only fits.
+            ``None`` (default) and ``0.0`` disable selection. ``"auto"``
+            explicitly requests calibration to 10% of lambda_max at fit time.
         spline_penalty : float, optional
             Within-group ridge shrinkage for spline smoothing.
             Defaults to 0.1.
@@ -287,14 +287,14 @@ class SuperGLM:
             self._config_revision += 1
 
     @property
-    def selection_penalty(self) -> float | None:
+    def selection_penalty(self) -> float | Literal["auto"] | None:
         """Configured selection-penalty intent."""
         return configured_penalty(self).lambda1
 
     @selection_penalty.setter
-    def selection_penalty(self, value: float | None) -> None:
+    def selection_penalty(self, value: float | Literal["auto"] | None) -> None:
         penalty = copy.deepcopy(configured_penalty(self))
-        penalty.lambda1 = value
+        penalty.lambda1 = base.normalize_selection_penalty(value)
         self.penalty = penalty
 
     @property
@@ -500,11 +500,12 @@ class SuperGLM:
     ) -> SuperGLM:
         """Fit with REML estimation of per-term smoothing parameters.
 
-        ``fit_reml()`` is the smoothness-selection path and requires
-        ``selection_penalty=0``. It optimizes a Laplace approximate REML
-        objective over per-term smoothing parameters. If you want sparse/group
-        selection, use ``fit()`` / ``fit_path()`` instead. If you want REML to
-        shrink spline null spaces, use ``select=True`` on the spline terms.
+        ``fit_reml()`` is the smoothness-selection path and does not support a
+        selection penalty: configure ``selection_penalty=None`` or ``0.0``.
+        It optimizes a Laplace approximate REML objective over per-term
+        smoothing parameters. For sparse/group selection, use ``fit()`` or
+        ``fit_path()``. To let REML shrink spline null spaces, use
+        ``select=True`` on the spline terms instead.
 
         Parameters
         ----------
@@ -847,6 +848,7 @@ class SuperGLM:
         fit_mode: str = "fit",
         phi_method: str = "mle",
         method: str = "auto",
+        ci_alpha: float | None = None,
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
@@ -882,6 +884,11 @@ class SuperGLM:
             ``"grid_refine"`` does a coarse grid + local Brent refinement.
             ``"profile_opt"`` uses a general-purpose optimizer on
             logit-transformed p.
+        ci_alpha : float, optional
+            Significance level for an explicitly requested likelihood-ratio
+            profile confidence interval. For example, ``0.05`` computes a 95%
+            interval and caches it for ``model.summary(alpha=0.05)``. The
+            default ``None`` performs no confidence-interval evaluations.
         """
         return profile_ops.estimate_p(
             self,
@@ -892,6 +899,7 @@ class SuperGLM:
             fit_mode=fit_mode,
             phi_method=phi_method,
             method=method,
+            ci_alpha=ci_alpha,
             **kwargs,
         )
 

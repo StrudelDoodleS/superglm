@@ -60,7 +60,7 @@ def test_features_property_returns_a_defensive_copy():
     assert "new" not in model.features
 
 
-def test_auto_selection_penalty_intent_survives_successful_fit():
+def test_disabled_selection_penalty_intent_survives_successful_fit():
     X, y, weights = _poisson_data()
     model = SuperGLM(
         selection_penalty=None,
@@ -70,6 +70,19 @@ def test_auto_selection_penalty_intent_survives_successful_fit():
     model.fit(X, y, sample_weight=weights)
 
     assert model.penalty.lambda1 is None
+    assert model.selection_penalty_ == pytest.approx(0.0)
+
+
+def test_auto_selection_penalty_intent_survives_successful_fit():
+    X, y, weights = _poisson_data()
+    model = SuperGLM(
+        selection_penalty="auto",
+        features={"x": Numeric(), "z": Numeric()},
+    )
+
+    model.fit(X, y, sample_weight=weights)
+
+    assert model.penalty.lambda1 == "auto"
     assert model.selection_penalty_ > 0.0
 
 
