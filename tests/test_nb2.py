@@ -194,6 +194,60 @@ class TestNB2FixedThetaFit:
 
 
 class TestNB2ProfileTheta:
+    @pytest.mark.parametrize(
+        ("selection_penalty", "expected_route"),
+        [
+            pytest.param(None, "direct", id="none-disabled"),
+            pytest.param(0.0, "direct", id="zero-disabled"),
+            pytest.param("auto", "pirls", id="explicit-auto"),
+        ],
+    )
+    def test_profile_resolves_selection_intent_numerically(
+        self,
+        monkeypatch,
+        selection_penalty,
+        expected_route,
+    ):
+        from types import SimpleNamespace
+
+        from superglm.profiling import nb as nb_module
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=selection_penalty,
+            features={"x": Numeric()},
+        )
+        calls = []
+
+        def result_for(dm):
+            return SimpleNamespace(
+                beta=np.zeros(dm.p),
+                intercept=float(np.log(np.mean(y))),
+                n_iter=1,
+                converged=True,
+            )
+
+        def fake_direct(**kwargs):
+            calls.append(("direct", None))
+            return result_for(kwargs["X"]), None
+
+        def fake_pirls(**kwargs):
+            calls.append(("pirls", kwargs["penalty"].lambda1))
+            return result_for(kwargs["X"])
+
+        monkeypatch.setattr(nb_module, "fit_irls_direct", fake_direct)
+        monkeypatch.setattr(nb_module, "fit_pirls", fake_pirls)
+        monkeypatch.setattr(nb_module, "_theta_ml", lambda *args, **kwargs: 1.0)
+
+        estimate_nb_theta(model, X, y, maxiter=1)
+
+        assert calls[0][0] == expected_route
+        if expected_route == "pirls":
+            assert isinstance(calls[0][1], float)
+            assert calls[0][1] > 0.0
+
     def test_recovers_theta(self):
         """Profile estimation recovers theta from synthetic data."""
         rng = np.random.default_rng(42)

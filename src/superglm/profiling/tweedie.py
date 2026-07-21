@@ -4029,8 +4029,9 @@ def _build_profile_context(
     validate_response(y_arr, profile_model._distribution)
 
     penalty = configured_penalty(profile_model)
-    if penalty.lambda1 is None:
-        penalty.lambda1 = profile_model._compute_lambda_max(y_arr, w_arr) * 0.1
+    from superglm.model.base import resolve_selection_penalty_for_fit
+
+    resolve_selection_penalty_for_fit(profile_model, penalty, y_arr, w_arr)
 
     if offset_arr is None:
         offset_arr = np.zeros(len(y_arr))

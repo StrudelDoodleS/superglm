@@ -706,18 +706,16 @@ def _fit_in_workspace(
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
 
     from superglm.model.base import (
-        compute_lambda_max,
         model_build_design_matrix,
         model_has_lambda1_targets,
+        resolve_selection_penalty_for_fit,
     )
 
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
 
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
 
-    # Auto-calibrate lambda1 if not set
-    if penalty.lambda1 is None:
-        penalty.lambda1 = compute_lambda_max(model, y, sample_weight) * 0.1
+    resolve_selection_penalty_for_fit(model, penalty, y, sample_weight)
     has_lambda1_targets = model_has_lambda1_targets(model)
 
     # Invalidate cached properties from previous fit

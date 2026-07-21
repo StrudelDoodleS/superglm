@@ -268,8 +268,7 @@ class TestPenaltyResolution:
         with pytest.raises(ValueError, match="Unknown penalty"):
             SuperGLM(penalty="lasso")
 
-    def test_auto_calibrate(self, sample_data):
-        """selection_penalty=None should auto-calibrate at fit time."""
+    def test_none_disables_selection(self, sample_data):
         X, y, sample_weight = sample_data
         model = SuperGLM(
             selection_penalty=None,
@@ -278,7 +277,63 @@ class TestPenaltyResolution:
         )
         model.fit(X, y, sample_weight=sample_weight)
         assert model.penalty.lambda1 is None
+        assert model.selection_penalty_ == pytest.approx(0.0)
+
+    def test_explicit_auto_calibrates(self, sample_data):
+        X, y, sample_weight = sample_data
+        model = SuperGLM(
+            selection_penalty="auto",
+            splines=["age"],
+            n_knots=10,
+        )
+
+        model.fit(X, y, sample_weight=sample_weight)
+
+        assert model.selection_penalty == "auto"
         assert model.selection_penalty_ > 0
+
+    def test_default_categorical_fit_uses_unpenalized_direct_geometry(self, monkeypatch):
+        from superglm.model import fit_ops
+
+        rng = np.random.default_rng(20260721)
+        n = 240
+        X = pd.DataFrame(
+            {
+                "region": rng.choice(["north", "south", "east", "west"], n),
+                "channel": rng.choice(["direct", "broker", "partner"], n),
+            }
+        )
+        y = rng.poisson(2.0, n).astype(np.float64)
+        direct_calls = []
+        real_direct = fit_ops.fit_irls_direct
+
+        def recording_direct(*args, **kwargs):
+            direct_calls.append(True)
+            return real_direct(*args, **kwargs)
+
+        def unexpected_pirls(*args, **kwargs):
+            raise AssertionError("disabled selection must not dispatch to PIRLS")
+
+        monkeypatch.setattr(fit_ops, "fit_irls_direct", recording_direct)
+        monkeypatch.setattr(fit_ops, "fit_pirls", unexpected_pirls)
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "region": Categorical(base="first"),
+                "channel": Categorical(base="first"),
+            },
+        )
+
+        model.fit(X, y)
+
+        assert direct_calls == [True]
+        assert model.selection_penalty is None
+        assert model.selection_penalty_ == pytest.approx(0.0)
+        assert model.result.rank_info is not None
+        assert model.result.effective_df == pytest.approx(
+            1.0 + model.result.rank_info.data.rank,
+            abs=1e-10,
+        )
 
     def test_string_penalty_features(self):
         model = SuperGLM(penalty="group_lasso", selection_penalty=0.05, penalty_features=["region"])

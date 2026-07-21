@@ -3466,6 +3466,37 @@ class TestProfileFitParity:
         assert captured["convergence"] == "coefficients"
         assert captured["penalty"] is ctx.penalty
 
+    @pytest.mark.parametrize(
+        ("selection_penalty", "expects_auto"),
+        [
+            pytest.param(None, False, id="none-disabled"),
+            pytest.param(0.0, False, id="zero-disabled"),
+            pytest.param("auto", True, id="explicit-auto"),
+        ],
+    )
+    def test_profile_context_resolves_selection_intent_numerically(
+        self,
+        selection_penalty,
+        expects_auto,
+    ):
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 24)})
+        y = np.linspace(0.5, 2.0, len(X))
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=selection_penalty,
+            features={"x": Numeric()},
+        )
+
+        ctx = tweedie_module._build_profile_context(model, X, y, None, None, "pearson", False)
+
+        assert isinstance(ctx.penalty.lambda1, float)
+        if expects_auto:
+            assert ctx.penalty.lambda1 > 0.0
+            assert ctx.use_direct is False
+        else:
+            assert ctx.penalty.lambda1 == pytest.approx(0.0)
+            assert ctx.use_direct is True
+
     def test_direct_profile_forwards_model_controls_and_lambda2(self, monkeypatch):
         X = pd.DataFrame({"x": np.linspace(0.0, 1.0, 12)})
         y = np.linspace(0.5, 2.0, len(X))

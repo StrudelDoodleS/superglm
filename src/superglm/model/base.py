@@ -799,6 +799,19 @@ def compute_lambda_max(model, y, weights):
     return lmax / n
 
 
+def resolve_selection_penalty_for_fit(model, penalty: Penalty, y, weights) -> float:
+    """Resolve one ordinary-fit selection setting on attempt-owned state."""
+    intent = normalize_selection_penalty(penalty.lambda1)
+    if intent == "auto":
+        resolved = float(compute_lambda_max(model, y, weights) * 0.1)
+    elif intent is None:
+        resolved = 0.0
+    else:
+        resolved = float(intent)
+    penalty.lambda1 = resolved
+    return resolved
+
+
 def model_has_lambda1_targets(model) -> bool:
     """Whether the lambda1 penalty applies to any fitted group."""
     return penalty_has_targets(configured_penalty(model), model._groups)
