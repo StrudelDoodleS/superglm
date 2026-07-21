@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.group_matrix import DesignMatrix
-
-if TYPE_CHECKING:
-    import pandas as pd
-
 
 # Diagnostic algebra can keep the dense block, a shifted copy, a weighted copy,
 # and matrix-product workspaces live at the same time.  Budget five row-sized
@@ -51,7 +47,7 @@ def _as_dense_block(values, *, n_rows: int, n_columns: int, term_name: str) -> N
 
 def _exact_runtime_design_block(
     model,
-    X: pd.DataFrame,
+    X: EagerFrame,
     selected_columns: NDArray,
 ) -> NDArray:
     """Evaluate selected frozen prediction-plan columns on one row chunk."""
@@ -72,7 +68,7 @@ def _exact_runtime_design_block(
         ]
         if not projection:
             continue
-        transformed = term["spec"].transform(np.asarray(X[term["name"]]))
+        transformed = term["spec"].transform(X.column_array(term["name"]))
         transformed = _as_dense_block(
             transformed,
             n_rows=len(X),
@@ -94,8 +90,8 @@ def _exact_runtime_design_block(
             continue
         left_name, right_name = term["parent_names"]
         transformed = term["spec"].transform(
-            np.asarray(X[left_name]),
-            np.asarray(X[right_name]),
+            X.column_array(left_name),
+            X.column_array(right_name),
         )
         transformed = _as_dense_block(
             transformed,
@@ -116,11 +112,11 @@ def _exact_runtime_design_block(
 class EvaluationDesign:
     """Lazy exact design on evaluation rows in public fitted coordinates."""
 
-    def __init__(self, model, X: pd.DataFrame, selected_columns: NDArray):
+    def __init__(self, model, X: FrameLike | EagerFrame, selected_columns: NDArray):
         self._model = model
-        self._X = X
+        self._X = as_eager_frame(X)
         self._selected_columns = np.asarray(selected_columns, dtype=np.intp)
-        self.n = len(X)
+        self.n = len(self._X)
         self.p = len(self._selected_columns)
         self.shape = (self.n, self.p)
         self._transform_width = self._selected_transform_width()
@@ -153,7 +149,8 @@ class EvaluationDesign:
     def iter_dense_chunks(self) -> Iterator[tuple[int, int, NDArray]]:
         for start in range(0, self.n, self.chunk_rows):
             stop = min(start + self.chunk_rows, self.n)
-            X_chunk = self._X.iloc[start:stop]
+            rows = np.arange(start, stop, dtype=np.intp)
+            X_chunk = as_eager_frame(self._X.take_rows(rows))
             block = _exact_runtime_design_block(
                 self._model,
                 X_chunk,

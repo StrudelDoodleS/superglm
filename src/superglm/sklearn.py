@@ -6,7 +6,7 @@ Two wrappers are provided:
   Rejects ``family="binomial"``; use the classifier for that.
 - ``SuperGLMClassifier`` — binary classification (Binomial)
 
-Both accept **DataFrame** or **ndarray** input:
+Both accept **pandas DataFrame**, **eager Polars DataFrame**, or **ndarray** input:
 
 - **DataFrame mode** (preferred): feature types are auto-detected from dtype.
   Object/category columns become ``Categorical``, columns in
@@ -24,7 +24,7 @@ to ``"group_lasso"``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,14 @@ from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.utils.validation import check_is_fitted
 
+from superglm._frame import (
+    EagerFrame,
+    FrameLike,
+    _is_polars_lazy_frame,
+    _is_recognized_dataframe,
+    as_eager_frame,
+    is_supported_eager_frame,
+)
 from superglm.distributions import Distribution
 from superglm.model import SuperGLM
 from superglm.penalties.base import Penalty
@@ -88,21 +96,34 @@ def _normalize_X(
     feature_names: list[str] | None,
     resolved_columns: list[str] | None,
     fitting: bool,
-) -> tuple[pd.DataFrame, list[str], bool]:
-    """Convert *X* to a DataFrame.
+) -> tuple[FrameLike, list[str], bool]:
+    """Normalize *X* to a native eager frame.
 
-    Returns ``(dataframe, column_names, synthetic_names)``.
+    Returns ``(frame, column_names, synthetic_names)``.
     *synthetic_names* is True when column names were auto-generated.
     """
-    if isinstance(X, pd.DataFrame):
-        df = X.copy() if fitting else X
-        return df, list(df.columns), False
+    frame = as_eager_frame(X) if isinstance(X, pd.DataFrame) else None
+    if frame is None and not isinstance(X, np.ndarray):
+        # Preserve the established ndarray/sparse route without paying native
+        # dataframe dispatch on every sklearn fit and prediction.
+        import scipy.sparse
 
-    # Densify sparse matrices (e.g. from ColumnTransformer)
-    import scipy.sparse
+        if scipy.sparse.issparse(X):
+            X = X.toarray()
+        elif _is_polars_lazy_frame(X):
+            as_eager_frame(X)  # raises with explicit collection guidance
+        elif not isinstance(X, np.ndarray):
+            if is_supported_eager_frame(X):
+                frame = as_eager_frame(X)
+            elif _is_recognized_dataframe(X):
+                as_eager_frame(X)  # rejects unsupported dataframe backends
 
-    if scipy.sparse.issparse(X):
-        X = X.toarray()
+    if frame is not None:
+        if fitting and frame.backend == "pandas":
+            native = cast(pd.DataFrame, frame.native).copy()
+            frame = as_eager_frame(native)
+        columns = cast(list[str], list(frame.columns))
+        return frame.native, columns, False
 
     arr = np.asarray(X)
     if arr.ndim == 1:
@@ -121,7 +142,7 @@ def _normalize_X(
             cols = [f"x{i}" for i in range(arr.shape[1])]
             synthetic = True
     else:
-        cols = resolved_columns
+        cols = cast(list[str], resolved_columns)
         if arr.shape[1] != len(cols):
             raise ValueError(f"X has {arr.shape[1]} columns but model was fit with {len(cols)}.")
         synthetic = False
@@ -163,7 +184,7 @@ def _resolve_refs(
 
 def _resolve_offset(
     offset_param,
-    X: pd.DataFrame,
+    X: EagerFrame,
     columns: list[str],
     synthetic: bool,
     *,
@@ -180,9 +201,9 @@ def _resolve_offset(
         raw_refs = list(offset_param)
 
     if fitting:
-        resolved = _resolve_refs(raw_refs, columns, synthetic, "offset")
+        resolved = cast(list[str], _resolve_refs(raw_refs, columns, synthetic, "offset"))
     else:
-        resolved = stored_cols
+        resolved = cast(list[str], stored_cols)
 
     missing = [c for c in resolved if c not in X.columns]
     if missing:
@@ -190,7 +211,7 @@ def _resolve_offset(
 
     arr = np.zeros(len(X), dtype=np.float64)
     for c in resolved:
-        arr += np.asarray(X[c], dtype=np.float64)
+        arr += X.column_array(c, dtype=np.float64)
     return arr, resolved
 
 
@@ -306,7 +327,7 @@ def _build_features_or_splines(
     cat_base: str,
     *,
     force_explicit: bool,
-    X_df: pd.DataFrame | None = None,
+    X_frame: EagerFrame | None = None,
 ) -> tuple[dict | None, list[str] | None]:
     """Build an explicit ``features`` dict or fall back to auto-detect.
 
@@ -354,12 +375,19 @@ def _build_features_or_splines(
     # Unspecified columns: auto-detect from dtype when DataFrame is
     # available, otherwise default to Numeric (ndarray mode).
     for name in unspecified:
-        if X_df is not None and X_df[name].dtype.kind in ("O", "S", "U"):
+        if X_frame is not None and X_frame.column_kind(name) == "categorical":
             features[name] = Categorical(base=cat_base)
         else:
             features[name] = Numeric()
 
     return features, None
+
+
+def _select_feature_frame(X: EagerFrame, feature_cols: list[str]) -> FrameLike:
+    """Select model features without losing rows for an intercept-only model."""
+    if not feature_cols:
+        return X.native
+    return X.select_native(tuple(feature_cols))
 
 
 # ── Shared fit / predict helpers ─────────────────────────────────
@@ -391,13 +419,18 @@ def _fit_common(
     )
 
     # ── Normalise inputs ──────────────────────────────────────
-    input_is_dataframe = isinstance(X, pd.DataFrame)
-    X_df, columns, synthetic = _normalize_X(
+    # ndarray is the established sklearn fast path.  Do not make it pay even
+    # the optional-backend probe used to distinguish native named frames.
+    input_is_named_frame = isinstance(X, pd.DataFrame) or (
+        not isinstance(X, np.ndarray) and is_supported_eager_frame(X)
+    )
+    X_native, columns, synthetic = _normalize_X(
         X,
         feature_names=wrapper.feature_names,
         resolved_columns=None,
         fitting=True,
     )
+    X_frame = as_eager_frame(X_native)
     wrapper._resolved_columns_ = columns
     wrapper._synthetic_names_ = synthetic
 
@@ -406,7 +439,7 @@ def _fit_common(
     # Resolve offset
     offset_array, offset_cols = _resolve_offset(
         wrapper.offset,
-        X_df,
+        X_frame,
         columns,
         synthetic,
         fitting=True,
@@ -477,7 +510,7 @@ def _fit_common(
             wrapper.degree,
             cat_base,
             force_explicit=force_explicit,
-            X_df=X_df if input_is_dataframe else None,
+            X_frame=X_frame if input_is_named_frame else None,
         )
 
         model_kwargs = dict(
@@ -494,9 +527,13 @@ def _fit_common(
         else:
             model_kwargs["splines"] = splines_list or []
 
+    if not feature_cols:
+        model_kwargs.pop("splines", None)
+        model_kwargs["features"] = {}
+
     wrapper._model = SuperGLM(**model_kwargs)
     wrapper._model.fit(
-        X_df[feature_cols],
+        _select_feature_frame(X_frame, feature_cols),
         y,
         sample_weight=sample_weight,
         offset=offset_array,
@@ -512,28 +549,29 @@ def _fit_common(
 def _prepare_predict(
     wrapper,
     X,
-) -> tuple[pd.DataFrame, list[str], NDArray | None]:
+) -> tuple[EagerFrame, list[str], NDArray | None]:
     """Normalize X and resolve offset for prediction.
 
-    Returns ``(X_df, feature_cols, offset_array)``.
+    Returns ``(X_frame, feature_cols, offset_array)``.
     """
     check_is_fitted(wrapper)
-    X_df, _, _ = _normalize_X(
+    X_native, _, _ = _normalize_X(
         X,
         feature_names=wrapper.feature_names,
         resolved_columns=wrapper._resolved_columns_,
         fitting=False,
     )
+    X_frame = as_eager_frame(X_native)
     offset_array, _ = _resolve_offset(
         wrapper.offset,
-        X_df,
+        X_frame,
         wrapper._resolved_columns_,
         False,
         fitting=False,
         stored_cols=wrapper._offset_cols_,
     )
     feature_cols = list(wrapper.feature_names_in_)
-    return X_df, feature_cols, offset_array
+    return X_frame, feature_cols, offset_array
 
 
 # ── Regressor ─────────────────────────────────────────────────────
@@ -574,7 +612,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         Columns to treat as numeric (by name or index).
         Unspecified columns default to numeric.
     feature_names : list of str or None
-        Column names for ndarray input.  Ignored for DataFrames.
+        Column names for ndarray input.  Ignored for native DataFrames.
     n_knots : int or list of int
         Interior knots for spline features.
     degree : int
@@ -643,8 +681,11 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def predict(self, X) -> NDArray:
-        X_df, feature_cols, offset_array = _prepare_predict(self, X)
-        return self._model.predict(X_df[feature_cols], offset=offset_array)
+        X_frame, feature_cols, offset_array = _prepare_predict(self, X)
+        return self._model.predict(
+            _select_feature_frame(X_frame, feature_cols),
+            offset=offset_array,
+        )
 
     def diagnostics(self) -> dict[str, Any]:
         check_is_fitted(self)
@@ -755,8 +796,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
 
     def predict_proba(self, X) -> NDArray:
         """Return class probabilities, shape ``(n_samples, 2)``."""
-        X_df, feature_cols, offset_array = _prepare_predict(self, X)
-        p1 = self._model.predict(X_df[feature_cols], offset=offset_array)
+        X_frame, feature_cols, offset_array = _prepare_predict(self, X)
+        p1 = self._model.predict(
+            _select_feature_frame(X_frame, feature_cols),
+            offset=offset_array,
+        )
         return np.column_stack([1 - p1, p1])
 
     def predict(self, X) -> NDArray:
@@ -766,23 +810,25 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
 
     def decision_function(self, X) -> NDArray:
         """Return log-odds (linear predictor)."""
-        X_df, feature_cols, offset_array = _prepare_predict(self, X)
-        X_feat = X_df[feature_cols]
+        X_frame, feature_cols, offset_array = _prepare_predict(self, X)
+        X_frame.require_columns(tuple(feature_cols))
 
         blocks = []
         for name in self._model._feature_order:
             spec = self._model._specs[name]
-            blocks.append(spec.transform(np.asarray(X_feat[name])))
+            blocks.append(spec.transform(X_frame.column_array(name)))
         for iname in self._model._interaction_order:
             ispec = self._model._interaction_specs[iname]
             p1, p2 = ispec.parent_names
             blocks.append(
                 ispec.transform(
-                    np.asarray(X_feat[p1]),
-                    np.asarray(X_feat[p2]),
+                    X_frame.column_array(p1),
+                    X_frame.column_array(p2),
                 )
             )
-        eta = np.hstack(blocks) @ self._model.result.beta + self._model.result.intercept
+        eta = np.full(len(X_frame), self._model.result.intercept, dtype=np.float64)
+        if blocks:
+            eta += np.hstack(blocks) @ self._model.result.beta
         if offset_array is not None:
             eta = eta + offset_array
         return eta

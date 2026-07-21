@@ -17,6 +17,7 @@ from superglm.features.spline import _SplineBase
 from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
 
 if TYPE_CHECKING:
+    from superglm._frame import FrameLike
     from superglm.editor.session import EditableTerm
     from superglm.types import GroupSlice
 
@@ -65,7 +66,7 @@ def apply_edits_to_model_copy_with_data(
     model,
     terms: dict[str, EditableTerm],
     *,
-    X=None,
+    X: FrameLike | None = None,
     y=None,
     sample_weight=None,
     offset=None,
@@ -351,7 +352,7 @@ def _invalidate_model_caches(model, *, keep_inference: bool = False) -> None:
 def _refresh_fit_statistics(
     model,
     *,
-    X=None,
+    X: FrameLike | None = None,
     y=None,
     sample_weight=None,
     offset=None,

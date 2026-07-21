@@ -569,6 +569,77 @@ def test_execution_plan_auto_rejects_additional_categorical_block(
     assert calls == {"sandwich": 0, "transpose_matvec": 0}
 
 
+def _ordinary_partition_case(case: str):
+    n = 49_999 if case == "row-threshold" else 50_000
+    dense_width = 2 if case == "dense-width" else 3
+    dense = DenseGroupMatrix(np.zeros((n, dense_width), dtype=np.float64))
+    category_levels = 100 if case == "low-cardinality" else 120
+    categorical = CategoricalGroupMatrix(np.zeros(n, dtype=np.intp), category_levels)
+    groups = [dense, categorical]
+    policy = None
+    expected = frozenset()
+
+    if case == "policy-disabled":
+        policy = False
+    elif case == "policy-forced":
+        policy = True
+        compressed = DiscretizedSSPGroupMatrix(
+            np.zeros((4, 3)),
+            np.zeros((3, 2)),
+            np.zeros(n, dtype=np.intp),
+        )
+        groups.append(compressed)
+        expected = frozenset({0, 1})
+    elif case == "contains-compressed-group":
+        groups.append(
+            DiscretizedSSPGroupMatrix(
+                np.zeros((4, 3)),
+                np.zeros((3, 2)),
+                np.zeros(n, dtype=np.intp),
+            )
+        )
+    elif case == "no-categorical":
+        groups = [dense]
+    elif case == "multiple-categoricals":
+        groups.append(CategoricalGroupMatrix(np.zeros(n, dtype=np.intp), 140))
+    elif case == "contains-sparse-group":
+        groups.append(SparseGroupMatrix(sp.csr_matrix((n, 1))))
+    elif case == "auto-certified":
+        expected = frozenset({0, 1})
+
+    return groups, n, policy, expected
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("policy-disabled", "policy-disabled"),
+        ("policy-forced", "policy-forced"),
+        ("contains-compressed-group", "contains-compressed-group"),
+        ("no-categorical", "categorical-layout"),
+        ("multiple-categoricals", "categorical-layout"),
+        ("low-cardinality", "categorical-layout"),
+        ("dense-width", "dense-width"),
+        ("contains-sparse-group", "contains-sparse-group"),
+        ("row-threshold", "row-threshold"),
+        ("auto-certified", "auto-certified"),
+    ],
+)
+def test_ordinary_partition_reason_is_stable_and_does_not_build_split(case, reason):
+    groups, n, policy, expected = _ordinary_partition_case(case)
+    plan = MatrixExecutionPlan(groups, n=n, ordinary_tabmat=policy)
+
+    assert plan._ordinary_split_built is False
+    assert plan.ordinary_indices == tuple(sorted(expected))
+    assert plan.ordinary_partition_reason == reason
+    assert plan._ordinary_indices == expected
+    assert plan._ordinary_split_built is False
+    with pytest.raises(AttributeError):
+        plan.ordinary_indices = ()
+    with pytest.raises(AttributeError):
+        plan.ordinary_partition_reason = "changed"
+
+
 def test_design_matrix_caches_one_immutable_execution_plan() -> None:
     _rng, groups, X = _mixed_groups(seed=172)
     dm = DesignMatrix(groups, n=X.shape[0], p=X.shape[1])

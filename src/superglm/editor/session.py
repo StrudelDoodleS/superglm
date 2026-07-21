@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._frame import as_eager_frame
 from superglm.editor import apply, persistence
 from superglm.editor._types import EditableTerm, EditRecord
 from superglm.editor.collapse import (
@@ -646,12 +647,14 @@ class EditorSession:
         """
         names = self._resolve_offset_terms(terms)
         X_ref = self._resolve_offset_frame(X)
-        n = len(X_ref)
+        frame = as_eager_frame(X_ref)
+        for name in names:
+            if name not in frame.columns:
+                raise KeyError(f"Offset data is missing column {name!r}.")
+        n = len(frame)
         offset = np.zeros(n, dtype=np.float64)
         for name in names:
-            if name not in X_ref:
-                raise KeyError(f"Offset data is missing column {name!r}.")
-            offset += term_offset_values(self.terms[name], X_ref[name])
+            offset += term_offset_values(self.terms[name], frame.column_array(name))
         return offset
 
     def edited_offset_factor(

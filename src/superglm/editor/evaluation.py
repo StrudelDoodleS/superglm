@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from superglm._frame import as_eager_frame
+
 _SPLIT_LABELS = {
     "train": "Train",
     "validation": "Validation",
@@ -28,7 +30,7 @@ class EvaluationDataset:
 
     @property
     def n_obs(self) -> int:
-        return int(np.asarray(self.y).shape[0])
+        return len(self.X)
 
 
 def coerce_evaluation_data(
@@ -63,7 +65,8 @@ def coerce_dataset(name: str, data) -> EvaluationDataset | None:
     sample_weight = data[2] if len(data) >= 3 else None
     offset = data[3] if len(data) == 4 else None
     n_obs = int(np.asarray(y).shape[0])
-    if len(X) != n_obs:
+    frame = as_eager_frame(X)
+    if len(frame) != n_obs:
         raise ValueError(f"{name}_data X and y lengths differ.")
     if sample_weight is not None and len(sample_weight) != n_obs:
         raise ValueError(f"{name}_data sample_weight length differs from y.")
@@ -72,7 +75,7 @@ def coerce_dataset(name: str, data) -> EvaluationDataset | None:
     return EvaluationDataset(
         name=name,
         label=_SPLIT_LABELS.get(name, name.title()),
-        X=X,
+        X=frame.native,
         y=y,
         sample_weight=sample_weight,
         offset=offset,

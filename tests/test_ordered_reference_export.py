@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 from superglm import OrderedCategorical, Spline, SuperGLM
 from superglm.export.rating_tables import build_rating_table_payload
@@ -69,6 +70,41 @@ def test_rating_payload_reference_factorization_matches_predictions():
     np.testing.assert_allclose(
         factored_predictions,
         model.predict(combinations),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_polars_rating_payload_preserves_ordered_reference_factorization():
+    model, X, y, combinations = _fit_two_ordered_splines()
+    X_polars = pl.DataFrame({name: X[name].to_numpy() for name in X.columns})
+    combinations_polars = pl.DataFrame(
+        {name: combinations[name].to_numpy() for name in combinations.columns}
+    )
+
+    pandas_payload = build_rating_table_payload(model, X, y, impact_bins=())
+    polars_payload = build_rating_table_payload(model, X_polars, y, impact_bins=())
+    age_relativities = _block_relativities(polars_payload, "age_band")
+    score_relativities = _block_relativities(polars_payload, "score_band")
+    factored_predictions = np.array(
+        [
+            polars_payload.base_relativity
+            * age_relativities[row.age_band]
+            * score_relativities[row.score_band]
+            for row in combinations.itertuples(index=False)
+        ]
+    )
+
+    assert polars_payload.base_relativity == pandas_payload.base_relativity
+    for polars_block, pandas_block in zip(
+        polars_payload.main_effects,
+        pandas_payload.main_effects,
+        strict=True,
+    ):
+        pd.testing.assert_frame_equal(polars_block.table, pandas_block.table)
+    np.testing.assert_allclose(
+        factored_predictions,
+        model.predict(combinations_polars),
         rtol=1e-10,
         atol=1e-12,
     )

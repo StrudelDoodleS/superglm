@@ -25,6 +25,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import digamma, gammaln, polygamma
 
+from superglm._frame import as_eager_frame
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.fit_state import (
@@ -366,7 +367,7 @@ def estimate_nb_theta(
     model : SuperGLM
         A configured but *unfitted* model with features already added.
         Must have a NegativeBinomial family (e.g. ``families.nb2(theta=1.0)``).
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix.
     y : array-like
         Response variable (counts).
@@ -390,6 +391,8 @@ def estimate_nb_theta(
     NBProfileResult
     """
     from superglm.distributions import NegativeBinomial
+
+    X = as_eager_frame(X)
 
     # Validate family
     family = configured_family(model)

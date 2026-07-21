@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.validation import _normalized_gini
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class CrossValidationResult:
 
     def plot_terms_by_fold(
         self,
-        X: pd.DataFrame,
+        X: FrameLike,
         *,
         sample_weight: NDArray | None = None,
         terms: str | list[str] | None = None,
@@ -74,6 +75,7 @@ class CrossValidationResult:
         }
         if not models:
             raise RuntimeError("No fitted fold estimators are available to plot.")
+        frame = as_eager_frame(X)
         support_by_label: dict[str, dict[str, Any]] = {}
         weight_arr = None if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
         for fold, indices in enumerate(self.fold_indices or []):
@@ -82,7 +84,7 @@ class CrossValidationResult:
                 continue
             train_idx, _test_idx = indices
             support_by_label[label] = {
-                "X": X.iloc[train_idx],
+                "X": frame.take_rows(train_idx),
                 "sample_weight": None if weight_arr is None else weight_arr[train_idx],
             }
 
@@ -212,7 +214,7 @@ def _resolve_scorers(
 
 def cross_validate(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     *,
     cv,
@@ -232,7 +234,7 @@ def cross_validate(
     model : SuperGLM
         An unfitted (or fitted) model. A fresh clone is created for each fold;
         the input model is never mutated.
-    X : DataFrame
+    X : pandas or eager Polars DataFrame
         Feature matrix.
     y : array-like
         Response variable.
@@ -272,6 +274,7 @@ def cross_validate(
 
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
+    frame = as_eager_frame(X)
 
     if sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -315,8 +318,8 @@ def cross_validate(
         }
 
         # Slice data
-        X_train = X.iloc[train_idx]
-        X_test = X.iloc[test_idx]
+        X_train = frame.take_rows(train_idx)
+        X_test = frame.take_rows(test_idx)
         y_train = y[train_idx]
         y_test = y[test_idx]
         sw_train = sample_weight[train_idx] if sample_weight is not None else None

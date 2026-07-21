@@ -323,7 +323,7 @@ def plot_diagnostics(
     ----------
     model : SuperGLM
         A fitted SuperGLM model.
-    X : pd.DataFrame
+    X : pandas or eager Polars DataFrame
         Design matrix.
     y : NDArray
         Response vector.

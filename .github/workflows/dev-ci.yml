@@ -33,54 +33,7 @@ jobs:
         continue-on-error: true
         run: uv run ty check src/superglm --output-format github
 
-  quick-check:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: "24"
-          cache: npm
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
-
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Install dependencies
-        run: uv sync --extra dev
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Check frontend modules
-        run: npm run check:frontend
-
-      - name: Ruff check
-        run: uv run ruff check src/ tests/
-
-      - name: Ruff format check
-        run: uv run ruff format --check src/ tests/
-
-      - name: Fast tests
-        run: uv run --with pyarrow pytest tests/ -q -m "not slow and not browser" --maxfail=1
-
-      - name: Install Chromium
-        run: uv run playwright install --with-deps chromium
-
-      - name: Legacy browser tests
-        run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q
-
-      - name: Workspace browser tests
-        run: uv run pytest tests/editor/ -m browser --run-browser -q
-
-      - name: Docs build check
-        run: uv sync --group docs --extra plotting && uv run mkdocs build --strict
-
-  py314-full:
+  quality:
     runs-on: ubuntu-latest
 
     steps:
@@ -95,5 +48,101 @@ jobs:
       - name: Install dependencies
         run: uv sync --python 3.14 --extra dev
 
-      - name: Full tests (3.14)
-        run: uv run pytest tests/ -q -m "not browser" --maxfail=1
+      - name: Ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/
+
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install documentation dependencies
+        run: uv sync --python 3.14 --group docs --extra plotting
+
+      - name: Docs build check
+        run: uv run mkdocs build --strict
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check frontend modules
+        run: npm run check:frontend
+
+  browser:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --python 3.14 --extra dev
+
+      - name: Install Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Legacy browser tests
+        run: uv run pytest tests/test_editor_browser.py -m browser --run-browser -q
+
+      - name: Workspace browser tests
+        run: uv run pytest tests/editor/ -m browser --run-browser -q
+
+  pytest-314:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: 1
+            label: Python 3.14 · non-browser regression suite · balanced A
+          - group: 2
+            label: Python 3.14 · non-browser regression suite · balanced B
+          - group: 3
+            label: Python 3.14 · non-browser regression suite · balanced C
+          - group: 4
+            label: Python 3.14 · non-browser regression suite · balanced D
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --python 3.14 --extra dev
+
+      - name: Run ${{ matrix.label }}
+        run: >-
+          uv run --with pyarrow pytest tests/ -q -m "not browser" --maxfail=1
+          --splits 4 --group ${{ matrix.group }}
+          --splitting-algorithm least_duration

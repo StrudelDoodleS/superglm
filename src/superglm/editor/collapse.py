@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
@@ -37,6 +38,9 @@ def collapsed_feature_spec(
             f"Collapse levels is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="collapse levels")
+    frame = as_eager_frame(X)
+    frame.require_columns((term.name,))
+    values = frame.column_array(term.name)
 
     idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
     if idx.min() < 0 or idx.max() >= len(term.levels):
@@ -76,7 +80,7 @@ def collapsed_feature_spec(
     grouping = _collapse_grouping(
         spec,
         term,
-        X[term.name],
+        values,
         selected_levels=selected_levels,
         group_label=label,
     )
@@ -88,7 +92,7 @@ def collapsed_feature_spec(
             grouping,
             selected_levels,
             base,
-            X[term.name],
+            values,
         )
     else:
         replacement = Categorical(
@@ -123,6 +127,9 @@ def ungrouped_feature_spec(
             f"Ungroup levels is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="ungroup levels")
+    frame = as_eager_frame(X)
+    frame.require_columns((term.name,))
+    values = frame.column_array(term.name)
     existing = getattr(spec, "_grouping", None)
     if existing is None:
         raise ValueError(f"Term {term.name!r} does not have collapsed levels.")
@@ -136,7 +143,7 @@ def ungrouped_feature_spec(
     grouping = _ungroup_grouping(
         spec,
         term,
-        X[term.name],
+        values,
         selected_levels=selected_levels,
     )
     replacement_grouping = None if _is_identity_grouping(grouping) else grouping
@@ -148,7 +155,7 @@ def ungrouped_feature_spec(
             replacement_grouping,
             selected_levels,
             base,
-            X[term.name],
+            values,
         )
     else:
         replacement = Categorical(base=base, grouping=replacement_grouping)

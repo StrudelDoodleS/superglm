@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame
 from superglm.inference.term import SmoothCurve, TermInference
 from superglm.plotting.common import _exposure_kde, _kde_2d
 from superglm.plotting.interactions import _highest_density_mass_field, _reconstruct_interaction
@@ -17,7 +18,7 @@ def build_main_effect_plot_data(
     model,
     terms: list[TermInference],
     *,
-    X: pd.DataFrame | None = None,
+    X: EagerFrame | None = None,
     sample_weight: NDArray | None = None,
     show_density: bool = True,
     show_knots: bool = False,
@@ -47,7 +48,7 @@ def build_interaction_plot_data(
     name: str,
     *,
     n_points: int = 200,
-    X: pd.DataFrame | None = None,
+    X: EagerFrame | None = None,
     sample_weight: NDArray | None = None,
 ) -> dict[str, Any]:
     """Return plot-ready data payload for one interaction."""
@@ -115,7 +116,7 @@ def _build_single_main_effect_payload(
     model,
     ti: TermInference,
     *,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
     show_density: bool,
     show_knots: bool,
@@ -165,9 +166,7 @@ def _build_single_main_effect_payload(
     return payload
 
 
-def _normalize_sample_weight(
-    X: pd.DataFrame | None, sample_weight: NDArray | None
-) -> NDArray | None:
+def _normalize_sample_weight(X: EagerFrame | None, sample_weight: NDArray | None) -> NDArray | None:
     if X is not None and sample_weight is None:
         return np.ones(len(X), dtype=np.float64)
     if sample_weight is None:
@@ -193,7 +192,7 @@ def _smooth_curve_dataframe(curve: SmoothCurve | None) -> pd.DataFrame | None:
 
 def _main_effect_density_dataframe(
     ti: TermInference,
-    X: pd.DataFrame | None,
+    X: EagerFrame | None,
     sample_weight: NDArray | None,
 ) -> pd.DataFrame | None:
     if X is None or sample_weight is None or ti.name not in X.columns:
@@ -201,19 +200,24 @@ def _main_effect_density_dataframe(
 
     if ti.kind in ("spline", "polynomial"):
         x_grid = np.asarray(ti.x, dtype=np.float64)
-        x_vals = X[ti.name].to_numpy(dtype=np.float64)
+        x_vals = X.column_array(ti.name, dtype=np.float64)
         density = _exposure_kde(x_vals, sample_weight, x_grid)
         return pd.DataFrame({"x": x_grid, "density": density})
 
     if ti.kind == "numeric":
-        x_vals = X[ti.name].to_numpy(dtype=np.float64)
+        x_vals = X.column_array(ti.name, dtype=np.float64)
         x_grid = np.linspace(float(x_vals.min()), float(x_vals.max()), 200)
         density = _exposure_kde(x_vals, sample_weight, x_grid)
         return pd.DataFrame({"x": x_grid, "density": density})
 
     levels = list(ti.levels)
     exp = (
-        pd.DataFrame({"level": X[ti.name].astype(str), "sample_weight": sample_weight})
+        pd.DataFrame(
+            {
+                "level": pd.Series(X.column_array(ti.name), name=ti.name).astype(str),
+                "sample_weight": sample_weight,
+            }
+        )
         .groupby("level", sort=False)["sample_weight"]
         .sum()
     )
@@ -398,7 +402,7 @@ def _numeric_interaction_dataframe(
 
 
 def _surface_density_dataframe(
-    X: pd.DataFrame,
+    X: EagerFrame,
     sample_weight: NDArray,
     parent_names: tuple[str, str],
     x1: NDArray,
@@ -408,13 +412,13 @@ def _surface_density_dataframe(
     if (
         p0 not in X.columns
         or p1 not in X.columns
-        or not pd.api.types.is_numeric_dtype(X[p0])
-        or not pd.api.types.is_numeric_dtype(X[p1])
+        or X.column_kind(p0) != "numeric"
+        or X.column_kind(p1) != "numeric"
     ):
         return None
 
-    d1 = np.asarray(X[p0], dtype=np.float64)
-    d2 = np.asarray(X[p1], dtype=np.float64)
+    d1 = X.column_array(p0, dtype=np.float64)
+    d2 = X.column_array(p1, dtype=np.float64)
     density = _kde_2d(d1, d2, sample_weight, x1, x2)
     mass_field = _highest_density_mass_field(density)
     X1, X2 = np.meshgrid(x1, x2)

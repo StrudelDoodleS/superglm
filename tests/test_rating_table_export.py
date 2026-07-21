@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
@@ -132,6 +133,46 @@ def _table_records(ws, table_name: str) -> list[dict[str, object]]:
         }
         for row in range(min_row + 1, max_row + 1)
     ]
+
+
+def _to_polars(frame: pd.DataFrame) -> pl.DataFrame:
+    return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
+
+
+def _assert_rating_payload_equal(
+    actual: RatingTablePayload,
+    expected: RatingTablePayload,
+) -> None:
+    assert actual.base_relativity == pytest.approx(expected.base_relativity)
+    assert actual.selected_n_bins == expected.selected_n_bins
+    assert [(block.name, block.kind) for block in actual.main_effects] == [
+        (block.name, block.kind) for block in expected.main_effects
+    ]
+    for actual_block, expected_block in zip(
+        actual.main_effects,
+        expected.main_effects,
+        strict=True,
+    ):
+        pd.testing.assert_frame_equal(actual_block.table, expected_block.table)
+    assert [block.name for block in actual.interactions] == [
+        block.name for block in expected.interactions
+    ]
+    for actual_block, expected_block in zip(
+        actual.interactions,
+        expected.interactions,
+        strict=True,
+    ):
+        pd.testing.assert_frame_equal(actual_block.table, expected_block.table)
+    pd.testing.assert_frame_equal(actual.discretization_impact, expected.discretization_impact)
+    assert actual.summary == expected.summary
+
+
+def _workbook_values(path) -> dict[str, list[tuple[object, ...]]]:
+    workbook = load_workbook(path, data_only=True)
+    return {
+        sheet_name: [tuple(cell.value for cell in row) for row in workbook[sheet_name].iter_rows()]
+        for sheet_name in workbook.sheetnames
+    }
 
 
 def _fit_ordered_export_model():
@@ -463,6 +504,124 @@ def test_public_export_api_exists(tmp_path):
     assert result_path == output
     assert output.exists()
     assert method_path.exists()
+
+
+def test_polars_rating_payload_and_workbook_match_pandas(tmp_path, monkeypatch):
+    _, X, y, w = _fit_export_model()
+    X = X.assign(segment=np.where(X["score"].to_numpy() >= 0.0, "high", "low"))
+    interaction_model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "age": Spline(n_knots=8),
+            "region": Categorical(base="first"),
+            "score": Numeric(),
+            "segment": Categorical(base="first"),
+        },
+        interactions=[("region", "segment")],
+    ).fit(X, y, sample_weight=w)
+    X_polars = _to_polars(X)
+    expected = build_rating_table_payload(
+        interaction_model,
+        X,
+        y,
+        sample_weight=w,
+        n_bins=24,
+        impact_bins=(20,),
+    )
+
+    def unexpected_whole_frame_conversion(*_args, **_kwargs):
+        pytest.fail("rating-table export converted the whole Polars frame")
+
+    monkeypatch.setattr(pl.DataFrame, "to_pandas", unexpected_whole_frame_conversion)
+    actual = interaction_model.rating_table_payload(
+        X_polars,
+        y,
+        sample_weight=w,
+        n_bins=24,
+        impact_bins=(20,),
+    )
+
+    _assert_rating_payload_equal(actual, expected)
+    assert actual.interactions
+    pandas_path = tmp_path / "pandas-rating.xlsx"
+    polars_path = tmp_path / "polars-rating.xlsx"
+    export_rating_tables(
+        interaction_model,
+        pandas_path,
+        X,
+        y,
+        sample_weight=w,
+        n_bins=24,
+        impact_bins=(20,),
+    )
+    interaction_model.export_rating_tables(
+        polars_path,
+        X_polars,
+        y,
+        sample_weight=w,
+        n_bins=24,
+        impact_bins=(20,),
+    )
+    assert _workbook_values(polars_path) == _workbook_values(pandas_path)
+
+
+def test_polars_rating_payload_preserves_fitted_offset_and_source_column():
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+    X_with_source = X.assign(term_months=term)
+    X_polars = _to_polars(X_with_source)
+    expected = build_rating_table_payload(
+        model,
+        X_with_source,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source="term_months",
+        impact_bins=(),
+    )
+
+    actual = build_rating_table_payload(
+        model,
+        X_polars,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source="term_months",
+        impact_bins=(),
+    )
+
+    _assert_rating_payload_equal(actual, expected)
+    offset_block = next(block for block in actual.main_effects if block.name == "term_months")
+    assert offset_block.table.columns.tolist() == ["term_months", "Relativity", "Weight"]
+
+
+def test_polars_fitted_frame_resolves_retained_offset_by_identity():
+    pandas_model, X, y, w, _term, offset = _fit_term_offset_export_model()
+    X_polars = _to_polars(X)
+    polars_model = pandas_model.clone_unfitted().fit(
+        X_polars,
+        y,
+        sample_weight=w,
+        offset=offset,
+    )
+
+    expected = build_rating_table_payload(
+        pandas_model,
+        X,
+        y,
+        sample_weight=w,
+        impact_bins=(),
+    )
+    actual = build_rating_table_payload(
+        polars_model,
+        X_polars,
+        y,
+        sample_weight=w,
+        impact_bins=(),
+    )
+
+    assert polars_model._fit_X_ref is X_polars
+    _assert_rating_payload_equal(actual, expected)
 
 
 def test_default_selected_bins_are_150():

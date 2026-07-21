@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 from superglm import Categorical, Spline, SuperGLM
 
@@ -92,3 +93,36 @@ def test_build_cv_curve_similarity_returns_both_scales_for_all_comparable_terms(
     assert "response" in similarity["x"]["pairwise"]
     assert "link" in similarity["x"]["pairwise"]
     assert len(similarity["x"]["domain"]["x"]) == 51
+
+
+def test_build_cv_curve_similarity_accepts_polars_without_converting_fold_models():
+    from superglm._frame import as_eager_frame
+    from superglm.plotting.curve_similarity import build_cv_curve_similarity
+
+    rng = np.random.default_rng(8)
+    n = 120
+    x = rng.uniform(0, 10, n)
+    band = rng.choice(["A", "B", "C"], n)
+    w = rng.uniform(0.5, 1.2, n)
+    y = rng.poisson(np.exp(-1.0 + 0.15 * np.sin(x) + 0.1 * (band == "C")) * w).astype(float)
+    X = pl.DataFrame({"x": x, "band": band})
+    frame = as_eager_frame(X)
+
+    models = []
+    for seed in [1, 2, 3]:
+        idx = np.random.default_rng(seed).choice(n, size=int(0.8 * n), replace=False)
+        model = SuperGLM(
+            features={
+                "x": Spline(n_knots=6),
+                "band": Categorical(base="first"),
+            }
+        )
+        model.fit(frame.take_rows(idx), y[idx], sample_weight=w[idx])
+        models.append(model)
+
+    similarity = build_cv_curve_similarity(models=models, X=X, sample_weight=w, n_points=41)
+
+    assert set(similarity) == {"x", "band"}
+    assert len(similarity["x"]["domain"]["x"]) == 41
+    assert similarity["band"]["domain"]["levels"] == list(dict.fromkeys(band))
+    assert all(isinstance(model._fit_X_ref, pl.DataFrame) for model in models)

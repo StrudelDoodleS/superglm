@@ -59,6 +59,27 @@ model = SuperGLM(
 model.fit_reml(df, y, sample_weight=exposure)
 ```
 
+## Eager Polars Input
+
+The same named-frame API accepts eager Polars frames. Install Polars separately
+and collect a `LazyFrame` before passing it to SuperGLM.
+
+```python
+import polars as pl
+
+from superglm import SuperGLM
+
+X = pl.DataFrame({"age": [20.0, 30.0, 40.0], "region": ["N", "S", "N"]})
+y = [0.0, 1.0, 2.0]
+
+model = SuperGLM(family="poisson", splines=["age"]).fit(X, y)
+predictions = model.predict(X)
+```
+
+Input storage remains Polars through fitting and prediction. Public tabular
+results such as inference tables, diagnostics, plot data, and rating-table
+payloads remain pandas DataFrames.
+
 ## Sparse Screening Or Fixed-Penalty Fitting
 
 If your goal is sparse screening or compression rather than GAM-style REML

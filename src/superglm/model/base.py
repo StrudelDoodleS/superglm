@@ -7,9 +7,9 @@ import logging
 from typing import Any
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributions import Distribution, clip_mu
 from superglm.dm_builder import (
     add_interaction,
@@ -111,27 +111,32 @@ def _compile_feature_fast_discrete_metadata(
     model,
     name: str,
     spec: FeatureSpec,
+    frame: EagerFrame | None,
 ) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized main-effect fast predictor."""
     if not should_discretize(spec, model._discrete):
         return None
-    if model._fit_X_ref is None:
+    if frame is None:
         return None
     n_bins = resolve_discrete_n_bins(name, spec, model._n_bins)
     return {
         "kind": "feature",
         "discretizer": _fit_discretizer_metadata(
-            np.asarray(model._fit_X_ref[name], dtype=np.float64),
+            frame.column_array(name, dtype=np.float64),
             n_bins,
         ),
     }
 
 
-def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, Any] | None:
+def _compile_interaction_fast_discrete_metadata(
+    model,
+    spec: Any,
+    frame: EagerFrame | None,
+) -> dict[str, Any] | None:
     """Compile fit-time metadata for a discretized tensor fast predictor."""
     if not should_discretize_tensor_interaction(spec, model._specs, model._discrete):
         return None
-    if model._fit_X_ref is None:
+    if frame is None:
         return None
     left_name, right_name = spec.parent_names
     left_bins = resolve_discrete_n_bins(left_name, model._specs[left_name], model._n_bins)
@@ -139,11 +144,11 @@ def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, A
     return {
         "kind": "interaction",
         "left_discretizer": _fit_discretizer_metadata(
-            np.asarray(model._fit_X_ref[left_name], dtype=np.float64),
+            frame.column_array(left_name, dtype=np.float64),
             left_bins,
         ),
         "right_discretizer": _fit_discretizer_metadata(
-            np.asarray(model._fit_X_ref[right_name], dtype=np.float64),
+            frame.column_array(right_name, dtype=np.float64),
             right_bins,
         ),
         "left_marginal": copy.deepcopy(spec._marginal1),
@@ -154,13 +159,37 @@ def _compile_interaction_fast_discrete_metadata(model, spec: Any) -> dict[str, A
 
 def _compile_fast_prediction_state(model) -> dict[str, dict[str, dict[str, Any] | None]]:
     """Freeze fit-time fast prediction metadata on the model."""
+    needs_fit_frame = any(
+        should_discretize(model._specs[name], model._discrete) for name in model._feature_order
+    ) or any(
+        should_discretize_tensor_interaction(
+            model._interaction_specs[name],
+            model._specs,
+            model._discrete,
+        )
+        for name in model._interaction_order
+    )
+    fit_frame = (
+        as_eager_frame(model._fit_X_ref)
+        if needs_fit_frame and model._fit_X_ref is not None
+        else None
+    )
     return {
         "features": {
-            name: _compile_feature_fast_discrete_metadata(model, name, model._specs[name])
+            name: _compile_feature_fast_discrete_metadata(
+                model,
+                name,
+                model._specs[name],
+                fit_frame,
+            )
             for name in model._feature_order
         },
         "interactions": {
-            name: _compile_interaction_fast_discrete_metadata(model, model._interaction_specs[name])
+            name: _compile_interaction_fast_discrete_metadata(
+                model,
+                model._interaction_specs[name],
+                fit_frame,
+            )
             for name in model._interaction_order
         },
     }
@@ -240,12 +269,12 @@ def freeze_prediction_plan(model) -> None:
 
 def _score_feature_fast_discrete(
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta: NDArray,
 ) -> NDArray[np.floating]:
     """Approximate one canonical main-effect term via discretized support points."""
     support, bin_idx = _discretize_against_fit_metadata(
-        np.asarray(X[term["name"]], dtype=np.float64),
+        X.column_array(term["name"], dtype=np.float64),
         term["fast_discrete"]["discretizer"],
     )
     values = _score_feature(term["spec"], support, beta)
@@ -255,7 +284,7 @@ def _score_feature_fast_discrete(
 def _score_interaction_fast_discrete(
     model,
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta: NDArray,
 ) -> NDArray[np.floating]:
     """Approximate one canonical tensor term via discretized support pairs."""
@@ -263,11 +292,11 @@ def _score_interaction_fast_discrete(
     metadata = term["fast_discrete"]
     left_name, right_name = term["parent_names"]
     left_support, idx1 = _discretize_against_fit_metadata(
-        np.asarray(X[left_name], dtype=np.float64),
+        X.column_array(left_name, dtype=np.float64),
         metadata["left_discretizer"],
     )
     right_support, idx2 = _discretize_against_fit_metadata(
-        np.asarray(X[right_name], dtype=np.float64),
+        X.column_array(right_name, dtype=np.float64),
         metadata["right_discretizer"],
     )
     B1_unique = np.asarray(
@@ -301,19 +330,19 @@ def _score_interaction_fast_discrete(
 
 def _score_prediction_term_exact(
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta_all: NDArray,
 ) -> NDArray[np.floating]:
     """Score one canonical term exactly on the requested rows."""
     beta = beta_all[term["beta_idx"]]
     if term["kind"] == "feature":
-        return _score_feature(term["spec"], np.asarray(X[term["name"]]), beta)
+        return _score_feature(term["spec"], X.column_array(term["name"]), beta)
 
     left_name, right_name = term["parent_names"]
     return _score_interaction(
         term["spec"],
-        np.asarray(X[left_name]),
-        np.asarray(X[right_name]),
+        X.column_array(left_name),
+        X.column_array(right_name),
         beta,
     )
 
@@ -321,7 +350,7 @@ def _score_prediction_term_exact(
 def _score_prediction_term_fast_discrete(
     model,
     term: dict[str, Any],
-    X: pd.DataFrame,
+    X: EagerFrame,
     beta_all: NDArray,
 ) -> NDArray[np.floating]:
     """Score one canonical term via the fast discrete approximation when available."""
@@ -336,29 +365,37 @@ def _score_prediction_term_fast_discrete(
 
 def _predict_eta(
     model,
-    X: pd.DataFrame,
+    X,
     offset: NDArray | None,
     *,
     fast_discrete: bool,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor on exact or fast-discrete blocks."""
+    frame = as_eager_frame(X)
     plan = _prediction_plan(model)
+    required_columns = tuple(
+        dict.fromkeys(
+            [term["name"] for term in plan["features"]]
+            + [parent for term in plan["interactions"] for parent in term["parent_names"]]
+        )
+    )
+    frame.require_columns(required_columns)
     beta_all = model.result.beta
-    eta = np.full(len(X), model.result.intercept, dtype=np.float64)
+    eta = np.full(len(frame), model.result.intercept, dtype=np.float64)
 
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
 
     for term in plan["features"]:
         if fast_discrete:
-            eta += scorer(model, term, X, beta_all)
+            eta += scorer(model, term, frame, beta_all)
         else:
-            eta += scorer(term, X, beta_all)
+            eta += scorer(term, frame, beta_all)
 
     for term in plan["interactions"]:
         if fast_discrete:
-            eta += scorer(model, term, X, beta_all)
+            eta += scorer(model, term, frame, beta_all)
         else:
-            eta += scorer(term, X, beta_all)
+            eta += scorer(term, frame, beta_all)
 
     if offset is not None:
         eta = eta + np.asarray(offset, dtype=np.float64)
@@ -366,7 +403,9 @@ def _predict_eta(
 
 
 def predict_eta_exact(
-    model, X: pd.DataFrame, offset: NDArray | None = None
+    model,
+    X: EagerFrame | FrameLike,
+    offset: NDArray | None = None,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the exact canonical contract."""
     return _predict_eta(model, X, offset, fast_discrete=False)
@@ -374,7 +413,7 @@ def predict_eta_exact(
 
 def predict_eta_fast_discrete(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     offset: NDArray | None = None,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the fast discrete contract."""
@@ -386,12 +425,12 @@ def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
     return clip_mu(model._link.inverse(eta), model._distribution)
 
 
-def predict_exact(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+def predict_exact(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean through the exact canonical contract."""
     return _eta_to_mu(model, predict_eta_exact(model, X, offset))
 
 
-def predict_fast_discrete(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+def predict_fast_discrete(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean through the fast discrete contract."""
     return _eta_to_mu(model, predict_eta_fast_discrete(model, X, offset))
 
@@ -637,8 +676,8 @@ def clone_without_features(
     return new_model
 
 
-def auto_detect(model, X: pd.DataFrame, sample_weight: NDArray | None) -> None:
-    """Auto-detect feature types from DataFrame columns."""
+def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:
+    """Auto-detect feature types from native dataframe columns."""
     spline_cols = model._splines or []
     knots_map = resolve_knots(model, spline_cols)
     auto_detect_features(
@@ -678,7 +717,7 @@ def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None
 
 def model_build_design_matrix(
     model,
-    X: pd.DataFrame,
+    X: EagerFrame | FrameLike,
     y: NDArray,
     sample_weight: NDArray,
     offset: NDArray | None,
@@ -688,9 +727,10 @@ def model_build_design_matrix(
     Sets model._dm, model._groups, model._distribution, model._link.
     Returns (y, sample_weight, offset) as float64 arrays.
     """
+    frame = as_eager_frame(X)
     pending_interactions = list(model._pending_interactions)
     result = build_design_matrix(
-        X,
+        frame,
         y,
         sample_weight,
         offset,
@@ -748,6 +788,6 @@ def rebuild_dm_with_lambdas(
     )
 
 
-def predict(model, X: pd.DataFrame, offset: NDArray | None = None) -> NDArray:
+def predict(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
     """Predict the response mean for new data."""
     return predict_exact(model, X, offset)

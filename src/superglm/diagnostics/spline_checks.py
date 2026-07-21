@@ -8,8 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
+
+from superglm._frame import FrameLike, as_eager_frame
 
 
 @dataclass
@@ -29,7 +30,7 @@ class SplineRedundancyReport:
 
 def spline_redundancy(
     model,
-    X: pd.DataFrame,
+    X: FrameLike,
     sample_weight: NDArray | None = None,
 ) -> dict[str, SplineRedundancyReport]:
     """Spline redundancy diagnostics for all spline features.
@@ -41,13 +42,14 @@ def spline_redundancy(
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
+    frame = as_eager_frame(X)
     results = {}
 
     for name, spec in model._specs.items():
         if not isinstance(spec, _SplineBase):
             continue
 
-        x_col = np.asarray(X[name], dtype=np.float64)
+        x_col = frame.column_array(name, dtype=np.float64)
 
         # Knot info
         interior_knots = spec.fitted_knots

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.export.summary import SummaryExportPayload, build_summary_export_payload
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -100,7 +101,7 @@ def _continuous_block(name: str, table: pd.DataFrame) -> RatingTableBlock:
 
 
 def _weights_by_level(
-    X: pd.DataFrame,
+    X: EagerFrame,
     name: str,
     levels: list[str],
     sample_weight: NDArray | None,
@@ -111,7 +112,12 @@ def _weights_by_level(
         else np.asarray(sample_weight, dtype=np.float64)
     )
     grouped = (
-        pd.DataFrame({"level": X[name].astype(str), "weight": weights})
+        pd.DataFrame(
+            {
+                "level": pd.Series(X.column_array(name)).astype(str),
+                "weight": weights,
+            }
+        )
         .groupby("level", sort=False)["weight"]
         .sum()
     )
@@ -121,7 +127,7 @@ def _weights_by_level(
 
 def _categorical_block(
     model: SuperGLM,
-    X: pd.DataFrame,
+    X: EagerFrame,
     name: str,
     sample_weight: NDArray | None,
     centering: str,
@@ -176,7 +182,7 @@ def _require_log_link_offset_export(model: SuperGLM) -> None:
 def _resolve_export_offset(
     offset,
     model: SuperGLM,
-    X: pd.DataFrame,
+    X: FrameLike,
 ) -> NDArray | None:
     if offset is not None:
         offset_arr = np.asarray(offset, dtype=np.float64).ravel()
@@ -199,14 +205,14 @@ def _resolve_export_offset(
 
 def _resolve_offset_source(
     offset_source,
-    X: pd.DataFrame,
+    X: EagerFrame,
     *,
     offset_name: str | None,
 ) -> tuple[pd.Series, str]:
     if isinstance(offset_source, str):
-        if offset_source not in X:
+        if offset_source not in X.columns:
             raise ValueError(f"offset_source column {offset_source!r} is not present in X.")
-        source = pd.Series(X[offset_source].to_numpy(), name=offset_source)
+        source = pd.Series(X.column_array(offset_source), name=offset_source)
         name = offset_name if offset_name is not None else offset_source
     elif isinstance(offset_source, pd.Series):
         source = offset_source.reset_index(drop=True)
@@ -308,7 +314,7 @@ def _offset_multiplier_block(
 def _offset_source_block(
     offset: NDArray,
     offset_source,
-    X: pd.DataFrame,
+    X: EagerFrame,
     sample_weight: NDArray | None,
     *,
     offset_name: str | None,
@@ -464,7 +470,7 @@ def _empty_impact_frame() -> pd.DataFrame:
 
 def _impact_sweep(
     model: SuperGLM,
-    X: pd.DataFrame,
+    X: EagerFrame,
     y: NDArray,
     sample_weight: NDArray | None,
     *,
@@ -502,7 +508,7 @@ def _impact_sweep(
 
 def build_rating_table_payload(
     model: SuperGLM,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     *,
@@ -521,23 +527,25 @@ def build_rating_table_payload(
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
 
+    native_X = X
+    frame = as_eager_frame(X)
     y_arr = np.asarray(y, dtype=np.float64)
-    if len(X) != len(y_arr):
+    if len(frame) != len(y_arr):
         raise ValueError("X and y must have the same length.")
-    if sample_weight is not None and len(sample_weight) != len(X):
+    if sample_weight is not None and len(sample_weight) != len(frame):
         raise ValueError("sample_weight must have the same length as X.")
 
     export_offset: NDArray | None = None
     if _fit_used_offset(model):
         _require_log_link_offset_export(model)
-        export_offset = _resolve_export_offset(offset, model, X)
+        export_offset = _resolve_export_offset(offset, model, native_X)
     elif offset is not None or offset_source is not None:
         raise ValueError("Offset rating-table export requires a model fitted with an offset.")
 
     continuous = _continuous_features(model)
     selected = (
         model.discretization_impact(
-            X,
+            frame,
             y_arr,
             sample_weight=sample_weight,
             offset=export_offset,
@@ -555,7 +563,7 @@ def build_rating_table_payload(
         if selected is not None and name in selected.tables:
             main_effects.append(_continuous_block(name, selected.tables[name]))
         elif isinstance(spec, Categorical | OrderedCategorical):
-            main_effects.append(_categorical_block(model, X, name, sample_weight, centering))
+            main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
         elif isinstance(spec, Numeric):
             main_effects.append(_numeric_block(model, name, centering))
 
@@ -563,7 +571,7 @@ def build_rating_table_payload(
         if offset_source is None:
             offset_block = _offset_multiplier_block(
                 export_offset,
-                len(X),
+                len(frame),
                 sample_weight,
                 n_bins=n_bins,
                 bin_strategy=bin_strategy,
@@ -572,7 +580,7 @@ def build_rating_table_payload(
             offset_block = _offset_source_block(
                 export_offset,
                 offset_source,
-                X,
+                frame,
                 sample_weight,
                 offset_name=offset_name,
                 offset_kind=offset_kind,
@@ -584,7 +592,7 @@ def build_rating_table_payload(
 
     impact = _impact_sweep(
         model,
-        X,
+        frame,
         y_arr,
         sample_weight,
         offset=export_offset,
@@ -615,7 +623,7 @@ def build_rating_table_payload(
 def export_rating_tables(
     model: SuperGLM,
     file_path: str | Path,
-    X: pd.DataFrame,
+    X: FrameLike,
     y: NDArray,
     sample_weight: NDArray | None = None,
     *,
