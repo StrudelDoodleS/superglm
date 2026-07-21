@@ -92,7 +92,7 @@ class EagerFrame:
 
     def _extract_column(self, name: object) -> NDArray:
         if self.backend == "pandas":
-            return np.asarray(cast(pd.DataFrame, self.native)[cast(Any, name)].to_numpy(copy=False))
+            return np.asarray(cast(pd.DataFrame, self.native)[cast(Any, name)])
         return np.asarray(self._polars_frame[cast(str, name)].to_numpy())
 
     def column_array(self, name: object, *, dtype=None) -> NDArray:

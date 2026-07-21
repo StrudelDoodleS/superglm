@@ -39,6 +39,20 @@ def test_pandas_fast_path_does_not_enter_narwhals(monkeypatch: pytest.MonkeyPatc
     np.testing.assert_array_equal(frame.column_array("x"), [1.0, 2.0])
 
 
+def test_pandas_string_extraction_keeps_the_array_protocol_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pd.DataFrame({"label": ["a", "b"]})
+
+    monkeypatch.setattr(
+        pd.Series,
+        "to_numpy",
+        lambda *_args, **_kwargs: pytest.fail("StringDtype.to_numpy allocates on this path"),
+    )
+
+    np.testing.assert_array_equal(as_eager_frame(X).column_array("label"), ["a", "b"])
+
+
 def test_as_eager_frame_wraps_eager_polars_once() -> None:
     X = pl.DataFrame({"x": [1.0, 2.0], "label": ["a", "b"]})
 
