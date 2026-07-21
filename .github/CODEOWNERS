@@ -5,3 +5,8 @@ pyproject.toml @StrudelDoodleS
 scripts/verify_release_artifacts.py @StrudelDoodleS
 uv.lock @StrudelDoodleS
 src/superglm/ @StrudelDoodleS
+.codex/agents/ @StrudelDoodleS
+.github/PULL_REQUEST_TEMPLATE.md @StrudelDoodleS
+AGENTS.md @StrudelDoodleS
+docs/development/releases.md @StrudelDoodleS
+scripts/bump_version.py @StrudelDoodleS
