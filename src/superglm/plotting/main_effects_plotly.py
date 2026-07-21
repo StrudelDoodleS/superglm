@@ -205,7 +205,7 @@ def plot_main_effects_plotly(
             "plotly is required for engine='plotly'. Install it with: pip install plotly"
         ) from None
 
-    X = None if X is None else as_eager_frame(X)
+    frame = None if X is None else as_eager_frame(X)
     if not terms:
         return go.Figure()
 
@@ -219,12 +219,12 @@ def plot_main_effects_plotly(
     style_cfg = _resolve_plotly_style(style)
 
     weighted = sample_weight is not None
-    if X is not None and sample_weight is None:
-        sample_weight = np.ones(len(X), dtype=np.float64)
+    if frame is not None and sample_weight is None:
+        sample_weight = np.ones(len(frame), dtype=np.float64)
     elif sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
 
-    density_available = X is not None and sample_weight is not None
+    density_available = frame is not None and sample_weight is not None
     density_visible = density_available and show_exposure
     needs_lower_panel = density_available
 
@@ -250,7 +250,7 @@ def plot_main_effects_plotly(
                 term_idx,
                 entries,
                 link_variants,
-                X=X,
+                X=frame,
                 sample_weight=sample_weight,
                 interval=interval,
                 ci_style=ci_style,

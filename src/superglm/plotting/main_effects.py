@@ -347,18 +347,18 @@ def plot_term(
     """
     import matplotlib.pyplot as plt
 
-    X = None if X is None else as_eager_frame(X)
+    frame = None if X is None else as_eager_frame(X)
     weighted = sample_weight is not None
     if sample_weight is not None:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    elif X is not None and show_exposure:
+    elif frame is not None and show_exposure:
         # Fall back to uniform weights (observation counts) when no
         # sample_weight is provided.
-        sample_weight = np.ones(len(X), dtype=np.float64)
+        sample_weight = np.ones(len(frame), dtype=np.float64)
 
     density_label = "Weight\ndensity" if weighted else "Obs.\ndensity"
     weight_label = "Weight" if weighted else "Count"
-    has_density = show_exposure and X is not None and sample_weight is not None
+    has_density = show_exposure and frame is not None and sample_weight is not None
 
     display: GroupedTermDisplay | None = None
     if ti.kind == "categorical":
@@ -366,7 +366,7 @@ def plot_term(
         ti = display.term
 
     if ti.kind in ("spline", "polynomial"):
-        needs_strip = has_density and ti.name in X.columns
+        needs_strip = has_density and ti.name in frame.columns
         fig, ax, ax_den = _make_continuous_figure(needs_strip, figsize)
 
         _plot_spline_panel(ax, ti, interval, show_knots)
@@ -374,13 +374,13 @@ def plot_term(
 
         if ax_den is not None:
             knots = ti.spline.interior_knots if ti.spline is not None else None
-            _plot_density_strip(ax_den, ti.name, X, sample_weight, ti.x, show_knots, knots)
+            _plot_density_strip(ax_den, ti.name, frame, sample_weight, ti.x, show_knots, knots)
             ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "numeric":
-        needs_strip = has_density and ti.name in X.columns
-        if X is not None and ti.name in X.columns:
-            x_vals = X.column_array(ti.name, dtype=np.float64)
+        needs_strip = has_density and ti.name in frame.columns
+        if frame is not None and ti.name in frame.columns:
+            x_vals = frame.column_array(ti.name, dtype=np.float64)
             x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
         else:
             x_grid = np.linspace(0.0, 1.0, 200)
@@ -389,7 +389,7 @@ def plot_term(
         _plot_numeric_panel_continuous(ax, ti, interval, x_grid)
 
         if ax_den is not None:
-            _plot_density_strip(ax_den, ti.name, X, sample_weight, x_grid, False, None)
+            _plot_density_strip(ax_den, ti.name, frame, sample_weight, x_grid, False, None)
             ax_den.set_ylabel(density_label, fontsize=8)
 
     elif ti.kind == "categorical" and ti.smooth_curve is not None:
@@ -400,7 +400,7 @@ def plot_term(
             ax,
             ti,
             interval,
-            X=X,
+            X=frame,
             sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
             display=display,
@@ -414,7 +414,7 @@ def plot_term(
             ax,
             ti,
             interval,
-            X=X,
+            X=frame,
             sample_weight=sample_weight if has_density else None,
             weight_label=weight_label,
             display=display,
