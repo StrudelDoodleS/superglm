@@ -4,16 +4,19 @@ import { escapeHTML, fmt } from "./format.js";
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
 const summaryMarkupByFrame = new WeakMap();
 
-export async function refreshSummary(nodes) {
+export async function refreshSummary(nodes, { request = requestJSON } = {}) {
   const { summarySource, summaryStatus, summaryFrame } = nodes;
   const hasSummary = summaryFrame.innerHTML.trim().length > 0;
   summaryStatus.textContent = hasSummary ? "Updating summary..." : "Loading summary...";
   summaryFrame.setAttribute("aria-busy", "true");
   try {
-    const payload = await requestJSON("/summary", {
+    const payload = await request("/summary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: summarySource.value })
+      body: JSON.stringify({
+        source: summarySource.value,
+        level_display: requestedLevelDisplay(nodes)
+      })
     });
     renderSummary(payload, nodes);
   } catch (error) {
@@ -23,16 +26,23 @@ export async function refreshSummary(nodes) {
   }
 }
 
-export async function runOffsetRefit(nodes, refreshMetrics) {
+export async function runOffsetRefit(
+  nodes,
+  refreshMetrics,
+  { request = requestJSON } = {}
+) {
   const { summarySource, summaryStatus, summaryFrame, refitOffset } = nodes;
   summaryStatus.textContent = "Refitting fixed offsets...";
   summaryFrame.setAttribute("aria-busy", "true");
   refitOffset.disabled = true;
   try {
-    const payload = await requestJSON("/refit_offset", {
+    const payload = await request("/refit_offset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method: "auto" })
+      body: JSON.stringify({
+        method: "auto",
+        level_display: requestedLevelDisplay(nodes)
+      })
     });
     summarySource.value = "refit";
     renderSummary(payload, nodes);
@@ -72,7 +82,11 @@ export async function runDistributionProfile(
     const started = await request("/profile_distribution/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ parameter, ...profileOptionsPayload(nodes, parameter) })
+      body: JSON.stringify({
+        parameter,
+        level_display: requestedLevelDisplay(nodes),
+        ...profileOptionsPayload(nodes, parameter)
+      })
     });
     let status = started;
     renderProfileTrace(status, nodes);
@@ -131,6 +145,10 @@ function profileOptionsPayload(nodes, parameter) {
     payload.trace_iterations = true;
   }
   return payload;
+}
+
+function requestedLevelDisplay(nodes) {
+  return nodes.summaryLevelDisplay === "grouped" ? "grouped" : "expanded";
 }
 
 function sleep(ms) {
@@ -597,6 +615,8 @@ function renderCompactSummary(payload) {
   const compact = payload.compact || {};
   const model = compact.model || {};
   const rows = Array.isArray(compact.rows) ? compact.rows : [];
+  const hasLevelGroups = compact.has_level_groups === true;
+  const columnCount = hasLevelGroups ? 7 : 6;
   const facts = [
     ["Family", model.family],
     ["Link", model.link],
@@ -626,21 +646,23 @@ function renderCompactSummary(payload) {
       <div class="summary-facts">
         ${facts.map(([label, value]) => renderSummaryFact(label, value)).join("")}
       </div>
-      <table class="summary-table" aria-label="Compact coefficient summary">
+      <table class="summary-table${hasLevelGroups ? " has-level-groups" : ""}" aria-label="Compact coefficient summary">
         <thead>
           <tr>
-            <th>Term</th>
-            <th>EDF</th>
-            <th>Estimate</th>
-            <th>SE</th>
-            <th>p</th>
-            <th>Sig</th>
+            <th class="summary-term">Term</th>
+            ${hasLevelGroups ? '<th class="summary-level-group">Level group</th>' : ""}
+            <th class="summary-edf">EDF</th>
+            <th class="summary-estimate">Estimate</th>
+            <th class="summary-se">SE</th>
+            <th class="summary-p">p</th>
+            <th class="sig-code">Sig</th>
           </tr>
         </thead>
         <tbody>
-          ${renderSummaryRows(rows)}
+          ${renderSummaryRows(rows, hasLevelGroups, columnCount)}
         </tbody>
       </table>
+      ${renderLevelGroupLegends(compact)}
       <details class="raw-summary">
         <summary>Full summary</summary>
         <div class="raw-summary-body">${renderRawSummaryFrame(payload.html)}</div>
@@ -664,16 +686,16 @@ function renderRawSummaryFrame(html) {
   `;
 }
 
-function renderSummaryRows(rows) {
+function renderSummaryRows(rows, hasLevelGroups, columnCount) {
   let previousGroup = "";
   return rows.map((row) => {
     const group = summaryRowGroup(row);
     const showGroup = group && group !== previousGroup && group !== "Intercept";
     previousGroup = group || previousGroup;
     const groupRow = showGroup
-      ? `<tr class="summary-group-row"><td colspan="6">${escapeHTML(group)}</td></tr>`
+      ? `<tr class="summary-group-row"><td colspan="${columnCount}">${escapeHTML(group)}</td></tr>`
       : "";
-    return `${groupRow}${renderSummaryRow(row)}`;
+    return `${groupRow}${renderSummaryRow(row, hasLevelGroups)}`;
   }).join("");
 }
 
@@ -694,29 +716,64 @@ function renderSummaryFact(label, value) {
   `;
 }
 
-function renderSummaryRow(row) {
+function renderSummaryRow(row, hasLevelGroups) {
   // SE cell color is data-driven from Python's significance class. The browser
   // never infers significance from display text.
   const sigClass = safeSigClass(row.sig_class);
+  const levelGroupCell = hasLevelGroups
+    ? `<td class="summary-level-group">${escapeHTML(row.level_group || "")}</td>`
+    : "";
   return `
     <tr class="summary-row ${sigClass}">
       <td class="summary-term">
         <span>${escapeHTML(row.name || "")}</span>
         ${row.kind === "spline" ? '<em>spline</em>' : ""}
       </td>
-      ${renderNumberCell(row.edf)}
-      ${renderNumberCell(row.coef)}
-      <td class="se-cell ${sigClass}" title="${escapeHTML(sigTitle(row))}">
+      ${levelGroupCell}
+      ${renderNumberCell(row.edf, "summary-edf")}
+      ${renderNumberCell(row.coef, "summary-estimate")}
+      <td class="summary-se se-cell ${sigClass}" title="${escapeHTML(sigTitle(row))}">
         ${escapeHTML(formatSE(row))}
       </td>
-      <td>${escapeHTML(formatP(row.p_value))}</td>
+      <td class="summary-p">${escapeHTML(formatP(row.p_value))}</td>
       <td class="sig-code">${escapeHTML(row.sig_code || "")}</td>
     </tr>
   `;
 }
 
-function renderNumberCell(value) {
-  return `<td class="summary-number" title="${escapeHTML(formatFullNumber(value))}">${escapeHTML(formatSummaryValue(value))}</td>`;
+function renderNumberCell(value, columnClass) {
+  return `<td class="summary-number ${columnClass}" title="${escapeHTML(formatFullNumber(value))}">${escapeHTML(formatSummaryValue(value))}</td>`;
+}
+
+function renderLevelGroupLegends(compact) {
+  if (compact.level_display !== "grouped") return "";
+  const groups = Array.isArray(compact.level_groups) ? compact.level_groups : [];
+  if (!groups.length) return "";
+  const byFeature = new Map();
+  for (const group of groups) {
+    const feature = String(group.feature || "");
+    if (!byFeature.has(feature)) byFeature.set(feature, []);
+    byFeature.get(feature).push(group);
+  }
+  return `
+    <section class="summary-level-groups" aria-label="Level group membership">
+      ${[...byFeature.entries()].map(([feature, featureGroups]) => `
+        <div class="summary-level-groups-feature">
+          <strong>Level groups (${escapeHTML(feature)}):</strong>
+          ${featureGroups.map((group) => {
+            const members = Array.isArray(group.members) ? group.members : [];
+            return `
+              <div class="summary-level-group-members">
+                <span class="summary-level-group-id">${escapeHTML(group.group_id || "")}</span>
+                <span aria-hidden="true"> = </span>
+                <span>${members.map((member) => escapeHTML(String(member))).join(", ")}</span>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `).join("")}
+    </section>
+  `;
 }
 
 function formatSummaryValue(value) {
