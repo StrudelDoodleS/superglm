@@ -99,12 +99,6 @@ def build_summary_level_display(
                 start=1,
             )
         }
-        legends.extend(
-            LevelGroupLegend(feature, group_ids[fitted], tuple(members))
-            for fitted, members in members_by_fitted.items()
-            if fitted in group_ids
-        )
-
         expected_names = {fitted: f"{term_prefix}[{fitted}]" for fitted in fitted_levels}
         row_by_fitted: dict[str, _CoefRow] = {}
         matched_indices: list[int] = []
@@ -115,13 +109,17 @@ def build_summary_level_display(
                     matched_indices.append(index)
                     break
 
-        base_level = str(spec._base_level)
-        non_reference_matches = [
-            fitted for fitted in fitted_levels if fitted != base_level and fitted in row_by_fitted
-        ]
-        if not non_reference_matches:
+        # Ordered splines retain their reference row, which can be the only
+        # matched level after every original level is collapsed into it.
+        if not matched_indices:
             continue
 
+        legends.extend(
+            LevelGroupLegend(feature, group_ids[fitted], tuple(members))
+            for fitted, members in members_by_fitted.items()
+            if fitted in group_ids
+        )
+        base_level = str(spec._base_level)
         display_rows: list[_CoefRow] = []
         edf_emitted: set[int] = set()
         level_items = (

@@ -225,6 +225,53 @@ def test_reference_group_expands_to_reference_members_and_compacts_to_one_row():
     assert grouped.rows[0].is_reference is True
 
 
+def test_reference_only_ordered_group_still_expands_and_groups():
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    levels = ["A", "B", "C"]
+    grouping = collapse_levels(
+        levels,
+        groups={"all fitted label": levels},
+        order=levels,
+    )
+    with pytest.warns(UserWarning, match="clamped to 0"):
+        spec = OrderedCategorical(
+            order=levels,
+            base="all fitted label",
+            grouping=grouping,
+        )
+    info = spec.build(np.asarray(levels))
+    canonical = [
+        _CoefRow(name="band", group="band", is_spline=True, active=True, edf=1.0),
+        _CoefRow(name="band[all fitted label]", group="band", coef=0.0),
+    ]
+    groups = [GroupSlice("band", 0, info.n_cols)]
+
+    expanded = build_summary_level_display(
+        canonical,
+        specs={"band": spec},
+        groups=groups,
+        level_display="expanded",
+    )
+    grouped = build_summary_level_display(
+        canonical,
+        specs={"band": spec},
+        groups=groups,
+        level_display="grouped",
+    )
+
+    assert [row.name for row in expanded.rows] == ["band", "band[A]", "band[B]", "band[C]"]
+    assert all(row.is_reference for row in expanded.rows[1:])
+    assert [row.level_group for row in expanded.rows[1:]] == ["G1", "G1", "G1"]
+    assert [(row.name, row.level_group, row.is_reference) for row in grouped.rows] == [
+        ("band", "", False),
+        ("band", "G1", True),
+    ]
+    assert [(legend.group_id, legend.members) for legend in grouped.level_groups] == [
+        ("G1", ("A", "B", "C")),
+    ]
+
+
 def test_ordered_spline_whole_feature_row_stays_before_expanded_reference():
     from superglm.inference.summary_levels import build_summary_level_display
 
