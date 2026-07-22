@@ -166,6 +166,33 @@ def test_grouped_display_uses_one_row_per_fitted_group_and_legends():
     assert territory[1].coef == 0.2
 
 
+def test_expanded_display_reports_group_level_qs_diagnostics_once():
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    spec, rows, groups = _categorical_case()
+    rows[1].quasi_separated = True
+    rows[1].level_n_obs = 12
+    rows[1].level_exposure_share = 0.004
+    presentation = build_summary_level_display(
+        rows,
+        specs={"territory": spec},
+        groups=groups,
+        level_display="expanded",
+    )
+    summary = ModelSummary({}, _model_info(), rows, level_presentation=presentation)
+    grouped_members = [row for row in presentation.rows if row.level_group == "G1"]
+
+    assert [row.quasi_separated for row in grouped_members] == [True, True]
+    assert [row.level_n_obs for row in grouped_members] == [12, None]
+    assert [row.level_exposure_share for row in grouped_members] == [0.004, None]
+    text = str(summary)
+    html = summary._repr_html_()
+    assert text.count("12 obs (0.40% exposure)") == 1
+    assert "territory G1: 12 obs (0.40% exposure)" in text
+    assert html.count("12 obs (0.40% exposure)") == 1
+    assert "territory G1: " in html
+
+
 def test_identity_categorical_adds_reference_without_group_metadata():
     from superglm.inference.summary_levels import build_summary_level_display
 

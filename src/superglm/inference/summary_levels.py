@@ -126,6 +126,7 @@ def build_summary_level_display(
         )
         display_rows: list[_CoefRow] = []
         edf_emitted: set[int] = set()
+        diagnostics_emitted: set[int] = set()
         level_items = (
             [(original, original_to_group[original]) for original in original_levels]
             if mode == "expanded"
@@ -177,6 +178,15 @@ def build_summary_level_display(
                     edf_emitted.add(id(source))
             else:
                 continue
+            if source.level_n_obs is not None or source.level_exposure_share is not None:
+                if id(source) in diagnostics_emitted:
+                    display_row = replace(
+                        display_row,
+                        level_n_obs=None,
+                        level_exposure_share=None,
+                    )
+                else:
+                    diagnostics_emitted.add(id(source))
             display_rows.append(display_row)
 
         if matched_indices:

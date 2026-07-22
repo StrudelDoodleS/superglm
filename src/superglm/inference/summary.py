@@ -131,6 +131,15 @@ _EDITOR_STALE_NOTE = (
     "and p-values are suppressed because they belong to the original fitted "
     "model, not the manually edited coefficients."
 )
+
+
+def _qs_diagnostic_label(row: _CoefRow) -> str:
+    """Label fitted-group diagnostics without attributing them to one member."""
+    if row.level_group:
+        return f"{row.group or row.name} {row.level_group}"
+    return row.name
+
+
 _EDITOR_OFFSET_NOTE = (
     "Editor offset refit: listed editor terms are fixed offset factors. "
     "Inference is conditional on those fixed offsets."
@@ -595,7 +604,9 @@ class ModelSummary:
             lines.append("? Quasi-separated levels (insufficient data):")
             for r in qs_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
-                lines.append(f"    {r.name}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)")
+                lines.append(
+                    f"    {_qs_diagnostic_label(r)}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
+                )
 
         return "\n".join(lines)
 
@@ -984,7 +995,7 @@ class ModelSummary:
             for r in qs_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
                 qs_lines.append(
-                    f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(r.name)}: "
+                    f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(_qs_diagnostic_label(r))}: "
                     f"{r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
                 )
             qs_html = "<br>".join(qs_lines)

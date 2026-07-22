@@ -324,7 +324,7 @@ test("direct summary helpers include the grouped level display", async () => {
   ]);
 });
 
-test("offset refit does not render a response for an obsolete level display", async () => {
+test("offset refit keeps its source and markup for an obsolete level display", async () => {
   let levelDisplay = "expanded";
   const nodes = {
     ...compactSummaryNodes(),
@@ -344,7 +344,36 @@ test("offset refit does not render a response for an obsolete level display", as
 
   await runOffsetRefit(nodes, async () => {}, { request });
 
-  assert.equal(nodes.summarySource.value, "refit");
+  assert.equal(nodes.summarySource.value, "selected");
+  assert.equal(nodes.summaryFrame.innerHTML, "<p>Current grouped summary</p>");
+});
+
+test("distribution profile does not render a response for an obsolete level display", async () => {
+  let levelDisplay = "expanded";
+  const nodes = {
+    ...profileTraceNodes(),
+    get summaryLevelDisplay() {
+      return levelDisplay;
+    }
+  };
+  const result = compactLevelSummary("expanded");
+  /** @param {string} path @param {{body:string}} options */
+  const request = async (path, options) => {
+    assert.equal(path, "/profile_distribution/start");
+    assert.equal(JSON.parse(options.body).level_display, "expanded");
+    levelDisplay = "grouped";
+    nodes.summaryFrame.innerHTML = "<p>Current grouped summary</p>";
+    return { status: "complete", job_id: "job-obsolete", result };
+  };
+
+  const payload = await runDistributionProfile(
+    nodes,
+    "tweedie_p",
+    async () => {},
+    { request, pause: async () => {} }
+  );
+
+  assert.strictEqual(payload, result);
   assert.equal(nodes.summaryFrame.innerHTML, "<p>Current grouped summary</p>");
 });
 

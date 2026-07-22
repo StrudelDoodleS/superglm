@@ -45,12 +45,9 @@ export async function runOffsetRefit(
         level_display: levelDisplay
       })
     });
-    summarySource.value = "refit";
-    const payloadLevelDisplay = payload.level_display === "expanded" ||
-      payload.level_display === "grouped"
-      ? payload.level_display
-      : levelDisplay;
+    const payloadLevelDisplay = responseLevelDisplay(payload, levelDisplay);
     if (payloadLevelDisplay === requestedLevelDisplay(nodes)) {
+      summarySource.value = "refit";
       renderSummary(payload, nodes);
     }
     await refreshMetrics();
@@ -72,6 +69,7 @@ export async function runDistributionProfile(
 ) {
   const { summaryStatus, summaryFrame, reprofileTweedie, reprofileNb2, profileRun } = nodes;
   const button = parameter === "tweedie_p" ? reprofileTweedie : reprofileNb2;
+  const levelDisplay = requestedLevelDisplay(nodes);
   openProfileDialog(nodes);
   summaryStatus.textContent = parameter === "tweedie_p"
     ? "Re-profiling Tweedie p..."
@@ -91,7 +89,7 @@ export async function runDistributionProfile(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         parameter,
-        level_display: requestedLevelDisplay(nodes),
+        level_display: levelDisplay,
         ...profileOptionsPayload(nodes, parameter)
       })
     });
@@ -107,7 +105,9 @@ export async function runDistributionProfile(
     }
     const payload = status.result || {};
     renderProfileTrace(status, nodes);
-    renderSummary(payload, nodes);
+    if (responseLevelDisplay(payload, levelDisplay) === requestedLevelDisplay(nodes)) {
+      renderSummary(payload, nodes);
+    }
     await acceptProfile(payload);
     return payload;
   } catch (error) {
@@ -156,6 +156,12 @@ function profileOptionsPayload(nodes, parameter) {
 
 function requestedLevelDisplay(nodes) {
   return nodes.summaryLevelDisplay === "grouped" ? "grouped" : "expanded";
+}
+
+function responseLevelDisplay(payload, fallback) {
+  return payload.level_display === "expanded" || payload.level_display === "grouped"
+    ? payload.level_display
+    : fallback;
 }
 
 function sleep(ms) {
