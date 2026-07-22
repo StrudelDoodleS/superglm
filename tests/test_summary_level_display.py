@@ -293,6 +293,68 @@ def test_reference_only_ordered_group_still_expands_and_groups():
     ]
 
 
+@pytest.mark.parametrize("include_feature_row", [False, True])
+def test_reference_only_group_synthesizes_rows_without_a_canonical_level_row(
+    include_feature_row,
+):
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    levels = ["A", "B", "C"]
+    grouping = collapse_levels(
+        levels,
+        groups={"all fitted label": levels},
+        order=levels,
+    )
+    with pytest.warns(UserWarning, match="clamped to 0"):
+        spec = OrderedCategorical(
+            order=levels,
+            base="all fitted label",
+            grouping=grouping,
+        )
+    info = spec.build(np.asarray(levels))
+    canonical = [_CoefRow(name="Intercept", coef=0.5)]
+    if include_feature_row:
+        canonical.append(_CoefRow(name="band", group="band", is_spline=True, active=True, edf=1.0))
+    canonical.append(_CoefRow(name="region[B]", group="region", coef=0.2))
+    groups = [
+        GroupSlice("band", 0, info.n_cols),
+        GroupSlice("region", info.n_cols, info.n_cols + 1),
+    ]
+
+    expanded = build_summary_level_display(
+        canonical,
+        specs={"band": spec},
+        groups=groups,
+        level_display="expanded",
+    )
+    grouped = build_summary_level_display(
+        canonical,
+        specs={"band": spec},
+        groups=groups,
+        level_display="grouped",
+    )
+
+    assert [row.name for row in expanded.rows] == [
+        "Intercept",
+        *(["band"] if include_feature_row else []),
+        "band[A]",
+        "band[B]",
+        "band[C]",
+        "region[B]",
+    ]
+    first_level = 2 if include_feature_row else 1
+    assert all(row.is_reference for row in expanded.rows[first_level : first_level + 3])
+    assert [(row.name, row.level_group, row.is_reference) for row in grouped.rows] == [
+        ("Intercept", "", False),
+        *(([("band", "", False)]) if include_feature_row else []),
+        ("band", "G1", True),
+        ("region[B]", "", False),
+    ]
+    assert [(legend.group_id, legend.members) for legend in grouped.level_groups] == [
+        ("G1", ("A", "B", "C")),
+    ]
+
+
 def test_ordered_spline_whole_feature_row_stays_before_expanded_reference():
     from superglm.inference.summary_levels import build_summary_level_display
 

@@ -110,9 +110,13 @@ def build_summary_level_display(
                     matched_indices.append(index)
                     break
 
-        # Ordered splines retain their reference row, which can be the only
-        # matched level after every original level is collapsed into it.
-        if not matched_indices:
+        base_level = str(spec._base_level)
+        reference_only = bool(presentation_fitted_levels) and all(
+            fitted == base_level for fitted in presentation_fitted_levels
+        )
+        # Preserve unknown canonical layouts, but a reference-only feature has
+        # no non-reference coefficient to match and must be synthesized here.
+        if not matched_indices and not reference_only:
             continue
 
         legends.extend(
@@ -120,7 +124,6 @@ def build_summary_level_display(
             for fitted, members in members_by_fitted.items()
             if fitted in group_ids
         )
-        base_level = str(spec._base_level)
         display_rows: list[_CoefRow] = []
         edf_emitted: set[int] = set()
         level_items = (
@@ -176,7 +179,29 @@ def build_summary_level_display(
                 continue
             display_rows.append(display_row)
 
-        insert_at = min(matched_indices)
+        if matched_indices:
+            insert_at = min(matched_indices)
+        else:
+            feature_indices = [index for index, row in enumerate(rows) if row.group == term_prefix]
+            if feature_indices:
+                insert_at = max(feature_indices) + 1
+            else:
+                group_positions = [
+                    index for index, group in enumerate(groups) if group.feature_name == feature
+                ]
+                later_group_names = (
+                    {
+                        name
+                        for group in groups[max(group_positions) + 1 :]
+                        for name in (group.name, group.feature_name)
+                    }
+                    if group_positions
+                    else set()
+                )
+                insert_at = next(
+                    (index for index, row in enumerate(rows) if row.group in later_group_names),
+                    len(rows),
+                )
         matched = set(matched_indices)
         rows = [
             *rows[:insert_at],
