@@ -202,12 +202,16 @@ export function renderSummary(payload, nodes) {
 }
 
 function updateSummaryMarkup(summaryFrame, markup) {
+  const cached = summaryMarkupByFrame.get(summaryFrame);
   if (
-    summaryMarkupByFrame.get(summaryFrame) === markup &&
-    summaryFrame.innerHTML === markup
+    cached?.markup === markup &&
+    cached.firstElementChild === summaryFrame.firstElementChild
   ) return;
   summaryFrame.innerHTML = markup;
-  summaryMarkupByFrame.set(summaryFrame, markup);
+  summaryMarkupByFrame.set(summaryFrame, {
+    markup,
+    firstElementChild: summaryFrame.firstElementChild
+  });
 }
 
 export function updateDistributionProfileActions(payload, nodes) {

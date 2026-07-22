@@ -1514,10 +1514,14 @@ def test_ordered_summary_has_one_whole_smooth_test_and_no_level_tests(open_edito
         for row in level_rows:
             full_row = next(cells for cells in full_rows if cells and cells[0] == row["term"])
             assert full_row[1] != "---"  # estimate
-            assert full_row[2] != "---"  # standard error
-            assert full_row[4] == "---"  # no separate level p-value
-            assert full_row[5] != "---"  # confidence interval lower bound
-            assert full_row[6] != "---"  # confidence interval upper bound
+            if row["cells"][3] == "ref":
+                assert full_row[2] == "ref"
+                assert full_row[3:7] == ["---"] * 4
+            else:
+                assert full_row[2] != "---"  # standard error
+                assert full_row[4] == "---"  # no separate level p-value
+                assert full_row[5] != "---"  # confidence interval lower bound
+                assert full_row[6] != "---"  # confidence interval upper bound
             assert full_row[7] == ""  # no significance marker
 
 

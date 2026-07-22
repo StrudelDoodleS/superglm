@@ -204,19 +204,25 @@ test("transition descriptor payloads are independent caller-owned values", () =>
 test("rendering unchanged summary markup preserves the existing table DOM", () => {
   let writes = 0;
   let markup = "";
+  /** @type {object | null} */
+  let firstElementChild = null;
   const summaryFrame = {
-    get innerHTML() { return markup; },
+    // Browsers serialize parsed HTML rather than returning the exact source
+    // string. Character references are one common source of differences.
+    get innerHTML() { return markup.replaceAll("&quot;", '"'); },
     set innerHTML(value) {
       writes += 1;
       markup = value;
-    }
+      firstElementChild = value ? {} : null;
+    },
+    get firstElementChild() { return firstElementChild; }
   };
   const nodes = {
     summaryStatus: { textContent: "" },
     summaryNote: { textContent: "" },
     summaryFrame
   };
-  const payload = { available: false, label: "Summary", error: "Unavailable" };
+  const payload = { available: false, label: "Summary", error: 'Unavailable "now"' };
 
   renderSummary(payload, nodes);
   renderSummary(payload, nodes);
@@ -224,6 +230,7 @@ test("rendering unchanged summary markup preserves the existing table DOM", () =
   assert.equal(writes, 1);
 
   markup = "";
+  firstElementChild = null;
   renderSummary(payload, nodes);
 
   assert.equal(writes, 2);

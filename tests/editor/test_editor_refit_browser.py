@@ -497,6 +497,7 @@ def test_structural_confirmation_is_bypassed_when_manual_history_is_empty(open_e
         assert response.request.post_data_json == {
             "term": "long_category",
             "method": "auto",
+            "level_display": "expanded",
         }
         assert page.evaluate("window.__structuralDialogOpenCount") == 0
         assert page.locator("#structuralConfirmDialog").get_attribute("open") is None
@@ -574,6 +575,7 @@ def test_structural_confirmation_cancel_escape_and_continue_are_atomic(open_edit
         assert response.request.post_data_json == {
             "term": "long_category",
             "method": "auto",
+            "level_display": "expanded",
         }
         assert [_path(request.url) for request in requests].count("/collapse_levels") == 1
         assert page.evaluate("window.__structuralDialogOpenCount") == 3
