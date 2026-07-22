@@ -1317,9 +1317,10 @@ class ModelMetrics:
         coef_rows = self._build_coef_rows(alpha=alpha)
 
         X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
+        specs = self._model._specs
         basis_detail = build_basis_detail(
             groups=self._groups,
-            specs=self._model._specs,
+            specs=specs,
             interaction_specs=self._model._interaction_specs,
             result=self._result,
             XtWX_inv_aug=XtWX_inv_aug,
@@ -1332,7 +1333,7 @@ class ModelMetrics:
 
         level_presentation = build_summary_level_display(
             coef_rows,
-            specs=self._model._specs,
+            specs=specs,
             groups=self._groups,
             level_display=level_display,
         )

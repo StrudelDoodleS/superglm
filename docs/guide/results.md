@@ -5,8 +5,20 @@
 Statsmodels-style summary with SEs, p-values, and smooth tests:
 
 ```python
+print(model.summary())                          # exact original levels, expanded
+print(model.summary(level_display="grouped"))  # one fitted row per group + legend
+```
+
+Categorical levels are expanded by default, including reference levels. If fitted levels have been
+collapsed together, each exact original label remains visible and a separate `Level group` column
+shows IDs such as `G1`. Grouped mode shows one row per fitted group and a membership legend instead.
+These IDs restart within each feature, exist only for presentation, and never rename level labels.
+
+The same `level_display="expanded"` or `"grouped"` option is available from a metrics summary:
+
+```python
 m = model.metrics(df, y, sample_weight=exposure)
-print(m.summary())
+print(m.summary(level_display="grouped"))
 ```
 
 ## Per-term inference
@@ -126,6 +138,10 @@ The workbook includes selected-bin rating tables, a discretization impact sweep 
 `TermInference` Excel tables use typed cells for metrics, estimates, intervals, and p-values instead
 of storing the formatted console summary as one text column. The editor exposes the same workbook
 through **Export > Excel rating workbook** when explicit training or retained fit data is available.
+
+Excel export remains expanded over the exact original categorical levels, regardless of the most
+recent summary view. `export_rating_tables()` does not accept `level_display` and does not emit the
+summary-only `Level group` column or `G1` metadata.
 
 ## Families
 
