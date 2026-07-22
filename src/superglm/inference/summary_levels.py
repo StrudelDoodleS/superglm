@@ -68,9 +68,10 @@ def build_summary_level_display(
         term_prefix = (
             feature_groups[0].name if isinstance(spec, Categorical) and feature_groups else feature
         )
-        fitted_levels = list(
-            spec._levels if isinstance(spec, Categorical) else spec._ordered_levels
-        )
+        fitted_levels = [
+            str(level)
+            for level in (spec._levels if isinstance(spec, Categorical) else spec._ordered_levels)
+        ]
         grouping = getattr(spec, "_grouping", None)
         if grouping is None:
             original_levels = fitted_levels

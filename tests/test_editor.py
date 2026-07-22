@@ -4075,6 +4075,74 @@ def test_widget_structural_mutations_advance_chart_generation_once(editor_model)
     ] == [0, 1, 2, 2, 3, 4]
 
 
+@pytest.mark.parametrize("operation", ["collapse", "ungroup", "uncollapse"])
+def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, operation):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        widget._select("region", [1, 2])
+        if operation != "collapse":
+            widget._collapse_levels("region", method="fit")
+
+        before_model = session.model
+        before_revision = session.model_revision
+        before_history = [id(model) for model in session.collapse_history]
+        before_chart_generation = widget._chart_generation
+
+        with pytest.raises(ValueError, match="level_display"):
+            if operation == "collapse":
+                widget._collapse_levels("region", method="fit", level_display="invalid")
+            elif operation == "ungroup":
+                widget._ungroup_levels("region", method="fit", level_display="invalid")
+            else:
+                widget._uncollapse_levels(level_display="invalid")
+
+        assert session.model is before_model
+        assert session.model_revision == before_revision
+        assert [id(model) for model in session.collapse_history] == before_history
+        assert widget._chart_generation == before_chart_generation
+    finally:
+        widget.close()
+
+
+def test_invalid_level_display_is_rejected_before_other_editor_mutations(
+    editor_model,
+    monkeypatch,
+):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    profile_called = False
+    thread_started = False
+
+    def unexpected_profile(*_args, **_kwargs):
+        nonlocal profile_called
+        profile_called = True
+        raise AssertionError("profile mutation ran before level_display validation")
+
+    def unexpected_thread_start(_thread):
+        nonlocal thread_started
+        thread_started = True
+
+    monkeypatch.setattr(session, "reprofile_distribution", unexpected_profile)
+    monkeypatch.setattr(widget_module.threading.Thread, "start", unexpected_thread_start)
+    try:
+        with pytest.raises(ValueError, match="level_display"):
+            widget._refit_offset(level_display="invalid")
+        with pytest.raises(ValueError, match="level_display"):
+            widget._profile_distribution("tweedie_p", level_display="invalid")
+        with pytest.raises(ValueError, match="level_display"):
+            widget._start_profile_distribution_job("tweedie_p", level_display="invalid")
+
+        assert profile_called is False
+        assert thread_started is False
+        assert widget._offset_refit_model is None
+        assert widget._profile_jobs == {}
+    finally:
+        widget.close()
+
+
 def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()

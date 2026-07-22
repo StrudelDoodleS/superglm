@@ -41,6 +41,7 @@ from superglm.editor.payloads import history_payload, session_payload
 from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
 from superglm.editor.summaries import offset_label_payload, summary_payload
+from superglm.inference.summary_levels import validate_level_display
 from superglm.profiling._reporting import cached_tweedie_profile_ci
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
@@ -756,6 +757,7 @@ class EditorWidget:
         *,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
+        level_display = validate_level_display(level_display)
         with self._lock:
             terms = self.session.edited_terms()
             if not terms:
@@ -779,6 +781,7 @@ class EditorWidget:
         progress_callback=None,
         **options: Any,
     ) -> dict[str, Any]:
+        level_display = validate_level_display(level_display)
         with self._lock:
             profile_options = dict(options)
             if progress_callback is not None:
@@ -802,6 +805,7 @@ class EditorWidget:
         **options: Any,
     ) -> dict[str, Any]:
         """Start a distribution-parameter profile job and return its status payload."""
+        level_display = validate_level_display(level_display)
         with self._profile_condition:
             self._profile_job_counter += 1
             job_id = str(self._profile_job_counter)
@@ -932,6 +936,7 @@ class EditorWidget:
         *,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
+        level_display = validate_level_display(level_display)
         with self._lock:
             operation_start = time.perf_counter()
             if term is not None:
@@ -965,6 +970,7 @@ class EditorWidget:
         *,
         level_display: str = "expanded",
     ) -> dict[str, Any]:
+        level_display = validate_level_display(level_display)
         with self._lock:
             operation_start = time.perf_counter()
             if term is not None:
@@ -1008,6 +1014,7 @@ class EditorWidget:
             return self._state()
 
     def _uncollapse_levels(self, *, level_display: str = "expanded") -> dict[str, Any]:
+        level_display = validate_level_display(level_display)
         with self._lock:
             operation_start = time.perf_counter()
             fit_start = time.perf_counter()

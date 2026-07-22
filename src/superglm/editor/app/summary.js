@@ -833,6 +833,7 @@ function safeSigClass(value) {
     "sig-weak",
     "sig-none",
     "sig-unknown",
+    "sig-reference",
     "sig-qs"
   ]);
   return allowed.has(value) ? value : "sig-unknown";

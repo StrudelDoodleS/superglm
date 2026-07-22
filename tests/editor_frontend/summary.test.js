@@ -249,6 +249,18 @@ test("expanded compact summary shows group indicators without a membership legen
   assert.doesNotMatch(nodes.summaryFrame.innerHTML, /Level groups \(territory\)/);
 });
 
+test("reference summary rows retain their emitted significance class", () => {
+  const nodes = compactSummaryNodes();
+  const payload = compactLevelSummary("expanded", { hasLevelGroups: false });
+  payload.compact.rows[0].sig_class = "sig-reference";
+
+  renderSummary(payload, nodes);
+
+  assert.match(nodes.summaryFrame.innerHTML, /summary-row sig-reference/);
+  assert.match(nodes.summaryFrame.innerHTML, /summary-se se-cell sig-reference/);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /summary-row sig-unknown/);
+});
+
 test("grouped compact summary renders one row and escaped membership legend", () => {
   const nodes = compactSummaryNodes();
 

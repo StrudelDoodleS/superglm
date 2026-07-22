@@ -187,6 +187,27 @@ def test_identity_categorical_adds_reference_without_group_metadata():
     assert display.has_level_groups is False
 
 
+def test_numeric_identity_categorical_preserves_its_reference_level():
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    spec = Categorical(base="first")
+    spec.build(np.asarray([10, 20, 30]))
+    canonical = [
+        _CoefRow(name="region[20]", group="region", coef=0.2, se=0.1, edf=1.0),
+        _CoefRow(name="region[30]", group="region", coef=-0.1, se=0.1),
+    ]
+
+    display = build_summary_level_display(
+        canonical,
+        specs={"region": spec},
+        groups=[GroupSlice("region", 0, 2)],
+    )
+
+    assert [row.name for row in display.rows] == ["region[10]", "region[20]", "region[30]"]
+    assert display.rows[0].is_reference is True
+    assert (display.rows[0].coef, display.rows[0].se, display.rows[0].p) == (0.0, None, None)
+
+
 def test_reference_group_expands_to_reference_members_and_compacts_to_one_row():
     from superglm.inference.summary_levels import build_summary_level_display
 
