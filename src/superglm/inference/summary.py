@@ -48,6 +48,10 @@ class _CoefRow:
     quasi_separated: bool = False
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
+    # Summary presentation only. Canonical coefficient builders leave these
+    # fields at their defaults.
+    level_group: str = ""
+    is_reference: bool = False
 
 
 @dataclass
