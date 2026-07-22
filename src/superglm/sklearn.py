@@ -692,9 +692,19 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         check_is_fitted(self)
         return self._model.diagnostics()
 
-    def summary(self, alpha: float = 0.05):
+    def summary(
+        self,
+        alpha: float = 0.05,
+        detail: str = "compact",
+        level_display: str = "expanded",
+    ):
+        """Return the fitted model summary with categorical display control."""
         check_is_fitted(self)
-        return self._model.summary(alpha=alpha)
+        return self._model.summary(
+            alpha=alpha,
+            detail=detail,
+            level_display=level_display,
+        )
 
     def reconstruct_feature(self, name: str) -> dict[str, Any]:
         check_is_fitted(self)
@@ -841,6 +851,16 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         check_is_fitted(self)
         return self._model.diagnostics()
 
-    def summary(self, alpha: float = 0.05):
+    def summary(
+        self,
+        alpha: float = 0.05,
+        detail: str = "compact",
+        level_display: str = "expanded",
+    ):
+        """Return the fitted model summary with categorical display control."""
         check_is_fitted(self)
-        return self._model.summary(alpha=alpha)
+        return self._model.summary(
+            alpha=alpha,
+            detail=detail,
+            level_display=level_display,
+        )

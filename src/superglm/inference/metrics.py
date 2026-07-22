@@ -1211,7 +1211,12 @@ class ModelMetrics:
             sample_weights=self._weights,
         )
 
-    def summary(self, alpha: float = 0.05, detail: str = "compact") -> ModelSummary:
+    def summary(
+        self,
+        alpha: float = 0.05,
+        detail: str = "compact",
+        level_display: str = "expanded",
+    ) -> ModelSummary:
         """Formatted model summary with coefficient table.
 
         Parameters
@@ -1224,6 +1229,10 @@ class ModelMetrics:
             detail rows (ASCII: printed inline; HTML: pre-expanded
             ``<details>`` disclosure). Default ``"compact"`` still shows
             closed disclosures in HTML.
+        level_display : str
+            Categorical level presentation. ``"expanded"`` (default) shows
+            exact original levels; ``"grouped"`` shows one row per fitted
+            group with a membership legend.
 
         Returns
         -------
@@ -1231,6 +1240,12 @@ class ModelMetrics:
             Object with ``__str__`` (ASCII), ``_repr_html_`` (HTML),
             and dict-like access for backward compatibility.
         """
+        from superglm.inference.summary_levels import (
+            build_summary_level_display,
+            validate_level_display,
+        )
+
+        level_display = validate_level_display(level_display)
         data = {
             "information_criteria": {
                 "log_likelihood": self.log_likelihood,
@@ -1315,6 +1330,18 @@ class ModelMetrics:
             selected_group_names={group.name for group in active_groups},
         )
 
+        level_presentation = build_summary_level_display(
+            coef_rows,
+            specs=self._model._specs,
+            groups=self._groups,
+            level_display=level_display,
+        )
         return ModelSummary(
-            data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
+            data,
+            model_info,
+            coef_rows,
+            alpha=alpha,
+            detail=detail,
+            basis_detail=basis_detail,
+            level_presentation=level_presentation,
         )

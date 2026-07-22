@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from superglm import SuperGLM
 from superglm.features import Categorical, OrderedCategorical, Spline
 from superglm.features.grouping import collapse_levels
 from superglm.inference.summary import ModelSummary, _CoefRow
@@ -80,6 +82,26 @@ def _rendered_summary(level_display: str) -> ModelSummary:
         level_display=level_display,
     )
     return ModelSummary({}, _model_info(), rows, level_presentation=presentation)
+
+
+@pytest.fixture(scope="module")
+def grouped_model_data():
+    rng = np.random.default_rng(20260722)
+    territory = np.tile(np.asarray(["A", "B", "C", "D"]), 40)
+    X = pd.DataFrame({"territory": territory})
+    means = {"A": 1.0, "B": 1.4, "C": 1.4, "D": 0.8}
+    y = rng.poisson(np.asarray([means[level] for level in territory])).astype(float)
+    weights = np.linspace(0.8, 1.2, len(X))
+    grouping = collapse_levels(
+        territory,
+        groups={"B+C fitted label": ["B", "C"]},
+        order=["A", "B", "C", "D"],
+    )
+    model = SuperGLM(
+        features={"territory": Categorical(base="A", grouping=grouping)},
+    )
+    model.fit(X, y, sample_weight=weights)
+    return model, X, y, weights
 
 
 @pytest.mark.parametrize("value", ["", "expand", "ungrouped", "GROUPED", None])
@@ -424,3 +446,100 @@ def test_ungrouped_summary_omits_level_group_column():
 
     assert "Level group" not in str(summary)
     assert "Level group" not in summary._repr_html_()
+
+
+def test_model_summary_defaults_to_expanded_original_levels(grouped_model_data):
+    model, _, _, _ = grouped_model_data
+
+    summary = model.summary()
+
+    territory = [row for row in summary._display_rows if row.group == "territory"]
+    assert [row.name for row in territory] == [
+        "territory[A]",
+        "territory[B]",
+        "territory[C]",
+        "territory[D]",
+    ]
+    assert [row.level_group for row in territory] == ["", "G1", "G1", ""]
+
+
+def test_model_summary_caches_expanded_and_grouped_modes_separately(grouped_model_data):
+    model, _, _, _ = grouped_model_data
+
+    expanded = model.summary()
+    grouped = model.summary(level_display="grouped")
+
+    assert expanded._level_display == "expanded"
+    assert grouped._level_display == "grouped"
+    assert model.summary() is expanded
+    assert model.summary(level_display="grouped") is grouped
+    assert expanded is not grouped
+    territory = [row for row in grouped._display_rows if row.group == "territory"]
+    assert [(row.name, row.level_group) for row in territory] == [
+        ("territory[A]", ""),
+        ("territory", "G1"),
+        ("territory[D]", ""),
+    ]
+
+
+def test_model_summary_validates_level_display_before_cache(grouped_model_data):
+    model, _, _, _ = grouped_model_data
+    model.summary(level_display="grouped")
+
+    with pytest.raises(ValueError, match=r"expanded.*grouped"):
+        model.summary(level_display="ungrouped")
+
+
+def test_model_and_metrics_summary_share_grouped_display(grouped_model_data):
+    model, X, y, weights = grouped_model_data
+
+    model_rows = model.summary(level_display="grouped")._display_rows
+    metric_rows = (
+        model.metrics(X, y, sample_weight=weights).summary(level_display="grouped")._display_rows
+    )
+
+    assert [(row.name, row.level_group) for row in metric_rows] == [
+        (row.name, row.level_group) for row in model_rows
+    ]
+
+
+@pytest.mark.parametrize("wrapper_name", ["SuperGLMRegressor", "SuperGLMClassifier"])
+def test_sklearn_summary_forwards_detail_and_level_display(grouped_model_data, wrapper_name):
+    from superglm import sklearn as sklearn_module
+
+    model, _, _, _ = grouped_model_data
+    wrapper_class = getattr(sklearn_module, wrapper_name)
+    wrapper = wrapper_class()
+    wrapper._model = model
+    wrapper.n_features_in_ = 1
+
+    summary = wrapper.summary(detail="full", level_display="grouped")
+
+    assert summary._detail == "full"
+    assert summary._level_display == "grouped"
+
+
+@pytest.mark.parametrize("level_display", ["expanded", "grouped"])
+def test_editor_stale_inference_stays_suppressed_after_level_adaptation(
+    grouped_model_data,
+    level_display,
+):
+    model, _, _, _ = grouped_model_data
+    prior_stale = getattr(model, "_editor_inference_stale", False)
+    prior_edits = getattr(model, "_editor_edits", None)
+    prior_cache = model._summary_cache
+    model._editor_inference_stale = True
+    model._editor_edits = {"terms": ["territory"]}
+    model._summary_cache = {}
+    try:
+        summary = model.summary(level_display=level_display)
+    finally:
+        model._editor_inference_stale = prior_stale
+        model._editor_edits = prior_edits
+        model._summary_cache = prior_cache
+
+    rows = [row for row in summary._display_rows if row.group == "territory"]
+    assert rows
+    assert all(row.se is None for row in rows)
+    assert all(row.p is None for row in rows)
+    assert all(row.ci_low is None and row.ci_high is None for row in rows)
