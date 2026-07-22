@@ -7,7 +7,7 @@ import pytest
 
 from superglm.features import Categorical, OrderedCategorical, Spline
 from superglm.features.grouping import collapse_levels
-from superglm.inference.summary import _CoefRow
+from superglm.inference.summary import ModelSummary, _CoefRow
 from superglm.types import GroupSlice
 
 
@@ -46,6 +46,40 @@ def _categorical_case():
         _CoefRow(name="territory[F]", group="territory", coef=0.05, se=0.03),
     ]
     return spec, rows, [GroupSlice("territory", 0, 3)]
+
+
+def _model_info() -> dict[str, object]:
+    return {
+        "family": "Poisson",
+        "link": "Log",
+        "penalty": "None",
+        "method": "ML",
+        "n_obs": 100,
+        "effective_df": 4.0,
+        "phi": 1.0,
+        "pearson_chi2": 98.0,
+        "deviance": 95.0,
+        "log_likelihood": -50.0,
+        "aic": 108.0,
+        "aicc": 108.5,
+        "bic": 118.0,
+        "ebic": 118.0,
+        "converged": True,
+        "n_iter": 4,
+    }
+
+
+def _rendered_summary(level_display: str) -> ModelSummary:
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    spec, rows, groups = _categorical_case()
+    presentation = build_summary_level_display(
+        rows,
+        specs={"territory": spec},
+        groups=groups,
+        level_display=level_display,
+    )
+    return ModelSummary({}, _model_info(), rows, level_presentation=presentation)
 
 
 @pytest.mark.parametrize("value", ["", "expand", "ungrouped", "GROUPED", None])
@@ -281,3 +315,112 @@ def test_group_ids_restart_per_feature_and_unmatched_rows_survive():
         ("zone", "G1"),
     ]
     assert any(row is unmatched for row in display.rows)
+
+
+def test_model_summary_retains_canonical_rows_and_accepts_presentation():
+    summary = _rendered_summary("expanded")
+
+    assert summary._coef_rows[1].name == "territory[B+C fitted label]"
+    assert [row.name for row in summary._display_rows[1:]] == [
+        "territory[A]",
+        "territory[B]",
+        "territory[C]",
+        "territory[D]",
+        "territory[E]",
+        "territory[F]",
+    ]
+    assert summary._level_display == "expanded"
+
+
+def test_ascii_summary_renders_expanded_rows_group_column_and_reference():
+    text = str(_rendered_summary("expanded"))
+
+    assert "Level group" in text
+    assert "territory[A]" in text
+    assert "territory[B]" in text
+    assert "territory[C]" in text
+    assert "territory[B+C fitted label]" not in text
+    assert "G1" in text and "G2" in text
+    reference_line = next(line for line in text.splitlines() if "territory[A]" in line)
+    assert "0.0000" in reference_line
+    assert "ref" in reference_line
+
+
+def test_ascii_grouped_summary_uses_short_rows_and_membership_legend():
+    text = str(_rendered_summary("grouped"))
+
+    assert "territory[B+C fitted label]" not in text
+    assert "Level groups (territory):" in text
+    assert "G1 = B, C" in text
+    assert "G2 = D, E" in text
+    assert max(len(line) for line in text.splitlines()) <= 100
+
+
+def test_html_summary_renders_expanded_group_column_and_reference():
+    html = _rendered_summary("expanded")._repr_html_()
+
+    assert "Level group" in html
+    assert "territory[A]" in html
+    assert "territory[B]" in html
+    assert "territory[C]" in html
+    assert "territory[B+C fitted label]" not in html
+    reference_row = next(row for row in html.split("</tr>") if "territory[A]" in row)
+    assert "0.0000" in reference_row
+    assert "ref" in reference_row
+
+
+def test_html_grouped_summary_escapes_exact_members_in_wrapped_legend():
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    levels = ["A", "<script>alert(1)</script>", "B & C"]
+    grouping = collapse_levels(
+        levels,
+        groups={"malicious fitted label": levels[1:]},
+        order=levels,
+    )
+    spec = Categorical(base="A", grouping=grouping)
+    spec.build(np.asarray(levels))
+    canonical = [
+        _CoefRow(
+            name="region[malicious fitted label]",
+            group="region",
+            coef=0.2,
+            se=0.1,
+        )
+    ]
+    presentation = build_summary_level_display(
+        canonical,
+        specs={"region": spec},
+        groups=[GroupSlice("region", 0, 1)],
+        level_display="grouped",
+    )
+    summary = ModelSummary(
+        {},
+        _model_info(),
+        canonical,
+        level_presentation=presentation,
+    )
+
+    html = summary._repr_html_()
+    assert "Level groups (region):" in html
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "B &amp; C" in html
+
+
+def test_ungrouped_summary_omits_level_group_column():
+    from superglm.inference.summary_levels import build_summary_level_display
+
+    spec = Categorical(base="A")
+    spec.build(np.asarray(["A", "B"]))
+    canonical = [_CoefRow(name="region[B]", group="region", coef=0.2, se=0.1)]
+    presentation = build_summary_level_display(
+        canonical,
+        specs={"region": spec},
+        groups=[GroupSlice("region", 0, 1)],
+        level_display="expanded",
+    )
+    summary = ModelSummary({}, _model_info(), canonical, level_presentation=presentation)
+
+    assert "Level group" not in str(summary)
+    assert "Level group" not in summary._repr_html_()

@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import re
+import textwrap
 from dataclasses import dataclass
-from typing import Any
+from html import escape as html_escape
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from scipy.stats import norm
+
+if TYPE_CHECKING:
+    from superglm.inference.summary_levels import SummaryLevelDisplay
 
 
 @dataclass
@@ -167,6 +172,7 @@ class ModelSummary:
         alpha: float = 0.05,
         detail: str = "compact",
         basis_detail: dict[str, list[_BasisDetailRow]] | None = None,
+        level_presentation: SummaryLevelDisplay | None = None,
     ):
         _VALID_DETAIL = {"compact", "full"}
         if detail not in _VALID_DETAIL:
@@ -176,6 +182,15 @@ class ModelSummary:
         self._data = data
         self._info = model_info
         self._coef_rows = coef_rows
+        self._display_rows = (
+            list(level_presentation.rows) if level_presentation is not None else list(coef_rows)
+        )
+        self._level_display = (
+            level_presentation.level_display if level_presentation is not None else "expanded"
+        )
+        self._level_groups = (
+            level_presentation.level_groups if level_presentation is not None else ()
+        )
         self._alpha = alpha
         self._detail = detail
         self._basis_detail: dict[str, list[_BasisDetailRow]] = basis_detail or {}
@@ -219,6 +234,8 @@ class ModelSummary:
         info = self._info
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
+        display_rows = self._display_rows
+        has_level_groups = bool(self._level_groups)
 
         # Compute EDF breakdown from coef rows
         smooth_edf = sum(r.edf for r in self._coef_rows if r.is_spline and r.edf is not None)
@@ -266,9 +283,14 @@ class ModelSummary:
 
         # Compute content width from coefficient columns AND header values
         #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4) + qs(2)
-        name_w = max(len(r.name) for r in self._coef_rows) if self._coef_rows else 10
+        name_w = max(len(r.name) for r in display_rows) if display_rows else 10
         name_w = max(name_w, 10)
-        coef_W = name_w + 10 + 10 + 8 + 8 + 9 + 9 + 4 + 2
+        level_group_w = (
+            max(len("Level group"), *(len(row.level_group) for row in display_rows))
+            if has_level_groups
+            else 0
+        )
+        coef_W = name_w + level_group_w + 10 + 10 + 8 + 8 + 9 + 9 + 4 + 2
 
         # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
         # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
@@ -322,6 +344,12 @@ class ModelSummary:
         def _bot() -> str:
             return f"{_BL}{_D * F}{_BR}"
 
+        def _coef_prefix(row: _CoefRow, *, name: str | None = None) -> str:
+            prefix = f"{row.name if name is None else name:<{name_w}s}"
+            if has_level_groups:
+                prefix += f"{row.level_group if name is None else '':>{level_group_w}s}"
+            return prefix
+
         lines: list[str] = []
 
         # Title
@@ -344,7 +372,10 @@ class ModelSummary:
 
         # Coefficient table header
         hdr = (
-            f"{'':>{name_w}s}"
+            f"{'':>{name_w}s}{'Level group':>{level_group_w}s}"
+            if has_level_groups
+            else f"{'':>{name_w}s}"
+        ) + (
             f"{'coef':>10s}"
             f"{'std err':>10s}"
             f"{'z':>6s}  "
@@ -359,7 +390,7 @@ class ModelSummary:
 
         # Coefficient rows with group separators
         prev_group = None
-        for row in self._coef_rows:
+        for row in display_rows:
             # Emit group separator when the group changes (blank rows for breathing room)
             if row.group and row.group != prev_group:
                 if prev_group is not None:
@@ -412,19 +443,19 @@ class ModelSummary:
                     spline_text = (
                         f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
                     )
-                    prefix = f"{row.name:<{name_w}s}  {spline_text} "
+                    prefix = f"{_coef_prefix(row)}  {spline_text} "
                     pad = max(W - len(prefix) - 4, 0)
                     lines.append(_row(f"{prefix}{'':<{pad}s} {stars:<3s}"))
                     if detail_str:
-                        lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
+                        lines.append(_row(f"{'':<{name_w + level_group_w}s}    {detail_str}"))
                 elif row.active:
                     spline_text = f"[{kind}, {param_label}, active]"
-                    lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
+                    lines.append(_row(f"{_coef_prefix(row)}  {spline_text}"))
                     if detail_str:
-                        lines.append(_row(f"{'':<{name_w}s}    {detail_str}"))
+                        lines.append(_row(f"{'':<{name_w + level_group_w}s}    {detail_str}"))
                 else:
                     spline_text = f"[{kind}, {param_label}, inactive]"
-                    lines.append(_row(f"{row.name:<{name_w}s}  {spline_text}"))
+                    lines.append(_row(f"{_coef_prefix(row)}  {spline_text}"))
 
                 # Coefficient detail rows (only for detail="full")
                 if self._detail == "full" and row.name in self._basis_detail:
@@ -437,7 +468,7 @@ class ModelSummary:
                             bz_str = f"{br.z:>8.3f}"
                         lines.append(
                             _row(
-                                f"{b_label:<{name_w}s}"
+                                f"{_coef_prefix(row, name=b_label)}"
                                 f"{br.coef:>10.4f}"
                                 f"{br.se:>10.4f}"
                                 f"{bz_str}"
@@ -449,6 +480,20 @@ class ModelSummary:
                             )
                         )
 
+            elif row.is_reference:
+                lines.append(
+                    _row(
+                        f"{_coef_prefix(row)}"
+                        f"{0.0:>10.4f}"
+                        f"{'ref':>10s}"
+                        f"{'---':>8s}"
+                        f"{'---':>8s}"
+                        f"{'---':>9s}"
+                        f"{'---':>9s}"
+                        f"{'':>4s}"
+                        f"{'':>2s}"
+                    )
+                )
             elif (
                 row.coef is not None
                 and row.se is not None
@@ -480,7 +525,7 @@ class ModelSummary:
                 )
                 lines.append(
                     _row(
-                        f"{row.name:<{name_w}s}"
+                        f"{_coef_prefix(row)}"
                         f"{row.coef:>10.4f}"
                         f"{row.se:>10.4f}"
                         f"{z_str}"
@@ -495,7 +540,7 @@ class ModelSummary:
                 coef_str = f"{row.coef:>10.4f}" if row.coef is not None else f"{'---':>10s}"
                 lines.append(
                     _row(
-                        f"{row.name:<{name_w}s}"
+                        f"{_coef_prefix(row)}"
                         f"{coef_str}"
                         f"{'---':>10s}"
                         f"{'---':>8s}"
@@ -508,8 +553,24 @@ class ModelSummary:
                 )
 
         lines.append(_bot())
+        if self._level_display == "grouped" and self._level_groups:
+            groups_by_feature: dict[str, list[Any]] = {}
+            for item in self._level_groups:
+                groups_by_feature.setdefault(item.feature, []).append(item)
+            for feature, feature_groups in groups_by_feature.items():
+                mapping = "; ".join(
+                    f"{item.group_id} = {', '.join(item.members)}" for item in feature_groups
+                )
+                legend = f"Level groups ({feature}): {mapping}"
+                lines.extend(
+                    textwrap.wrap(
+                        legend,
+                        width=max(60, min(W + 2, 100)),
+                        subsequent_indent="  ",
+                    )
+                )
         lines.append(_SIG_LEGEND)
-        has_qs = any(r.quasi_separated for r in self._coef_rows)
+        has_qs = any(r.quasi_separated for r in display_rows)
         if has_qs:
             lines.append(_QS_NOTE)
         abbrevs = info.get("penalty_abbrevs", {})
@@ -528,7 +589,7 @@ class ModelSummary:
                 )
 
         # Quasi-separated footnote
-        qs_rows = [r for r in self._coef_rows if r.quasi_separated and r.level_n_obs is not None]
+        qs_rows = [r for r in display_rows if r.quasi_separated and r.level_n_obs is not None]
         if qs_rows:
             lines.append("")
             lines.append("? Quasi-separated levels (insufficient data):")
@@ -547,7 +608,9 @@ class ModelSummary:
         info = self._info
         half = self._alpha / 2.0
         _fmt = self._fmt_scalar
-        ncols = 9  # name + coef + se + z + p + ci_lo + ci_hi + sig + qs
+        display_rows = self._display_rows
+        has_level_groups = bool(self._level_groups)
+        ncols = 10 if has_level_groups else 9
 
         css = "border-collapse:collapse;font-family:monospace;font-size:13px;margin:8px 0;"
         cell = "padding:3px 8px;text-align:right;border:none;"
@@ -557,6 +620,11 @@ class ModelSummary:
         sep_style = "border-bottom:1px solid #999;"
         label_style = "padding:3px 8px;text-align:left;font-weight:bold;color:#555;border:none;"
         sig_cell = "padding:3px 4px;text-align:left;border:none;"
+
+        def _level_group_cell(row: _CoefRow) -> str:
+            if not has_level_groups:
+                return ""
+            return f'<td style="{cell_l}">{html_escape(row.level_group)}</td>'
 
         parts: list[str] = []
         parts.append(f'<table style="{css}">')
@@ -624,20 +692,28 @@ class ModelSummary:
         parts.append(f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>')
 
         # Coefficient table header
-        col_names = [
-            "",
-            "coef",
-            "std err",
-            "z",
-            "P>|z|",
-            f"[{half:.3f}",
-            f"{1 - half:.3f}]",
-            "Sig",
-            "QS",
-        ]
+        col_names = [""]
+        if has_level_groups:
+            col_names.append("Level group")
+        col_names.extend(
+            [
+                "coef",
+                "std err",
+                "z",
+                "P>|z|",
+                f"[{half:.3f}",
+                f"{1 - half:.3f}]",
+                "Sig",
+                "QS",
+            ]
+        )
         parts.append("<tr>")
         parts.append(f'<td style="{hdr_cell_l}">{col_names[0]}</td>')
-        for cn in col_names[1:-1]:
+        first_numeric = 1
+        if has_level_groups:
+            parts.append(f'<td style="{hdr_cell_l}">{col_names[1]}</td>')
+            first_numeric = 2
+        for cn in col_names[first_numeric:-1]:
             parts.append(f'<td style="{hdr_cell}">{cn}</td>')
         parts.append(f'<td style="{hdr_cell_l}">{col_names[-1]}</td>')
         parts.append("</tr>")
@@ -649,10 +725,11 @@ class ModelSummary:
             "border-top:1px solid #bbb;border-bottom:none;font-size:12px;"
         )
         prev_group = None
-        for row in self._coef_rows:
+        for row in display_rows:
             if row.group and row.group != prev_group:
                 parts.append(
-                    f'<tr><td colspan="{ncols}" style="{group_sep_style}">{row.group}</td></tr>'
+                    f'<tr><td colspan="{ncols}" style="{group_sep_style}">'
+                    f"{html_escape(row.group)}</td></tr>"
                 )
             prev_group = row.group
 
@@ -710,8 +787,10 @@ class ModelSummary:
                     )
                     parts.append(
                         f"<tr>"
-                        f'<td style="{cell_l}">{row.name}</td>'
-                        f'<td colspan="{ncols - 3}" style="{cell_l};color:#666;'
+                        f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                        f"{_level_group_cell(row)}"
+                        f'<td colspan="{ncols - 3 - int(has_level_groups)}" '
+                        f'style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td>'
                         f'<td style="{sig_cell}">{stars}</td>'
                         f'<td style="{sig_cell}"></td>'
@@ -721,16 +800,20 @@ class ModelSummary:
                     text = f"[{kind}, {param_label}, active]{detail_html}"
                     parts.append(
                         f"<tr>"
-                        f'<td style="{cell_l}">{row.name}</td>'
-                        f'<td colspan="{ncols - 1}" style="{cell_l};color:#666;'
+                        f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                        f"{_level_group_cell(row)}"
+                        f'<td colspan="{ncols - 1 - int(has_level_groups)}" '
+                        f'style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td></tr>'
                     )
                 else:
                     text = f"[{kind}, {param_label}, inactive]"
                     parts.append(
                         f"<tr>"
-                        f'<td style="{cell_l}">{row.name}</td>'
-                        f'<td colspan="{ncols - 1}" style="{cell_l};color:#666;'
+                        f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                        f"{_level_group_cell(row)}"
+                        f'<td colspan="{ncols - 1 - int(has_level_groups)}" '
+                        f'style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td></tr>'
                     )
 
@@ -777,6 +860,21 @@ class ModelSummary:
                         f"</details></td></tr>"
                     )
 
+            elif row.is_reference:
+                parts.append(
+                    f"<tr>"
+                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                    f"{_level_group_cell(row)}"
+                    f'<td style="{cell}">0.0000</td>'
+                    f'<td style="{cell}">ref</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{cell}">---</td>'
+                    f'<td style="{sig_cell}"></td>'
+                    f'<td style="{sig_cell}"></td>'
+                    f"</tr>"
+                )
             elif (
                 row.coef is not None
                 and row.se is not None
@@ -801,7 +899,8 @@ class ModelSummary:
                 )
                 parts.append(
                     f"<tr>"
-                    f'<td style="{cell_l}">{row.name}</td>'
+                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                    f"{_level_group_cell(row)}"
                     f'<td style="{cell}">{row.coef:.4f}</td>'
                     f'<td style="{cell}">{row.se:.4f}</td>'
                     f'<td style="{cell}">{z_text}</td>'
@@ -816,7 +915,8 @@ class ModelSummary:
                 coef_str = f"{row.coef:.4f}" if row.coef is not None else "---"
                 parts.append(
                     f"<tr>"
-                    f'<td style="{cell_l}">{row.name}</td>'
+                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                    f"{_level_group_cell(row)}"
                     f'<td style="{cell}">{coef_str}</td>'
                     f'<td style="{cell}">---</td>'
                     f'<td style="{cell}">---</td>'
@@ -828,13 +928,31 @@ class ModelSummary:
                     f"</tr>"
                 )
 
+        if self._level_display == "grouped" and self._level_groups:
+            groups_by_feature: dict[str, list[Any]] = {}
+            for item in self._level_groups:
+                groups_by_feature.setdefault(item.feature, []).append(item)
+            for feature, feature_groups in groups_by_feature.items():
+                mapping_html = "; ".join(
+                    f"<strong>{html_escape(item.group_id)}</strong> = "
+                    f"{', '.join(html_escape(member) for member in item.members)}"
+                    for item in feature_groups
+                )
+                parts.append(
+                    f'<tr><td colspan="{ncols}" style="padding:4px 8px;'
+                    f'white-space:normal;overflow-wrap:anywhere;border:none;" '
+                    f'aria-label="Level groups for {html_escape(feature, quote=True)}">'
+                    f"<strong>Level groups ({html_escape(feature)}):</strong> "
+                    f"{mapping_html}</td></tr>"
+                )
+
         # Bottom border + legend
         parts.append(f'<tr><td colspan="{ncols}" style="border-bottom:2px solid #333;"></td></tr>')
         parts.append(
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
         )
-        has_qs = any(r.quasi_separated for r in self._coef_rows)
+        has_qs = any(r.quasi_separated for r in display_rows)
         if has_qs:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
@@ -860,13 +978,14 @@ class ModelSummary:
                 f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
             )
         # Quasi-separated footnote
-        qs_rows = [r for r in self._coef_rows if r.quasi_separated and r.level_n_obs is not None]
+        qs_rows = [r for r in display_rows if r.quasi_separated and r.level_n_obs is not None]
         if qs_rows:
             qs_lines = ["? Quasi-separated levels (insufficient data):"]
             for r in qs_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
                 qs_lines.append(
-                    f"&nbsp;&nbsp;&nbsp;&nbsp;{r.name}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
+                    f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(r.name)}: "
+                    f"{r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
                 )
             qs_html = "<br>".join(qs_lines)
             parts.append(
