@@ -199,7 +199,16 @@ def build_summary_level_display(
                     else set()
                 )
                 insert_at = next(
-                    (index for index, row in enumerate(rows) if row.group in later_group_names),
+                    (
+                        index
+                        for index, row in enumerate(rows)
+                        if row.group in later_group_names
+                        or row.name in later_group_names
+                        or any(
+                            row.name.startswith(f"{group_name}[")
+                            for group_name in later_group_names
+                        )
+                    ),
                     len(rows),
                 )
         matched = set(matched_indices)

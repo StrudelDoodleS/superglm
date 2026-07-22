@@ -1471,6 +1471,44 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
         ]
 
 
+def test_failed_summary_level_display_refresh_remains_retryable(open_editor_page):
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", ("T02", "T03")),
+    ) as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')"""
+        )
+
+        def fail_grouped_summary(route) -> None:
+            payload = route.request.post_data_json
+            if payload.get("level_display") == "grouped":
+                route.fulfill(status=503, json={"error": "Grouped summary unavailable."})
+            else:
+                route.continue_()
+
+        page.route("**/summary", fail_grouped_summary)
+        grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
+            "radio", name="Grouped"
+        )
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/summary")
+                and response.request.post_data_json.get("level_display") == "grouped"
+            )
+        ) as grouped_response:
+            grouped.check()
+
+        assert grouped_response.value.status == 503
+        page.wait_for_timeout(50)
+        assert page.locator("#summaryFrame").get_attribute("data-freshness") == "stale"
+        assert page.locator("#summaryFrame").get_attribute("aria-busy") == "false"
+        assert page.locator("#summaryRetry").is_visible()
+        assert "Grouped summary unavailable." in page.locator("#summaryStatus").inner_text()
+
+
 def test_ordered_summary_has_one_whole_smooth_test_and_no_level_tests(open_editor_page):
     with open_editor_page(selected_term="age_band") as (page, _session):
         page.wait_for_function(

@@ -324,6 +324,30 @@ test("direct summary helpers include the grouped level display", async () => {
   ]);
 });
 
+test("offset refit does not render a response for an obsolete level display", async () => {
+  let levelDisplay = "expanded";
+  const nodes = {
+    ...compactSummaryNodes(),
+    summarySource: { value: "selected" },
+    get summaryLevelDisplay() {
+      return levelDisplay;
+    },
+    refitOffset: { disabled: false }
+  };
+  /** @param {string} _path @param {{body:string}} options */
+  const request = async (_path, options) => {
+    assert.equal(JSON.parse(options.body).level_display, "expanded");
+    levelDisplay = "grouped";
+    nodes.summaryFrame.innerHTML = "<p>Current grouped summary</p>";
+    return compactLevelSummary("expanded");
+  };
+
+  await runOffsetRefit(nodes, async () => {}, { request });
+
+  assert.equal(nodes.summarySource.value, "refit");
+  assert.equal(nodes.summaryFrame.innerHTML, "<p>Current grouped summary</p>");
+});
+
 test("direct summary helpers default legacy callers to expanded", async () => {
   /** @type {Array<Record<string, unknown>>} */
   const calls = [];

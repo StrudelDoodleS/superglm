@@ -347,7 +347,9 @@ function visualMode() {
 function summaryNodes() {
   return {
     summarySource,
-    summaryLevelDisplay: selectSummaryLevelDisplay(store.getState()),
+    get summaryLevelDisplay() {
+      return selectSummaryLevelDisplay(store.getState());
+    },
     refitOffset,
     reprofileTweedie,
     reprofileNb2,
@@ -1060,6 +1062,7 @@ function renderSummaryEvidence(evidence, previous = null) {
     : null;
   const retainedPayloadIsFromOtherLevelDisplay = evidenceMatchesRevision &&
     !retainedPayloadIsFromPriorRevision &&
+    evidence.status === "updating" &&
     evidence.payload !== null &&
     !payloadMatchesLevelDisplay;
   const effectiveEvidence = !evidenceMatchesRevision

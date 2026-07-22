@@ -293,9 +293,18 @@ def test_reference_only_ordered_group_still_expands_and_groups():
     ]
 
 
-@pytest.mark.parametrize("include_feature_row", [False, True])
+@pytest.mark.parametrize(
+    ("include_feature_row", "later_row_name", "later_row_group"),
+    [
+        (False, "region[B]", "region"),
+        (False, "region[P1]", "region P(3)"),
+        (True, "region[B]", "region"),
+    ],
+)
 def test_reference_only_group_synthesizes_rows_without_a_canonical_level_row(
     include_feature_row,
+    later_row_name,
+    later_row_group,
 ):
     from superglm.inference.summary_levels import build_summary_level_display
 
@@ -315,7 +324,7 @@ def test_reference_only_group_synthesizes_rows_without_a_canonical_level_row(
     canonical = [_CoefRow(name="Intercept", coef=0.5)]
     if include_feature_row:
         canonical.append(_CoefRow(name="band", group="band", is_spline=True, active=True, edf=1.0))
-    canonical.append(_CoefRow(name="region[B]", group="region", coef=0.2))
+    canonical.append(_CoefRow(name=later_row_name, group=later_row_group, coef=0.2))
     groups = [
         GroupSlice("band", 0, info.n_cols),
         GroupSlice("region", info.n_cols, info.n_cols + 1),
@@ -340,7 +349,7 @@ def test_reference_only_group_synthesizes_rows_without_a_canonical_level_row(
         "band[A]",
         "band[B]",
         "band[C]",
-        "region[B]",
+        later_row_name,
     ]
     first_level = 2 if include_feature_row else 1
     assert all(row.is_reference for row in expanded.rows[first_level : first_level + 3])
@@ -348,7 +357,7 @@ def test_reference_only_group_synthesizes_rows_without_a_canonical_level_row(
         ("Intercept", "", False),
         *(([("band", "", False)]) if include_feature_row else []),
         ("band", "G1", True),
-        ("region[B]", "", False),
+        (later_row_name, "", False),
     ]
     assert [(legend.group_id, legend.members) for legend in grouped.level_groups] == [
         ("G1", ("A", "B", "C")),

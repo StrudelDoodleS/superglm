@@ -6348,7 +6348,8 @@ def test_editor_summary_has_view_only_categorical_levels_control():
     assert "function summaryRequestPayload()" in main_js
     assert "level_display: selectSummaryLevelDisplay(store.getState())" in main_js
     assert main_js.count("summaryRequestPayload()") >= 3
-    assert "summaryLevelDisplay: selectSummaryLevelDisplay(store.getState())" in main_js
+    assert "get summaryLevelDisplay()" in main_js
+    assert "return selectSummaryLevelDisplay(store.getState())" in main_js
     assert "payload: {" in main_js
     assert "...descriptor.payload," in main_js
     assert "level_display: selectSummaryLevelDisplay(store.getState())" in main_js

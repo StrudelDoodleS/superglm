@@ -32,6 +32,7 @@ export async function runOffsetRefit(
   { request = requestJSON } = {}
 ) {
   const { summarySource, summaryStatus, summaryFrame, refitOffset } = nodes;
+  const levelDisplay = requestedLevelDisplay(nodes);
   summaryStatus.textContent = "Refitting fixed offsets...";
   summaryFrame.setAttribute("aria-busy", "true");
   refitOffset.disabled = true;
@@ -41,11 +42,17 @@ export async function runOffsetRefit(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         method: "auto",
-        level_display: requestedLevelDisplay(nodes)
+        level_display: levelDisplay
       })
     });
     summarySource.value = "refit";
-    renderSummary(payload, nodes);
+    const payloadLevelDisplay = payload.level_display === "expanded" ||
+      payload.level_display === "grouped"
+      ? payload.level_display
+      : levelDisplay;
+    if (payloadLevelDisplay === requestedLevelDisplay(nodes)) {
+      renderSummary(payload, nodes);
+    }
     await refreshMetrics();
     return payload;
   } catch (error) {
