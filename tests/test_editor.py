@@ -2605,17 +2605,42 @@ def test_compact_summary_shows_collapsed_reference_level_group():
     widget = session.widget()
     try:
         payload = summary_payload(widget, "in_force")
+        grouped_payload = summary_payload(widget, "in_force", level_display="grouped")
     finally:
         widget.close()
 
     rows = payload["compact"]["rows"]
-    names = [row["name"] for row in rows]
-    assert "territory[T03+T04+T05]" in names
-    assert "territory[T06+T07+T08]" in names
-    reference_row = next(row for row in rows if row["name"] == "territory[T03+T04+T05]")
-    assert reference_row["kind"] == "reference"
-    assert reference_row["coef"] == 0.0
-    assert reference_row["se_label"] == "ref"
+    rows_by_name = {row["name"]: row for row in rows}
+    for level in ["T03", "T04", "T05"]:
+        reference_row = rows_by_name[f"territory[{level}]"]
+        assert reference_row["kind"] == "reference"
+        assert reference_row["level_group"] == "G1"
+        assert reference_row["coef"] == 0.0
+        assert reference_row["se_label"] == "ref"
+    shared_rows = [rows_by_name[f"territory[{level}]"] for level in ["T06", "T07", "T08"]]
+    assert {row["level_group"] for row in shared_rows} == {"G2"}
+    assert len({row["coef"] for row in shared_rows}) == 1
+    assert len({row["se"] for row in shared_rows}) == 1
+    assert payload["level_display"] == "expanded"
+    assert payload["compact"]["level_display"] == "expanded"
+    assert payload["compact"]["has_level_groups"] is True
+
+    grouped_rows = grouped_payload["compact"]["rows"]
+    grouped_reference = next(row for row in grouped_rows if row["level_group"] == "G1")
+    assert grouped_reference["name"] == "territory"
+    assert grouped_reference["kind"] == "reference"
+    assert grouped_payload["compact"]["level_groups"] == [
+        {
+            "feature": "territory",
+            "group_id": "G1",
+            "members": ["T03", "T04", "T05"],
+        },
+        {
+            "feature": "territory",
+            "group_id": "G2",
+            "members": ["T06", "T07", "T08"],
+        },
+    ]
 
 
 def test_compact_summary_shows_regular_reference_level(editor_model):
@@ -4774,8 +4799,13 @@ def test_widget_http_selected_summary_uses_in_force_without_model_selector(edito
         assert "model_source" not in state
         assert "model_sources" not in state
 
-        summary = _post_json(f"{widget.url}/summary", {"source": "selected"})
+        summary = _post_json(
+            f"{widget.url}/summary",
+            {"source": "selected", "level_display": "grouped"},
+        )
         assert summary["source"] == "in_force"
+        assert summary["level_display"] == "grouped"
+        assert summary["compact"]["level_display"] == "grouped"
 
         original = _post_json(f"{widget.url}/summary", {"source": "original"})
         assert original["source"] == "original"

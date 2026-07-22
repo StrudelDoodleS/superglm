@@ -134,6 +134,7 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._summary(
                 str(payload.get("source", "original")),
+                level_display=str(payload.get("level_display", "expanded")),
                 model_revision=_optional_int(payload.get("model_revision")),
                 request_sequence=_optional_int(payload.get("request_sequence")),
             ),

@@ -477,6 +477,7 @@ class EditorWidget:
         self,
         source: str,
         *,
+        level_display: str = "expanded",
         model_revision: int | None = None,
         request_sequence: int | None = None,
     ) -> dict[str, Any]:
@@ -520,6 +521,7 @@ class EditorWidget:
             offset_terms_override=offset_terms_override,
             offset_labels_override=offset_labels_override,
             collapse_info_override=collapse_info_override,
+            level_display=level_display,
         )
         with self._lock:
             if revision != self.session.model_revision:
