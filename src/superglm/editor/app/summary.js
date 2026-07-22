@@ -184,7 +184,10 @@ export function renderSummary(payload, nodes) {
 }
 
 function updateSummaryMarkup(summaryFrame, markup) {
-  if (summaryMarkupByFrame.get(summaryFrame) === markup) return;
+  if (
+    summaryMarkupByFrame.get(summaryFrame) === markup &&
+    summaryFrame.innerHTML === markup
+  ) return;
   summaryFrame.innerHTML = markup;
   summaryMarkupByFrame.set(summaryFrame, markup);
 }

@@ -6256,6 +6256,38 @@ def test_editor_frontend_includes_grouped_display_control_and_view_mapping():
     assert ".group-display-toggle" in css
 
 
+def test_editor_summary_has_view_only_categorical_levels_control():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+
+    assert 'id="summaryLevelDisplay"' in html
+    assert "<legend>Categorical levels</legend>" in html
+    assert html.count('type="radio" name="summaryLevelDisplay"') == 2
+    assert 'value="expanded" checked' in html
+    assert 'value="grouped"' in html
+    assert "<span>Expanded</span>" in html
+    assert "<span>Grouped</span>" in html
+
+    binding_start = main_js.index("for (const input of summaryLevelDisplayInputs)")
+    binding_end = main_js.index("\n}", binding_start) + 2
+    binding_source = main_js[binding_start:binding_end]
+    assert "actions.patchView({ summaryLevelDisplay: input.value })" in binding_source
+    assert "refreshSummaryView" in binding_source
+    assert "runStructuralRefit" not in binding_source
+    assert "ungroupTransition" not in binding_source
+
+    assert "function summaryRequestPayload()" in main_js
+    assert "level_display: selectSummaryLevelDisplay(store.getState())" in main_js
+    assert main_js.count("summaryRequestPayload()") >= 3
+    assert "summaryLevelDisplay: selectSummaryLevelDisplay(store.getState())" in main_js
+    assert "payload: {" in main_js
+    assert "...descriptor.payload," in main_js
+    assert "level_display: selectSummaryLevelDisplay(store.getState())" in main_js
+    assert 'payload.level_display || "expanded"' in main_js
+    assert 'summaryFrame.innerHTML = ""' in main_js
+
+
 def test_editor_interactions_map_group_display_indices_to_source_indices():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     interactions_js = (root / "interactions.js").read_text()

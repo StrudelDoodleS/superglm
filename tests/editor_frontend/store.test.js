@@ -34,6 +34,7 @@ const {
   selectModelRevision,
   selectMutation,
   selectRenderableTerm,
+  selectSummaryLevelDisplay,
   selectSnapshot
 } = selectors;
 
@@ -90,6 +91,21 @@ test("initial remote state has no summary and ordinary commits preserve the conf
   assert.equal(structural.remote.chartEpoch, 1);
   assert.equal(ordinary.remote.chartEpoch, 2);
   assert.equal(summaryNotifications, 0);
+});
+
+test("summary level display defaults expanded and patches view state only", () => {
+  const initial = createInitialEditorState(snapshot(4));
+
+  assert.equal(initial.view.summaryLevelDisplay, "expanded");
+  assert.equal(selectSummaryLevelDisplay(initial), "expanded");
+
+  const grouped = patchView(initial, { summaryLevelDisplay: "grouped" });
+
+  assert.equal(selectSummaryLevelDisplay(grouped), "grouped");
+  assert.strictEqual(grouped.remote, initial.remote);
+  assert.strictEqual(grouped.request, initial.request);
+  assert.equal(grouped.remote.snapshot?.model_revision, 4);
+  assert.deepEqual(grouped.remote.snapshot?.history, initial.remote.snapshot?.history);
 });
 
 test("structural transition commits snapshot and summary atomically without ending the mutation", () => {
@@ -676,6 +692,7 @@ test("state modules expose only their requested public symbols", () => {
     "selectMutation",
     "selectRenderableTerm",
     "selectSnapshot",
+    "selectSummaryLevelDisplay",
     "selectVisibleEvidencePanels"
   ]);
 });

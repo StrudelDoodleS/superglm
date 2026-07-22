@@ -302,6 +302,19 @@
             <option value="selected">Selected model</option>
             <option value="refit">Fixed-offset refit</option>
           </select>
+          <fieldset id="summaryLevelDisplay" class="summary-level-display">
+            <legend>Categorical levels</legend>
+            <div class="summary-level-segments">
+              <label>
+                <input type="radio" name="summaryLevelDisplay" value="expanded" checked>
+                <span>Expanded</span>
+              </label>
+              <label>
+                <input type="radio" name="summaryLevelDisplay" value="grouped">
+                <span>Grouped</span>
+              </label>
+            </div>
+          </fieldset>
           <button id="refitOffset" type="button">Refit offsets</button>
           <button id="reprofileTweedie" type="button" hidden>Re-profile p</button>
           <button id="reprofileNb2" type="button" hidden>Re-estimate theta</button>

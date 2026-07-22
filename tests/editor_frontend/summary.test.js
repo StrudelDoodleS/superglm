@@ -163,6 +163,12 @@ test("rendering unchanged summary markup preserves the existing table DOM", () =
   renderSummary(payload, nodes);
 
   assert.equal(writes, 1);
+
+  markup = "";
+  renderSummary(payload, nodes);
+
+  assert.equal(writes, 2);
+  assert.match(markup, /Unavailable/);
 });
 
 for (const method of [
