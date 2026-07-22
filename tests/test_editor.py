@@ -3277,6 +3277,7 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
     )
     widget = session.widget()
     calls: list[dict[str, object]] = []
+    summary_calls: list[dict[str, str]] = []
 
     class FakeTrace:
         def to_dict(self, orient):
@@ -3302,15 +3303,22 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
         calls.append({"parameter": parameter, "kwargs": kwargs})
         return FakeResult()
 
+    def fake_summary(_widget, source, *, level_display="expanded"):
+        summary_calls.append({"source": source, "level_display": level_display})
+        return {
+            "available": True,
+            "source": source,
+            "level_display": level_display,
+            "compact": {"model": {}},
+        }
+
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
-    monkeypatch.setattr(
-        "superglm.editor.widget.summary_payload",
-        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
-    )
+    monkeypatch.setattr("superglm.editor.widget.summary_payload", fake_summary)
 
     try:
         payload = widget._profile_distribution(
             "tweedie_p",
+            level_display="grouped",
             method="brent",
             phi_method="mle",
             xatol=0.002,
@@ -3324,6 +3332,8 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
             "kwargs": {"method": "brent", "phi_method": "mle", "xatol": 0.002},
         }
     ]
+    assert summary_calls == [{"source": "in_force", "level_display": "grouped"}]
+    assert payload["level_display"] == "grouped"
     assert payload["profile_trace"] == [
         {"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}
     ]
@@ -3422,15 +3432,21 @@ def test_widget_profile_distribution_job_reports_live_trace(
         trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
         return FakeResult()
 
+    def fake_summary(_widget, source, *, level_display="expanded"):
+        return {
+            "available": True,
+            "source": source,
+            "level_display": level_display,
+            "compact": {"model": {}},
+        }
+
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
-    monkeypatch.setattr(
-        "superglm.editor.widget.summary_payload",
-        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
-    )
+    monkeypatch.setattr("superglm.editor.widget.summary_payload", fake_summary)
 
     try:
         started = widget._start_profile_distribution_job(
             "tweedie_p",
+            level_display="grouped",
             method="brent",
             phi_method="mle",
             xatol=0.001,
@@ -3442,12 +3458,13 @@ def test_widget_profile_distribution_job_reports_live_trace(
 
     assert started["status"] in {"running", "complete"}
     assert status["status"] == "complete"
-    assert status["options"]["xatol"] == 0.001
+    assert status["options"] == {"method": "brent", "phi_method": "mle", "xatol": 0.001}
     assert status["trace"] == [
         {"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"},
         {"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"},
     ]
     assert status["result"]["source"] == "in_force"
+    assert status["result"]["level_display"] == "grouped"
 
 
 def test_widget_profile_distribution_job_reports_finalizing_phase(
@@ -3476,7 +3493,8 @@ def test_widget_profile_distribution_job_reports_finalizing_phase(
         trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
         return FakeResult()
 
-    def blocking_summary(_widget, source):
+    def blocking_summary(_widget, source, *, level_display="expanded"):
+        assert level_display == "expanded"
         summary_started.set()
         assert release_summary.wait(timeout=2.0)
         return {"available": True, "source": source, "compact": {"model": {}}}
@@ -3563,7 +3581,12 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
     monkeypatch.setattr(
         "superglm.editor.widget.summary_payload",
-        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
+        lambda _widget, source, *, level_display="expanded": {
+            "available": True,
+            "source": source,
+            "level_display": level_display,
+            "compact": {"model": {}},
+        },
     )
 
     try:
@@ -4468,12 +4491,13 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
         payload = _post_json(
             f"{widget.url}/collapse_levels",
-            {"term": "region", "method": "fit"},
+            {"term": "region", "method": "fit", "level_display": "grouped"},
         )
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
         assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["level_display"] == "grouped"
         assert payload["summary"]["label"] == "In-force edit model"
         assert payload["state"]["model_revision"] == session.model_revision == 1
         assert payload["state"]["terms"]["region"]["y"][1] == pytest.approx(
@@ -4502,12 +4526,13 @@ def test_widget_http_ungroup_levels_returns_transition_envelope(editor_model):
 
         payload = _post_json(
             f"{widget.url}/ungroup_levels",
-            {"term": "region", "method": "fit"},
+            {"term": "region", "method": "fit", "level_display": "grouped"},
         )
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
         assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["level_display"] == "grouped"
         assert payload["state"]["model_revision"] == session.model_revision == 2
         assert payload["timing"]["operation"] == "ungroup_levels"
         assert payload["timing"]["fit_ms"] >= 0.0
@@ -4771,11 +4796,15 @@ def test_widget_http_uncollapse_levels_restores_previous_model(editor_model):
         assert widget.session.model is not editor_model
         assert widget.session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
 
-        payload = _post_json(f"{widget.url}/uncollapse_levels", {})
+        payload = _post_json(
+            f"{widget.url}/uncollapse_levels",
+            {"level_display": "grouped"},
+        )
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
         assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["level_display"] == "grouped"
         assert payload["state"]["model_revision"] == session.model_revision == 2
         assert widget.session.model is editor_model
         assert getattr(widget.session.model.features["region"], "_grouping", None) is None
@@ -5288,9 +5317,13 @@ def test_widget_http_summary_and_fixed_offset_refit(editor_model):
         assert before_refit["available"] is False
         assert "No fixed-offset refit" in before_refit["error"]
 
-        refit = _post_json(f"{widget.url}/refit_offset", {})
+        refit = _post_json(
+            f"{widget.url}/refit_offset",
+            {"level_display": "grouped"},
+        )
         assert refit["available"] is True
         assert refit["source"] == "refit"
+        assert refit["level_display"] == "grouped"
         assert refit["offset_terms"] == ["region"]
         assert "Editor offset refit" in refit["html"]
         assert refit["compact"]["source"] == "refit"

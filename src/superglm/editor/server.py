@@ -208,13 +208,19 @@ def create_editor_app(widget: Any) -> FastAPI:
 
     @app.post("/refit_offset")
     def refit_offset(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(lambda: widget._refit_offset(str(payload.get("method", "auto"))))
+        return _guarded_json(
+            lambda: widget._refit_offset(
+                str(payload.get("method", "auto")),
+                level_display=str(payload.get("level_display", "expanded")),
+            )
+        )
 
     @app.post("/profile_distribution")
     def profile_distribution(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._profile_distribution(
                 str(payload.get("parameter", "")),
+                level_display=str(payload.get("level_display", "expanded")),
                 **_profile_options(payload),
             )
         )
@@ -226,6 +232,7 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._start_profile_distribution_job(
                 str(payload.get("parameter", "")),
+                level_display=str(payload.get("level_display", "expanded")),
                 **_profile_options(payload),
             )
         )
@@ -240,6 +247,7 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._collapse_levels(
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
+                level_display=str(payload.get("level_display", "expanded")),
             )
         )
 
@@ -249,6 +257,7 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._ungroup_levels(
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
+                level_display=str(payload.get("level_display", "expanded")),
             )
         )
 
@@ -262,8 +271,12 @@ def create_editor_app(widget: Any) -> FastAPI:
         )
 
     @app.post("/uncollapse_levels")
-    def uncollapse_levels() -> Response:
-        return _guarded_json(widget._uncollapse_levels)
+    def uncollapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._uncollapse_levels(
+                level_display=str(payload.get("level_display", "expanded")),
+            )
+        )
 
     return app
 

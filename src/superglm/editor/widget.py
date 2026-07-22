@@ -750,25 +750,32 @@ class EditorWidget:
             "entries": entries,
         }
 
-    def _refit_offset(self, method: str = "auto") -> dict[str, Any]:
+    def _refit_offset(
+        self,
+        method: str = "auto",
+        *,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
         with self._lock:
             terms = self.session.edited_terms()
             if not terms:
                 return {
                     "available": False,
                     "source": "refit",
+                    "level_display": level_display,
                     "error": "No edited terms are available for a fixed-offset refit.",
                 }
             refit_model = self.session.refit_with_edited_offset(method=method)
             self._offset_refit_model = refit_model
             self._offset_refit_terms = list(terms)
             self._offset_refit_labels = offset_label_payload(self.session, terms)
-            return summary_payload(self, "refit")
+            return summary_payload(self, "refit", level_display=level_display)
 
     def _profile_distribution(
         self,
         parameter: str,
         *,
+        level_display: str = "expanded",
         progress_callback=None,
         **options: Any,
     ) -> dict[str, Any]:
@@ -782,12 +789,18 @@ class EditorWidget:
                 progress_callback("finalizing", {"profile_estimate": estimate})
             if self.selected_term not in self.session.terms:
                 self.selected_term = next(iter(self.session.terms), "")
-            payload = summary_payload(self, "in_force")
+            payload = summary_payload(self, "in_force", level_display=level_display)
             payload["profile_trace"] = _profile_trace_rows(result)
             payload["profile_estimate"] = estimate
             return payload
 
-    def _start_profile_distribution_job(self, parameter: str, **options: Any) -> dict[str, Any]:
+    def _start_profile_distribution_job(
+        self,
+        parameter: str,
+        *,
+        level_display: str = "expanded",
+        **options: Any,
+    ) -> dict[str, Any]:
         """Start a distribution-parameter profile job and return its status payload."""
         with self._profile_condition:
             self._profile_job_counter += 1
@@ -795,6 +808,7 @@ class EditorWidget:
             job = {
                 "job_id": job_id,
                 "parameter": parameter,
+                "level_display": level_display,
                 "options": jsonable(dict(options)),
                 "status": "running",
                 "phase": "profiling",
@@ -808,7 +822,7 @@ class EditorWidget:
 
         thread = threading.Thread(
             target=self._run_profile_distribution_job,
-            args=(job_id, parameter, dict(options)),
+            args=(job_id, parameter, level_display, dict(options)),
             name=f"superglm-profile-{job_id}",
             daemon=True,
         )
@@ -834,6 +848,7 @@ class EditorWidget:
         self,
         job_id: str,
         parameter: str,
+        level_display: str,
         options: dict[str, Any],
     ) -> None:
         def trace_callback(row: dict[str, Any]) -> None:
@@ -856,6 +871,7 @@ class EditorWidget:
         try:
             payload = self._profile_distribution(
                 parameter,
+                level_display=level_display,
                 progress_callback=progress_callback,
                 trace_callback=trace_callback,
                 **options,
@@ -888,10 +904,11 @@ class EditorWidget:
         operation_start: float,
         fit_start: float,
         fit_end: float,
+        level_display: str = "expanded",
     ) -> dict[str, Any]:
         with self._lock:
             summary_start = time.perf_counter()
-            summary = jsonable(summary_payload(self, "in_force"))
+            summary = jsonable(summary_payload(self, "in_force", level_display=level_display))
             summary_end = time.perf_counter()
             state_start = time.perf_counter()
             state = jsonable(self._state())
@@ -908,7 +925,13 @@ class EditorWidget:
                 },
             }
 
-    def _collapse_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
+    def _collapse_levels(
+        self,
+        term: str | None = None,
+        method: str = "auto",
+        *,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
         with self._lock:
             operation_start = time.perf_counter()
             if term is not None:
@@ -932,9 +955,16 @@ class EditorWidget:
                 operation_start=operation_start,
                 fit_start=fit_start,
                 fit_end=fit_end,
+                level_display=level_display,
             )
 
-    def _ungroup_levels(self, term: str | None = None, method: str = "auto") -> dict[str, Any]:
+    def _ungroup_levels(
+        self,
+        term: str | None = None,
+        method: str = "auto",
+        *,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
         with self._lock:
             operation_start = time.perf_counter()
             if term is not None:
@@ -966,6 +996,7 @@ class EditorWidget:
                 operation_start=operation_start,
                 fit_start=fit_start,
                 fit_end=fit_end,
+                level_display=level_display,
             )
 
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
@@ -976,7 +1007,7 @@ class EditorWidget:
             self._chart_generation += 1
             return self._state()
 
-    def _uncollapse_levels(self) -> dict[str, Any]:
+    def _uncollapse_levels(self, *, level_display: str = "expanded") -> dict[str, Any]:
         with self._lock:
             operation_start = time.perf_counter()
             fit_start = time.perf_counter()
@@ -999,6 +1030,7 @@ class EditorWidget:
                 operation_start=operation_start,
                 fit_start=fit_start,
                 fit_end=fit_end,
+                level_display=level_display,
             )
 
     def _selected_level_labels(self, term: str) -> list[str]:
