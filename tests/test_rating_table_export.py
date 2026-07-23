@@ -18,6 +18,7 @@ from superglm import (
     SuperGLM,
     export_rating_tables,
 )
+from superglm.editor import EditorSession
 from superglm.export.excel import write_rating_table_workbook
 from superglm.export.rating_tables import RatingTablePayload, build_rating_table_payload
 from superglm.export.summary import (
@@ -26,6 +27,24 @@ from superglm.export.summary import (
     SummaryTermRow,
     build_summary_export_payload,
 )
+
+EXPECTED_SUMMARY_TERM_HEADERS = [
+    "Term",
+    "Group",
+    "Kind",
+    "Estimate",
+    "Std Error",
+    "Statistic",
+    "Statistic Type",
+    "P Value",
+    "CI Lower",
+    "CI Upper",
+    "EDF",
+    "Lambda",
+    "Active",
+    "Significance",
+    "Warning",
+]
 
 
 def _fit_export_model():
@@ -1075,23 +1094,7 @@ def test_excel_workbook_layout(tmp_path):
         summary_ws.cell(row=term_min_row, column=column).value
         for column in range(term_min_col, term_max_col + 1)
     ]
-    assert term_headers == [
-        "Term",
-        "Group",
-        "Kind",
-        "Estimate",
-        "Std Error",
-        "Statistic",
-        "Statistic Type",
-        "P Value",
-        "CI Lower",
-        "CI Upper",
-        "EDF",
-        "Lambda",
-        "Active",
-        "Significance",
-        "Warning",
-    ]
+    assert term_headers == EXPECTED_SUMMARY_TERM_HEADERS
 
     overview = {row["Metric"]: row["Value"] for row in _table_records(summary_ws, "ModelOverview")}
     assert isinstance(overview["Observations"], int)
@@ -1114,6 +1117,67 @@ def test_excel_workbook_layout(tmp_path):
         "SuperGLM Results" not in str(cell.value) for row in summary_ws.iter_rows() for cell in row
     )
     assert summary_ws.column_dimensions["A"].width < 60
+
+
+def test_summary_level_display_modes_do_not_change_collapsed_excel_export(tmp_path):
+    model, X, y, w = _fit_export_model()
+    session = EditorSession.from_model(
+        model,
+        terms=["region"],
+        train_data=(X, y, w),
+    )
+    session.select_levels("region", ["B", "C"])
+    collapsed = session.replace_with_collapsed_levels("region", method="fit")
+    before_summary = build_summary_export_payload(collapsed)
+    before_rating = build_rating_table_payload(collapsed, X, y, sample_weight=w)
+
+    collapsed.summary(level_display="expanded")
+    collapsed.summary(level_display="grouped")
+
+    assert build_summary_export_payload(collapsed) == before_summary
+    after_rating = build_rating_table_payload(collapsed, X, y, sample_weight=w)
+    _assert_rating_payload_equal(after_rating, before_rating)
+
+    region = next(block.table for block in before_rating.main_effects if block.name == "region")
+    assert region["region"].tolist() == ["A", "B", "C"]
+    expected_weights = X.assign(_weight=w).groupby("region", sort=False)["_weight"].sum()
+    np.testing.assert_allclose(
+        region["Weight"].to_numpy(),
+        expected_weights.reindex(region["region"]).to_numpy(),
+    )
+    assert region.loc[region["region"] == "B", "Relativity"].iloc[0] == pytest.approx(
+        region.loc[region["region"] == "C", "Relativity"].iloc[0]
+    )
+
+    output = tmp_path / "collapsed_summary_modes.xlsx"
+    collapsed.export_rating_tables(output, X, y, sample_weight=w)
+    workbook = load_workbook(output, data_only=True)
+    summary_ws = workbook["Model Summary"]
+    term_min_col, term_min_row, term_max_col, _ = range_boundaries(
+        summary_ws.tables["TermInference"].ref
+    )
+    term_headers = [
+        summary_ws.cell(row=term_min_row, column=column).value
+        for column in range(term_min_col, term_max_col + 1)
+    ]
+    assert term_headers == EXPECTED_SUMMARY_TERM_HEADERS
+    assert "Level group" not in term_headers
+    assert "G1" not in {cell.value for row in summary_ws.iter_rows() for cell in row}
+
+    rating_ws = workbook["Rating Tables"]
+    assert [rating_ws.cell(row=7, column=column).value for column in range(4, 7)] == [
+        "region",
+        "Relativity",
+        "Weight",
+    ]
+    workbook_region = pd.DataFrame(
+        {
+            "region": [rating_ws.cell(row=row, column=4).value for row in range(8, 11)],
+            "Relativity": [rating_ws.cell(row=row, column=5).value for row in range(8, 11)],
+            "Weight": [rating_ws.cell(row=row, column=6).value for row in range(8, 11)],
+        }
+    )
+    pd.testing.assert_frame_equal(workbook_region, region.reset_index(drop=True))
 
 
 def test_ordered_spline_workbook_keeps_only_global_inference(tmp_path):

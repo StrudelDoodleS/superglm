@@ -11,6 +11,7 @@ import {
   selectGroupDisplayMode,
   selectRenderableTerm,
   selectSnapshot,
+  selectSummaryLevelDisplay,
   selectVisibleEvidencePanels
 } from "./state/selectors.js";
 import {
@@ -105,6 +106,9 @@ const metricGrid = document.getElementById("metricGrid");
 const metricFreshness = document.getElementById("metricFreshness");
 const metricRetry = document.getElementById("metricRetry");
 const summarySource = document.getElementById("summarySource");
+const summaryLevelDisplayInputs = /** @type {HTMLInputElement[]} */ (
+  [...document.querySelectorAll('input[name="summaryLevelDisplay"]')]
+);
 const refitOffset = document.getElementById("refitOffset");
 const reprofileTweedie = document.getElementById("reprofileTweedie");
 const reprofileNb2 = document.getElementById("reprofileNb2");
@@ -343,6 +347,9 @@ function visualMode() {
 function summaryNodes() {
   return {
     summarySource,
+    get summaryLevelDisplay() {
+      return selectSummaryLevelDisplay(store.getState());
+    },
     refitOffset,
     reprofileTweedie,
     reprofileNb2,
@@ -460,10 +467,15 @@ async function refreshMetricsView() {
   });
 }
 
+function summaryRequestPayload() {
+  return {
+    source: summarySource.value,
+    level_display: selectSummaryLevelDisplay(store.getState())
+  };
+}
+
 async function refreshSummaryView() {
-  await actions.refreshEvidence("summary", "/summary", {
-    source: summarySource.value
-  });
+  await actions.refreshEvidence("summary", "/summary", summaryRequestPayload());
 }
 
 async function refreshActiveReport() {
@@ -499,7 +511,7 @@ function scheduleVisibleEvidence(
       actions.schedulePanelEvidence(
         panel,
         "/summary",
-        { source: summarySource.value },
+        summaryRequestPayload(),
         { immediate }
       );
     }
@@ -547,6 +559,10 @@ async function runStructuralRefit(descriptor) {
   };
   const result = await actions.executeStructuralMutation({
     ...descriptor,
+    payload: {
+      ...descriptor.payload,
+      level_display: selectSummaryLevelDisplay(store.getState())
+    },
     onRequestSettled: () => {
       milestones.requestEnd = performance.now();
     },
@@ -1037,12 +1053,23 @@ function renderSummaryEvidence(evidence, previous = null) {
   const evidenceMatchesRevision = evidence.revision === revision;
   const retainedPayloadIsFromPriorRevision = evidence.status === "updating" &&
     previous !== null && previous.revision !== evidence.revision;
-  const payload = evidenceMatchesRevision && !retainedPayloadIsFromPriorRevision
+  const payloadMatchesLevelDisplay = evidence.payload === null ||
+    (evidence.payload.level_display || "expanded") === selectSummaryLevelDisplay(state);
+  const payload = evidenceMatchesRevision &&
+    !retainedPayloadIsFromPriorRevision &&
+    payloadMatchesLevelDisplay
     ? evidence.payload
     : null;
-  const effectiveEvidence = evidenceMatchesRevision
-    ? evidence
-    : { ...evidence, status: "stale", error: null };
+  const retainedPayloadIsFromOtherLevelDisplay = evidenceMatchesRevision &&
+    !retainedPayloadIsFromPriorRevision &&
+    evidence.status === "updating" &&
+    evidence.payload !== null &&
+    !payloadMatchesLevelDisplay;
+  const effectiveEvidence = !evidenceMatchesRevision
+    ? { ...evidence, status: "stale", error: null }
+    : retainedPayloadIsFromOtherLevelDisplay
+      ? { ...evidence, status: "updating", error: null }
+      : evidence;
   summaryFrame.setAttribute(
     "aria-busy",
     effectiveEvidence.status === "updating" ? "true" : "false"
@@ -1050,6 +1077,9 @@ function renderSummaryEvidence(evidence, previous = null) {
   summaryFrame.dataset.freshness = effectiveEvidence.status;
   if (payload !== null) {
     renderSummary(payload, summaryNodes());
+  } else if (retainedPayloadIsFromOtherLevelDisplay) {
+    summaryFrame.innerHTML = "";
+    summaryStatus.textContent = "Updating summary...";
   } else if (
     summaryFrame.innerHTML.trim().length === 0 &&
     (effectiveEvidence.status === "error" || effectiveEvidence.status === "stale")
@@ -1326,6 +1356,19 @@ if (groupDisplayMode) {
   });
 }
 
+for (const input of summaryLevelDisplayInputs) {
+  input.addEventListener("change", () => {
+    if (!input.checked) return;
+    actions.patchView({ summaryLevelDisplay: input.value });
+    actions.schedulePanelEvidence(
+      "summary",
+      "/summary",
+      summaryRequestPayload(),
+      { immediate: true }
+    );
+  });
+}
+
 basisToggle.addEventListener("click", () => {
   stopContributionBuild();
   actions.patchView({ showContrib: !store.getState().view.showContrib });
@@ -1453,6 +1496,12 @@ store.subscribe(
     renderSummaryEvidence(store.getState().request.evidence.summary);
   }
 );
+store.subscribe(selectSummaryLevelDisplay, (levelDisplay) => {
+  for (const input of summaryLevelDisplayInputs) {
+    input.checked = input.value === levelDisplay;
+  }
+  renderSummaryEvidence(store.getState().request.evidence.summary);
+});
 store.subscribe(
   (state) => state.request.evidence.summary,
   (evidence, previous) => {
@@ -1482,6 +1531,10 @@ store.subscribe(
     evidenceTiming.observe("report", evidence, previous);
   }
 );
+
+for (const input of summaryLevelDisplayInputs) {
+  input.checked = input.value === selectSummaryLevelDisplay(store.getState());
+}
 
 loadState().then(async () => {
   await refreshMetricsView();

@@ -2605,17 +2605,42 @@ def test_compact_summary_shows_collapsed_reference_level_group():
     widget = session.widget()
     try:
         payload = summary_payload(widget, "in_force")
+        grouped_payload = summary_payload(widget, "in_force", level_display="grouped")
     finally:
         widget.close()
 
     rows = payload["compact"]["rows"]
-    names = [row["name"] for row in rows]
-    assert "territory[T03+T04+T05]" in names
-    assert "territory[T06+T07+T08]" in names
-    reference_row = next(row for row in rows if row["name"] == "territory[T03+T04+T05]")
-    assert reference_row["kind"] == "reference"
-    assert reference_row["coef"] == 0.0
-    assert reference_row["se_label"] == "ref"
+    rows_by_name = {row["name"]: row for row in rows}
+    for level in ["T03", "T04", "T05"]:
+        reference_row = rows_by_name[f"territory[{level}]"]
+        assert reference_row["kind"] == "reference"
+        assert reference_row["level_group"] == "G1"
+        assert reference_row["coef"] == 0.0
+        assert reference_row["se_label"] == "ref"
+    shared_rows = [rows_by_name[f"territory[{level}]"] for level in ["T06", "T07", "T08"]]
+    assert {row["level_group"] for row in shared_rows} == {"G2"}
+    assert len({row["coef"] for row in shared_rows}) == 1
+    assert len({row["se"] for row in shared_rows}) == 1
+    assert payload["level_display"] == "expanded"
+    assert payload["compact"]["level_display"] == "expanded"
+    assert payload["compact"]["has_level_groups"] is True
+
+    grouped_rows = grouped_payload["compact"]["rows"]
+    grouped_reference = next(row for row in grouped_rows if row["level_group"] == "G1")
+    assert grouped_reference["name"] == "territory"
+    assert grouped_reference["kind"] == "reference"
+    assert grouped_payload["compact"]["level_groups"] == [
+        {
+            "feature": "territory",
+            "group_id": "G1",
+            "members": ["T03", "T04", "T05"],
+        },
+        {
+            "feature": "territory",
+            "group_id": "G2",
+            "members": ["T06", "T07", "T08"],
+        },
+    ]
 
 
 def test_compact_summary_shows_regular_reference_level(editor_model):
@@ -3252,6 +3277,7 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
     )
     widget = session.widget()
     calls: list[dict[str, object]] = []
+    summary_calls: list[dict[str, str]] = []
 
     class FakeTrace:
         def to_dict(self, orient):
@@ -3277,15 +3303,22 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
         calls.append({"parameter": parameter, "kwargs": kwargs})
         return FakeResult()
 
+    def fake_summary(_widget, source, *, level_display="expanded"):
+        summary_calls.append({"source": source, "level_display": level_display})
+        return {
+            "available": True,
+            "source": source,
+            "level_display": level_display,
+            "compact": {"model": {}},
+        }
+
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
-    monkeypatch.setattr(
-        "superglm.editor.widget.summary_payload",
-        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
-    )
+    monkeypatch.setattr("superglm.editor.widget.summary_payload", fake_summary)
 
     try:
         payload = widget._profile_distribution(
             "tweedie_p",
+            level_display="grouped",
             method="brent",
             phi_method="mle",
             xatol=0.002,
@@ -3299,6 +3332,8 @@ def test_widget_profile_distribution_forwards_options_and_returns_trace(
             "kwargs": {"method": "brent", "phi_method": "mle", "xatol": 0.002},
         }
     ]
+    assert summary_calls == [{"source": "in_force", "level_display": "grouped"}]
+    assert payload["level_display"] == "grouped"
     assert payload["profile_trace"] == [
         {"step": 0, "p": 1.42, "phi": 0.3, "nll": 0.12, "source": "brent"}
     ]
@@ -3397,15 +3432,21 @@ def test_widget_profile_distribution_job_reports_live_trace(
         trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
         return FakeResult()
 
+    def fake_summary(_widget, source, *, level_display="expanded"):
+        return {
+            "available": True,
+            "source": source,
+            "level_display": level_display,
+            "compact": {"model": {}},
+        }
+
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
-    monkeypatch.setattr(
-        "superglm.editor.widget.summary_payload",
-        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
-    )
+    monkeypatch.setattr("superglm.editor.widget.summary_payload", fake_summary)
 
     try:
         started = widget._start_profile_distribution_job(
             "tweedie_p",
+            level_display="grouped",
             method="brent",
             phi_method="mle",
             xatol=0.001,
@@ -3417,12 +3458,13 @@ def test_widget_profile_distribution_job_reports_live_trace(
 
     assert started["status"] in {"running", "complete"}
     assert status["status"] == "complete"
-    assert status["options"]["xatol"] == 0.001
+    assert status["options"] == {"method": "brent", "phi_method": "mle", "xatol": 0.001}
     assert status["trace"] == [
         {"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"},
         {"step": 1, "p": 1.5, "phi": 0.2, "nll": 0.1, "source": "final"},
     ]
     assert status["result"]["source"] == "in_force"
+    assert status["result"]["level_display"] == "grouped"
 
 
 def test_widget_profile_distribution_job_reports_finalizing_phase(
@@ -3451,7 +3493,8 @@ def test_widget_profile_distribution_job_reports_finalizing_phase(
         trace_callback({"step": 0, "p": 1.3, "phi": 0.22, "nll": 0.14, "source": "brent"})
         return FakeResult()
 
-    def blocking_summary(_widget, source):
+    def blocking_summary(_widget, source, *, level_display="expanded"):
+        assert level_display == "expanded"
         summary_started.set()
         assert release_summary.wait(timeout=2.0)
         return {"available": True, "source": source, "compact": {"model": {}}}
@@ -3538,7 +3581,12 @@ def test_widget_profile_distribution_job_reports_best_parameter_and_refit_phase(
     monkeypatch.setattr(session, "reprofile_distribution", fake_reprofile)
     monkeypatch.setattr(
         "superglm.editor.widget.summary_payload",
-        lambda _widget, source: {"available": True, "source": source, "compact": {"model": {}}},
+        lambda _widget, source, *, level_display="expanded": {
+            "available": True,
+            "source": source,
+            "level_display": level_display,
+            "compact": {"model": {}},
+        },
     )
 
     try:
@@ -4027,6 +4075,74 @@ def test_widget_structural_mutations_advance_chart_generation_once(editor_model)
     ] == [0, 1, 2, 2, 3, 4]
 
 
+@pytest.mark.parametrize("operation", ["collapse", "ungroup", "uncollapse"])
+def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, operation):
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    try:
+        widget._select("region", [1, 2])
+        if operation != "collapse":
+            widget._collapse_levels("region", method="fit")
+
+        before_model = session.model
+        before_revision = session.model_revision
+        before_history = [id(model) for model in session.collapse_history]
+        before_chart_generation = widget._chart_generation
+
+        with pytest.raises(ValueError, match="level_display"):
+            if operation == "collapse":
+                widget._collapse_levels("region", method="fit", level_display="invalid")
+            elif operation == "ungroup":
+                widget._ungroup_levels("region", method="fit", level_display="invalid")
+            else:
+                widget._uncollapse_levels(level_display="invalid")
+
+        assert session.model is before_model
+        assert session.model_revision == before_revision
+        assert [id(model) for model in session.collapse_history] == before_history
+        assert widget._chart_generation == before_chart_generation
+    finally:
+        widget.close()
+
+
+def test_invalid_level_display_is_rejected_before_other_editor_mutations(
+    editor_model,
+    monkeypatch,
+):
+    import superglm.editor.widget as widget_module
+
+    session = EditorSession.from_model(editor_model, terms=["region"])
+    widget = session.widget()
+    profile_called = False
+    thread_started = False
+
+    def unexpected_profile(*_args, **_kwargs):
+        nonlocal profile_called
+        profile_called = True
+        raise AssertionError("profile mutation ran before level_display validation")
+
+    def unexpected_thread_start(_thread):
+        nonlocal thread_started
+        thread_started = True
+
+    monkeypatch.setattr(session, "reprofile_distribution", unexpected_profile)
+    monkeypatch.setattr(widget_module.threading.Thread, "start", unexpected_thread_start)
+    try:
+        with pytest.raises(ValueError, match="level_display"):
+            widget._refit_offset(level_display="invalid")
+        with pytest.raises(ValueError, match="level_display"):
+            widget._profile_distribution("tweedie_p", level_display="invalid")
+        with pytest.raises(ValueError, match="level_display"):
+            widget._start_profile_distribution_job("tweedie_p", level_display="invalid")
+
+        assert profile_called is False
+        assert thread_started is False
+        assert widget._offset_refit_model is None
+        assert widget._profile_jobs == {}
+    finally:
+        widget.close()
+
+
 def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
@@ -4443,12 +4559,13 @@ def test_widget_http_collapse_levels_refit_updates_summary_source(editor_model):
         _post_json(f"{widget.url}/select", {"term": "region", "indices": [1, 2]})
         payload = _post_json(
             f"{widget.url}/collapse_levels",
-            {"term": "region", "method": "fit"},
+            {"term": "region", "method": "fit", "level_display": "grouped"},
         )
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
         assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["level_display"] == "grouped"
         assert payload["summary"]["label"] == "In-force edit model"
         assert payload["state"]["model_revision"] == session.model_revision == 1
         assert payload["state"]["terms"]["region"]["y"][1] == pytest.approx(
@@ -4477,12 +4594,13 @@ def test_widget_http_ungroup_levels_returns_transition_envelope(editor_model):
 
         payload = _post_json(
             f"{widget.url}/ungroup_levels",
-            {"term": "region", "method": "fit"},
+            {"term": "region", "method": "fit", "level_display": "grouped"},
         )
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
         assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["level_display"] == "grouped"
         assert payload["state"]["model_revision"] == session.model_revision == 2
         assert payload["timing"]["operation"] == "ungroup_levels"
         assert payload["timing"]["fit_ms"] >= 0.0
@@ -4746,11 +4864,15 @@ def test_widget_http_uncollapse_levels_restores_previous_model(editor_model):
         assert widget.session.model is not editor_model
         assert widget.session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
 
-        payload = _post_json(f"{widget.url}/uncollapse_levels", {})
+        payload = _post_json(
+            f"{widget.url}/uncollapse_levels",
+            {"level_display": "grouped"},
+        )
 
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["summary"]["available"] is True
         assert payload["summary"]["source"] == "in_force"
+        assert payload["summary"]["level_display"] == "grouped"
         assert payload["state"]["model_revision"] == session.model_revision == 2
         assert widget.session.model is editor_model
         assert getattr(widget.session.model.features["region"], "_grouping", None) is None
@@ -4774,8 +4896,13 @@ def test_widget_http_selected_summary_uses_in_force_without_model_selector(edito
         assert "model_source" not in state
         assert "model_sources" not in state
 
-        summary = _post_json(f"{widget.url}/summary", {"source": "selected"})
+        summary = _post_json(
+            f"{widget.url}/summary",
+            {"source": "selected", "level_display": "grouped"},
+        )
         assert summary["source"] == "in_force"
+        assert summary["level_display"] == "grouped"
+        assert summary["compact"]["level_display"] == "grouped"
 
         original = _post_json(f"{widget.url}/summary", {"source": "original"})
         assert original["source"] == "original"
@@ -5258,9 +5385,13 @@ def test_widget_http_summary_and_fixed_offset_refit(editor_model):
         assert before_refit["available"] is False
         assert "No fixed-offset refit" in before_refit["error"]
 
-        refit = _post_json(f"{widget.url}/refit_offset", {})
+        refit = _post_json(
+            f"{widget.url}/refit_offset",
+            {"level_display": "grouped"},
+        )
         assert refit["available"] is True
         assert refit["source"] == "refit"
+        assert refit["level_display"] == "grouped"
         assert refit["offset_terms"] == ["region"]
         assert "Editor offset refit" in refit["html"]
         assert refit["compact"]["source"] == "refit"
@@ -6191,6 +6322,42 @@ def test_editor_frontend_includes_grouped_display_control_and_view_mapping():
     assert "source_indices" in chart_js
     assert "displayToSourceIndices" in chart_js
     assert ".group-display-toggle" in css
+
+
+def test_editor_summary_has_view_only_categorical_levels_control():
+    root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
+    html = (root / "index.html").read_text()
+    main_js = (root / "main.js").read_text()
+
+    assert 'id="summaryLevelDisplay"' in html
+    assert "<legend>Categorical levels</legend>" in html
+    assert html.count('type="radio" name="summaryLevelDisplay"') == 2
+    assert 'value="expanded" checked' in html
+    assert 'value="grouped"' in html
+    assert "<span>Expanded</span>" in html
+    assert "<span>Grouped</span>" in html
+
+    binding_start = main_js.index("for (const input of summaryLevelDisplayInputs)")
+    binding_end = main_js.index("\n}", binding_start) + 2
+    binding_source = main_js[binding_start:binding_end]
+    assert "actions.patchView({ summaryLevelDisplay: input.value })" in binding_source
+    assert "actions.schedulePanelEvidence(" in binding_source
+    assert '"summary"' in binding_source
+    assert "{ immediate: true }" in binding_source
+    assert "refreshSummaryView" not in binding_source
+    assert "runStructuralRefit" not in binding_source
+    assert "ungroupTransition" not in binding_source
+
+    assert "function summaryRequestPayload()" in main_js
+    assert "level_display: selectSummaryLevelDisplay(store.getState())" in main_js
+    assert main_js.count("summaryRequestPayload()") >= 3
+    assert "get summaryLevelDisplay()" in main_js
+    assert "return selectSummaryLevelDisplay(store.getState())" in main_js
+    assert "payload: {" in main_js
+    assert "...descriptor.payload," in main_js
+    assert "level_display: selectSummaryLevelDisplay(store.getState())" in main_js
+    assert 'payload.level_display || "expanded"' in main_js
+    assert 'summaryFrame.innerHTML = ""' in main_js
 
 
 def test_editor_interactions_map_group_display_indices_to_source_indices():

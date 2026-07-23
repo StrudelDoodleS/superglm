@@ -10,8 +10,10 @@ import {
 const summaryModulePath = "../../src/superglm/editor/app/summary.js";
 const {
   collapseTransition,
+  refreshSummary,
   renderSummary,
   runDistributionProfile,
+  runOffsetRefit,
   uncollapseTransition,
   ungroupTransition
 } = await import(summaryModulePath);
@@ -48,6 +50,63 @@ function profileTraceNodes() {
     profileTraceLegend: { innerHTML: "" },
     profileTracePlot: { innerHTML: "" },
     profileTraceTable: { innerHTML: "" }
+  };
+}
+
+function compactSummaryNodes() {
+  return {
+    summaryStatus: { textContent: "" },
+    summaryNote: { textContent: "" },
+    summaryFrame: { innerHTML: "", setAttribute: () => {} }
+  };
+}
+
+/**
+ * @param {"expanded"|"grouped"} levelDisplay
+ * @param {{hasLevelGroups?:boolean}} [options]
+ */
+function compactLevelSummary(levelDisplay, { hasLevelGroups = true } = {}) {
+  const expanded = levelDisplay === "expanded";
+  return {
+    available: true,
+    label: "Summary",
+    level_display: levelDisplay,
+    html: `<p>Full ${levelDisplay}</p>`,
+    compact: {
+      model: {},
+      level_display: levelDisplay,
+      has_level_groups: hasLevelGroups,
+      level_groups: hasLevelGroups
+        ? [{
+          feature: "territory",
+          group_id: "G1",
+          members: ["B", "C", '<img src=x onerror="alert(1)">']
+        }]
+        : [],
+      rows: expanded
+        ? ["B", "C"].map((member) => ({
+          name: `territory[${member}]`,
+          group: "territory",
+          level_group: "G1",
+          kind: "coef",
+          coef: 0.2,
+          se: 0.1,
+          p_value: 0.04,
+          sig_code: "*",
+          sig_class: "sig-standard"
+        }))
+        : [{
+          name: "territory",
+          group: "territory",
+          level_group: "G1",
+          kind: "coef",
+          coef: 0.2,
+          se: 0.1,
+          p_value: 0.04,
+          sig_code: "*",
+          sig_class: "sig-standard"
+        }]
+    }
   };
 }
 
@@ -145,24 +204,195 @@ test("transition descriptor payloads are independent caller-owned values", () =>
 test("rendering unchanged summary markup preserves the existing table DOM", () => {
   let writes = 0;
   let markup = "";
+  /** @type {object | null} */
+  let firstElementChild = null;
   const summaryFrame = {
-    get innerHTML() { return markup; },
+    // Browsers serialize parsed HTML rather than returning the exact source
+    // string. Character references are one common source of differences.
+    get innerHTML() { return markup.replaceAll("&quot;", '"'); },
     set innerHTML(value) {
       writes += 1;
       markup = value;
-    }
+      firstElementChild = value ? {} : null;
+    },
+    get firstElementChild() { return firstElementChild; }
   };
   const nodes = {
     summaryStatus: { textContent: "" },
     summaryNote: { textContent: "" },
     summaryFrame
   };
-  const payload = { available: false, label: "Summary", error: "Unavailable" };
+  const payload = { available: false, label: "Summary", error: 'Unavailable "now"' };
 
   renderSummary(payload, nodes);
   renderSummary(payload, nodes);
 
   assert.equal(writes, 1);
+
+  markup = "";
+  firstElementChild = null;
+  renderSummary(payload, nodes);
+
+  assert.equal(writes, 2);
+  assert.match(markup, /Unavailable/);
+});
+
+test("expanded compact summary shows group indicators without a membership legend", () => {
+  const nodes = compactSummaryNodes();
+
+  renderSummary(compactLevelSummary("expanded"), nodes);
+
+  assert.match(nodes.summaryFrame.innerHTML, /Level group/);
+  assert.match(nodes.summaryFrame.innerHTML, /territory\[B\]/);
+  assert.match(nodes.summaryFrame.innerHTML, /territory\[C\]/);
+  assert.match(nodes.summaryFrame.innerHTML, />G1</);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /Level groups \(territory\)/);
+});
+
+test("reference summary rows retain their emitted significance class", () => {
+  const nodes = compactSummaryNodes();
+  const payload = compactLevelSummary("expanded", { hasLevelGroups: false });
+  payload.compact.rows[0].sig_class = "sig-reference";
+
+  renderSummary(payload, nodes);
+
+  assert.match(nodes.summaryFrame.innerHTML, /summary-row sig-reference/);
+  assert.match(nodes.summaryFrame.innerHTML, /summary-se se-cell sig-reference/);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /summary-row sig-unknown/);
+});
+
+test("grouped compact summary renders one row and escaped membership legend", () => {
+  const nodes = compactSummaryNodes();
+
+  renderSummary(compactLevelSummary("grouped"), nodes);
+
+  assert.equal((nodes.summaryFrame.innerHTML.match(/<tr class="summary-row/g) || []).length, 1);
+  assert.match(nodes.summaryFrame.innerHTML, /Level groups \(territory\):/);
+  assert.match(nodes.summaryFrame.innerHTML, /G1/);
+  assert.match(nodes.summaryFrame.innerHTML, /B, C/);
+  assert.match(nodes.summaryFrame.innerHTML, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /<img/);
+  assert.match(nodes.summaryFrame.innerHTML, /aria-label="Level group membership"/);
+});
+
+test("ordinary compact summary remains a six-column table", () => {
+  const nodes = compactSummaryNodes();
+  const payload = compactLevelSummary("expanded", { hasLevelGroups: false });
+
+  renderSummary(payload, nodes);
+
+  assert.equal((nodes.summaryFrame.innerHTML.match(/<th(?:\s|>)/g) || []).length, 6);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /Level group/);
+  assert.doesNotMatch(nodes.summaryFrame.innerHTML, /summary-level-group/);
+});
+
+test("direct summary helpers include the grouped level display", async () => {
+  /** @type {Array<{path:string, body:Record<string, unknown>}>} */
+  const calls = [];
+  const response = { available: false, label: "Summary", error: "Unavailable" };
+  /** @param {string} path @param {{body?:string}} [options] */
+  const request = async (path, options = {}) => {
+    calls.push({
+      path,
+      body: options.body ? JSON.parse(options.body) : {}
+    });
+    if (path === "/profile_distribution/start") {
+      return { status: "complete", job_id: "job-grouped", result: response };
+    }
+    return response;
+  };
+  const nodes = {
+    ...profileTraceNodes(),
+    summarySource: { value: "selected" },
+    summaryLevelDisplay: "grouped",
+    refitOffset: { disabled: false }
+  };
+
+  await refreshSummary(nodes, { request });
+  await runOffsetRefit(nodes, async () => {}, { request });
+  await runDistributionProfile(
+    nodes,
+    "tweedie_p",
+    async () => {},
+    { request, pause: async () => {} }
+  );
+
+  assert.deepEqual(calls.map(({ path, body }) => [path, body.level_display]), [
+    ["/summary", "grouped"],
+    ["/refit_offset", "grouped"],
+    ["/profile_distribution/start", "grouped"]
+  ]);
+});
+
+test("offset refit keeps its source and markup for an obsolete level display", async () => {
+  let levelDisplay = "expanded";
+  const nodes = {
+    ...compactSummaryNodes(),
+    summarySource: { value: "selected" },
+    get summaryLevelDisplay() {
+      return levelDisplay;
+    },
+    refitOffset: { disabled: false }
+  };
+  /** @param {string} _path @param {{body:string}} options */
+  const request = async (_path, options) => {
+    assert.equal(JSON.parse(options.body).level_display, "expanded");
+    levelDisplay = "grouped";
+    nodes.summaryFrame.innerHTML = "<p>Current grouped summary</p>";
+    return compactLevelSummary("expanded");
+  };
+
+  await runOffsetRefit(nodes, async () => {}, { request });
+
+  assert.equal(nodes.summarySource.value, "selected");
+  assert.equal(nodes.summaryFrame.innerHTML, "<p>Current grouped summary</p>");
+});
+
+test("distribution profile does not render a response for an obsolete level display", async () => {
+  let levelDisplay = "expanded";
+  const nodes = {
+    ...profileTraceNodes(),
+    get summaryLevelDisplay() {
+      return levelDisplay;
+    }
+  };
+  const result = compactLevelSummary("expanded");
+  /** @param {string} path @param {{body:string}} options */
+  const request = async (path, options) => {
+    assert.equal(path, "/profile_distribution/start");
+    assert.equal(JSON.parse(options.body).level_display, "expanded");
+    levelDisplay = "grouped";
+    nodes.summaryFrame.innerHTML = "<p>Current grouped summary</p>";
+    return { status: "complete", job_id: "job-obsolete", result };
+  };
+
+  const payload = await runDistributionProfile(
+    nodes,
+    "tweedie_p",
+    async () => {},
+    { request, pause: async () => {} }
+  );
+
+  assert.strictEqual(payload, result);
+  assert.equal(nodes.summaryFrame.innerHTML, "<p>Current grouped summary</p>");
+});
+
+test("direct summary helpers default legacy callers to expanded", async () => {
+  /** @type {Array<Record<string, unknown>>} */
+  const calls = [];
+  const nodes = {
+    ...compactSummaryNodes(),
+    summarySource: { value: "selected" }
+  };
+  /** @param {string} _path @param {{body:string}} options */
+  const request = async (_path, options) => {
+    calls.push(JSON.parse(options.body));
+    return { available: false, label: "Summary", error: "Unavailable" };
+  };
+
+  await refreshSummary(nodes, { request });
+
+  assert.equal(calls[0].level_display, "expanded");
 });
 
 for (const method of [
