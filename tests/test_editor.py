@@ -6341,7 +6341,10 @@ def test_editor_summary_has_view_only_categorical_levels_control():
     binding_end = main_js.index("\n}", binding_start) + 2
     binding_source = main_js[binding_start:binding_end]
     assert "actions.patchView({ summaryLevelDisplay: input.value })" in binding_source
-    assert "refreshSummaryView" in binding_source
+    assert "actions.schedulePanelEvidence(" in binding_source
+    assert '"summary"' in binding_source
+    assert "{ immediate: true }" in binding_source
+    assert "refreshSummaryView" not in binding_source
     assert "runStructuralRefit" not in binding_source
     assert "ungroupTransition" not in binding_source
 

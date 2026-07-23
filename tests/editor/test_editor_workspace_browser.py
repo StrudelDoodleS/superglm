@@ -1471,6 +1471,72 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
         ]
 
 
+def test_summary_level_display_toggle_cancels_queued_prior_mode_refresh(open_editor_page):
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", ("T02", "T03")),
+    ) as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')"""
+        )
+        summary_payloads = []
+
+        def record_summary_request(request) -> None:
+            if request.method == "POST" and request.url.split("?", maxsplit=1)[0].endswith(
+                "/summary"
+            ):
+                summary_payloads.append(request.post_data_json)
+
+        page.on("request", record_summary_request)
+        page.evaluate(
+            """() => {
+                const frame = document.querySelector('#summaryFrame');
+                const initialRevision = frame.dataset.modelRevision;
+                const observer = new MutationObserver(() => {
+                    if (frame.dataset.modelRevision === initialRevision) return;
+                    observer.disconnect();
+                    document.querySelector(
+                        'input[name="summaryLevelDisplay"][value="grouped"]'
+                    ).click();
+                });
+                observer.observe(frame, {
+                    attributes: true,
+                    attributeFilter: ['data-model-revision'],
+                });
+            }"""
+        )
+
+        select_chart_tool(page, "Select")
+        page.locator('button[data-op="select_all"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ) as operation_response:
+            page.get_by_role("button", name="Increase selection").click()
+
+        assert operation_response.value.status == 200
+        grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
+            "radio", name="Grouped"
+        )
+        page.wait_for_function(
+            """() => document.querySelector(
+                'input[name="summaryLevelDisplay"][value="grouped"]'
+            )?.checked"""
+        )
+        page.wait_for_timeout(350)
+
+        assert [payload["level_display"] for payload in summary_payloads] == ["grouped"]
+        assert grouped.is_checked()
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame .summary-level-groups')"""
+        )
+
+
 def test_failed_summary_level_display_refresh_remains_retryable(open_editor_page):
     with open_editor_page(
         selected_term="territory",

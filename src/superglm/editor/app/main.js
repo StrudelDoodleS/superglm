@@ -1360,7 +1360,12 @@ for (const input of summaryLevelDisplayInputs) {
   input.addEventListener("change", () => {
     if (!input.checked) return;
     actions.patchView({ summaryLevelDisplay: input.value });
-    void refreshSummaryView();
+    actions.schedulePanelEvidence(
+      "summary",
+      "/summary",
+      summaryRequestPayload(),
+      { immediate: true }
+    );
   });
 }
 
