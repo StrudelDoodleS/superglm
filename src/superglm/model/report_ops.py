@@ -62,12 +62,23 @@ def diagnostics(model) -> dict[str, Any]:
     return out
 
 
-def summary(model, alpha: float = 0.05, detail: str = "compact"):
+def summary(
+    model,
+    alpha: float = 0.05,
+    detail: str = "compact",
+    level_display: str = "expanded",
+):
     """Rich model summary with coefficient table (statsmodels-style)."""
     from scipy.special import gammaln
 
     from superglm.inference.coef_tables import build_basis_detail, build_coef_rows
     from superglm.inference.summary import ModelSummary
+    from superglm.inference.summary_levels import (
+        build_summary_level_display,
+        validate_level_display,
+    )
+
+    level_display = validate_level_display(level_display)
 
     cache = model._summary_cache
     if cache is None:
@@ -75,7 +86,7 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         model._summary_cache = cache
     tw_pr = getattr(model, "_tweedie_profile_result", None)
     tweedie_identity = None if tw_pr is None else tweedie_profile_report_identity(tw_pr, alpha)
-    key = (float(alpha), detail, tweedie_identity)
+    key = (float(alpha), detail, level_display, tweedie_identity)
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -223,7 +234,20 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         coef_rows = _build_editor_stale_coef_rows(model)
         _suppress_editor_inference(coef_rows)
         data["standard_errors"] = {"inference_stale": True}
-        summary_obj = ModelSummary(data, model_info, coef_rows, alpha=alpha, detail=detail)
+        level_presentation = build_summary_level_display(
+            coef_rows,
+            specs=model._specs,
+            groups=model._groups,
+            level_display=level_display,
+        )
+        summary_obj = ModelSummary(
+            data,
+            model_info,
+            coef_rows,
+            alpha=alpha,
+            detail=detail,
+            level_presentation=level_presentation,
+        )
         cache[key] = summary_obj
         return summary_obj
 
@@ -292,8 +316,20 @@ def summary(model, alpha: float = 0.05, detail: str = "compact"):
         selected_group_names=selected_names,
     )
 
+    level_presentation = build_summary_level_display(
+        coef_rows,
+        specs=model._specs,
+        groups=model._groups,
+        level_display=level_display,
+    )
     summary_obj = ModelSummary(
-        data, model_info, coef_rows, alpha=alpha, detail=detail, basis_detail=basis_detail
+        data,
+        model_info,
+        coef_rows,
+        alpha=alpha,
+        detail=detail,
+        basis_detail=basis_detail,
+        level_presentation=level_presentation,
     )
     cache[key] = summary_obj
     return summary_obj

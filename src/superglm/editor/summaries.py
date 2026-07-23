@@ -8,6 +8,7 @@ import numpy as np
 
 from superglm.editor.apply import materialize_edit_request
 from superglm.editor.terms import native_log_effect_values
+from superglm.inference.summary_levels import validate_level_display
 
 _UNSET = object()
 
@@ -20,7 +21,9 @@ def summary_payload(
     offset_terms_override: list[str] | None = None,
     offset_labels_override: list[dict[str, Any]] | None = None,
     collapse_info_override: Any = _UNSET,
+    level_display: str = "expanded",
 ) -> dict[str, Any]:
+    level_display = validate_level_display(level_display)
     # The editor has one working lane: the in-force editable model. The
     # immutable original remains available as a reference payload for plots,
     # deltas, and explicit audit calls.
@@ -64,6 +67,7 @@ def summary_payload(
                 "available": False,
                 "source": "refit",
                 "label": label,
+                "level_display": level_display,
                 "error": "No fixed-offset refit has been run for the current edits.",
             }
     else:
@@ -85,15 +89,17 @@ def summary_payload(
             "available": False,
             "source": source,
             "label": label,
+            "level_display": level_display,
             "error": "No fitted model is available.",
         }
 
-    summary = model.summary()
-    compact = _compact_summary_payload(summary, source, offset_terms, offset_labels, model=model)
+    summary = model.summary(level_display=level_display)
+    compact = _compact_summary_payload(summary, source, offset_terms, offset_labels)
     return {
         "available": True,
         "source": source,
         "label": label,
+        "level_display": level_display,
         "html": summary._repr_html_(),
         "compact": compact,
         "offset_terms": offset_terms,
@@ -174,17 +180,25 @@ def _compact_summary_payload(
     source: str,
     offset_terms: list[str],
     offset_labels: list[dict[str, Any]],
-    *,
-    model=None,
 ) -> dict[str, Any]:
     # The browser renders this typed payload instead of scraping the notebook
     # HTML. The raw HTML remains available behind the "Full summary" disclosure.
     info = getattr(summary, "_info", {})
-    rows = [_compact_summary_row(row) for row in getattr(summary, "_coef_rows", [])]
-    if model is not None:
-        rows = _with_reference_rows(rows, model)
+    display_rows = getattr(summary, "_display_rows", getattr(summary, "_coef_rows", []))
+    rows = [_compact_summary_row(row) for row in display_rows]
+    level_groups = getattr(summary, "_level_groups", ())
     return {
         "source": source,
+        "level_display": getattr(summary, "_level_display", "expanded"),
+        "has_level_groups": bool(level_groups),
+        "level_groups": [
+            {
+                "feature": item.feature,
+                "group_id": item.group_id,
+                "members": list(item.members),
+            }
+            for item in level_groups
+        ],
         "model": {
             "family": _compact_scalar(info.get("family")),
             "link": _compact_scalar(info.get("link")),
@@ -208,78 +222,36 @@ def _compact_summary_payload(
     }
 
 
-def _with_reference_rows(rows: list[dict[str, Any]], model) -> list[dict[str, Any]]:
-    existing = {row["name"] for row in rows}
-    additions: dict[str, list[dict[str, Any]]] = {}
-    for term, spec in getattr(model, "_specs", {}).items():
-        base_level = str(getattr(spec, "_base_level", "") or "")
-        if not base_level:
-            continue
-        row_name = f"{term}[{base_level}]"
-        if row_name in existing:
-            continue
-        additions.setdefault(str(term), []).append(_compact_reference_row(str(term), base_level))
-
-    if not additions:
-        return rows
-
-    inserted: set[str] = set()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        group = str(row.get("group") or "")
-        if group in additions and group not in inserted:
-            out.extend(additions[group])
-            inserted.add(group)
-        out.append(row)
-    for group, group_rows in additions.items():
-        if group not in inserted:
-            out.extend(group_rows)
-    return out
-
-
-def _compact_reference_row(term: str, level: str) -> dict[str, Any]:
-    return {
-        "name": f"{term}[{level}]",
-        "group": term,
-        "kind": "reference",
-        "coef": 0.0,
-        "se": None,
-        "se_label": "ref",
-        "stat": None,
-        "stat_label": "",
-        "p_value": None,
-        "sig_code": "",
-        "sig_class": "sig-reference",
-        "quasi_separated": False,
-        "active": True,
-        "n_params": 0,
-        "ref_df": None,
-        "edf": None,
-    }
-
-
 def _compact_summary_row(row) -> dict[str, Any]:
     # Spline rows are group-level Wald tests, not coefficient rows. They get a
     # p-value/significance class but no coefficient SE cell.
-    p_value = _finite_float(row.wald_p if row.is_spline else row.p)
-    stat = _finite_float(row.wald_chi2 if row.is_spline else row.z)
+    is_reference = bool(getattr(row, "is_reference", False))
+    p_value = None if is_reference else _finite_float(row.wald_p if row.is_spline else row.p)
+    stat = None if is_reference else _finite_float(row.wald_chi2 if row.is_spline else row.z)
     return {
         "name": str(row.name),
         "group": str(row.group or ""),
-        "kind": "spline" if row.is_spline else "coef",
+        "level_group": str(getattr(row, "level_group", "") or ""),
+        "kind": "reference" if is_reference else ("spline" if row.is_spline else "coef"),
         "coef": _finite_float(row.coef),
-        "se": None if row.is_spline else _finite_float(row.se),
-        "se_label": "curve" if row.is_spline else "",
+        "se": None if row.is_spline or is_reference else _finite_float(row.se),
+        "se_label": "ref" if is_reference else ("curve" if row.is_spline else ""),
         "stat": stat,
-        "stat_label": "chi2" if row.is_spline else ("z" if stat is not None else ""),
+        "stat_label": (
+            "" if is_reference else ("chi2" if row.is_spline else ("z" if stat is not None else ""))
+        ),
         "p_value": p_value,
         "sig_code": _summary_sig_code(p_value, bool(row.quasi_separated)),
-        "sig_class": _summary_sig_class(p_value, bool(row.quasi_separated)),
+        "sig_class": (
+            "sig-reference"
+            if is_reference
+            else _summary_sig_class(p_value, bool(row.quasi_separated))
+        ),
         "quasi_separated": bool(row.quasi_separated),
         "active": bool(row.active),
         "n_params": int(row.n_params or 0),
         "ref_df": _finite_float(row.ref_df),
-        "edf": _row_edf(row),
+        "edf": None if is_reference else _row_edf(row),
     }
 
 

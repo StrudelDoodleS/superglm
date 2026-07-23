@@ -708,9 +708,23 @@ class SuperGLM:
 
         return build_design_summary(self)
 
-    def summary(self, alpha: float = 0.05, detail: str = "compact"):
-        """Rich model summary with coefficient table (statsmodels-style)."""
-        return report_ops.summary(self, alpha, detail=detail)
+    def summary(
+        self,
+        alpha: float = 0.05,
+        detail: str = "compact",
+        level_display: str = "expanded",
+    ):
+        """Rich model summary with coefficient table (statsmodels-style).
+
+        ``level_display="expanded"`` shows exact original categorical levels.
+        Use ``"grouped"`` for one row per fitted group plus a membership legend.
+        """
+        return report_ops.summary(
+            self,
+            alpha,
+            detail=detail,
+            level_display=level_display,
+        )
 
     def _feature_groups(self, name: str) -> list[GroupSlice]:
         """Get all groups belonging to a feature."""

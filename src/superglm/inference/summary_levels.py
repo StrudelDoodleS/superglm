@@ -1,0 +1,235 @@
+"""Summary-only presentation helpers for categorical levels."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Literal, cast
+
+from superglm.inference.summary import _CoefRow
+from superglm.types import GroupSlice
+
+LevelDisplay = Literal["expanded", "grouped"]
+_VALID_LEVEL_DISPLAYS = frozenset({"expanded", "grouped"})
+
+
+@dataclass(frozen=True)
+class LevelGroupLegend:
+    """Exact original members represented by one fitted categorical group."""
+
+    feature: str
+    group_id: str
+    members: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SummaryLevelDisplay:
+    """Rows and legends for one requested summary presentation."""
+
+    level_display: LevelDisplay
+    rows: tuple[_CoefRow, ...]
+    level_groups: tuple[LevelGroupLegend, ...]
+
+    @property
+    def has_level_groups(self) -> bool:
+        return bool(self.level_groups)
+
+
+def validate_level_display(value: object) -> LevelDisplay:
+    """Validate and narrow a categorical summary display mode."""
+    if not isinstance(value, str) or value not in _VALID_LEVEL_DISPLAYS:
+        raise ValueError(
+            f"level_display={value!r} is not valid. "
+            f"Expected one of {sorted(_VALID_LEVEL_DISPLAYS)}."
+        )
+    return cast(LevelDisplay, value)
+
+
+def build_summary_level_display(
+    coef_rows: Sequence[_CoefRow],
+    *,
+    specs: Mapping[str, Any],
+    groups: Sequence[GroupSlice],
+    level_display: object = "expanded",
+) -> SummaryLevelDisplay:
+    """Build summary-only rows without mutating canonical coefficient rows."""
+    mode = validate_level_display(level_display)
+    rows = list(coef_rows)
+    legends: list[LevelGroupLegend] = []
+
+    from superglm.features.categorical import Categorical
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    for feature, spec in specs.items():
+        if not isinstance(spec, Categorical | OrderedCategorical):
+            continue
+
+        feature_groups = [group for group in groups if group.feature_name == feature]
+        term_prefix = (
+            feature_groups[0].name if isinstance(spec, Categorical) and feature_groups else feature
+        )
+        fitted_levels = [
+            str(level)
+            for level in (spec._levels if isinstance(spec, Categorical) else spec._ordered_levels)
+        ]
+        grouping = getattr(spec, "_grouping", None)
+        if grouping is None:
+            original_levels = fitted_levels
+            original_to_group = {level: level for level in original_levels}
+            presentation_fitted_levels = fitted_levels
+        else:
+            original_levels = [str(level) for level in grouping.all_original_levels]
+            original_to_group = {
+                str(original): str(fitted)
+                for original, fitted in grouping.original_to_group.items()
+            }
+            presentation_fitted_levels = [str(level) for level in grouping.grouped_levels]
+
+        members_by_fitted: dict[str, list[str]] = {}
+        for original in original_levels:
+            fitted = original_to_group[original]
+            members_by_fitted.setdefault(fitted, []).append(original)
+        group_ids = {
+            fitted: f"G{index}"
+            for index, (fitted, members) in enumerate(
+                (
+                    (fitted, members)
+                    for fitted, members in members_by_fitted.items()
+                    if len(members) > 1
+                ),
+                start=1,
+            )
+        }
+        expected_names = {fitted: f"{term_prefix}[{fitted}]" for fitted in fitted_levels}
+        row_by_fitted: dict[str, _CoefRow] = {}
+        matched_indices: list[int] = []
+        for index, row in enumerate(rows):
+            for fitted, expected_name in expected_names.items():
+                if row.name == expected_name and row.group == term_prefix:
+                    row_by_fitted[fitted] = row
+                    matched_indices.append(index)
+                    break
+
+        base_level = str(spec._base_level)
+        reference_only = bool(presentation_fitted_levels) and all(
+            fitted == base_level for fitted in presentation_fitted_levels
+        )
+        # Preserve unknown canonical layouts, but a reference-only feature has
+        # no non-reference coefficient to match and must be synthesized here.
+        if not matched_indices and not reference_only:
+            continue
+
+        legends.extend(
+            LevelGroupLegend(feature, group_ids[fitted], tuple(members))
+            for fitted, members in members_by_fitted.items()
+            if fitted in group_ids
+        )
+        display_rows: list[_CoefRow] = []
+        edf_emitted: set[int] = set()
+        diagnostics_emitted: set[int] = set()
+        level_items = (
+            [(original, original_to_group[original]) for original in original_levels]
+            if mode == "expanded"
+            else [
+                (members_by_fitted[fitted][0], fitted)
+                for fitted in presentation_fitted_levels
+                if fitted in members_by_fitted
+            ]
+        )
+        for original, fitted in level_items:
+            source = row_by_fitted.get(fitted)
+            member_count = len(members_by_fitted[fitted])
+            row_name = (
+                term_prefix
+                if mode == "grouped" and member_count > 1
+                else f"{term_prefix}[{original}]"
+            )
+            if fitted == base_level:
+                if source is None:
+                    source = _CoefRow(
+                        name=f"{term_prefix}[{fitted}]",
+                        group=term_prefix,
+                        coef=0.0,
+                        active=True,
+                    )
+                display_row = replace(
+                    source,
+                    name=row_name,
+                    level_group=group_ids.get(fitted, ""),
+                    is_reference=True,
+                    active=True,
+                    coef=0.0,
+                    se=None,
+                    z=None,
+                    p=None,
+                    ci_low=None,
+                    ci_high=None,
+                    edf=None,
+                )
+            elif source is not None:
+                display_row = replace(
+                    source,
+                    name=row_name,
+                    level_group=group_ids.get(fitted, ""),
+                    is_reference=False,
+                    edf=source.edf if id(source) not in edf_emitted else None,
+                )
+                if source.edf is not None:
+                    edf_emitted.add(id(source))
+            else:
+                continue
+            if source.level_n_obs is not None or source.level_exposure_share is not None:
+                if id(source) in diagnostics_emitted:
+                    display_row = replace(
+                        display_row,
+                        level_n_obs=None,
+                        level_exposure_share=None,
+                    )
+                else:
+                    diagnostics_emitted.add(id(source))
+            display_rows.append(display_row)
+
+        if matched_indices:
+            insert_at = min(matched_indices)
+        else:
+            feature_indices = [index for index, row in enumerate(rows) if row.group == term_prefix]
+            if feature_indices:
+                insert_at = max(feature_indices) + 1
+            else:
+                group_positions = [
+                    index for index, group in enumerate(groups) if group.feature_name == feature
+                ]
+                later_group_names = (
+                    {
+                        name
+                        for group in groups[max(group_positions) + 1 :]
+                        for name in (group.name, group.feature_name)
+                    }
+                    if group_positions
+                    else set()
+                )
+                insert_at = next(
+                    (
+                        index
+                        for index, row in enumerate(rows)
+                        if row.group in later_group_names
+                        or row.name in later_group_names
+                        or any(
+                            row.name.startswith(f"{group_name}[")
+                            for group_name in later_group_names
+                        )
+                    ),
+                    len(rows),
+                )
+        matched = set(matched_indices)
+        rows = [
+            *rows[:insert_at],
+            *display_rows,
+            *(
+                row
+                for index, row in enumerate(rows[insert_at:], start=insert_at)
+                if index not in matched
+            ),
+        ]
+
+    return SummaryLevelDisplay(mode, tuple(rows), tuple(legends))

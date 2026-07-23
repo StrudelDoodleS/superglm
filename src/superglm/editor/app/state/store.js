@@ -18,6 +18,7 @@ export function createInitialEditorState(snapshot = null) {
       mode: "select",
       showCi: false,
       showContrib: false,
+      summaryLevelDisplay: "expanded",
       zoomByTerm: {},
       groupModeByTerm: {},
       inspectorPane: "summary",

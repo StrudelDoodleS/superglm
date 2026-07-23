@@ -5,9 +5,11 @@
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
 /** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
+/** @typedef {'expanded'|'grouped'} SummaryLevelDisplay */
 /**
  * @typedef {Object} SummaryPayload
  * @property {boolean} available
+ * @property {SummaryLevelDisplay} [level_display]
  * @property {string} [source]
  * @property {string} [label]
  * @property {string} [note]
@@ -101,6 +103,7 @@
  * @property {EditorMode} mode
  * @property {boolean} showCi
  * @property {boolean} showContrib
+ * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm
  * @property {'summary'|'history'|'advanced'|'help'} inspectorPane

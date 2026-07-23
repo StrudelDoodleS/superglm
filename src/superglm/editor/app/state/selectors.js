@@ -56,6 +56,9 @@ export function selectGroupDisplayMode(state) {
 }
 
 /** @param {EditorState} state */
+export const selectSummaryLevelDisplay = (state) => state.view.summaryLevelDisplay;
+
+/** @param {EditorState} state */
 export const selectMutation = (state) => state.request.mutation;
 
 /** @param {EvidencePanel} panel @returns {(state: EditorState) => EvidenceState} */

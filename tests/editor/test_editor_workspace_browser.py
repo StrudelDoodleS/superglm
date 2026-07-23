@@ -1351,6 +1351,230 @@ def test_export_dialog_downloads_both_formats_without_redrawing_the_app(open_edi
         )
 
 
+def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary(
+    open_editor_page,
+):
+    collapsed_levels = ("T02", "T03")
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", collapsed_levels),
+    ) as (page, session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T03]')"""
+        )
+        initial_revision = session.model_revision
+        initial_history = (
+            len(session.history),
+            len(session.redo_stack),
+            len(session.collapse_history),
+        )
+        initial_chart_group_mode = page.locator("#groupDisplayMode").input_value()
+        initial_chart_is_collapsed = page.evaluate(
+            "Boolean(document.querySelector('#chart')?._scale?.displayIsCollapsed)"
+        )
+        requests = []
+
+        def record_request(request) -> None:
+            if request.method != "POST":
+                return
+            path = request.url.split("?", maxsplit=1)[0].rsplit("/", maxsplit=1)[-1]
+            requests.append((path, request.post_data_json))
+
+        page.on("request", record_request)
+        control = page.get_by_role("group", name="Categorical levels")
+        expanded = control.get_by_role("radio", name="Expanded")
+        grouped = control.get_by_role("radio", name="Grouped")
+
+        assert control.is_visible()
+        assert expanded.is_checked()
+        assert grouped.is_checked() is False
+
+        grouped.focus()
+        assert grouped.evaluate("node => document.activeElement === node")
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/summary")
+                and response.request.post_data_json.get("level_display") == "grouped"
+            )
+        ) as grouped_response:
+            grouped.press("Space")
+
+        assert grouped_response.value.status == 200
+        assert grouped.is_checked()
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame .summary-level-groups')
+                && !document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')"""
+        )
+        compact_grouped = page.locator("#summaryFrame").inner_text()
+        assert "Level group" in compact_grouped
+        assert "G1" in compact_grouped
+        assert "Level groups (territory):" in compact_grouped
+        assert "T02, T03" in compact_grouped
+
+        page.locator("details.raw-summary > summary").click()
+        grouped_full = page.frame_locator(".raw-summary-frame").locator("body")
+        grouped_full.wait_for()
+        grouped_full_text = grouped_full.inner_text()
+        assert "G1" in grouped_full_text
+        assert "Level groups (territory): G1 = T02, T03" in grouped_full_text
+
+        expanded.focus()
+        assert expanded.evaluate("node => document.activeElement === node")
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/summary")
+                and response.request.post_data_json.get("level_display") == "expanded"
+            )
+        ) as expanded_response:
+            expanded.press("Space")
+
+        assert expanded_response.value.status == 200
+        assert expanded.is_checked()
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T03]')"""
+        )
+        assert "Level groups (territory):" not in page.locator("#summaryFrame").inner_text()
+
+        page.locator("details.raw-summary > summary").click()
+        expanded_full = page.frame_locator(".raw-summary-frame").locator("body")
+        expanded_full.wait_for()
+        expanded_full_text = expanded_full.inner_text()
+        assert "territory[T02]" in expanded_full_text
+        assert "territory[T03]" in expanded_full_text
+        assert "Level groups (territory):" not in expanded_full_text
+
+        assert session.model_revision == initial_revision
+        assert (
+            len(session.history),
+            len(session.redo_stack),
+            len(session.collapse_history),
+        ) == initial_history
+        assert page.locator("#groupDisplayMode").input_value() == initial_chart_group_mode
+        assert (
+            page.evaluate("Boolean(document.querySelector('#chart')?._scale?.displayIsCollapsed)")
+            is initial_chart_is_collapsed
+        )
+
+        forbidden = {"collapse_levels", "ungroup_levels", "uncollapse_levels", "refit_offset"}
+        assert not any(path in forbidden for path, _payload in requests)
+        summary_payloads = [payload for path, payload in requests if path == "summary"]
+        assert [payload["level_display"] for payload in summary_payloads] == [
+            "grouped",
+            "expanded",
+        ]
+
+
+def test_summary_level_display_toggle_cancels_queued_prior_mode_refresh(open_editor_page):
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", ("T02", "T03")),
+    ) as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')"""
+        )
+        summary_payloads = []
+
+        def record_summary_request(request) -> None:
+            if request.method == "POST" and request.url.split("?", maxsplit=1)[0].endswith(
+                "/summary"
+            ):
+                summary_payloads.append(request.post_data_json)
+
+        page.on("request", record_summary_request)
+        page.evaluate(
+            """() => {
+                const frame = document.querySelector('#summaryFrame');
+                const initialRevision = frame.dataset.modelRevision;
+                const observer = new MutationObserver(() => {
+                    if (frame.dataset.modelRevision === initialRevision) return;
+                    observer.disconnect();
+                    document.querySelector(
+                        'input[name="summaryLevelDisplay"][value="grouped"]'
+                    ).click();
+                });
+                observer.observe(frame, {
+                    attributes: true,
+                    attributeFilter: ['data-model-revision'],
+                });
+            }"""
+        )
+
+        select_chart_tool(page, "Select")
+        page.locator('button[data-op="select_all"]').click()
+        page.locator("#selectionMenu").wait_for(state="visible")
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/op")
+            )
+        ) as operation_response:
+            page.get_by_role("button", name="Increase selection").click()
+
+        assert operation_response.value.status == 200
+        grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
+            "radio", name="Grouped"
+        )
+        page.wait_for_function(
+            """() => document.querySelector(
+                'input[name="summaryLevelDisplay"][value="grouped"]'
+            )?.checked"""
+        )
+        page.wait_for_timeout(350)
+
+        assert [payload["level_display"] for payload in summary_payloads] == ["grouped"]
+        assert grouped.is_checked()
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame .summary-level-groups')"""
+        )
+
+
+def test_failed_summary_level_display_refresh_remains_retryable(open_editor_page):
+    with open_editor_page(
+        selected_term="territory",
+        collapsed_levels=("territory", ("T02", "T03")),
+    ) as (page, _session):
+        page.wait_for_function(
+            """() => document.querySelector('#summaryFrame')?.getAttribute('aria-busy') === 'false'
+                && document.querySelector('#summaryFrame')?.textContent.includes('territory[T02]')"""
+        )
+
+        def fail_grouped_summary(route) -> None:
+            payload = route.request.post_data_json
+            if payload.get("level_display") == "grouped":
+                route.fulfill(status=503, json={"error": "Grouped summary unavailable."})
+            else:
+                route.continue_()
+
+        page.route("**/summary", fail_grouped_summary)
+        grouped = page.get_by_role("group", name="Categorical levels").get_by_role(
+            "radio", name="Grouped"
+        )
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url.split("?", maxsplit=1)[0].endswith("/summary")
+                and response.request.post_data_json.get("level_display") == "grouped"
+            )
+        ) as grouped_response:
+            grouped.check()
+
+        assert grouped_response.value.status == 503
+        page.wait_for_timeout(50)
+        assert page.locator("#summaryFrame").get_attribute("data-freshness") == "stale"
+        assert page.locator("#summaryFrame").get_attribute("aria-busy") == "false"
+        assert page.locator("#summaryRetry").is_visible()
+        assert "Grouped summary unavailable." in page.locator("#summaryStatus").inner_text()
+
+
 def test_ordered_summary_has_one_whole_smooth_test_and_no_level_tests(open_editor_page):
     with open_editor_page(selected_term="age_band") as (page, _session):
         page.wait_for_function(
@@ -1394,10 +1618,14 @@ def test_ordered_summary_has_one_whole_smooth_test_and_no_level_tests(open_edito
         for row in level_rows:
             full_row = next(cells for cells in full_rows if cells and cells[0] == row["term"])
             assert full_row[1] != "---"  # estimate
-            assert full_row[2] != "---"  # standard error
-            assert full_row[4] == "---"  # no separate level p-value
-            assert full_row[5] != "---"  # confidence interval lower bound
-            assert full_row[6] != "---"  # confidence interval upper bound
+            if row["cells"][3] == "ref":
+                assert full_row[2] == "ref"
+                assert full_row[3:7] == ["---"] * 4
+            else:
+                assert full_row[2] != "---"  # standard error
+                assert full_row[4] == "---"  # no separate level p-value
+                assert full_row[5] != "---"  # confidence interval lower bound
+                assert full_row[6] != "---"  # confidence interval upper bound
             assert full_row[7] == ""  # no significance marker
 
 
