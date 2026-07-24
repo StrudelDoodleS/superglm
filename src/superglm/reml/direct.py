@@ -33,6 +33,9 @@ from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     coerce_reml_penalties,
     compute_penalty_nullity,
+    penalty_component_quadratic,
+    penalty_component_trace,
+    total_penalty_quadratic,
 )
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import (
@@ -219,7 +222,12 @@ def optimize_direct_reml(
     boot_phi = 1.0
     boot_inv_phi = 1.0
     if not scale_known:
-        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        pq_boot = total_penalty_quadratic(
+            boot_result.beta,
+            boot_lambdas,
+            penalties,
+            dm.group_matrices,
+        )
         boot_hessian_rank = boot_result.reml_hessian_rank
         if boot_hessian_rank is None:
             boot_hessian_rank = 1 + dm.p
@@ -270,11 +278,10 @@ def optimize_direct_reml(
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
             continue
         gm = dm.group_matrices[pc.group_index]
-        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
         beta_g = boot_result.beta[pc.group_sl]
-        quad = float(beta_g @ omega_ssp @ beta_g)
+        quad = penalty_component_quadratic(pc, beta_g, gm)
         H_inv_jj = boot_inv[pc.group_sl, pc.group_sl]
-        trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+        trace_term = penalty_component_trace(pc, H_inv_jj, gm)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
@@ -455,7 +462,12 @@ def optimize_direct_reml(
                 if isinstance(objective_evaluation, REMLObjectiveEvaluation):
                     penalized_deviance = objective_evaluation.penalized_deviance
                 else:
-                    pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
+                    pq = total_penalty_quadratic(
+                        pirls_result.beta,
+                        cand_lambdas,
+                        penalties,
+                        dm.group_matrices,
+                    )
                     penalized_deviance = float(pirls_result.deviance + pq)
                 phi_hat = max(
                     penalized_deviance / max(len(y) - penalty_nullity, 1.0),

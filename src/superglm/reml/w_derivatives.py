@@ -23,7 +23,10 @@ from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import LogLink, stabilize_eta
 from superglm.reml.observed_geometry import ObservedREMLGeometry
-from superglm.reml.penalty_algebra import coerce_reml_penalties
+from superglm.reml.penalty_algebra import (
+    coerce_reml_penalties,
+    penalty_component_matvec,
+)
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -338,23 +341,16 @@ def reml_w_correction(
     dbeta_vectors: list[NDArray] = []
     dmean_vectors: list[NDArray] = []
     dsum_w_values: list[float] = []
-    omega_ssp_list: list[NDArray] = []
     lam_list: list[float] = []
 
     for i, pc in enumerate(penalties):
-        omega_ssp = pc.omega_ssp
-        if omega_ssp is None:
-            if penalty_caches is not None and pc.name in penalty_caches:
-                omega_ssp = penalty_caches[pc.name].omega_ssp
-            else:
-                gm = gms[pc.group_index]
-                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        gm = gms[pc.group_index]
         lam = lambdas[pc.name]
         beta_g = pirls_result.beta[pc.group_sl]
 
         # S_j beta (p-vector, nonzero only in pc.group_sl block)
         s_beta = np.zeros(p)
-        s_beta[pc.group_sl] = lam * (omega_ssp @ beta_g)
+        s_beta[pc.group_sl] = lam * penalty_component_matvec(pc, beta_g, gm)
 
         # dbeta/drho_j = -H^{-1} S_j beta  (IFT)
         dbeta_j = -(XtWX_S_inv @ s_beta)
@@ -392,7 +388,6 @@ def reml_w_correction(
             dbeta_vectors.append(dbeta_j)
             dmean_vectors.append(dmean_j)
             dsum_w_values.append(dsum_w_j)
-            omega_ssp_list.append(omega_ssp)
             lam_list.append(lam)
 
     # -- Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) --
@@ -417,14 +412,18 @@ def reml_w_correction(
 
                 # lam_i S_i dbeta/drho_j  (nonzero in pc_i block)
                 lam_i_S_i_dbeta_j = np.zeros(p)
-                lam_i_S_i_dbeta_j[pc_i.group_sl] = lam_list[i] * (
-                    omega_ssp_list[i] @ dbeta_vectors[j][pc_i.group_sl]
+                lam_i_S_i_dbeta_j[pc_i.group_sl] = lam_list[i] * penalty_component_matvec(
+                    pc_i,
+                    dbeta_vectors[j][pc_i.group_sl],
+                    gms[pc_i.group_index],
                 )
 
                 # lam_j S_j dbeta/drho_i  (nonzero in pc_j block)
                 lam_j_S_j_dbeta_i = np.zeros(p)
-                lam_j_S_j_dbeta_i[pc_j.group_sl] = lam_list[j] * (
-                    omega_ssp_list[j] @ dbeta_vectors[i][pc_j.group_sl]
+                lam_j_S_j_dbeta_i[pc_j.group_sl] = lam_list[j] * penalty_component_matvec(
+                    pc_j,
+                    dbeta_vectors[i][pc_j.group_sl],
+                    gms[pc_j.group_index],
                 )
 
                 # rhs = X_c^T f^{jk} + lam_i S_i dbeta_j + lam_j S_j dbeta_i

@@ -23,6 +23,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
+    RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
@@ -52,6 +53,85 @@ class TensorPairLogdetEvaluation:
     rank: float
     gradient: dict[str, float]
     hessian: dict[tuple[str, str], float]
+
+
+def _penalty_component_omega_ssp(
+    component: PenaltyComponent,
+    group_matrix: GroupMatrix | None = None,
+) -> NDArray | None:
+    """Return a dense solver-space penalty only for non-identity components."""
+    if component.penalty_kind == "identity":
+        return None
+    if component.omega_ssp is not None:
+        return component.omega_ssp
+    if group_matrix is None or component.omega_raw is None:
+        raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
+    return group_matrix.R_inv.T @ component.omega_raw @ group_matrix.R_inv
+
+
+def penalty_component_quadratic(
+    component: PenaltyComponent,
+    beta_group: NDArray,
+    group_matrix: GroupMatrix | None = None,
+) -> float:
+    """Return ``beta.T @ Omega @ beta`` without materializing identity penalties."""
+    beta = np.asarray(beta_group, dtype=np.float64)
+    if component.penalty_kind == "identity":
+        return float(beta @ beta)
+    omega = _penalty_component_omega_ssp(component, group_matrix)
+    return float(beta @ omega @ beta)
+
+
+def penalty_component_matvec(
+    component: PenaltyComponent,
+    beta_group: NDArray,
+    group_matrix: GroupMatrix | None = None,
+) -> NDArray:
+    """Return ``Omega @ beta`` using the component's compact representation."""
+    beta = np.asarray(beta_group, dtype=np.float64)
+    if component.penalty_kind == "identity":
+        return beta.copy()
+    omega = _penalty_component_omega_ssp(component, group_matrix)
+    return omega @ beta
+
+
+def penalty_component_trace(
+    component: PenaltyComponent,
+    inverse_block_or_diagonal: NDArray,
+    group_matrix: GroupMatrix | None = None,
+) -> float:
+    """Return ``trace(H^-1_jj Omega)`` from a selected block or identity diagonal."""
+    inverse = np.asarray(inverse_block_or_diagonal, dtype=np.float64)
+    if component.penalty_kind == "identity":
+        if inverse.ndim == 1:
+            return float(np.sum(inverse))
+        if inverse.ndim == 2:
+            return float(np.trace(inverse))
+        raise ValueError("Identity penalty trace requires an inverse diagonal or square block.")
+    if inverse.ndim != 2:
+        raise ValueError("Dense penalty trace requires a selected inverse block.")
+    omega = _penalty_component_omega_ssp(component, group_matrix)
+    return float(np.trace(inverse @ omega))
+
+
+def total_penalty_quadratic(
+    beta: NDArray,
+    lambdas: float | dict[str, float],
+    penalties: list[PenaltyComponent],
+    group_matrices: list[GroupMatrix],
+) -> float:
+    """Return the full weighted penalty quadratic from compact components."""
+    total = 0.0
+    for component in penalties:
+        lam = lambdas[component.name] if isinstance(lambdas, dict) else lambdas
+        if lam == 0:
+            continue
+        total += float(lam) * penalty_component_quadratic(
+            component,
+            np.asarray(beta)[component.group_sl],
+            group_matrices[component.group_index],
+        )
+    return total
 
 
 def _extract_tensor_marginal_eigvals(
@@ -318,6 +398,10 @@ def build_penalty_matrix(
             lam = lambda2[pc.name] if isinstance(lambda2, dict) else lambda2
             if lam == 0:
                 continue
+            if pc.penalty_kind == "identity":
+                diagonal_indices = np.arange(pc.group_sl.start, pc.group_sl.stop)
+                S[diagonal_indices, diagonal_indices] += lam
+                continue
             omega_ssp = (
                 pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
             )
@@ -482,6 +566,25 @@ def build_penalty_components(
             continue
 
         group_components: list[PenaltyComponent] = []
+
+        if isinstance(gm, RandomEffectGroupMatrix):
+            lp_map = gm.lambda_policies or {}
+            components.append(
+                PenaltyComponent(
+                    name=g.name,
+                    group_name=g.name,
+                    group_index=idx,
+                    group_sl=g.sl,
+                    omega_raw=None,
+                    omega_ssp=None,
+                    rank=float(g.size),
+                    log_det_omega_plus=0.0,
+                    eigvals_omega=None,
+                    lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
+                    penalty_kind="identity",
+                )
+            )
+            continue
 
         if getattr(gm, "omega_components", None) is not None:
             # Multi-penalty path: N components share this coefficient block.

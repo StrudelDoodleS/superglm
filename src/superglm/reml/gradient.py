@@ -11,10 +11,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.reml.penalty_algebra import (
+    _penalty_component_omega_ssp,
     coerce_reml_penalties,
     compute_logdet_s_derivatives,
     compute_penalty_nullity,
     compute_total_penalty_rank,
+    penalty_component_matvec,
+    penalty_component_quadratic,
+    penalty_component_trace,
 )
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import PenaltyComponent
@@ -35,6 +39,27 @@ def _penalty_block_trace(
 
 def _same_slice(sl_i: slice, sl_j: slice) -> bool:
     return bool(sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step)
+
+
+def _penalty_component_cross_trace(
+    inverse: NDArray,
+    left: PenaltyComponent,
+    left_scale: float,
+    left_group_matrix: Any,
+    right: PenaltyComponent,
+    right_scale: float,
+    right_group_matrix: Any,
+) -> float:
+    """Return a penalty cross trace while keeping identity components implicit."""
+    H_ji = inverse[right.group_sl, :][:, left.group_sl]
+    H_ij = inverse[left.group_sl, :][:, right.group_sl]
+    left_product = H_ji
+    if left.penalty_kind != "identity":
+        left_product = left_product @ _penalty_component_omega_ssp(left, left_group_matrix)
+    right_product = H_ij
+    if right.penalty_kind != "identity":
+        right_product = right_product @ _penalty_component_omega_ssp(right, right_group_matrix)
+    return float(left_scale * right_scale * np.trace(left_product @ right_product))
 
 
 def reml_direct_gradient(
@@ -74,11 +99,10 @@ def reml_direct_gradient(
         raise ValueError("inverse_phi must be positive and finite")
     for i, pc in enumerate(penalties):
         gm = group_matrices[pc.group_index]
-        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
         beta_g = result.beta[pc.group_sl]
-        quad = float(beta_g @ omega_ssp @ beta_g)
+        quad = penalty_component_quadratic(pc, beta_g, gm)
         H_inv_jj = XtWX_S_inv[pc.group_sl, pc.group_sl]
-        trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+        trace_term = penalty_component_trace(pc, H_inv_jj, gm)
         lam = float(lambdas[pc.name])
         r_j = r_dict.get(pc.name, pc.rank)
         if r_j <= 0 and penalty_ranks is not None:
@@ -148,35 +172,34 @@ def reml_direct_hessian(
     )
 
     full_HdHj: dict[int, NDArray] = {}
-    compact_dS: list[tuple[slice, NDArray]] = []
+    compact_dS: list[tuple[PenaltyComponent, float, Any]] = []
     same_slice_H_blocks: dict[tuple[int | None, int | None, int | None], NDArray] = {}
     same_slice_products: dict[int, NDArray] = {}
     quad_per_group: list[float] = []
     s_beta_list: list[NDArray] = []
     for i, pc in enumerate(penalties):
-        omega_ssp = pc.omega_ssp
-        if omega_ssp is None:
-            if penalty_caches is not None and pc.name in penalty_caches:
-                omega_ssp = penalty_caches[pc.name].omega_ssp
-            else:
-                gm = group_matrices[pc.group_index]
-                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        gm = group_matrices[pc.group_index]
+        omega_ssp = _penalty_component_omega_ssp(pc, gm)
         lam = lambdas[pc.name]
-        weighted_omega = lam * omega_ssp
         if use_compact_trace:
-            compact_dS.append((pc.group_sl, weighted_omega))
+            compact_dS.append((pc, lam, gm))
         else:
             F = np.zeros((p, p))
-            F[:, pc.group_sl] = XtWX_S_inv[:, pc.group_sl] @ weighted_omega
+            inverse_columns = XtWX_S_inv[:, pc.group_sl]
+            F[:, pc.group_sl] = (
+                lam * inverse_columns
+                if pc.penalty_kind == "identity"
+                else inverse_columns @ (lam * omega_ssp)
+            )
             if dH_extra is not None and i in dH_extra:
                 F = F + XtWX_S_inv @ dH_extra[i]
             full_HdHj[i] = F
 
         if pirls_result is not None:
             beta_g = pirls_result.beta[pc.group_sl]
-            quad_per_group.append(lam * float(beta_g @ omega_ssp @ beta_g))
+            quad_per_group.append(lam * penalty_component_quadratic(pc, beta_g, gm))
             v = np.zeros(p)
-            v[pc.group_sl] = lam * (omega_ssp @ beta_g)
+            v[pc.group_sl] = lam * penalty_component_matvec(pc, beta_g, gm)
             s_beta_list.append(v)
         else:
             quad_per_group.append(0.0)
@@ -185,30 +208,46 @@ def reml_direct_hessian(
     for i in range(m):
         for j in range(i, m):
             if use_compact_trace:
-                sl_i, weighted_omega_i = compact_dS[i]
-                sl_j, weighted_omega_j = compact_dS[j]
-                if _same_slice(sl_i, sl_j):
-                    key_i = (sl_i.start, sl_i.stop, sl_i.step)
+                pc_i, lam_i, gm_i = compact_dS[i]
+                pc_j, lam_j, gm_j = compact_dS[j]
+                if _same_slice(pc_i.group_sl, pc_j.group_sl):
+                    key_i = (
+                        pc_i.group_sl.start,
+                        pc_i.group_sl.stop,
+                        pc_i.group_sl.step,
+                    )
                     H_block = same_slice_H_blocks.get(key_i)
                     if H_block is None:
-                        H_block = XtWX_S_inv[sl_i, sl_i]
+                        H_block = XtWX_S_inv[pc_i.group_sl, pc_i.group_sl]
                         same_slice_H_blocks[key_i] = H_block
                     A_i = same_slice_products.get(i)
                     if A_i is None:
-                        A_i = H_block @ weighted_omega_i
+                        if pc_i.penalty_kind == "identity":
+                            A_i = lam_i * H_block
+                        else:
+                            A_i = H_block @ (
+                                lam_i * _penalty_component_omega_ssp(pc_i, gm_i)
+                            )
                         same_slice_products[i] = A_i
                     A_j = same_slice_products.get(j)
                     if A_j is None:
-                        A_j = H_block @ weighted_omega_j
+                        if pc_j.penalty_kind == "identity":
+                            A_j = lam_j * H_block
+                        else:
+                            A_j = H_block @ (
+                                lam_j * _penalty_component_omega_ssp(pc_j, gm_j)
+                            )
                         same_slice_products[j] = A_j
                     h = -0.5 * float(np.sum(A_i * A_j.T))
                 else:
-                    h = -0.5 * _penalty_block_trace(
+                    h = -0.5 * _penalty_component_cross_trace(
                         XtWX_S_inv,
-                        sl_i,
-                        weighted_omega_i,
-                        sl_j,
-                        weighted_omega_j,
+                        pc_i,
+                        lam_i,
+                        gm_i,
+                        pc_j,
+                        lam_j,
+                        gm_j,
                     )
             else:
                 h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))

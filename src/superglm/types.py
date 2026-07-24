@@ -251,13 +251,14 @@ class PenaltyComponent:
     group_name: str  # parent GroupSlice name
     group_index: int  # index into groups list
     group_sl: slice  # coefficient slice from parent GroupSlice
-    omega_raw: NDArray  # (K, K) penalty in B-spline / raw basis space
+    omega_raw: NDArray | None  # (K, K) penalty in B-spline / raw basis space
     omega_ssp: NDArray | None = None  # (p_g, p_g) in SSP coordinates
     rank: float = 0.0
     log_det_omega_plus: float = 0.0
     eigvals_omega: NDArray | None = None  # positive eigenvalues of omega_ssp
     component_type: str | None = None  # "selection" for null-space select penalty
     lambda_policy: LambdaPolicy | None = None  # per-component lambda control
+    penalty_kind: Literal["dense", "identity", "repeated"] = "dense"
 
 
 # ── Tensor marginal ingredients ────────────────────────────────

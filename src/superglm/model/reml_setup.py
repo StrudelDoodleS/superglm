@@ -8,6 +8,7 @@ from typing import Any
 from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
+    RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
@@ -22,6 +23,9 @@ def collect_reml_groups(
     reml_groups: list[tuple[int, GroupSlice]] = []
     for i, group in enumerate(groups):
         group_matrix = group_matrices[i]
+        if isinstance(group_matrix, RandomEffectGroupMatrix) and group.penalized:
+            reml_groups.append((i, group))
+            continue
         if (
             isinstance(
                 group_matrix,
