@@ -5,6 +5,9 @@ import pytest
 
 import superglm.group_matrix as group_matrix
 from superglm import LambdaPolicy, RandomEffect
+from superglm._group_matrix._group_matrix_kernels import (
+    _random_effect_sufficient_stats,
+)
 from superglm.dm_builder import _process_info
 
 
@@ -87,3 +90,14 @@ def test_tabmat_keeps_ordinary_categorical_drop_first_representation():
 
     assert categorical.drop_first is True
     np.testing.assert_array_equal(categorical.toarray(), gm.toarray())
+
+
+def test_random_effect_sufficient_stats_fuse_weight_and_rhs_aggregation():
+    codes = np.array([2, 0, 1, 2, 1, 2], dtype=np.intp)
+    W = np.array([0.5, -1.0, 2.0, 1.5, -0.25, 0.75])
+    Wz = np.array([-0.2, 1.0, 0.4, 2.0, -1.5, 0.3])
+
+    level_W, level_Wz = _random_effect_sufficient_stats(codes, W, Wz, 4)
+
+    np.testing.assert_allclose(level_W, np.bincount(codes, weights=W, minlength=4))
+    np.testing.assert_allclose(level_Wz, np.bincount(codes, weights=Wz, minlength=4))

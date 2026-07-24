@@ -94,6 +94,18 @@ def _fused_bincount_2(bin_idx, W, Wz, n_bins):
 
 
 @njit(cache=True)
+def _random_effect_sufficient_stats(codes, W, Wz, n_levels):
+    """Aggregate local Hessian diagonals and working RHS in one observation pass."""
+    level_W = np.zeros(n_levels)
+    level_Wz = np.zeros(n_levels)
+    for i in range(len(codes)):
+        level = codes[i]
+        level_W[level] += W[i]
+        level_Wz[level] += Wz[i]
+    return level_W, level_Wz
+
+
+@njit(cache=True)
 def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
     """Fused dual 2D bincount for tensor gram_rmatvec."""
     n = len(idx1)

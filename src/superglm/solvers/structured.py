@@ -2,14 +2,220 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Literal
 
 import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_algebra import _random_effect_cross_gram
+from superglm._group_matrix._group_matrix_kernels import (
+    _random_effect_sufficient_stats,
+)
+from superglm.group_matrix import (
+    GroupMatrix,
+    RandomEffectGroupMatrix,
+    _block_xtwx_signed,
+)
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
-from superglm.types import PenaltyComponent
+from superglm.types import GroupSlice, PenaltyComponent
+
+
+@dataclass(frozen=True)
+class StructuredGroupSelection:
+    """Dominant structured group choice or a recorded dense-fallback reason."""
+
+    group_index: int | None
+    group_name: str | None
+    fallback_reason: str | None
+
+
+@dataclass(frozen=True)
+class ScalarStructuredSystem:
+    """Unpenalized coefficient blocks and working sufficient statistics."""
+
+    operator: SymmetricBlockOperator
+    xtw_small: NDArray
+    xtw_structured: NDArray
+    xtwz_small: NDArray
+    xtwz_structured: NDArray
+    sum_w: float
+    sum_wz: float
+    dominant_group_index: int
+    dominant_group_name: str
+
+
+def _selection_failure(
+    reason: str,
+    mode: Literal["auto", "structured"],
+) -> StructuredGroupSelection:
+    if mode == "structured":
+        raise ValueError(f"direct_solve='structured' is ineligible: {reason}")
+    return StructuredGroupSelection(
+        group_index=None,
+        group_name=None,
+        fallback_reason=reason,
+    )
+
+
+def select_structured_group(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    *,
+    mode: Literal["auto", "structured"],
+) -> StructuredGroupSelection:
+    """Select the largest eligible random-effect block for scalar Schur elimination."""
+    if mode not in ("auto", "structured"):
+        raise ValueError("Structured selection mode must be 'auto' or 'structured'.")
+    if len(group_matrices) != len(groups):
+        raise ValueError("group_matrices and groups must have the same length.")
+
+    for group in groups:
+        if group.constraints is not None:
+            return _selection_failure(
+                f"group {group.name!r} has coefficient constraints",
+                mode,
+            )
+        if group.scop_reparameterization is not None:
+            return _selection_failure(
+                f"group {group.name!r} has unsupported SCOP geometry",
+                mode,
+            )
+
+    candidates = [
+        index
+        for index, matrix in enumerate(group_matrices)
+        if isinstance(matrix, RandomEffectGroupMatrix)
+    ]
+    if not candidates:
+        return _selection_failure("the model has no RandomEffect term", mode)
+
+    dominant_index = max(candidates, key=lambda index: group_matrices[index].shape[1])
+    dominant_group = groups[dominant_index]
+    dominant_matrix = group_matrices[dominant_index]
+    if dominant_group.size != dominant_matrix.shape[1]:
+        return _selection_failure(
+            f"RandomEffect group {dominant_group.name!r} has inconsistent coefficient geometry",
+            mode,
+        )
+    return StructuredGroupSelection(
+        group_index=dominant_index,
+        group_name=dominant_group.name,
+        fallback_reason=None,
+    )
+
+
+def _validate_structured_inputs(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    W: NDArray,
+    Wz: NDArray,
+    dominant_group_index: int,
+) -> tuple[NDArray, NDArray, RandomEffectGroupMatrix]:
+    if len(group_matrices) != len(groups):
+        raise ValueError("group_matrices and groups must have the same length.")
+    if not 0 <= dominant_group_index < len(group_matrices):
+        raise IndexError("dominant_group_index is outside group_matrices.")
+    dominant = group_matrices[dominant_group_index]
+    if not isinstance(dominant, RandomEffectGroupMatrix):
+        raise ValueError("The dominant structured group must be a RandomEffectGroupMatrix.")
+    weights = np.asarray(W, dtype=np.float64)
+    weighted_rhs = np.asarray(Wz, dtype=np.float64)
+    if weights.ndim != 1 or weighted_rhs.shape != weights.shape:
+        raise ValueError("W and Wz must be one-dimensional arrays with identical shape.")
+    if len(weights) != dominant.shape[0] or any(
+        matrix.shape[0] != len(weights) for matrix in group_matrices
+    ):
+        raise ValueError("All group matrices, W, and Wz must have the same row count.")
+    return weights, weighted_rhs, dominant
+
+
+def build_scalar_structured_system(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    W: NDArray,
+    Wz: NDArray,
+    *,
+    dominant_group_index: int,
+    tabmat_split=None,
+) -> ScalarStructuredSystem:
+    """Build exact scalar-Schur blocks without a full coefficient Gram matrix."""
+    weights, weighted_rhs, dominant = _validate_structured_inputs(
+        group_matrices,
+        groups,
+        W,
+        Wz,
+        dominant_group_index,
+    )
+    dominant_group = groups[dominant_group_index]
+    structured_indices = np.arange(
+        dominant_group.start,
+        dominant_group.end,
+        dtype=np.intp,
+    )
+
+    small_group_indices = [
+        index for index in range(len(group_matrices)) if index != dominant_group_index
+    ]
+    small_matrices = [group_matrices[index] for index in small_group_indices]
+    small_ranges = [
+        np.arange(groups[index].start, groups[index].end, dtype=np.intp)
+        for index in small_group_indices
+    ]
+    small_indices = np.concatenate(small_ranges) if small_ranges else np.empty(0, dtype=np.intp)
+    local_groups: list[GroupSlice] = []
+    local_start = 0
+    for index in small_group_indices:
+        group = groups[index]
+        local_end = local_start + group.size
+        local_groups.append(replace(group, start=local_start, end=local_end))
+        local_start = local_end
+
+    if len(small_indices):
+        if tabmat_split is not None:
+            A = np.asarray(
+                tabmat_split.sandwich(weights, cols=small_indices),
+                dtype=np.float64,
+            )
+        else:
+            A = _block_xtwx_signed(small_matrices, local_groups, weights)
+        C = np.concatenate(
+            [_random_effect_cross_gram(dominant, matrix, weights) for matrix in small_matrices],
+            axis=1,
+        )
+        xtw_small = np.concatenate([matrix.rmatvec(weights) for matrix in small_matrices])
+        xtwz_small = np.concatenate([matrix.rmatvec(weighted_rhs) for matrix in small_matrices])
+    else:
+        A = np.empty((0, 0), dtype=np.float64)
+        C = np.empty((dominant.n_levels, 0), dtype=np.float64)
+        xtw_small = np.empty(0, dtype=np.float64)
+        xtwz_small = np.empty(0, dtype=np.float64)
+
+    level_W, level_Wz = _random_effect_sufficient_stats(
+        dominant.codes,
+        weights,
+        weighted_rhs,
+        dominant.n_levels,
+    )
+    operator = SymmetricBlockOperator(
+        A=A,
+        C=C,
+        d=level_W,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+    )
+    return ScalarStructuredSystem(
+        operator=operator,
+        xtw_small=xtw_small,
+        xtw_structured=level_W,
+        xtwz_small=xtwz_small,
+        xtwz_structured=level_Wz,
+        sum_w=float(np.sum(weights)),
+        sum_wz=float(np.sum(weighted_rhs)),
+        dominant_group_index=dominant_group_index,
+        dominant_group_name=dominant_group.name,
+    )
 
 
 @dataclass(frozen=True)
