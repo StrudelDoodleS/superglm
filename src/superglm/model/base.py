@@ -381,6 +381,7 @@ def _predict_eta(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
         )
 
+    from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.random_effect import RandomEffect
 
     frame = as_eager_frame(X)
@@ -407,6 +408,13 @@ def _predict_eta(
             eta += scorer(term, frame, beta_all)
 
     for term in plan["interactions"]:
+        if random_effects == "population" and isinstance(term["spec"], FactorSmooth):
+            left_name, right_name = term["parent_names"]
+            term["spec"].validate_prediction_values(
+                frame.column_array(left_name),
+                frame.column_array(right_name),
+            )
+            continue
         if fast_discrete:
             eta += scorer(model, term, frame, beta_all)
         else:

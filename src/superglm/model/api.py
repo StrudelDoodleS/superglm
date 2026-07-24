@@ -35,6 +35,7 @@ from .fit_state import (
 
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
+    from superglm.inference.factor_smooths import FactorSmoothResult
     from superglm.inference.metrics import ModelMetrics
     from superglm.inference.random_effects import RandomEffectResult
     from superglm.inference.term import InteractionInference, TermInference
@@ -641,6 +642,25 @@ class SuperGLM:
             y=y,
             sample_weight=sample_weight,
             offset=offset,
+        )
+
+    def factor_smooth(
+        self,
+        name: str,
+        *,
+        grid: int | NDArray | None = 100,
+        levels: list[object] | tuple[object, ...] | None = None,
+        confidence_level: float = 0.95,
+    ) -> FactorSmoothResult:
+        """Return shared penalties, level credibility, and smooth curves."""
+        from superglm.inference.factor_smooths import factor_smooth_result
+
+        return factor_smooth_result(
+            self,
+            name,
+            grid=grid,
+            levels=levels,
+            confidence_level=confidence_level,
         )
 
     def iteration_diagnostics(self):
@@ -1302,8 +1322,9 @@ class SuperGLM:
             Optional offset added to the linear predictor before
             applying the inverse link.
         random_effects : {"conditional", "population"}
-            Whether to include fitted random-effect contributions. Population
-            prediction sets them to zero.
+            Whether to include fitted random-effect and factor-smooth
+            deviations. Population prediction sets all such contributions to
+            zero.
 
         Returns
         -------

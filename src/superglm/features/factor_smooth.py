@@ -273,5 +273,87 @@ class FactorSmooth:
             bin_idx=np.asarray(bin_idx, dtype=np.intp),
         )
 
+    def validate_prediction_values(
+        self,
+        x: NDArray,
+        group: NDArray,
+    ) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
+        """Validate new rows and return the numeric marginal and fitted-level codes."""
+        numeric = self._validate_numeric(x)
+        group_values = np.asarray(group).ravel()
+        if len(numeric) != len(group_values):
+            raise ValueError("FactorSmooth variable and group lengths differ.")
+        if np.any(pd.isna(group_values)):
+            raise ValueError("FactorSmooth group contains missing values (NaN or None).")
+        codes = pd.Index(self._levels).get_indexer(group_values).astype(np.intp, copy=False)
+        unseen_mask = codes < 0
+        if self.unseen == "error" and np.any(unseen_mask):
+            unseen = pd.unique(group_values[unseen_mask]).tolist()
+            raise ValueError(f"Encountered unseen FactorSmooth levels: {unseen}.")
+        return numeric, codes
+
+    def marginal_basis(self, x: NDArray) -> NDArray[np.float64]:
+        """Evaluate the fitted natural marginal basis on requested numeric values."""
+        numeric = self._validate_numeric(x)
+        if self._spline is None or self._natural_map is None:
+            raise RuntimeError("FactorSmooth has not been fitted.")
+        raw = np.asarray(self._spline._raw_basis_matrix(numeric), dtype=np.float64)
+        return np.asarray(raw @ self._natural_map, dtype=np.float64)
+
+    def score(
+        self,
+        x: NDArray,
+        group: NDArray,
+        beta: NDArray,
+    ) -> NDArray[np.float64]:
+        """Score fitted level-specific deviations without materializing ``n x Kk``."""
+        numeric, codes = self.validate_prediction_values(x, group)
+        coefficients = np.asarray(beta, dtype=np.float64)
+        expected = len(self._levels) * self.k
+        if coefficients.shape != (expected,):
+            raise ValueError(f"beta must have shape ({expected},).")
+        basis = self.marginal_basis(numeric)
+        blocks = coefficients.reshape(len(self._levels), self.k)
+        result = np.zeros(len(numeric), dtype=np.float64)
+        known = codes >= 0
+        result[known] = np.einsum(
+            "ij,ij->i",
+            basis[known],
+            blocks[codes[known]],
+            optimize=True,
+        )
+        return result
+
+    def transform(
+        self,
+        x: NDArray,
+        group: NDArray,
+    ) -> NDArray[np.float64]:
+        """Materialize a small prediction matrix for compatibility and references."""
+        numeric, codes = self.validate_prediction_values(x, group)
+        basis = self.marginal_basis(numeric)
+        result = np.zeros((len(numeric), len(self._levels) * self.k), dtype=np.float64)
+        known_rows = np.flatnonzero(codes >= 0)
+        if len(known_rows):
+            columns = codes[known_rows, None] * self.k + np.arange(self.k)[None, :]
+            result[known_rows[:, None], columns] = basis[known_rows]
+        return result
+
+    def reconstruct(self, beta: NDArray) -> dict[str, Any]:
+        """Return fitted natural-basis coefficients by level."""
+        coefficients = np.asarray(beta, dtype=np.float64)
+        expected = len(self._levels) * self.k
+        if coefficients.shape != (expected,):
+            raise ValueError(f"beta must have shape ({expected},).")
+        blocks = coefficients.reshape(len(self._levels), self.k)
+        return {
+            "variable": self.variable,
+            "group": self.group,
+            "levels": self._levels.copy(),
+            "coefficients": {
+                level: block.copy() for level, block in zip(self._levels, blocks, strict=True)
+            },
+        }
+
 
 __all__ = ["FactorSmooth"]

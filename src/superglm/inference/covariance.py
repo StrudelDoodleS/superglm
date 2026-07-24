@@ -17,8 +17,12 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
+from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.rank import decompose_factor, decompose_gram
-from superglm.solvers.structured import ProfiledScalarSchurFactor
+from superglm.solvers.structured import (
+    ProfiledBlockSchurFactor,
+    ProfiledScalarSchurFactor,
+)
 from superglm.types import GroupSlice
 
 
@@ -45,7 +49,7 @@ class StructuredSlopeCovarianceAccessor:
 
     def __init__(
         self,
-        factor: ProfiledScalarSchurFactor,
+        factor: HessianFactor,
         *,
         scale: float = 1.0,
     ):
@@ -117,7 +121,7 @@ class StructuredCovarianceAccessor:
 
     def __init__(
         self,
-        factor: ProfiledScalarSchurFactor,
+        factor: ProfiledScalarSchurFactor | ProfiledBlockSchurFactor,
         *,
         intercept_shift: NDArray | None = None,
         scale: float = 1.0,
@@ -161,14 +165,14 @@ class StructuredCovarianceAccessor:
         slope_indices = selected[selected > 0] - 1
         structured = np.intersect1d(
             slope_indices,
-            self.factor.structured_indices,
+            np.asarray(self.factor.structured_indices, dtype=np.intp).ravel(),
             assume_unique=False,
         )
         limit = self.augmented_factor.max_structured_inverse_block
         if len(structured) > limit:
             raise RuntimeError(
                 "Refusing to materialize a full dominant structured covariance "
-                f"block with {len(structured)} levels; request its diagonal or "
+                f"block with {len(structured)} coefficients; request its diagonal or "
                 "a bounded selected block instead."
             )
 

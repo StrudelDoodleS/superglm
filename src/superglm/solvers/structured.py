@@ -186,6 +186,42 @@ class StructuredLevelSupport:
 
 
 @dataclass(frozen=True)
+class FactorSmoothLevelSupport:
+    """Compact row support and local Fisher information for a factor smooth."""
+
+    count: NDArray
+    fit_weight: NDArray
+    information: NDArray
+
+    def __post_init__(self) -> None:
+        count = np.array(self.count, dtype=np.int64, copy=True)
+        fit_weight = np.array(self.fit_weight, dtype=np.float64, copy=True)
+        information = np.array(self.information, dtype=np.float64, copy=True)
+        if count.ndim != 1 or fit_weight.shape != count.shape:
+            raise ValueError("FactorSmooth count and fit_weight must be aligned vectors.")
+        if (
+            information.ndim != 3
+            or information.shape[0] != len(count)
+            or information.shape[1] != information.shape[2]
+        ):
+            raise ValueError(
+                "FactorSmooth information must have shape (n_levels, block_size, block_size)."
+            )
+        if not np.allclose(
+            information,
+            information.transpose(0, 2, 1),
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise ValueError("FactorSmooth local information blocks must be symmetric.")
+        for values in (count, fit_weight, information):
+            values.setflags(write=False)
+        object.__setattr__(self, "count", count)
+        object.__setattr__(self, "fit_weight", fit_weight)
+        object.__setattr__(self, "information", information)
+
+
+@dataclass(frozen=True)
 class StructuredLinearSystemState:
     """Authoritative compact factors and moments retained after a fit."""
 
@@ -195,7 +231,10 @@ class StructuredLinearSystemState:
     system: ScalarStructuredSystem | BlockStructuredSystem
     penalized_operator: SymmetricBlockOperator | BlockSymmetricOperator
     centered_data_operator: CenteredBlockOperator
-    support_totals: dict[str, StructuredLevelSupport]
+    support_totals: dict[
+        str,
+        StructuredLevelSupport | FactorSmoothLevelSupport,
+    ]
     backend: str = "structured"
     fallback_reason: str | None = None
 

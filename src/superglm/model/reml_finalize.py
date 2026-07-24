@@ -8,8 +8,8 @@ from dataclasses import replace
 import numpy as np
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
-from superglm.group_matrix import RandomEffectGroupMatrix
+from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian, Tweedie, clip_mu
+from superglm.group_matrix import FactorSmoothGroupMatrix, RandomEffectGroupMatrix
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_state import update_reml_r_inv
@@ -40,6 +40,7 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
+    FactorSmoothLevelSupport,
     ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
@@ -108,12 +109,48 @@ def _build_structured_linear_system_state(
         model._dm.matvec(result.beta) + result.intercept + offset_arr,
         model._link,
     )
-    support_totals: dict[str, StructuredLevelSupport] = {}
-    for group_matrix, group in zip(
-        model._dm.group_matrices,
-        model._groups,
-        strict=True,
+    fitted_mu = clip_mu(model._link.inverse(full_eta), model._distribution)
+    fitted_variance = np.maximum(
+        model._distribution.variance(fitted_mu),
+        _VARIANCE_FLOOR,
+    )
+    fitted_derivative = model._link.deriv_inverse(full_eta)
+    working_weights = sample_weight * fitted_derivative**2 / fitted_variance
+    support_totals: dict[
+        str,
+        StructuredLevelSupport | FactorSmoothLevelSupport,
+    ] = {}
+    for group_index, (group_matrix, group) in enumerate(
+        zip(
+            model._dm.group_matrices,
+            model._groups,
+            strict=True,
+        )
     ):
+        if isinstance(group_matrix, FactorSmoothGroupMatrix):
+            if (
+                isinstance(system, BlockStructuredSystem)
+                and system.dominant_group_index == group_index
+            ):
+                information = system.operator.D
+            else:
+                information, _xtw, _xtwz = group_matrix.factor_smooth_sufficient_stats(
+                    working_weights,
+                    np.zeros_like(working_weights),
+                )
+            support_totals[group.name] = FactorSmoothLevelSupport(
+                count=np.bincount(
+                    group_matrix.codes,
+                    minlength=group_matrix.n_levels,
+                ),
+                fit_weight=np.bincount(
+                    group_matrix.codes,
+                    weights=sample_weight,
+                    minlength=group_matrix.n_levels,
+                ),
+                information=information,
+            )
+            continue
         if not isinstance(group_matrix, RandomEffectGroupMatrix):
             continue
         base_eta = full_eta - result.beta[group.sl][group_matrix.codes]

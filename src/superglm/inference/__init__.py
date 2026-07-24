@@ -9,6 +9,7 @@ from superglm.inference.covariance import (
     _penalised_xtwx_inv_gram,
     _second_diff_penalty,
 )
+from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import (
@@ -44,6 +45,7 @@ __all__ = [
     "_second_diff_penalty",
     # metrics
     "ModelMetrics",
+    "FactorSmoothResult",
     "RandomEffectResult",
     "build_coef_rows",
     "build_basis_detail",
