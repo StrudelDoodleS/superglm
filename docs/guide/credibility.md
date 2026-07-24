@@ -190,7 +190,7 @@ exact.
 
 ## Real French motor example
 
-[`examples/fremtpl2_credibility.py`](../../examples/fremtpl2_credibility.py)
+[`examples/fremtpl2_credibility.py`](https://github.com/StrudelDoodleS/superglm/blob/master/examples/fremtpl2_credibility.py)
 uses the real
 [`freMTPL2freq` OpenML data set](https://www.openml.org/d/41214)
 and follows the caps used by
