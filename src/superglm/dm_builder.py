@@ -31,6 +31,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
     GroupMatrix,
+    RandomEffectGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -556,6 +557,12 @@ def _process_info(
         elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
             # SCOP discrete: columns holds the bin-level centered design
             gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
+        elif info.structured_kind == "random_effect":
+            gm = RandomEffectGroupMatrix(
+                info.cat_codes,
+                info.n_cols,
+                lambda_policies=info.lambda_policies,
+            )
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):

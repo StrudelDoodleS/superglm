@@ -114,6 +114,34 @@ class CategoricalGroupMatrix:
         return CategoricalGroupMatrix(c, self.n_levels)
 
 
+class RandomEffectGroupMatrix(CategoricalGroupMatrix):
+    """All-level categorical matrix used by structured random effects."""
+
+    __slots__ = ("lambda_policies",)
+
+    def __init__(
+        self,
+        codes: NDArray,
+        n_levels: int,
+        *,
+        lambda_policies=None,
+    ):
+        c = np.asarray(codes, dtype=np.intp)
+        if n_levels < 1:
+            raise ValueError(f"n_levels must be positive, got {n_levels}")
+        if np.any((c < 0) | (c >= n_levels)):
+            raise ValueError("RandomEffect codes must be between 0 and n_levels - 1.")
+        super().__init__(c, n_levels)
+        self.lambda_policies = lambda_policies
+
+    def row_subset(self, idx: NDArray) -> RandomEffectGroupMatrix:
+        return RandomEffectGroupMatrix(
+            self.codes[idx],
+            self.n_levels,
+            lambda_policies=self.lambda_policies,
+        )
+
+
 class SparseSSPGroupMatrix:
     """Factored SSP group matrix: stores sparse B + dense R_inv separately.
 

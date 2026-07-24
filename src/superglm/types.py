@@ -159,6 +159,8 @@ class GroupInfo:
     spline_cat_bin_idx: NDArray | None = None
     spline_cat_level: str | None = None
     spline_cat_feature: str | None = None
+    # Structured terms retain compact geometry for specialized solvers.
+    structured_kind: Literal["random_effect", "factor_smooth"] | None = None
 
     def __post_init__(self):
         if self.columns is None:

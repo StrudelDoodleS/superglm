@@ -11,6 +11,7 @@ from superglm.features.interaction import (
 )
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.random_effect import RandomEffect
 from superglm.features.spline import (
     BSplineSmooth,
     CubicRegressionSpline,
@@ -29,6 +30,7 @@ __all__ = [
     "OrderedCategorical",
     "Constraint",
     "ConstraintSpec",
+    "RandomEffect",
     "LevelGrouping",
     "collapse_levels",
     "Numeric",

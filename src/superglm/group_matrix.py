@@ -27,6 +27,7 @@ from ._group_matrix._group_matrix_bins import discretize_column
 from ._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
+    RandomEffectGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -53,6 +54,7 @@ from ._group_matrix._group_matrix_tabmat import (
 DenseGroupMatrix.__module__ = __name__
 SparseGroupMatrix.__module__ = __name__
 CategoricalGroupMatrix.__module__ = __name__
+RandomEffectGroupMatrix.__module__ = __name__
 SparseSSPGroupMatrix.__module__ = __name__
 SplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedSSPGroupMatrix.__module__ = __name__
@@ -70,6 +72,7 @@ GroupMatrix = (
     DenseGroupMatrix
     | SparseGroupMatrix
     | CategoricalGroupMatrix
+    | RandomEffectGroupMatrix
     | SparseSSPGroupMatrix
     | SplineCategoricalGroupMatrix
     | DiscretizedSSPGroupMatrix
