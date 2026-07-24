@@ -306,6 +306,8 @@ class PenaltyComponent:
     component_type: str | None = None  # "selection" for null-space select penalty
     lambda_policy: LambdaPolicy | None = None  # per-component lambda control
     penalty_kind: Literal["dense", "identity", "repeated"] = "dense"
+    repeat_count: int = 1
+    block_width: int | None = None
 
 
 # ── Tensor marginal ingredients ────────────────────────────────

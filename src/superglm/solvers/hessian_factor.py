@@ -30,6 +30,17 @@ def _component_omega(component: PenaltyComponent, size: int) -> NDArray:
     if component.omega_ssp is None:
         raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
     omega = np.asarray(component.omega_ssp, dtype=np.float64)
+    if component.penalty_kind == "repeated":
+        repeat_count = int(component.repeat_count)
+        block_width = component.block_width
+        if block_width is None or repeat_count * int(block_width) != len(indices):
+            raise ValueError(f"Repeated penalty component {component.name!r} has invalid geometry.")
+        if omega.shape != (int(block_width), int(block_width)):
+            raise ValueError(
+                f"Repeated penalty component {component.name!r} has shape {omega.shape}; "
+                f"expected ({int(block_width)}, {int(block_width)})."
+            )
+        return np.kron(np.eye(repeat_count, dtype=np.float64), omega)
     if omega.shape != (len(indices), len(indices)):
         raise ValueError(
             f"Penalty component {component.name!r} has shape {omega.shape}; "

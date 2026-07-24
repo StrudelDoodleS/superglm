@@ -11,11 +11,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.reml.penalty_algebra import (
-    _penalty_component_omega_ssp,
     coerce_reml_penalties,
     compute_logdet_s_derivatives,
     compute_penalty_nullity,
     compute_total_penalty_rank,
+    penalty_component_dense_matrix,
     penalty_component_matvec,
     penalty_component_quadratic,
 )
@@ -60,10 +60,10 @@ def _penalty_component_cross_trace(
     H_ij = inverse[left.group_sl, :][:, right.group_sl]
     left_product = H_ji
     if left.penalty_kind != "identity":
-        left_product = left_product @ _penalty_component_omega_ssp(left, left_group_matrix)
+        left_product = left_product @ penalty_component_dense_matrix(left, left_group_matrix)
     right_product = H_ij
     if right.penalty_kind != "identity":
-        right_product = right_product @ _penalty_component_omega_ssp(right, right_group_matrix)
+        right_product = right_product @ penalty_component_dense_matrix(right, right_group_matrix)
     return float(left_scale * right_scale * np.trace(left_product @ right_product))
 
 
@@ -186,7 +186,6 @@ def reml_direct_hessian(
     s_beta_list: list[NDArray] = []
     for i, pc in enumerate(penalties):
         gm = group_matrices[pc.group_index]
-        omega_ssp = _penalty_component_omega_ssp(pc, gm)
         lam = lambdas[pc.name]
         if use_compact_trace:
             compact_dS.append((pc, lam, gm))
@@ -198,7 +197,7 @@ def reml_direct_hessian(
             F[:, pc.group_sl] = (
                 lam * inverse_columns
                 if pc.penalty_kind == "identity"
-                else inverse_columns @ (lam * omega_ssp)
+                else inverse_columns @ (lam * penalty_component_dense_matrix(pc, gm))
             )
             if dH_extra is not None and i in dH_extra:
                 F = F + factor.solve(dH_extra[i])
@@ -235,14 +234,14 @@ def reml_direct_hessian(
                             if pc_i.penalty_kind == "identity":
                                 A_i = lam_i * H_block
                             else:
-                                A_i = H_block @ (lam_i * _penalty_component_omega_ssp(pc_i, gm_i))
+                                A_i = H_block @ (lam_i * penalty_component_dense_matrix(pc_i, gm_i))
                             same_slice_products[i] = A_i
                         A_j = same_slice_products.get(j)
                         if A_j is None:
                             if pc_j.penalty_kind == "identity":
                                 A_j = lam_j * H_block
                             else:
-                                A_j = H_block @ (lam_j * _penalty_component_omega_ssp(pc_j, gm_j))
+                                A_j = H_block @ (lam_j * penalty_component_dense_matrix(pc_j, gm_j))
                             same_slice_products[j] = A_j
                         trace_value = float(np.sum(A_i * A_j.T))
                     else:

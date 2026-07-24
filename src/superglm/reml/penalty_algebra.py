@@ -22,6 +22,7 @@ from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
@@ -69,6 +70,54 @@ def _penalty_component_omega_ssp(
     return group_matrix.R_inv.T @ component.omega_raw @ group_matrix.R_inv
 
 
+def _repeated_penalty_geometry(
+    component: PenaltyComponent,
+) -> tuple[int, int]:
+    """Return and validate ``(repeat_count, local_width)`` metadata."""
+    if component.penalty_kind != "repeated":
+        raise ValueError(f"Penalty component {component.name!r} is not repeated.")
+    repeat_count = int(component.repeat_count)
+    block_width = component.block_width
+    if repeat_count < 1 or block_width is None or int(block_width) < 1:
+        raise ValueError(f"Repeated penalty component {component.name!r} has invalid geometry.")
+    block_width = int(block_width)
+    group_width = component.group_sl.stop - component.group_sl.start
+    if repeat_count * block_width != group_width:
+        raise ValueError(
+            f"Repeated penalty component {component.name!r} geometry "
+            f"{repeat_count} x {block_width} does not match group width {group_width}."
+        )
+    return repeat_count, block_width
+
+
+def penalty_component_dense_matrix(
+    component: PenaltyComponent,
+    group_matrix: GroupMatrix | None = None,
+) -> NDArray:
+    """Materialize one component for an explicitly dense reference path."""
+    width = component.group_sl.stop - component.group_sl.start
+    if component.penalty_kind == "identity":
+        return np.eye(width, dtype=np.float64)
+    omega = np.asarray(
+        _penalty_component_omega_ssp(component, group_matrix),
+        dtype=np.float64,
+    )
+    if component.penalty_kind == "repeated":
+        repeat_count, block_width = _repeated_penalty_geometry(component)
+        if omega.shape != (block_width, block_width):
+            raise ValueError(
+                f"Repeated penalty component {component.name!r} has local shape "
+                f"{omega.shape}; expected {(block_width, block_width)}."
+            )
+        return np.kron(np.eye(repeat_count, dtype=np.float64), omega)
+    if omega.shape != (width, width):
+        raise ValueError(
+            f"Dense penalty component {component.name!r} has shape {omega.shape}; "
+            f"expected {(width, width)}."
+        )
+    return omega
+
+
 def penalty_component_quadratic(
     component: PenaltyComponent,
     beta_group: NDArray,
@@ -79,6 +128,10 @@ def penalty_component_quadratic(
     if component.penalty_kind == "identity":
         return float(beta @ beta)
     omega = _penalty_component_omega_ssp(component, group_matrix)
+    if component.penalty_kind == "repeated":
+        repeat_count, block_width = _repeated_penalty_geometry(component)
+        blocks = beta.reshape(repeat_count, block_width)
+        return float(np.einsum("ki,ij,kj->", blocks, omega, blocks, optimize=True))
     return float(beta @ omega @ beta)
 
 
@@ -92,6 +145,10 @@ def penalty_component_matvec(
     if component.penalty_kind == "identity":
         return beta.copy()
     omega = _penalty_component_omega_ssp(component, group_matrix)
+    if component.penalty_kind == "repeated":
+        repeat_count, block_width = _repeated_penalty_geometry(component)
+        blocks = beta.reshape(repeat_count, block_width)
+        return np.asarray(blocks @ omega.T, dtype=np.float64).ravel()
     return omega @ beta
 
 
@@ -108,6 +165,32 @@ def penalty_component_trace(
         if inverse.ndim == 2:
             return float(np.trace(inverse))
         raise ValueError("Identity penalty trace requires an inverse diagonal or square block.")
+    if component.penalty_kind == "repeated":
+        repeat_count, block_width = _repeated_penalty_geometry(component)
+        omega = _penalty_component_omega_ssp(component, group_matrix)
+        if inverse.ndim == 1:
+            if inverse.shape != (repeat_count * block_width,):
+                raise ValueError("Repeated penalty inverse diagonal has the wrong width.")
+            off_diagonal = omega - np.diag(np.diag(omega))
+            if not np.allclose(off_diagonal, 0.0, atol=1e-14):
+                raise ValueError(
+                    "A repeated non-diagonal penalty trace requires a selected inverse block."
+                )
+            return float(np.sum(inverse.reshape(repeat_count, block_width) * np.diag(omega)))
+        if inverse.shape != (
+            repeat_count * block_width,
+            repeat_count * block_width,
+        ):
+            raise ValueError("Repeated penalty trace requires its full selected inverse block.")
+        blocks = inverse.reshape(
+            repeat_count,
+            block_width,
+            repeat_count,
+            block_width,
+        )
+        return float(
+            sum(np.trace(blocks[level, :, level, :] @ omega) for level in range(repeat_count))
+        )
     if inverse.ndim != 2:
         raise ValueError("Dense penalty trace requires a selected inverse block.")
     omega = _penalty_component_omega_ssp(component, group_matrix)
@@ -423,6 +506,9 @@ def build_penalty_matrix(
                 diagonal_indices = np.arange(pc.group_sl.start, pc.group_sl.stop)
                 S[diagonal_indices, diagonal_indices] += lam
                 continue
+            if pc.penalty_kind == "repeated":
+                S[pc.group_sl, pc.group_sl] += lam * penalty_component_dense_matrix(pc, gm)
+                continue
             omega_ssp = (
                 pc.omega_ssp if pc.omega_ssp is not None else (gm.R_inv.T @ pc.omega_raw @ gm.R_inv)
             )
@@ -607,7 +693,32 @@ def build_penalty_components(
             )
             continue
 
-        if getattr(gm, "omega_components", None) is not None:
+        if isinstance(gm, FactorSmoothGroupMatrix):
+            lp_map = gm.lambda_policies or {}
+            for suffix, omega_j in gm.repeated_penalty_components:
+                local_rank, local_log_det, local_eigvals, omega_ssp_j = _rank_and_logdet(
+                    omega_j,
+                    omega_j,
+                )
+                group_components.append(
+                    PenaltyComponent(
+                        name=f"{g.name}:{suffix}",
+                        group_name=g.name,
+                        group_index=idx,
+                        group_sl=g.sl,
+                        omega_raw=omega_j,
+                        omega_ssp=omega_ssp_j,
+                        rank=float(gm.n_levels * local_rank),
+                        log_det_omega_plus=float(gm.n_levels * local_log_det),
+                        eigvals_omega=np.tile(local_eigvals, gm.n_levels),
+                        component_type="wiggle" if suffix == "wiggle" else "null",
+                        lambda_policy=lp_map.get(suffix),
+                        penalty_kind="repeated",
+                        repeat_count=gm.n_levels,
+                        block_width=gm.block_size,
+                    )
+                )
+        elif getattr(gm, "omega_components", None) is not None:
             # Multi-penalty path: N components share this coefficient block.
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
@@ -812,7 +923,20 @@ def compute_total_penalty_rank(
         elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
             total += tensor_pair_evaluations[group_name].rank
         else:
-            omega_sum = sum(penalties[i].omega_ssp for i in indices)
+            grouped = [penalties[i] for i in indices]
+            if all(component.penalty_kind == "repeated" for component in grouped):
+                repeat_count, block_width = _repeated_penalty_geometry(grouped[0])
+                if any(
+                    _repeated_penalty_geometry(component) != (repeat_count, block_width)
+                    for component in grouped[1:]
+                ):
+                    raise ValueError("Repeated components in one group must share geometry.")
+                omega_sum = sum(component.omega_ssp for component in grouped)
+                eigvals = np.linalg.eigvalsh(omega_sum)
+                thresh = eps_thresh * max(eigvals.max(), 1e-12)
+                total += float(repeat_count * np.sum(eigvals > thresh))
+                continue
+            omega_sum = sum(component.omega_ssp for component in grouped)
             eigvals = np.linalg.eigvalsh(omega_sum)
             thresh = eps_thresh * max(eigvals.max(), 1e-12)
             total += float(np.sum(eigvals > thresh))
@@ -864,6 +988,23 @@ def _structural_active_penalty_rank(
             continue
         if len(active) == 1 and active[0].rank > 0.0:
             total += int(round(active[0].rank))
+            continue
+        if all(component.penalty_kind == "repeated" for component in active):
+            repeat_count, block_width = _repeated_penalty_geometry(active[0])
+            if any(
+                _repeated_penalty_geometry(component) != (repeat_count, block_width)
+                for component in active[1:]
+            ):
+                raise ValueError("Repeated components in one group must share geometry.")
+            normalized_local = np.zeros((block_width, block_width), dtype=np.float64)
+            for component in active:
+                omega = np.asarray(component.omega_ssp, dtype=np.float64)
+                symmetric = 0.5 * (omega + omega.T)
+                eigenvalues = np.linalg.eigvalsh(symmetric)
+                scale = float(np.max(np.abs(eigenvalues), initial=0.0))
+                if scale > 0.0:
+                    normalized_local += symmetric / scale
+            total += repeat_count * _matrix_penalty_rank(normalized_local)
             continue
 
         width = active[0].group_sl.stop - active[0].group_sl.start
@@ -971,10 +1112,19 @@ def compute_logdet_s_plus(
         elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
             total += tensor_pair_evaluations[group_name].logdet_s_plus
         else:
-            comp_omegas = [penalties[i].omega_ssp for i in indices]
-            comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
+            grouped = [penalties[i] for i in indices]
+            repeated_scale = 1
+            if all(component.penalty_kind == "repeated" for component in grouped):
+                geometry = _repeated_penalty_geometry(grouped[0])
+                if any(
+                    _repeated_penalty_geometry(component) != geometry for component in grouped[1:]
+                ):
+                    raise ValueError("Repeated components in one group must share geometry.")
+                repeated_scale = geometry[0]
+            comp_omegas = [component.omega_ssp for component in grouped]
+            comp_lambdas = np.array([lambdas.get(component.name, 1.0) for component in grouped])
             result = similarity_transform_logdet(comp_omegas, comp_lambdas)
-            total += result.logdet_s_plus
+            total += repeated_scale * result.logdet_s_plus
     return total
 
 
@@ -1012,15 +1162,24 @@ def compute_logdet_s_derivatives(
             r_dict.update(eval_result.gradient)
             hess_dict.update(eval_result.hessian)
         else:
-            comp_omegas = [penalties[i].omega_ssp for i in indices]
-            comp_lambdas = np.array([lambdas.get(penalties[i].name, 1.0) for i in indices])
+            grouped = [penalties[i] for i in indices]
+            repeated_scale = 1
+            if all(component.penalty_kind == "repeated" for component in grouped):
+                geometry = _repeated_penalty_geometry(grouped[0])
+                if any(
+                    _repeated_penalty_geometry(component) != geometry for component in grouped[1:]
+                ):
+                    raise ValueError("Repeated components in one group must share geometry.")
+                repeated_scale = geometry[0]
+            comp_omegas = [component.omega_ssp for component in grouped]
+            comp_lambdas = np.array([lambdas.get(component.name, 1.0) for component in grouped])
             result = similarity_transform_logdet(comp_omegas, comp_lambdas)
             grad = logdet_s_gradient(result, comp_omegas, comp_lambdas)
             hess = logdet_s_hessian(result, comp_omegas, comp_lambdas)
             for local_i, global_i in enumerate(indices):
                 name_i = penalties[global_i].name
-                r_dict[name_i] = float(grad[local_i])
+                r_dict[name_i] = float(repeated_scale * grad[local_i])
                 for local_j, global_j in enumerate(indices):
                     name_j = penalties[global_j].name
-                    hess_dict[(name_i, name_j)] = float(hess[local_i, local_j])
+                    hess_dict[(name_i, name_j)] = float(repeated_scale * hess[local_i, local_j])
     return r_dict, hess_dict
