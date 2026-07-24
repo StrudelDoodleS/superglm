@@ -2131,6 +2131,7 @@ def fit_irls_direct(
                 raise RuntimeError("Structured fit did not produce final sufficient statistics.")
             cache_out["structured_system"] = structured_final
             cache_out["structured_operator"] = structured_final.operator
+            cache_out["penalized_operator"] = _final_penalized_operator
             cache_out["xtwz_small"] = structured_final.xtwz_small
             cache_out["xtwz_structured"] = structured_final.xtwz_structured
         else:

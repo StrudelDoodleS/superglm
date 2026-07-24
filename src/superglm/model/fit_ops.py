@@ -324,6 +324,7 @@ def _clear_fit_inference_caches(model) -> None:
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
     model._solver_result = None
+    model._linear_system_state = None
     model._runtime_canonical_state = None
     model._fast_prediction_state = None
     model._prediction_plan = None
@@ -540,8 +541,13 @@ def _maybe_release_fit_state(model) -> None:
     # directly without needing model._dm.
     inf = model._fit_inference_info
     model.__dict__["_group_edf"] = dict(inf["group_edf_map"])
+    augmented = inf["XtWX_inv_aug"]
+    if hasattr(augmented, "scaled") and hasattr(augmented, "slopes"):
+        coefficient_covariance = augmented.scaled(model.result.phi).slopes
+    else:
+        coefficient_covariance = model.result.phi * augmented[1:, 1:]
     model.__dict__["_coef_covariance"] = (
-        model.result.phi * inf["XtWX_inv_aug"][1:, 1:],
+        coefficient_covariance,
         inf["active_groups"],
     )
     inf["W"] = np.empty(0, dtype=np.float64)

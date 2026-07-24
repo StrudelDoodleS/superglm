@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 
 from superglm.inference._term_helpers import spline_group_enrichment
+from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.profiling._reporting import (
@@ -294,8 +295,15 @@ def summary(
                 se_dict[g.name] = np.zeros(g.size)
                 se_raw_dict[g.name] = np.zeros(g.size)
             else:
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                var_diag = np.diag(XtWX_inv_aug[aug_sl, aug_sl])
+                augmented_indices = np.arange(
+                    1 + ag.start,
+                    1 + ag.end,
+                    dtype=np.intp,
+                )
+                var_diag = covariance_selected_diagonal(
+                    XtWX_inv_aug,
+                    augmented_indices,
+                )
                 se_raw_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
                 se_dict[g.name] = np.sqrt(np.maximum(phi * var_diag, 0.0))
 

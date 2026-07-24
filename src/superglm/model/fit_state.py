@@ -201,6 +201,7 @@ class ModelConfig:
             "_link": None,
             "_result": None,
             "_solver_result": None,
+            "_linear_system_state": None,
             "_dm": None,
             "_fit_weights": None,
             "_fit_offset": None,
@@ -409,6 +410,7 @@ def invalidate_revised_coefficient_mode(model) -> None:
 
     # Profile likelihoods and confidence intervals are functions of the old
     # fitted mean, so they cannot survive an arbitrary coefficient revision.
+    model._linear_system_state = None
     model._nb_profile_result = None
     model._tweedie_profile_result = None
 
@@ -416,6 +418,7 @@ def invalidate_revised_coefficient_mode(model) -> None:
 _FIT_PROJECTION_NAMES = (
     "_result",
     "_solver_result",
+    "_linear_system_state",
     "_dm",
     "_groups",
     "_specs",

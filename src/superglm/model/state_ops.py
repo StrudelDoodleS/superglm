@@ -9,6 +9,10 @@ from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
 from superglm.group_matrix import DesignMatrix
+from superglm.inference.covariance import (
+    StructuredCovarianceAccessor,
+    StructuredSlopeCovarianceAccessor,
+)
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.solvers.rank import (
     decompose_factor,
@@ -17,6 +21,7 @@ from superglm.solvers.rank import (
     needs_factor_certification,
     selected_group_name_set,
 )
+from superglm.solvers.structured import StructuredLinearSystemState
 from superglm.types import GroupSlice
 
 
@@ -36,17 +41,12 @@ def _solver_space_working_weights(model) -> NDArray:
     return model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
 
 
-def _public_augmented_covariance(model, XtWX_inv_aug: NDArray, active_groups) -> NDArray:
-    """Map solver-space augmented covariance into the public runtime state."""
+def _public_intercept_shift(model, active_groups, p_active: int) -> NDArray:
+    """Return the solver-to-public intercept shift in active coordinates."""
     runtime_state = getattr(model, "_runtime_canonical_state", None)
-    if runtime_state is None:
-        return XtWX_inv_aug
-
-    p_active = XtWX_inv_aug.shape[0] - 1
-    if p_active <= 0:
-        return XtWX_inv_aug
-
     intercept_shift = np.zeros(p_active, dtype=np.float64)
+    if runtime_state is None or p_active <= 0:
+        return intercept_shift
     for term_state in runtime_state.get("terms", {}).values():
         if not term_state.get("applied_to_public_model", False):
             continue
@@ -59,6 +59,13 @@ def _public_augmented_covariance(model, XtWX_inv_aug: NDArray, active_groups) ->
                 continue
             column_means = np.asarray(group_state["column_means"], dtype=np.float64).ravel()
             intercept_shift[active_group.sl] = column_means
+    return intercept_shift
+
+
+def _public_augmented_covariance(model, XtWX_inv_aug: NDArray, active_groups) -> NDArray:
+    """Map solver-space augmented covariance into the public runtime state."""
+    p_active = XtWX_inv_aug.shape[0] - 1
+    intercept_shift = _public_intercept_shift(model, active_groups, p_active)
 
     if not np.any(intercept_shift):
         return XtWX_inv_aug
@@ -283,6 +290,29 @@ def _rank_augmented_covariance(model, rank_info, active_groups):
     return _public_augmented_covariance(model, solver_covariance, active_groups)
 
 
+def _structured_covariance_state(
+    model,
+    state: StructuredLinearSystemState,
+) -> tuple[
+    StructuredSlopeCovarianceAccessor,
+    StructuredCovarianceAccessor,
+    list[GroupSlice],
+]:
+    """Build lazy covariance views over one retained structured fit."""
+    active_groups = list(model._groups)
+    shift = _public_intercept_shift(
+        model,
+        active_groups,
+        state.profiled_factor.shape[0],
+    )
+    augmented = StructuredCovarianceAccessor(
+        state.profiled_factor,
+        intercept_shift=shift,
+    )
+    coefficient = StructuredSlopeCovarianceAccessor(state.coefficient_factor)
+    return coefficient, augmented, active_groups
+
+
 def coef_covariance(model):
     """Phi-scaled Bayesian covariance for active coefficients."""
     solver = model._solver_pirls_result()
@@ -299,6 +329,10 @@ def coef_covariance(model):
         mapped_covariance = np.asarray(scop_inference.augmented_inverse)[1:, 1:]
         covariance = solver.phi * mapped_covariance[np.ix_(selected, selected)]
         return covariance, active_groups
+    linear_state = getattr(model, "_linear_system_state", None)
+    if isinstance(linear_state, StructuredLinearSystemState):
+        _, augmented, active_groups = _structured_covariance_state(model, linear_state)
+        return augmented.scaled(solver.phi).slopes, active_groups
     if solver.rank_info is not None:
         _, active_groups = _rank_active_state(model, solver.rank_info)
         covariance = solver.phi * solver.rank_info.augmented.pseudo_inverse()
@@ -329,6 +363,13 @@ def fit_active_info(model):
         ]
         augmented = _public_augmented_covariance(model, augmented, active_groups)
         return X_active, W, inverse, augmented, active_groups
+    linear_state = getattr(model, "_linear_system_state", None)
+    if isinstance(linear_state, StructuredLinearSystemState):
+        inverse, augmented, active_groups = _structured_covariance_state(
+            model,
+            linear_state,
+        )
+        return model._dm, W, inverse, augmented, active_groups
     if solver.rank_info is not None:
         X_active, active_groups = _rank_active_state(model, solver.rank_info)
         inverse = solver.rank_info.coefficient.pseudo_inverse()
@@ -401,6 +442,36 @@ def fit_inference_info(model):
             "edf1": edf1,
             "group_edf_map": dict(scop_inference.group_edf),
             "coefficient_estimable": coefficient_estimable,
+        }
+    linear_state = getattr(model, "_linear_system_state", None)
+    if isinstance(linear_state, StructuredLinearSystemState):
+        inverse, augmented, active_groups = _structured_covariance_state(
+            model,
+            linear_state,
+        )
+        edf = linear_state.profiled_factor.inverse_operator_diagonal(
+            linear_state.centered_data_operator,
+        )
+        edf[np.abs(edf) < 100.0 * np.finfo(float).eps] = 0.0
+        edf1 = 2.0 * edf - linear_state.profiled_factor.inverse_operator_square_diagonal(
+            linear_state.centered_data_operator,
+        )
+        group_edf_map = {group.name: float(np.sum(edf[group.sl])) for group in active_groups}
+        return {
+            "W": W,
+            "XtWX_inv": inverse,
+            "XtWX_inv_aug": augmented,
+            "active_groups": active_groups,
+            # Wood-style smooth tests require an explicit data factor. Keep a
+            # zero-row, correctly indexed placeholder rather than allocating
+            # the dominant K x K factor; selected covariance and EDF remain
+            # exact.
+            "R_a": np.empty((0, len(edf))),
+            "edf": edf,
+            "edf1": edf1,
+            "group_edf_map": group_edf_map,
+            "coefficient_estimable": np.ones(len(solver.beta), dtype=bool),
+            "structured_covariance": True,
         }
     if solver.rank_info is not None:
         rank_info = solver.rank_info

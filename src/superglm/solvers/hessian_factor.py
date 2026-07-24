@@ -65,6 +65,16 @@ class HessianFactor(Protocol):
 
     def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float: ...
 
+    def inverse_operator_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray: ...
+
+    def inverse_operator_square_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray: ...
+
     def operator_cross_trace(
         self,
         left: CompactSymmetricOperator,
@@ -141,6 +151,29 @@ class DenseHessianFactor:
         from superglm.solvers.structured import materialize_compact_operator
 
         return float(np.trace(self.inverse @ materialize_compact_operator(operator)))
+
+    def inverse_operator_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray:
+        """Return ``diag(H^-1 O)`` from a compact symmetric operator."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        from superglm.solvers.structured import materialize_compact_operator
+
+        return np.diag(self.inverse @ materialize_compact_operator(operator)).copy()
+
+    def inverse_operator_square_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray:
+        """Return ``diag((H^-1 O)^2)`` for a dense-reference factor."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        from superglm.solvers.structured import materialize_compact_operator
+
+        product = self.inverse @ materialize_compact_operator(operator)
+        return np.diag(product @ product).copy()
 
     def operator_cross_trace(
         self,

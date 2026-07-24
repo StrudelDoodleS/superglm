@@ -436,6 +436,17 @@ def test_compact_centered_and_low_rank_operator_products_match_dense():
             np.trace(inverse @ combined_dense),
             atol=2e-12,
         )
+        inverse_product = inverse @ combined_dense
+        np.testing.assert_allclose(
+            factor.inverse_operator_diagonal(combined),
+            np.diag(inverse_product),
+            atol=2e-12,
+        )
+        np.testing.assert_allclose(
+            factor.inverse_operator_square_diagonal(combined),
+            np.diag(inverse_product @ inverse_product),
+            atol=2e-12,
+        )
         np.testing.assert_allclose(
             factor.operator_cross_trace(combined, other),
             np.trace(inverse @ combined_dense @ inverse @ other_dense),

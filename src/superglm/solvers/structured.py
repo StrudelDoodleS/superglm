@@ -68,6 +68,61 @@ class CachedScalarStructuredSolution:
     hessian_rank: int
 
 
+@dataclass(frozen=True)
+class StructuredLevelSupport:
+    """Compact training support retained for one all-level structured term."""
+
+    count: NDArray
+    fit_weight: NDArray
+    information: NDArray
+
+    def __post_init__(self) -> None:
+        expected_shape: tuple[int, ...] | None = None
+        for name, dtype in (
+            ("count", np.int64),
+            ("fit_weight", np.float64),
+            ("information", np.float64),
+        ):
+            values = np.array(getattr(self, name), dtype=dtype, copy=True)
+            if values.ndim != 1:
+                raise ValueError(f"{name} must be one-dimensional.")
+            if expected_shape is None:
+                expected_shape = values.shape
+            elif values.shape != expected_shape:
+                raise ValueError("Structured support arrays must have identical shapes.")
+            values.setflags(write=False)
+            object.__setattr__(self, name, values)
+
+
+@dataclass(frozen=True)
+class StructuredLinearSystemState:
+    """Authoritative compact factors and moments retained after a fit."""
+
+    coefficient_factor: ScalarSchurFactor
+    profiled_factor: ProfiledScalarSchurFactor
+    augmented_factor: ScalarSchurFactor
+    system: ScalarStructuredSystem
+    penalized_operator: SymmetricBlockOperator
+    centered_data_operator: CenteredBlockOperator
+    support_totals: dict[str, StructuredLevelSupport]
+    backend: str = "structured"
+    fallback_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.coefficient_factor.shape != self.system.operator.shape:
+            raise ValueError("Coefficient factor does not match the structured system.")
+        if self.profiled_factor.shape != self.system.operator.shape:
+            raise ValueError("Profiled factor does not match the structured system.")
+        expected_augmented = self.system.operator.shape[0] + 1
+        if self.augmented_factor.shape != (expected_augmented, expected_augmented):
+            raise ValueError("Augmented factor does not match the structured system.")
+        if self.penalized_operator.shape != self.system.operator.shape:
+            raise ValueError("Penalized operator does not match the structured system.")
+        if self.centered_data_operator.shape != self.system.operator.shape:
+            raise ValueError("Centered data operator does not match the structured system.")
+        object.__setattr__(self, "support_totals", dict(self.support_totals))
+
+
 def _selection_failure(
     reason: str,
     mode: Literal["auto", "structured"],
@@ -782,6 +837,26 @@ def _multiply_symmetric_dlr(
     )
 
 
+def _general_dlr_diagonal(operator: _GeneralDiagonalLowRank) -> NDArray:
+    """Return the diagonal of a general diagonal-plus-low-rank operator."""
+    diagonal = np.array(operator.diagonal, dtype=np.float64, copy=True)
+    if operator.core.size:
+        diagonal += np.sum((operator.left @ operator.core) * operator.right, axis=1)
+    return diagonal
+
+
+def _general_dlr_square_diagonal(operator: _GeneralDiagonalLowRank) -> NDArray:
+    """Return the diagonal of the square of a general DLR operator."""
+    diagonal = np.square(operator.diagonal)
+    if not operator.core.size:
+        return diagonal
+    low_diagonal = np.sum((operator.left @ operator.core) * operator.right, axis=1)
+    diagonal += 2.0 * operator.diagonal * low_diagonal
+    square_left = operator.left @ operator.core @ (operator.right.T @ operator.left) @ operator.core
+    diagonal += np.sum(square_left * operator.right, axis=1)
+    return diagonal
+
+
 def _trace_general_product(
     left: _GeneralDiagonalLowRank,
     right: _GeneralDiagonalLowRank,
@@ -1185,6 +1260,34 @@ class ScalarSchurFactor:
             raise ValueError("Operator and factor dimensions must match.")
         return _trace_symmetric_dlr(self._inverse_dlr(), _operator_dlr(operator))
 
+    def inverse_operator_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray:
+        """Return ``diag(H^-1 O)`` in O(Kq + q²) memory."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        return _general_dlr_diagonal(
+            _multiply_symmetric_dlr(
+                self._inverse_dlr(),
+                _operator_dlr(operator),
+            )
+        )
+
+    def inverse_operator_square_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray:
+        """Return ``diag((H^-1 O)^2)`` compactly."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        return _general_dlr_square_diagonal(
+            _multiply_symmetric_dlr(
+                self._inverse_dlr(),
+                _operator_dlr(operator),
+            )
+        )
+
     def operator_cross_trace(
         self,
         left: CompactSymmetricOperator,
@@ -1377,6 +1480,48 @@ class ProfiledScalarSchurFactor:
                 center=self.mean_x,
             )
         return _trace_symmetric_dlr(self._inverse_dlr(), _operator_dlr(operator))
+
+    def inverse_operator_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray:
+        """Return ``diag(Hc^-1 O)`` in O(Kq + q²) memory."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        if isinstance(operator, SymmetricBlockOperator):
+            operator = CenteredBlockOperator(
+                raw=operator,
+                cross=self.xtw,
+                total=self.sum_w,
+                center=self.mean_x,
+            )
+        return _general_dlr_diagonal(
+            _multiply_symmetric_dlr(
+                self._inverse_dlr(),
+                _operator_dlr(operator),
+            )
+        )
+
+    def inverse_operator_square_diagonal(
+        self,
+        operator: CompactSymmetricOperator,
+    ) -> NDArray:
+        """Return ``diag((Hc^-1 O)^2)`` compactly."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        if isinstance(operator, SymmetricBlockOperator):
+            operator = CenteredBlockOperator(
+                raw=operator,
+                cross=self.xtw,
+                total=self.sum_w,
+                center=self.mean_x,
+            )
+        return _general_dlr_square_diagonal(
+            _multiply_symmetric_dlr(
+                self._inverse_dlr(),
+                _operator_dlr(operator),
+            )
+        )
 
     def operator_cross_trace(
         self,

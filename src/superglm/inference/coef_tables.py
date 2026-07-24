@@ -8,6 +8,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
+from superglm.inference.covariance import (
+    covariance_quadratic_form,
+    covariance_selected_block,
+    covariance_selected_diagonal,
+    covariance_slope_view,
+)
 from superglm.inference.summary import _BasisDetailRow, _CoefRow, _compute_coef_stats
 from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
@@ -119,8 +125,15 @@ def build_coef_rows(
                 se_dict[g.name] = np.zeros(g.size)
             else:
                 scale = 1.0 if known_scale else phi
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
+                augmented_indices = np.arange(
+                    1 + ag.start,
+                    1 + ag.end,
+                    dtype=np.intp,
+                )
+                var_diag = scale * covariance_selected_diagonal(
+                    XtWX_inv_aug,
+                    augmented_indices,
+                )
                 se_dict[g.name] = np.sqrt(np.maximum(var_diag, 0.0))
         if g.name in selected_names:
             se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
@@ -150,7 +163,10 @@ def build_coef_rows(
         augmented_reference_contrast[1 + active_group.start : 1 + active_group.end] = (
             full_reference_contrast[original_group.sl]
         )
-    icpt_var = float(augmented_reference_contrast @ XtWX_inv_aug @ augmented_reference_contrast)
+    icpt_var = covariance_quadratic_form(
+        XtWX_inv_aug,
+        augmented_reference_contrast,
+    )
     scale = 1.0 if known_scale else max(phi, 0.0)
     icpt_se = float(np.sqrt(max(scale * icpt_var, 0.0)))
 
@@ -222,11 +238,23 @@ def build_coef_rows(
         """Compute curve SE min/max for a spline feature."""
         scale = phi if not known_scale else 1.0
         # Use the feature block of the augmented inverse for correct marginal SEs
-        Cov_active = scale * XtWX_inv_aug[1:, 1:]
+        Cov_active = covariance_slope_view(XtWX_inv_aug, scale=scale)
         se_curve = feature_se_from_cov(
             feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
         )
         return float(np.min(se_curve)), float(np.max(se_curve))
+
+    def _augmented_group_block(active_group: GroupSlice) -> NDArray:
+        augmented_indices = np.arange(
+            1 + active_group.start,
+            1 + active_group.end,
+            dtype=np.intp,
+        )
+        covariance = covariance_selected_block(
+            XtWX_inv_aug,
+            augmented_indices,
+        )
+        return covariance if known_scale else phi * covariance
 
     def _spline_enrichment(g_name, spec):
         d = spline_group_enrichment(g_name, spec, _get_group_edf_map(), reml_lambdas, lambda2)
@@ -264,7 +292,7 @@ def build_coef_rows(
             )
 
             scale = 1.0 if known_scale else phi
-            Cov_active = scale * XtWX_inv_aug[1:, 1:]
+            Cov_active = covariance_slope_view(XtWX_inv_aug, scale=scale)
             se_levels = feature_se_from_cov(
                 g.feature_name,
                 Cov_active,
@@ -304,7 +332,10 @@ def build_coef_rows(
                         [np.arange(ag.start, ag.end) for _, ag in active_pairs]
                     )
                     augmented_indices = active_indices + 1
-                    V_b_j = scale * XtWX_inv_aug[np.ix_(augmented_indices, augmented_indices)]
+                    V_b_j = scale * covariance_selected_block(
+                        XtWX_inv_aug,
+                        augmented_indices,
+                    )
                     R_a = _get_R_factor()
                     edf, edf1 = _get_influence_edf()
                     edf1_j = float(np.sum(edf1[active_indices]))
@@ -416,12 +447,7 @@ def build_coef_rows(
                 curve_se_max = float("nan")
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                V_b_j = (
-                    XtWX_inv_aug[aug_sl, aug_sl]
-                    if known_scale
-                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
-                )
+                V_b_j = _augmented_group_block(ag)
 
                 if is_linear_subgroup:
                     from scipy.stats import chi2 as chi2_dist
@@ -529,12 +555,7 @@ def build_coef_rows(
                 ref_df = float(g.size)
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                V_b_j = (
-                    XtWX_inv_aug[aug_sl, aug_sl]
-                    if known_scale
-                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
-                )
+                V_b_j = _augmented_group_block(ag)
 
                 from superglm.stats.wood_pvalue import wood_test_smooth
 
@@ -603,12 +624,7 @@ def build_coef_rows(
                 ref_df = float(g.size)
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                V_b_j = (
-                    XtWX_inv_aug[aug_sl, aug_sl]
-                    if known_scale
-                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
-                )
+                V_b_j = _augmented_group_block(ag)
 
                 from scipy.stats import chi2 as chi2_dist
 
@@ -702,12 +718,7 @@ def build_coef_rows(
                 p_val = float("nan")
                 ref_df = float(g.size)
                 ag = next(a for a in active_groups if a.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                V_b_j = (
-                    XtWX_inv_aug[aug_sl, aug_sl]
-                    if known_scale
-                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
-                )
+                V_b_j = _augmented_group_block(ag)
                 from scipy.stats import chi2 as chi2_dist
 
                 try:
@@ -753,12 +764,7 @@ def build_coef_rows(
                 ref_df = float(g.size)
 
                 ag = next(a for a in active_groups if a.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                V_b_j = (
-                    XtWX_inv_aug[aug_sl, aug_sl]
-                    if known_scale
-                    else phi * XtWX_inv_aug[aug_sl, aug_sl]
-                )
+                V_b_j = _augmented_group_block(ag)
 
                 from superglm.stats.wood_pvalue import wood_test_smooth
 
@@ -941,8 +947,15 @@ def build_basis_detail(
             continue
 
         scale = 1.0 if known_scale else phi
-        aug_sl = slice(1 + ag.start, 1 + ag.end)
-        var_diag = scale * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
+        augmented_indices = np.arange(
+            1 + ag.start,
+            1 + ag.end,
+            dtype=np.intp,
+        )
+        var_diag = scale * covariance_selected_diagonal(
+            XtWX_inv_aug,
+            augmented_indices,
+        )
         se_arr = np.sqrt(np.maximum(var_diag, 0.0))
         se_arr[~coefficient_estimable[g.sl]] = np.nan
 
