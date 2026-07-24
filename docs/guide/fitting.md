@@ -7,6 +7,7 @@ model or a fixed-penalty sparse model.
 |---|---|---|
 | Standard spline pricing model | `fit_reml()` with `selection_penalty=0` | Automatic smoothness selection and clean GAM-style inference |
 | Large-`n` spline pricing model | `fit_reml(discrete=True)` | Same modeling story, cheaper outer iterations |
+| High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | Compact scalar/block Schur fitting with automatic small-model fallback |
 | Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | mgcv-style double-penalty shrinkage |
 | Sparse screening / compression | `fit()` with `selection_penalty > 0` | Fixed-penalty sparse model rather than REML smoothness selection |
 | Regularisation path analysis | `fit_path()` | Warm-started lambda path for fixed-penalty models |
@@ -62,6 +63,33 @@ model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ```
 
 This is the preferred production path for large spline-heavy frequency models.
+`RandomEffect` and `FactorSmooth` retain their exact factor levels on this
+path; only the continuous spline support is binned.
+
+## Structured credibility terms
+
+`RandomEffect` and `FactorSmooth` are REML-only terms. Their dominant
+categorical block remains compact, and `direct_solve="auto"` chooses between
+the ordinary Gram solver and a scalar/block Schur solver from the fitted
+geometry.
+
+```python
+model = SuperGLM(
+    family="poisson",
+    features={"VehBrand": RandomEffect()},
+    interactions=[FactorSmooth("DrivAge", group="Region", k=6)],
+    discrete=True,
+    n_bins=256,
+    direct_solve="auto",
+    selection_penalty=0.0,
+)
+model.fit_reml(df, y, offset=np.log(df["Exposure"]))
+```
+
+The structured path supports one dominant credibility block plus narrow dense
+features, global splines, and secondary random effects. See
+[Credibility terms](credibility.md) for model semantics and the French motor
+example.
 
 ## `select=True` Versus `selection_penalty > 0`
 

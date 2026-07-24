@@ -11,6 +11,7 @@ from superglm.solvers.structured import (
     CenteredBlockOperator,
     LowRankSymmetricOperator,
     ProfiledBlockSchurFactor,
+    _block_operator_bdlr,
     materialize_compact_operator,
 )
 from superglm.types import PenaltyComponent
@@ -88,6 +89,32 @@ def _expanded(component: PenaltyComponent, width: int) -> np.ndarray:
     else:
         result[component.group_sl, component.group_sl] = component.omega_ssp
     return result
+
+
+def test_block_operator_bdlr_drops_structural_zero_low_rank_parts() -> None:
+    _rng, operator, _factor, _dense = _fixture()
+    pure_blocks = BlockSymmetricOperator(
+        A=np.zeros_like(operator.A),
+        C=np.zeros_like(operator.C),
+        D=operator.D,
+        small_indices=operator.small_indices,
+        structured_indices=operator.structured_indices,
+    )
+    small_only = BlockSymmetricOperator(
+        A=operator.A,
+        C=np.zeros_like(operator.C),
+        D=np.zeros_like(operator.D),
+        small_indices=operator.small_indices,
+        structured_indices=operator.structured_indices,
+    )
+
+    block_repr = _block_operator_bdlr(pure_blocks)
+    small_repr = _block_operator_bdlr(small_only)
+
+    assert block_repr.basis.shape[1] == 0
+    assert block_repr.core.shape == (0, 0)
+    assert small_repr.basis.shape[1] == len(operator.small_indices)
+    assert small_repr.core.shape == operator.A.shape
 
 
 def test_block_schur_solve_logdet_rank_and_selected_inverse_match_dense() -> None:

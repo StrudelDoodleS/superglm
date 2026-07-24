@@ -47,6 +47,33 @@ geometric mean of relativities is 1, pass `centering="mean"` explicitly:
 ti = model.term_inference("DrivAge", centering="mean")
 ```
 
+## Credibility reports
+
+Random effects expose the fitted variance component and one row per level:
+
+```python
+brand = model.random_effects("VehBrand", exposure=train["Exposure"])
+brand.tau_squared
+brand.effective_df
+brand.table[["level", "effect", "posterior_se", "credibility", "shrinkage"]]
+```
+
+Factor smooths expose the shared smoothing parameters, normalized
+block-credibility summaries, and posterior curves:
+
+```python
+region_age = model.factor_smooth(
+    "DrivAge:Region:fs",
+    grid=80,
+    levels=["R11", "R24"],
+)
+region_age.lambdas
+region_age.table[["level", "effective_df", "credibility", "sufficient_support"]]
+region_age.curves[["level", "DrivAge", "effect", "posterior_se", "lower", "upper"]]
+```
+
+See [Credibility terms](credibility.md) for the definitions and interpretation.
+
 ## Plotting
 
 All plotting goes through `model.plot()`:

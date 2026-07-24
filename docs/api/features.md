@@ -52,6 +52,12 @@ with `model.apply_shape_postfit(...)`.
 
 ::: superglm.Categorical
 
+::: superglm.RandomEffect
+
 ::: superglm.Numeric
 
 ::: superglm.Polynomial
+
+## Interaction Specs
+
+::: superglm.FactorSmooth

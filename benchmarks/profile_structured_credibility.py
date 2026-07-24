@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from superglm import Numeric, RandomEffect, SuperGLM
+from superglm import FactorSmooth, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.profiling.harness import (
     SystemSampler,
     dump_json,
@@ -50,13 +50,23 @@ class CaseConfig:
     small_width: int
     weights: str
     seed: int
+    structured_term: str = "random_effect"
+    block_size: int = 1
+    global_spline: bool = False
+
+    @property
+    def dominant_width(self) -> int:
+        """Coefficient width of the profiled structured term."""
+        return self.levels * self.block_size
 
     @property
     def slug(self) -> str:
         mode = "discrete" if self.discrete else "exact"
+        term = "re" if self.structured_term == "random_effect" else f"fs_k{self.block_size}"
+        global_suffix = "_global" if self.global_spline else ""
         return (
             f"{self.family}_{mode}_n{self.n}_k{self.levels}"
-            f"_q{self.small_width}_re{self.random_effects}"
+            f"_q{self.small_width}_{term}{global_suffix}_re{self.random_effects}"
         )
 
 
@@ -83,6 +93,79 @@ CORE_MATRIX = (
     CaseConfig(20_000, 1_000, "poisson", False, 2, 80, 4, "nonuniform", 7307),
 )
 
+FACTOR_SMOOTH_MATRIX = (
+    CaseConfig(
+        3_000,
+        30,
+        "gaussian",
+        False,
+        0,
+        None,
+        4,
+        "unit",
+        7401,
+        "factor_smooth",
+        5,
+        False,
+    ),
+    CaseConfig(
+        6_000,
+        50,
+        "poisson",
+        False,
+        0,
+        None,
+        4,
+        "nonuniform",
+        7402,
+        "factor_smooth",
+        5,
+        True,
+    ),
+    CaseConfig(
+        10_000,
+        100,
+        "poisson",
+        True,
+        0,
+        None,
+        4,
+        "nonuniform",
+        7403,
+        "factor_smooth",
+        5,
+        False,
+    ),
+    CaseConfig(
+        8_000,
+        40,
+        "gamma",
+        False,
+        0,
+        None,
+        4,
+        "nonuniform",
+        7404,
+        "factor_smooth",
+        10,
+        False,
+    ),
+    CaseConfig(
+        20_000,
+        300,
+        "poisson",
+        True,
+        1,
+        25,
+        4,
+        "nonuniform",
+        7405,
+        "factor_smooth",
+        10,
+        True,
+    ),
+)
+
 
 def _balanced_codes(rng: np.random.Generator, n: int, levels: int) -> np.ndarray:
     if levels < 2:
@@ -98,8 +181,16 @@ def prepare_case(config: CaseConfig) -> PreparedCase:
     """Generate a deterministic actuarial model with every level represented."""
     if config.family not in ("gaussian", "poisson", "gamma"):
         raise ValueError("family must be gaussian, poisson, or gamma")
-    if config.random_effects not in (1, 2):
-        raise ValueError("random_effects must be 1 or 2")
+    if config.structured_term not in ("random_effect", "factor_smooth"):
+        raise ValueError("structured_term must be random_effect or factor_smooth")
+    if config.structured_term == "random_effect" and config.random_effects not in (1, 2):
+        raise ValueError("random-effect cases require random_effects=1 or 2")
+    if config.structured_term == "factor_smooth" and config.random_effects not in (0, 1):
+        raise ValueError("factor-smooth cases support zero or one secondary random effect")
+    if config.structured_term == "factor_smooth" and config.block_size < 5:
+        raise ValueError("factor-smooth block_size must be at least 5")
+    if config.structured_term == "random_effect" and config.block_size != 1:
+        raise ValueError("random-effect cases require block_size=1")
     if config.small_width < 0:
         raise ValueError("small_width must be non-negative")
     if config.weights not in ("unit", "nonuniform"):
@@ -107,18 +198,30 @@ def prepare_case(config: CaseConfig) -> PreparedCase:
 
     rng = np.random.default_rng(config.seed)
     dominant_codes = _balanced_codes(rng, config.n, config.levels)
-    dominant_labels = np.asarray(
-        [f"policy_{index:05d}" for index in range(config.levels)],
-        dtype=object,
-    )
-    dominant_effect = rng.normal(scale=0.34, size=config.levels)
-    dominant_effect -= dominant_effect.mean()
-
-    frame: dict[str, np.ndarray] = {
-        "policy": dominant_labels[dominant_codes],
-    }
+    frame: dict[str, np.ndarray] = {}
     eta = np.full(config.n, -0.3, dtype=np.float64)
-    eta += dominant_effect[dominant_codes]
+    if config.structured_term == "random_effect":
+        dominant_labels = np.asarray(
+            [f"policy_{index:05d}" for index in range(config.levels)],
+            dtype=object,
+        )
+        dominant_effect = rng.normal(scale=0.34, size=config.levels)
+        dominant_effect -= dominant_effect.mean()
+        frame["policy"] = dominant_labels[dominant_codes]
+        eta += dominant_effect[dominant_codes]
+    else:
+        dominant_labels = np.asarray(
+            [f"segment_{index:05d}" for index in range(config.levels)],
+            dtype=object,
+        )
+        curve_x = rng.uniform(-1.25, 1.25, size=config.n)
+        curve_amplitude = rng.normal(scale=0.24, size=config.levels)
+        curve_amplitude -= curve_amplitude.mean()
+        frame["curve_x"] = curve_x
+        frame["curve_group"] = dominant_labels[dominant_codes]
+        eta += 0.24 * np.sin(2.1 * curve_x)
+        eta += curve_amplitude[dominant_codes] * (curve_x + 0.28 * curve_x**2)
+
     for column in range(config.small_width):
         values = rng.normal(size=config.n)
         frame[f"x{column}"] = values
@@ -126,7 +229,10 @@ def prepare_case(config: CaseConfig) -> PreparedCase:
         eta += coefficient * values
 
     secondary_level_count = 0
-    if config.random_effects == 2:
+    has_secondary = (config.structured_term == "random_effect" and config.random_effects == 2) or (
+        config.structured_term == "factor_smooth" and config.random_effects == 1
+    )
+    if has_secondary:
         secondary_level_count = config.secondary_levels or max(
             8,
             int(round(np.sqrt(config.levels))),
@@ -172,12 +278,30 @@ def prepare_case(config: CaseConfig) -> PreparedCase:
 
 def _new_model(prepared: PreparedCase, backend: str) -> SuperGLM:
     features = {f"x{column}": Numeric() for column in range(prepared.config.small_width)}
-    features["policy"] = RandomEffect()
-    if prepared.config.random_effects == 2:
-        features["branch"] = RandomEffect()
+    interactions = []
+    if prepared.config.structured_term == "random_effect":
+        features["policy"] = RandomEffect()
+        if prepared.config.random_effects == 2:
+            features["branch"] = RandomEffect()
+    else:
+        if prepared.config.global_spline:
+            features["curve_x"] = Spline(
+                kind="ps",
+                k=max(7, prepared.config.block_size),
+            )
+        if prepared.config.random_effects == 1:
+            features["branch"] = RandomEffect()
+        interactions.append(
+            FactorSmooth(
+                "curve_x",
+                group="curve_group",
+                k=prepared.config.block_size,
+            )
+        )
     return SuperGLM(
         family=prepared.config.family,
         features=features,
+        interactions=interactions,
         selection_penalty=0,
         direct_solve=backend,
         discrete=prepared.config.discrete,
@@ -236,7 +360,7 @@ def model_diagnostics(
     """Collect compact numerical and phase diagnostics from a completed fit."""
     result = model.result
     reml_result = model._reml_result
-    dominant_width = prepared.config.levels
+    dominant_width = prepared.config.dominant_width
     p = len(result.beta)
     return {
         "requested_backend": requested_backend,
@@ -245,6 +369,9 @@ def model_diagnostics(
         "n": prepared.config.n,
         "coefficient_width": p,
         "dominant_width": dominant_width,
+        "dominant_levels": prepared.config.levels,
+        "dominant_block_size": prepared.config.block_size,
+        "structured_term": prepared.config.structured_term,
         "small_width": p - dominant_width,
         "secondary_level_count": prepared.secondary_level_count,
         "pirls_iterations": result.n_iter,
@@ -356,7 +483,11 @@ def run_case(
     """Run warmups, clean wall repetitions, and one instrumented fit."""
     output_dir.mkdir(parents=True, exist_ok=True)
     backends = _backend_sequence(backend)
-    if dense_parity and "gram" not in backends and prepared.config.levels <= dense_max_levels:
+    if (
+        dense_parity
+        and "gram" not in backends
+        and prepared.config.dominant_width <= dense_max_levels
+    ):
         backends += ("gram",)
 
     sampler = SystemSampler(interval_s=sample_interval_ms / 1000.0)
@@ -534,6 +665,13 @@ def _case_from_args(args: argparse.Namespace) -> CaseConfig:
         small_width=args.small_width,
         weights=args.weights,
         seed=args.seed,
+        structured_term=args.structured_term,
+        block_size=(
+            args.block_size
+            if args.block_size is not None
+            else (5 if args.structured_term == "factor_smooth" else 1)
+        ),
+        global_spline=args.global_spline,
     )
 
 
@@ -543,9 +681,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--levels", type=int, default=1_000)
     parser.add_argument("--family", choices=("gaussian", "poisson", "gamma"), default="poisson")
     parser.add_argument("--discrete", action="store_true")
-    parser.add_argument("--random-effects", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--random-effects", type=int, choices=(0, 1, 2), default=1)
     parser.add_argument("--secondary-levels", type=int, default=None)
     parser.add_argument("--small-width", type=int, default=4)
+    parser.add_argument(
+        "--structured-term",
+        choices=("random_effect", "factor_smooth"),
+        default="random_effect",
+    )
+    parser.add_argument("--block-size", type=int, default=None)
+    parser.add_argument(
+        "--global-spline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     parser.add_argument("--weights", choices=("unit", "nonuniform"), default="nonuniform")
     parser.add_argument(
         "--backend",
@@ -574,7 +723,7 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--matrix", choices=("core",), default=None)
+    parser.add_argument("--matrix", choices=("core", "factor-smooth", "all"), default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser.parse_args()
 
@@ -586,12 +735,21 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_root = args.output_dir or RESULTS_ROOT / timestamp
 
-    configs = CORE_MATRIX if args.matrix == "core" else (_case_from_args(args),)
+    if args.matrix == "core":
+        configs = CORE_MATRIX
+    elif args.matrix == "factor-smooth":
+        configs = FACTOR_SMOOTH_MATRIX
+    elif args.matrix == "all":
+        configs = (*CORE_MATRIX, *FACTOR_SMOOTH_MATRIX)
+    else:
+        configs = (_case_from_args(args),)
     matrix_results = {}
     for config in configs:
         selected_backend = args.backend
-        if args.matrix == "core":
-            selected_backend = "both" if config.levels <= args.dense_max_levels else "structured"
+        if args.matrix is not None:
+            selected_backend = (
+                "both" if config.dominant_width <= args.dense_max_levels else "structured"
+            )
         case_output = output_root / config.slug if len(configs) > 1 else output_root
         payload = run_case(
             prepare_case(config),

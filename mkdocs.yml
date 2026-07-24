@@ -85,6 +85,7 @@ nav:
     - Editing a Fitted Model: guide/editor.md
     - Choosing A Fitting Path: guide/fitting.md
     - Feature Types: guide/features.md
+    - Credibility Terms: guide/credibility.md
     - Monotone Splines: guide/monotone.md
     - Validation And Model Comparison: guide/validation.md
     - Inspecting Results: guide/results.md

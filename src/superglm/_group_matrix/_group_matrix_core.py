@@ -356,6 +356,11 @@ class FactorSmoothGroupMatrix:
             self.natural_map,
             optimize=True,
         )
+        # The raw kernels update symmetric entries identically.  BLAS
+        # contraction through the natural map can still leave round-off at
+        # opposite triangle entries, large enough to trip exact structured
+        # factor validation on production-sized data.
+        local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
         return (
             local_gram,
             raw_xtw @ self.natural_map,

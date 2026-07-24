@@ -8,6 +8,12 @@
 
 ::: superglm.SplineMetadata
 
+## Credibility
+
+::: superglm.RandomEffectResult
+
+::: superglm.FactorSmoothResult
+
 ## REML
 
 ::: superglm.REMLResult

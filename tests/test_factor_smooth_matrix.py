@@ -278,6 +278,30 @@ def test_factor_smooth_uses_mgcv_pspline_knot_spacing() -> None:
     np.testing.assert_allclose(spec._spline._knots, expected, rtol=0.0, atol=2e-15)
 
 
+def test_large_factor_smooth_local_grams_are_exactly_symmetric() -> None:
+    n = 60_000
+    x = np.resize(np.arange(18.0, 91.0), n)
+    group = np.resize(np.array([f"region-{index}" for index in range(22)], dtype=object), n)
+    spec = FactorSmooth("x", group="group", k=6)
+    info = spec.build_discrete(x, group, {}, n_bins=256)
+    gm = FactorSmoothGroupMatrix(
+        info.factor_smooth_basis_unique,
+        info.factor_smooth_codes,
+        info.factor_smooth_n_levels,
+        natural_map=info.factor_smooth_transform,
+        levels=info.factor_smooth_levels,
+        repeated_penalty_components=info.repeated_penalty_components,
+        bin_idx=info.factor_smooth_bin_idx,
+    )
+
+    local_gram, _xtw, _rhs = gm.factor_smooth_sufficient_stats(
+        np.linspace(0.1, 2.0, n),
+        np.zeros(n),
+    )
+
+    np.testing.assert_array_equal(local_gram, local_gram.transpose(0, 2, 1))
+
+
 def test_factor_smooth_is_excluded_from_tabmat_but_small_blocks_remain_eligible() -> None:
     gm, _reference = _matrix_fixture(discrete=False)
     dense = DenseGroupMatrix(np.ones((gm.shape[0], 2)))

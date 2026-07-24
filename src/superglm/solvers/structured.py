@@ -1931,7 +1931,9 @@ def _apply_local_blocks(
 def _block_operator_bdlr(operator: BlockSymmetricOperator) -> _BlockDiagonalLowRank:
     p = operator.shape[0]
     q = len(operator.small_indices)
-    if q == 0:
+    has_small = bool(np.any(operator.A))
+    has_cross = bool(np.any(operator.C))
+    if q == 0 or (not has_small and not has_cross):
         return _BlockDiagonalLowRank(
             blocks=operator.D,
             structured_indices=operator.structured_indices,
@@ -1941,12 +1943,21 @@ def _block_operator_bdlr(operator: BlockSymmetricOperator) -> _BlockDiagonalLowR
         )
     small_basis = np.zeros((p, q), dtype=np.float64)
     small_basis[operator.small_indices] = np.eye(q)
+    if not has_cross:
+        return _BlockDiagonalLowRank(
+            blocks=operator.D,
+            structured_indices=operator.structured_indices,
+            basis=small_basis,
+            core=operator.A,
+            shape=operator.shape,
+        )
     cross_basis = np.zeros((p, q), dtype=np.float64)
     cross_basis[operator.structured_indices] = operator.C
     basis = np.column_stack((small_basis, cross_basis))
+    small_core = operator.A if has_small else np.zeros_like(operator.A)
     core = np.block(
         [
-            [operator.A, np.eye(q)],
+            [small_core, np.eye(q)],
             [np.eye(q), np.zeros((q, q))],
         ]
     )

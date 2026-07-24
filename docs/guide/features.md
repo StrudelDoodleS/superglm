@@ -112,6 +112,22 @@ area = Categorical(base="most_exposed", grouping=grouping)
 This is useful when a tariff factor has many thin levels but you still want a
 single grouped factor inside the model.
 
+## RandomEffect
+
+`RandomEffect()` gives every observed factor level a penalized intercept. REML
+estimates the shared variance component, so thin levels shrink more strongly
+toward the portfolio prediction than thick levels.
+
+```python
+RandomEffect()                    # unseen levels use the population prediction
+RandomEffect(unseen="error")      # fail on an unseen level
+```
+
+It is the SuperGLM analogue of mgcv's `s(group, bs="re")`. Unlike
+`Categorical`, it retains every level rather than choosing a reference level,
+and it requires `fit_reml()`. See [Credibility terms](credibility.md) for
+reporting, prediction, and a real insurance example.
+
 ## OrderedCategorical
 
 Use `OrderedCategorical(...)` when a factor has a real order and you want a

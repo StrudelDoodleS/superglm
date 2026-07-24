@@ -19,6 +19,8 @@ cProfile, tracemalloc, and system telemetry run in separate fits.
 
 ## Results
 
+### Scalar random effects
+
 | Case | Backend selected | Median fit | REML iterations | Notes |
 | --- | --- | ---: | ---: | --- |
 | Poisson, n=1,000, K=20, q=4 | `auto -> gram` | 0.0895 s | 5 | Explicit Gram median 0.0919 s |
@@ -36,6 +38,31 @@ For the K=30 crossover case, dense and structured results agree to:
 
 The K=20 auto case resolves to the existing Gram solver and is bit-identical to an
 explicit Gram fit.
+
+### Block factor smooths
+
+All rows below converged at `reml_tol=1e-7`. `K` is the number of factor levels,
+`k` is the marginal basis width, and the dominant coefficient width is `K * k`.
+
+| Case | Backend selected | Median fit | REML iterations | Notes |
+| --- | --- | ---: | ---: | --- |
+| Gaussian, n=2,000, K=6, k=5, q=2 | exact structured | 0.0936 s | 6 | Explicit Gram median 3.1890 s; 34.1x speedup |
+| Poisson, n=6,000, K=50, k=5, q=4 | exact structured | 1.8517 s | 7 | Includes a separate global spline |
+| Poisson, n=10,000, K=100, k=5, q=4 | discrete structured | 0.2221 s | 10 | 500-coefficient factor-smooth block |
+| Gamma, n=8,000, K=40, k=10, q=4 | exact structured | 0.5244 s | 6 | 400-coefficient factor-smooth block |
+| Poisson, n=20,000, K=300, k=10, q=4 | discrete structured | 35.1557 s | 11 | Global spline plus a secondary 25-level random effect |
+
+The converged K=6 Gaussian reference agrees with the dense solver to:
+
+- maximum prediction difference: `2.89e-15`;
+- maximum coefficient difference: `1.02e-14`;
+- REML objective difference: `2.27e-13`;
+- maximum relative lambda difference: `1.51e-14`;
+- EDF difference: `2.13e-14`.
+
+The block auto rule keeps a `K=5, k=5, q=2` term (`p=27`) on Gram and switches
+`K=6` (`p=32`) to structured fitting. This is the same measured coefficient-width
+crossover used for scalar random effects, with a block-aware cost estimate.
 
 ## Profile-guided changes
 
@@ -56,6 +83,25 @@ evaluation, compact diagonal-plus-low-rank trace products, selected inverse diag
 and tabmat matvecs. No `K x K` design, Hessian, covariance, or identity is constructed by
 the structured fit.
 
+The first combined factor-smooth profile (`n=5,000`, `K=50`, `k=6`, global
+spline, and secondary random effect) encoded penalty operators with structural
+zero dense/cross blocks as unnecessary low-rank terms. Removing those zero
+parts reduced the same eight-outer-iteration cProfile workload from 7.649 s to
+1.754 s (4.4x). Its general block-diagonal-plus-low-rank trace kernel fell from
+5.530 s to 0.280 s (19.8x).
+
+On the real 30,000-policy `freMTPL2freq` example, the same change reduced the
+fully converged combined random-effect plus factor-smooth fit from 57.0 s to
+7.0 s without changing predictions or reported credibility. The smaller
+single-term fits take 1.58 s for vehicle-brand random effects and 3.81 s for
+driver-age-by-region factor smooths.
+
+The deliberately wide `K=300, k=10` combined stress case shows the next
+cProfile target honestly: about 15.0 s is penalty cross traces and 13.9 s is
+tabmat cross-Gram aggregation in its 35.6 s instrumented fit. Those operations
+scale with compact level blocks; the backend still avoids a dense
+`3,038 x 3,038` Hessian and covariance.
+
 ## Reproduction
 
 The harness is `benchmarks/profile_structured_credibility.py`. Representative commands:
@@ -72,6 +118,17 @@ uv run python benchmarks/profile_structured_credibility.py \
 uv run python benchmarks/profile_structured_credibility.py \
   --n 50000 --levels 10000 --family poisson --small-width 4 \
   --backend structured --repetitions 3 --warmups 1 --max-reml-iter 12
+
+uv run python benchmarks/profile_structured_credibility.py \
+  --n 10000 --levels 100 --family poisson --discrete \
+  --structured-term factor_smooth --block-size 5 --random-effects 0 \
+  --backend structured --repetitions 3 --warmups 1 --max-reml-iter 20
+
+uv run python benchmarks/profile_structured_credibility.py \
+  --n 20000 --levels 300 --family poisson --discrete \
+  --structured-term factor_smooth --block-size 10 --global-spline \
+  --random-effects 1 --secondary-levels 25 --backend structured \
+  --repetitions 3 --warmups 1 --max-reml-iter 20
 ```
 
 Use `--backend auto` with a level count within `--dense-max-levels` to record both the
