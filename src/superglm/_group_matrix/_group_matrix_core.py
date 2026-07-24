@@ -8,9 +8,11 @@ from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
     _csr_weighted_gram,
+    _factor_smooth_csr_dense_cross,
     _factor_smooth_csr_matvec,
     _factor_smooth_csr_rmatvec,
     _factor_smooth_csr_sufficient_stats,
+    _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
     _factor_smooth_support_sufficient_stats,
@@ -369,6 +371,45 @@ class FactorSmoothGroupMatrix:
             start = level * self.block_size
             result[start : start + self.block_size, start : start + self.block_size] = block
         return result
+
+    def factor_smooth_dense_cross_gram(
+        self,
+        W: NDArray,
+        dense_small: NDArray,
+    ) -> NDArray:
+        """Return ``(K, k, q)`` cross blocks against one narrow dense matrix."""
+        weights = np.asarray(W, dtype=np.float64)
+        small = np.asarray(dense_small, dtype=np.float64)
+        if weights.shape != (self.shape[0],):
+            raise ValueError("weights must match the FactorSmooth row count")
+        if small.ndim != 2 or small.shape[0] != self.shape[0]:
+            raise ValueError("dense_small must be a row-aligned two-dimensional matrix")
+        if self.is_discrete:
+            raw = _factor_smooth_support_dense_cross(
+                self.B_unique,
+                self.bin_idx,
+                self.codes,
+                weights,
+                small,
+                self.n_levels,
+            )
+        else:
+            raw = _factor_smooth_csr_dense_cross(
+                self._data,
+                self._indices,
+                self._indptr,
+                self.codes,
+                weights,
+                small,
+                self.n_levels,
+                self.raw_width,
+            )
+        return np.einsum(
+            "ai,kaq->kiq",
+            self.natural_map,
+            raw,
+            optimize=True,
+        )
 
     def gram_rmatvec(
         self,

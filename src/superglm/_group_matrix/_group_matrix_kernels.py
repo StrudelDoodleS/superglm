@@ -228,6 +228,59 @@ def _factor_smooth_support_sufficient_stats(
 
 
 @njit(cache=True)
+def _factor_smooth_csr_dense_cross(
+    data,
+    indices,
+    indptr,
+    codes,
+    weights,
+    dense_small,
+    n_levels,
+    width,
+):
+    """Aggregate exact factor-smooth by dense-small weighted cross-products."""
+    small_width = dense_small.shape[1]
+    result = np.zeros((n_levels, width, small_width))
+    for row in range(len(codes)):
+        level = codes[row]
+        weight = weights[row]
+        for ptr in range(indptr[row], indptr[row + 1]):
+            basis_column = indices[ptr]
+            weighted_basis = weight * data[ptr]
+            for small_column in range(small_width):
+                result[level, basis_column, small_column] += (
+                    weighted_basis * dense_small[row, small_column]
+                )
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_support_dense_cross(
+    basis,
+    bin_idx,
+    codes,
+    weights,
+    dense_small,
+    n_levels,
+):
+    """Aggregate discrete factor-smooth by dense-small weighted cross-products."""
+    width = basis.shape[1]
+    small_width = dense_small.shape[1]
+    result = np.zeros((n_levels, width, small_width))
+    for row in range(len(codes)):
+        level = codes[row]
+        support_row = bin_idx[row]
+        weight = weights[row]
+        for basis_column in range(width):
+            weighted_basis = weight * basis[support_row, basis_column]
+            for small_column in range(small_width):
+                result[level, basis_column, small_column] += (
+                    weighted_basis * dense_small[row, small_column]
+                )
+    return result
+
+
+@njit(cache=True)
 def _dense_small_weighted_moments(X, W, Wz):
     """Fuse ``X'WX``, ``X'W``, and ``X'Wz`` for a narrow dense Schur block."""
     n, width = X.shape
