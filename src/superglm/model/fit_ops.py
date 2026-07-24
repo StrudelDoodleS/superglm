@@ -166,14 +166,26 @@ class PathResult:
 
 
 def _reject_random_effect_selection_fit(model, method: str) -> None:
-    """Keep variance components out of selection-penalty fit paths."""
+    """Keep structured variance components out of selection-penalty fit paths."""
+    from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.random_effect import RandomEffect
 
-    names = [name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)]
-    if names:
-        joined = ", ".join(repr(name) for name in names)
+    random_effect_names = [
+        name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)
+    ]
+    factor_smooth_names = [
+        name for name, spec in model._interaction_specs.items() if isinstance(spec, FactorSmooth)
+    ]
+    if random_effect_names:
+        joined = ", ".join(repr(name) for name in random_effect_names)
         raise NotImplementedError(
             f"RandomEffect feature(s) {joined} are only supported with fit_reml(), not {method}()."
+        )
+    if factor_smooth_names:
+        joined = ", ".join(repr(name) for name in factor_smooth_names)
+        raise NotImplementedError(
+            f"FactorSmooth interaction(s) {joined} are only supported with "
+            f"fit_reml(), not {method}()."
         )
 
 

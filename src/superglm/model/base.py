@@ -567,7 +567,7 @@ def init_model(
     n_knots: int | list[int] = 10,
     degree: int = 3,
     categorical_base: str = "most_exposed",
-    interactions: list[tuple[str, str]] | None = None,
+    interactions: list[tuple[str, str] | object] | None = None,
     active_set: bool = False,
     direct_solve: str = "auto",
     discrete: bool = False,
@@ -650,16 +650,61 @@ def init_model(
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
 
-    # Interaction support
+    # Interaction support. Tuple interactions are resolved after feature
+    # construction; explicit specs already own their parent-column contract.
     model._interaction_specs: dict[str, Any] = {}
     model._interaction_order: list[str] = []
-    model._pending_interactions: tuple[tuple[str, str], ...] = tuple(interactions or ())
+    pending_interactions: list[tuple[str, str]] = []
+    explicit_interactions: list[Any] = []
+    for interaction in interactions or ():
+        if (
+            isinstance(interaction, tuple)
+            and len(interaction) == 2
+            and all(isinstance(name, str) for name in interaction)
+        ):
+            pending_interactions.append(interaction)
+            continue
+        parent_names = getattr(interaction, "parent_names", None)
+        interaction_name = getattr(interaction, "name", None)
+        if (
+            not isinstance(parent_names, tuple)
+            or len(parent_names) != 2
+            or not all(isinstance(parent, str) and parent for parent in parent_names)
+            or not isinstance(interaction_name, str)
+            or not interaction_name
+        ):
+            raise TypeError(
+                "interactions entries must be (left, right) tuples or explicit "
+                "interaction specs with parent_names and name"
+            )
+        if interaction_name in model._interaction_specs or any(
+            existing.name == interaction_name for existing in explicit_interactions
+        ):
+            raise ValueError(f"Interaction already added: {interaction_name}")
+        explicit_interactions.append(interaction)
+    model._pending_interactions = tuple(pending_interactions)
 
     # Register explicit features dict
     if features is not None:
         for name, spec in features.items():
             model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
+
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
+    for interaction in explicit_interactions:
+        owned = copy.deepcopy(interaction)
+        if isinstance(owned, FactorSmooth) and isinstance(
+            model._specs.get(owned.group),
+            RandomEffect,
+        ):
+            raise ValueError(
+                f"FactorSmooth group {owned.group!r} duplicates the constant null-space "
+                "geometry of the RandomEffect on the same column."
+            )
+        model._interaction_specs[owned.name] = owned
+        model._interaction_order.append(owned.name)
 
     from superglm.model.fit_state import ModelConfig
 
@@ -687,13 +732,17 @@ def clone_without_features(
     keep_features = {n: s for n, s in model._specs.items() if n not in drop}
 
     # Filter interactions: drop any whose parent is being dropped
-    keep_interactions: list[tuple[str, str]] = []
+    from superglm.features.factor_smooth import FactorSmooth
+
+    keep_interactions: list[tuple[str, str] | object] = []
     # Check resolved interactions (fitted model)
     for iname in model._interaction_order:
         ispec = model._interaction_specs[iname]
         p1, p2 = ispec.parent_names
         if p1 not in drop and p2 not in drop:
-            keep_interactions.append((p1, p2))
+            keep_interactions.append(
+                copy.deepcopy(ispec) if isinstance(ispec, FactorSmooth) else (p1, p2)
+            )
     # Check pending interactions (unfitted model)
     for p1, p2 in model._pending_interactions:
         if p1 not in drop and p2 not in drop:

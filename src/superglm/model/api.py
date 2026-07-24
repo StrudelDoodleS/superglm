@@ -65,7 +65,7 @@ class SuperGLM:
         degree: int = 3,
         categorical_base: str = "most_exposed",
         # Interactions
-        interactions: list[tuple[str, str]] | None = None,
+        interactions: list[tuple[str, str] | object] | None = None,
         # Solver options
         active_set: bool = False,
         direct_solve: str = "auto",
@@ -119,9 +119,10 @@ class SuperGLM:
             B-spline degree for auto-detect splines.
         categorical_base : str
             Base level strategy for auto-detected categoricals.
-        interactions : list[tuple[str, str]], optional
-            Pairs of feature names to interact.  Interaction type is
-            auto-detected from the parent feature specs.
+        interactions : list[tuple[str, str] or interaction spec], optional
+            Pairs of feature names to interact, or explicit interaction
+            specifications such as ``FactorSmooth``. Tuple interaction types
+            are auto-detected from their parent feature specs.
         active_set : bool
             Use active-set cycling in the BCD solver.
         direct_solve : {"auto", "gram", "qr", "structured"}
