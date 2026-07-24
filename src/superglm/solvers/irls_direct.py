@@ -88,6 +88,7 @@ from superglm.solvers.structured import (
     build_augmented_scalar_factor,
     build_penalized_scalar_operator,
     build_scalar_structured_system,
+    get_scalar_structured_layout,
     resolve_structured_backend,
 )
 from superglm.solvers.working_rows import (
@@ -511,6 +512,15 @@ def fit_irls_direct(
     _use_structured = structured_decision.use_structured
     _structured_group_index = structured_decision.group_index
     _direct_fallback_reason = structured_decision.fallback_reason
+    _structured_layout = (
+        get_scalar_structured_layout(
+            dm,
+            groups,
+            dominant_group_index=_structured_group_index,
+        )
+        if _use_structured and _structured_group_index is not None
+        else None
+    )
 
     if offset is None:
         offset = np.zeros(n)
@@ -907,11 +917,11 @@ def fit_irls_direct(
         _X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
         _L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
 
-    # tabmat acceleration: build SplitMatrix once for non-discrete paths.
-    # R_inv is constant within a single fit_irls_direct call, so the
-    # materialized X is valid for all IRLS iterations.
+    # Tabmat acceleration: the structured layout owns a pruned small-block
+    # plan, so it must not construct a split containing the dominant factor.
+    # Other non-discrete paths retain the shared full-design split behavior.
     if _use_structured:
-        _tabmat_split = dm.tabmat_split
+        _tabmat_split = None
     elif _use_qr:
         _tabmat_split = None
     elif has_constraints:
@@ -1382,6 +1392,7 @@ def fit_irls_direct(
                     Wz,
                     dominant_group_index=_structured_group_index,
                     tabmat_split=_tabmat_split,
+                    layout=_structured_layout,
                 )
                 penalized_operator = build_penalized_scalar_operator(
                     structured_system,
@@ -2086,6 +2097,7 @@ def fit_irls_direct(
                 W * z_off,
                 dominant_group_index=_structured_group_index,
                 tabmat_split=_tabmat_split,
+                layout=_structured_layout,
             )
         _final_structured_system = structured_final
         _final_penalized_operator = build_penalized_scalar_operator(

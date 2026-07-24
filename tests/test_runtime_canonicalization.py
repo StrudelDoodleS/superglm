@@ -13,6 +13,25 @@ from superglm.features.spline import PSpline, Spline
 from superglm.links import stabilize_eta
 
 
+def test_solver_to_public_identity_map_stays_lazy_at_wide_width(monkeypatch) -> None:
+    from superglm.model import runtime_canonicalize
+
+    def reject_dense_identity(*args, **kwargs):
+        raise AssertionError("runtime canonicalization must not allocate a dense p-by-p identity")
+
+    monkeypatch.setattr(runtime_canonicalize.np, "eye", reject_dense_identity)
+    model = SimpleNamespace(_dm=SimpleNamespace(p=10_004))
+    term_states = {"smooth": {"applied_to_public_model": True}}
+
+    mapping, complete = runtime_canonicalize._solver_to_public_state(model, term_states)
+
+    probe = np.arange(model._dm.p, dtype=np.float64)
+    assert complete is True
+    assert mapping is not None
+    assert mapping.shape == (model._dm.p, model._dm.p)
+    np.testing.assert_array_equal(mapping @ probe, probe)
+
+
 def test_runtime_feature_means_evaluate_repeated_values_once() -> None:
     from superglm.model.runtime_canonicalize import _runtime_training_feature_column_means
 

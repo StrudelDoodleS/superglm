@@ -62,6 +62,7 @@ from superglm.solvers.structured import (
     build_penalized_scalar_operator,
     build_scalar_structured_system,
     compact_operator_diagonal,
+    get_scalar_structured_layout,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -890,13 +891,18 @@ def build_observed_reml_geometry(
     if structured_group_index is not None:
         if groups is None or lambdas is None or reml_penalties is None:
             raise RuntimeError("Structured observed geometry inputs were not validated.")
+        structured_layout = get_scalar_structured_layout(
+            dm,
+            groups,
+            dominant_group_index=structured_group_index,
+        )
         system = build_scalar_structured_system(
             list(dm.group_matrices),
             groups,
             observed_w,
             np.zeros(dm.n, dtype=np.float64),
             dominant_group_index=structured_group_index,
-            tabmat_split=dm.tabmat_split,
+            layout=structured_layout,
         )
         penalized = build_penalized_scalar_operator(
             system,

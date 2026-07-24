@@ -106,6 +106,29 @@ def _random_effect_sufficient_stats(codes, W, Wz, n_levels):
 
 
 @njit(cache=True)
+def _dense_small_weighted_moments(X, W, Wz):
+    """Fuse ``X'WX``, ``X'W``, and ``X'Wz`` for a narrow dense Schur block."""
+    n, width = X.shape
+    gram = np.zeros((width, width))
+    xtw = np.zeros(width)
+    xtwz = np.zeros(width)
+    for row in range(n):
+        weight = W[row]
+        weighted_rhs = Wz[row]
+        for left in range(width):
+            value = X[row, left]
+            xtw[left] += weight * value
+            xtwz[left] += weighted_rhs * value
+            weighted_value = weight * value
+            for right in range(left, width):
+                product = weighted_value * X[row, right]
+                gram[left, right] += product
+                if left != right:
+                    gram[right, left] += product
+    return gram, xtw, xtwz
+
+
+@njit(cache=True)
 def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
     """Fused dual 2D bincount for tensor gram_rmatvec."""
     n = len(idx1)

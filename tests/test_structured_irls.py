@@ -34,6 +34,7 @@ from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.structured import (
     SymmetricBlockOperator,
     materialize_compact_operator,
+    resolve_structured_backend,
 )
 from superglm.types import (
     GroupSlice,
@@ -477,6 +478,50 @@ def test_auto_records_dense_fallback_reason_for_constraints():
     assert result.direct_backend == "gram"
     assert "constraint" in result.direct_fallback_reason.lower()
     assert profile["direct_fallback_reason"] == result.direct_fallback_reason
+
+
+@pytest.mark.parametrize(
+    ("dominant_width", "small_width", "expected_structured"),
+    [
+        pytest.param(20, 4, False, id="small-total-width-stays-dense"),
+        pytest.param(30, 4, True, id="measured-scalar-crossover"),
+        pytest.param(20, 20, True, id="larger-small-block-crossover"),
+        pytest.param(4, 28, False, id="insufficient-schur-cost-reduction"),
+    ],
+)
+def test_auto_backend_uses_measured_structured_crossover(
+    dominant_width: int,
+    small_width: int,
+    expected_structured: bool,
+):
+    n = max(80, dominant_width * 2)
+    matrices = [
+        DenseGroupMatrix(np.ones((n, small_width))),
+        RandomEffectGroupMatrix(np.arange(n) % dominant_width, dominant_width),
+    ]
+    groups = [
+        GroupSlice(name="numeric", start=0, end=small_width, penalized=False),
+        GroupSlice(
+            name="policy",
+            start=small_width,
+            end=small_width + dominant_width,
+            penalized=True,
+        ),
+    ]
+
+    decision = resolve_structured_backend(
+        matrices,
+        groups,
+        direct_solve="auto",
+        coefficient_width=small_width + dominant_width,
+    )
+
+    assert decision.use_structured is expected_structured
+    if expected_structured:
+        assert decision.fallback_reason is None
+        assert decision.group_name == "policy"
+    else:
+        assert "crossover" in decision.fallback_reason
 
 
 def test_structured_factor_matches_dense_fixed_weight_reml_derivatives():

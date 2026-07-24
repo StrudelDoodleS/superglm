@@ -27,6 +27,67 @@ class CanonicalizationDiagnostics:
     term_means_after: dict[str, float]
 
 
+@dataclass(frozen=True)
+class _IdentityCoefficientMap:
+    """Lazy identity map from solver coefficients to public coefficients."""
+
+    size: int
+
+    __array_priority__ = 1000.0
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self.size, self.size)
+
+    @property
+    def ndim(self) -> int:
+        return 2
+
+    @property
+    def dtype(self) -> np.dtype[np.float64]:
+        return np.dtype(np.float64)
+
+    @property
+    def T(self) -> _IdentityCoefficientMap:
+        return self
+
+    def matvec(self, vector: NDArray[np.float64]) -> NDArray[np.float64]:
+        vector = np.asarray(vector, dtype=np.float64)
+        if vector.shape != (self.size,):
+            raise ValueError(f"Expected a vector of shape ({self.size},), got {vector.shape}")
+        return vector.copy()
+
+    def rmatvec(self, vector: NDArray[np.float64]) -> NDArray[np.float64]:
+        return self.matvec(vector)
+
+    def __matmul__(self, other: Any) -> NDArray[Any]:
+        array = np.asarray(other)
+        if array.ndim == 0 or array.shape[0] != self.size:
+            raise ValueError(
+                f"Identity map with shape {self.shape} cannot multiply an array "
+                f"with shape {array.shape}"
+            )
+        return array.copy()
+
+    def __rmatmul__(self, other: Any) -> NDArray[Any]:
+        array = np.asarray(other)
+        if array.ndim == 0 or array.shape[-1] != self.size:
+            raise ValueError(
+                f"Array with shape {array.shape} cannot multiply identity map "
+                f"with shape {self.shape}"
+            )
+        return array.copy()
+
+    def __array__(
+        self,
+        dtype: np.dtype[Any] | None = None,
+        copy: bool | None = None,
+    ) -> NDArray[Any]:
+        """Materialize only when an ndarray consumer explicitly requests it."""
+        del copy
+        return np.eye(self.size, dtype=np.float64 if dtype is None else dtype)
+
+
 def _is_spline_backed_feature_spec(spec: Any) -> bool:
     """Whether this main-effect spec exposes spline-style runtime hooks."""
     return hasattr(spec, "_basis_matrix")
@@ -372,11 +433,11 @@ def _compute_public_parity_diagnostics(
 def _solver_to_public_state(
     model,
     term_states: dict[str, dict[str, Any]],
-) -> tuple[NDArray[np.float64] | None, bool]:
+) -> tuple[_IdentityCoefficientMap | None, bool]:
     """Return the honest solver-to-public mapping state for Task 2."""
     complete = all(term_state["applied_to_public_model"] for term_state in term_states.values())
     if complete:
-        return np.eye(model._dm.p, dtype=np.float64), True
+        return _IdentityCoefficientMap(model._dm.p), True
     return None, False
 
 

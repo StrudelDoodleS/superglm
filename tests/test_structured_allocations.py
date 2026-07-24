@@ -21,8 +21,11 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
 )
 from superglm.solvers.structured import (
+    build_scalar_structured_layout,
     build_scalar_structured_system,
     select_structured_group,
+    structured_design_matvec,
+    structured_design_rmatvec,
 )
 from superglm.types import GroupSlice, LinearConstraintSet
 
@@ -268,7 +271,7 @@ class _GuardedRandomEffect(RandomEffectGroupMatrix):
         raise AssertionError("dominant random-effect design must not be materialized")
 
 
-def test_tabmat_selected_small_sandwich_avoids_dominant_materialization(monkeypatch):
+def test_fused_dense_small_moments_avoid_full_tabmat_sandwich(monkeypatch):
     n_levels = 101
     n = n_levels * 2
     rng = np.random.default_rng(66)
@@ -298,11 +301,108 @@ def test_tabmat_selected_small_sandwich_avoids_dominant_materialization(monkeypa
         tabmat_split=split,
     )
 
-    assert any(
-        cols is not None and np.array_equal(cols, system.operator.small_indices) for cols in calls
-    )
+    assert calls == []
     assert system.operator.A.shape == (2, 2)
     assert system.operator.C.shape == (n_levels, 2)
+
+
+def test_small_moment_plan_skips_excluded_tabmat_categorical_and_fuses_rhs(monkeypatch):
+    n_levels = 131
+    n = n_levels * 3
+    rng = np.random.default_rng(607)
+    small = [
+        DenseGroupMatrix(rng.normal(size=n)),
+        DenseGroupMatrix(rng.normal(size=n)),
+        DenseGroupMatrix(rng.normal(size=n)),
+    ]
+    dominant = RandomEffectGroupMatrix(
+        np.arange(n, dtype=np.intp) % n_levels,
+        n_levels,
+    )
+    group_matrices: list[GroupMatrix] = [*small, dominant]
+    groups = _groups(group_matrices)
+    split = DesignMatrix(
+        group_matrices,
+        n=n,
+        p=sum(matrix.shape[1] for matrix in group_matrices),
+    ).tabmat_split
+    categorical_component = next(matrix for matrix in split.matrices if matrix.shape[1] == n_levels)
+    dense_component = next(matrix for matrix in split.matrices if matrix.shape[1] == len(small))
+
+    def fail_excluded_categorical(*_args, **_kwargs):
+        raise AssertionError("excluded dominant Tabmat component was evaluated")
+
+    def fail_separate_dense_rhs(*_args, **_kwargs):
+        raise AssertionError("small RHS products were not fused into the moment plan")
+
+    monkeypatch.setattr(
+        type(categorical_component),
+        "sandwich",
+        fail_excluded_categorical,
+    )
+    monkeypatch.setattr(
+        type(dense_component),
+        "sandwich",
+        fail_separate_dense_rhs,
+    )
+    monkeypatch.setattr(DenseGroupMatrix, "rmatvec", fail_separate_dense_rhs)
+    weights = rng.uniform(0.4, 1.6, size=n)
+    weighted_rhs = rng.normal(size=n)
+    dense_small = np.column_stack([matrix.M for matrix in small])
+
+    system = build_scalar_structured_system(
+        group_matrices,
+        groups,
+        weights,
+        weighted_rhs,
+        dominant_group_index=len(group_matrices) - 1,
+        tabmat_split=split,
+    )
+
+    assert system.operator.A.shape == (3, 3)
+    assert system.operator.C.shape == (n_levels, 3)
+    np.testing.assert_allclose(
+        system.operator.A,
+        dense_small.T @ (weights[:, None] * dense_small),
+    )
+    np.testing.assert_allclose(system.xtw_small, dense_small.T @ weights)
+    np.testing.assert_allclose(system.xtwz_small, dense_small.T @ weighted_rhs)
+
+
+def test_cached_dense_small_layout_fuses_design_vector_products(monkeypatch):
+    rng = np.random.default_rng(918)
+    n = 240
+    n_levels = 61
+    small = [
+        DenseGroupMatrix(rng.normal(size=n)),
+        DenseGroupMatrix(rng.normal(size=(n, 2))),
+    ]
+    dominant = RandomEffectGroupMatrix(np.arange(n) % n_levels, n_levels)
+    matrices: list[GroupMatrix] = [*small, dominant]
+    groups = _groups(matrices)
+    layout = build_scalar_structured_layout(
+        matrices,
+        groups,
+        dominant_group_index=2,
+    )
+    dense = np.column_stack([matrix.toarray() for matrix in matrices])
+    beta = rng.normal(size=dense.shape[1])
+    rows = rng.normal(size=n)
+
+    def fail_separate_dense_dispatch(*_args, **_kwargs):
+        raise AssertionError("cached dense-small vector product was not used")
+
+    monkeypatch.setattr(DenseGroupMatrix, "matvec", fail_separate_dense_dispatch)
+    monkeypatch.setattr(DenseGroupMatrix, "rmatvec", fail_separate_dense_dispatch)
+
+    np.testing.assert_allclose(
+        structured_design_matvec(layout, matrices, beta),
+        dense @ beta,
+    )
+    np.testing.assert_allclose(
+        structured_design_rmatvec(layout, matrices, rows),
+        dense.T @ rows,
+    )
 
 
 def test_native_ssp_aggregation_avoids_toarray_when_tabmat_is_ineligible(monkeypatch):

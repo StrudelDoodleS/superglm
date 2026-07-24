@@ -10,13 +10,16 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_algebra import _random_effect_cross_gram
+from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm._group_matrix._group_matrix_kernels import (
+    _dense_small_weighted_moments,
     _random_effect_sufficient_stats,
 )
 from superglm.group_matrix import (
+    DenseGroupMatrix,
+    DesignMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
-    _block_xtwx_signed,
 )
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
 from superglm.types import GroupSlice, PenaltyComponent
@@ -39,6 +42,31 @@ class StructuredBackendDecision:
     group_index: int | None
     group_name: str | None
     fallback_reason: str | None
+
+
+@dataclass(frozen=True)
+class ScalarStructuredLayout:
+    """Cached coefficient partitions and small-block execution plan."""
+
+    dominant_group_index: int
+    dominant_group_name: str
+    small_group_indices: tuple[int, ...]
+    small_matrices: tuple[GroupMatrix, ...]
+    local_groups: tuple[GroupSlice, ...]
+    small_indices: NDArray
+    structured_indices: NDArray
+    dense_small_matrix: NDArray | None
+    small_execution_plan: MatrixExecutionPlan | None
+
+    def __post_init__(self) -> None:
+        for name in ("small_indices", "structured_indices"):
+            values = np.array(getattr(self, name), dtype=np.intp, copy=True)
+            values.setflags(write=False)
+            object.__setattr__(self, name, values)
+        if self.dense_small_matrix is not None:
+            dense = np.asarray(self.dense_small_matrix, dtype=np.float64)
+            dense.setflags(write=False)
+            object.__setattr__(self, "dense_small_matrix", dense)
 
 
 @dataclass(frozen=True)
@@ -128,6 +156,37 @@ class StructuredLinearSystemState:
         if self.centered_data_operator.shape != self.system.operator.shape:
             raise ValueError("Centered data operator does not match the structured system.")
         object.__setattr__(self, "support_totals", dict(self.support_totals))
+
+
+_AUTO_MIN_COEFFICIENT_WIDTH = 32
+_AUTO_MAX_STRUCTURED_COST_RATIO = 0.75
+_MAX_FUSED_DENSE_SMALL_WIDTH = 32
+
+
+def _structured_auto_is_beneficial(
+    dominant_size: int,
+    small_size: int,
+) -> tuple[bool, float]:
+    """Apply the measured scalar-Schur crossover and return its cost ratio.
+
+    July 2026 end-to-end REML profiles found dense wins below 32 slope
+    coefficients, while scalar Schur wins materially at and above that width
+    when its leading factor/solve work is no more than 75% of dense work.
+    The intercept is included in both algebra estimates.
+    """
+    if dominant_size < 1 or small_size < 0:
+        raise ValueError("Structured auto dimensions must be non-negative with a dominant block.")
+    coefficient_width = dominant_size + small_size
+    dense_dimension = coefficient_width + 1
+    schur_small_dimension = small_size + 1
+    dense_cost = float(dense_dimension**3)
+    structured_cost = float(schur_small_dimension**3 + dominant_size * schur_small_dimension**2)
+    cost_ratio = structured_cost / dense_cost
+    return (
+        coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH
+        and cost_ratio <= _AUTO_MAX_STRUCTURED_COST_RATIO,
+        cost_ratio,
+    )
 
 
 def _selection_failure(
@@ -225,14 +284,18 @@ def resolve_structured_backend(
 
     dominant_size = group_matrices[selection.group_index].shape[1]
     small_size = coefficient_width - dominant_size
-    dense_cost = float(coefficient_width**3)
-    structured_cost = float(small_size**3 + dominant_size * small_size**2)
-    use_structured = dominant_size >= 128 and structured_cost < 0.75 * dense_cost
+    use_structured, cost_ratio = _structured_auto_is_beneficial(
+        dominant_size,
+        small_size,
+    )
     fallback_reason = None
     if not use_structured:
         fallback_reason = (
-            f"RandomEffect block has {dominant_size} coefficients, below the "
-            "conservative structured crossover"
+            "RandomEffect geometry is below the measured structured crossover "
+            f"(p={coefficient_width}, K={dominant_size}, q={small_size}, "
+            f"estimated_cost_ratio={cost_ratio:.3f}; require p >= "
+            f"{_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
+            f"{_AUTO_MAX_STRUCTURED_COST_RATIO:.2f})"
         )
     return StructuredBackendDecision(
         use_structured=use_structured,
@@ -267,38 +330,37 @@ def _validate_structured_inputs(
     return weights, weighted_rhs, dominant
 
 
-def build_scalar_structured_system(
-    group_matrices: list[GroupMatrix],
+def build_scalar_structured_layout(
+    group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
     groups: list[GroupSlice],
-    W: NDArray,
-    Wz: NDArray,
     *,
     dominant_group_index: int,
-    tabmat_split=None,
-) -> ScalarStructuredSystem:
-    """Build exact scalar-Schur blocks without a full coefficient Gram matrix."""
-    weights, weighted_rhs, dominant = _validate_structured_inputs(
-        group_matrices,
-        groups,
-        W,
-        Wz,
-        dominant_group_index,
-    )
+) -> ScalarStructuredLayout:
+    """Build immutable partitions and one reusable small-block moment plan."""
+    if len(group_matrices) != len(groups):
+        raise ValueError("group_matrices and groups must have the same length.")
+    if not 0 <= dominant_group_index < len(group_matrices):
+        raise IndexError("dominant_group_index is outside group_matrices.")
+    dominant = group_matrices[dominant_group_index]
+    if not isinstance(dominant, RandomEffectGroupMatrix):
+        raise ValueError("The dominant structured group must be a RandomEffectGroupMatrix.")
+
     dominant_group = groups[dominant_group_index]
+    if dominant_group.size != dominant.n_levels:
+        raise ValueError("The dominant group slice does not match its random-effect width.")
     structured_indices = np.arange(
         dominant_group.start,
         dominant_group.end,
         dtype=np.intp,
     )
-
-    small_group_indices = [
+    small_group_indices = tuple(
         index for index in range(len(group_matrices)) if index != dominant_group_index
-    ]
-    small_matrices = [group_matrices[index] for index in small_group_indices]
-    small_ranges = [
+    )
+    small_matrices = tuple(group_matrices[index] for index in small_group_indices)
+    small_ranges = tuple(
         np.arange(groups[index].start, groups[index].end, dtype=np.intp)
         for index in small_group_indices
-    ]
+    )
     small_indices = np.concatenate(small_ranges) if small_ranges else np.empty(0, dtype=np.intp)
     local_groups: list[GroupSlice] = []
     local_start = 0
@@ -308,20 +370,184 @@ def build_scalar_structured_system(
         local_groups.append(replace(group, start=local_start, end=local_end))
         local_start = local_end
 
-    if len(small_indices):
-        if tabmat_split is not None:
-            A = np.asarray(
-                tabmat_split.sandwich(weights, cols=small_indices),
-                dtype=np.float64,
+    dense_small_matrix = None
+    small_execution_plan = None
+    if (
+        small_matrices
+        and local_start <= _MAX_FUSED_DENSE_SMALL_WIDTH
+        and all(type(matrix) is DenseGroupMatrix for matrix in small_matrices)
+    ):
+        dense_small_matrix = np.ascontiguousarray(
+            np.column_stack([matrix.M for matrix in small_matrices]),
+            dtype=np.float64,
+        )
+    elif small_matrices:
+        small_execution_plan = MatrixExecutionPlan(
+            small_matrices,
+            n=dominant.shape[0],
+            ordinary_tabmat=True,
+        )
+        small_execution_plan.validate_group_spans(local_groups)
+    return ScalarStructuredLayout(
+        dominant_group_index=dominant_group_index,
+        dominant_group_name=dominant_group.name,
+        small_group_indices=small_group_indices,
+        small_matrices=small_matrices,
+        local_groups=tuple(local_groups),
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        dense_small_matrix=dense_small_matrix,
+        small_execution_plan=small_execution_plan,
+    )
+
+
+def get_scalar_structured_layout(
+    dm: DesignMatrix,
+    groups: list[GroupSlice],
+    *,
+    dominant_group_index: int,
+) -> ScalarStructuredLayout:
+    """Return a DesignMatrix-owned layout reused across REML candidate fits."""
+    signature = (
+        dominant_group_index,
+        tuple((group.name, group.start, group.end) for group in groups),
+    )
+    cache = dm._scalar_structured_layout_cache
+    layout = cache.get(signature)
+    if layout is None:
+        layout = build_scalar_structured_layout(
+            dm.group_matrices,
+            groups,
+            dominant_group_index=dominant_group_index,
+        )
+        cache[signature] = layout
+    return layout
+
+
+def structured_design_matvec(
+    layout: ScalarStructuredLayout,
+    group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
+    beta: NDArray,
+) -> NDArray:
+    """Apply a grouped design while fusing a cached dense-small partition."""
+    values = np.asarray(beta, dtype=np.float64)
+    width = len(layout.small_indices) + len(layout.structured_indices)
+    if values.shape != (width,):
+        raise ValueError(f"beta must have shape ({width},).")
+    dominant = group_matrices[layout.dominant_group_index]
+    if not isinstance(dominant, RandomEffectGroupMatrix):
+        raise ValueError("Structured layout no longer points to a random-effect group.")
+
+    if layout.dense_small_matrix is not None:
+        result = layout.dense_small_matrix @ values[layout.small_indices]
+    else:
+        result = np.zeros(dominant.shape[0], dtype=np.float64)
+        local_beta = values[layout.small_indices]
+        for matrix, group in zip(
+            layout.small_matrices,
+            layout.local_groups,
+            strict=True,
+        ):
+            result += matrix.matvec(local_beta[group.sl])
+    result += dominant.matvec(values[layout.structured_indices])
+    return result
+
+
+def structured_design_rmatvec(
+    layout: ScalarStructuredLayout,
+    group_matrices: list[GroupMatrix] | tuple[GroupMatrix, ...],
+    rows: NDArray,
+) -> NDArray:
+    """Apply a grouped design transpose with one cached dense-small product."""
+    values = np.asarray(rows, dtype=np.float64)
+    dominant = group_matrices[layout.dominant_group_index]
+    if not isinstance(dominant, RandomEffectGroupMatrix):
+        raise ValueError("Structured layout no longer points to a random-effect group.")
+    if values.shape != (dominant.shape[0],):
+        raise ValueError(f"rows must have shape ({dominant.shape[0]},).")
+
+    width = len(layout.small_indices) + len(layout.structured_indices)
+    result = np.empty(width, dtype=np.float64)
+    if layout.dense_small_matrix is not None:
+        result[layout.small_indices] = layout.dense_small_matrix.T @ values
+    elif layout.small_matrices:
+        result[layout.small_indices] = np.concatenate(
+            [matrix.rmatvec(values) for matrix in layout.small_matrices]
+        )
+    else:
+        result[layout.small_indices] = np.empty(0, dtype=np.float64)
+    result[layout.structured_indices] = dominant.rmatvec(values)
+    return result
+
+
+def build_scalar_structured_system(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    W: NDArray,
+    Wz: NDArray,
+    *,
+    dominant_group_index: int,
+    tabmat_split=None,
+    layout: ScalarStructuredLayout | None = None,
+) -> ScalarStructuredSystem:
+    """Build exact scalar-Schur blocks without a full coefficient Gram matrix."""
+    del tabmat_split
+    weights, weighted_rhs, dominant = _validate_structured_inputs(
+        group_matrices,
+        groups,
+        W,
+        Wz,
+        dominant_group_index,
+    )
+    if layout is None:
+        layout = build_scalar_structured_layout(
+            group_matrices,
+            groups,
+            dominant_group_index=dominant_group_index,
+        )
+    if (
+        layout.dominant_group_index != dominant_group_index
+        or layout.dominant_group_name != groups[dominant_group_index].name
+        or len(layout.small_matrices) != len(group_matrices) - 1
+        or any(
+            matrix is not group_matrices[index]
+            for matrix, index in zip(
+                layout.small_matrices,
+                layout.small_group_indices,
+                strict=True,
+            )
+        )
+    ):
+        raise ValueError("Structured layout does not match the supplied grouped design.")
+
+    if len(layout.small_indices):
+        if layout.dense_small_matrix is not None:
+            A, xtw_small, xtwz_small = _dense_small_weighted_moments(
+                layout.dense_small_matrix,
+                weights,
+                weighted_rhs,
             )
         else:
-            A = _block_xtwx_signed(small_matrices, local_groups, weights)
+            if layout.small_execution_plan is None:  # pragma: no cover - layout invariant
+                raise RuntimeError("Structured small block has no execution plan.")
+            small_moments = layout.small_execution_plan._moments_prevalidated(
+                weights,
+                rhs=(weighted_rhs,),
+                include_xtw=True,
+                signed=bool(np.any(weights < 0.0)),
+            )
+            if small_moments.xtw is None:  # pragma: no cover - requested above
+                raise RuntimeError("Structured small moment plan omitted X'W.")
+            A = small_moments.gram
+            xtw_small = small_moments.xtw
+            xtwz_small = small_moments.xt_rhs[0]
         C = np.concatenate(
-            [_random_effect_cross_gram(dominant, matrix, weights) for matrix in small_matrices],
+            [
+                _random_effect_cross_gram(dominant, matrix, weights)
+                for matrix in layout.small_matrices
+            ],
             axis=1,
         )
-        xtw_small = np.concatenate([matrix.rmatvec(weights) for matrix in small_matrices])
-        xtwz_small = np.concatenate([matrix.rmatvec(weighted_rhs) for matrix in small_matrices])
     else:
         A = np.empty((0, 0), dtype=np.float64)
         C = np.empty((dominant.n_levels, 0), dtype=np.float64)
@@ -338,8 +564,8 @@ def build_scalar_structured_system(
         A=A,
         C=C,
         d=level_W,
-        small_indices=small_indices,
-        structured_indices=structured_indices,
+        small_indices=layout.small_indices,
+        structured_indices=layout.structured_indices,
     )
     return ScalarStructuredSystem(
         operator=operator,
@@ -350,7 +576,7 @@ def build_scalar_structured_system(
         sum_w=float(np.sum(weights)),
         sum_wz=float(np.sum(weighted_rhs)),
         dominant_group_index=dominant_group_index,
-        dominant_group_name=dominant_group.name,
+        dominant_group_name=layout.dominant_group_name,
     )
 
 

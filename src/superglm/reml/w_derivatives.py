@@ -40,6 +40,9 @@ from superglm.solvers.structured import (
     SumBlockOperator,
     build_scalar_structured_system,
     compact_operator_diagonal,
+    get_scalar_structured_layout,
+    structured_design_matvec,
+    structured_design_rmatvec,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -320,13 +323,32 @@ def reml_w_correction(
 
     def centered_matvec(values: NDArray) -> NDArray:
         """Apply the profiled-intercept design ``X - 1 mean_x'``."""
-        return dm.matvec(values) - float(mean_x @ values)
+        design_values = (
+            dm.matvec(values)
+            if structured_layout is None
+            else structured_design_matvec(
+                structured_layout,
+                dm.group_matrices,
+                values,
+            )
+        )
+        return design_values - float(mean_x @ values)
 
     def centered_rmatvec(values: NDArray) -> NDArray:
         """Apply the transpose of the profiled-intercept design."""
-        return dm.rmatvec(values) - mean_x * float(np.sum(values, dtype=np.float64))
+        transpose_values = (
+            dm.rmatvec(values)
+            if structured_layout is None
+            else structured_design_rmatvec(
+                structured_layout,
+                dm.group_matrices,
+                values,
+            )
+        )
+        return transpose_values - mean_x * float(np.sum(values, dtype=np.float64))
 
     structured_group_index: int | None = None
+    structured_layout = None
     if not isinstance(factor, DenseHessianFactor):
         dominant_name = getattr(factor, "dominant_group_name", None)
         structured_group_index = next(
@@ -335,6 +357,11 @@ def reml_w_correction(
         )
         if structured_group_index is None:
             raise ValueError("Structured Hessian factor has no matching dominant group.")
+        structured_layout = get_scalar_structured_layout(
+            dm,
+            groups,
+            dominant_group_index=structured_group_index,
+        )
 
     def centered_signed_gram(
         row_weights: NDArray,
@@ -347,7 +374,7 @@ def reml_w_correction(
                 row_weights,
                 np.zeros_like(row_weights),
                 dominant_group_index=structured_group_index,
-                tabmat_split=dm.tabmat_split,
+                layout=structured_layout,
             )
             cross = np.empty(p, dtype=np.float64)
             cross[system.operator.small_indices] = system.xtw_small
