@@ -1,0 +1,219 @@
+"""Discrete cached-fREML coverage for compact factor smooths."""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+import superglm.reml.discrete as discrete_module
+from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
+from superglm.group_matrix import FactorSmoothGroupMatrix
+from superglm.reml.penalty_algebra import build_penalty_matrix
+from superglm.solvers.structured import (
+    BlockStructuredSystem,
+    CachedBlockStructuredSolution,
+    materialize_compact_operator,
+    solve_cached_structured,
+)
+
+
+def _data() -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(1031)
+    x_support = np.linspace(-1.0, 1.0, 60)
+    x = np.tile(x_support, 8)
+    n = len(x)
+    segment_code = np.repeat(np.arange(8), len(x_support))
+    permutation = rng.permutation(n)
+    x = x[permutation]
+    segment_code = segment_code[permutation]
+    branch_code = rng.integers(0, 4, size=n)
+    z = rng.normal(size=n)
+    offset = np.log(rng.uniform(0.55, 1.9, size=n))
+    weights = rng.uniform(0.45, 2.0, size=n)
+    amplitudes = np.array([0.42, -0.3, 0.24, -0.38, 0.18, 0.33, -0.12, 0.27])
+    eta = (
+        -0.3
+        + 0.17 * z
+        + 0.19 * np.sin(2.2 * x)
+        + amplitudes[segment_code] * (x + 0.3 * x**2)
+        + np.array([0.1, -0.08, 0.04, 0.13])[branch_code]
+        + offset
+    )
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "z": z,
+            "segment": np.array([f"s-{code}" for code in segment_code], dtype=object),
+            "branch": np.array([f"b-{code}" for code in branch_code], dtype=object),
+        }
+    )
+    return X, y, weights, offset
+
+
+def _model(*, discrete: bool, direct_solve: str) -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        features={
+            "x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.5)),
+            "z": Numeric(),
+            "branch": RandomEffect(),
+        },
+        interactions=[FactorSmooth("x", group="segment", k=6)],
+        selection_penalty=0.0,
+        discrete=discrete,
+        n_bins=256,
+        direct_solve=direct_solve,
+    )
+
+
+def _fit(model: SuperGLM, X, y, weights, offset) -> SuperGLM:
+    return model.fit_reml(
+        X,
+        y,
+        sample_weight=weights,
+        offset=offset,
+        max_reml_iter=6,
+        reml_tol=1e-5,
+        pirls_tol=1e-9,
+        runtime_validation="skip",
+    )
+
+
+def _training_eta(model: SuperGLM, offset: np.ndarray) -> np.ndarray:
+    return model._dm.matvec(model.result.beta) + model.result.intercept + offset
+
+
+def test_discrete_factor_smooth_matches_exact_at_full_support_resolution() -> None:
+    X, y, weights, offset = _data()
+    exact = _fit(_model(discrete=False, direct_solve="structured"), X, y, weights, offset)
+    discrete = _fit(_model(discrete=True, direct_solve="structured"), X, y, weights, offset)
+
+    eta_delta = _training_eta(discrete, offset) - _training_eta(exact, offset)
+    assert np.sqrt(np.mean(eta_delta**2)) < 5e-3
+    assert np.max(np.abs(eta_delta)) < 2e-2
+    for name in exact._reml_lambdas:
+        assert discrete._reml_lambdas[name] == pytest.approx(
+            exact._reml_lambdas[name],
+            rel=5e-2,
+            abs=2e-6,
+        )
+    assert discrete._reml_result.objective == pytest.approx(
+        exact._reml_result.objective,
+        abs=3e-2,
+    )
+
+
+def test_forced_block_structured_discrete_matches_gram_and_uses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X, y, weights, offset = _data()
+    dense = _fit(_model(discrete=True, direct_solve="gram"), X, y, weights, offset)
+
+    def forbidden_dense_cached_solve(*_args, **_kwargs):
+        raise AssertionError("block structured fREML entered the dense cached solver")
+
+    def forbidden_materialization(_self):
+        raise AssertionError("factor smooth rows were materialized")
+
+    monkeypatch.setattr(
+        discrete_module,
+        "_solve_cached_profiled_system",
+        forbidden_dense_cached_solve,
+    )
+    monkeypatch.setattr(FactorSmoothGroupMatrix, "toarray", forbidden_materialization)
+    structured = _fit(
+        _model(discrete=True, direct_solve="structured"),
+        X,
+        y,
+        weights,
+        offset,
+    )
+
+    np.testing.assert_allclose(structured.result.beta, dense.result.beta, atol=6e-8)
+    assert structured.result.intercept == pytest.approx(dense.result.intercept, abs=6e-8)
+    for name in dense._reml_lambdas:
+        assert structured._reml_lambdas[name] == pytest.approx(
+            dense._reml_lambdas[name],
+            rel=6e-7,
+            abs=3e-8,
+        )
+    assert structured._reml_result.objective == pytest.approx(
+        dense._reml_result.objective,
+        abs=8e-8,
+    )
+    assert structured._reml_profile["reml_n_structured_cache_solves"] > 0
+    assert structured._reml_profile["reml_structured_cache_solve_s"] >= 0.0
+    assert structured._reml_profile["reml_structured_cache_data_passes"] == 0
+    assert structured._reml_profile["reml_n_block_structured_cache_solves"] > 0
+    assert structured._reml_profile["reml_block_structured_cache_solve_s"] >= 0.0
+    assert structured._reml_profile["reml_block_structured_cache_data_passes"] == 0
+
+
+def test_cached_block_lambda_trial_uses_only_retained_moments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X, y, weights, offset = _data()
+    model = _fit(
+        _model(discrete=True, direct_solve="structured"),
+        X,
+        y,
+        weights,
+        offset,
+    )
+    state = model._linear_system_state
+    assert state is not None
+    system = state.system
+    assert isinstance(system, BlockStructuredSystem)
+    trial_lambdas = {
+        name: value * (1.25 if name.endswith("wiggle") else 0.85)
+        for name, value in model._reml_lambdas.items()
+    }
+    penalty = build_penalty_matrix(
+        list(model._dm.group_matrices),
+        model._groups,
+        trial_lambdas,
+        model._dm.p,
+        reml_penalties=model._reml_penalties,
+    )
+    xtw = np.empty(model._dm.p)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    xtwz = np.empty(model._dm.p)
+    xtwz[system.operator.small_indices] = system.xtwz_small
+    xtwz[system.operator.structured_indices] = system.xtwz_structured
+    dense_augmented = np.empty((model._dm.p + 1, model._dm.p + 1))
+    dense_augmented[0, 0] = system.sum_w
+    dense_augmented[0, 1:] = xtw
+    dense_augmented[1:, 0] = xtw
+    dense_augmented[1:, 1:] = materialize_compact_operator(system.operator) + penalty
+    rhs = np.concatenate(([system.sum_wz], xtwz))
+    expected = np.linalg.solve(dense_augmented, rhs)
+
+    def forbidden_rows(*_args, **_kwargs):
+        raise AssertionError("cached lambda trial touched observation rows")
+
+    monkeypatch.setattr(
+        FactorSmoothGroupMatrix,
+        "factor_smooth_sufficient_stats",
+        forbidden_rows,
+    )
+    monkeypatch.setattr(FactorSmoothGroupMatrix, "matvec", forbidden_rows)
+    monkeypatch.setattr(FactorSmoothGroupMatrix, "rmatvec", forbidden_rows)
+    monkeypatch.setattr(FactorSmoothGroupMatrix, "toarray", forbidden_rows)
+    solution = solve_cached_structured(
+        system,
+        list(model._dm.group_matrices),
+        model._groups,
+        trial_lambdas,
+        reml_penalties=model._reml_penalties,
+    )
+
+    assert isinstance(solution, CachedBlockStructuredSolution)
+    np.testing.assert_allclose(solution.intercept, expected[0], atol=2e-9)
+    np.testing.assert_allclose(solution.beta, expected[1:], atol=2e-9)
+    assert solution.log_det_H == pytest.approx(
+        np.linalg.slogdet(dense_augmented)[1],
+        abs=2e-9,
+    )

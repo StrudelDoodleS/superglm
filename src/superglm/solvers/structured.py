@@ -141,6 +141,18 @@ class CachedScalarStructuredSolution:
 
 
 @dataclass(frozen=True)
+class CachedBlockStructuredSolution:
+    """One lambda-only solve against cached factor-smooth working moments."""
+
+    beta: NDArray
+    intercept: float
+    factor: ProfiledBlockSchurFactor
+    penalized_operator: BlockSymmetricOperator
+    log_det_H: float  # noqa: N815
+    hessian_rank: int
+
+
+@dataclass(frozen=True)
 class StructuredLevelSupport:
     """Compact training support retained for one all-level structured term."""
 
@@ -3498,4 +3510,66 @@ def solve_cached_scalar_structured(
         penalized_operator=penalized,
         log_det_H=augmented_factor.logdet(),
         hessian_rank=augmented_factor.rank,
+    )
+
+
+def solve_cached_block_structured(
+    system: BlockStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambdas: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+) -> CachedBlockStructuredSolution:
+    """Solve a factor-smooth lambda trial from cached working moments."""
+    penalized = build_penalized_block_operator(
+        system,
+        group_matrices,
+        groups,
+        lambdas,
+        reml_penalties=reml_penalties,
+    )
+    augmented_factor, rhs = build_augmented_block_factor(system, penalized)
+    coefficients = augmented_factor.solve(rhs)
+    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    factor = ProfiledBlockSchurFactor(
+        augmented_factor=augmented_factor,
+        sum_w=system.sum_w,
+        xtw=xtw,
+    )
+    return CachedBlockStructuredSolution(
+        beta=coefficients[1:],
+        intercept=float(coefficients[0]),
+        factor=factor,
+        penalized_operator=penalized,
+        log_det_H=augmented_factor.logdet(),
+        hessian_rank=augmented_factor.rank,
+    )
+
+
+def solve_cached_structured(
+    system: ScalarStructuredSystem | BlockStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambdas: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+) -> CachedScalarStructuredSolution | CachedBlockStructuredSolution:
+    """Dispatch a cached lambda-only solve by dominant structured geometry."""
+    if isinstance(system, BlockStructuredSystem):
+        return solve_cached_block_structured(
+            system,
+            group_matrices,
+            groups,
+            lambdas,
+            reml_penalties=reml_penalties,
+        )
+    return solve_cached_scalar_structured(
+        system,
+        group_matrices,
+        groups,
+        lambdas,
+        reml_penalties=reml_penalties,
     )

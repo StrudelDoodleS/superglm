@@ -48,9 +48,10 @@ from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.solvers.structured import (
+    BlockStructuredSystem,
     ScalarStructuredSystem,
     resolve_structured_backend,
-    solve_cached_scalar_structured,
+    solve_cached_structured,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -229,6 +230,7 @@ def optimize_discrete_reml_cached_w(
     _t_linesearch = 0.0
     _t_linesearch_solve = 0.0
     _t_structured_cache_solve = 0.0
+    _t_block_structured_cache_solve = 0.0
     _t_linesearch_surrogate = 0.0
     _t_linesearch_full_obj = 0.0
     _t_rebuild_dm = 0.0
@@ -278,6 +280,7 @@ def optimize_discrete_reml_cached_w(
     _n_newton_steps = 0
     _n_linesearch_evals = 0
     _n_structured_cache_solves = 0
+    _n_block_structured_cache_solves = 0
     _n_linesearch_surrogate_evals = 0
     _n_linesearch_full_evals = 0
     _outer_step_stats: list[dict[str, float | int | bool | None | dict[str, float]]] = []
@@ -544,7 +547,7 @@ def optimize_discrete_reml_cached_w(
         c_structured_system = cache.get("structured_system")
         if use_structured and not isinstance(
             c_structured_system,
-            ScalarStructuredSystem,
+            ScalarStructuredSystem | BlockStructuredSystem,
         ):
             raise RuntimeError("Structured discrete REML cache is missing its block system.")
         c_centered_XtWz = cache["centered_rhs"]
@@ -829,10 +832,10 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 if not isinstance(
                     c_structured_system,
-                    ScalarStructuredSystem,
+                    ScalarStructuredSystem | BlockStructuredSystem,
                 ):  # pragma: no cover - validated above
                     raise RuntimeError("Structured cached solve has no block system.")
-                cached_solution = solve_cached_scalar_structured(
+                cached_solution = solve_cached_structured(
                     c_structured_system,
                     list(dm.group_matrices),
                     groups,
@@ -861,6 +864,9 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 _t_structured_cache_solve += cached_solve_elapsed
                 _n_structured_cache_solves += 1
+                if isinstance(c_structured_system, BlockStructuredSystem):
+                    _t_block_structured_cache_solve += cached_solve_elapsed
+                    _n_block_structured_cache_solves += 1
 
             # Evaluate full REML at trial point once the cached surrogate
             # suggests an improving direction (or for all trials on the
@@ -920,10 +926,10 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 if not isinstance(
                     c_structured_system,
-                    ScalarStructuredSystem,
+                    ScalarStructuredSystem | BlockStructuredSystem,
                 ):  # pragma: no cover - validated above
                     raise RuntimeError("Structured cached solve has no block system.")
-                cached_solution = solve_cached_scalar_structured(
+                cached_solution = solve_cached_structured(
                     c_structured_system,
                     list(dm.group_matrices),
                     groups,
@@ -952,6 +958,9 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 _t_structured_cache_solve += cached_solve_elapsed
                 _n_structured_cache_solves += 1
+                if isinstance(c_structured_system, BlockStructuredSystem):
+                    _t_block_structured_cache_solve += cached_solve_elapsed
+                    _n_block_structured_cache_solves += 1
             eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
@@ -1246,10 +1255,13 @@ def optimize_discrete_reml_cached_w(
         profile["reml_linesearch_solve_s"] = _t_linesearch_solve
         profile["reml_structured_cache_solve_s"] = _t_structured_cache_solve
         profile["reml_n_structured_cache_solves"] = _n_structured_cache_solves
+        profile["reml_block_structured_cache_solve_s"] = _t_block_structured_cache_solve
+        profile["reml_n_block_structured_cache_solves"] = _n_block_structured_cache_solves
         # Lambda-only Schur re-solves consume cached O(q² + Kq) moments.
         # Objective evaluation may score eta separately, but the solve itself
         # never traverses row-scale design data.
         profile["reml_structured_cache_data_passes"] = 0
+        profile["reml_block_structured_cache_data_passes"] = 0
         profile["reml_linesearch_surrogate_s"] = _t_linesearch_surrogate
         profile["reml_linesearch_full_obj_s"] = _t_linesearch_full_obj
         profile["reml_rebuild_dm_s"] = _t_rebuild_dm
