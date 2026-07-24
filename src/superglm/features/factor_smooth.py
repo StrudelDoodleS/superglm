@@ -33,7 +33,14 @@ def _natural_parameterization(
     _Q, R = np.linalg.qr(X, mode="reduced")
     R_inv = la.solve_triangular(R, np.eye(R.shape[0]), lower=False)
     transformed_penalty = R_inv.T @ S @ R_inv
-    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (transformed_penalty + transformed_penalty.T))
+    # R's ``eigen(..., symmetric=TRUE)`` uses LAPACK's MRRR driver.  The
+    # zero-eigenvalue subspace is otherwise free to rotate, which matters here
+    # because ``bs="fs"`` gives each null coordinate its own smoothing
+    # parameter.  Pinning ``evr`` reproduces mgcv's stable orientation.
+    eigenvalues, eigenvectors = la.eigh(
+        0.5 * (transformed_penalty + transformed_penalty.T),
+        driver="evr",
+    )
     order = np.argsort(eigenvalues)[::-1]
     eigenvalues = eigenvalues[order]
     eigenvectors = eigenvectors[:, order]
@@ -191,6 +198,20 @@ class FactorSmooth:
 
         spline = Spline(kind="ps", k=self.k, penalty="none", m=self.m)
         spline._place_knots(x)
+        # mgcv's ``ps`` constructor lays the whole equally spaced knot
+        # sequence out from boundaries expanded by 0.1% of the data range.
+        # Ordinary SuperGLM P-splines preserve their pre-expansion interior
+        # knots for backwards compatibility, so align this owned marginal
+        # explicitly before constructing the ``bs="fs"`` natural basis.
+        x_range = spline._hi - spline._lo
+        expanded_lo = spline._lo - 0.001 * x_range
+        expanded_hi = spline._hi + 0.001 * x_range
+        interior = np.linspace(
+            expanded_lo,
+            expanded_hi,
+            spline.n_knots + 2,
+        )[1:-1]
+        spline._assemble_knot_vector(interior)
         spline._validate_m_orders_build()
         exact_basis = sp.csr_matrix(spline._basis_matrix(x), dtype=np.float64)
         raw_dense = exact_basis.toarray()

@@ -74,7 +74,7 @@ def _fit(model: SuperGLM, X, y, weights, offset) -> SuperGLM:
         y,
         sample_weight=weights,
         offset=offset,
-        max_reml_iter=6,
+        max_reml_iter=12,
         reml_tol=1e-5,
         pirls_tol=1e-9,
         runtime_validation="skip",
@@ -90,6 +90,8 @@ def test_discrete_factor_smooth_matches_exact_at_full_support_resolution() -> No
     exact = _fit(_model(discrete=False, direct_solve="structured"), X, y, weights, offset)
     discrete = _fit(_model(discrete=True, direct_solve="structured"), X, y, weights, offset)
 
+    assert exact._reml_result.converged
+    assert discrete._reml_result.converged
     eta_delta = _training_eta(discrete, offset) - _training_eta(exact, offset)
     assert np.sqrt(np.mean(eta_delta**2)) < 5e-3
     assert np.max(np.abs(eta_delta)) < 2e-2

@@ -260,6 +260,24 @@ def test_factor_smooth_natural_parameterization_diagonalizes_base_penalty() -> N
     np.testing.assert_allclose(component_sum, np.diag(np.diag(component_sum)), atol=2e-10)
 
 
+def test_factor_smooth_uses_mgcv_pspline_knot_spacing() -> None:
+    x = np.linspace(-1.03, 1.03, 150)
+    group = np.resize(np.array(["a", "b", "c"], dtype=object), len(x))
+    spec = FactorSmooth("x", group="group", k=6, m=2)
+
+    spec.build(x, group, {})
+
+    expanded_lo = x.min() - 0.001 * np.ptp(x)
+    expanded_hi = x.max() + 0.001 * np.ptp(x)
+    knot_step = (expanded_hi - expanded_lo) / 3.0
+    expected = np.linspace(
+        expanded_lo - 3.0 * knot_step,
+        expanded_hi + 3.0 * knot_step,
+        10,
+    )
+    np.testing.assert_allclose(spec._spline._knots, expected, rtol=0.0, atol=2e-15)
+
+
 def test_factor_smooth_is_excluded_from_tabmat_but_small_blocks_remain_eligible() -> None:
     gm, _reference = _matrix_fixture(discrete=False)
     dense = DenseGroupMatrix(np.ones((gm.shape[0], 2)))
