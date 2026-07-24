@@ -194,6 +194,8 @@ class PIRLSResult:
     state_space: str = "solver"
     basis_id: int | None = None
     termination_reason: str | None = None
+    direct_backend: str | None = None
+    direct_fallback_reason: str | None = None
     # Terminal SCOP geometry is retained separately because covariance uses
     # expected Fisher curvature while EDF uses the full-Newton latent Hessian.
     scop_geometry: object | None = None

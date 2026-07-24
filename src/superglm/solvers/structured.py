@@ -218,6 +218,191 @@ def build_scalar_structured_system(
     )
 
 
+def _lambda_for_component(
+    lambda2: float | dict[str, float],
+    name: str,
+) -> float:
+    return float(lambda2[name]) if isinstance(lambda2, dict) else float(lambda2)
+
+
+def _dense_component_omega(
+    component: PenaltyComponent,
+    group_matrix: GroupMatrix,
+) -> NDArray:
+    if component.omega_ssp is not None:
+        return np.asarray(component.omega_ssp, dtype=np.float64)
+    if component.omega_raw is None or not hasattr(group_matrix, "R_inv"):
+        raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
+    return np.asarray(
+        group_matrix.R_inv.T @ component.omega_raw @ group_matrix.R_inv,
+        dtype=np.float64,
+    )
+
+
+def build_penalized_scalar_operator(
+    system: ScalarStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    S_override: NDArray | None = None,
+) -> SymmetricBlockOperator:
+    """Add block penalties to a structured Gram without forming a full penalty matrix."""
+    operator = system.operator
+    p = operator.shape[0]
+    A = np.array(operator.A, copy=True)
+    d = np.array(operator.d, copy=True)
+    small_position = np.full(p, -1, dtype=np.intp)
+    small_position[operator.small_indices] = np.arange(len(operator.small_indices))
+    structured_position = np.full(p, -1, dtype=np.intp)
+    structured_position[operator.structured_indices] = np.arange(len(operator.structured_indices))
+
+    if S_override is not None:
+        penalty = np.asarray(S_override, dtype=np.float64)
+        if penalty.shape != (p, p):
+            raise ValueError(f"S_override must have shape ({p}, {p}).")
+        cross = penalty[np.ix_(operator.structured_indices, operator.small_indices)]
+        if np.any(np.abs(cross) > 1e-12):
+            raise ValueError("S_override couples the dominant and dense-small blocks.")
+        A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
+        d += np.diag(penalty)[operator.structured_indices]
+        return SymmetricBlockOperator(
+            A=A,
+            C=operator.C,
+            d=d,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+        )
+
+    if reml_penalties is not None:
+        for component in reml_penalties:
+            lam = _lambda_for_component(lambda2, component.name)
+            if lam == 0.0:
+                continue
+            indices = _component_indices(component, p)
+            local_small = small_position[indices]
+            local_structured = structured_position[indices]
+            wholly_small = np.all(local_small >= 0)
+            wholly_structured = np.all(local_structured >= 0)
+            if not wholly_small and not wholly_structured:
+                raise ValueError(
+                    f"Penalty component {component.name!r} crosses structured partitions."
+                )
+            if component.penalty_kind == "identity":
+                if wholly_small:
+                    A[local_small, local_small] += lam
+                else:
+                    d[local_structured] += lam
+                continue
+
+            omega = _dense_component_omega(
+                component,
+                group_matrices[component.group_index],
+            )
+            if omega.shape != (len(indices), len(indices)):
+                raise ValueError(
+                    f"Penalty component {component.name!r} has shape {omega.shape}; "
+                    f"expected ({len(indices)}, {len(indices)})."
+                )
+            if wholly_small:
+                A[np.ix_(local_small, local_small)] += lam * omega
+                continue
+            off_diagonal = omega - np.diag(np.diag(omega))
+            if np.any(np.abs(off_diagonal) > 1e-12):
+                raise ValueError(f"Dominant penalty component {component.name!r} is not diagonal.")
+            d[local_structured] += lam * np.diag(omega)
+    else:
+        for group_index, (matrix, group) in enumerate(zip(group_matrices, groups, strict=True)):
+            if not group.penalized:
+                continue
+            lam = (
+                float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
+            )
+            if lam == 0.0:
+                continue
+            indices = np.arange(group.start, group.end, dtype=np.intp)
+            local_small = small_position[indices]
+            local_structured = structured_position[indices]
+            if isinstance(matrix, RandomEffectGroupMatrix):
+                if np.all(local_small >= 0):
+                    A[local_small, local_small] += lam
+                elif np.all(local_structured >= 0):
+                    d[local_structured] += lam
+                else:
+                    raise ValueError(
+                        f"RandomEffect group {group.name!r} crosses structured partitions."
+                    )
+                continue
+            omega_raw = getattr(matrix, "omega", None)
+            if omega_raw is None or not hasattr(matrix, "R_inv"):
+                continue
+            omega = np.asarray(
+                matrix.R_inv.T @ omega_raw @ matrix.R_inv,
+                dtype=np.float64,
+            )
+            if not np.all(local_small >= 0):
+                raise ValueError(
+                    f"Penalty geometry for dominant group index {group_index} is unsupported."
+                )
+            A[np.ix_(local_small, local_small)] += lam * omega
+
+    return SymmetricBlockOperator(
+        A=A,
+        C=operator.C,
+        d=d,
+        small_indices=operator.small_indices,
+        structured_indices=operator.structured_indices,
+    )
+
+
+def build_augmented_scalar_factor(
+    system: ScalarStructuredSystem,
+    penalized_operator: SymmetricBlockOperator,
+) -> tuple[ScalarSchurFactor, NDArray]:
+    """Add the unpenalized intercept and return its Schur factor and global RHS."""
+    operator = system.operator
+    if not np.array_equal(
+        penalized_operator.small_indices,
+        operator.small_indices,
+    ) or not np.array_equal(
+        penalized_operator.structured_indices,
+        operator.structured_indices,
+    ):
+        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
+
+    q = len(operator.small_indices)
+    p = operator.shape[0]
+    A_augmented = np.empty((q + 1, q + 1), dtype=np.float64)
+    A_augmented[0, 0] = system.sum_w
+    A_augmented[0, 1:] = system.xtw_small
+    A_augmented[1:, 0] = system.xtw_small
+    A_augmented[1:, 1:] = penalized_operator.A
+    C_augmented = np.empty((len(operator.structured_indices), q + 1))
+    C_augmented[:, 0] = system.xtw_structured
+    C_augmented[:, 1:] = operator.C
+    small_indices = np.concatenate(
+        [
+            np.array([0], dtype=np.intp),
+            operator.small_indices + 1,
+        ]
+    )
+    structured_indices = operator.structured_indices + 1
+    factor = ScalarSchurFactor(
+        A=A_augmented,
+        C=C_augmented,
+        d=penalized_operator.d,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        term_name=system.dominant_group_name,
+    )
+    rhs = np.empty(p + 1, dtype=np.float64)
+    rhs[0] = system.sum_wz
+    rhs[operator.small_indices + 1] = system.xtwz_small
+    rhs[operator.structured_indices + 1] = system.xtwz_structured
+    return factor, rhs
+
+
 @dataclass(frozen=True)
 class SymmetricBlockOperator:
     """Symmetric matrix represented by dense-small, cross, and diagonal blocks."""
@@ -321,6 +506,7 @@ class ScalarSchurFactor:
         if q == 0:
             self.schur_condition_estimate = 1.0
             logdet_Q = 0.0
+            self._Q_rank = 0
         else:
             try:
                 self._Q_cholesky = scipy.linalg.cholesky(
@@ -345,6 +531,7 @@ class ScalarSchurFactor:
                     (diagonal.max() / max(diagonal.min(), 1e-300)) ** 2
                 )
                 logdet_Q = 2.0 * float(np.sum(np.log(diagonal)))
+                self._Q_rank = q
             except (np.linalg.LinAlgError, ValueError) as error:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
@@ -360,6 +547,7 @@ class ScalarSchurFactor:
                     where=positive,
                 )
                 self._Q_svd = (U, inverse_singular_values, Vh)
+                self._Q_rank = int(np.count_nonzero(positive))
                 if not len(singular_values) or singular_values[-1] <= threshold:
                     self.schur_condition_estimate = float("inf")
                 else:
@@ -367,6 +555,8 @@ class ScalarSchurFactor:
                 logdet_Q = float(np.sum(np.log(singular_values[positive])))
 
         self._logdet = float(np.sum(np.log(self.d)) + logdet_Q)
+        self.rank = int(k + self._Q_rank)
+        self.rank_truncated = self.rank < self.shape[0]
         self._Q_inverse_cache: NDArray | None = None
 
     def _Q_solve(self, rhs: NDArray) -> NDArray:
@@ -568,3 +758,118 @@ class ScalarSchurFactor:
             + 2.0 * np.sum(inverse_ba * operator.C)
             + inverse_bb_diagonal @ operator.d
         )
+
+
+class ProfiledScalarSchurFactor:
+    """Slope inverse induced by profiling an intercept from a scalar Schur factor.
+
+    ``ScalarSchurFactor`` factors the raw augmented coefficient system
+    ``[1, X]' W [1, X] + diag(0, S)``.  The lower-right block of its inverse is
+    exactly the inverse of the centered slope Hessian.  This adapter exposes
+    that block through the common Hessian-factor protocol without materializing
+    a coefficient-by-coefficient matrix.
+    """
+
+    backend = "structured"
+
+    def __init__(
+        self,
+        *,
+        augmented_factor: ScalarSchurFactor,
+        sum_w: float,
+        xtw: NDArray,
+    ):
+        self.augmented_factor = augmented_factor
+        self.sum_w = float(sum_w)
+        self.xtw = np.asarray(xtw, dtype=np.float64)
+        if not np.isfinite(self.sum_w) or self.sum_w <= 0.0:
+            raise ValueError("sum_w must be positive and finite.")
+        if augmented_factor.shape != (len(self.xtw) + 1, len(self.xtw) + 1):
+            raise ValueError("Augmented factor width does not match xtw.")
+        self.shape = (len(self.xtw), len(self.xtw))
+        self.mean_x = self.xtw / self.sum_w
+        self.rank = max(int(augmented_factor.rank) - 1, 0)
+        self.rank_truncated = self.rank < self.shape[0]
+        self.used_dense_fallback = augmented_factor.used_dense_fallback
+        self.schur_condition_estimate = augmented_factor.schur_condition_estimate
+        self.minimum_local_diagonal = augmented_factor.minimum_local_diagonal
+        self.fallback_reason = augmented_factor.fallback_reason
+        self.dominant_group_name = augmented_factor.dominant_group_name
+
+    @staticmethod
+    def _shift_indices(indices: NDArray) -> NDArray[np.intp]:
+        return np.asarray(indices, dtype=np.intp) + 1
+
+    @staticmethod
+    def _shift_component(component: PenaltyComponent) -> PenaltyComponent:
+        start = component.group_sl.start
+        stop = component.group_sl.stop
+        if start is None or stop is None:
+            raise ValueError("Penalty component slices must have explicit bounds.")
+        return replace(
+            component,
+            group_sl=slice(start + 1, stop + 1, component.group_sl.step),
+        )
+
+    def solve(self, rhs: NDArray) -> NDArray:
+        """Apply the profiled slope inverse to one or many right-hand sides."""
+        values = np.asarray(rhs, dtype=np.float64)
+        vector_rhs = values.ndim == 1
+        if vector_rhs:
+            values = values[:, None]
+        if values.ndim != 2 or values.shape[0] != self.shape[0]:
+            raise ValueError(
+                f"rhs must have shape ({self.shape[0]},) or ({self.shape[0]}, m), "
+                f"got {np.asarray(rhs).shape}."
+            )
+        augmented_rhs = np.zeros((self.shape[0] + 1, values.shape[1]))
+        augmented_rhs[1:] = values
+        solution = self.augmented_factor.solve(augmented_rhs)[1:]
+        return solution[:, 0] if vector_rhs else solution
+
+    def logdet(self) -> float:
+        """Return the profiled centered-slope log determinant."""
+        return float(self.augmented_factor.logdet() - np.log(self.sum_w))
+
+    def selected_inverse_block(self, indices: NDArray) -> NDArray:
+        return self.augmented_factor.selected_inverse_block(self._shift_indices(indices))
+
+    def selected_inverse_diagonal(self, indices: NDArray) -> NDArray:
+        return self.augmented_factor.selected_inverse_diagonal(self._shift_indices(indices))
+
+    def trace_inverse_penalty(self, component: PenaltyComponent) -> float:
+        return self.augmented_factor.trace_inverse_penalty(self._shift_component(component))
+
+    def penalty_cross_trace(
+        self,
+        left: PenaltyComponent,
+        right: PenaltyComponent,
+        left_scale: float,
+        right_scale: float,
+    ) -> float:
+        return self.augmented_factor.penalty_cross_trace(
+            self._shift_component(left),
+            self._shift_component(right),
+            left_scale,
+            right_scale,
+        )
+
+    def trace_inverse_operator(self, operator: SymmetricBlockOperator) -> float:
+        """Return ``trace(Hc^-1 Gc)`` for a matching raw data operator."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        q = len(operator.small_indices)
+        augmented_operator = SymmetricBlockOperator(
+            A=np.pad(operator.A, ((1, 0), (1, 0))),
+            C=np.pad(operator.C, ((0, 0), (1, 0))),
+            d=operator.d,
+            small_indices=np.concatenate(
+                (np.array([0], dtype=np.intp), operator.small_indices + 1)
+            ),
+            structured_indices=operator.structured_indices + 1,
+        )
+        if augmented_operator.A.shape != (q + 1, q + 1):  # pragma: no cover - invariant
+            raise RuntimeError("Augmented compact operator has inconsistent shape.")
+        raw_trace = self.augmented_factor.trace_inverse_operator(augmented_operator)
+        centered_correction = float(self.xtw @ self.solve(self.xtw) / self.sum_w)
+        return float(raw_trace - centered_correction)
