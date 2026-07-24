@@ -30,6 +30,7 @@ from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
     SparseGroupMatrix,
@@ -143,6 +144,13 @@ def should_discretize_spline_categorical_interaction(
         return False
     spline_name, _cat_name = ispec.parent_names
     return should_discretize(specs[spline_name], model_discrete)
+
+
+def should_discretize_factor_smooth(ispec: Any, model_discrete: bool) -> bool:
+    """Use compact marginal support bins for factor smooths in discrete models."""
+    from superglm.features.factor_smooth import FactorSmooth
+
+    return isinstance(ispec, FactorSmooth) and model_discrete
 
 
 def resolve_discrete_n_bins(
@@ -557,6 +565,22 @@ def _process_info(
         elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
             # SCOP discrete: columns holds the bin-level centered design
             gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
+        elif info.structured_kind == "factor_smooth":
+            factor_basis = (
+                info.factor_smooth_basis_unique
+                if info.factor_smooth_basis_unique is not None
+                else info.factor_smooth_basis
+            )
+            gm = FactorSmoothGroupMatrix(
+                factor_basis,
+                info.factor_smooth_codes,
+                info.factor_smooth_n_levels,
+                natural_map=info.factor_smooth_transform,
+                levels=info.factor_smooth_levels,
+                repeated_penalty_components=info.repeated_penalty_components,
+                lambda_policies=info.lambda_policies,
+                bin_idx=info.factor_smooth_bin_idx,
+            )
         elif info.structured_kind == "random_effect":
             gm = RandomEffectGroupMatrix(
                 info.cat_codes,
@@ -877,12 +901,25 @@ def build_design_matrix(
             specs,
             model_discrete,
         )
+        use_discrete_factor_smooth = should_discretize_factor_smooth(
+            ispec,
+            model_discrete,
+        )
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None
         tensor_build: DiscreteTensorBuildResult | None = None
         tensor_id = -1
-        if use_discrete_tensor:
+        if use_discrete_factor_smooth:
+            n_bins_factor_smooth = resolve_discrete_n_bins(p1, ispec, n_bins_config)
+            result = ispec.build_discrete(
+                x1,
+                x2,
+                specs,
+                n_bins_factor_smooth,
+                sample_weight=sample_weight,
+            )
+        elif use_discrete_tensor:
             n_bins1 = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
             n_bins2 = resolve_discrete_n_bins(p2, specs[p2], n_bins_config)
             tensor_build = ispec.build_discrete(

@@ -193,6 +193,7 @@ def _is_tabmat_centering_candidate(gms) -> bool:
         DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
+        FactorSmoothGroupMatrix,
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     )
@@ -203,6 +204,7 @@ def _is_tabmat_centering_candidate(gms) -> bool:
         | DiscretizedSplineCategoricalGroupMatrix
         | DiscretizedSSPGroupMatrix
         | DiscretizedSCOPGroupMatrix
+        | FactorSmoothGroupMatrix
     )
     return (
         not any(isinstance(gm, unsupported) for gm in gms)
@@ -245,6 +247,7 @@ def _build_tabmat_split(gms):
         DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
+        FactorSmoothGroupMatrix,
         RandomEffectGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
@@ -258,7 +261,8 @@ def _build_tabmat_split(gms):
             | SplineCategoricalGroupMatrix
             | DiscretizedSplineCategoricalGroupMatrix
             | DiscretizedSSPGroupMatrix
-            | DiscretizedSCOPGroupMatrix,
+            | DiscretizedSCOPGroupMatrix
+            | FactorSmoothGroupMatrix,
         )
         for gm in gms
     ):
