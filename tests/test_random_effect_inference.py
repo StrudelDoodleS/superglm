@@ -5,10 +5,17 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.optimize
 
 import superglm.model.state_ops as state_ops
-from superglm import Numeric, RandomEffect, SuperGLM
+from superglm import LambdaPolicy, Numeric, RandomEffect, SuperGLM
+from superglm.distributions import _VARIANCE_FLOOR, Binomial, Gamma, Gaussian, clip_mu
 from superglm.inference.covariance import StructuredCovarianceAccessor
+from superglm.inference.random_effects import (
+    RandomEffectResult,
+    vectorized_conditional_unpooled_effect,
+)
+from superglm.links import IdentityLink, LogitLink, LogLink, stabilize_eta
 from superglm.solvers.structured import StructuredLinearSystemState
 
 
@@ -174,3 +181,239 @@ def test_structured_state_has_no_dominant_square_array():
         if isinstance(value, np.ndarray)
     ]
     assert all(array.shape != (dominant_size, dominant_size) for array in arrays)
+
+
+def test_random_effect_report_matches_dense_and_poisson_actual_expected():
+    dense, structured, X, y, exposure = _fit_pair()
+    assert dense is not None
+
+    dense_report = dense.random_effects("broker", exposure=exposure)
+    report = structured.random_effects("broker", exposure=exposure)
+
+    assert isinstance(report, RandomEffectResult)
+    assert report.name == "broker"
+    assert report.lambda_value == structured._reml_lambdas["broker"]
+    assert report.tau_squared == pytest.approx(report.phi / report.lambda_value)
+    assert report.variance_component == report.tau_squared
+    assert report.standard_deviation == pytest.approx(np.sqrt(report.tau_squared))
+    assert report.effective_df == pytest.approx(structured._group_edf["broker"])
+    assert list(report.table.columns) == [
+        "level",
+        "count",
+        "fit_weight",
+        "exposure",
+        "unpooled_effect",
+        "effect",
+        "relativity",
+        "posterior_se",
+        "credibility",
+        "shrinkage",
+        "finite",
+        "has_information",
+        "collapsed",
+    ]
+
+    spec = structured._specs["broker"]
+    codes = spec._prediction_codes(X["broker"].to_numpy())
+    population_mean = structured.predict(
+        X,
+        offset=np.log(exposure),
+        random_effects="population",
+    )
+    actual = np.bincount(codes, weights=y, minlength=len(spec._levels))
+    expected = np.bincount(
+        codes,
+        weights=population_mean,
+        minlength=len(spec._levels),
+    )
+    np.testing.assert_allclose(
+        report.table["unpooled_effect"],
+        np.log(actual / expected),
+        rtol=3e-10,
+        atol=3e-10,
+    )
+    information = structured._linear_system_state.support_totals["broker"].information
+    np.testing.assert_allclose(
+        report.table["credibility"],
+        information / (information + report.lambda_value),
+        rtol=2e-13,
+        atol=2e-13,
+    )
+    np.testing.assert_allclose(
+        report.table["shrinkage"],
+        1.0 - report.table["credibility"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        report.table[["unpooled_effect", "effect", "posterior_se", "credibility"]].to_numpy(),
+        dense_report.table[["unpooled_effect", "effect", "posterior_se", "credibility"]].to_numpy(),
+        rtol=4e-8,
+        atol=4e-9,
+    )
+
+    local_se = np.sqrt(
+        report.phi / (information + report.lambda_value),
+    )
+    assert np.max(np.abs(report.table["posterior_se"].to_numpy() - local_se)) > 1e-6
+
+
+def test_random_effect_report_never_infers_exposure_from_offset():
+    _, structured, X, y, exposure = _fit_pair(fit_dense=False)
+
+    without_exposure = structured.random_effects("broker")
+    assert without_exposure.table["exposure"].isna().all()
+
+    with_exposure = structured.random_effects("broker", exposure=exposure)
+    assert np.isclose(with_exposure.table["exposure"].sum(), exposure.sum())
+
+    with pytest.raises(ValueError, match="exposure"):
+        structured.random_effects("broker", exposure=exposure[:-1])
+    with pytest.raises(ValueError, match="X and y"):
+        structured.random_effects(
+            "broker",
+            X=X,
+            y=None,
+            offset=np.zeros(len(y)),
+        )
+
+
+def test_random_effect_report_aggregates_fit_weight_and_explicit_exposure():
+    rng = np.random.default_rng(581)
+    codes = np.repeat(np.arange(4), 30)
+    sample_weight = rng.uniform(0.25, 2.0, size=len(codes))
+    exposure = rng.uniform(0.4, 1.6, size=len(codes))
+    truth = np.array([-0.3, 0.1, 0.25, -0.05])
+    y = rng.poisson(exposure * np.exp(-0.2 + truth[codes])).astype(float)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    model = SuperGLM(
+        family="poisson",
+        features={"broker": RandomEffect()},
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    model.fit_reml(
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=np.log(exposure),
+        max_reml_iter=5,
+    )
+
+    report = model.random_effects("broker", exposure=exposure)
+
+    np.testing.assert_allclose(
+        report.table["fit_weight"],
+        np.bincount(codes, weights=sample_weight),
+    )
+    np.testing.assert_allclose(
+        report.table["exposure"],
+        np.bincount(codes, weights=exposure),
+    )
+
+
+def test_released_random_effect_report_uses_precomputed_unpooled_effects():
+    _, structured, _, _, _ = _fit_pair(
+        retain_fit_state=False,
+        n_levels=32,
+        fit_dense=False,
+    )
+
+    report = structured.random_effects("broker")
+
+    assert np.all(np.isfinite(report.table["unpooled_effect"]))
+    assert np.all(np.isfinite(report.table["posterior_se"]))
+    assert report.table["exposure"].isna().all()
+
+
+@pytest.mark.parametrize(
+    ("distribution", "link", "response"),
+    [
+        pytest.param(
+            Gaussian(),
+            IdentityLink(),
+            lambda rng, eta: eta + rng.normal(scale=0.35, size=len(eta)),
+            id="gaussian",
+        ),
+        pytest.param(
+            Binomial(),
+            LogitLink(),
+            lambda rng, eta: rng.binomial(1, 1.0 / (1.0 + np.exp(-eta))).astype(float),
+            id="binomial",
+        ),
+        pytest.param(
+            Gamma(),
+            LogLink(),
+            lambda rng, eta: rng.gamma(shape=4.0, scale=np.exp(eta) / 4.0),
+            id="gamma",
+        ),
+    ],
+)
+def test_vectorized_unpooled_fisher_matches_scalar_score_roots(
+    distribution,
+    link,
+    response,
+):
+    rng = np.random.default_rng(4008)
+    n_levels = 3
+    codes = np.repeat(np.arange(n_levels), 80)
+    base_eta = rng.normal(scale=0.25, size=len(codes))
+    truth = np.array([-0.4, 0.15, 0.55])
+    y = response(rng, base_eta + truth[codes])
+    # Guarantee finite logit roots without changing the vectorized contract.
+    if isinstance(distribution, Binomial):
+        for level in range(n_levels):
+            rows = np.flatnonzero(codes == level)
+            y[rows[0]] = 0.0
+            y[rows[1]] = 1.0
+    weights = rng.uniform(0.4, 1.8, size=len(codes))
+
+    actual = vectorized_conditional_unpooled_effect(
+        codes=codes,
+        n_levels=n_levels,
+        y=y,
+        sample_weight=weights,
+        base_eta=base_eta,
+        distribution=distribution,
+        link=link,
+    )
+
+    expected = np.empty(n_levels)
+    for level in range(n_levels):
+        rows = codes == level
+
+        def score(effect):
+            eta = stabilize_eta(base_eta[rows] + effect, link)
+            mu = clip_mu(link.inverse(eta), distribution)
+            variance = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
+            derivative = link.deriv_inverse(eta)
+            return float(np.sum(weights[rows] * (y[rows] - mu) * derivative / variance))
+
+        expected[level] = scipy.optimize.brentq(score, -30.0, 30.0)
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-9, atol=2e-9)
+
+
+def test_random_effect_upper_boundary_is_reported_as_collapsed():
+    X = pd.DataFrame({"broker": ["a"] * 24 + ["b"] * 24})
+    y = np.concatenate((np.ones(24), np.full(24, 2.0)))
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "broker": RandomEffect(
+                lambda_policy=LambdaPolicy.fixed(1.0e10),
+            )
+        },
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+    model.fit_reml(X, y, max_reml_iter=2)
+
+    with pytest.warns(UserWarning, match="collapsed"):
+        report = model.random_effects("broker")
+
+    assert report.collapsed
+    assert report.at_upper_boundary
+    assert not report.at_lower_boundary
+    assert report.table["collapsed"].all()
+    assert report.table["relativity"].isna().all()

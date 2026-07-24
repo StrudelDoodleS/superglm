@@ -36,6 +36,7 @@ from .fit_state import (
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
     from superglm.inference.metrics import ModelMetrics
+    from superglm.inference.random_effects import RandomEffectResult
     from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
@@ -617,6 +618,29 @@ class SuperGLM:
         return state_ops.group_edf(self)
 
     # ── Diagnostics & summary ─────────────────────────────────────
+
+    def random_effects(
+        self,
+        name: str,
+        *,
+        exposure: NDArray | None = None,
+        X: FrameLike | None = None,
+        y: NDArray | None = None,
+        sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
+    ) -> RandomEffectResult:
+        """Return variance-component and per-level credibility diagnostics."""
+        from superglm.inference.random_effects import random_effect_result
+
+        return random_effect_result(
+            self,
+            name,
+            exposure=exposure,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
 
     def iteration_diagnostics(self):
         """Return per-iteration IRLS diagnostics as a DataFrame.

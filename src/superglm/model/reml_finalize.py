@@ -53,6 +53,9 @@ def _build_structured_linear_system_state(
     data_operator,
     cache: dict,
     sample_weight: np.ndarray,
+    y: np.ndarray,
+    offset_arr: np.ndarray,
+    result,
 ) -> StructuredLinearSystemState | None:
     """Distill a final structured refit into compact persistent state."""
     if not isinstance(factor, ProfiledScalarSchurFactor):
@@ -85,6 +88,12 @@ def _build_structured_linear_system_state(
         center=xtw / system.sum_w,
     )
 
+    from superglm.inference.random_effects import vectorized_conditional_unpooled_effect
+
+    full_eta = stabilize_eta(
+        model._dm.matvec(result.beta) + result.intercept + offset_arr,
+        model._link,
+    )
     support_totals: dict[str, StructuredLevelSupport] = {}
     for group_matrix, group in zip(
         model._dm.group_matrices,
@@ -93,6 +102,7 @@ def _build_structured_linear_system_state(
     ):
         if not isinstance(group_matrix, RandomEffectGroupMatrix):
             continue
+        base_eta = full_eta - result.beta[group.sl][group_matrix.codes]
         support_totals[group.name] = StructuredLevelSupport(
             count=np.bincount(
                 group_matrix.codes,
@@ -104,6 +114,16 @@ def _build_structured_linear_system_state(
                 minlength=group_matrix.n_levels,
             ),
             information=xtw[group.sl],
+            unpooled_effect=vectorized_conditional_unpooled_effect(
+                codes=group_matrix.codes,
+                n_levels=group_matrix.n_levels,
+                y=y,
+                sample_weight=sample_weight,
+                base_eta=base_eta,
+                distribution=model._distribution,
+                link=model._link,
+                initial=result.beta[group.sl],
+            ),
         )
 
     return StructuredLinearSystemState(
@@ -344,6 +364,9 @@ def finalize_reml_fit(
             data_operator=final_xtwx,
             cache=final_cache,
             sample_weight=sample_weight,
+            y=y,
+            offset_arr=offset_arr,
+            result=final_pirls,
         )
         if use_direct and not qp_passthrough
         else None

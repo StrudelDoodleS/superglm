@@ -64,6 +64,7 @@ from superglm.features.spline import (
     n_knots_from_k,
 )
 from superglm.inference.metrics import ModelMetrics
+from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
 from superglm.inference.term import InteractionInference, SmoothCurve, SplineMetadata, TermInference
 from superglm.links import (
@@ -134,6 +135,7 @@ __all__ = [
     "export_rating_tables",
     "ModelMetrics",
     "ModelSummary",
+    "RandomEffectResult",
     "SuperGLMRegressor",
     "SuperGLMClassifier",
     "Poisson",

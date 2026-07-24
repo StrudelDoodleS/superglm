@@ -75,6 +75,7 @@ class StructuredLevelSupport:
     count: NDArray
     fit_weight: NDArray
     information: NDArray
+    unpooled_effect: NDArray | None = None
 
     def __post_init__(self) -> None:
         expected_shape: tuple[int, ...] | None = None
@@ -92,6 +93,12 @@ class StructuredLevelSupport:
                 raise ValueError("Structured support arrays must have identical shapes.")
             values.setflags(write=False)
             object.__setattr__(self, name, values)
+        if self.unpooled_effect is not None:
+            unpooled = np.array(self.unpooled_effect, dtype=np.float64, copy=True)
+            if unpooled.shape != expected_shape:
+                raise ValueError("unpooled_effect must match the structured support shape.")
+            unpooled.setflags(write=False)
+            object.__setattr__(self, "unpooled_effect", unpooled)
 
 
 @dataclass(frozen=True)
