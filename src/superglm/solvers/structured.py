@@ -32,6 +32,16 @@ class StructuredGroupSelection:
 
 
 @dataclass(frozen=True)
+class StructuredBackendDecision:
+    """Resolved direct backend and the selected dominant block."""
+
+    use_structured: bool
+    group_index: int | None
+    group_name: str | None
+    fallback_reason: str | None
+
+
+@dataclass(frozen=True)
 class ScalarStructuredSystem:
     """Unpenalized coefficient blocks and working sufficient statistics."""
 
@@ -44,6 +54,18 @@ class ScalarStructuredSystem:
     sum_wz: float
     dominant_group_index: int
     dominant_group_name: str
+
+
+@dataclass(frozen=True)
+class CachedScalarStructuredSolution:
+    """One lambda-only solve against cached structured working moments."""
+
+    beta: NDArray
+    intercept: float
+    factor: ProfiledScalarSchurFactor
+    penalized_operator: SymmetricBlockOperator
+    log_det_H: float  # noqa: N815
+    hessian_rank: int
 
 
 def _selection_failure(
@@ -103,6 +125,58 @@ def select_structured_group(
         group_index=dominant_index,
         group_name=dominant_group.name,
         fallback_reason=None,
+    )
+
+
+def resolve_structured_backend(
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    *,
+    direct_solve: str,
+    coefficient_width: int,
+) -> StructuredBackendDecision:
+    """Resolve forced/automatic scalar Schur use once for a direct fit."""
+    if direct_solve not in ("auto", "structured"):
+        return StructuredBackendDecision(
+            use_structured=False,
+            group_index=None,
+            group_name=None,
+            fallback_reason=None,
+        )
+
+    mode: Literal["auto", "structured"] = "structured" if direct_solve == "structured" else "auto"
+    selection = select_structured_group(group_matrices, groups, mode=mode)
+    if selection.group_index is None:
+        return StructuredBackendDecision(
+            use_structured=False,
+            group_index=None,
+            group_name=None,
+            fallback_reason=selection.fallback_reason,
+        )
+    if mode == "structured":
+        return StructuredBackendDecision(
+            use_structured=True,
+            group_index=selection.group_index,
+            group_name=selection.group_name,
+            fallback_reason=None,
+        )
+
+    dominant_size = group_matrices[selection.group_index].shape[1]
+    small_size = coefficient_width - dominant_size
+    dense_cost = float(coefficient_width**3)
+    structured_cost = float(small_size**3 + dominant_size * small_size**2)
+    use_structured = dominant_size >= 128 and structured_cost < 0.75 * dense_cost
+    fallback_reason = None
+    if not use_structured:
+        fallback_reason = (
+            f"RandomEffect block has {dominant_size} coefficients, below the "
+            "conservative structured crossover"
+        )
+    return StructuredBackendDecision(
+        use_structured=use_structured,
+        group_index=selection.group_index,
+        group_name=selection.group_name,
+        fallback_reason=fallback_reason,
     )
 
 
@@ -441,6 +515,319 @@ class SymmetricBlockOperator:
             raise ValueError("Structured index partitions must cover every coefficient once.")
         object.__setattr__(self, "shape", (len(all_indices), len(all_indices)))
 
+    def matvec(self, rhs: NDArray) -> NDArray:
+        """Apply the compact symmetric operator to one or many RHS columns."""
+        values = np.asarray(rhs, dtype=np.float64)
+        vector_rhs = values.ndim == 1
+        if vector_rhs:
+            values = values[:, None]
+        if values.ndim != 2 or values.shape[0] != self.shape[0]:
+            raise ValueError(f"rhs must have shape ({self.shape[0]},) or ({self.shape[0]}, m).")
+        small_rhs = values[self.small_indices]
+        structured_rhs = values[self.structured_indices]
+        result = np.empty_like(values)
+        result[self.small_indices] = self.A @ small_rhs + self.C.T @ structured_rhs
+        result[self.structured_indices] = self.C @ small_rhs + self.d[:, None] * structured_rhs
+        return result[:, 0] if vector_rhs else result
+
+
+@dataclass(frozen=True)
+class CenteredBlockOperator:
+    """A block operator centered around a fixed weighted design mean."""
+
+    raw: SymmetricBlockOperator
+    cross: NDArray
+    total: float
+    center: NDArray
+    shape: tuple[int, int] = field(init=False)
+
+    def __post_init__(self):
+        p = self.raw.shape[0]
+        cross = np.array(self.cross, dtype=np.float64, copy=True)
+        center = np.array(self.center, dtype=np.float64, copy=True)
+        if cross.shape != (p,) or center.shape != (p,):
+            raise ValueError("Centered operator vectors must match its coefficient width.")
+        cross.setflags(write=False)
+        center.setflags(write=False)
+        object.__setattr__(self, "cross", cross)
+        object.__setattr__(self, "center", center)
+        object.__setattr__(self, "total", float(self.total))
+        object.__setattr__(self, "shape", self.raw.shape)
+
+    def matvec(self, rhs: NDArray) -> NDArray:
+        values = np.asarray(rhs, dtype=np.float64)
+        result = self.raw.matvec(values)
+        if values.ndim == 1:
+            center_projection = float(self.center @ values)
+            cross_projection = float(self.cross @ values)
+            return (
+                result
+                - self.cross * center_projection
+                - self.center * cross_projection
+                + self.total * self.center * center_projection
+            )
+        center_projection = self.center @ values
+        cross_projection = self.cross @ values
+        return (
+            result
+            - self.cross[:, None] * center_projection
+            - self.center[:, None] * cross_projection
+            + self.total * self.center[:, None] * center_projection
+        )
+
+
+@dataclass(frozen=True)
+class LowRankSymmetricOperator:
+    """A symmetric low-rank update ``U R U.T``."""
+
+    basis: NDArray
+    core: NDArray
+    shape: tuple[int, int] = field(init=False)
+
+    def __post_init__(self):
+        basis = np.array(self.basis, dtype=np.float64, copy=True)
+        core = np.array(self.core, dtype=np.float64, copy=True)
+        if basis.ndim != 2 or core.shape != (basis.shape[1], basis.shape[1]):
+            raise ValueError("Low-rank operator basis and core shapes are inconsistent.")
+        if not np.allclose(core, core.T, rtol=0.0, atol=1e-14):
+            raise ValueError("Low-rank operator core must be symmetric.")
+        basis.setflags(write=False)
+        core.setflags(write=False)
+        object.__setattr__(self, "basis", basis)
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "shape", (basis.shape[0], basis.shape[0]))
+
+    def matvec(self, rhs: NDArray) -> NDArray:
+        values = np.asarray(rhs, dtype=np.float64)
+        if values.ndim not in (1, 2) or values.shape[0] != self.shape[0]:
+            raise ValueError("rhs does not match the low-rank operator width.")
+        return self.basis @ (self.core @ (self.basis.T @ values))
+
+
+@dataclass(frozen=True)
+class SumBlockOperator:
+    """A small sum of compact symmetric operators."""
+
+    operators: tuple[
+        SymmetricBlockOperator | CenteredBlockOperator | LowRankSymmetricOperator,
+        ...,
+    ]
+    shape: tuple[int, int] = field(init=False)
+
+    def __post_init__(self):
+        if not self.operators:
+            raise ValueError("A compact operator sum cannot be empty.")
+        shape = self.operators[0].shape
+        if any(operator.shape != shape for operator in self.operators[1:]):
+            raise ValueError("All compact operators in a sum must have the same shape.")
+        object.__setattr__(self, "shape", shape)
+
+    def matvec(self, rhs: NDArray) -> NDArray:
+        return sum(
+            (operator.matvec(rhs) for operator in self.operators),
+            start=np.zeros_like(np.asarray(rhs, dtype=np.float64)),
+        )
+
+
+CompactSymmetricOperator = (
+    SymmetricBlockOperator | CenteredBlockOperator | LowRankSymmetricOperator | SumBlockOperator
+)
+
+
+@dataclass(frozen=True)
+class _DiagonalLowRank:
+    """Internal exact ``diag(d) + U R U.T`` representation."""
+
+    diagonal: NDArray
+    basis: NDArray
+    core: NDArray
+
+
+@dataclass(frozen=True)
+class _GeneralDiagonalLowRank:
+    """Internal exact ``diag(d) + L M R.T`` representation."""
+
+    diagonal: NDArray
+    left: NDArray
+    core: NDArray
+    right: NDArray
+
+
+def _block_operator_dlr(operator: SymmetricBlockOperator) -> _DiagonalLowRank:
+    p = operator.shape[0]
+    q = len(operator.small_indices)
+    diagonal = np.zeros(p, dtype=np.float64)
+    diagonal[operator.structured_indices] = operator.d
+    if q == 0:
+        return _DiagonalLowRank(
+            diagonal=diagonal,
+            basis=np.empty((p, 0)),
+            core=np.empty((0, 0)),
+        )
+    small_basis = np.zeros((p, q), dtype=np.float64)
+    small_basis[operator.small_indices] = np.eye(q)
+    cross_basis = np.zeros((p, q), dtype=np.float64)
+    cross_basis[operator.structured_indices] = operator.C
+    basis = np.column_stack((small_basis, cross_basis))
+    core = np.block(
+        [
+            [operator.A, np.eye(q)],
+            [np.eye(q), np.zeros((q, q))],
+        ]
+    )
+    return _DiagonalLowRank(diagonal=diagonal, basis=basis, core=core)
+
+
+def _merge_dlr(parts: tuple[_DiagonalLowRank, ...]) -> _DiagonalLowRank:
+    if not parts:
+        raise ValueError("At least one diagonal-low-rank part is required.")
+    diagonal = sum(
+        (part.diagonal for part in parts),
+        start=np.zeros_like(parts[0].diagonal),
+    )
+    ranks = [part.core.shape[0] for part in parts]
+    if not any(ranks):
+        return _DiagonalLowRank(
+            diagonal=diagonal,
+            basis=np.empty((len(diagonal), 0)),
+            core=np.empty((0, 0)),
+        )
+    basis = np.column_stack([part.basis for part in parts if part.core.shape[0]])
+    core = scipy.linalg.block_diag(*[part.core for part in parts if part.core.shape[0]])
+    return _DiagonalLowRank(diagonal=diagonal, basis=basis, core=core)
+
+
+def _operator_dlr(operator: CompactSymmetricOperator) -> _DiagonalLowRank:
+    if isinstance(operator, SumBlockOperator):
+        return _merge_dlr(tuple(_operator_dlr(item) for item in operator.operators))
+    if isinstance(operator, LowRankSymmetricOperator):
+        return _DiagonalLowRank(
+            diagonal=np.zeros(operator.shape[0]),
+            basis=operator.basis,
+            core=operator.core,
+        )
+    base = _block_operator_dlr(
+        operator.raw if isinstance(operator, CenteredBlockOperator) else operator
+    )
+    if not isinstance(operator, CenteredBlockOperator):
+        return base
+    update_basis = np.column_stack((operator.cross, operator.center))
+    update_core = np.array(
+        [
+            [0.0, -1.0],
+            [-1.0, operator.total],
+        ]
+    )
+    return _merge_dlr(
+        (
+            base,
+            _DiagonalLowRank(
+                diagonal=np.zeros(operator.shape[0]),
+                basis=update_basis,
+                core=update_core,
+            ),
+        )
+    )
+
+
+def _trace_symmetric_dlr(left: _DiagonalLowRank, right: _DiagonalLowRank) -> float:
+    value = float(left.diagonal @ right.diagonal)
+    if right.core.size:
+        value += float(
+            np.trace(right.core @ (right.basis.T @ (left.diagonal[:, None] * right.basis)))
+        )
+    if left.core.size:
+        value += float(
+            np.trace(left.core @ (left.basis.T @ (right.diagonal[:, None] * left.basis)))
+        )
+    if left.core.size and right.core.size:
+        overlap = left.basis.T @ right.basis
+        value += float(np.trace(left.core @ overlap @ right.core @ overlap.T))
+    return value
+
+
+def _multiply_symmetric_dlr(
+    left: _DiagonalLowRank,
+    right: _DiagonalLowRank,
+) -> _GeneralDiagonalLowRank:
+    diagonal = left.diagonal * right.diagonal
+    left_parts: list[NDArray] = []
+    core_parts: list[NDArray] = []
+    right_parts: list[NDArray] = []
+    if right.core.size:
+        left_parts.append(left.diagonal[:, None] * right.basis)
+        core_parts.append(right.core)
+        right_parts.append(right.basis)
+    if left.core.size:
+        left_parts.append(left.basis)
+        core_parts.append(left.core)
+        right_parts.append(right.diagonal[:, None] * left.basis)
+    if left.core.size and right.core.size:
+        left_parts.append(left.basis)
+        core_parts.append(left.core @ (left.basis.T @ right.basis) @ right.core)
+        right_parts.append(right.basis)
+    if not core_parts:
+        empty = np.empty((len(diagonal), 0))
+        return _GeneralDiagonalLowRank(
+            diagonal=diagonal,
+            left=empty,
+            core=np.empty((0, 0)),
+            right=empty,
+        )
+    return _GeneralDiagonalLowRank(
+        diagonal=diagonal,
+        left=np.column_stack(left_parts),
+        core=scipy.linalg.block_diag(*core_parts),
+        right=np.column_stack(right_parts),
+    )
+
+
+def _trace_general_product(
+    left: _GeneralDiagonalLowRank,
+    right: _GeneralDiagonalLowRank,
+) -> float:
+    value = float(left.diagonal @ right.diagonal)
+    if right.core.size:
+        value += float(
+            np.trace(right.core @ (right.right.T @ (left.diagonal[:, None] * right.left)))
+        )
+    if left.core.size:
+        value += float(np.trace(left.core @ (left.right.T @ (right.diagonal[:, None] * left.left))))
+    if left.core.size and right.core.size:
+        value += float(
+            np.trace(
+                left.core @ (left.right.T @ right.left) @ right.core @ (right.right.T @ left.left)
+            )
+        )
+    return value
+
+
+def materialize_compact_operator(operator: CompactSymmetricOperator) -> NDArray:
+    """Materialize a compact operator for dense-reference paths only."""
+    return operator.matvec(np.eye(operator.shape[0]))
+
+
+def compact_operator_diagonal(
+    operator: CompactSymmetricOperator,
+) -> NDArray:
+    """Return an exact compact-operator diagonal in O(Kq + q²) memory."""
+    if isinstance(operator, SumBlockOperator):
+        return sum(
+            (compact_operator_diagonal(item) for item in operator.operators),
+            start=np.zeros(operator.shape[0]),
+        )
+    if isinstance(operator, LowRankSymmetricOperator):
+        return np.sum((operator.basis @ operator.core) * operator.basis, axis=1)
+    raw = operator.raw if isinstance(operator, CenteredBlockOperator) else operator
+    diagonal = np.empty(raw.shape[0], dtype=np.float64)
+    diagonal[raw.small_indices] = np.diag(raw.A)
+    diagonal[raw.structured_indices] = raw.d
+    if isinstance(operator, CenteredBlockOperator):
+        diagonal = (
+            diagonal - 2.0 * operator.cross * operator.center + operator.total * operator.center**2
+        )
+    return diagonal
+
 
 class ScalarSchurFactor:
     """Factorization of one diagonal random-effect block and a dense remainder."""
@@ -558,6 +945,7 @@ class ScalarSchurFactor:
         self.rank = int(k + self._Q_rank)
         self.rank_truncated = self.rank < self.shape[0]
         self._Q_inverse_cache: NDArray | None = None
+        self._inverse_dlr_cache: _DiagonalLowRank | None = None
 
     def _Q_solve(self, rhs: NDArray) -> NDArray:
         """Solve the dense-small Schur system using the cached robust factor."""
@@ -740,23 +1128,87 @@ class ScalarSchurFactor:
             left_right = left_right @ _component_omega(right, self.shape[0])
         return float(scale * np.trace(right_left @ left_right))
 
-    def trace_inverse_operator(self, operator: SymmetricBlockOperator) -> float:
-        """Return ``trace(H^-1 O)`` from matching compact block geometry."""
-        if not np.array_equal(operator.small_indices, self.small_indices) or not np.array_equal(
-            operator.structured_indices,
-            self.structured_indices,
-        ):
-            raise ValueError("Operator and factor must use identical structured partitions.")
-        Q_inverse = self._Q_inverse()
-        inverse_ba = -self._F @ Q_inverse
-        inverse_bb_diagonal = self._d_inv + np.sum(
-            (self._F @ Q_inverse) * self._F,
-            axis=1,
+    def _inverse_dlr(self) -> _DiagonalLowRank:
+        cached = self._inverse_dlr_cache
+        if cached is not None:
+            return cached
+        basis = np.zeros((self.shape[0], len(self.small_indices)))
+        if len(self.small_indices):
+            basis[self.small_indices] = np.eye(len(self.small_indices))
+            basis[self.structured_indices] = -self._F
+        diagonal = np.zeros(self.shape[0])
+        diagonal[self.structured_indices] = self._d_inv
+        cached = _DiagonalLowRank(
+            diagonal=diagonal,
+            basis=basis,
+            core=self._Q_inverse(),
         )
-        return float(
-            np.trace(Q_inverse @ operator.A)
-            + 2.0 * np.sum(inverse_ba * operator.C)
-            + inverse_bb_diagonal @ operator.d
+        self._inverse_dlr_cache = cached
+        return cached
+
+    def _penalty_operator(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+    ) -> SymmetricBlockOperator:
+        indices = _component_indices(component, self.shape[0])
+        local_small = self._small_position[indices]
+        local_structured = self._structured_position[indices]
+        A = np.zeros_like(self.A)
+        C = np.zeros_like(self.C)
+        d = np.zeros_like(self.d)
+        if component.penalty_kind == "identity":
+            if np.all(local_small >= 0):
+                A[local_small, local_small] = scale
+            elif np.all(local_structured >= 0):
+                d[local_structured] = scale
+            else:
+                raise ValueError("Identity penalty crosses structured partitions.")
+        else:
+            if not np.all(local_small >= 0):
+                raise ValueError("A dense structured-operator penalty must lie in the small block.")
+            A[np.ix_(local_small, local_small)] = scale * _component_omega(
+                component,
+                self.shape[0],
+            )
+        return SymmetricBlockOperator(
+            A=A,
+            C=C,
+            d=d,
+            small_indices=self.small_indices,
+            structured_indices=self.structured_indices,
+        )
+
+    def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float:
+        """Return ``trace(H^-1 O)`` from matching compact geometry."""
+        if operator.shape != self.shape:
+            raise ValueError("Operator and factor dimensions must match.")
+        return _trace_symmetric_dlr(self._inverse_dlr(), _operator_dlr(operator))
+
+    def operator_cross_trace(
+        self,
+        left: CompactSymmetricOperator,
+        right: CompactSymmetricOperator,
+    ) -> float:
+        """Return ``trace(H^-1 O_left H^-1 O_right)`` compactly."""
+        if left.shape != self.shape or right.shape != self.shape:
+            raise ValueError("Operators and factor dimensions must match.")
+        inverse = self._inverse_dlr()
+        return _trace_general_product(
+            _multiply_symmetric_dlr(inverse, _operator_dlr(left)),
+            _multiply_symmetric_dlr(inverse, _operator_dlr(right)),
+        )
+
+    def penalty_operator_cross_trace(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+        operator: CompactSymmetricOperator,
+    ) -> float:
+        """Return ``trace(H^-1 lambda*Omega H^-1 O)`` compactly."""
+        return self.operator_cross_trace(
+            self._penalty_operator(component, scale),
+            operator,
         )
 
 
@@ -795,6 +1247,9 @@ class ProfiledScalarSchurFactor:
         self.minimum_local_diagonal = augmented_factor.minimum_local_diagonal
         self.fallback_reason = augmented_factor.fallback_reason
         self.dominant_group_name = augmented_factor.dominant_group_name
+        self.small_indices = augmented_factor.small_indices[1:] - 1
+        self.structured_indices = augmented_factor.structured_indices - 1
+        self._inverse_dlr_cache: _DiagonalLowRank | None = None
 
     @staticmethod
     def _shift_indices(indices: NDArray) -> NDArray[np.intp]:
@@ -854,22 +1309,132 @@ class ProfiledScalarSchurFactor:
             right_scale,
         )
 
-    def trace_inverse_operator(self, operator: SymmetricBlockOperator) -> float:
+    def _inverse_dlr(self) -> _DiagonalLowRank:
+        cached = self._inverse_dlr_cache
+        if cached is not None:
+            return cached
+        q_augmented = len(self.augmented_factor.small_indices)
+        basis = np.zeros((self.shape[0], q_augmented), dtype=np.float64)
+        if len(self.small_indices):
+            basis[self.small_indices, 1:] = np.eye(len(self.small_indices))
+        basis[self.structured_indices] = -self.augmented_factor._F
+        diagonal = np.zeros(self.shape[0], dtype=np.float64)
+        diagonal[self.structured_indices] = self.augmented_factor._d_inv
+        cached = _DiagonalLowRank(
+            diagonal=diagonal,
+            basis=basis,
+            core=self.augmented_factor._Q_inverse(),
+        )
+        self._inverse_dlr_cache = cached
+        return cached
+
+    def _penalty_operator(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+    ) -> SymmetricBlockOperator:
+        indices = _component_indices(component, self.shape[0])
+        small_positions = np.full(self.shape[0], -1, dtype=np.intp)
+        small_positions[self.small_indices] = np.arange(len(self.small_indices))
+        structured_positions = np.full(self.shape[0], -1, dtype=np.intp)
+        structured_positions[self.structured_indices] = np.arange(len(self.structured_indices))
+        local_small = small_positions[indices]
+        local_structured = structured_positions[indices]
+        A = np.zeros((len(self.small_indices), len(self.small_indices)))
+        C = np.zeros((len(self.structured_indices), len(self.small_indices)))
+        d = np.zeros(len(self.structured_indices))
+        if component.penalty_kind == "identity":
+            if np.all(local_small >= 0):
+                A[local_small, local_small] = scale
+            elif np.all(local_structured >= 0):
+                d[local_structured] = scale
+            else:
+                raise ValueError("Identity penalty crosses structured partitions.")
+        else:
+            if not np.all(local_small >= 0):
+                raise ValueError("A dense structured-operator penalty must lie in the small block.")
+            A[np.ix_(local_small, local_small)] = scale * _component_omega(
+                component,
+                self.shape[0],
+            )
+        return SymmetricBlockOperator(
+            A=A,
+            C=C,
+            d=d,
+            small_indices=self.small_indices,
+            structured_indices=self.structured_indices,
+        )
+
+    def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float:
         """Return ``trace(Hc^-1 Gc)`` for a matching raw data operator."""
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
-        q = len(operator.small_indices)
-        augmented_operator = SymmetricBlockOperator(
-            A=np.pad(operator.A, ((1, 0), (1, 0))),
-            C=np.pad(operator.C, ((0, 0), (1, 0))),
-            d=operator.d,
-            small_indices=np.concatenate(
-                (np.array([0], dtype=np.intp), operator.small_indices + 1)
-            ),
-            structured_indices=operator.structured_indices + 1,
+        if isinstance(operator, SymmetricBlockOperator):
+            operator = CenteredBlockOperator(
+                raw=operator,
+                cross=self.xtw,
+                total=self.sum_w,
+                center=self.mean_x,
+            )
+        return _trace_symmetric_dlr(self._inverse_dlr(), _operator_dlr(operator))
+
+    def operator_cross_trace(
+        self,
+        left: CompactSymmetricOperator,
+        right: CompactSymmetricOperator,
+    ) -> float:
+        """Return ``trace(H^-1 O_left H^-1 O_right)`` compactly."""
+        if left.shape != self.shape or right.shape != self.shape:
+            raise ValueError("Operators and factor dimensions must match.")
+        inverse = self._inverse_dlr()
+        left_product = _multiply_symmetric_dlr(inverse, _operator_dlr(left))
+        right_product = _multiply_symmetric_dlr(inverse, _operator_dlr(right))
+        return _trace_general_product(left_product, right_product)
+
+    def penalty_operator_cross_trace(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+        operator: CompactSymmetricOperator,
+    ) -> float:
+        """Return ``trace(H^-1 lambda*Omega H^-1 O)`` compactly."""
+        return self.operator_cross_trace(
+            self._penalty_operator(component, scale),
+            operator,
         )
-        if augmented_operator.A.shape != (q + 1, q + 1):  # pragma: no cover - invariant
-            raise RuntimeError("Augmented compact operator has inconsistent shape.")
-        raw_trace = self.augmented_factor.trace_inverse_operator(augmented_operator)
-        centered_correction = float(self.xtw @ self.solve(self.xtw) / self.sum_w)
-        return float(raw_trace - centered_correction)
+
+
+def solve_cached_scalar_structured(
+    system: ScalarStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambdas: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+) -> CachedScalarStructuredSolution:
+    """Solve a lambda trial from cached working sufficient statistics."""
+    penalized = build_penalized_scalar_operator(
+        system,
+        group_matrices,
+        groups,
+        lambdas,
+        reml_penalties=reml_penalties,
+    )
+    augmented_factor, rhs = build_augmented_scalar_factor(system, penalized)
+    coefficients = augmented_factor.solve(rhs)
+    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    factor = ProfiledScalarSchurFactor(
+        augmented_factor=augmented_factor,
+        sum_w=system.sum_w,
+        xtw=xtw,
+    )
+    return CachedScalarStructuredSolution(
+        beta=coefficients[1:],
+        intercept=float(coefficients[0]),
+        factor=factor,
+        penalized_operator=penalized,
+        log_det_H=augmented_factor.logdet(),
+        hessian_rank=augmented_factor.rank,
+    )

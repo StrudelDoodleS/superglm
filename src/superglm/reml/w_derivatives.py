@@ -27,7 +27,20 @@ from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     penalty_component_matvec,
 )
+from superglm.solvers.hessian_factor import (
+    DenseHessianFactor,
+    HessianFactor,
+    as_hessian_factor,
+)
 from superglm.solvers.pirls import PIRLSResult
+from superglm.solvers.structured import (
+    CenteredBlockOperator,
+    CompactSymmetricOperator,
+    LowRankSymmetricOperator,
+    SumBlockOperator,
+    build_scalar_structured_system,
+    compact_operator_diagonal,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -162,7 +175,7 @@ def reml_w_correction(
     link: Any,
     groups: list[GroupSlice],
     pirls_result: PIRLSResult,
-    XtWX_S_inv: NDArray,
+    XtWX_S_inv: NDArray | HessianFactor,
     lambdas: dict[str, float],
     reml_groups=None,
     penalty_caches: dict | None = None,
@@ -254,7 +267,8 @@ def reml_w_correction(
     if not np.any(dW_deta):
         return None  # Structurally constant working curvature.
 
-    p = XtWX_S_inv.shape[0]
+    factor = as_hessian_factor(XtWX_S_inv)
+    p = factor.shape[0]
     m = len(penalties)
     grad_correction = np.zeros(m)
     dH_extra: dict[int, NDArray] = {}
@@ -265,15 +279,25 @@ def reml_w_correction(
         sum_w: float | None = float(geometry.sum_w)
         if mean_x.shape != (p,):
             raise ValueError("observed REML geometry does not match the coefficient space")
-        centered_diagonal = np.diag(geometry.centered_data_gram)
+        centered_diagonal = (
+            np.diag(geometry.centered_data_gram)
+            if isinstance(geometry.centered_data_gram, np.ndarray)
+            else compact_operator_diagonal(geometry.centered_data_gram)
+        )
         with np.errstate(invalid="ignore", divide="ignore"):
             centered_scale = np.sqrt(np.abs(centered_diagonal) / sum_w)
         use_stable_signed_gram = not np.all(
             np.isfinite(centered_scale)
         ) or not _raw_centering_well_scaled(mean_x, centered_scale)
     elif pirls_result.rank_info is None:
-        mean_x = np.zeros(p)
-        sum_w = None
+        factor_mean = getattr(factor, "mean_x", None)
+        factor_sum_w = getattr(factor, "sum_w", None)
+        if factor_mean is None or factor_sum_w is None:
+            mean_x = np.zeros(p)
+            sum_w = None
+        else:
+            mean_x = np.asarray(factor_mean, dtype=np.float64)
+            sum_w = float(factor_sum_w)
         use_stable_signed_gram = False
     else:
         mean_x = np.asarray(pirls_result.rank_info.mean_x, dtype=np.float64)
@@ -302,8 +326,38 @@ def reml_w_correction(
         """Apply the transpose of the profiled-intercept design."""
         return dm.rmatvec(values) - mean_x * float(np.sum(values, dtype=np.float64))
 
-    def centered_signed_gram(row_weights: NDArray) -> NDArray:
+    structured_group_index: int | None = None
+    if not isinstance(factor, DenseHessianFactor):
+        dominant_name = getattr(factor, "dominant_group_name", None)
+        structured_group_index = next(
+            (index for index, group in enumerate(groups) if group.name == dominant_name),
+            None,
+        )
+        if structured_group_index is None:
+            raise ValueError("Structured Hessian factor has no matching dominant group.")
+
+    def centered_signed_gram(
+        row_weights: NDArray,
+    ) -> NDArray | CompactSymmetricOperator:
         """Return ``X_c' diag(row_weights) X_c`` for fixed ``mean_x``."""
+        if structured_group_index is not None:
+            system = build_scalar_structured_system(
+                list(dm.group_matrices),
+                groups,
+                row_weights,
+                np.zeros_like(row_weights),
+                dominant_group_index=structured_group_index,
+                tabmat_split=dm.tabmat_split,
+            )
+            cross = np.empty(p, dtype=np.float64)
+            cross[system.operator.small_indices] = system.xtw_small
+            cross[system.operator.structured_indices] = system.xtw_structured
+            return CenteredBlockOperator(
+                raw=system.operator,
+                cross=cross,
+                total=system.sum_w,
+                center=mean_x,
+            )
         if stable_gram_rhs is not None:
             result, _ = centered_gram_rhs(
                 dm=dm,
@@ -353,7 +407,7 @@ def reml_w_correction(
         s_beta[pc.group_sl] = lam * penalty_component_matvec(pc, beta_g, gm)
 
         # dbeta/drho_j = -H^{-1} S_j beta  (IFT)
-        dbeta_j = -(XtWX_S_inv @ s_beta)
+        dbeta_j = -factor.solve(s_beta)
 
         # The intercept is unpenalized and profiled out, so
         # dalpha/drho_j = -mean_x' dbeta/drho_j and hence
@@ -374,7 +428,12 @@ def reml_w_correction(
 
         # Profiled-determinant gradient: centered-Hessian trace plus the
         # scalar 0.5 * log(sum(W)) derivative below.
-        grad_correction[i] = 0.5 * float(np.sum(XtWX_S_inv * C_j))
+        if isinstance(C_j, np.ndarray):
+            if not isinstance(factor, DenseHessianFactor):  # pragma: no cover - branch invariant
+                raise RuntimeError("Structured derivative Gram unexpectedly materialized.")
+            grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
+        else:
+            grad_correction[i] = 0.5 * factor.trace_inverse_operator(C_j)
         dsum_w_j = float(np.sum(a_j, dtype=np.float64))
         if sum_w is not None:
             # The fitted determinant is log(sum(W)) + log|H_c| after
@@ -430,7 +489,7 @@ def reml_w_correction(
                 rhs = Xt_f + lam_i_S_i_dbeta_j + lam_j_S_j_dbeta_i
 
                 # d2beta_hat/(drho_i drho_j) = delta_ij * dbeta_hat/drho_j - H^{-1} rhs
-                d2beta_ij = -(XtWX_S_inv @ rhs)
+                d2beta_ij = -factor.solve(rhs)
                 if i == j:
                     d2beta_ij += dbeta_vectors[j]
 
@@ -445,11 +504,36 @@ def reml_w_correction(
                 # plus the two negative weighted-mean outer products.
                 C_ij = centered_signed_gram(d2w_drho_ij)
                 if sum_w is not None:
-                    C_ij -= sum_w * (
-                        np.outer(dmean_vectors[i], dmean_vectors[j])
-                        + np.outer(dmean_vectors[j], dmean_vectors[i])
-                    )
-                val = 0.5 * float(np.sum(XtWX_S_inv * C_ij))
+                    if isinstance(C_ij, np.ndarray):
+                        C_ij -= sum_w * (
+                            np.outer(dmean_vectors[i], dmean_vectors[j])
+                            + np.outer(dmean_vectors[j], dmean_vectors[i])
+                        )
+                    else:
+                        C_ij = SumBlockOperator(
+                            (
+                                C_ij,
+                                LowRankSymmetricOperator(
+                                    basis=np.column_stack((dmean_vectors[i], dmean_vectors[j])),
+                                    core=np.array(
+                                        [
+                                            [0.0, -sum_w],
+                                            [-sum_w, 0.0],
+                                        ]
+                                    ),
+                                ),
+                            )
+                        )
+                if isinstance(C_ij, np.ndarray):
+                    if not isinstance(
+                        factor, DenseHessianFactor
+                    ):  # pragma: no cover - branch invariant
+                        raise RuntimeError(
+                            "Structured second derivative Gram unexpectedly materialized."
+                        )
+                    val = 0.5 * float(np.sum(factor.inverse * C_ij))
+                else:
+                    val = 0.5 * factor.trace_inverse_operator(C_ij)
                 if sum_w is not None:
                     d2sum_w_ij = float(np.sum(d2w_drho_ij, dtype=np.float64))
                     val += 0.5 * (

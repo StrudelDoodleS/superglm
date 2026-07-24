@@ -120,3 +120,77 @@ def test_poisson_estimates_finite_random_effect_lambda_with_exposure_offset():
     assert 1e-6 <= lam <= 1e10
     assert np.isfinite(model._reml_result.objective)
     assert np.all(np.isfinite(model.predict(X, offset=np.log(exposure))))
+
+
+def test_poisson_structured_reml_matches_dense_lambda_trajectory():
+    rng = np.random.default_rng(7814)
+    n_levels = 18
+    repeats = 18
+    codes = np.repeat(np.arange(n_levels), repeats)
+    effects = rng.normal(scale=0.4, size=n_levels)
+    exposure = rng.uniform(0.5, 2.2, size=len(codes))
+    y = rng.poisson(exposure * np.exp(-0.2 + effects[codes])).astype(float)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    common = {
+        "family": "poisson",
+        "features": {"broker": RandomEffect()},
+        "selection_penalty": 0,
+    }
+
+    dense = SuperGLM(**common, direct_solve="gram")
+    structured = SuperGLM(**common, direct_solve="structured")
+    dense.fit_reml(X, y, offset=np.log(exposure), max_reml_iter=8)
+    structured.fit_reml(X, y, offset=np.log(exposure), max_reml_iter=8)
+
+    np.testing.assert_allclose(structured.result.beta, dense.result.beta, atol=2e-8)
+    np.testing.assert_allclose(structured.result.intercept, dense.result.intercept, atol=2e-8)
+    np.testing.assert_allclose(
+        structured._reml_lambdas["broker"],
+        dense._reml_lambdas["broker"],
+        rtol=2e-7,
+    )
+    assert len(structured._reml_result.lambda_history) == len(dense._reml_result.lambda_history)
+    for structured_lambdas, dense_lambdas in zip(
+        structured._reml_result.lambda_history,
+        dense._reml_result.lambda_history,
+        strict=True,
+    ):
+        np.testing.assert_allclose(
+            structured_lambdas["broker"],
+            dense_lambdas["broker"],
+            rtol=2e-7,
+        )
+
+
+def test_gamma_structured_observed_reml_matches_dense():
+    rng = np.random.default_rng(993)
+    n_levels = 14
+    repeats = 20
+    codes = np.repeat(np.arange(n_levels), repeats)
+    effects = rng.normal(scale=0.28, size=n_levels)
+    mean = np.exp(0.35 + effects[codes])
+    y = rng.gamma(shape=4.0, scale=mean / 4.0)
+    X = pd.DataFrame({"broker": np.array([f"b{i}" for i in codes], dtype=object)})
+    common = {
+        "family": "gamma",
+        "features": {"broker": RandomEffect()},
+        "selection_penalty": 0,
+    }
+
+    dense = SuperGLM(**common, direct_solve="gram")
+    structured = SuperGLM(**common, direct_solve="structured")
+    dense.fit_reml(X, y, max_reml_iter=6)
+    structured.fit_reml(X, y, max_reml_iter=6)
+
+    np.testing.assert_allclose(structured.result.beta, dense.result.beta, atol=3e-8)
+    np.testing.assert_allclose(structured.result.intercept, dense.result.intercept, atol=3e-8)
+    np.testing.assert_allclose(
+        structured._reml_lambdas["broker"],
+        dense._reml_lambdas["broker"],
+        rtol=3e-7,
+    )
+    np.testing.assert_allclose(
+        structured._reml_result.objective,
+        dense._reml_result.objective,
+        atol=2e-8,
+    )

@@ -18,9 +18,14 @@ from superglm.reml.penalty_algebra import (
     compute_total_penalty_rank,
     penalty_component_matvec,
     penalty_component_quadratic,
-    penalty_component_trace,
+)
+from superglm.solvers.hessian_factor import (
+    DenseHessianFactor,
+    HessianFactor,
+    as_hessian_factor,
 )
 from superglm.solvers.pirls import PIRLSResult
+from superglm.solvers.structured import CompactSymmetricOperator
 from superglm.types import PenaltyComponent
 
 
@@ -65,7 +70,7 @@ def _penalty_component_cross_trace(
 def reml_direct_gradient(
     group_matrices: list,
     result: PIRLSResult,
-    XtWX_S_inv: NDArray,
+    XtWX_S_inv: NDArray | HessianFactor,
     lambdas: dict[str, float],
     reml_groups=None,
     penalty_ranks: dict[str, float] | None = None,
@@ -77,6 +82,7 @@ def reml_direct_gradient(
     tensor_pair_evaluations: dict | None = None,
 ) -> NDArray:
     """Partial gradient of the LAML objective w.r.t. log-lambdas (fixed W)."""
+    factor = as_hessian_factor(XtWX_S_inv)
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -101,8 +107,7 @@ def reml_direct_gradient(
         gm = group_matrices[pc.group_index]
         beta_g = result.beta[pc.group_sl]
         quad = penalty_component_quadratic(pc, beta_g, gm)
-        H_inv_jj = XtWX_S_inv[pc.group_sl, pc.group_sl]
-        trace_term = penalty_component_trace(pc, H_inv_jj, gm)
+        trace_term = factor.trace_inverse_penalty(pc)
         lam = float(lambdas[pc.name])
         r_j = r_dict.get(pc.name, pc.rank)
         if r_j <= 0 and penalty_ranks is not None:
@@ -114,7 +119,7 @@ def reml_direct_gradient(
 def reml_direct_hessian(
     group_matrices: list,
     distribution: Any,
-    XtWX_S_inv: NDArray,
+    XtWX_S_inv: NDArray | HessianFactor,
     lambdas: dict[str, float],
     reml_groups=None,
     gradient: NDArray | None = None,
@@ -124,7 +129,7 @@ def reml_direct_hessian(
     n_obs: int = 0,
     phi_hat: float = 1.0,
     penalty_nullity: float | None = None,
-    dH_extra: dict[int, NDArray] | None = None,
+    dH_extra: dict[int, NDArray | CompactSymmetricOperator] | None = None,
     dH2_cross: NDArray | None = None,
     *,
     inverse_phi: float | None = None,
@@ -154,10 +159,12 @@ def reml_direct_hessian(
     )
     if gradient is None:
         raise ValueError("gradient is required for the direct REML Hessian")
+    factor = as_hessian_factor(XtWX_S_inv)
+    dense_inverse = factor.inverse if isinstance(factor, DenseHessianFactor) else None
     m = len(penalties)
-    p = XtWX_S_inv.shape[0]
+    p = factor.shape[0]
     hess = np.zeros((m, m))
-    use_compact_trace = dH_extra is None
+    use_compact_trace = dH_extra is None or dense_inverse is None
 
     # Pre-compute log-det derivatives for multi-penalty groups.
     # r_logdet: first derivative d(log|S|_+)/drho_i
@@ -185,14 +192,16 @@ def reml_direct_hessian(
             compact_dS.append((pc, lam, gm))
         else:
             F = np.zeros((p, p))
-            inverse_columns = XtWX_S_inv[:, pc.group_sl]
+            if dense_inverse is None:  # pragma: no cover - branch invariant
+                raise RuntimeError("Dense derivative branch has no dense inverse.")
+            inverse_columns = dense_inverse[:, pc.group_sl]
             F[:, pc.group_sl] = (
                 lam * inverse_columns
                 if pc.penalty_kind == "identity"
                 else inverse_columns @ (lam * omega_ssp)
             )
             if dH_extra is not None and i in dH_extra:
-                F = F + XtWX_S_inv @ dH_extra[i]
+                F = F + factor.solve(dH_extra[i])
             full_HdHj[i] = F
 
         if pirls_result is not None:
@@ -216,39 +225,102 @@ def reml_direct_hessian(
                         pc_i.group_sl.stop,
                         pc_i.group_sl.step,
                     )
-                    H_block = same_slice_H_blocks.get(key_i)
-                    if H_block is None:
-                        H_block = XtWX_S_inv[pc_i.group_sl, pc_i.group_sl]
-                        same_slice_H_blocks[key_i] = H_block
-                    A_i = same_slice_products.get(i)
-                    if A_i is None:
-                        if pc_i.penalty_kind == "identity":
-                            A_i = lam_i * H_block
-                        else:
-                            A_i = H_block @ (
-                                lam_i * _penalty_component_omega_ssp(pc_i, gm_i)
+                    if dense_inverse is not None:
+                        H_block = same_slice_H_blocks.get(key_i)
+                        if H_block is None:
+                            H_block = dense_inverse[pc_i.group_sl, pc_i.group_sl]
+                            same_slice_H_blocks[key_i] = H_block
+                        A_i = same_slice_products.get(i)
+                        if A_i is None:
+                            if pc_i.penalty_kind == "identity":
+                                A_i = lam_i * H_block
+                            else:
+                                A_i = H_block @ (lam_i * _penalty_component_omega_ssp(pc_i, gm_i))
+                            same_slice_products[i] = A_i
+                        A_j = same_slice_products.get(j)
+                        if A_j is None:
+                            if pc_j.penalty_kind == "identity":
+                                A_j = lam_j * H_block
+                            else:
+                                A_j = H_block @ (lam_j * _penalty_component_omega_ssp(pc_j, gm_j))
+                            same_slice_products[j] = A_j
+                        trace_value = float(np.sum(A_i * A_j.T))
+                    else:
+                        trace_value = factor.penalty_cross_trace(
+                            pc_i,
+                            pc_j,
+                            lam_i,
+                            lam_j,
+                        )
+                    if dH_extra is not None:
+                        left_extra = dH_extra.get(i)
+                        right_extra = dH_extra.get(j)
+                        if left_extra is not None:
+                            if isinstance(left_extra, np.ndarray):
+                                raise TypeError(
+                                    "Structured Hessian correction received a dense operator."
+                                )
+                            trace_value += factor.penalty_operator_cross_trace(
+                                pc_j,
+                                lam_j,
+                                left_extra,
                             )
-                        same_slice_products[i] = A_i
-                    A_j = same_slice_products.get(j)
-                    if A_j is None:
-                        if pc_j.penalty_kind == "identity":
-                            A_j = lam_j * H_block
-                        else:
-                            A_j = H_block @ (
-                                lam_j * _penalty_component_omega_ssp(pc_j, gm_j)
+                        if right_extra is not None:
+                            if isinstance(right_extra, np.ndarray):
+                                raise TypeError(
+                                    "Structured Hessian correction received a dense operator."
+                                )
+                            trace_value += factor.penalty_operator_cross_trace(
+                                pc_i,
+                                lam_i,
+                                right_extra,
                             )
-                        same_slice_products[j] = A_j
-                    h = -0.5 * float(np.sum(A_i * A_j.T))
+                        if left_extra is not None and right_extra is not None:
+                            assert not isinstance(left_extra, np.ndarray)
+                            assert not isinstance(right_extra, np.ndarray)
+                            trace_value += factor.operator_cross_trace(
+                                left_extra,
+                                right_extra,
+                            )
+                    h = -0.5 * trace_value
                 else:
-                    h = -0.5 * _penalty_component_cross_trace(
-                        XtWX_S_inv,
+                    trace_value = factor.penalty_cross_trace(
                         pc_i,
-                        lam_i,
-                        gm_i,
                         pc_j,
+                        lam_i,
                         lam_j,
-                        gm_j,
                     )
+                    if dH_extra is not None:
+                        left_extra = dH_extra.get(i)
+                        right_extra = dH_extra.get(j)
+                        if left_extra is not None:
+                            if isinstance(left_extra, np.ndarray):
+                                raise TypeError(
+                                    "Structured Hessian correction received a dense operator."
+                                )
+                            trace_value += factor.penalty_operator_cross_trace(
+                                pc_j,
+                                lam_j,
+                                left_extra,
+                            )
+                        if right_extra is not None:
+                            if isinstance(right_extra, np.ndarray):
+                                raise TypeError(
+                                    "Structured Hessian correction received a dense operator."
+                                )
+                            trace_value += factor.penalty_operator_cross_trace(
+                                pc_i,
+                                lam_i,
+                                right_extra,
+                            )
+                        if left_extra is not None and right_extra is not None:
+                            assert not isinstance(left_extra, np.ndarray)
+                            assert not isinstance(right_extra, np.ndarray)
+                            trace_value += factor.operator_cross_trace(
+                                left_extra,
+                                right_extra,
+                            )
+                    h = -0.5 * trace_value
             else:
                 h = -0.5 * float(np.sum(full_HdHj[i] * full_HdHj[j].T))
             hess[i, j] = h
@@ -277,7 +349,7 @@ def reml_direct_hessian(
         if not np.isfinite(inv_phi) or inv_phi <= 0.0:
             raise ValueError("inverse_phi must be positive and finite")
         S_beta = np.column_stack(s_beta_list)
-        HinvSbeta = XtWX_S_inv @ S_beta
+        HinvSbeta = factor.solve(S_beta)
         hess -= inv_phi * (S_beta.T @ HinvSbeta)
 
     scale_known = getattr(distribution, "scale_known", True)

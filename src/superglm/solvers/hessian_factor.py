@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from superglm.types import PenaltyComponent
 
 if TYPE_CHECKING:
-    from superglm.solvers.structured import SymmetricBlockOperator
+    from superglm.solvers.structured import CompactSymmetricOperator
 
 
 def _component_indices(component: PenaltyComponent, size: int) -> NDArray[np.intp]:
@@ -63,7 +63,20 @@ class HessianFactor(Protocol):
         right_scale: float,
     ) -> float: ...
 
-    def trace_inverse_operator(self, operator: SymmetricBlockOperator) -> float: ...
+    def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float: ...
+
+    def operator_cross_trace(
+        self,
+        left: CompactSymmetricOperator,
+        right: CompactSymmetricOperator,
+    ) -> float: ...
+
+    def penalty_operator_cross_trace(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+        operator: CompactSymmetricOperator,
+    ) -> float: ...
 
 
 class DenseHessianFactor:
@@ -121,15 +134,57 @@ class DenseHessianFactor:
             left_right = left_right @ _component_omega(right, self.shape[0])
         return float(left_scale * right_scale * np.trace(right_left @ left_right))
 
-    def trace_inverse_operator(self, operator: SymmetricBlockOperator) -> float:
-        """Return ``trace(H^-1 O)`` from compact symmetric operator blocks."""
+    def trace_inverse_operator(self, operator: CompactSymmetricOperator) -> float:
+        """Return ``trace(H^-1 O)`` from a compact symmetric operator."""
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
-        inverse_aa = self.inverse[np.ix_(operator.small_indices, operator.small_indices)]
-        inverse_ba = self.inverse[np.ix_(operator.structured_indices, operator.small_indices)]
-        inverse_bb_diagonal = np.diag(self.inverse)[operator.structured_indices]
-        return float(
-            np.trace(inverse_aa @ operator.A)
-            + 2.0 * np.sum(inverse_ba * operator.C)
-            + inverse_bb_diagonal @ operator.d
-        )
+        from superglm.solvers.structured import materialize_compact_operator
+
+        return float(np.trace(self.inverse @ materialize_compact_operator(operator)))
+
+    def operator_cross_trace(
+        self,
+        left: CompactSymmetricOperator,
+        right: CompactSymmetricOperator,
+    ) -> float:
+        """Return ``trace(H^-1 O_left H^-1 O_right)``."""
+        from superglm.solvers.structured import materialize_compact_operator
+
+        left_matrix = materialize_compact_operator(left)
+        right_matrix = materialize_compact_operator(right)
+        return float(np.trace(self.inverse @ left_matrix @ self.inverse @ right_matrix))
+
+    def penalty_operator_cross_trace(
+        self,
+        component: PenaltyComponent,
+        scale: float,
+        operator: CompactSymmetricOperator,
+    ) -> float:
+        """Return ``trace(H^-1 lambda*Omega H^-1 O)``."""
+        from superglm.solvers.structured import materialize_compact_operator
+
+        penalty = np.zeros(self.shape)
+        indices = _component_indices(component, self.shape[0])
+        if component.penalty_kind == "identity":
+            penalty[indices, indices] = scale
+        else:
+            penalty[np.ix_(indices, indices)] = scale * _component_omega(
+                component,
+                self.shape[0],
+            )
+        matrix = materialize_compact_operator(operator)
+        return float(np.trace(self.inverse @ penalty @ self.inverse @ matrix))
+
+
+def as_hessian_factor(
+    inverse_or_factor: NDArray | HessianFactor,
+    *,
+    log_det: float = float("nan"),
+) -> HessianFactor:
+    """Normalize a historical dense inverse or compact factor to one protocol."""
+    if isinstance(inverse_or_factor, HessianFactor):
+        return inverse_or_factor
+    return DenseHessianFactor(
+        inverse=np.asarray(inverse_or_factor, dtype=np.float64),
+        log_det=log_det,
+    )

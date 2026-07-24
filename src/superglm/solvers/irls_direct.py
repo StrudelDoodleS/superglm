@@ -88,7 +88,7 @@ from superglm.solvers.structured import (
     build_augmented_scalar_factor,
     build_penalized_scalar_operator,
     build_scalar_structured_system,
-    select_structured_group,
+    resolve_structured_backend,
 )
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -502,28 +502,15 @@ def fit_irls_direct(
     if not np.any(weights > 0.0):
         raise ValueError("weights must contain at least one positive value")
 
-    _use_structured = False
-    _structured_group_index: int | None = None
-    _direct_fallback_reason: str | None = None
-    if direct_solve == "structured":
-        selection = select_structured_group(gms, groups, mode="structured")
-        _structured_group_index = selection.group_index
-        _use_structured = True
-    elif direct_solve == "auto":
-        selection = select_structured_group(gms, groups, mode="auto")
-        _structured_group_index = selection.group_index
-        _direct_fallback_reason = selection.fallback_reason
-        if _structured_group_index is not None:
-            dominant_size = gms[_structured_group_index].shape[1]
-            small_size = p - dominant_size
-            dense_cost = float(p**3)
-            structured_cost = float(small_size**3 + dominant_size * small_size**2)
-            _use_structured = dominant_size >= 128 and structured_cost < 0.75 * dense_cost
-            if not _use_structured:
-                _direct_fallback_reason = (
-                    f"RandomEffect block has {dominant_size} coefficients, below the "
-                    "conservative structured crossover"
-                )
+    structured_decision = resolve_structured_backend(
+        gms,
+        groups,
+        direct_solve=direct_solve,
+        coefficient_width=p,
+    )
+    _use_structured = structured_decision.use_structured
+    _structured_group_index = structured_decision.group_index
+    _direct_fallback_reason = structured_decision.fallback_reason
 
     if offset is None:
         offset = np.zeros(n)

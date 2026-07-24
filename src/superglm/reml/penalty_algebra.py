@@ -134,6 +134,27 @@ def total_penalty_quadratic(
     return total
 
 
+def total_penalty_matvec(
+    beta: NDArray,
+    lambdas: float | dict[str, float],
+    penalties: list[PenaltyComponent],
+    group_matrices: list[GroupMatrix],
+) -> NDArray:
+    """Apply the full weighted penalty from compact components."""
+    values = np.asarray(beta, dtype=np.float64)
+    product = np.zeros_like(values)
+    for component in penalties:
+        lam = lambdas[component.name] if isinstance(lambdas, dict) else lambdas
+        if lam == 0:
+            continue
+        product[component.group_sl] += float(lam) * penalty_component_matvec(
+            component,
+            values[component.group_sl],
+            group_matrices[component.group_index],
+        )
+    return product
+
+
 def _extract_tensor_marginal_eigvals(
     omega: NDArray,
     p1: int,

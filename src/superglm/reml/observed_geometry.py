@@ -45,13 +45,25 @@ from superglm.links import (
     SqrtLink,
     stabilize_eta,
 )
+from superglm.reml.penalty_algebra import total_penalty_matvec
 from superglm.solvers.centered_system import (
     TabmatCenteringState,
     build_centered_system,
     grouped_augmented_factor,
 )
+from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
+from superglm.solvers.structured import (
+    CenteredBlockOperator,
+    CompactSymmetricOperator,
+    ProfiledScalarSchurFactor,
+    build_augmented_scalar_factor,
+    build_penalized_scalar_operator,
+    build_scalar_structured_system,
+    compact_operator_diagonal,
+)
+from superglm.types import GroupSlice, PenaltyComponent
 
 
 def _readonly(values: NDArray, *, dtype: Any = np.float64) -> NDArray:
@@ -643,9 +655,9 @@ class ObservedREMLGeometry:
     weight_second_derivative: NDArray | None
     sum_w: float
     mean_x: NDArray
-    centered_data_gram: NDArray
-    centered_hessian: NDArray
-    hessian_inverse: NDArray | None
+    centered_data_gram: NDArray | CompactSymmetricOperator
+    centered_hessian: NDArray | CompactSymmetricOperator
+    hessian_inverse: NDArray | HessianFactor | None
     log_det_H: float  # noqa: N815
     hessian_rank: int
 
@@ -677,8 +689,10 @@ def observed_penalized_mode_score(
     y: NDArray,
     sample_weight: NDArray,
     result: PIRLSResult,
-    penalty: NDArray,
+    penalty: NDArray | None,
     geometry: ObservedREMLGeometry,
+    lambdas: dict[str, float] | None = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
 ) -> ObservedModeScore:
     """Evaluate the full penalized score at a proposed Laplace mode.
 
@@ -690,11 +704,14 @@ def observed_penalized_mode_score(
     """
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    penalty = np.asarray(penalty, dtype=np.float64)
     if y.shape != (dm.n,) or sample_weight.shape != y.shape:
         raise ValueError("mode-score rows must match the design")
-    if penalty.shape != (dm.p, dm.p):
-        raise ValueError("mode-score penalty must match slope coordinates")
+    if penalty is not None:
+        penalty = np.asarray(penalty, dtype=np.float64)
+        if penalty.shape != (dm.p, dm.p):
+            raise ValueError("mode-score penalty must match slope coordinates")
+    elif reml_penalties is None or lambdas is None:
+        raise ValueError("mode-score requires either a dense penalty or compact penalty components")
     if geometry.mu.shape != y.shape:
         raise ValueError("observed geometry does not match mode-score rows")
 
@@ -709,7 +726,11 @@ def observed_penalized_mode_score(
         raise ValueError("penalized mode score is not finite")
 
     intercept_score = float(np.sum(row_score, dtype=np.float64))
-    centered_diagonal = np.diag(geometry.centered_data_gram)
+    centered_diagonal = (
+        np.diag(geometry.centered_data_gram)
+        if isinstance(geometry.centered_data_gram, np.ndarray)
+        else compact_operator_diagonal(geometry.centered_data_gram)
+    )
     with np.errstate(invalid="ignore", divide="ignore"):
         centered_scale = np.sqrt(np.abs(centered_diagonal) / geometry.sum_w)
     raw_centering_safe = np.all(np.isfinite(centered_scale)) and _raw_centering_well_scaled(
@@ -725,7 +746,16 @@ def observed_penalized_mode_score(
             mean_x=geometry.mean_x,
             z_centered=row_score,
         )
-    penalty_score = penalty @ result.beta
+    penalty_score = (
+        penalty @ result.beta
+        if penalty is not None
+        else total_penalty_matvec(
+            result.beta,
+            lambdas,
+            reml_penalties,
+            list(dm.group_matrices),
+        )
+    )
     slope_score = data_slope_score - penalty_score
     max_abs = max(
         abs(intercept_score),
@@ -788,10 +818,14 @@ def build_observed_reml_geometry(
     sample_weight: NDArray,
     offset_arr: NDArray,
     result: PIRLSResult,
-    penalty: NDArray,
+    penalty: NDArray | None,
     tabmat_state: TabmatCenteringState | None = None,
     compute_inverse: bool = True,
     derivative_order: int = 0,
+    groups: list[GroupSlice] | None = None,
+    lambdas: dict[str, float] | None = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    structured_group_index: int | None = None,
 ) -> ObservedREMLGeometry:
     """Build Wood's observed LAML Hessian without altering fit inference state.
 
@@ -805,14 +839,25 @@ def build_observed_reml_geometry(
     offset_arr = np.asarray(offset_arr, dtype=np.float64)
     if y.shape != (dm.n,) or sample_weight.shape != y.shape or offset_arr.shape != y.shape:
         raise ValueError("REML geometry row arrays must match the design")
-    penalty = np.asarray(penalty, dtype=np.float64)
-    if penalty.shape != (dm.p, dm.p) or not np.all(np.isfinite(penalty)):
-        raise ValueError("penalty must be a finite square matrix in slope coordinates")
-    penalty = 0.5 * (penalty + penalty.T)
-    # S is a Gaussian-prior precision and must be PSD.  The shared centered
-    # solver may project tiny round-off in a declared-PSD system, so reject a
-    # materially invalid penalty before entering that path.
-    decompose_gram(penalty)
+    if penalty is not None:
+        penalty = np.asarray(penalty, dtype=np.float64)
+        if penalty.shape != (dm.p, dm.p) or not np.all(np.isfinite(penalty)):
+            raise ValueError("penalty must be a finite square matrix in slope coordinates")
+        penalty = 0.5 * (penalty + penalty.T)
+        # S is a Gaussian-prior precision and must be PSD.  The shared centered
+        # solver may project tiny round-off in a declared-PSD system, so reject a
+        # materially invalid penalty before entering that path.
+        decompose_gram(penalty)
+    elif (
+        structured_group_index is None
+        or groups is None
+        or lambdas is None
+        or reml_penalties is None
+    ):
+        raise ValueError(
+            "compact observed geometry requires groups, lambdas, penalties, "
+            "and a structured group index"
+        )
     if derivative_order not in (0, 1, 2):
         raise ValueError("derivative_order must be 0, 1, or 2")
 
@@ -842,7 +887,80 @@ def build_observed_reml_geometry(
     if not np.isfinite(sum_w) or sum_w <= 0.0:
         raise ValueError("observed intercept curvature must have a positive finite sum")
 
+    if structured_group_index is not None:
+        if groups is None or lambdas is None or reml_penalties is None:
+            raise RuntimeError("Structured observed geometry inputs were not validated.")
+        system = build_scalar_structured_system(
+            list(dm.group_matrices),
+            groups,
+            observed_w,
+            np.zeros(dm.n, dtype=np.float64),
+            dominant_group_index=structured_group_index,
+            tabmat_split=dm.tabmat_split,
+        )
+        penalized = build_penalized_scalar_operator(
+            system,
+            list(dm.group_matrices),
+            groups,
+            lambdas,
+            reml_penalties=reml_penalties,
+        )
+        xtw = np.empty(dm.p, dtype=np.float64)
+        xtw[system.operator.small_indices] = system.xtw_small
+        xtw[system.operator.structured_indices] = system.xtw_structured
+        mean_x = xtw / system.sum_w
+        data_gram = CenteredBlockOperator(
+            raw=system.operator,
+            cross=xtw,
+            total=system.sum_w,
+            center=mean_x,
+        )
+        hessian = CenteredBlockOperator(
+            raw=penalized,
+            cross=xtw,
+            total=system.sum_w,
+            center=mean_x,
+        )
+        augmented_factor, _ = build_augmented_scalar_factor(system, penalized)
+        schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
+        schur_scale = max(
+            float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
+            1.0,
+        )
+        if np.any(schur_eigenvalues < -1e-10 * schur_scale):
+            raise ValueError(
+                "terminal observed REML coefficient Hessian is indefinite; "
+                "the fitted coefficients do not define a valid Laplace mode"
+            )
+        profiled_factor = ProfiledScalarSchurFactor(
+            augmented_factor=augmented_factor,
+            sum_w=system.sum_w,
+            xtw=xtw,
+        )
+        return ObservedREMLGeometry(
+            eta=_readonly(eta),
+            mu=_readonly(mu),
+            weights=_readonly(observed_w),
+            weight_derivative=(
+                _readonly(weight_derivative) if weight_derivative is not None else None
+            ),
+            weight_second_derivative=(
+                _readonly(weight_second_derivative)
+                if weight_second_derivative is not None
+                else None
+            ),
+            sum_w=system.sum_w,
+            mean_x=_readonly(mean_x),
+            centered_data_gram=data_gram,
+            centered_hessian=hessian,
+            hessian_inverse=profiled_factor if compute_inverse else None,
+            log_det_H=augmented_factor.logdet(),
+            hessian_rank=augmented_factor.rank,
+        )
+
     if nonnegative:
+        if penalty is None:  # pragma: no cover - dense branch invariant
+            raise RuntimeError("Dense observed geometry is missing its penalty.")
         centered = build_centered_system(
             dm=dm,
             W=observed_w,
@@ -855,6 +973,8 @@ def build_observed_reml_geometry(
         data_gram = centered.data_gram
         hessian = centered.hessian
     else:
+        if penalty is None:  # pragma: no cover - dense branch invariant
+            raise RuntimeError("Dense observed geometry is missing its penalty.")
         mean_x = _stable_signed_mean(dm, observed_w, sum_w)
         data_gram, _ = centered_gram_rhs(
             dm=dm,

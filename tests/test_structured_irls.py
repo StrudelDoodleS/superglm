@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+import superglm.reml.objective as reml_objective
 import superglm.solvers.irls_direct as irls_direct
 from superglm.distributions import (
     Gamma,
@@ -26,9 +27,14 @@ from superglm.group_matrix import (
 )
 from superglm.links import IdentityLink, LogLink
 from superglm.profiling.tweedie import generate_tweedie_cpg
+from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.penalty_algebra import build_penalty_matrix
+from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.hessian_factor import HessianFactor
-from superglm.solvers.structured import SymmetricBlockOperator
+from superglm.solvers.structured import (
+    SymmetricBlockOperator,
+    materialize_compact_operator,
+)
 from superglm.types import (
     GroupSlice,
     LinearConstraintSet,
@@ -471,3 +477,256 @@ def test_auto_records_dense_fallback_reason_for_constraints():
     assert result.direct_backend == "gram"
     assert "constraint" in result.direct_fallback_reason.lower()
     assert profile["direct_fallback_reason"] == result.direct_fallback_reason
+
+
+def test_structured_factor_matches_dense_fixed_weight_reml_derivatives():
+    dm, groups, penalties, y, weights, offset = _structured_problem(_poisson_response)
+    lambdas = {"policy": 2.75}
+    dense_result, dense_inverse = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        reml_penalties=penalties,
+        tol=1e-10,
+    )
+    structured_result, structured_factor = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="structured",
+        reml_penalties=penalties,
+        tol=1e-10,
+    )
+
+    dense_gradient = reml_direct_gradient(
+        dm.group_matrices,
+        dense_result,
+        dense_inverse,
+        lambdas,
+        reml_penalties=penalties,
+    )
+    structured_gradient = reml_direct_gradient(
+        dm.group_matrices,
+        structured_result,
+        structured_factor,
+        lambdas,
+        reml_penalties=penalties,
+    )
+    np.testing.assert_allclose(structured_gradient, dense_gradient, atol=2e-10)
+
+    dense_hessian = reml_direct_hessian(
+        dm.group_matrices,
+        Poisson(),
+        dense_inverse,
+        lambdas,
+        gradient=dense_gradient,
+        reml_penalties=penalties,
+    )
+    structured_hessian = reml_direct_hessian(
+        dm.group_matrices,
+        Poisson(),
+        structured_factor,
+        lambdas,
+        gradient=structured_gradient,
+        reml_penalties=penalties,
+    )
+    np.testing.assert_allclose(structured_hessian, dense_hessian, atol=2e-10)
+
+
+def test_structured_w_derivatives_match_dense_first_and_second_order():
+    dm, groups, penalties, y, weights, offset = _structured_problem(_poisson_response)
+    lambdas = {"policy": 2.75}
+    dense_result, dense_inverse = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        reml_penalties=penalties,
+        tol=1e-10,
+    )
+    structured_result, structured_factor = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="structured",
+        reml_penalties=penalties,
+        tol=1e-10,
+    )
+    dense_correction = reml_w_correction(
+        dm,
+        LogLink(),
+        groups,
+        dense_result,
+        dense_inverse,
+        lambdas,
+        sample_weight=weights,
+        offset_arr=offset,
+        distribution=Poisson(),
+        w_correction_order=2,
+        reml_penalties=penalties,
+    )
+    structured_correction = reml_w_correction(
+        dm,
+        LogLink(),
+        groups,
+        structured_result,
+        structured_factor,
+        lambdas,
+        sample_weight=weights,
+        offset_arr=offset,
+        distribution=Poisson(),
+        w_correction_order=2,
+        reml_penalties=penalties,
+    )
+    assert dense_correction is not None
+    assert structured_correction is not None
+    dense_gradient_correction, dense_operators, dense_second = dense_correction
+    structured_gradient_correction, structured_operators, structured_second = structured_correction
+    np.testing.assert_allclose(
+        structured_gradient_correction,
+        dense_gradient_correction,
+        atol=3e-9,
+    )
+    for index, dense_operator in dense_operators.items():
+        np.testing.assert_allclose(
+            materialize_compact_operator(structured_operators[index]),
+            dense_operator,
+            atol=2e-9,
+        )
+    np.testing.assert_allclose(structured_second, dense_second, atol=2e-8)
+
+    dense_partial = reml_direct_gradient(
+        dm.group_matrices,
+        dense_result,
+        dense_inverse,
+        lambdas,
+        reml_penalties=penalties,
+    )
+    structured_partial = reml_direct_gradient(
+        dm.group_matrices,
+        structured_result,
+        structured_factor,
+        lambdas,
+        reml_penalties=penalties,
+    )
+    dense_hessian = reml_direct_hessian(
+        dm.group_matrices,
+        Poisson(),
+        dense_inverse,
+        lambdas,
+        gradient=dense_partial,
+        dH_extra=dense_operators,
+        dH2_cross=dense_second,
+        reml_penalties=penalties,
+    )
+    structured_hessian = reml_direct_hessian(
+        dm.group_matrices,
+        Poisson(),
+        structured_factor,
+        lambdas,
+        gradient=structured_partial,
+        dH_extra=structured_operators,
+        dH2_cross=structured_second,
+        reml_penalties=penalties,
+    )
+    np.testing.assert_allclose(structured_hessian, dense_hessian, atol=3e-8)
+
+
+def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
+    dm, groups, penalties, y, weights, offset = _structured_problem(_poisson_response)
+    lambdas = {"policy": 2.75}
+    dense_result, _, dense_gram = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        reml_penalties=penalties,
+        return_xtwx=True,
+        tol=1e-10,
+    )
+    structured_result, _, structured_gram = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Poisson(),
+        link=LogLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="structured",
+        reml_penalties=penalties,
+        return_xtwx=True,
+        tol=1e-10,
+    )
+    dense_penalty = build_penalty_matrix(
+        dm.group_matrices,
+        groups,
+        lambdas,
+        dm.p,
+        reml_penalties=penalties,
+    )
+    dense_value = reml_objective.reml_laml_objective(
+        dm,
+        Poisson(),
+        LogLink(),
+        groups,
+        y,
+        dense_result,
+        lambdas,
+        weights,
+        offset,
+        XtWX=dense_gram,
+        log_det_H=dense_result.log_det_H,
+        S_override=dense_penalty,
+        reml_penalties=penalties,
+    )
+
+    def fail_dense_penalty(*args, **kwargs):
+        raise AssertionError("structured objective expanded a dense penalty")
+
+    monkeypatch.setattr(
+        reml_objective,
+        "build_penalty_matrix",
+        fail_dense_penalty,
+    )
+    structured_value = reml_objective.reml_laml_objective(
+        dm,
+        Poisson(),
+        LogLink(),
+        groups,
+        y,
+        structured_result,
+        lambdas,
+        weights,
+        offset,
+        XtWX=structured_gram,
+        log_det_H=structured_result.log_det_H,
+        reml_penalties=penalties,
+    )
+    np.testing.assert_allclose(structured_value, dense_value, atol=2e-9)

@@ -8,7 +8,14 @@ import numpy as np
 import pytest
 
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
-from superglm.solvers.structured import ScalarSchurFactor, SymmetricBlockOperator
+from superglm.solvers.structured import (
+    CenteredBlockOperator,
+    LowRankSymmetricOperator,
+    ScalarSchurFactor,
+    SumBlockOperator,
+    SymmetricBlockOperator,
+    materialize_compact_operator,
+)
 from superglm.types import PenaltyComponent
 
 
@@ -368,4 +375,74 @@ def test_dense_and_structured_penalty_traces_match_materialized_formulas():
         np.testing.assert_allclose(
             factor.penalty_cross_trace(identity, dense_penalty, 2.0, 3.0),
             6.0 * expected_cross,
+        )
+
+
+def test_compact_centered_and_low_rank_operator_products_match_dense():
+    structured_factor, H = _contiguous_scalar_factor()
+    inverse = np.linalg.inv(H)
+    dense_factor = DenseHessianFactor(
+        inverse=inverse,
+        log_det=np.linalg.slogdet(H)[1],
+    )
+    rng = np.random.default_rng(818)
+    base = SymmetricBlockOperator(
+        A=rng.normal(size=(3, 3)),
+        C=rng.normal(size=(4, 3)),
+        d=rng.normal(size=4),
+        small_indices=np.arange(3, dtype=np.intp),
+        structured_indices=np.arange(3, 7, dtype=np.intp),
+    )
+    base = SymmetricBlockOperator(
+        A=0.5 * (base.A + base.A.T),
+        C=base.C,
+        d=base.d,
+        small_indices=base.small_indices,
+        structured_indices=base.structured_indices,
+    )
+    centered = CenteredBlockOperator(
+        raw=base,
+        cross=rng.normal(size=7),
+        total=-0.35,
+        center=rng.normal(size=7),
+    )
+    low_rank = LowRankSymmetricOperator(
+        basis=rng.normal(size=(7, 2)),
+        core=np.array([[0.3, -0.2], [-0.2, 0.5]]),
+    )
+    combined = SumBlockOperator((centered, low_rank))
+    other = SymmetricBlockOperator(
+        A=np.diag([0.4, -0.1, 0.2]),
+        C=rng.normal(scale=0.2, size=(4, 3)),
+        d=rng.normal(scale=0.3, size=4),
+        small_indices=np.arange(3, dtype=np.intp),
+        structured_indices=np.arange(3, 7, dtype=np.intp),
+    )
+    combined_dense = materialize_compact_operator(combined)
+    other_dense = materialize_compact_operator(other)
+    identity = PenaltyComponent(
+        name="broker",
+        group_name="broker",
+        group_index=1,
+        group_sl=slice(3, 7),
+        omega_raw=None,
+        penalty_kind="identity",
+    )
+    identity_matrix = np.diag([0.0, 0.0, 0.0, 1.7, 1.7, 1.7, 1.7])
+
+    for factor in (dense_factor, structured_factor):
+        np.testing.assert_allclose(
+            factor.trace_inverse_operator(combined),
+            np.trace(inverse @ combined_dense),
+            atol=2e-12,
+        )
+        np.testing.assert_allclose(
+            factor.operator_cross_trace(combined, other),
+            np.trace(inverse @ combined_dense @ inverse @ other_dense),
+            atol=2e-12,
+        )
+        np.testing.assert_allclose(
+            factor.penalty_operator_cross_trace(identity, 1.7, combined),
+            np.trace(inverse @ identity_matrix @ inverse @ combined_dense),
+            atol=2e-12,
         )

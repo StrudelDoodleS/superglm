@@ -34,7 +34,6 @@ from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     compute_penalty_nullity,
     penalty_component_quadratic,
-    penalty_component_trace,
     total_penalty_quadratic,
 )
 from superglm.reml.result import REMLResult
@@ -46,7 +45,9 @@ from superglm.reml.scale import (
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
 from superglm.solvers.centered_system import TabmatCenteringState
+from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.structured import resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -144,6 +145,13 @@ def optimize_direct_reml(
         )
         == "observed"
     )
+    structured_decision = resolve_structured_backend(
+        list(dm.group_matrices),
+        groups,
+        direct_solve=direct_solve,
+        coefficient_width=dm.p,
+    )
+    use_structured = structured_decision.use_structured
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
@@ -191,8 +199,16 @@ def optimize_direct_reml(
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
     # interaction penalty components from a materially stronger seed.
     boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
-    S_boot = build_penalty_matrix(
-        dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
+    S_boot = (
+        None
+        if use_structured
+        else build_penalty_matrix(
+            dm.group_matrices,
+            groups,
+            boot_lambdas,
+            dm.p,
+            reml_penalties=penalties,
+        )
     )
     _t0 = _time.perf_counter()
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
@@ -210,6 +226,7 @@ def optimize_direct_reml(
         profile=profile,
         direct_solve=direct_solve,
         S_override=S_boot,
+        reml_penalties=penalties,
         debug_recorder=debug_recorder,
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
@@ -236,6 +253,7 @@ def optimize_direct_reml(
             hessian_rank=boot_hessian_rank,
             penalties=penalties,
             lambdas=boot_lambdas,
+            coefficient_width=dm.p,
         )
         penalized_deviance = float(boot_result.deviance + pq_boot)
         if isinstance(distribution, Gaussian):
@@ -280,8 +298,7 @@ def optimize_direct_reml(
         gm = dm.group_matrices[pc.group_index]
         beta_g = boot_result.beta[pc.group_sl]
         quad = penalty_component_quadratic(pc, beta_g, gm)
-        H_inv_jj = boot_inv[pc.group_sl, pc.group_sl]
-        trace_term = penalty_component_trace(pc, H_inv_jj, gm)
+        trace_term = as_hessian_factor(boot_inv).trace_inverse_penalty(pc)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
@@ -324,13 +341,16 @@ def optimize_direct_reml(
         # Restore exact fixed values (exp->clip would clamp 0.0 to 1e-6)
         cand_lambdas.update(fixed_lambdas)
 
-        # Pre-build penalty matrix S once for this lambda candidate
-        S_cand = build_penalty_matrix(
-            dm.group_matrices,
-            groups,
-            cand_lambdas,
-            dm.p,
-            reml_penalties=penalties,
+        S_cand = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                cand_lambdas,
+                dm.p,
+                reml_penalties=penalties,
+            )
         )
 
         _t0 = _time.perf_counter()
@@ -352,6 +372,7 @@ def optimize_direct_reml(
             profile=profile,
             direct_solve=direct_solve,
             S_override=S_cand,
+            reml_penalties=penalties,
             debug_recorder=debug_recorder,
             debug_context={"phase": "candidate", "reml_iteration": n_iter},
             trace_run=trace_run,
@@ -380,6 +401,12 @@ def optimize_direct_reml(
                 penalty=S_cand,
                 tabmat_state=observed_tabmat_state,
                 derivative_order=w_correction_order,
+                groups=groups if use_structured else None,
+                lambdas=cand_lambdas if use_structured else None,
+                reml_penalties=penalties if use_structured else None,
+                structured_group_index=(
+                    structured_decision.group_index if use_structured else None
+                ),
             )
             _t_observed_geometry += _time.perf_counter() - _t0
             if geometry.hessian_inverse is None:  # pragma: no cover - requested above
@@ -396,6 +423,8 @@ def optimize_direct_reml(
                 result=pirls_result,
                 penalty=S_cand,
                 geometry=geometry,
+                lambdas=cand_lambdas if use_structured else None,
+                reml_penalties=penalties if use_structured else None,
             )
             _accepted_observed_mode_residual_max = max(
                 _accepted_observed_mode_residual_max,
@@ -458,6 +487,7 @@ def optimize_direct_reml(
                         hessian_rank=hessian_rank,
                         penalties=penalties,
                         lambdas=cand_lambdas,
+                        coefficient_width=dm.p,
                     )
                 if isinstance(objective_evaluation, REMLObjectiveEvaluation):
                     penalized_deviance = objective_evaluation.penalized_deviance
@@ -669,12 +699,16 @@ def optimize_direct_reml(
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1
-            S_trial = build_penalty_matrix(
-                dm.group_matrices,
-                groups,
-                trial_lambdas,
-                dm.p,
-                reml_penalties=penalties,
+            S_trial = (
+                None
+                if use_structured
+                else build_penalty_matrix(
+                    dm.group_matrices,
+                    groups,
+                    trial_lambdas,
+                    dm.p,
+                    reml_penalties=penalties,
+                )
             )
             trial_result, _trial_inv, trial_xtwx = fit_irls_direct(
                 X=dm,
@@ -694,6 +728,7 @@ def optimize_direct_reml(
                 profile=profile,
                 direct_solve=direct_solve,
                 S_override=S_trial,
+                reml_penalties=penalties,
                 debug_recorder=debug_recorder,
                 debug_context={
                     "phase": "line_search",
@@ -725,6 +760,12 @@ def optimize_direct_reml(
                         penalty=S_trial,
                         tabmat_state=observed_tabmat_state,
                         compute_inverse=False,
+                        groups=groups if use_structured else None,
+                        lambdas=trial_lambdas if use_structured else None,
+                        reml_penalties=penalties if use_structured else None,
+                        structured_group_index=(
+                            structured_decision.group_index if use_structured else None
+                        ),
                     )
                 except ValueError:
                     _t_observed_geometry += _time.perf_counter() - _t_geometry
@@ -743,6 +784,8 @@ def optimize_direct_reml(
                     result=trial_result,
                     penalty=S_trial,
                     geometry=trial_geometry,
+                    lambdas=trial_lambdas if use_structured else None,
+                    reml_penalties=penalties if use_structured else None,
                 )
                 trial_mode_residual = trial_mode_score.relative_max
                 if trial_mode_score.relative_max > observed_mode_tol:
