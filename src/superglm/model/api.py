@@ -123,13 +123,15 @@ class SuperGLM:
             auto-detected from the parent feature specs.
         active_set : bool
             Use active-set cycling in the BCD solver.
-        direct_solve : {"auto", "gram", "qr"}
+        direct_solve : {"auto", "gram", "qr", "structured"}
             Strategy for the direct IRLS solver (lambda1=0).
             ``"auto"`` uses gram-based Cholesky with residual-checked SVD
             fallback, warning after repeated fallbacks.  ``"gram"`` forces
             the gram path without warnings.  ``"qr"`` uses QR on the
             materialised weighted design matrix — backward-stable but
             O(n·p²) per iteration.  Intended for smaller datasets.
+            ``"structured"`` forces structured elimination for an eligible
+            random-effect block.
         discrete : bool
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
@@ -1208,23 +1210,63 @@ class SuperGLM:
 
     # ── Prediction ────────────────────────────────────────────────
 
-    def _predict_eta_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_exact(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private exact canonical predictor on the link scale."""
-        return base.predict_eta_exact(self, X, offset)
+        return base.predict_eta_exact(self, X, offset, random_effects=random_effects)
 
-    def _predict_eta_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_fast_discrete(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private fast discrete predictor on the link scale."""
-        return base.predict_eta_fast_discrete(self, X, offset)
+        return base.predict_eta_fast_discrete(
+            self,
+            X,
+            offset,
+            random_effects=random_effects,
+        )
 
-    def _predict_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_exact(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private exact canonical predictor on the response scale."""
-        return base.predict_exact(self, X, offset)
+        return base.predict_exact(self, X, offset, random_effects=random_effects)
 
-    def _predict_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_fast_discrete(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private fast discrete predictor on the response scale."""
-        return base.predict_fast_discrete(self, X, offset)
+        return base.predict_fast_discrete(
+            self,
+            X,
+            offset,
+            random_effects=random_effects,
+        )
 
-    def predict(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def predict(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Predict the response mean for new data.
 
         Parameters
@@ -1234,13 +1276,16 @@ class SuperGLM:
         offset : NDArray or None
             Optional offset added to the linear predictor before
             applying the inverse link.
+        random_effects : {"conditional", "population"}
+            Whether to include fitted random-effect contributions. Population
+            prediction sets them to zero.
 
         Returns
         -------
         NDArray
             Predicted mean on the response scale (inverse-link of eta).
         """
-        return self._predict_exact(X, offset)
+        return self._predict_exact(X, offset, random_effects=random_effects)
 
     # ── Monotone repair ─────────────────────────────────────────
 

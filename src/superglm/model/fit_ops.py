@@ -165,6 +165,18 @@ class PathResult:
         return telemetry
 
 
+def _reject_random_effect_selection_fit(model, method: str) -> None:
+    """Keep variance components out of selection-penalty fit paths."""
+    from superglm.features.random_effect import RandomEffect
+
+    names = [name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)]
+    if names:
+        joined = ", ".join(repr(name) for name in names)
+        raise NotImplementedError(
+            f"RandomEffect feature(s) {joined} are only supported with fit_reml(), not {method}()."
+        )
+
+
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -689,6 +701,8 @@ def _fit_in_workspace(
     penalty = configured_penalty(model)
     lambda2 = configured_lambda2(model)
 
+    _reject_random_effect_selection_fit(model, "fit")
+
     # lambda_policy is only supported in fit_reml(); reject here.
     for name, spec in model._specs.items():
         lp = getattr(spec, "_lambda_policy", None)
@@ -854,6 +868,7 @@ def _fit_path_in_workspace(
     lambda_seq=None,
 ):
     """Build and solve a regularization path on private mutable state."""
+    _reject_random_effect_selection_fit(model, "fit_path")
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,

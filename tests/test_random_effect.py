@@ -3,10 +3,35 @@
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import superglm
-from superglm import LambdaPolicy, RandomEffect
+from superglm import LambdaPolicy, Numeric, RandomEffect, SuperGLM
+
+
+def _fit_prediction_model(*, unseen="population"):
+    X = pd.DataFrame(
+        {
+            "x": np.array([-1.0, 0.0, 1.0, 2.0, -0.5, 1.5]),
+            "broker": np.array(["a", "a", "b", "b", "c", "c"], dtype=object),
+        }
+    )
+    y = np.array([0.2, 0.8, 1.9, 2.8, -0.1, 1.1])
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Numeric(),
+            "broker": RandomEffect(
+                unseen=unseen,
+                lambda_policy=LambdaPolicy.fixed(1.5),
+            ),
+        },
+        selection_penalty=0,
+        direct_solve="gram",
+    )
+    model.fit_reml(X, y, max_reml_iter=2)
+    return model, X
 
 
 def test_random_effect_is_exported_from_top_level():
@@ -122,3 +147,80 @@ def test_random_effect_transform_and_reconstruct_keep_all_levels():
         "levels": ["a", "b", "c"],
         "effects": {"a": 0.1, "b": -0.2, "c": 0.3},
     }
+
+
+def test_superglm_accepts_structured_direct_solver_mode():
+    model = SuperGLM(
+        features={"broker": RandomEffect()},
+        selection_penalty=0,
+        direct_solve="structured",
+    )
+
+    assert model._direct_solve == "structured"
+
+
+@pytest.mark.parametrize("method", ["fit", "fit_path"])
+def test_random_effect_rejects_selection_fit_paths(method):
+    X = pd.DataFrame({"broker": np.array(["a", "b", "a", "c"], dtype=object)})
+    y = np.array([1.0, 2.0, 1.5, 0.5])
+    model = SuperGLM(
+        family="gaussian",
+        features={"broker": RandomEffect()},
+        selection_penalty=0.1,
+    )
+
+    with pytest.raises(NotImplementedError, match="RandomEffect.*fit_reml"):
+        if method == "fit":
+            model.fit(X, y)
+        else:
+            model.fit_path(X, y, n_lambda=2)
+
+
+def test_random_effect_prediction_defaults_to_conditional_and_supports_population_mode():
+    model, X = _fit_prediction_model()
+
+    default = model.predict(X)
+    conditional = model.predict(X, random_effects="conditional")
+    population = model.predict(X, random_effects="population")
+
+    np.testing.assert_allclose(default, conditional, rtol=0.0, atol=0.0)
+    expected_population = model.result.intercept + X["x"].to_numpy() * model.result.beta[0]
+    np.testing.assert_allclose(population, expected_population)
+    assert not np.allclose(conditional, population)
+
+
+def test_random_effect_population_unseen_matches_population_prediction():
+    model, _ = _fit_prediction_model(unseen="population")
+    X_new = pd.DataFrame({"x": [0.25], "broker": ["new"]})
+
+    conditional = model.predict(X_new, random_effects="conditional")
+    population = model.predict(X_new, random_effects="population")
+
+    np.testing.assert_allclose(conditional, population)
+
+
+def test_random_effect_error_policy_applies_only_to_conditional_unseen_levels():
+    model, _ = _fit_prediction_model(unseen="error")
+    X_new = pd.DataFrame({"x": [0.25], "broker": ["new"]})
+
+    with pytest.raises(ValueError, match="unseen"):
+        model.predict(X_new, random_effects="conditional")
+    population = model.predict(X_new, random_effects="population")
+
+    assert np.isfinite(population[0])
+
+
+@pytest.mark.parametrize("mode", ["conditional", "population"])
+def test_random_effect_prediction_rejects_missing_values_in_every_mode(mode):
+    model, _ = _fit_prediction_model()
+    X_new = pd.DataFrame({"x": [0.25], "broker": [None]})
+
+    with pytest.raises(ValueError, match="missing values"):
+        model.predict(X_new, random_effects=mode)
+
+
+def test_random_effect_prediction_rejects_unknown_mode():
+    model, X = _fit_prediction_model()
+
+    with pytest.raises(ValueError, match="random_effects"):
+        model.predict(X, random_effects="marginal")

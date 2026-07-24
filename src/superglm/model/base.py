@@ -373,8 +373,16 @@ def _predict_eta(
     offset: NDArray | None,
     *,
     fast_discrete: bool,
+    random_effects: str,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor on exact or fast-discrete blocks."""
+    if random_effects not in ("conditional", "population"):
+        raise ValueError(
+            f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
+        )
+
+    from superglm.features.random_effect import RandomEffect
+
     frame = as_eager_frame(X)
     plan = _prediction_plan(model)
     required_columns = tuple(
@@ -390,6 +398,9 @@ def _predict_eta(
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
 
     for term in plan["features"]:
+        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
+            term["spec"].validate_prediction_values(frame.column_array(term["name"]))
+            continue
         if fast_discrete:
             eta += scorer(model, term, frame, beta_all)
         else:
@@ -410,18 +421,34 @@ def predict_eta_exact(
     model,
     X: EagerFrame | FrameLike,
     offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the exact canonical contract."""
-    return _predict_eta(model, X, offset, fast_discrete=False)
+    return _predict_eta(
+        model,
+        X,
+        offset,
+        fast_discrete=False,
+        random_effects=random_effects,
+    )
 
 
 def predict_eta_fast_discrete(
     model,
     X: FrameLike,
     offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the fast discrete contract."""
-    return _predict_eta(model, X, offset, fast_discrete=True)
+    return _predict_eta(
+        model,
+        X,
+        offset,
+        fast_discrete=True,
+        random_effects=random_effects,
+    )
 
 
 def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
@@ -429,14 +456,32 @@ def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
     return clip_mu(model._link.inverse(eta), model._distribution)
 
 
-def predict_exact(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+def predict_exact(
+    model,
+    X: FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray:
     """Predict the response mean through the exact canonical contract."""
-    return _eta_to_mu(model, predict_eta_exact(model, X, offset))
+    return _eta_to_mu(
+        model,
+        predict_eta_exact(model, X, offset, random_effects=random_effects),
+    )
 
 
-def predict_fast_discrete(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+def predict_fast_discrete(
+    model,
+    X: FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray:
     """Predict the response mean through the fast discrete contract."""
-    return _eta_to_mu(model, predict_eta_fast_discrete(model, X, offset))
+    return _eta_to_mu(
+        model,
+        predict_eta_fast_discrete(model, X, offset, random_effects=random_effects),
+    )
 
 
 def resolve_penalty(
@@ -549,8 +594,10 @@ def init_model(
     model._degree = degree
     model._categorical_base = categorical_base
     model._active_set = active_set
-    if direct_solve not in ("auto", "gram", "qr"):
-        raise ValueError(f"direct_solve must be 'auto', 'gram', or 'qr', got {direct_solve!r}")
+    if direct_solve not in ("auto", "gram", "qr", "structured"):
+        raise ValueError(
+            f"direct_solve must be 'auto', 'gram', 'qr', or 'structured', got {direct_solve!r}"
+        )
     model._direct_solve = direct_solve
     model._discrete = discrete
     model._n_bins = copy.deepcopy(n_bins)
@@ -850,6 +897,12 @@ def rebuild_dm_with_lambdas(
     )
 
 
-def predict(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+def predict(
+    model,
+    X: FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray:
     """Predict the response mean for new data."""
-    return predict_exact(model, X, offset)
+    return predict_exact(model, X, offset, random_effects=random_effects)
