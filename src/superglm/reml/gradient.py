@@ -104,7 +104,7 @@ def reml_direct_gradient(
     if not np.isfinite(inv_phi) or inv_phi <= 0.0:
         raise ValueError("inverse_phi must be positive and finite")
     for i, pc in enumerate(penalties):
-        gm = group_matrices[pc.group_index]
+        gm = group_matrices[pc.group_index] if 0 <= pc.group_index < len(group_matrices) else None
         beta_g = result.beta[pc.group_sl]
         quad = penalty_component_quadratic(pc, beta_g, gm)
         trace_term = factor.trace_inverse_penalty(pc)
@@ -185,7 +185,7 @@ def reml_direct_hessian(
     quad_per_group: list[float] = []
     s_beta_list: list[NDArray] = []
     for i, pc in enumerate(penalties):
-        gm = group_matrices[pc.group_index]
+        gm = group_matrices[pc.group_index] if 0 <= pc.group_index < len(group_matrices) else None
         lam = lambdas[pc.name]
         if use_compact_trace:
             compact_dS.append((pc, lam, gm))

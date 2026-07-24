@@ -209,10 +209,15 @@ def total_penalty_quadratic(
         lam = lambdas[component.name] if isinstance(lambdas, dict) else lambdas
         if lam == 0:
             continue
+        group_matrix = (
+            group_matrices[component.group_index]
+            if 0 <= component.group_index < len(group_matrices)
+            else None
+        )
         total += float(lam) * penalty_component_quadratic(
             component,
             np.asarray(beta)[component.group_sl],
-            group_matrices[component.group_index],
+            group_matrix,
         )
     return total
 
@@ -230,10 +235,15 @@ def total_penalty_matvec(
         lam = lambdas[component.name] if isinstance(lambdas, dict) else lambdas
         if lam == 0:
             continue
+        group_matrix = (
+            group_matrices[component.group_index]
+            if 0 <= component.group_index < len(group_matrices)
+            else None
+        )
         product[component.group_sl] += float(lam) * penalty_component_matvec(
             component,
             values[component.group_sl],
-            group_matrices[component.group_index],
+            group_matrix,
         )
     return product
 

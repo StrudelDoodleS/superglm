@@ -109,7 +109,7 @@ logger = logging.getLogger(__name__)
 def _stable_penalized_deviance_delta(
     candidate: _IRLSState,
     committed: _IRLSState,
-    penalty_matvec: Callable[[NDArray], NDArray],
+    penalty_matvec: Callable[[NDArray], NDArray] | NDArray,
 ) -> float:
     """Compare ``D + beta' S beta`` without subtracting two quadratics.
 
@@ -119,7 +119,12 @@ def _stable_penalized_deviance_delta(
     identity evaluates that difference directly from the coefficient update.
     """
     delta_beta = candidate.beta - committed.beta
-    penalty_direction = penalty_matvec(candidate.beta + committed.beta)
+    summed_beta = candidate.beta + committed.beta
+    penalty_direction = (
+        penalty_matvec(summed_beta)
+        if callable(penalty_matvec)
+        else np.asarray(penalty_matvec, dtype=np.float64) @ summed_beta
+    )
     penalty_delta = math.fsum(
         float(delta_value * direction_value)
         for delta_value, direction_value in zip(
