@@ -36,7 +36,11 @@ from superglm.reml.scale import (
 )
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.structured import (
+    BlockSchurFactor,
+    BlockStructuredSystem,
+    BlockSymmetricOperator,
     CenteredBlockOperator,
+    ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
@@ -58,26 +62,36 @@ def _build_structured_linear_system_state(
     result,
 ) -> StructuredLinearSystemState | None:
     """Distill a final structured refit into compact persistent state."""
-    if not isinstance(factor, ProfiledScalarSchurFactor):
+    if not isinstance(factor, ProfiledScalarSchurFactor | ProfiledBlockSchurFactor):
         return None
     system = cache.get("structured_system")
     penalized_operator = cache.get("penalized_operator")
-    if not isinstance(system, ScalarStructuredSystem) or not isinstance(
+    if not isinstance(system, ScalarStructuredSystem | BlockStructuredSystem) or not isinstance(
         penalized_operator,
-        SymmetricBlockOperator,
+        SymmetricBlockOperator | BlockSymmetricOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact system state")
-    if not isinstance(data_operator, SymmetricBlockOperator):
+    if not isinstance(data_operator, SymmetricBlockOperator | BlockSymmetricOperator):
         raise RuntimeError("terminal structured refit omitted its compact data operator")
 
-    coefficient_factor = ScalarSchurFactor(
-        A=penalized_operator.A,
-        C=penalized_operator.C,
-        d=penalized_operator.d,
-        small_indices=penalized_operator.small_indices,
-        structured_indices=penalized_operator.structured_indices,
-        term_name=system.dominant_group_name,
-    )
+    if isinstance(penalized_operator, BlockSymmetricOperator):
+        coefficient_factor = BlockSchurFactor(
+            A=penalized_operator.A,
+            C=penalized_operator.C,
+            D=penalized_operator.D,
+            small_indices=penalized_operator.small_indices,
+            structured_indices=penalized_operator.structured_indices,
+            term_name=system.dominant_group_name,
+        )
+    else:
+        coefficient_factor = ScalarSchurFactor(
+            A=penalized_operator.A,
+            C=penalized_operator.C,
+            d=penalized_operator.d,
+            small_indices=penalized_operator.small_indices,
+            structured_indices=penalized_operator.structured_indices,
+            term_name=system.dominant_group_name,
+        )
     xtw = np.empty(system.operator.shape[0], dtype=np.float64)
     xtw[system.operator.small_indices] = system.xtw_small
     xtw[system.operator.structured_indices] = system.xtw_structured

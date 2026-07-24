@@ -38,9 +38,9 @@ from superglm.solvers.structured import (
     CompactSymmetricOperator,
     LowRankSymmetricOperator,
     SumBlockOperator,
-    build_scalar_structured_system,
+    build_structured_system,
     compact_operator_diagonal,
-    get_scalar_structured_layout,
+    get_structured_layout,
     structured_design_matvec,
     structured_design_rmatvec,
 )
@@ -357,7 +357,7 @@ def reml_w_correction(
         )
         if structured_group_index is None:
             raise ValueError("Structured Hessian factor has no matching dominant group.")
-        structured_layout = get_scalar_structured_layout(
+        structured_layout = get_structured_layout(
             dm,
             groups,
             dominant_group_index=structured_group_index,
@@ -368,7 +368,7 @@ def reml_w_correction(
     ) -> NDArray | CompactSymmetricOperator:
         """Return ``X_c' diag(row_weights) X_c`` for fixed ``mean_x``."""
         if structured_group_index is not None:
-            system = build_scalar_structured_system(
+            system = build_structured_system(
                 list(dm.group_matrices),
                 groups,
                 row_weights,

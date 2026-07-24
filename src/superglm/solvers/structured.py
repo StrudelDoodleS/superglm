@@ -177,11 +177,11 @@ class StructuredLevelSupport:
 class StructuredLinearSystemState:
     """Authoritative compact factors and moments retained after a fit."""
 
-    coefficient_factor: ScalarSchurFactor
-    profiled_factor: ProfiledScalarSchurFactor
-    augmented_factor: ScalarSchurFactor
-    system: ScalarStructuredSystem
-    penalized_operator: SymmetricBlockOperator
+    coefficient_factor: ScalarSchurFactor | BlockSchurFactor
+    profiled_factor: ProfiledScalarSchurFactor | ProfiledBlockSchurFactor
+    augmented_factor: ScalarSchurFactor | BlockSchurFactor
+    system: ScalarStructuredSystem | BlockStructuredSystem
+    penalized_operator: SymmetricBlockOperator | BlockSymmetricOperator
     centered_data_operator: CenteredBlockOperator
     support_totals: dict[str, StructuredLevelSupport]
     backend: str = "structured"
@@ -225,6 +225,41 @@ def _structured_auto_is_beneficial(
     schur_small_dimension = small_size + 1
     dense_cost = float(dense_dimension**3)
     structured_cost = float(schur_small_dimension**3 + dominant_size * schur_small_dimension**2)
+    cost_ratio = structured_cost / dense_cost
+    return (
+        coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH
+        and cost_ratio <= _AUTO_MAX_STRUCTURED_COST_RATIO,
+        cost_ratio,
+    )
+
+
+def _block_structured_auto_is_beneficial(
+    n_levels: int,
+    block_size: int,
+    small_size: int,
+) -> tuple[bool, float]:
+    """Estimate the block-Schur crossover from the actual ``K``, ``k``, and ``q``.
+
+    The estimate counts local factorizations, local solves against the
+    dense-small block, Schur accumulation, and the final dense-small
+    factorization.  It intentionally ignores shared row-moment work, so auto
+    selection only chooses the block backend when its linear algebra alone has
+    a material cubic-cost advantage.
+    """
+    if n_levels < 1 or block_size < 1 or small_size < 0:
+        raise ValueError(
+            "Block structured auto dimensions require positive K and k and non-negative q."
+        )
+    coefficient_width = n_levels * block_size + small_size
+    dense_dimension = coefficient_width + 1
+    schur_small_dimension = small_size + 1
+    dense_cost = float(dense_dimension**3)
+    structured_cost = float(
+        n_levels * block_size**3
+        + n_levels * block_size**2 * schur_small_dimension
+        + n_levels * block_size * schur_small_dimension**2
+        + schur_small_dimension**3
+    )
     cost_ratio = structured_cost / dense_cost
     return (
         coefficient_width >= _AUTO_MIN_COEFFICIENT_WIDTH
@@ -331,12 +366,20 @@ def resolve_structured_backend(
             fallback_reason=None,
         )
 
-    dominant_size = group_matrices[selection.group_index].shape[1]
+    dominant_matrix = group_matrices[selection.group_index]
+    dominant_size = dominant_matrix.shape[1]
     small_size = coefficient_width - dominant_size
-    use_structured, cost_ratio = _structured_auto_is_beneficial(
-        dominant_size,
-        small_size,
-    )
+    if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+        use_structured, cost_ratio = _block_structured_auto_is_beneficial(
+            dominant_matrix.n_levels,
+            dominant_matrix.block_size,
+            small_size,
+        )
+    else:
+        use_structured, cost_ratio = _structured_auto_is_beneficial(
+            dominant_size,
+            small_size,
+        )
     fallback_reason = None
     if not use_structured:
         geometry_name = (
@@ -347,11 +390,16 @@ def resolve_structured_backend(
             )
             else "RandomEffect"
         )
+        if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+            dimensions = (
+                f"K={dominant_matrix.n_levels}, k={dominant_matrix.block_size}, q={small_size}"
+            )
+        else:
+            dimensions = f"K={dominant_size}, q={small_size}"
         fallback_reason = (
             f"{geometry_name} geometry is below the measured structured crossover "
-            f"(p={coefficient_width}, K={dominant_size}, q={small_size}, "
-            f"estimated_cost_ratio={cost_ratio:.3f}; require p >= "
-            f"{_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
+            f"(p={coefficient_width}, {dimensions}, estimated_cost_ratio={cost_ratio:.3f}; "
+            f"require p >= {_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
             f"{_AUTO_MAX_STRUCTURED_COST_RATIO:.2f})"
         )
     return StructuredBackendDecision(
@@ -1046,6 +1094,207 @@ def build_penalized_scalar_operator(
     )
 
 
+def build_penalized_block_operator(
+    system: BlockStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    S_override: NDArray | None = None,
+) -> BlockSymmetricOperator:
+    """Add compact penalties to a factor-smooth block Gram."""
+    operator = system.operator
+    p = operator.shape[0]
+    A = np.array(operator.A, copy=True)
+    D = np.array(operator.D, copy=True)
+    small_position = np.full(p, -1, dtype=np.intp)
+    small_position[operator.small_indices] = np.arange(len(operator.small_indices))
+    structured_position = np.full(p, -1, dtype=np.intp)
+    structured_position[operator.structured_indices.ravel()] = np.arange(
+        operator.n_levels * operator.block_size
+    )
+
+    if S_override is not None:
+        penalty = np.asarray(S_override, dtype=np.float64)
+        if penalty.shape != (p, p):
+            raise ValueError(f"S_override must have shape ({p}, {p}).")
+        flat_structured = operator.structured_indices.ravel()
+        cross = penalty[np.ix_(flat_structured, operator.small_indices)]
+        if np.any(np.abs(cross) > 1e-12):
+            raise ValueError("S_override couples the dominant and dense-small blocks.")
+        A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
+        structured_penalty = penalty[np.ix_(flat_structured, flat_structured)]
+        residual = np.array(structured_penalty, copy=True)
+        for level in range(operator.n_levels):
+            local = slice(
+                level * operator.block_size,
+                (level + 1) * operator.block_size,
+            )
+            D[level] += structured_penalty[local, local]
+            residual[local, local] = 0.0
+        if np.any(np.abs(residual) > 1e-12):
+            raise ValueError("S_override couples distinct factor-smooth levels.")
+        return BlockSymmetricOperator(
+            A=A,
+            C=operator.C,
+            D=D,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+        )
+
+    if reml_penalties is not None:
+        for component in reml_penalties:
+            lam = _lambda_for_component(lambda2, component.name)
+            if lam == 0.0:
+                continue
+            indices = _component_indices(component, p)
+            local_small = small_position[indices]
+            local_structured = structured_position[indices]
+            wholly_small = np.all(local_small >= 0)
+            wholly_structured = np.all(local_structured >= 0)
+            if not wholly_small and not wholly_structured:
+                raise ValueError(
+                    f"Penalty component {component.name!r} crosses structured partitions."
+                )
+            if component.penalty_kind == "identity":
+                if wholly_small:
+                    A[local_small, local_small] += lam
+                else:
+                    levels = local_structured // operator.block_size
+                    coordinates = local_structured % operator.block_size
+                    D[levels, coordinates, coordinates] += lam
+                continue
+            if component.penalty_kind == "repeated":
+                if not wholly_structured:
+                    raise ValueError(
+                        f"Repeated penalty component {component.name!r} must lie in "
+                        "the dominant factor-smooth block."
+                    )
+                if (
+                    component.repeat_count != operator.n_levels
+                    or component.block_width != operator.block_size
+                    or not np.array_equal(
+                        indices.reshape(operator.n_levels, operator.block_size),
+                        operator.structured_indices,
+                    )
+                ):
+                    raise ValueError(
+                        f"Repeated penalty component {component.name!r} does not match "
+                        "the dominant factor-smooth geometry."
+                    )
+                omega = np.asarray(component.omega_ssp, dtype=np.float64)
+                if omega.shape != (operator.block_size, operator.block_size):
+                    raise ValueError(
+                        f"Repeated penalty component {component.name!r} has shape "
+                        f"{omega.shape}; expected "
+                        f"({operator.block_size}, {operator.block_size})."
+                    )
+                D += lam * omega[None, :, :]
+                continue
+
+            omega = _dense_component_omega(
+                component,
+                group_matrices[component.group_index],
+            )
+            if omega.shape != (len(indices), len(indices)):
+                raise ValueError(
+                    f"Penalty component {component.name!r} has shape {omega.shape}; "
+                    f"expected ({len(indices)}, {len(indices)})."
+                )
+            if not wholly_small:
+                raise ValueError(
+                    f"Dense penalty component {component.name!r} cannot span the "
+                    "dominant factor-smooth block."
+                )
+            A[np.ix_(local_small, local_small)] += lam * omega
+    else:
+        for group_index, (matrix, group) in enumerate(zip(group_matrices, groups, strict=True)):
+            if not group.penalized:
+                continue
+            indices = np.arange(group.start, group.end, dtype=np.intp)
+            local_small = small_position[indices]
+            local_structured = structured_position[indices]
+            if isinstance(matrix, FactorSmoothGroupMatrix):
+                if not np.all(local_structured >= 0):
+                    raise ValueError(
+                        f"FactorSmooth group {group.name!r} is not the dominant block."
+                    )
+                for suffix, omega in matrix.repeated_penalty_components:
+                    if isinstance(lambda2, dict):
+                        lam = float(
+                            lambda2.get(
+                                f"{group.name}:{suffix}",
+                                lambda2.get(group.name, 0.0),
+                            )
+                        )
+                    else:
+                        lam = float(lambda2)
+                    D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
+                continue
+            lam = (
+                float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
+            )
+            if lam == 0.0:
+                continue
+            if isinstance(matrix, RandomEffectGroupMatrix):
+                if not np.all(local_small >= 0):
+                    raise ValueError(
+                        f"RandomEffect group {group.name!r} crosses structured partitions."
+                    )
+                A[local_small, local_small] += lam
+                continue
+            omega_raw = getattr(matrix, "omega", None)
+            if omega_raw is None or not hasattr(matrix, "R_inv"):
+                continue
+            if not np.all(local_small >= 0):
+                raise ValueError(
+                    f"Penalty geometry for dominant group index {group_index} is unsupported."
+                )
+            omega = np.asarray(
+                matrix.R_inv.T @ omega_raw @ matrix.R_inv,
+                dtype=np.float64,
+            )
+            A[np.ix_(local_small, local_small)] += lam * omega
+
+    return BlockSymmetricOperator(
+        A=A,
+        C=operator.C,
+        D=D,
+        small_indices=operator.small_indices,
+        structured_indices=operator.structured_indices,
+    )
+
+
+def build_penalized_structured_operator(
+    system: ScalarStructuredSystem | BlockStructuredSystem,
+    group_matrices: list[GroupMatrix],
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    *,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    S_override: NDArray | None = None,
+) -> SymmetricBlockOperator | BlockSymmetricOperator:
+    """Dispatch compact penalty assembly by structured-system geometry."""
+    if isinstance(system, BlockStructuredSystem):
+        return build_penalized_block_operator(
+            system,
+            group_matrices,
+            groups,
+            lambda2,
+            reml_penalties=reml_penalties,
+            S_override=S_override,
+        )
+    return build_penalized_scalar_operator(
+        system,
+        group_matrices,
+        groups,
+        lambda2,
+        reml_penalties=reml_penalties,
+        S_override=S_override,
+    )
+
+
 def build_augmented_scalar_factor(
     system: ScalarStructuredSystem,
     penalized_operator: SymmetricBlockOperator,
@@ -1091,6 +1340,70 @@ def build_augmented_scalar_factor(
     rhs[operator.small_indices + 1] = system.xtwz_small
     rhs[operator.structured_indices + 1] = system.xtwz_structured
     return factor, rhs
+
+
+def build_augmented_block_factor(
+    system: BlockStructuredSystem,
+    penalized_operator: BlockSymmetricOperator,
+) -> tuple[BlockSchurFactor, NDArray]:
+    """Add the intercept to a factor-smooth block system and factor it."""
+    operator = system.operator
+    if not np.array_equal(
+        penalized_operator.small_indices,
+        operator.small_indices,
+    ) or not np.array_equal(
+        penalized_operator.structured_indices,
+        operator.structured_indices,
+    ):
+        raise ValueError("Penalized and unpenalized operators must use identical partitions.")
+
+    q = len(operator.small_indices)
+    p = operator.shape[0]
+    A_augmented = np.empty((q + 1, q + 1), dtype=np.float64)
+    A_augmented[0, 0] = system.sum_w
+    A_augmented[0, 1:] = system.xtw_small
+    A_augmented[1:, 0] = system.xtw_small
+    A_augmented[1:, 1:] = penalized_operator.A
+    C_augmented = np.empty(
+        (operator.n_levels, operator.block_size, q + 1),
+        dtype=np.float64,
+    )
+    C_augmented[:, :, 0] = system.xtw_structured
+    C_augmented[:, :, 1:] = operator.C
+    small_indices = np.concatenate(
+        [
+            np.array([0], dtype=np.intp),
+            operator.small_indices + 1,
+        ]
+    )
+    structured_indices = operator.structured_indices + 1
+    factor = BlockSchurFactor(
+        A=A_augmented,
+        C=C_augmented,
+        D=penalized_operator.D,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+        term_name=system.dominant_group_name,
+    )
+    rhs = np.empty(p + 1, dtype=np.float64)
+    rhs[0] = system.sum_wz
+    rhs[operator.small_indices + 1] = system.xtwz_small
+    rhs[operator.structured_indices + 1] = system.xtwz_structured
+    return factor, rhs
+
+
+def build_augmented_structured_factor(
+    system: ScalarStructuredSystem | BlockStructuredSystem,
+    penalized_operator: SymmetricBlockOperator | BlockSymmetricOperator,
+) -> tuple[ScalarSchurFactor | BlockSchurFactor, NDArray]:
+    """Dispatch intercept augmentation and Schur factorization."""
+    if isinstance(system, BlockStructuredSystem):
+        if not isinstance(penalized_operator, BlockSymmetricOperator):
+            raise TypeError("Block structured systems require a block penalized operator.")
+        return build_augmented_block_factor(system, penalized_operator)
+    if not isinstance(penalized_operator, SymmetricBlockOperator):
+        raise TypeError("Scalar structured systems require a scalar penalized operator.")
+    return build_augmented_scalar_factor(system, penalized_operator)
 
 
 @dataclass(frozen=True)

@@ -55,14 +55,17 @@ from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
+    BlockSchurFactor,
     CenteredBlockOperator,
     CompactSymmetricOperator,
+    ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
-    build_augmented_scalar_factor,
-    build_penalized_scalar_operator,
-    build_scalar_structured_system,
+    ScalarSchurFactor,
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+    build_structured_system,
     compact_operator_diagonal,
-    get_scalar_structured_layout,
+    get_structured_layout,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -891,12 +894,12 @@ def build_observed_reml_geometry(
     if structured_group_index is not None:
         if groups is None or lambdas is None or reml_penalties is None:
             raise RuntimeError("Structured observed geometry inputs were not validated.")
-        structured_layout = get_scalar_structured_layout(
+        structured_layout = get_structured_layout(
             dm,
             groups,
             dominant_group_index=structured_group_index,
         )
-        system = build_scalar_structured_system(
+        system = build_structured_system(
             list(dm.group_matrices),
             groups,
             observed_w,
@@ -904,7 +907,7 @@ def build_observed_reml_geometry(
             dominant_group_index=structured_group_index,
             layout=structured_layout,
         )
-        penalized = build_penalized_scalar_operator(
+        penalized = build_penalized_structured_operator(
             system,
             list(dm.group_matrices),
             groups,
@@ -927,7 +930,7 @@ def build_observed_reml_geometry(
             total=system.sum_w,
             center=mean_x,
         )
-        augmented_factor, _ = build_augmented_scalar_factor(system, penalized)
+        augmented_factor, _ = build_augmented_structured_factor(system, penalized)
         schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
         schur_scale = max(
             float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
@@ -938,11 +941,20 @@ def build_observed_reml_geometry(
                 "terminal observed REML coefficient Hessian is indefinite; "
                 "the fitted coefficients do not define a valid Laplace mode"
             )
-        profiled_factor = ProfiledScalarSchurFactor(
-            augmented_factor=augmented_factor,
-            sum_w=system.sum_w,
-            xtw=xtw,
-        )
+        if isinstance(augmented_factor, BlockSchurFactor):
+            profiled_factor = ProfiledBlockSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=system.sum_w,
+                xtw=xtw,
+            )
+        elif isinstance(augmented_factor, ScalarSchurFactor):
+            profiled_factor = ProfiledScalarSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=system.sum_w,
+                xtw=xtw,
+            )
+        else:  # pragma: no cover - structured dispatch invariant
+            raise TypeError("Unsupported structured observed factor geometry.")
         return ObservedREMLGeometry(
             eta=_readonly(eta),
             mu=_readonly(mu),

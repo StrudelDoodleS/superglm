@@ -82,13 +82,19 @@ from superglm.solvers.rank import (
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
 from superglm.solvers.structured import (
+    BlockSchurFactor,
+    BlockStructuredSystem,
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
+    ScalarSchurFactor,
     ScalarStructuredSystem,
     SymmetricBlockOperator,
-    build_augmented_scalar_factor,
-    build_penalized_scalar_operator,
-    build_scalar_structured_system,
-    get_scalar_structured_layout,
+    build_augmented_structured_factor,
+    build_penalized_structured_operator,
+    build_structured_system,
+    get_structured_layout,
     resolve_structured_backend,
 )
 from superglm.solvers.working_rows import (
@@ -513,7 +519,7 @@ def fit_irls_direct(
     _structured_group_index = structured_decision.group_index
     _direct_fallback_reason = structured_decision.fallback_reason
     _structured_layout = (
-        get_scalar_structured_layout(
+        get_structured_layout(
             dm,
             groups,
             dominant_group_index=_structured_group_index,
@@ -1054,9 +1060,9 @@ def fit_irls_direct(
 
     t_start = time.perf_counter()
     converged = False
-    XtWX_beta: NDArray | SymmetricBlockOperator | None = None
-    _final_structured_system: ScalarStructuredSystem | None = None
-    _final_penalized_operator: SymmetricBlockOperator | None = None
+    XtWX_beta: NDArray | SymmetricBlockOperator | BlockSymmetricOperator | None = None
+    _final_structured_system: ScalarStructuredSystem | BlockStructuredSystem | None = None
+    _final_penalized_operator: SymmetricBlockOperator | BlockSymmetricOperator | None = None
 
     # Phase timing accumulators
     _t_working = 0.0
@@ -1066,7 +1072,7 @@ def fit_irls_direct(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
-    _last_working_structured: ScalarStructuredSystem | None = None
+    _last_working_structured: ScalarStructuredSystem | BlockStructuredSystem | None = None
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = evaluate_state(
@@ -1385,7 +1391,7 @@ def fit_irls_direct(
                 if _structured_group_index is None:  # pragma: no cover - selection invariant
                     raise RuntimeError("Structured backend has no dominant group.")
                 Wz = W * z_off
-                structured_system = build_scalar_structured_system(
+                structured_system = build_structured_system(
                     gms,
                     groups,
                     W,
@@ -1394,7 +1400,7 @@ def fit_irls_direct(
                     tabmat_split=_tabmat_split,
                     layout=_structured_layout,
                 )
-                penalized_operator = build_penalized_scalar_operator(
+                penalized_operator = build_penalized_structured_operator(
                     structured_system,
                     gms,
                     groups,
@@ -1408,7 +1414,7 @@ def fit_irls_direct(
                 _t_gram += time.perf_counter() - _t0
 
                 _t0 = time.perf_counter()
-                augmented_factor, rhs = build_augmented_scalar_factor(
+                augmented_factor, rhs = build_augmented_structured_factor(
                     structured_system,
                     penalized_operator,
                 )
@@ -2080,7 +2086,7 @@ def fit_irls_direct(
     # the centered inference system. The structured path retains the same
     # moments in block form and never materializes the dominant K x K block.
     centered_final: CenteredSystem | None = None
-    structured_final: ScalarStructuredSystem | None = None
+    structured_final: ScalarStructuredSystem | BlockStructuredSystem | None = None
     if _use_structured:
         if _return_working_system:
             if _last_working_structured is None:
@@ -2090,7 +2096,7 @@ def fit_irls_direct(
             if _structured_group_index is None:  # pragma: no cover - selection invariant
                 raise RuntimeError("Structured backend has no dominant group.")
             z_off = z - offset
-            structured_final = build_scalar_structured_system(
+            structured_final = build_structured_system(
                 gms,
                 groups,
                 W,
@@ -2100,7 +2106,7 @@ def fit_irls_direct(
                 layout=_structured_layout,
             )
         _final_structured_system = structured_final
-        _final_penalized_operator = build_penalized_scalar_operator(
+        _final_penalized_operator = build_penalized_structured_operator(
             structured_final,
             gms,
             groups,
@@ -2172,19 +2178,28 @@ def fit_irls_direct(
     # rank. With aliases, the same expression is the retained centered-space
     # determinant measure, not the raw augmented pseudo-determinant.
     _t0 = time.perf_counter()
-    structured_factor: ProfiledScalarSchurFactor | None = None
+    structured_factor: ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | None = None
     if _use_structured:
         if structured_final is None or _final_penalized_operator is None:
             raise RuntimeError("Structured fit did not produce final coefficient blocks.")
-        augmented_factor, _ = build_augmented_scalar_factor(
+        augmented_factor, _ = build_augmented_structured_factor(
             structured_final,
             _final_penalized_operator,
         )
-        structured_factor = ProfiledScalarSchurFactor(
-            augmented_factor=augmented_factor,
-            sum_w=structured_final.sum_w,
-            xtw=XtW1,
-        )
+        if isinstance(augmented_factor, BlockSchurFactor):
+            structured_factor = ProfiledBlockSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=structured_final.sum_w,
+                xtw=XtW1,
+            )
+        elif isinstance(augmented_factor, ScalarSchurFactor):
+            structured_factor = ProfiledScalarSchurFactor(
+                augmented_factor=augmented_factor,
+                sum_w=structured_final.sum_w,
+                xtw=XtW1,
+            )
+        else:  # pragma: no cover - structured dispatch invariant
+            raise TypeError("Unsupported structured factor geometry.")
         XtWX_beta = structured_final.operator
         if _compute_reml_geometry:
             XtWX_S_inv_beta: NDArray | HessianFactor = structured_factor
@@ -2195,7 +2210,17 @@ def fit_irls_direct(
             log_det_H = None
             reml_hessian_rank = None
         if _compute_fit_statistics:
-            p_eff = 1.0 + structured_factor.trace_inverse_operator(XtWX_beta)
+            edf_operator = (
+                CenteredBlockOperator(
+                    raw=XtWX_beta,
+                    cross=XtW1,
+                    total=sum_W,
+                    center=mean_x,
+                )
+                if isinstance(XtWX_beta, BlockSymmetricOperator)
+                else XtWX_beta
+            )
+            p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)
         else:
             p_eff = 0.0
         # Structured retained-fit inference consumes the factor directly. A
