@@ -23,7 +23,7 @@ def _natural_parameterization(
     *,
     rank: int,
 ) -> tuple[NDArray, tuple[tuple[str, NDArray], ...]]:
-    """Reproduce ``mgcv:::nat.param(..., type=1)`` for one marginal smooth."""
+    """Build a QR-whitened, RMS-scaled parameterization of one marginal smooth."""
     X = np.asarray(basis, dtype=np.float64)
     S = np.asarray(penalty, dtype=np.float64)
     if X.ndim != 2 or S.shape != (X.shape[1], X.shape[1]):
@@ -37,10 +37,10 @@ def _natural_parameterization(
     _Q, R = np.linalg.qr(X, mode="reduced")
     R_inv = la.solve_triangular(R, np.eye(R.shape[0]), lower=False)
     transformed_penalty = R_inv.T @ S @ R_inv
-    # R's ``eigen(..., symmetric=TRUE)`` uses LAPACK's MRRR driver.  The
-    # zero-eigenvalue subspace is otherwise free to rotate, which matters here
-    # because ``bs="fs"`` gives each null coordinate its own smoothing
-    # parameter.  Pinning ``evr`` reproduces mgcv's stable orientation.
+    # The zero-eigenvalue eigenspace can rotate freely.  Each FS null
+    # coordinate has its own smoothing parameter, so explicitly select the
+    # MRRR driver to keep that coordinate system deterministic under the
+    # tested numerical contract.
     eigenvalues, eigenvectors = la.eigh(
         0.5 * (transformed_penalty + transformed_penalty.T),
         driver="evr",
@@ -77,7 +77,7 @@ def _natural_parameterization(
 
 
 class FactorSmooth:
-    """An mgcv-style factor-by-P-spline interaction.
+    """A factor-by-P-spline interaction.
 
     ``basis="fs"`` is fully penalized and retains independent level curves.
     ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
@@ -210,11 +210,10 @@ class FactorSmooth:
 
         spline = cast(PSpline, Spline(kind="ps", k=self.k, penalty="none", m=self.m))
         spline._place_knots(x)
-        # mgcv's ``ps`` constructor lays the whole equally spaced knot
-        # sequence out from boundaries expanded by 0.1% of the data range.
-        # Ordinary SuperGLM P-splines preserve their pre-expansion interior
-        # knots for backwards compatibility, so align this owned marginal
-        # explicitly before constructing the factor-smooth marginal basis.
+        # Factor-smooth marginals place one equally spaced knot sequence
+        # across boundaries expanded by 0.1% of the data range.  Ordinary
+        # SuperGLM P-splines preserve their pre-expansion interior knots for
+        # backwards compatibility, so align this owned marginal explicitly.
         boundary = spline.fitted_boundary
         if boundary is None:  # pragma: no cover - populated by _place_knots
             raise RuntimeError("FactorSmooth marginal spline has no fitted boundary.")

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.features.factor_smooth as factor_smooth_module
 from superglm import FactorSmooth, Spline, SuperGLM
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "factor_smooth_mgcv_reference.json"
@@ -97,6 +98,18 @@ def test_reference_fixture_is_pinned_to_documented_mgcv_release(mgcv_fixture: di
     assert mgcv_fixture["metadata"]["factor_smooth"] == (
         's(x, f, bs="fs", k=6, xt=list(bs="ps"), m=2)'
     )
+
+
+def test_superglm_source_does_not_name_private_mgcv_symbols() -> None:
+    source_root = Path(factor_smooth_module.__file__).parents[1]
+    private_namespace = "mgcv" + ":" * 3
+    offenders = [
+        str(path.relative_to(source_root))
+        for path in source_root.rglob("*.py")
+        if private_namespace in path.read_text()
+    ]
+
+    assert offenders == []
 
 
 @pytest.mark.parametrize(
