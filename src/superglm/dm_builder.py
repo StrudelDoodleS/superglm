@@ -578,6 +578,7 @@ def _process_info(
                 natural_map=info.factor_smooth_transform,
                 levels=info.factor_smooth_levels,
                 repeated_penalty_components=info.repeated_penalty_components,
+                factor_basis=info.factor_smooth_factor_basis,
                 lambda_policies=info.lambda_policies,
                 bin_idx=info.factor_smooth_bin_idx,
             )

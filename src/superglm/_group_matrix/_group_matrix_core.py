@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
+
+from superglm.factor_smooth_geometry import (
+    adjoint_sum_to_zero_blocks,
+    expand_sum_to_zero_blocks,
+)
 
 from ._group_matrix_kernels import (
     _csr_weighted_gram,
@@ -155,11 +162,11 @@ class RandomEffectGroupMatrix(CategoricalGroupMatrix):
 class FactorSmoothGroupMatrix:
     """Compact all-level factor-by-spline matrix.
 
-    Coefficients are level-major with ``block_size`` natural-basis
-    coefficients per fitted level.  The observation-level interaction matrix
-    is never retained: exact matrices store one shared CSR marginal basis,
-    while discrete matrices store one support basis and an observation-to-bin
-    index.
+    FS coefficients have one natural-basis block per level. SZ coefficients
+    have ``K-1`` free blocks and reconstruct the final raw level by contrast.
+    The observation-level interaction matrix is never retained: exact matrices
+    store one shared CSR marginal basis, while discrete matrices store one
+    support basis and an observation-to-bin index.
     """
 
     __slots__ = (
@@ -171,6 +178,7 @@ class FactorSmoothGroupMatrix:
         "bin_idx",
         "codes",
         "n_levels",
+        "coefficient_levels",
         "block_size",
         "raw_width",
         "natural_map",
@@ -184,6 +192,7 @@ class FactorSmoothGroupMatrix:
         "component_types",
         "projection",
         "structured_kind",
+        "factor_basis",
     )
 
     def __init__(
@@ -195,11 +204,16 @@ class FactorSmoothGroupMatrix:
         natural_map: NDArray,
         levels: tuple[object, ...] | list[object],
         repeated_penalty_components: tuple[tuple[str, NDArray], ...],
+        factor_basis: Literal["fs", "sz"] = "fs",
         lambda_policies=None,
         bin_idx: NDArray | None = None,
     ):
         if n_levels < 1:
             raise ValueError(f"n_levels must be positive, got {n_levels}")
+        if factor_basis not in ("fs", "sz"):
+            raise ValueError(f"factor_basis must be 'fs' or 'sz', got {factor_basis!r}")
+        if factor_basis == "sz" and n_levels < 2:
+            raise ValueError("factor_basis='sz' requires at least two levels")
         level_codes = np.asarray(codes, dtype=np.intp)
         if level_codes.ndim != 1:
             raise ValueError("FactorSmooth codes must be one-dimensional.")
@@ -218,6 +232,8 @@ class FactorSmoothGroupMatrix:
 
         self.codes = level_codes
         self.n_levels = int(n_levels)
+        self.factor_basis = factor_basis
+        self.coefficient_levels = self.n_levels if factor_basis == "fs" else self.n_levels - 1
         self.block_size = int(block_size)
         self.raw_width = int(raw_width)
         self.natural_map = transform
@@ -269,14 +285,16 @@ class FactorSmoothGroupMatrix:
                     f"repeated penalty component {suffix!r} has shape {block.shape}, "
                     f"expected {(block_size, block_size)}"
                 )
-        self.shape = (n_rows, self.n_levels * self.block_size)
+        self.shape = (n_rows, self.coefficient_levels * self.block_size)
 
     def matvec(self, v: NDArray) -> NDArray:
         """Apply the implicit level-major design to a coefficient vector."""
         coefficients = np.asarray(v, dtype=np.float64)
         if coefficients.shape != (self.shape[1],):
             raise ValueError(f"coefficient vector must have shape {(self.shape[1],)}")
-        natural_coefficients = coefficients.reshape(self.n_levels, self.block_size)
+        natural_coefficients = coefficients.reshape(self.coefficient_levels, self.block_size)
+        if self.factor_basis == "sz":
+            natural_coefficients = expand_sum_to_zero_blocks(natural_coefficients)
         raw_coefficients = natural_coefficients @ self.natural_map.T
         if self.is_discrete:
             return _factor_smooth_support_matvec(
@@ -316,7 +334,10 @@ class FactorSmoothGroupMatrix:
                 self.n_levels,
                 self.raw_width,
             )
-        return np.asarray(raw @ self.natural_map, dtype=np.float64).ravel()
+        natural = np.asarray(raw @ self.natural_map, dtype=np.float64)
+        if self.factor_basis == "sz":
+            natural = adjoint_sum_to_zero_blocks(natural)
+        return natural.ravel()
 
     def factor_smooth_sufficient_stats(
         self,
@@ -371,10 +392,24 @@ class FactorSmoothGroupMatrix:
         """Materialize the block-diagonal Gram for small dense-reference fits."""
         zeros = np.zeros(self.shape[0], dtype=np.float64)
         local_gram, _xtw, _rhs = self.factor_smooth_sufficient_stats(W, zeros)
+        return self._public_gram(local_gram)
+
+    def _public_gram(self, local_gram: NDArray) -> NDArray[np.float64]:
+        """Convert raw independent level Grams to public FS/SZ coordinates."""
         result = np.zeros((self.shape[1], self.shape[1]), dtype=np.float64)
-        for level, block in enumerate(local_gram):
-            start = level * self.block_size
-            result[start : start + self.block_size, start : start + self.block_size] = block
+        if self.factor_basis == "fs":
+            for level, block in enumerate(local_gram):
+                start = level * self.block_size
+                result[start : start + self.block_size, start : start + self.block_size] = block
+            return result
+
+        last = local_gram[-1]
+        for left in range(self.coefficient_levels):
+            left_sl = slice(left * self.block_size, (left + 1) * self.block_size)
+            result[left_sl, left_sl] += local_gram[left]
+            for right in range(self.coefficient_levels):
+                right_sl = slice(right * self.block_size, (right + 1) * self.block_size)
+                result[left_sl, right_sl] += last
         return result
 
     def factor_smooth_dense_cross_gram(
@@ -423,11 +458,10 @@ class FactorSmoothGroupMatrix:
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Fuse the dense-reference Gram and two transpose products."""
         local_gram, local_xtw, local_rhs = self.factor_smooth_sufficient_stats(W, Wz)
-        result = np.zeros((self.shape[1], self.shape[1]), dtype=np.float64)
-        for level, block in enumerate(local_gram):
-            start = level * self.block_size
-            result[start : start + self.block_size, start : start + self.block_size] = block
-        return result, local_xtw.ravel(), local_rhs.ravel()
+        if self.factor_basis == "sz":
+            local_xtw = adjoint_sum_to_zero_blocks(local_xtw)
+            local_rhs = adjoint_sum_to_zero_blocks(local_rhs)
+        return self._public_gram(local_gram), local_xtw.ravel(), local_rhs.ravel()
 
     def toarray(self) -> NDArray:
         """Materialize the implicit matrix as an explicit small-model oracle."""
@@ -436,9 +470,12 @@ class FactorSmoothGroupMatrix:
         else:
             natural_basis = np.asarray(self.B @ self.natural_map)
         result = np.zeros(self.shape, dtype=np.float64)
-        rows = np.arange(self.shape[0])
-        for column in range(self.block_size):
-            result[rows, self.codes * self.block_size + column] = natural_basis[:, column]
+        blocks = result.reshape(self.shape[0], self.coefficient_levels, self.block_size)
+        free_rows = np.flatnonzero(self.codes < self.coefficient_levels)
+        blocks[free_rows, self.codes[free_rows]] = natural_basis[free_rows]
+        if self.factor_basis == "sz":
+            final_rows = np.flatnonzero(self.codes == self.n_levels - 1)
+            blocks[final_rows] = -natural_basis[final_rows, None, :]
         return result
 
     def row_subset(self, idx: NDArray) -> FactorSmoothGroupMatrix:
@@ -452,6 +489,7 @@ class FactorSmoothGroupMatrix:
                 natural_map=self.natural_map,
                 levels=self.levels,
                 repeated_penalty_components=self.repeated_penalty_components,
+                factor_basis=self.factor_basis,
                 lambda_policies=self.lambda_policies,
                 bin_idx=self.bin_idx[row_index],
             )
@@ -462,6 +500,7 @@ class FactorSmoothGroupMatrix:
             natural_map=self.natural_map,
             levels=self.levels,
             repeated_penalty_components=self.repeated_penalty_components,
+            factor_basis=self.factor_basis,
             lambda_policies=self.lambda_policies,
         )
 
