@@ -228,6 +228,48 @@ def _factor_smooth_support_sufficient_stats(
 
 
 @njit(cache=True)
+def _factor_smooth_support_cell_sufficient_stats(
+    basis,
+    bin_idx,
+    codes,
+    weights,
+    rhs,
+    n_levels,
+):
+    """Aggregate discrete factor-smooth moments through compact support cells."""
+    n_bins = basis.shape[0]
+    width = basis.shape[1]
+    cell_weights = np.zeros((n_levels, n_bins))
+    cell_rhs = np.zeros((n_levels, n_bins))
+    for row in range(len(codes)):
+        level = codes[row]
+        support = bin_idx[row]
+        cell_weights[level, support] += weights[row]
+        cell_rhs[level, support] += rhs[row]
+
+    gram = np.zeros((n_levels, width, width))
+    xtw = np.zeros((n_levels, width))
+    xt_rhs = np.zeros((n_levels, width))
+    for level in range(n_levels):
+        for support in range(n_bins):
+            weight = cell_weights[level, support]
+            rhs_value = cell_rhs[level, support]
+            if weight == 0.0 and rhs_value == 0.0:
+                continue
+            for left in range(width):
+                left_value = basis[support, left]
+                xtw[level, left] += left_value * weight
+                xt_rhs[level, left] += left_value * rhs_value
+                weighted_left = left_value * weight
+                for right in range(left, width):
+                    product = weighted_left * basis[support, right]
+                    gram[level, left, right] += product
+                    if left != right:
+                        gram[level, right, left] += product
+    return cell_weights, gram, xtw, xt_rhs
+
+
+@njit(cache=True)
 def _factor_smooth_csr_dense_cross(
     data,
     indices,

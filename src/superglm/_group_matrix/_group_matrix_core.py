@@ -19,10 +19,10 @@ from ._group_matrix_kernels import (
     _factor_smooth_csr_matvec,
     _factor_smooth_csr_rmatvec,
     _factor_smooth_csr_sufficient_stats,
+    _factor_smooth_support_cell_sufficient_stats,
     _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
-    _factor_smooth_support_sufficient_stats,
 )
 
 
@@ -351,25 +351,20 @@ class FactorSmoothGroupMatrix:
         if weights.shape != expected or rhs_values.shape != expected:
             raise ValueError("weights and rhs must match the FactorSmooth row count")
         if self.is_discrete:
-            raw_gram, raw_xtw, raw_rhs = _factor_smooth_support_sufficient_stats(
-                self.B_unique,
-                self.bin_idx,
-                self.codes,
-                weights,
-                rhs_values,
-                self.n_levels,
+            _cell_weights, local_gram, xtw_nat, rhs_nat = self.factor_smooth_discrete_cell_moments(
+                weights, rhs_values
             )
-        else:
-            raw_gram, raw_xtw, raw_rhs = _factor_smooth_csr_sufficient_stats(
-                self._data,
-                self._indices,
-                self._indptr,
-                self.codes,
-                weights,
-                rhs_values,
-                self.n_levels,
-                self.raw_width,
-            )
+            return local_gram, xtw_nat, rhs_nat
+        raw_gram, raw_xtw, raw_rhs = _factor_smooth_csr_sufficient_stats(
+            self._data,
+            self._indices,
+            self._indptr,
+            self.codes,
+            weights,
+            rhs_values,
+            self.n_levels,
+            self.raw_width,
+        )
         local_gram = np.einsum(
             "ai,kab,bj->kij",
             self.natural_map,
@@ -386,6 +381,43 @@ class FactorSmoothGroupMatrix:
             local_gram,
             raw_xtw @ self.natural_map,
             raw_rhs @ self.natural_map,
+        )
+
+    def factor_smooth_discrete_cell_moments(
+        self,
+        W: NDArray,
+        rhs: NDArray,
+    ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+        """Return compact cells and natural-basis moments for a discrete block."""
+        weights = np.asarray(W, dtype=np.float64)
+        rhs_values = np.asarray(rhs, dtype=np.float64)
+        expected = (self.shape[0],)
+        if weights.shape != expected or rhs_values.shape != expected:
+            raise ValueError("weights and rhs must match the FactorSmooth row count")
+        if not self.is_discrete:
+            raise ValueError("cell moments require a discrete FactorSmooth matrix")
+
+        cell_weights, raw_gram, raw_xtw, raw_rhs = _factor_smooth_support_cell_sufficient_stats(
+            self.B_unique,
+            self.bin_idx,
+            self.codes,
+            weights,
+            rhs_values,
+            self.n_levels,
+        )
+        local_gram = np.einsum(
+            "ai,kab,bj->kij",
+            self.natural_map,
+            raw_gram,
+            self.natural_map,
+            optimize=True,
+        )
+        local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
+        return (
+            cell_weights,
+            np.ascontiguousarray(local_gram),
+            np.ascontiguousarray(raw_xtw @ self.natural_map),
+            np.ascontiguousarray(raw_rhs @ self.natural_map),
         )
 
     def gram(self, W: NDArray) -> NDArray:
