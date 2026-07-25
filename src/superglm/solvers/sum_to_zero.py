@@ -363,6 +363,7 @@ class SumToZeroBlockFactor:
         self._logdet = local_logdet + self._border_factor.logabsdet
         self.rank = self.shape[0]
         self.rank_truncated = False
+        self.public_positive_definite = True
         self.used_dense_fallback = self._border_factor.used_fallback
         self.fallback_reason = self._border_factor.fallback_reason
         self.schur_condition_estimate = self._border_factor.condition_estimate
@@ -705,6 +706,7 @@ class ProfiledSumToZeroBlockFactor:
         if not len(augmented_factor.small_indices) or augmented_factor.small_indices[0] != 0:
             raise ValueError("The augmented intercept must be the first dense-small coefficient.")
         self.shape = (len(self.xtw), len(self.xtw))
+        self.mean_x = self.xtw / self.sum_w
         self.small_indices = augmented_factor.small_indices[1:] - 1
         self.structured_indices = augmented_factor.structured_indices - 1
         self.n_levels = augmented_factor.n_levels

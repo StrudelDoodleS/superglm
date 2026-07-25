@@ -50,6 +50,7 @@ from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.solvers.structured import (
     BlockStructuredSystem,
     ScalarStructuredSystem,
+    SumToZeroBlockStructuredSystem,
     resolve_structured_backend,
     solve_cached_structured,
 )
@@ -547,7 +548,7 @@ def optimize_discrete_reml_cached_w(
         c_structured_system = cache.get("structured_system")
         if use_structured and not isinstance(
             c_structured_system,
-            ScalarStructuredSystem | BlockStructuredSystem,
+            ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
         ):
             raise RuntimeError("Structured discrete REML cache is missing its block system.")
         c_centered_XtWz = cache["centered_rhs"]
@@ -832,7 +833,7 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 if not isinstance(
                     c_structured_system,
-                    ScalarStructuredSystem | BlockStructuredSystem,
+                    ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
                 ):  # pragma: no cover - validated above
                     raise RuntimeError("Structured cached solve has no block system.")
                 cached_solution = solve_cached_structured(
@@ -864,7 +865,10 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 _t_structured_cache_solve += cached_solve_elapsed
                 _n_structured_cache_solves += 1
-                if isinstance(c_structured_system, BlockStructuredSystem):
+                if isinstance(
+                    c_structured_system,
+                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                ):
                     _t_block_structured_cache_solve += cached_solve_elapsed
                     _n_block_structured_cache_solves += 1
 
@@ -926,7 +930,7 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 if not isinstance(
                     c_structured_system,
-                    ScalarStructuredSystem | BlockStructuredSystem,
+                    ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
                 ):  # pragma: no cover - validated above
                     raise RuntimeError("Structured cached solve has no block system.")
                 cached_solution = solve_cached_structured(
@@ -958,7 +962,10 @@ def optimize_discrete_reml_cached_w(
             if use_structured:
                 _t_structured_cache_solve += cached_solve_elapsed
                 _n_structured_cache_solves += 1
-                if isinstance(c_structured_system, BlockStructuredSystem):
+                if isinstance(
+                    c_structured_system,
+                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                ):
                     _t_block_structured_cache_solve += cached_solve_elapsed
                     _n_block_structured_cache_solves += 1
             eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)

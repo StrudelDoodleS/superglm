@@ -16,6 +16,7 @@ from superglm.group_matrix import (
 )
 from superglm.solvers.structured import (
     BlockStructuredSystem,
+    SumToZeroBlockStructuredSystem,
     build_block_structured_system,
     build_structured_system,
     get_block_structured_layout,
@@ -27,7 +28,12 @@ from superglm.solvers.structured import (
 from superglm.types import GroupSlice
 
 
-def _dominant(*, discrete: bool, n: int = 48) -> FactorSmoothGroupMatrix:
+def _dominant(
+    *,
+    discrete: bool,
+    n: int = 48,
+    factor_basis: str = "fs",
+) -> FactorSmoothGroupMatrix:
     x_support = np.linspace(-1.0, 1.0, 9)
     basis_support = np.column_stack(
         [
@@ -54,6 +60,7 @@ def _dominant(*, discrete: bool, n: int = 48) -> FactorSmoothGroupMatrix:
         natural_map=transform,
         levels=tuple(f"level-{index}" for index in range(6)),
         repeated_penalty_components=components,
+        factor_basis=factor_basis,
     )
     if discrete:
         return FactorSmoothGroupMatrix(
@@ -67,9 +74,9 @@ def _dominant(*, discrete: bool, n: int = 48) -> FactorSmoothGroupMatrix:
     )
 
 
-def _design(*, discrete: bool):
+def _design(*, discrete: bool, factor_basis: str = "fs"):
     rng = np.random.default_rng(417)
-    dominant = _dominant(discrete=discrete)
+    dominant = _dominant(discrete=discrete, factor_basis=factor_basis)
     n = dominant.shape[0]
     matrices = [
         DenseGroupMatrix(rng.normal(size=(n, 2))),
@@ -141,6 +148,44 @@ def test_generic_structured_builder_dispatches_factor_smooth(discrete: bool) -> 
     )
 
     assert isinstance(system, BlockStructuredSystem)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_sum_to_zero_structured_system_keeps_raw_blocks_and_public_moments(
+    discrete: bool,
+) -> None:
+    rng, dm, groups, dominant_index = _design(
+        discrete=discrete,
+        factor_basis="sz",
+    )
+    W = rng.uniform(0.3, 1.6, size=dm.n)
+    Wz = rng.normal(size=dm.n)
+
+    system = build_structured_system(
+        list(dm.group_matrices),
+        groups,
+        W,
+        Wz,
+        dominant_group_index=dominant_index,
+    )
+    reference = dm.toarray()
+    gram = reference.T @ (W[:, None] * reference)
+    xtw = reference.T @ W
+    xtwz = reference.T @ Wz
+
+    assert isinstance(system, SumToZeroBlockStructuredSystem)
+    assert system.operator.D.shape == (6, 4, 4)
+    assert system.raw_xtw_structured.shape == (6, 4)
+    assert system.raw_xtwz_structured.shape == (6, 4)
+    np.testing.assert_allclose(materialize_compact_operator(system.operator), gram, atol=2e-11)
+    np.testing.assert_allclose(
+        system.xtw_structured.ravel(),
+        xtw[system.operator.structured_indices.ravel()],
+    )
+    np.testing.assert_allclose(
+        system.xtwz_structured.ravel(),
+        xtwz[system.operator.structured_indices.ravel()],
+    )
 
 
 def test_structured_selection_prefers_wider_factor_smooth_over_secondary_random_effect() -> None:

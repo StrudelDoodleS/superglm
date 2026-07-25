@@ -90,12 +90,18 @@ from superglm.solvers.structured import (
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
+    SumToZeroBlockOperator,
+    SumToZeroBlockStructuredSystem,
     SymmetricBlockOperator,
     build_augmented_structured_factor,
     build_penalized_structured_operator,
     build_structured_system,
     get_structured_layout,
     resolve_structured_backend,
+)
+from superglm.solvers.sum_to_zero import (
+    ProfiledSumToZeroBlockFactor,
+    SumToZeroBlockFactor,
 )
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -1065,9 +1071,15 @@ def fit_irls_direct(
 
     t_start = time.perf_counter()
     converged = False
-    XtWX_beta: NDArray | SymmetricBlockOperator | BlockSymmetricOperator | None = None
-    _final_structured_system: ScalarStructuredSystem | BlockStructuredSystem | None = None
-    _final_penalized_operator: SymmetricBlockOperator | BlockSymmetricOperator | None = None
+    XtWX_beta: (
+        NDArray | SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator | None
+    ) = None
+    _final_structured_system: (
+        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+    ) = None
+    _final_penalized_operator: (
+        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator | None
+    ) = None
 
     # Phase timing accumulators
     _t_working = 0.0
@@ -1077,7 +1089,9 @@ def fit_irls_direct(
     _t_eta = 0.0
     _t_deviance_eval = 0.0
     _last_working_centered: CenteredSystem | None = None
-    _last_working_structured: ScalarStructuredSystem | BlockStructuredSystem | None = None
+    _last_working_structured: (
+        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+    ) = None
 
     # Freeze the fit-entry state so iteration-one trial safety has a baseline.
     committed = evaluate_state(
@@ -2091,7 +2105,9 @@ def fit_irls_direct(
     # the centered inference system. The structured path retains the same
     # moments in block form and never materializes the dominant K x K block.
     centered_final: CenteredSystem | None = None
-    structured_final: ScalarStructuredSystem | BlockStructuredSystem | None = None
+    structured_final: (
+        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem | None
+    ) = None
     if _use_structured:
         if _return_working_system:
             if _last_working_structured is None:
@@ -2183,7 +2199,9 @@ def fit_irls_direct(
     # rank. With aliases, the same expression is the retained centered-space
     # determinant measure, not the raw augmented pseudo-determinant.
     _t0 = time.perf_counter()
-    structured_factor: ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | None = None
+    structured_factor: (
+        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor | None
+    ) = None
     if _use_structured:
         if structured_final is None or _final_penalized_operator is None:
             raise RuntimeError("Structured fit did not produce final coefficient blocks.")
@@ -2191,7 +2209,13 @@ def fit_irls_direct(
             structured_final,
             _final_penalized_operator,
         )
-        if isinstance(augmented_factor, BlockSchurFactor):
+        if isinstance(augmented_factor, SumToZeroBlockFactor):
+            structured_factor = ProfiledSumToZeroBlockFactor(
+                augmented_factor=augmented_factor,
+                sum_w=structured_final.sum_w,
+                xtw=XtW1,
+            )
+        elif isinstance(augmented_factor, BlockSchurFactor):
             structured_factor = ProfiledBlockSchurFactor(
                 augmented_factor=augmented_factor,
                 sum_w=structured_final.sum_w,
@@ -2222,7 +2246,7 @@ def fit_irls_direct(
                     total=sum_W,
                     center=mean_x,
                 )
-                if isinstance(XtWX_beta, BlockSymmetricOperator)
+                if isinstance(XtWX_beta, BlockSymmetricOperator | SumToZeroBlockOperator)
                 else XtWX_beta
             )
             p_eff = 1.0 + structured_factor.trace_inverse_operator(edf_operator)

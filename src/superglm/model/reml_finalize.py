@@ -47,7 +47,13 @@ from superglm.solvers.structured import (
     ScalarStructuredSystem,
     StructuredLevelSupport,
     StructuredLinearSystemState,
+    SumToZeroBlockOperator,
+    SumToZeroBlockStructuredSystem,
     SymmetricBlockOperator,
+)
+from superglm.solvers.sum_to_zero import (
+    ProfiledSumToZeroBlockFactor,
+    SumToZeroBlockFactor,
 )
 
 
@@ -63,19 +69,38 @@ def _build_structured_linear_system_state(
     result,
 ) -> StructuredLinearSystemState | None:
     """Distill a final structured refit into compact persistent state."""
-    if not isinstance(factor, ProfiledScalarSchurFactor | ProfiledBlockSchurFactor):
+    if not isinstance(
+        factor,
+        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor,
+    ):
         return None
     system = cache.get("structured_system")
     penalized_operator = cache.get("penalized_operator")
-    if not isinstance(system, ScalarStructuredSystem | BlockStructuredSystem) or not isinstance(
+    if not isinstance(
+        system,
+        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+    ) or not isinstance(
         penalized_operator,
-        SymmetricBlockOperator | BlockSymmetricOperator,
+        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
     ):
         raise RuntimeError("terminal structured refit omitted its compact system state")
-    if not isinstance(data_operator, SymmetricBlockOperator | BlockSymmetricOperator):
+    if not isinstance(
+        data_operator,
+        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+    ):
         raise RuntimeError("terminal structured refit omitted its compact data operator")
 
-    if isinstance(penalized_operator, BlockSymmetricOperator):
+    if isinstance(penalized_operator, SumToZeroBlockOperator):
+        coefficient_factor = SumToZeroBlockFactor(
+            A=penalized_operator.A,
+            C=penalized_operator.C,
+            D=penalized_operator.D,
+            small_indices=penalized_operator.small_indices,
+            structured_indices=penalized_operator.structured_indices,
+            term_name=system.dominant_group_name,
+            level_labels=system.level_labels,
+        )
+    elif isinstance(penalized_operator, BlockSymmetricOperator):
         coefficient_factor = BlockSchurFactor(
             A=penalized_operator.A,
             C=penalized_operator.C,
@@ -129,7 +154,10 @@ def _build_structured_linear_system_state(
     ):
         if isinstance(group_matrix, FactorSmoothGroupMatrix):
             if (
-                isinstance(system, BlockStructuredSystem)
+                isinstance(
+                    system,
+                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                )
                 and system.dominant_group_index == group_index
             ):
                 information = system.operator.D

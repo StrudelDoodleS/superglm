@@ -67,6 +67,10 @@ from superglm.solvers.structured import (
     compact_operator_diagonal,
     get_structured_layout,
 )
+from superglm.solvers.sum_to_zero import (
+    ProfiledSumToZeroBlockFactor,
+    SumToZeroBlockFactor,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -931,30 +935,42 @@ def build_observed_reml_geometry(
             center=mean_x,
         )
         augmented_factor, _ = build_augmented_structured_factor(system, penalized)
-        schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
-        schur_scale = max(
-            float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
-            1.0,
-        )
-        if np.any(schur_eigenvalues < -1e-10 * schur_scale):
-            raise ValueError(
-                "terminal observed REML coefficient Hessian is indefinite; "
-                "the fitted coefficients do not define a valid Laplace mode"
-            )
-        if isinstance(augmented_factor, BlockSchurFactor):
-            profiled_factor = ProfiledBlockSchurFactor(
+        if isinstance(augmented_factor, SumToZeroBlockFactor):
+            if not augmented_factor.public_positive_definite:
+                raise ValueError(
+                    "terminal observed REML coefficient Hessian is indefinite; "
+                    "the fitted coefficients do not define a valid Laplace mode"
+                )
+            profiled_factor = ProfiledSumToZeroBlockFactor(
                 augmented_factor=augmented_factor,
                 sum_w=system.sum_w,
                 xtw=xtw,
             )
-        elif isinstance(augmented_factor, ScalarSchurFactor):
-            profiled_factor = ProfiledScalarSchurFactor(
-                augmented_factor=augmented_factor,
-                sum_w=system.sum_w,
-                xtw=xtw,
+        else:
+            schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
+            schur_scale = max(
+                float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
+                1.0,
             )
-        else:  # pragma: no cover - structured dispatch invariant
-            raise TypeError("Unsupported structured observed factor geometry.")
+            if np.any(schur_eigenvalues < -1e-10 * schur_scale):
+                raise ValueError(
+                    "terminal observed REML coefficient Hessian is indefinite; "
+                    "the fitted coefficients do not define a valid Laplace mode"
+                )
+            if isinstance(augmented_factor, BlockSchurFactor):
+                profiled_factor = ProfiledBlockSchurFactor(
+                    augmented_factor=augmented_factor,
+                    sum_w=system.sum_w,
+                    xtw=xtw,
+                )
+            elif isinstance(augmented_factor, ScalarSchurFactor):
+                profiled_factor = ProfiledScalarSchurFactor(
+                    augmented_factor=augmented_factor,
+                    sum_w=system.sum_w,
+                    xtw=xtw,
+                )
+            else:  # pragma: no cover - structured dispatch invariant
+                raise TypeError("Unsupported structured observed factor geometry.")
         return ObservedREMLGeometry(
             eta=_readonly(eta),
             mu=_readonly(mu),
