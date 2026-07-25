@@ -16,11 +16,13 @@ from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    FactorSmoothGroupMatrix,
     GroupMatrix,
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
 )
 from superglm.solvers.structured import (
+    build_block_structured_system,
     build_scalar_structured_layout,
     build_scalar_structured_system,
     select_structured_group,
@@ -430,6 +432,51 @@ def test_native_ssp_aggregation_avoids_toarray_when_tabmat_is_ineligible(monkeyp
 
     np.testing.assert_allclose(system.xtw_structured, reference)
     assert system.operator.C.shape == (6, 4)
+
+
+def test_discrete_factor_smooth_shared_bin_cross_avoids_spline_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(429)
+    n = 90
+    n_levels = 6
+    block_size = 4
+    n_bins = 9
+    bin_idx = np.arange(n, dtype=np.intp) % n_bins
+    dominant = FactorSmoothGroupMatrix(
+        rng.normal(size=(n_bins, 5)),
+        (np.arange(n, dtype=np.intp) * 5 + 2) % n_levels,
+        n_levels,
+        natural_map=rng.normal(size=(5, block_size)),
+        levels=tuple(f"level-{level}" for level in range(n_levels)),
+        repeated_penalty_components=(("wiggle", np.eye(block_size)),),
+        factor_basis="sz",
+        bin_idx=bin_idx,
+    )
+    dense = DenseGroupMatrix(rng.normal(size=(n, 4)))
+    spline = DiscretizedSSPGroupMatrix(
+        rng.normal(size=(n_bins, 5)),
+        rng.normal(size=(5, 3)),
+        bin_idx.copy(),
+    )
+    matrices: list[GroupMatrix] = [dense, spline, dominant]
+    groups = _groups(matrices)
+
+    def fail_toarray(_self):
+        raise AssertionError("optimized cross must not materialize observation rows")
+
+    monkeypatch.setattr(DiscretizedSSPGroupMatrix, "toarray", fail_toarray)
+    monkeypatch.setattr(FactorSmoothGroupMatrix, "toarray", fail_toarray)
+
+    system = build_block_structured_system(
+        matrices,
+        groups,
+        rng.uniform(0.3, 1.8, size=n),
+        rng.normal(size=n),
+        dominant_group_index=2,
+    )
+
+    assert system.operator.C.shape == (n_levels, block_size, 7)
 
 
 def test_large_dominant_builder_never_requests_full_p_by_p_storage(monkeypatch):

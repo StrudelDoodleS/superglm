@@ -10,6 +10,7 @@ from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
+    DiscretizedSSPGroupMatrix,
     FactorSmoothGroupMatrix,
     RandomEffectGroupMatrix,
     SparseGroupMatrix,
@@ -92,6 +93,136 @@ def _design(*, discrete: bool, factor_basis: str = "fs"):
         start += matrix.shape[1]
     dm = DesignMatrix(matrices, n, start)
     return rng, dm, groups, len(matrices) - 1
+
+
+def _supported_mixed_discrete_sz_design():
+    rng = np.random.default_rng(1831)
+    dominant = _dominant(discrete=True, n=77, factor_basis="sz")
+    n = dominant.shape[0]
+    dense = DenseGroupMatrix(rng.normal(size=(n, 4)))
+    spline = DiscretizedSSPGroupMatrix(
+        rng.normal(size=(dominant.B_unique.shape[0], 5)),
+        rng.normal(size=(5, 3)),
+        dominant.bin_idx.copy(),
+    )
+    matrices = [dense, spline, dominant]
+    groups = []
+    start = 0
+    for index, matrix in enumerate(matrices):
+        groups.append(GroupSlice(name=f"mixed-{index}", start=start, end=start + matrix.shape[1]))
+        start += matrix.shape[1]
+    return rng, matrices, groups
+
+
+@pytest.mark.parametrize("small_width", [1, 4, 13])
+def test_discrete_sz_dense_cell_cross_matches_row_level_reference(
+    small_width: int,
+) -> None:
+    dominant = _dominant(discrete=True, n=83, factor_basis="sz")
+    rng = np.random.default_rng(1207 + small_width)
+    W = rng.uniform(0.15, 1.85, size=dominant.shape[0])
+    dense_small = rng.normal(size=(dominant.shape[0], small_width))
+
+    actual = dominant.factor_smooth_discrete_dense_cell_cross_gram(W, dense_small)
+
+    effective_basis = dominant.B_unique @ dominant.natural_map
+    expected = np.zeros(
+        (dominant.n_levels, dominant.block_size, small_width),
+        dtype=np.float64,
+    )
+    for level in range(dominant.n_levels):
+        rows = dominant.codes == level
+        level_basis = effective_basis[dominant.bin_idx[rows]]
+        expected[level] = level_basis.T @ (W[rows, None] * dense_small[rows])
+
+    assert actual.shape == expected.shape
+    assert actual.dtype == np.float64
+    assert actual.flags.c_contiguous
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
+
+
+def test_discrete_sz_mixed_shared_bin_crosses_avoid_legacy_column_scans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng, matrices, groups = _supported_mixed_discrete_sz_design()
+    dominant = matrices[-1]
+    W = rng.uniform(0.2, 1.9, size=dominant.shape[0])
+    Wz = rng.normal(size=dominant.shape[0])
+    X = np.column_stack([matrix.toarray() for matrix in matrices])
+    legacy_method = FactorSmoothGroupMatrix.factor_smooth_dense_cross_gram
+    legacy_calls = 0
+
+    def counted_legacy(self, weights, dense_small):
+        nonlocal legacy_calls
+        legacy_calls += 1
+        return legacy_method(self, weights, dense_small)
+
+    monkeypatch.setattr(
+        FactorSmoothGroupMatrix,
+        "factor_smooth_dense_cross_gram",
+        counted_legacy,
+    )
+
+    system = build_block_structured_system(
+        matrices,
+        groups,
+        W,
+        Wz,
+        dominant_group_index=2,
+    )
+
+    np.testing.assert_allclose(
+        materialize_compact_operator(system.operator),
+        X.T @ (W[:, None] * X),
+        rtol=2e-12,
+        atol=2e-12,
+    )
+    assert legacy_calls == 0
+
+
+def test_discrete_sz_mismatched_spline_bins_keep_legacy_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng, matrices, groups = _supported_mixed_discrete_sz_design()
+    matching_spline = matrices[1]
+    matrices[1] = DiscretizedSSPGroupMatrix(
+        matching_spline.B_unique,
+        matching_spline.R_inv,
+        np.roll(matching_spline.bin_idx, 1),
+    )
+    dominant = matrices[-1]
+    W = rng.uniform(0.2, 1.9, size=dominant.shape[0])
+    Wz = rng.normal(size=dominant.shape[0])
+    X = np.column_stack([matrix.toarray() for matrix in matrices])
+    legacy_method = FactorSmoothGroupMatrix.factor_smooth_dense_cross_gram
+    legacy_calls = 0
+
+    def counted_legacy(self, weights, dense_small):
+        nonlocal legacy_calls
+        legacy_calls += 1
+        return legacy_method(self, weights, dense_small)
+
+    monkeypatch.setattr(
+        FactorSmoothGroupMatrix,
+        "factor_smooth_dense_cross_gram",
+        counted_legacy,
+    )
+
+    system = build_block_structured_system(
+        matrices,
+        groups,
+        W,
+        Wz,
+        dominant_group_index=2,
+    )
+
+    np.testing.assert_allclose(
+        materialize_compact_operator(system.operator),
+        X.T @ (W[:, None] * X),
+        rtol=2e-12,
+        atol=2e-12,
+    )
+    assert legacy_calls == matching_spline.shape[1]
 
 
 @pytest.mark.parametrize("discrete", [False, True])

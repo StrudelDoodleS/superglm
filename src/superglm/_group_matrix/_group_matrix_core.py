@@ -13,6 +13,7 @@ from superglm.factor_smooth_geometry import (
     expand_sum_to_zero_blocks,
 )
 
+from ._group_matrix_discretized import DiscretizedSSPGroupMatrix
 from ._group_matrix_kernels import (
     _csr_weighted_gram,
     _factor_smooth_csr_dense_cross,
@@ -20,6 +21,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_csr_rmatvec,
     _factor_smooth_csr_sufficient_stats,
     _factor_smooth_support_cell_sufficient_stats,
+    _factor_smooth_support_dense_cell_cross,
     _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
@@ -481,6 +483,90 @@ class FactorSmoothGroupMatrix:
             self.natural_map,
             raw,
             optimize=True,
+        )
+
+    def factor_smooth_discrete_dense_cell_cross_gram(
+        self,
+        W: NDArray,
+        dense_small: NDArray,
+    ) -> NDArray:
+        """Return raw level crosses after one dense-small cell aggregation."""
+        weights = np.asarray(W, dtype=np.float64)
+        small = np.asarray(dense_small, dtype=np.float64)
+        if weights.shape != (self.shape[0],):
+            raise ValueError("weights must match the FactorSmooth row count")
+        if small.ndim != 2 or small.shape[0] != self.shape[0]:
+            raise ValueError("dense_small must be a row-aligned two-dimensional matrix")
+        if not self.is_discrete:
+            raise ValueError("dense cell crosses require a discrete FactorSmooth matrix")
+        basis = self.B_unique
+        support_index = self.bin_idx
+        if basis is None or support_index is None:  # pragma: no cover - constructor invariant
+            raise RuntimeError("discrete FactorSmooth support is unavailable")
+
+        raw = _factor_smooth_support_dense_cell_cross(
+            basis,
+            support_index,
+            self.codes,
+            weights,
+            small,
+            self.n_levels,
+        )
+        return np.ascontiguousarray(
+            np.einsum(
+                "ai,kaq->kiq",
+                self.natural_map,
+                raw,
+                optimize=True,
+            ),
+            dtype=np.float64,
+        )
+
+    def factor_smooth_discrete_shared_bin_cross_gram(
+        self,
+        cell_weights: NDArray,
+        other: object,
+    ) -> NDArray | None:
+        """Return raw level crosses for an SSP sharing the exact support map."""
+        basis = self.B_unique
+        support_index = self.bin_idx
+        if (
+            not self.is_discrete
+            or basis is None
+            or support_index is None
+            or not isinstance(other, DiscretizedSSPGroupMatrix)
+            or type(other) is not DiscretizedSSPGroupMatrix
+        ):
+            return None
+        if support_index.shape != other.bin_idx.shape or not np.array_equal(
+            support_index,
+            other.bin_idx,
+        ):
+            return None
+
+        cells = np.asarray(cell_weights, dtype=np.float64)
+        expected_cells = (self.n_levels, basis.shape[0])
+        if cells.shape != expected_cells:
+            raise ValueError(f"cell_weights must have shape {expected_cells}")
+        other_basis = np.asarray(other.B_unique, dtype=np.float64)
+        other_transform = np.asarray(other.R_inv, dtype=np.float64)
+        if (
+            other_basis.ndim != 2
+            or other_transform.ndim != 2
+            or other_basis.shape[0] != basis.shape[0]
+            or other_basis.shape[1] != other_transform.shape[0]
+        ):
+            return None
+
+        other_support = np.ascontiguousarray(
+            other_basis @ other_transform,
+            dtype=np.float64,
+        )
+        weighted_other = cells[:, :, None] * other_support[None, :, :]
+        raw = basis.T[None, :, :] @ weighted_other
+        return np.ascontiguousarray(
+            self.natural_map.T[None, :, :] @ raw,
+            dtype=np.float64,
         )
 
     def gram_rmatvec(

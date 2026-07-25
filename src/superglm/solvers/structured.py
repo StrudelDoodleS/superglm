@@ -977,6 +977,27 @@ def build_block_structured_system(
     ):
         raise ValueError("Structured block layout does not match the grouped design.")
 
+    cell_weights = None
+    if dominant.is_discrete:
+        (
+            cell_weights,
+            D,
+            raw_xtw_structured,
+            raw_xtwz_structured,
+        ) = dominant.factor_smooth_discrete_cell_moments(
+            weights,
+            weighted_rhs,
+        )
+    else:
+        (
+            D,
+            raw_xtw_structured,
+            raw_xtwz_structured,
+        ) = dominant.factor_smooth_sufficient_stats(
+            weights,
+            weighted_rhs,
+        )
+
     if len(layout.small_indices):
         if layout.dense_small_matrix is not None:
             A, xtw_small, xtwz_small = _dense_small_weighted_moments(
@@ -984,10 +1005,16 @@ def build_block_structured_system(
                 weights,
                 weighted_rhs,
             )
-            C = dominant.factor_smooth_dense_cross_gram(
-                weights,
-                layout.dense_small_matrix,
-            )
+            if dominant.is_discrete:
+                C = dominant.factor_smooth_discrete_dense_cell_cross_gram(
+                    weights,
+                    layout.dense_small_matrix,
+                )
+            else:
+                C = dominant.factor_smooth_dense_cross_gram(
+                    weights,
+                    layout.dense_small_matrix,
+                )
         else:
             if layout.small_execution_plan is None:  # pragma: no cover - layout invariant
                 raise RuntimeError("Structured small block has no execution plan.")
@@ -1004,6 +1031,20 @@ def build_block_structured_system(
             xtwz_small = small_moments.xt_rhs[0]
             cross_blocks = []
             for matrix in layout.small_matrices:
+                optimized_cross = None
+                if dominant.is_discrete and type(matrix) is DenseGroupMatrix:
+                    optimized_cross = dominant.factor_smooth_discrete_dense_cell_cross_gram(
+                        weights,
+                        matrix.M,
+                    )
+                elif dominant.is_discrete and cell_weights is not None:
+                    optimized_cross = dominant.factor_smooth_discrete_shared_bin_cross_gram(
+                        cell_weights,
+                        matrix,
+                    )
+                if optimized_cross is not None:
+                    cross_blocks.append(optimized_cross)
+                    continue
                 if dominant.factor_basis == "sz":
                     raw_cross = np.empty(
                         (
@@ -1041,10 +1082,6 @@ def build_block_structured_system(
         xtw_small = np.empty(0, dtype=np.float64)
         xtwz_small = np.empty(0, dtype=np.float64)
 
-    D, raw_xtw_structured, raw_xtwz_structured = dominant.factor_smooth_sufficient_stats(
-        weights,
-        weighted_rhs,
-    )
     if dominant.factor_basis == "sz":
         # Tabmat/BLAS assembly is mathematically symmetric but may leave
         # opposite triangles a few ulps apart.  Canonicalize at the moment
