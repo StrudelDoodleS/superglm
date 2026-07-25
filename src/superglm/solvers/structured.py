@@ -18,6 +18,10 @@ from superglm._group_matrix._group_matrix_kernels import (
     _dense_small_weighted_moments,
     _random_effect_sufficient_stats,
 )
+from superglm.factor_smooth_geometry import (
+    adjoint_sum_to_zero_blocks,
+    expand_sum_to_zero_blocks,
+)
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -1588,10 +1592,93 @@ class BlockSymmetricOperator:
 
 
 @dataclass(frozen=True)
+class SumToZeroBlockOperator:
+    """Raw all-level blocks exposed through ``K - 1`` sum-to-zero coordinates."""
+
+    A: NDArray
+    C: NDArray
+    D: NDArray
+    small_indices: NDArray
+    structured_indices: NDArray
+    shape: tuple[int, int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name, dtype in (
+            ("A", np.float64),
+            ("C", np.float64),
+            ("D", np.float64),
+            ("small_indices", np.intp),
+            ("structured_indices", np.intp),
+        ):
+            values = np.array(getattr(self, name), dtype=dtype, copy=True)
+            values.setflags(write=False)
+            object.__setattr__(self, name, values)
+
+        if self.C.ndim != 3:
+            raise ValueError("C must have shape (K, k, q).")
+        n_levels, block_size, small_size = self.C.shape
+        if n_levels < 2 or self.D.shape != (n_levels, block_size, block_size):
+            raise ValueError("SZ raw blocks must have shapes (K, k, q) and (K, k, k).")
+        if self.A.shape != (small_size, small_size):
+            raise ValueError("SZ ordinary block has the wrong shape.")
+        if self.small_indices.shape != (small_size,):
+            raise ValueError("SZ small_indices width does not match A.")
+        if self.structured_indices.shape != (n_levels - 1, block_size):
+            raise ValueError("SZ public indices must have shape (K - 1, k).")
+        if not all(np.all(np.isfinite(values)) for values in (self.A, self.C, self.D)):
+            raise ValueError("SZ operator blocks must be finite.")
+        if not np.allclose(self.A, self.A.T, rtol=0.0, atol=1e-13):
+            raise ValueError("SZ ordinary block must be symmetric.")
+        if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):
+            raise ValueError("Every SZ local block must be symmetric.")
+        all_indices = np.concatenate((self.small_indices, self.structured_indices.ravel()))
+        if len(np.unique(all_indices)) != len(all_indices):
+            raise ValueError("SZ index partitions must be disjoint.")
+        if not np.array_equal(np.sort(all_indices), np.arange(len(all_indices))):
+            raise ValueError("SZ index partitions must cover every coefficient once.")
+        object.__setattr__(self, "shape", (len(all_indices), len(all_indices)))
+
+    @property
+    def n_levels(self) -> int:
+        return int(self.C.shape[0])
+
+    @property
+    def block_size(self) -> int:
+        return int(self.C.shape[1])
+
+    def matvec(self, rhs: NDArray) -> NDArray:
+        """Apply raw block geometry through the public sum-to-zero contrast."""
+        values = np.asarray(rhs, dtype=np.float64)
+        vector_rhs = values.ndim == 1
+        if vector_rhs:
+            values = values[:, None]
+        if values.ndim != 2 or values.shape[0] != self.shape[0]:
+            raise ValueError(f"rhs must have shape ({self.shape[0]},) or ({self.shape[0]}, m).")
+        small = values[self.small_indices]
+        free = values[self.structured_indices]
+        raw = expand_sum_to_zero_blocks(free)
+        raw_result = np.einsum(
+            "kiq,qm->kim",
+            self.C,
+            small,
+            optimize=True,
+        ) + np.einsum("kij,kjm->kim", self.D, raw, optimize=True)
+        result = np.empty_like(values)
+        result[self.small_indices] = self.A @ small + np.einsum(
+            "kiq,kim->qm",
+            self.C,
+            raw,
+            optimize=True,
+        )
+        result[self.structured_indices] = adjoint_sum_to_zero_blocks(raw_result)
+        return result[:, 0] if vector_rhs else result
+
+
+@dataclass(frozen=True)
 class CenteredBlockOperator:
     """A block operator centered around a fixed weighted design mean."""
 
-    raw: SymmetricBlockOperator | BlockSymmetricOperator
+    raw: SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator
     cross: NDArray
     total: float
     center: NDArray
@@ -1667,6 +1754,7 @@ class SumBlockOperator:
     operators: tuple[
         SymmetricBlockOperator
         | BlockSymmetricOperator
+        | SumToZeroBlockOperator
         | CenteredBlockOperator
         | LowRankSymmetricOperator,
         ...,
@@ -1691,6 +1779,7 @@ class SumBlockOperator:
 CompactSymmetricOperator = (
     SymmetricBlockOperator
     | BlockSymmetricOperator
+    | SumToZeroBlockOperator
     | CenteredBlockOperator
     | LowRankSymmetricOperator
     | SumBlockOperator
@@ -1970,6 +2059,30 @@ def _block_operator_bdlr(operator: BlockSymmetricOperator) -> _BlockDiagonalLowR
     )
 
 
+def _sum_to_zero_operator_bdlr(
+    operator: SumToZeroBlockOperator,
+) -> _BlockDiagonalLowRank:
+    """Convert raw constrained blocks to public block-diagonal-plus-low-rank form."""
+    base = BlockSymmetricOperator(
+        A=operator.A,
+        C=operator.C[:-1] - operator.C[-1:],
+        D=operator.D[:-1],
+        small_indices=operator.small_indices,
+        structured_indices=operator.structured_indices,
+    )
+    last_basis = np.zeros((operator.shape[0], operator.block_size))
+    for indices in operator.structured_indices:
+        last_basis[indices] = np.eye(operator.block_size)
+    last = _BlockDiagonalLowRank(
+        blocks=np.zeros_like(operator.D[:-1]),
+        structured_indices=operator.structured_indices,
+        basis=last_basis,
+        core=operator.D[-1],
+        shape=operator.shape,
+    )
+    return _merge_bdlr((_block_operator_bdlr(base), last))
+
+
 def _empty_block_part(
     shape: tuple[int, int],
     structured_indices: NDArray,
@@ -2032,11 +2145,15 @@ def _operator_bdlr(
             shape=operator.shape,
         )
     raw = operator.raw if isinstance(operator, CenteredBlockOperator) else operator
-    if not isinstance(raw, BlockSymmetricOperator):
+    if not isinstance(raw, BlockSymmetricOperator | SumToZeroBlockOperator):
         raise TypeError("BlockSchurFactor requires block-compatible compact operators.")
     if not np.array_equal(raw.structured_indices, structured_indices):
         raise ValueError("Compact operator has a different structured block layout.")
-    base = _block_operator_bdlr(raw)
+    base = (
+        _sum_to_zero_operator_bdlr(raw)
+        if isinstance(raw, SumToZeroBlockOperator)
+        else _block_operator_bdlr(raw)
+    )
     if not isinstance(operator, CenteredBlockOperator):
         return base
     update = _empty_block_part(operator.shape, structured_indices)
@@ -2242,6 +2359,12 @@ def compact_operator_diagonal(
     diagonal[raw.small_indices] = np.diag(raw.A)
     if isinstance(raw, BlockSymmetricOperator):
         diagonal[raw.structured_indices] = np.diagonal(raw.D, axis1=1, axis2=2)
+    elif isinstance(raw, SumToZeroBlockOperator):
+        diagonal[raw.structured_indices] = np.diagonal(
+            raw.D[:-1] + raw.D[-1:],
+            axis1=1,
+            axis2=2,
+        )
     else:
         diagonal[raw.structured_indices] = raw.d
     if isinstance(operator, CenteredBlockOperator):
