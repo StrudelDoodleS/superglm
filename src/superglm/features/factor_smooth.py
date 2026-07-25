@@ -10,6 +10,7 @@ import scipy.linalg as la
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm.factor_smooth_geometry import expand_sum_to_zero_blocks
 from superglm.types import GroupInfo, LambdaPolicy
 
 
@@ -27,7 +28,7 @@ def _natural_parameterization(
     if X.shape[0] < X.shape[1] or np.linalg.matrix_rank(X) < X.shape[1]:
         raise ValueError(
             "FactorSmooth marginal basis is rank deficient; use more distinct numeric values "
-            "or a smaller k."
+            "or a smaller k, or choose a suitable non-smooth feature."
         )
 
     _Q, R = np.linalg.qr(X, mode="reduced")
@@ -184,6 +185,8 @@ class FactorSmooth:
         codes, uniques = pd.factorize(group_values, sort=True)
         if len(uniques) < 1:
             raise ValueError("FactorSmooth requires at least one fitted group level.")
+        if self.basis == "sz" and len(uniques) < 2:
+            raise ValueError("FactorSmooth basis='sz' requires at least two fitted group levels.")
         self._levels = uniques.tolist()
         self._level_to_code = {level: code for code, level in enumerate(self._levels)}
         return codes.astype(np.intp, copy=False)
@@ -208,7 +211,7 @@ class FactorSmooth:
         # sequence out from boundaries expanded by 0.1% of the data range.
         # Ordinary SuperGLM P-splines preserve their pre-expansion interior
         # knots for backwards compatibility, so align this owned marginal
-        # explicitly before constructing the ``bs="fs"`` natural basis.
+        # explicitly before constructing the factor-smooth marginal basis.
         x_range = spline._hi - spline._lo
         expanded_lo = spline._lo - 0.001 * x_range
         expanded_hi = spline._hi + 0.001 * x_range
@@ -221,13 +224,23 @@ class FactorSmooth:
         spline._validate_m_orders_build()
         exact_basis = sp.csr_matrix(spline._basis_matrix(x), dtype=np.float64)
         raw_dense = exact_basis.toarray()
+        if self.basis == "sz" and (
+            raw_dense.shape[0] < self.k or np.linalg.matrix_rank(raw_dense) < self.k
+        ):
+            raise ValueError(
+                "FactorSmooth marginal basis is rank deficient; use more distinct "
+                "numeric values or a smaller k, or choose a suitable non-smooth feature."
+            )
         penalty = spline._build_penalty()
-        rank = self.k - self.m
-        natural_map, components = _natural_parameterization(
-            raw_dense,
-            penalty,
-            rank=rank,
-        )
+        if self.basis == "fs":
+            natural_map, components = _natural_parameterization(
+                raw_dense,
+                penalty,
+                rank=self.k - self.m,
+            )
+        else:
+            natural_map = np.eye(self.k, dtype=np.float64)
+            components = (("wiggle", np.asarray(penalty, dtype=np.float64)),)
         self._spline = spline
         self._natural_map = natural_map
         self._base_penalty_components = components
@@ -242,12 +255,14 @@ class FactorSmooth:
         bin_idx: NDArray | None = None,
     ) -> GroupInfo:
         n_levels = len(self._levels)
+        coefficient_levels = n_levels if self.basis == "fs" else n_levels - 1
         return GroupInfo(
             columns=None,
-            n_cols=n_levels * self.k,
+            n_cols=coefficient_levels * self.k,
             penalized=True,
             lambda_policies=self._resolve_lambda_policies(),
             structured_kind="factor_smooth",
+            factor_smooth_factor_basis=self.basis,
             factor_smooth_codes=codes,
             factor_smooth_basis=basis,
             factor_smooth_basis_unique=basis_unique,
@@ -333,14 +348,10 @@ class FactorSmooth:
         group: NDArray,
         beta: NDArray,
     ) -> NDArray[np.float64]:
-        """Score fitted level-specific deviations without materializing ``n x Kk``."""
+        """Score fitted level-specific deviations without expanding factor geometry."""
         numeric, codes = self.validate_prediction_values(x, group)
-        coefficients = np.asarray(beta, dtype=np.float64)
-        expected = len(self._levels) * self.k
-        if coefficients.shape != (expected,):
-            raise ValueError(f"beta must have shape ({expected},).")
         basis = self.marginal_basis(numeric)
-        blocks = coefficients.reshape(len(self._levels), self.k)
+        blocks = self._level_blocks(beta)
         result = np.zeros(len(numeric), dtype=np.float64)
         known = codes >= 0
         result[known] = np.einsum(
@@ -351,6 +362,16 @@ class FactorSmooth:
         )
         return result
 
+    def _level_blocks(self, beta: NDArray) -> NDArray[np.float64]:
+        """Return coefficients for every fitted level in marginal coordinates."""
+        coefficient_levels = len(self._levels) if self.basis == "fs" else len(self._levels) - 1
+        expected = coefficient_levels * self.k
+        coefficients = np.asarray(beta, dtype=np.float64)
+        if coefficients.shape != (expected,):
+            raise ValueError(f"beta must have shape ({expected},).")
+        free = coefficients.reshape(coefficient_levels, self.k)
+        return free if self.basis == "fs" else expand_sum_to_zero_blocks(free)
+
     def transform(
         self,
         x: NDArray,
@@ -359,23 +380,25 @@ class FactorSmooth:
         """Materialize a small prediction matrix for compatibility and references."""
         numeric, codes = self.validate_prediction_values(x, group)
         basis = self.marginal_basis(numeric)
-        result = np.zeros((len(numeric), len(self._levels) * self.k), dtype=np.float64)
-        known_rows = np.flatnonzero(codes >= 0)
-        if len(known_rows):
-            columns = codes[known_rows, None] * self.k + np.arange(self.k)[None, :]
-            result[known_rows[:, None], columns] = basis[known_rows]
+        coefficient_levels = len(self._levels) if self.basis == "fs" else len(self._levels) - 1
+        result = np.zeros((len(numeric), coefficient_levels * self.k), dtype=np.float64)
+        free_rows = np.flatnonzero((codes >= 0) & (codes < coefficient_levels))
+        if len(free_rows):
+            columns = codes[free_rows, None] * self.k + np.arange(self.k)[None, :]
+            result[free_rows[:, None], columns] = basis[free_rows]
+        if self.basis == "sz":
+            final_rows = np.flatnonzero(codes == len(self._levels) - 1)
+            if len(final_rows):
+                result[final_rows] = np.tile(-basis[final_rows], (1, coefficient_levels))
         return result
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         """Return fitted natural-basis coefficients by level."""
-        coefficients = np.asarray(beta, dtype=np.float64)
-        expected = len(self._levels) * self.k
-        if coefficients.shape != (expected,):
-            raise ValueError(f"beta must have shape ({expected},).")
-        blocks = coefficients.reshape(len(self._levels), self.k)
+        blocks = self._level_blocks(beta)
         return {
             "variable": self.variable,
             "group": self.group,
+            "basis": self.basis,
             "levels": self._levels.copy(),
             "coefficients": {
                 level: block.copy() for level, block in zip(self._levels, blocks, strict=True)

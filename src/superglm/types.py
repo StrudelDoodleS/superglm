@@ -164,6 +164,7 @@ class GroupInfo:
     # Compact all-level factor-smooth geometry.  The repeated penalties stay
     # at marginal ``block_size x block_size`` dimensions rather than being
     # expanded to the full ``(n_levels * block_size)^2`` coefficient space.
+    factor_smooth_factor_basis: Literal["fs", "sz"] = "fs"
     factor_smooth_codes: NDArray | None = None
     factor_smooth_basis: sp.spmatrix | None = None
     factor_smooth_basis_unique: NDArray | None = None
@@ -235,9 +236,13 @@ class GroupInfo:
                 )
             n_levels = int(self.factor_smooth_n_levels)
             block_size = int(self.factor_smooth_block_size)
-            if self.n_cols != n_levels * block_size:
+            coefficient_levels = (
+                n_levels if self.factor_smooth_factor_basis == "fs" else n_levels - 1
+            )
+            if self.n_cols != coefficient_levels * block_size:
                 raise ValueError(
-                    "factor_smooth n_cols must equal n_levels * factor_smooth_block_size"
+                    "factor_smooth n_cols does not match its factor basis, "
+                    "level count, and block size"
                 )
             transform = np.asarray(self.factor_smooth_transform)
             if transform.shape[1] != block_size:
