@@ -196,38 +196,6 @@ def _factor_smooth_csr_sufficient_stats(
 
 
 @njit(cache=True)
-def _factor_smooth_support_sufficient_stats(
-    basis,
-    bin_idx,
-    codes,
-    weights,
-    rhs,
-    n_levels,
-):
-    """Fuse discrete factor-smooth local Grams and two transpose products."""
-    width = basis.shape[1]
-    gram = np.zeros((n_levels, width, width))
-    xtw = np.zeros((n_levels, width))
-    xt_rhs = np.zeros((n_levels, width))
-    for row in range(len(codes)):
-        support_row = bin_idx[row]
-        level = codes[row]
-        weight = weights[row]
-        rhs_value = rhs[row]
-        for left in range(width):
-            left_value = basis[support_row, left]
-            xtw[level, left] += left_value * weight
-            xt_rhs[level, left] += left_value * rhs_value
-            weighted_left = left_value * weight
-            for right in range(left, width):
-                product = weighted_left * basis[support_row, right]
-                gram[level, left, right] += product
-                if left != right:
-                    gram[level, right, left] += product
-    return gram, xtw, xt_rhs
-
-
-@njit(cache=True)
 def _factor_smooth_support_cell_aggregates(
     bin_idx,
     codes,

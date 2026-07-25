@@ -289,6 +289,16 @@ class FactorSmoothGroupMatrix:
                 )
         self.shape = (n_rows, self.coefficient_levels * self.block_size)
 
+    def _discrete_support(self) -> tuple[NDArray, NDArray] | None:
+        """Return discrete basis/index support, or ``None`` for exact geometry."""
+        if not self.is_discrete:
+            return None
+        basis = self.B_unique
+        support_index = self.bin_idx
+        if basis is None or support_index is None:  # pragma: no cover - constructor invariant
+            raise RuntimeError("discrete FactorSmooth support is unavailable")
+        return basis, support_index
+
     def matvec(self, v: NDArray) -> NDArray:
         """Apply the implicit level-major design to a coefficient vector."""
         coefficients = np.asarray(v, dtype=np.float64)
@@ -396,13 +406,10 @@ class FactorSmoothGroupMatrix:
         expected = (self.shape[0],)
         if weights.shape != expected or rhs_values.shape != expected:
             raise ValueError("weights and rhs must match the FactorSmooth row count")
-        if not self.is_discrete:
+        support = self._discrete_support()
+        if support is None:
             raise ValueError("cell moments require a discrete FactorSmooth matrix")
-
-        basis = self.B_unique
-        support_index = self.bin_idx
-        if basis is None or support_index is None:  # pragma: no cover - constructor invariant
-            raise RuntimeError("discrete FactorSmooth support is unavailable")
+        basis, support_index = support
 
         cell_weights, cell_rhs = _factor_smooth_support_cell_aggregates(
             support_index,
@@ -501,14 +508,12 @@ class FactorSmoothGroupMatrix:
             raise ValueError("weights must match the FactorSmooth row count")
         if small.ndim != 2 or small.shape[0] != self.shape[0]:
             raise ValueError("dense_small must be a row-aligned two-dimensional matrix")
-        if not self.is_discrete:
+        support = self._discrete_support()
+        if support is None:
             raise ValueError("dense cell crosses require a discrete FactorSmooth matrix")
-        basis = self.B_unique
-        support_index = self.bin_idx
-        if basis is None or support_index is None:  # pragma: no cover - constructor invariant
-            raise RuntimeError("discrete FactorSmooth support is unavailable")
+        basis, support_index = support
 
-        cells = _factor_smooth_support_dense_cell_aggregates(
+        dense_cells = _factor_smooth_support_dense_cell_aggregates(
             support_index,
             self.codes,
             weights,
@@ -516,9 +521,9 @@ class FactorSmoothGroupMatrix:
             self.n_levels,
             basis.shape[0],
         )
-        raw = basis.T[None, :, :] @ cells
+        raw_cross = basis.T[None, :, :] @ dense_cells
         return np.ascontiguousarray(
-            self.natural_map.T[None, :, :] @ raw,
+            self.natural_map.T[None, :, :] @ raw_cross,
             dtype=np.float64,
         )
 
@@ -528,16 +533,14 @@ class FactorSmoothGroupMatrix:
         other: object,
     ) -> NDArray | None:
         """Return raw level crosses for an SSP sharing the exact support map."""
-        basis = self.B_unique
-        support_index = self.bin_idx
+        support = self._discrete_support()
         if (
-            not self.is_discrete
-            or basis is None
-            or support_index is None
+            support is None
             or not isinstance(other, DiscretizedSSPGroupMatrix)
             or type(other) is not DiscretizedSSPGroupMatrix
         ):
             return None
+        basis, support_index = support
         if support_index.shape != other.bin_idx.shape or not np.array_equal(
             support_index,
             other.bin_idx,
@@ -563,9 +566,9 @@ class FactorSmoothGroupMatrix:
             dtype=np.float64,
         )
         weighted_other = cells[:, :, None] * other_support[None, :, :]
-        raw = basis.T[None, :, :] @ weighted_other
+        raw_cross = basis.T[None, :, :] @ weighted_other
         return np.ascontiguousarray(
-            self.natural_map.T[None, :, :] @ raw,
+            self.natural_map.T[None, :, :] @ raw_cross,
             dtype=np.float64,
         )
 

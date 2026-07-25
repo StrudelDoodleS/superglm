@@ -928,6 +928,22 @@ def build_scalar_structured_system(
     )
 
 
+def _optimized_discrete_factor_smooth_cross(
+    dominant: FactorSmoothGroupMatrix,
+    matrix: GroupMatrix,
+    weights: NDArray,
+    cell_weights: NDArray | None,
+) -> NDArray | None:
+    """Use compact cell crosses when the small matrix has eligible geometry."""
+    if not dominant.is_discrete:
+        return None
+    if type(matrix) is DenseGroupMatrix:
+        return dominant.factor_smooth_discrete_dense_cell_cross_gram(weights, matrix.M)
+    if cell_weights is None:  # pragma: no cover - structured assembly invariant
+        raise RuntimeError("discrete FactorSmooth cell weights are unavailable")
+    return dominant.factor_smooth_discrete_shared_bin_cross_gram(cell_weights, matrix)
+
+
 def build_block_structured_system(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -1031,17 +1047,12 @@ def build_block_structured_system(
             xtwz_small = small_moments.xt_rhs[0]
             cross_blocks = []
             for matrix in layout.small_matrices:
-                optimized_cross = None
-                if dominant.is_discrete and type(matrix) is DenseGroupMatrix:
-                    optimized_cross = dominant.factor_smooth_discrete_dense_cell_cross_gram(
-                        weights,
-                        matrix.M,
-                    )
-                elif dominant.is_discrete and cell_weights is not None:
-                    optimized_cross = dominant.factor_smooth_discrete_shared_bin_cross_gram(
-                        cell_weights,
-                        matrix,
-                    )
+                optimized_cross = _optimized_discrete_factor_smooth_cross(
+                    dominant,
+                    matrix,
+                    weights,
+                    cell_weights,
+                )
                 if optimized_cross is not None:
                     cross_blocks.append(optimized_cross)
                     continue
