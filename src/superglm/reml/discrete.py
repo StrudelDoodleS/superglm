@@ -767,7 +767,10 @@ def optimize_discrete_reml_cached_w(
             base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
             delta = np.clip(delta, -base_cap, base_cap)
             for group_name, (i, j) in shared_tensor_pairs:
-                if not estimated_mask[i] or not estimated_mask[j]:
+                # Preserve the active-set Newton scatter. A two-dimensional
+                # pair solve must not reintroduce a frozen margin or overwrite
+                # the live margin with curvature from a settled coordinate.
+                if frozen_d[i] or frozen_d[j]:
                     continue
                 grad_pair = grad[[i, j]]
                 hess_pair = hess[np.ix_([i, j], [i, j])]
@@ -782,7 +785,10 @@ def optimize_discrete_reml_cached_w(
                 raw_u = float(delta_uv[0])
                 raw_v = float(delta_uv[1])
                 cap_u = 2.5 if not _tensor_post_stall_unlocked else 5.0
-                cap_v = 0.25 if not _tensor_post_stall_unlocked else 0.35
+                # Keep the bootstrap ratio conservative. After one clean full
+                # step, allow a one-log-unit ratio move so a finite margin does
+                # not crawl when its partner is heading to working infinity.
+                cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
                 used_u = float(np.clip(raw_u, -cap_u, cap_u))
                 used_v = float(np.clip(raw_v, -cap_v, cap_v))
                 delta_pair = J @ np.array([used_u, used_v])
