@@ -23,6 +23,7 @@ from superglm.solvers.structured import (
     ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
 )
+from superglm.solvers.sum_to_zero import ProfiledSumToZeroBlockFactor
 from superglm.types import GroupSlice
 
 
@@ -121,7 +122,9 @@ class StructuredCovarianceAccessor:
 
     def __init__(
         self,
-        factor: ProfiledScalarSchurFactor | ProfiledBlockSchurFactor,
+        factor: (
+            ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor
+        ),
         *,
         intercept_shift: NDArray | None = None,
         scale: float = 1.0,
@@ -283,6 +286,55 @@ def covariance_selected_diagonal(covariance, indices: NDArray) -> NDArray:
     if hasattr(covariance, "selected_diagonal"):
         return np.asarray(covariance.selected_diagonal(selected), dtype=np.float64)
     return np.diag(np.asarray(covariance))[selected]
+
+
+def covariance_factor_smooth_raw_level_block(
+    covariance,
+    public_group_indices: NDArray,
+    *,
+    level: int,
+    n_levels: int,
+    block_size: int,
+    term_name: str | None = None,
+) -> NDArray:
+    """Return one raw-level SZ covariance from public ``K - 1`` coordinates."""
+    public = np.asarray(public_group_indices, dtype=np.intp)
+    expected_width = (n_levels - 1) * block_size
+    if public.shape != (expected_width,):
+        raise ValueError(
+            "public_group_indices must contain the complete "
+            f"(K - 1)k SZ block ({expected_width} entries)."
+        )
+    if isinstance(level, bool) or not isinstance(level, (int, np.integer)):
+        raise TypeError("level must be an integer index")
+    level = int(level)
+    if level < 0 or level >= n_levels:
+        raise IndexError("raw level index is outside the fitted level range")
+
+    if (
+        isinstance(covariance, StructuredCovarianceAccessor)
+        and isinstance(
+            covariance.factor,
+            ProfiledSumToZeroBlockFactor,
+        )
+        and (term_name is None or covariance.factor.dominant_group_name == term_name)
+    ):
+        return covariance.scale * covariance.factor.raw_level_inverse_block(level)
+
+    if level < n_levels - 1:
+        start = level * block_size
+        return covariance_selected_block(
+            covariance,
+            public[start : start + block_size],
+        )
+
+    public_covariance = covariance_selected_block(covariance, public)
+    final_contrast = np.tile(
+        -np.eye(block_size, dtype=np.float64),
+        (1, n_levels - 1),
+    )
+    result = final_contrast @ public_covariance @ final_contrast.T
+    return 0.5 * (result + result.T)
 
 
 def covariance_quadratic_form(covariance, contrast: NDArray) -> float:

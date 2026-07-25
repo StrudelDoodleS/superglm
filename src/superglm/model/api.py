@@ -673,7 +673,7 @@ class SuperGLM:
         levels: list[object] | tuple[object, ...] | None = None,
         confidence_level: float = 0.95,
     ) -> FactorSmoothResult:
-        """Return shared penalties, level credibility, and smooth curves."""
+        """Return basis-aware penalties, level diagnostics, and smooth curves."""
         from superglm.inference.factor_smooths import factor_smooth_result
 
         return factor_smooth_result(

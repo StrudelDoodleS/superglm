@@ -53,10 +53,11 @@ def _decompose_local_psd(
         check_finite=False,
     )
     scale = max(float(np.max(np.abs(eigenvalues), initial=0.0)), 1.0)
-    threshold = max(
-        np.finfo(np.float64).eps ** (2 / 3) * scale,
-        np.finfo(np.float64).eps * symmetric.shape[0] * scale * 10.0,
-    )
+    # A large smoothing parameter can put O(1) data curvature beside an
+    # O(1e11) wiggle penalty.  The usual dimension-scaled roundoff threshold
+    # retains that real null-space information; eps**(2/3) would incorrectly
+    # discard eigenvalues as large as about five at lambda=1e10.
+    threshold = np.finfo(np.float64).eps * symmetric.shape[0] * scale * 10.0
     if eigenvalues.size and eigenvalues[0] < -threshold:
         raise np.linalg.LinAlgError(
             f"Structured term {term_name!r} level {level_label!r} "
@@ -77,6 +78,26 @@ def _decompose_local_psd(
         positive_eigenvalues=positive_values,
         rank=int(positive_values.size),
     )
+
+
+def _constraint_equilibration(matrix: NDArray) -> NDArray:
+    """Whiten the positive range of a small constraint covariance."""
+    symmetric = 0.5 * (
+        np.asarray(matrix, dtype=np.float64) + np.asarray(matrix, dtype=np.float64).T
+    )
+    if symmetric.shape == (0, 0):
+        return symmetric
+    eigenvalues, eigenvectors = scipy.linalg.eigh(
+        symmetric,
+        driver="evr",
+        check_finite=False,
+    )
+    scale = max(float(np.max(np.abs(eigenvalues), initial=0.0)), 1.0)
+    threshold = np.finfo(np.float64).eps * max(symmetric.shape[0], 1) * scale * 10.0
+    factors = np.ones_like(eigenvalues)
+    positive = eigenvalues > threshold
+    factors[positive] = 1.0 / np.sqrt(eigenvalues[positive])
+    return (eigenvectors * factors) @ eigenvectors.T
 
 
 class _SymmetricBorderFactor:
@@ -341,7 +362,12 @@ class SumToZeroBlockFactor:
             ]
         )
         self._border = border
-        self._border_factor = _SymmetricBorderFactor(border)
+        constraint_transform = _constraint_equilibration(M)
+        border_transform = np.eye(border.shape[0], dtype=np.float64)
+        border_transform[-self.block_size :, -self.block_size :] = constraint_transform
+        scaled_border = border_transform.T @ border @ border_transform
+        self._border_transform = border_transform
+        self._border_factor = _SymmetricBorderFactor(scaled_border)
         expected_positive = q + self._null_width
         expected_negative = self.block_size
         if (
@@ -360,7 +386,8 @@ class SumToZeroBlockFactor:
             for local in self._locals
             if local.positive_eigenvalues.size
         )
-        self._logdet = local_logdet + self._border_factor.logabsdet
+        transform_logdet = np.linalg.slogdet(border_transform)[1]
+        self._logdet = local_logdet + self._border_factor.logabsdet - 2.0 * float(transform_logdet)
         self.rank = self.shape[0]
         self.rank_truncated = False
         self.public_positive_definite = True
@@ -399,11 +426,16 @@ class SumToZeroBlockFactor:
 
     def _border_inverse(self) -> NDArray:
         if self._border_inverse_cache is None:
-            self._border_inverse_cache = self._border_factor.solve(np.eye(self._border.shape[0]))
+            self._border_inverse_cache = self._solve_border(np.eye(self._border.shape[0]))
             self._border_inverse_cache = 0.5 * (
                 self._border_inverse_cache + self._border_inverse_cache.T
             )
         return self._border_inverse_cache
+
+    def _solve_border(self, rhs: NDArray) -> NDArray:
+        transformed_rhs = self._border_transform.T @ np.asarray(rhs, dtype=np.float64)
+        scaled_solution = self._border_factor.solve(transformed_rhs)
+        return self._border_transform @ scaled_solution
 
     def solve(self, rhs: NDArray) -> NDArray:
         """Solve the public ``K - 1`` coordinate system without materializing it."""
@@ -433,7 +465,7 @@ class SumToZeroBlockFactor:
             border_null[gamma_slice] = local.null.T @ raw_rhs[level]
         border_multiplier = -np.sum(pinv_rhs, axis=0)
         border_rhs = np.vstack((border_small, border_null, border_multiplier))
-        border_solution = self._border_factor.solve(border_rhs)
+        border_solution = self._solve_border(border_rhs)
         small_solution = border_solution[:q]
         gamma = border_solution[q : q + self._null_width]
         multiplier = border_solution[q + self._null_width :]
