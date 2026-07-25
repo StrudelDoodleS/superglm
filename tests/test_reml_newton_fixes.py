@@ -286,6 +286,30 @@ class TestNoPostLoopRescue:
 class TestTerminationAuthority:
     """Termination status must describe the optimizer state that was checked."""
 
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_loose_tolerance_still_evaluates_two_candidates(self, discrete):
+        rng = np.random.default_rng(20260728)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+            discrete=discrete,
+        )
+
+        model.fit_reml(
+            X,
+            y,
+            max_reml_iter=8,
+            reml_tol=1e9,
+            runtime_validation="skip",
+        )
+
+        assert model._reml_result.converged
+        assert model._reml_result.n_reml_iter == 2
+
     def test_direct_rejected_search_stops_at_evaluated_lambdas(self, monkeypatch):
         """Exact REML reports step failure without taking an unscored fallback."""
         import superglm.reml.direct as direct_reml

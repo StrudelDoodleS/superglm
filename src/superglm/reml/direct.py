@@ -665,8 +665,13 @@ def optimize_direct_reml(
         active_idx = np.where(~frozen)[0]
 
         if active_idx.size == 0:
-            # All components frozen -- converged
+            rho = rho_clipped
             _t_hessian += _time.perf_counter() - _t0
+            if outer == 0:
+                # Do not let a deliberately loose tolerance bypass the
+                # two-evaluation convergence contract.
+                continue
+            # All components frozen -- converged
             converged = True
             termination_reason = "active_set_stationary"
             break
@@ -704,8 +709,12 @@ def optimize_direct_reml(
         armijo_c = 1e-4
         descent = float(grad @ delta)
         accepted = False
+        had_feasible_trial = False
         for _ls in range(max_ls):
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
+            if np.all(np.abs(rho_trial - rho_clipped) <= 1e-12):
+                break
+            had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
@@ -890,12 +899,16 @@ def optimize_direct_reml(
             step *= 0.5
 
         if not accepted:
-            # The fully converged exact objective rejected every trial.
-            # Stop at the evaluated candidate rather than installing an
-            # unscored fallback and repeating expensive full PIRLS fits.
             rho = rho_clipped
-            termination_reason = "line_search_failed"
             _t_linesearch += _time.perf_counter() - _t0
+            if not had_feasible_trial:
+                # All projected coordinates are stationary at a bound.
+                # Re-evaluate this same point once so the compound objective
+                # criterion can confirm stability without redundant trial fits.
+                continue
+            # The fully converged exact objective rejected every feasible
+            # trial. Stop rather than installing an unscored fallback.
+            termination_reason = "line_search_failed"
             break
         _t_linesearch += _time.perf_counter() - _t0
 

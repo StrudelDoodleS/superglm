@@ -742,9 +742,13 @@ def optimize_discrete_reml_cached_w(
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
         if active_idx_d.size == 0:
             rho = rho_clipped
+            _t_newton += _time.perf_counter() - _t0
+            if poi_iter == 0:
+                # Do not let a deliberately loose tolerance bypass the
+                # two-evaluation convergence contract.
+                continue
             converged = True
             termination_reason = "active_set_stationary"
-            _t_newton += _time.perf_counter() - _t0
             break
 
         if active_idx_d.size < m:
