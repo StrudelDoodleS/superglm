@@ -1,16 +1,6 @@
-"""
-SuperGLM: Penalised GLMs for insurance pricing.
+"""SuperGLM: Penalised GLMs for insurance pricing.
 
-Core API (auto-detect):
-    from superglm import SuperGLM
-
-    model = SuperGLM(
-        penalty="group_lasso", selection_penalty=0.01,
-        splines=["driver_age"],
-    )
-    model.fit(X, y, sample_weight=weights)
-
-Core API (explicit):
+Core API:
     from superglm import SuperGLM, Spline, Categorical, Numeric
 
     model = SuperGLM(

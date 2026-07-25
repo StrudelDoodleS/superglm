@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import ast
+import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -265,3 +269,31 @@ def test_auto_detection_cannot_bypass_group_geometry_validation(basis) -> None:
             max_reml_iter=1,
             runtime_validation="skip",
         )
+
+
+def test_public_docs_use_explicit_spline_features_and_cover_factor_smooth_choices() -> None:
+    module_path = Path("src/superglm/__init__.py")
+    module_doc = ast.get_docstring(ast.parse(module_path.read_text()))
+    python_fence = re.compile(r"```(?:python|py)\n(.*?)```", re.DOTALL)
+    violations = [
+        str(path)
+        for path in Path("docs").rglob("*.md")
+        if "superpowers" not in path.parts
+        for example in python_fence.findall(path.read_text())
+        if re.search(r"\bsplines\s*=", example)
+    ]
+    if re.search(r"\bsplines\s*=", module_doc or ""):
+        violations.append(str(module_path))
+
+    assert violations == []
+    interactions = Path("docs/guide/interactions.md").read_text()
+    for required in (
+        'basis="fs"',
+        'basis="sz"',
+        "group=",
+        "by=",
+        "SplineCategorical",
+        'random_effects="population"',
+        "unseen",
+    ):
+        assert required in interactions

@@ -7,7 +7,7 @@ model or a fixed-penalty sparse model.
 |---|---|---|
 | Standard spline pricing model | `fit_reml()` with `selection_penalty=0` | Automatic smoothness selection and clean GAM-style inference |
 | Large-`n` spline pricing model | `fit_reml(discrete=True)` | Same modeling story, cheaper outer iterations |
-| High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | Compact scalar/block Schur fitting with automatic small-model fallback |
+| High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | Compact scalar/block/constrained fitting with automatic small-model fallback |
 | Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | mgcv-style double-penalty shrinkage |
 | Sparse screening / compression | `fit()` with `selection_penalty > 0` | Fixed-penalty sparse model rather than REML smoothness selection |
 | Regularisation path analysis | `fit_path()` | Warm-started lambda path for fixed-penalty models |
@@ -70,14 +70,16 @@ path; only the continuous spline support is binned.
 
 `RandomEffect` and `FactorSmooth` are REML-only terms. Their dominant
 categorical block remains compact, and `direct_solve="auto"` chooses between
-the ordinary Gram solver and a scalar/block Schur solver from the fitted
-geometry.
+the ordinary Gram solver and a scalar, block, or sum-to-zero constrained solver
+from the fitted geometry.
 
 ```python
 model = SuperGLM(
     family="poisson",
     features={"VehBrand": RandomEffect()},
-    interactions=[FactorSmooth("DrivAge", group="Region", k=6)],
+    interactions=[
+        FactorSmooth("DrivAge", group="Region", basis="fs", k=6)
+    ],
     discrete=True,
     n_bins=256,
     direct_solve="auto",
@@ -90,6 +92,34 @@ The structured path supports one dominant credibility block plus narrow dense
 features, global splines, and secondary random effects. See
 [Credibility terms](credibility.md) for model semantics and the French motor
 example.
+
+For `basis="sz"`, configure the matching global spline explicitly:
+
+```python
+model = SuperGLM(
+    family="poisson",
+    features={"DrivAge": Spline(kind="ps", k=7, m=2)},
+    interactions=[
+        FactorSmooth(
+            "DrivAge",
+            group="Region",
+            basis="sz",
+            kind="ps",
+            k=6,
+            m=2,
+        )
+    ],
+    direct_solve="auto",
+    selection_penalty=0.0,
+)
+model.fit_reml(df, y, offset=np.log(exposure))
+```
+
+Tabmat handles the ordinary dense, sparse, and categorical partition and the
+dense-small side of this solve. The dominant factor smooth stays in compact
+`codes + shared basis` form and uses compiled raw sufficient-statistic
+kernels. This avoids expanding \(Kk\) columns into a generic sparse block and
+then paying for its full weighted sandwich products.
 
 ## `select=True` Versus `selection_penalty > 0`
 

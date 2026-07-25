@@ -42,19 +42,26 @@ model = SuperGLM(
 model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 ```
 
-## Auto-Detect Mode For Quick Prototypes
+## Legacy Auto-Detection
 
-Auto-detect mode still exists and is useful for a quick first pass, but
-explicit feature specs are the better default for pricing work.
+Auto-detection remains available for compatibility, but explicit feature
+specs are the canonical API. Passing the legacy `splines` keyword emits a
+`FutureWarning`; migrate each named spline to
+`features={"column": Spline(...)}`. The companion `n_knots`, `degree`, and
+`categorical_base` controls continue to configure that legacy path during the
+compatibility window.
 
 ```python
-from superglm import SuperGLM
+from superglm import Spline, SuperGLM
 
 model = SuperGLM(
     family="poisson",
     selection_penalty=0.0,
-    splines=["DrivAge", "VehAge", "BonusMalus"],
-    n_knots=10,
+    features={
+        "DrivAge": Spline(n_knots=10),
+        "VehAge": Spline(n_knots=10),
+        "BonusMalus": Spline(n_knots=10),
+    },
 )
 model.fit_reml(df, y, sample_weight=exposure)
 ```
@@ -67,12 +74,15 @@ and collect a `LazyFrame` before passing it to SuperGLM.
 ```python
 import polars as pl
 
-from superglm import SuperGLM
+from superglm import Spline, SuperGLM
 
 X = pl.DataFrame({"age": [20.0, 30.0, 40.0], "region": ["N", "S", "N"]})
 y = [0.0, 1.0, 2.0]
 
-model = SuperGLM(family="poisson", splines=["age"]).fit(X, y)
+model = SuperGLM(
+    family="poisson",
+    features={"age": Spline()},
+).fit(X, y)
 predictions = model.predict(X)
 ```
 

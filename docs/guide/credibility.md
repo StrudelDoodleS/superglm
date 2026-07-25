@@ -1,20 +1,25 @@
-# Credibility: Random Effects And Factor Smooths
+# Credibility And Factor-Varying Smooths
 
-`RandomEffect` and `FactorSmooth` are REML-selected credibility terms. They are
-useful when a categorical level has its own experience, but the thinner levels
-should borrow strength from the portfolio instead of receiving unrestricted
-fixed effects.
+`RandomEffect` and `FactorSmooth(..., basis="fs")` are REML-selected
+credibility terms. They are useful when a categorical level has its own
+experience, but thinner levels should borrow strength from the portfolio
+instead of receiving unrestricted fixed effects.
 
-They correspond to two common mgcv constructions:
+`FactorSmooth(..., basis="sz")` is related but has a different interpretation:
+it estimates centered level deviations around a required global curve. Its
+wiggle is smoothed, but its polynomial null space is not fully shrunk, so its
+level table is not labelled as credibility or collapse.
 
 | SuperGLM | mgcv analogue | What varies by level |
 |---|---|---|
 | `RandomEffect()` | `s(group, bs="re")` | one intercept |
-| `FactorSmooth(x, group=...)` | `s(x, group, bs="fs")` | a complete smooth curve |
+| `FactorSmooth(x, group=..., basis="fs")` | `s(x, group, bs="fs")` | a fully penalized smooth curve |
+| `FactorSmooth(x, group=..., basis="sz")` | `s(x, group, bs="sz", id=1)` | a centered deviation curve |
 
-Both terms use every fitted level rather than dropping a reference level. REML
-estimates their penalty strengths and therefore how strongly the level effects
-are pulled toward the population prediction.
+All three use every fitted level rather than dropping a reference level. REML
+estimates their penalty strengths. For RE and FS this controls full shrinkage
+toward the population prediction; for SZ it controls wiggle around a
+sum-to-zero deviation surface.
 
 ## Random intercept credibility
 
@@ -72,7 +77,7 @@ brand.table[
 ]
 ```
 
-## Factor-smooth credibility
+## Fully penalized FS credibility
 
 Use a factor smooth when the deviation itself changes over a continuous
 variable. For example, the driver-age curve can differ by region:
@@ -90,7 +95,7 @@ model = SuperGLM(
     },
     interactions=[
         # Fully penalized regional deviations from that curve
-        FactorSmooth("DrivAge", group="Region", k=6),
+        FactorSmooth("DrivAge", group="Region", basis="fs", k=6),
     ],
     selection_penalty=0.0,
 )
@@ -140,10 +145,56 @@ portfolio age curve, and how does each region deviate from it?” A factor
 smooth can also be fitted without a global smooth when complete level-specific
 curves are the intended model.
 
-Do not add `RandomEffect()` for the same grouping column as a `FactorSmooth`.
-The factor smooth already contains a penalized constant direction for every
-level, so the two terms would duplicate the random intercept. SuperGLM rejects
-that geometry. Random effects for a different grouping column are supported.
+The FS null-space smoothing components are REML smoothing/variance
+components. They are not sparse selection penalties, and they work with
+`fit_reml()` while `selection_penalty` remains zero.
+
+## Centered SZ deviations
+
+Use SZ when the global curve should carry the portfolio-wide shape and the
+level curves should be identifiable deviations from it:
+
+```python
+import numpy as np
+
+from superglm import FactorSmooth, Spline, SuperGLM
+
+model = SuperGLM(
+    family="poisson",
+    features={"DrivAge": Spline(kind="ps", k=7, m=2)},
+    interactions=[
+        FactorSmooth(
+            "DrivAge",
+            group="Region",
+            basis="sz",
+            kind="ps",
+            k=6,
+            m=2,
+        )
+    ],
+    selection_penalty=0.0,
+).fit_reml(train, train["ClaimNb"], offset=np.log(train["Exposure"]))
+
+regional_deviation = model.factor_smooth("DrivAge:Region:sz", grid=80)
+```
+
+Equivalent marginal coefficients across levels sum to zero, so the deviation
+curves also sum to zero pointwise. There is one shared `wiggle` lambda. The
+polynomial null space remains unpenalized: even an extremely large wiggle
+lambda can leave finite linear or low-order polynomial deviations.
+Consequently `regional_deviation.collapsed` is `None`, and its table reports
+support, information, EDF, and coefficient norms without `credibility` or
+`shrinkage` columns.
+
+SZ requires the matching global `Spline`. It is not a generic
+`SplineCategorical` interaction: `SplineCategorical` is reference-coded and
+unpooled, while SZ uses all levels symmetrically with an exact sum-to-zero
+constraint.
+
+Do not add `Categorical()` or `RandomEffect()` for the same grouping column as
+a `FactorSmooth`. The factor smooth already contains the lower-order group
+geometry, so those terms would duplicate it. SuperGLM rejects that
+configuration. Random effects for a different grouping column are supported.
 
 ## Conditional and population prediction
 
@@ -163,16 +214,19 @@ Missing group values always fail.
 
 ## Exact, discrete, and structured fitting
 
-Both credibility terms use compact group matrices alongside the tabmat-backed
-narrow design blocks. The structured solver factors the small dense part once
-and handles the dominant term as independent scalar or \(k \times k\) level
-blocks. It does not form the full \((Kk) \times (Kk)\) Hessian or covariance.
+These terms use compact group matrices alongside tabmat-backed narrow design
+blocks. The structured solver factors the small dense part once. RE and FS use
+independent scalar or \(k \times k\) local blocks; SZ uses raw all-level blocks
+plus a small equality-constrained border. It does not form the full
+\((Kk)^2\) FS or \(((K-1)k)^2\) SZ Hessian.
 
 ```python
 model = SuperGLM(
     family="poisson",
     features=features,
-    interactions=[FactorSmooth("DrivAge", group="Region", k=6)],
+    interactions=[
+        FactorSmooth("DrivAge", group="Region", basis="fs", k=6)
+    ],
     discrete=True,
     n_bins=256,
     direct_solve="auto",
@@ -183,10 +237,17 @@ model.fit_reml(train, y, offset=offset)
 
 `direct_solve="auto"` retains Gram fitting for small terms and switches to the
 structured backend at the measured crossover. `direct_solve="structured"`
-requires eligible credibility geometry and is useful for reproducible
-benchmarking. `discrete=True` bins the continuous spline support and reuses
-cached sufficient statistics across REML iterations; factor identities remain
-exact.
+requires eligible geometry and is useful for reproducible benchmarking.
+`discrete=True` bins the continuous spline support and reuses cached
+sufficient statistics across REML iterations; factor identities and the SZ
+constraint remain exact.
+
+Tabmat still owns ordinary dense, sparse, and categorical blocks and the
+dense-small side of the structured system. Factor smooths retain a more
+compact `codes + shared basis` representation with compiled raw-moment
+kernels. Expanding the dominant term into a generic tabmat sparse block would
+increase storage and weighted sandwich-product work; the structured solver
+combines the two representations at their natural boundary.
 
 ## Real French motor example
 
@@ -239,9 +300,10 @@ credibility and curve tables, and `credibility_demo.png`.
 
 ## Current scope
 
-- `FactorSmooth` currently supports `kind="ps"` and requires `fit_reml()`.
+- `FactorSmooth` supports `basis="fs"` and `basis="sz"`, currently with
+  `kind="ps"`, and requires `fit_reml()`.
 - `fit()` and `fit_path()` reject factor smooths.
 - Factor-smooth `k` must be at least 5.
 - Missing numeric or grouping values are rejected.
-- The mgcv Gaussian, Poisson, global-smooth, unseen-level, and discrete
-  reference cases are pinned in the test suite.
+- The mgcv 1.9-4 FS and SZ Gaussian, Poisson, construction, unseen-level, and
+  discrete reference cases are pinned in the test suite.
