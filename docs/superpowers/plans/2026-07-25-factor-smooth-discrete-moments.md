@@ -81,7 +81,7 @@ Expected:
 wall = [7.694315768079832, 7.654054712038487]
 converged = true
 reml_iterations = 5
-checksum = 1045155.2072170012
+checksum = 1045155.2072170011
 ```
 
 - [ ] **Step 2: Verify the profiled repeated-scan stack**
