@@ -276,6 +276,8 @@ def optimize_discrete_reml_cached_w(
     best_lambdas = lambdas.copy()
     best_pirls = None
     converged = False
+    termination_reason = "max_reml_iter"
+    all_lambdas_fixed = not bool(np.any(estimated_mask))
 
     _n_pirls_steps = 0
     _n_newton_steps = 0
@@ -653,6 +655,12 @@ def optimize_discrete_reml_cached_w(
             best_pirls = pirls_result
         lambda_history.append(cand_lambdas.copy())
 
+        if all_lambdas_fixed:
+            rho = rho_clipped
+            converged = True
+            termination_reason = "fixed_lambdas"
+            break
+
         # --- Step 2: Newton step on lambda ---
         _t0 = _time.perf_counter()
         grad = reml_direct_gradient(
@@ -695,6 +703,7 @@ def optimize_discrete_reml_cached_w(
                 rho = rho_clipped
                 prev_obj = obj
                 converged = True
+                termination_reason = "score_objective_tolerance"
                 _t_newton += _time.perf_counter() - _t0
                 break
         prev_obj = obj
@@ -732,22 +741,26 @@ def optimize_discrete_reml_cached_w(
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
         if active_idx_d.size == 0:
-            delta = np.zeros(m)
-        else:
-            if active_idx_d.size < m:
-                hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
-                grad_sub_d = grad[active_idx_d]
-            else:
-                hess_sub_d = hess
-                grad_sub_d = grad
+            rho = rho_clipped
+            converged = True
+            termination_reason = "active_set_stationary"
+            _t_newton += _time.perf_counter() - _t0
+            break
 
-            eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
-            max_eig_d = max(abs(eigvals_h).max(), 1e-12)
-            eig_floor_d = max_eig_d * _eps**0.7
-            eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
-            delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
-            delta = np.zeros(m)
-            delta[active_idx_d] = delta_sub_d
+        if active_idx_d.size < m:
+            hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
+            grad_sub_d = grad[active_idx_d]
+        else:
+            hess_sub_d = hess
+            grad_sub_d = grad
+
+        eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
+        max_eig_d = max(abs(eigvals_h).max(), 1e-12)
+        eig_floor_d = max_eig_d * _eps**0.7
+        eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
+        delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
+        delta = np.zeros(m)
+        delta[active_idx_d] = delta_sub_d
 
         tensor_step_diag = None
         if use_tensor_surrogate_linesearch:
@@ -1294,4 +1307,5 @@ def optimize_discrete_reml_cached_w(
         lambda_history=lambda_history,
         objective=float(best_obj),
         curvature_source="fisher",
+        termination_reason=termination_reason,
     )

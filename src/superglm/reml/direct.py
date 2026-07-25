@@ -179,7 +179,9 @@ def optimize_direct_reml(
     best_lambdas = lambdas.copy()
     best_pirls = None
     converged = False
+    termination_reason = "max_reml_iter"
     n_iter = 0
+    all_lambdas_fixed = not bool(np.any(estimated_mask))
 
     _t_reml_start = _time.perf_counter()
     _t_pirls = 0.0
@@ -527,6 +529,15 @@ def optimize_direct_reml(
                 authoritative=False,
             )
 
+        if all_lambdas_fixed:
+            best_obj = obj
+            best_lambdas = cand_lambdas.copy()
+            best_pirls = pirls_result
+            lambda_history.append(cand_lambdas.copy())
+            converged = True
+            termination_reason = "fixed_lambdas"
+            break
+
         _t0 = _time.perf_counter()
         grad_partial = reml_direct_gradient(
             dm.group_matrices,
@@ -609,6 +620,7 @@ def optimize_direct_reml(
             obj_converged = obj_change < _tol * score_scale
             if grad_converged and obj_converged:
                 converged = True
+                termination_reason = "score_objective_tolerance"
                 break
 
         # Wood outer-Hessian update.  With ``w_correction_order=2`` this
@@ -656,6 +668,7 @@ def optimize_direct_reml(
             # All components frozen -- converged
             _t_hessian += _time.perf_counter() - _t0
             converged = True
+            termination_reason = "active_set_stationary"
             break
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
@@ -920,4 +933,5 @@ def optimize_direct_reml(
         objective=float(best_obj),
         objective_history=objective_history,
         curvature_source="observed" if use_observed_geometry else "fisher",
+        termination_reason=termination_reason,
     )

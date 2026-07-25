@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import LambdaPolicy, RandomEffect, SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -268,6 +268,7 @@ class TestNoPostLoopRescue:
         )
         model.fit_reml(X[["x1", "x2"]], y, sample_weight=w, max_reml_iter=2)
         assert not model._reml_result.converged
+        assert model._reml_result.termination_reason == "max_reml_iter"
 
     def test_genuine_convergence_still_true(self, poisson_data):
         """Models that genuinely converge still report converged=True."""
@@ -279,6 +280,43 @@ class TestNoPostLoopRescue:
         )
         model.fit_reml(X[["x1"]], y, sample_weight=w)
         assert model._reml_result.converged
+        assert model._reml_result.termination_reason == "score_objective_tolerance"
+
+
+class TestTerminationAuthority:
+    """Termination status must describe the optimizer state that was checked."""
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_all_fixed_random_effect_has_no_lambda_search(self, discrete):
+        rng = np.random.default_rng(20260725)
+        n_levels = 12
+        repeats = 20
+        codes = np.repeat(np.arange(n_levels), repeats)
+        effects = rng.normal(scale=0.35, size=n_levels)
+        y = rng.poisson(np.exp(-0.2 + effects[codes])).astype(float)
+        X = pd.DataFrame({"group": np.array([f"g{i}" for i in codes], dtype=object)})
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "group": RandomEffect(
+                    lambda_policy=LambdaPolicy.fixed(2.0),
+                )
+            },
+            selection_penalty=0,
+            discrete=discrete,
+            direct_solve="structured",
+        )
+
+        model.fit_reml(X, y, max_reml_iter=20, runtime_validation="skip")
+
+        result = model._reml_result
+        profile = model._reml_profile
+        assert result.converged
+        assert result.termination_reason == "fixed_lambdas"
+        assert result.n_reml_iter == 1
+        assert profile["reml_n_linesearch_fits"] == 0
+        if discrete:
+            assert profile["reml_n_analytical_iters"] == 0
 
 
 # ── Bug 6: Summary iter count ────────────────────────────────────
