@@ -323,17 +323,15 @@ def _factor_smooth_support_dense_cross(
 
 
 @njit(cache=True)
-def _factor_smooth_support_dense_cell_cross(
-    basis,
+def _factor_smooth_support_dense_cell_aggregates(
     bin_idx,
     codes,
     weights,
     dense_small,
     n_levels,
+    n_bins,
 ):
-    """Aggregate dense crosses once by level/support cell, then contract."""
-    n_bins = basis.shape[0]
-    width = basis.shape[1]
+    """Aggregate weighted dense values once by level/support cell."""
     small_width = dense_small.shape[1]
     cells = np.zeros((n_levels, n_bins, small_width), dtype=np.float64)
     for row in range(len(codes)):
@@ -342,17 +340,7 @@ def _factor_smooth_support_dense_cell_cross(
         weight = weights[row]
         for small_column in range(small_width):
             cells[level, support, small_column] += weight * dense_small[row, small_column]
-
-    result = np.zeros((n_levels, width, small_width), dtype=np.float64)
-    for level in range(n_levels):
-        for support in range(n_bins):
-            for basis_column in range(width):
-                basis_value = basis[support, basis_column]
-                for small_column in range(small_width):
-                    result[level, basis_column, small_column] += (
-                        basis_value * cells[level, support, small_column]
-                    )
-    return result
+    return cells
 
 
 @njit(cache=True)

@@ -21,7 +21,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_csr_rmatvec,
     _factor_smooth_csr_sufficient_stats,
     _factor_smooth_support_cell_sufficient_stats,
-    _factor_smooth_support_dense_cell_cross,
+    _factor_smooth_support_dense_cell_aggregates,
     _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
@@ -504,21 +504,17 @@ class FactorSmoothGroupMatrix:
         if basis is None or support_index is None:  # pragma: no cover - constructor invariant
             raise RuntimeError("discrete FactorSmooth support is unavailable")
 
-        raw = _factor_smooth_support_dense_cell_cross(
-            basis,
+        cells = _factor_smooth_support_dense_cell_aggregates(
             support_index,
             self.codes,
             weights,
             small,
             self.n_levels,
+            basis.shape[0],
         )
+        raw = basis.T[None, :, :] @ cells
         return np.ascontiguousarray(
-            np.einsum(
-                "ai,kaq->kiq",
-                self.natural_map,
-                raw,
-                optimize=True,
-            ),
+            self.natural_map.T[None, :, :] @ raw,
             dtype=np.float64,
         )
 
