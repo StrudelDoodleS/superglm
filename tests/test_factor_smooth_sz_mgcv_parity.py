@@ -11,6 +11,7 @@ import pytest
 
 from superglm import FactorSmooth, Spline, SuperGLM
 from superglm.factor_smooth_geometry import sum_to_zero_penalty
+from superglm.group_matrix import FactorSmoothGroupMatrix
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "factor_smooth_sz_mgcv_reference.json"
 _CASE_NAMES = ("gaussian", "poisson", "poisson_discrete")
@@ -314,3 +315,81 @@ def test_sz_superglm_exact_and_discrete_predictions_match(
         atol=4e-4,
     )
     assert discrete.result.deviance == pytest.approx(exact.result.deviance, rel=8e-4)
+
+
+def test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate(
+    mgcv_sz_fixture: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = mgcv_sz_fixture["poisson_discrete"]
+    data = case["data"]
+    X = pd.DataFrame({"x": data["x"], "f": data["f"]})
+    y = np.asarray(data["y"], dtype=np.float64)
+    offset = np.log(np.asarray(data["exposure"], dtype=np.float64))
+    original = FactorSmoothGroupMatrix.factor_smooth_discrete_cell_moments
+
+    def equivalent_batched_moments(self, W, rhs):
+        cell_weights, _gram, _xtw, _xt_rhs = original(self, W, rhs)
+        cell_rhs = np.zeros_like(cell_weights)
+        np.add.at(
+            cell_rhs,
+            (self.codes, self.bin_idx),
+            np.asarray(rhs, dtype=np.float64),
+        )
+        effective_basis = np.ascontiguousarray(
+            self.B_unique @ self.natural_map,
+            dtype=np.float64,
+        )
+        weighted_basis = cell_weights[:, :, None] * effective_basis[None, :, :]
+        local_gram = effective_basis.T[None, :, :] @ weighted_basis
+        local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
+        return (
+            np.ascontiguousarray(cell_weights),
+            np.ascontiguousarray(local_gram),
+            np.ascontiguousarray(cell_weights @ effective_basis),
+            np.ascontiguousarray(cell_rhs @ effective_basis),
+        )
+
+    monkeypatch.setattr(
+        FactorSmoothGroupMatrix,
+        "factor_smooth_discrete_cell_moments",
+        equivalent_batched_moments,
+    )
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="ps", k=7, m=2)},
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="f",
+                basis="sz",
+                kind="ps",
+                k=6,
+                m=2,
+            )
+        ],
+        selection_penalty=0.0,
+        direct_solve="structured",
+        discrete=True,
+        n_bins=512,
+        tol=1e-10,
+        max_iter=200,
+    )
+    model.fit_reml(
+        X,
+        y,
+        offset=offset,
+        max_reml_iter=50,
+        reml_tol=1e-9,
+        pirls_tol=1e-10,
+        max_pirls_iter=200,
+        runtime_validation="skip",
+    )
+
+    result = model._reml_result
+    assert result.converged
+    assert result.lambda_history[-1] == result.lambda_history[-2]
+    assert model._reml_lambdas["x:f:sz:wiggle"] == pytest.approx(
+        case["reference"]["unscaled_lambdas"]["sz_wiggle"],
+        rel=5.0e-2,
+    )
