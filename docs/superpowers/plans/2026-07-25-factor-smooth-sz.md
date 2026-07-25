@@ -122,7 +122,7 @@ do not build on a stale base.
 
 ```bash
 rtk git rev-parse origin/master
-rtk pytest tests/test_random_effect_reml.py tests/test_factor_smooth_feature.py tests/test_factor_smooth_reml.py tests/test_factor_smooth_structured_parity.py -q
+rtk uv run pytest tests/test_random_effect_reml.py tests/test_factor_smooth_feature.py tests/test_factor_smooth_reml.py tests/test_factor_smooth_structured_parity.py -q
 ```
 
 Expected: the exact base SHA is recorded in the eventual review handoff and
@@ -131,8 +131,8 @@ the existing RE/FS baseline passes before SZ changes.
 - [ ] **Step 3: Capture same-hardware RE/FS performance sentinels**
 
 ```bash
-rtk uv run python benchmarks/profile_structured_credibility.py --structured-term random_effect --family poisson --n 6000 --levels 300 --backend structured --repetitions 3 --warmups 1 --output-dir /tmp/superglm-re-pre-sz
-rtk uv run python benchmarks/profile_structured_credibility.py --structured-term factor_smooth --global-spline --family poisson --n 6000 --levels 50 --block-size 5 --backend structured --repetitions 3 --warmups 1 --output-dir /tmp/superglm-fs-pre-sz
+rtk uv run python benchmarks/profile_structured_credibility.py --structured-term random_effect --family poisson --n 2000 --levels 50 --backend structured --repetitions 2 --warmups 1 --max-reml-iter 3 --output-dir /tmp/superglm-re-pre-sz
+rtk uv run python benchmarks/profile_structured_credibility.py --structured-term factor_smooth --global-spline --family poisson --n 2000 --levels 20 --block-size 5 --backend structured --repetitions 2 --warmups 1 --max-reml-iter 3 --output-dir /tmp/superglm-fs-pre-sz
 rtk json /tmp/superglm-re-pre-sz/summary.json
 rtk json /tmp/superglm-fs-pre-sz/summary.json
 ```
@@ -249,7 +249,7 @@ another.
 Run:
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_feature.py tests/test_api.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_feature.py tests/test_api.py -q
 ```
 
 Expected: failures for the missing `basis` attribute/argument, missing SZ
@@ -377,8 +377,8 @@ legacy controls without announcing a removal version.
 Run:
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_feature.py tests/test_api.py tests/test_cross_validate.py -q
-rtk ruff check src/superglm/features/factor_smooth.py src/superglm/model/api.py src/superglm/model/base.py tests/test_factor_smooth_sz_feature.py tests/test_api.py tests/test_cross_validate.py
+rtk uv run pytest tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_feature.py tests/test_api.py tests/test_cross_validate.py -q
+rtk uv run ruff check src/superglm/features/factor_smooth.py src/superglm/model/api.py src/superglm/model/base.py tests/test_factor_smooth_sz_feature.py tests/test_api.py tests/test_cross_validate.py
 rtk git add src/superglm/features/factor_smooth.py src/superglm/model/api.py src/superglm/model/base.py tests/test_factor_smooth_sz_feature.py tests/test_api.py tests/test_cross_validate.py
 rtk git commit -m "Add unified FactorSmooth basis API"
 ```
@@ -461,7 +461,7 @@ def test_factor_smooth_reports_clear_marginal_rank_error(basis) -> None:
 Run:
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_feature.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_feature.py -q
 ```
 
 Expected: failures for missing contrast helpers, incorrect width, FS natural
@@ -583,8 +583,8 @@ if self.n_cols != coefficient_levels * block_size:
 - [ ] **Step 7: Run tests and commit**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_feature.py -q
-rtk ruff check src/superglm/factor_smooth_geometry.py src/superglm/features/factor_smooth.py src/superglm/types.py tests/test_factor_smooth_sz_feature.py
+rtk uv run pytest tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_feature.py -q
+rtk uv run ruff check src/superglm/factor_smooth_geometry.py src/superglm/features/factor_smooth.py src/superglm/types.py tests/test_factor_smooth_sz_feature.py
 rtk git add src/superglm/factor_smooth_geometry.py src/superglm/features/factor_smooth.py src/superglm/types.py tests/test_factor_smooth_sz_feature.py
 rtk git commit -m "Add sum-to-zero factor smooth geometry"
 ```
@@ -628,7 +628,7 @@ Add a monkeypatch guard proving these fused operations and
 - [ ] **Step 2: Run matrix tests and verify failure**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_matrix.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_matrix.py -q
 ```
 
 Expected: constructor/shape and matvec failures because the matrix still
@@ -708,8 +708,8 @@ one-hot matrix.
 - [ ] **Step 6: Run matrix suites and commit**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py -q
-rtk ruff check src/superglm/dm_builder.py src/superglm/_group_matrix/_group_matrix_core.py tests/test_factor_smooth_sz_matrix.py
+rtk uv run pytest tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py -q
+rtk uv run ruff check src/superglm/dm_builder.py src/superglm/_group_matrix/_group_matrix_core.py tests/test_factor_smooth_sz_matrix.py
 rtk git add src/superglm/dm_builder.py src/superglm/_group_matrix/_group_matrix_core.py tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py
 rtk git commit -m "Add compact SZ matrix operations"
 ```
@@ -764,7 +764,7 @@ than a positional cursor.
 - [ ] **Step 2: Run the penalty tests and verify failure**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_penalties.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_penalties.py -q
 ```
 
 Expected: the current repeated-penalty invariant rejects `(K - 1)k` public
@@ -841,8 +841,8 @@ materializer only on explicit dense-reference paths.
 - [ ] **Step 5: Run penalty and existing REML algebra tests, then commit**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_penalties.py tests/test_factor_smooth_penalties.py tests/test_multi_penalty.py tests/test_penalties.py -q
-rtk ruff check src/superglm/types.py src/superglm/solvers/hessian_factor.py src/superglm/reml/penalty_algebra.py tests/test_factor_smooth_sz_penalties.py
+rtk uv run pytest tests/test_factor_smooth_sz_penalties.py tests/test_factor_smooth_penalties.py tests/test_multi_penalty.py tests/test_penalties.py -q
+rtk uv run ruff check src/superglm/types.py src/superglm/solvers/hessian_factor.py src/superglm/reml/penalty_algebra.py tests/test_factor_smooth_sz_penalties.py
 rtk git add src/superglm/types.py src/superglm/solvers/hessian_factor.py src/superglm/reml/penalty_algebra.py tests/test_factor_smooth_sz_penalties.py tests/test_factor_smooth_penalties.py
 rtk git commit -m "Add compact SZ penalty algebra"
 ```
@@ -888,7 +888,7 @@ np.testing.assert_allclose(
 - [ ] **Step 2: Run the test and verify missing operator failure**
 
 ```bash
-rtk pytest tests/test_sum_to_zero_structured_factor.py::test_sum_to_zero_operator_matches_dense_free_coordinates -q
+rtk uv run pytest tests/test_sum_to_zero_structured_factor.py::test_sum_to_zero_operator_matches_dense_free_coordinates -q
 ```
 
 Expected: import failure for `SumToZeroBlockOperator`.
@@ -1009,8 +1009,8 @@ continues to apply through the existing rank-two update.
 - [ ] **Step 5: Run the operator test and commit**
 
 ```bash
-rtk pytest tests/test_sum_to_zero_structured_factor.py::test_sum_to_zero_operator_matches_dense_free_coordinates -q
-rtk ruff check src/superglm/solvers/structured.py tests/test_sum_to_zero_structured_factor.py
+rtk uv run pytest tests/test_sum_to_zero_structured_factor.py::test_sum_to_zero_operator_matches_dense_free_coordinates -q
+rtk uv run ruff check src/superglm/solvers/structured.py tests/test_sum_to_zero_structured_factor.py
 rtk git add src/superglm/solvers/structured.py tests/test_sum_to_zero_structured_factor.py
 rtk git commit -m "Add compact SZ structured operator"
 ```
@@ -1071,7 +1071,7 @@ Compare every `HessianFactor` trace/operator method against
 - [ ] **Step 2: Run the factor test and verify missing implementation**
 
 ```bash
-rtk pytest tests/test_sum_to_zero_structured_factor.py -q
+rtk uv run pytest tests/test_sum_to_zero_structured_factor.py -q
 ```
 
 Expected: import/factor failures after the operator-only test.
@@ -1229,8 +1229,8 @@ traces. Shift penalty/index requests by one. Delegate
 - [ ] **Step 8: Run the full factor suite and commit**
 
 ```bash
-rtk pytest tests/test_sum_to_zero_structured_factor.py tests/test_structured_factor.py -q
-rtk ruff check src/superglm/solvers/sum_to_zero.py src/superglm/solvers/structured.py tests/test_sum_to_zero_structured_factor.py
+rtk uv run pytest tests/test_sum_to_zero_structured_factor.py tests/test_structured_factor.py -q
+rtk uv run ruff check src/superglm/solvers/sum_to_zero.py src/superglm/solvers/structured.py tests/test_sum_to_zero_structured_factor.py
 rtk git add src/superglm/solvers/sum_to_zero.py src/superglm/solvers/structured.py tests/test_sum_to_zero_structured_factor.py
 rtk git commit -m "Add rank-aware constrained SZ factor"
 ```
@@ -1291,7 +1291,7 @@ reference result on a size kept deliberately small.
 - [ ] **Step 2: Run integration tests and verify dispatch/shape failures**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_structured_system.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_structured_system.py -q
 ```
 
 Expected: raw/public moment shape mismatch and missing constrained-factor
@@ -1366,7 +1366,7 @@ existing Schur eigenvalue check for FS/RE.
 - [ ] **Step 7: Run structured, REML, derivative, and allocation tests**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_structured_allocations.py tests/test_reml_fd.py tests/test_reml_observed_geometry.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_structured_allocations.py tests/test_reml_fd.py tests/test_reml_observed_geometry.py -q
 ```
 
 Expected: exact/discrete structured results match dense reference tolerances;
@@ -1375,7 +1375,7 @@ allocation guards prove no expanded SZ design, penalty, or Hessian.
 - [ ] **Step 8: Commit**
 
 ```bash
-rtk ruff check src/superglm/solvers/structured.py src/superglm/solvers/irls_direct.py src/superglm/reml/observed_geometry.py src/superglm/model/reml_finalize.py tests/test_factor_smooth_sz_reml.py
+rtk uv run ruff check src/superglm/solvers/structured.py src/superglm/solvers/irls_direct.py src/superglm/reml/observed_geometry.py src/superglm/model/reml_finalize.py tests/test_factor_smooth_sz_reml.py
 rtk git add src/superglm/solvers/structured.py src/superglm/solvers/irls_direct.py src/superglm/reml/observed_geometry.py src/superglm/model/reml_finalize.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_structured_allocations.py
 rtk git commit -m "Integrate structured SZ REML fitting"
 ```
@@ -1428,7 +1428,7 @@ Also assert:
 - [ ] **Step 2: Run inference tests and verify FS assumptions fail**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_inference.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_inference.py -q
 ```
 
 Expected: repeated-penalty lookup, `Kk` coefficient reshape, credibility, and
@@ -1530,8 +1530,8 @@ Do not emit a collapse warning or label this as credibility.
 - [ ] **Step 6: Run reporting/inference suites and commit**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_mgcv_parity.py -q
-rtk ruff check src/superglm/inference/covariance.py src/superglm/inference/factor_smooths.py src/superglm/model/api.py tests/test_factor_smooth_sz_inference.py
+rtk uv run pytest tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_mgcv_parity.py -q
+rtk uv run ruff check src/superglm/inference/covariance.py src/superglm/inference/factor_smooths.py src/superglm/model/api.py tests/test_factor_smooth_sz_inference.py
 rtk git add src/superglm/inference/covariance.py src/superglm/inference/factor_smooths.py src/superglm/model/api.py tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_inference.py
 rtk git commit -m "Add SZ prediction and reporting"
 ```
@@ -1615,7 +1615,7 @@ the test.
 - [ ] **Step 4: Run parity tests and commit**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_mgcv_parity.py tests/test_factor_smooth_mgcv_parity.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_mgcv_parity.py tests/test_factor_smooth_mgcv_parity.py -q
 rtk git add tests/fixtures/factor_smooth_sz_mgcv_reference.R tests/fixtures/factor_smooth_sz_mgcv_reference.json tests/test_factor_smooth_sz_mgcv_parity.py
 rtk git commit -m "Pin SZ parity against mgcv"
 ```
@@ -1668,7 +1668,7 @@ Assert interactions documentation contains all of:
 - [ ] **Step 2: Run the doc contract and verify current shorthand/examples fail**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_feature.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_feature.py -q
 ```
 
 Expected: quickstart/module examples and missing SZ guidance fail.
@@ -1747,7 +1747,7 @@ increase memory and sandwich-product cost.
 - [ ] **Step 6: Build docs, run contracts, and commit**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_feature.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_feature.py -q
 rtk uv run mkdocs build --strict
 rtk git add src/superglm/__init__.py docs/getting-started/quickstart.md docs/guide/interactions.md docs/guide/credibility.md docs/guide/fitting.md docs/api/features.md docs/api/inference.md tests/test_factor_smooth_sz_feature.py
 rtk git commit -m "Document unified FS and SZ smooths"
@@ -1796,7 +1796,7 @@ assert "sz_k6" in config.slug
 - [ ] **Step 2: Run the harness smoke test and verify failure**
 
 ```bash
-rtk pytest tests/test_structured_credibility_benchmark.py -q
+rtk uv run pytest tests/test_structured_credibility_benchmark.py -q
 ```
 
 Expected: missing config field and FS-only model construction.
@@ -1824,8 +1824,8 @@ Use a temporary results directory:
 rtk uv run python benchmarks/profile_structured_credibility.py --matrix factor-smooth --factor-basis sz --global-spline --backend both --repetitions 3 --warmups 1 --output-dir /tmp/superglm-sz-profile-matrix
 rtk uv run python benchmarks/profile_structured_credibility.py --structured-term factor_smooth --factor-basis sz --global-spline --family poisson --n 6000 --levels 50 --block-size 6 --backend both --repetitions 3 --warmups 1 --cprofile --tracemalloc --output-dir /tmp/superglm-sz-profile-exact
 rtk uv run python benchmarks/profile_structured_credibility.py --structured-term factor_smooth --factor-basis sz --global-spline --family poisson --n 20000 --levels 300 --block-size 10 --discrete --backend structured --repetitions 3 --warmups 1 --cprofile --tracemalloc --output-dir /tmp/superglm-sz-profile-discrete
-rtk uv run python benchmarks/profile_structured_credibility.py --structured-term random_effect --family poisson --n 6000 --levels 300 --backend structured --repetitions 3 --warmups 1 --output-dir /tmp/superglm-re-post-sz
-rtk uv run python benchmarks/profile_structured_credibility.py --structured-term factor_smooth --factor-basis fs --global-spline --family poisson --n 6000 --levels 50 --block-size 5 --backend structured --repetitions 3 --warmups 1 --output-dir /tmp/superglm-fs-post-sz
+rtk uv run python benchmarks/profile_structured_credibility.py --structured-term random_effect --family poisson --n 2000 --levels 50 --backend structured --repetitions 2 --warmups 1 --max-reml-iter 3 --output-dir /tmp/superglm-re-post-sz
+rtk uv run python benchmarks/profile_structured_credibility.py --structured-term factor_smooth --factor-basis fs --global-spline --family poisson --n 2000 --levels 20 --block-size 5 --backend structured --repetitions 2 --warmups 1 --max-reml-iter 3 --output-dir /tmp/superglm-fs-post-sz
 rtk json /tmp/superglm-sz-profile-matrix/matrix_summary.json
 rtk json /tmp/superglm-sz-profile-exact/summary.json
 rtk log /tmp/superglm-sz-profile-exact/cprofile_structured_top.txt
@@ -1862,8 +1862,8 @@ recommendation.
 - [ ] **Step 6: Run smoke tests and commit**
 
 ```bash
-rtk pytest tests/test_structured_credibility_benchmark.py tests/test_factor_smooth_sz_reml.py -q
-rtk ruff check benchmarks/profile_structured_credibility.py tests/test_structured_credibility_benchmark.py
+rtk uv run pytest tests/test_structured_credibility_benchmark.py tests/test_factor_smooth_sz_reml.py -q
+rtk uv run ruff check benchmarks/profile_structured_credibility.py tests/test_structured_credibility_benchmark.py
 rtk git add benchmarks/profile_structured_credibility.py tests/test_structured_credibility_benchmark.py docs/guide/fitting.md
 rtk git commit -m "Profile structured SZ smooths"
 ```
@@ -1880,7 +1880,7 @@ rtk git commit -m "Profile structured SZ smooths"
 - [ ] **Step 1: Run all focused factor-smooth and structured suites**
 
 ```bash
-rtk pytest tests/test_factor_smooth_feature.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py tests/test_factor_smooth_penalties.py tests/test_factor_smooth_reml.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_sz_penalties.py tests/test_sum_to_zero_structured_factor.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_sz_mgcv_parity.py tests/test_random_effect_reml.py tests/test_structured_factor.py tests/test_structured_irls.py tests/test_structured_allocations.py -q
+rtk uv run pytest tests/test_factor_smooth_feature.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py tests/test_factor_smooth_penalties.py tests/test_factor_smooth_reml.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_sz_penalties.py tests/test_sum_to_zero_structured_factor.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_sz_mgcv_parity.py tests/test_random_effect_reml.py tests/test_structured_factor.py tests/test_structured_irls.py tests/test_structured_allocations.py -q
 ```
 
 Expected: all pass.
@@ -1888,10 +1888,10 @@ Expected: all pass.
 - [ ] **Step 2: Run full repository gates**
 
 ```bash
-rtk pytest tests/ -q
-rtk ruff check src/ tests/ benchmarks/
-rtk ruff format --check src/ tests/ benchmarks/
-rtk mypy src/
+rtk uv run pytest tests/ -q
+rtk uv run ruff check src/ tests/ benchmarks/
+rtk uv run ruff format --check src/ tests/ benchmarks/
+rtk uv run mypy src/
 rtk uv run mkdocs build --strict
 rtk uv run python run_test.py
 ```
