@@ -931,7 +931,7 @@ class ProfiledSumToZeroBlockFactor:
                 small_indices=self.small_indices,
                 structured_indices=self.structured_indices,
             )
-        else:
+        elif isinstance(penalty, BlockSymmetricOperator):
             slope_penalty = BlockSymmetricOperator(
                 A=penalty.A[1:, 1:],
                 C=penalty.C[:, :, 1:],
@@ -939,6 +939,8 @@ class ProfiledSumToZeroBlockFactor:
                 small_indices=self.small_indices,
                 structured_indices=self.structured_indices,
             )
+        else:  # pragma: no cover - _penalty_operator contract
+            raise TypeError("Profiled SZ penalties must use block-compatible operators.")
         return self.operator_cross_trace(slope_penalty, operator)
 
 

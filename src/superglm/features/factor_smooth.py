@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,9 @@ from numpy.typing import NDArray
 
 from superglm.factor_smooth_geometry import expand_sum_to_zero_blocks
 from superglm.types import GroupInfo, LambdaPolicy
+
+if TYPE_CHECKING:
+    from superglm.features.spline import PSpline
 
 
 def _natural_parameterization(
@@ -148,7 +151,7 @@ class FactorSmooth:
 
         self.variable = variable
         self.group = group
-        self.basis = basis
+        self.basis: Literal["fs", "sz"] = basis
         self.kind = kind
         self.k = k
         self.m = m
@@ -159,7 +162,7 @@ class FactorSmooth:
 
         self._levels: list[Any] = []
         self._level_to_code: dict[Any, int] = {}
-        self._spline = None
+        self._spline: PSpline | None = None
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
 
@@ -203,22 +206,26 @@ class FactorSmooth:
         self,
         x: NDArray,
     ) -> tuple[sp.csr_matrix, NDArray]:
-        from superglm.features.spline import Spline
+        from superglm.features.spline import PSpline, Spline
 
-        spline = Spline(kind="ps", k=self.k, penalty="none", m=self.m)
+        spline = cast(PSpline, Spline(kind="ps", k=self.k, penalty="none", m=self.m))
         spline._place_knots(x)
         # mgcv's ``ps`` constructor lays the whole equally spaced knot
         # sequence out from boundaries expanded by 0.1% of the data range.
         # Ordinary SuperGLM P-splines preserve their pre-expansion interior
         # knots for backwards compatibility, so align this owned marginal
         # explicitly before constructing the factor-smooth marginal basis.
-        x_range = spline._hi - spline._lo
-        expanded_lo = spline._lo - 0.001 * x_range
-        expanded_hi = spline._hi + 0.001 * x_range
+        boundary = spline.fitted_boundary
+        if boundary is None:  # pragma: no cover - populated by _place_knots
+            raise RuntimeError("FactorSmooth marginal spline has no fitted boundary.")
+        lo, hi = boundary
+        x_range = hi - lo
+        expanded_lo = lo - 0.001 * x_range
+        expanded_hi = hi + 0.001 * x_range
         interior = np.linspace(
             expanded_lo,
             expanded_hi,
-            spline.n_knots + 2,
+            self.k - 2,
         )[1:-1]
         spline._assemble_knot_vector(interior)
         spline._validate_m_orders_build()
@@ -308,7 +315,10 @@ class FactorSmooth:
             raise ValueError("FactorSmooth variable and group lengths differ.")
         self._build_marginal(numeric)
         support, bin_idx = _discretize_column(numeric, n_bins)
-        basis_unique = self._spline._raw_basis_matrix(support)
+        spline = self._spline
+        if spline is None:  # pragma: no cover - populated by _build_marginal
+            raise RuntimeError("FactorSmooth marginal spline was not initialized.")
+        basis_unique = spline._raw_basis_matrix(support)
         return self._group_info(
             codes=codes,
             basis_unique=np.asarray(basis_unique, dtype=np.float64),
