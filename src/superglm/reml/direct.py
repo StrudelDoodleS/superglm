@@ -151,6 +151,8 @@ def optimize_direct_reml(
         groups,
         direct_solve=direct_solve,
         coefficient_width=dm.p,
+        row_weights=sample_weight,
+        lambda2=lambdas,
     )
     use_structured = structured_decision.use_structured
     if use_observed_geometry:
@@ -887,6 +889,9 @@ def optimize_direct_reml(
                     best_obj = float(trial_obj)
                     best_lambdas = trial_lambdas.copy()
                     best_pirls = trial_result
+                if outer == max_reml_iter - 1:
+                    lambda_history.append(trial_lambdas.copy())
+                    objective_history.append(float(trial_obj))
                 accepted = True
                 break
             if trial_mode_residual is not None:

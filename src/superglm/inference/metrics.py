@@ -301,10 +301,6 @@ class ModelMetrics:
                     )
                 )
         self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
-        self._uses_compact_fit_inference = bool(
-            (self._dm is None and "_fit_inference_info" in model.__dict__)
-            or getattr(model, "_linear_system_state", None) is not None
-        )
 
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
@@ -325,6 +321,13 @@ class ModelMetrics:
             and fit_weights is not None
             and np.shape(fit_weights) == np.shape(self._weights)
             and np.array_equal(np.asarray(fit_weights), self._weights)
+        )
+        self._uses_compact_fit_inference = bool(
+            (self._dm is None and "_fit_inference_info" in model.__dict__)
+            or (
+                getattr(model, "_linear_system_state", None) is not None
+                and self._fit_geometry_matches
+            )
         )
 
         if _mu is not None:

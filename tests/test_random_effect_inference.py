@@ -8,7 +8,7 @@ import pytest
 import scipy.optimize
 
 import superglm.model.state_ops as state_ops
-from superglm import LambdaPolicy, Numeric, RandomEffect, SuperGLM
+from superglm import LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.distributions import _VARIANCE_FLOOR, Binomial, Gamma, Gaussian, clip_mu
 from superglm.inference.covariance import StructuredCovarianceAccessor
 from superglm.inference.random_effects import (
@@ -127,6 +127,105 @@ def test_structured_summary_uses_selected_covariance_only(monkeypatch):
     summary = structured.summary()
     assert summary["fit"]["n_obs"] > 0
     assert np.isfinite(structured.metrics(X, y).coefficient_se["x"][0])
+
+
+def test_structured_metrics_recompute_covariance_for_new_evaluation_weights():
+    dense, structured, X, y, exposure = _fit_pair(n_levels=36, max_reml_iter=3)
+    assert dense is not None
+    evaluation_weights = np.linspace(0.2, 2.0, len(X))
+    offset = np.log(exposure)
+
+    dense_metrics = dense.metrics(
+        X,
+        y,
+        sample_weight=evaluation_weights,
+        offset=offset,
+    )
+    structured_metrics = structured.metrics(
+        X,
+        y,
+        sample_weight=evaluation_weights,
+        offset=offset,
+    )
+
+    assert not structured_metrics._uses_compact_fit_inference
+    np.testing.assert_allclose(
+        structured_metrics._active_info[2],
+        dense_metrics._active_info[2],
+        rtol=5e-8,
+        atol=5e-9,
+    )
+
+
+def test_structured_summary_retains_ordinary_smooth_test_geometry():
+    rng = np.random.default_rng(20260725)
+    n_levels = 40
+    codes = np.repeat(np.arange(n_levels), 8)
+    x = rng.uniform(-1.0, 1.0, size=len(codes))
+    effects = rng.normal(scale=0.25, size=n_levels)
+    y = 0.4 + np.sin(2.5 * x) + effects[codes] + rng.normal(scale=0.15, size=len(codes))
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "broker": np.array([f"b{code}" for code in codes], dtype=object),
+        }
+    )
+    common = {
+        "family": "gaussian",
+        "features": {
+            "x": Spline(k=7, lambda_policy=LambdaPolicy.fixed(1.4)),
+            "broker": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.1)),
+        },
+        "selection_penalty": 0.0,
+    }
+    dense = SuperGLM(**common, direct_solve="gram").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+    structured = SuperGLM(**common, direct_solve="structured").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    dense_row = next(row for row in dense.summary()._coef_rows if row.name == "x")
+    structured_row = next(row for row in structured.summary()._coef_rows if row.name == "x")
+    smooth_group = next(group for group in structured._groups if group.name == "x")
+    R_a = structured._fit_inference_info["R_a"]
+
+    assert R_a.shape == (smooth_group.size, len(structured.result.beta))
+    assert structured_row.wald_chi2 > 0.0
+    assert 0.0 < structured_row.wald_p < 1.0
+    assert structured_row.wald_chi2 == pytest.approx(dense_row.wald_chi2, rel=2e-7)
+    assert structured_row.wald_p == pytest.approx(dense_row.wald_p, rel=2e-7)
+    assert structured_row.ref_df == pytest.approx(dense_row.ref_df, rel=2e-7)
+
+
+def test_structured_summary_marks_dense_small_aliases_nonestimable():
+    x = np.linspace(-2.0, 2.0, 160)
+    levels = np.array([f"g{i}" for i in np.arange(len(x)) % 40], dtype=object)
+    X = pd.DataFrame({"x": x, "duplicate": x, "group": levels})
+    y = 0.8 + 1.6 * x + 0.05 * np.sin(4.0 * x)
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Numeric(),
+            "duplicate": Numeric(),
+            "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.2)),
+        },
+        selection_penalty=0.0,
+        direct_solve="structured",
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    state = model._linear_system_state
+    assert isinstance(state, StructuredLinearSystemState)
+    assert state.coefficient_factor.rank < state.coefficient_factor.shape[0]
+    rows = {row.name: row for row in model.summary()._coef_rows}
+    for name in ("x", "duplicate"):
+        assert not rows[name].estimable
+        assert np.isnan(rows[name].se)
+        assert np.isnan(rows[name].p)
 
 
 def test_released_structured_state_keeps_compact_factors_and_support():
@@ -324,6 +423,76 @@ def test_released_random_effect_report_uses_precomputed_unpooled_effects():
     assert np.all(np.isfinite(report.table["unpooled_effect"]))
     assert np.all(np.isfinite(report.table["posterior_se"]))
     assert report.table["exposure"].isna().all()
+
+
+def test_retained_random_effect_rows_defer_unpooled_solve(monkeypatch):
+    import superglm.inference.random_effects as random_effects_module
+
+    original = random_effects_module.vectorized_conditional_unpooled_effect
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        random_effects_module,
+        "vectorized_conditional_unpooled_effect",
+        counted,
+    )
+    _, structured, _, _, _ = _fit_pair(
+        retain_fit_state=True,
+        fit_dense=False,
+        max_reml_iter=2,
+    )
+
+    assert calls == 0
+    structured.random_effects("broker")
+    assert calls == 1
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_auto_falls_back_for_unpenalized_zero_weight_random_effect_level(discrete: bool):
+    rng = np.random.default_rng(20260726)
+    n_levels = 40
+    codes = np.repeat(np.arange(n_levels), 5)
+    X = pd.DataFrame({"group": np.array([f"g{code}" for code in codes], dtype=object)})
+    y = rng.normal(size=len(codes))
+    sample_weight = np.ones(len(codes))
+    sample_weight[codes == n_levels - 1] = 0.0
+    model = SuperGLM(
+        family="gaussian",
+        features={"group": RandomEffect(lambda_policy=LambdaPolicy.off())},
+        selection_penalty=0.0,
+        direct_solve="auto",
+        discrete=discrete,
+    ).fit_reml(
+        X,
+        y,
+        sample_weight=sample_weight,
+        runtime_validation="skip",
+    )
+
+    assert model.result.direct_backend == "gram"
+    assert "zero total weight" in model.result.direct_fallback_reason
+
+
+def test_unpenalized_random_effect_reports_infinite_variance_component():
+    X = pd.DataFrame({"group": np.repeat(["a", "b", "c"], 30)})
+    y = np.tile([0.6, 1.0, 1.4], 30)
+    model = SuperGLM(
+        family="gaussian",
+        features={"group": RandomEffect(lambda_policy=LambdaPolicy.off())},
+        selection_penalty=0.0,
+        direct_solve="gram",
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    report = model.random_effects("group")
+
+    assert report.lambda_value == 0.0
+    assert np.isinf(report.tau_squared)
+    assert np.isinf(report.standard_deviation)
 
 
 @pytest.mark.parametrize(

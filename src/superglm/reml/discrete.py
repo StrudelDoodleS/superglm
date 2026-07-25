@@ -261,6 +261,8 @@ def optimize_discrete_reml_cached_w(
         groups,
         direct_solve=direct_solve,
         coefficient_width=p,
+        row_weights=sample_weight,
+        lambda2=lambdas,
     )
     use_structured = structured_decision.use_structured
 

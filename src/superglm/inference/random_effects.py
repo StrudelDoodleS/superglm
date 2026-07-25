@@ -283,7 +283,7 @@ def random_effect_result(
     group, spec = _resolve_random_effect(model, name)
     lambda_value = _lambda_for_group(model, group)
     phi = float(model.result.phi)
-    tau_squared = float(phi / lambda_value)
+    tau_squared = float(np.inf if lambda_value == 0.0 else phi / lambda_value)
     at_lower_boundary = lambda_value <= _LAMBDA_LOWER_BOUND * (1.0 + 1.0e-8)
     at_upper_boundary = lambda_value >= _LAMBDA_UPPER_BOUND * (1.0 - 1.0e-8)
     collapsed = at_upper_boundary

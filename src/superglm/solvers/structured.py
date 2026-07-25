@@ -30,6 +30,7 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
+from superglm.solvers.rank import SHARED_RANK_POLICY
 from superglm.types import GroupSlice, PenaltyComponent
 
 if TYPE_CHECKING:
@@ -457,6 +458,8 @@ def resolve_structured_backend(
     *,
     direct_solve: str,
     coefficient_width: int,
+    row_weights: NDArray | None = None,
+    lambda2: float | dict[str, float] | None = None,
 ) -> StructuredBackendDecision:
     """Resolve forced/automatic scalar Schur use once for a direct fit."""
     if direct_solve not in ("auto", "structured"):
@@ -487,6 +490,34 @@ def resolve_structured_backend(
     dominant_matrix = group_matrices[selection.group_index]
     dominant_size = dominant_matrix.shape[1]
     small_size = coefficient_width - dominant_size
+    if (
+        isinstance(dominant_matrix, RandomEffectGroupMatrix)
+        and row_weights is not None
+        and lambda2 is not None
+    ):
+        if isinstance(lambda2, dict):
+            dominant_lambda = lambda2.get(selection.group_name)
+        else:
+            dominant_lambda = float(lambda2)
+        if dominant_lambda is not None and float(dominant_lambda) == 0.0:
+            weights = np.asarray(row_weights, dtype=np.float64)
+            if weights.shape != (dominant_matrix.shape[0],):
+                raise ValueError("row_weights must match the structured design row count.")
+            level_weight = np.bincount(
+                dominant_matrix.codes,
+                weights=weights,
+                minlength=dominant_matrix.n_levels,
+            )
+            if np.any(level_weight <= 0.0):
+                return StructuredBackendDecision(
+                    use_structured=False,
+                    group_index=selection.group_index,
+                    group_name=selection.group_name,
+                    fallback_reason=(
+                        f"RandomEffect group {selection.group_name!r} has a level with "
+                        "zero total weight and zero penalty"
+                    ),
+                )
     if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
         if dominant_matrix.factor_basis == "sz":
             use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
@@ -2850,6 +2881,20 @@ def compact_operator_diagonal(
     return diagonal
 
 
+def _coefficient_estimable_from_null_basis(
+    width: int,
+    null_basis: NDArray,
+) -> NDArray:
+    """Mark coordinates orthogonal to a retained parameter null space."""
+    null = np.asarray(null_basis, dtype=np.float64)
+    if null.shape[0] != width:
+        raise ValueError("Null basis must match the coefficient width.")
+    if null.shape[1] == 0:
+        return np.ones(width, dtype=bool)
+    orthonormal, _ = np.linalg.qr(null, mode="reduced")
+    return np.linalg.norm(orthonormal, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+
+
 class ScalarSchurFactor:
     """Factorization of one diagonal random-effect block and a dense remainder."""
 
@@ -3006,6 +3051,17 @@ class ScalarSchurFactor:
         solution[self.small_indices] = solution_a
         solution[self.structured_indices] = solution_b
         return solution[:, 0] if vector_rhs else solution
+
+    def coefficient_estimable(self) -> NDArray:
+        """Return coordinate estimability after dense-small rank truncation."""
+        if not self.rank_truncated or self._Q_svd is None:
+            return np.ones(self.shape[0], dtype=bool)
+        _, inverse_singular_values, Vh = self._Q_svd
+        null_small = Vh[inverse_singular_values == 0.0].T
+        null_basis = np.zeros((self.shape[0], null_small.shape[1]))
+        null_basis[self.small_indices] = null_small
+        null_basis[self.structured_indices] = -self._F @ null_small
+        return _coefficient_estimable_from_null_basis(self.shape[0], null_basis)
 
     def logdet(self) -> float:
         """Return the exact positive-definite log determinant."""
@@ -3486,6 +3542,17 @@ class BlockSchurFactor:
         solution[self.small_indices] = solution_small
         solution[self.structured_indices] = solution_structured
         return solution[:, 0] if vector_rhs else solution
+
+    def coefficient_estimable(self) -> NDArray:
+        """Return coordinate estimability after dense-small rank truncation."""
+        if not self.rank_truncated or self._Q_svd is None:
+            return np.ones(self.shape[0], dtype=bool)
+        _, inverse_singular_values, Vh = self._Q_svd
+        null_small = Vh[inverse_singular_values == 0.0].T
+        null_basis = np.zeros((self.shape[0], null_small.shape[1]))
+        null_basis[self.small_indices] = null_small
+        null_basis[self.structured_indices] = -(self._F @ null_small)
+        return _coefficient_estimable_from_null_basis(self.shape[0], null_basis)
 
     def logdet(self) -> float:
         return self._logdet

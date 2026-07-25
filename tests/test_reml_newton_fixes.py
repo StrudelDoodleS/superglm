@@ -345,6 +345,24 @@ class TestTerminationAuthority:
         assert result.n_reml_iter == 1
         assert result.lambdas == pytest.approx(evaluated_lambdas)
 
+    def test_final_accepted_trial_is_recorded_in_histories(self):
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+        )
+
+        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+
+        result = model._reml_result
+        assert model._reml_profile["reml_n_linesearch_fits"] > 0
+        assert result.lambda_history[-1] == pytest.approx(result.lambdas)
+        assert result.objective_history[-1] == pytest.approx(result.objective)
+
     def test_discrete_rejected_search_retains_evaluated_lambdas(self, monkeypatch):
         """An exhausted line search must not install an unevaluated fallback."""
         import superglm.reml.discrete as discrete_reml

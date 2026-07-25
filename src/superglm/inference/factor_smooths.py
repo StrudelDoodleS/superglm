@@ -193,7 +193,10 @@ def factor_smooth_result(
         for component in penalties
     }
     phi = float(model.result.phi)
-    variance_components = {component: float(phi / value) for component, value in lambdas.items()}
+    variance_components = {
+        component: float(np.inf if value == 0.0 else phi / value)
+        for component, value in lambdas.items()
+    }
     at_lower_boundary = {
         component: value <= _LAMBDA_LOWER_BOUND * (1.0 + 1.0e-8)
         for component, value in lambdas.items()
@@ -252,7 +255,11 @@ def factor_smooth_result(
         axis1=1,
         axis2=2,
     )
-    has_information = (np.asarray(support.count) > 0) & np.isfinite(information_trace)
+    has_information = (
+        (np.asarray(support.fit_weight) > 0.0)
+        & np.isfinite(information_trace)
+        & (information_trace > 0.0)
+    )
     sufficient_support = information_rank == spec.k
 
     if levels is None:

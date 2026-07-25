@@ -272,6 +272,61 @@ def test_factor_smooth_report_selects_levels_and_flags_insufficient_support() ->
         model.factor_smooth("x:segment:fs", levels=["not-fitted"])
 
 
+def test_factor_smooth_zero_weight_level_has_no_information() -> None:
+    X, y = _data()
+    sample_weight = np.ones(len(X))
+    zero_weight_level = X["segment"] == "segment-5"
+    sample_weight[zero_weight_level.to_numpy()] = 0.0
+    model = _model(discrete=False).fit_reml(
+        X,
+        y,
+        sample_weight=sample_weight,
+        max_reml_iter=2,
+        runtime_validation="skip",
+    )
+
+    report = model.factor_smooth("x:segment:fs", grid=5)
+    level = report.table.set_index("level").loc["segment-5"]
+
+    assert level["count"] > 0
+    assert level["fit_weight"] == 0.0
+    assert level["information_trace"] == 0.0
+    assert not level["has_information"]
+    assert report.diagnostics["n_levels_without_information"] >= 1
+
+
+def test_unpenalized_factor_smooth_reports_infinite_variance_components() -> None:
+    X, y = _data()
+    policies = {
+        "wiggle": LambdaPolicy.off(),
+        "null_0": LambdaPolicy.off(),
+        "null_1": LambdaPolicy.off(),
+    }
+    model = SuperGLM(
+        family="gaussian",
+        features={"z": Numeric()},
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="segment",
+                k=6,
+                lambda_policy=policies,
+            )
+        ],
+        selection_penalty=0.0,
+        direct_solve="gram",
+    ).fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    report = model.factor_smooth("x:segment:fs", grid=5)
+
+    assert set(report.lambdas.values()) == {0.0}
+    assert all(np.isinf(value) for value in report.variance_components.values())
+
+
 def test_factor_smooth_upper_boundary_reports_collapse() -> None:
     X, y = _data()
     model = _model(

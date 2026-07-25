@@ -21,7 +21,7 @@ from superglm.solvers.rank import (
     needs_factor_certification,
     selected_group_name_set,
 )
-from superglm.solvers.structured import StructuredLinearSystemState
+from superglm.solvers.structured import CenteredBlockOperator, StructuredLinearSystemState
 from superglm.types import GroupSlice
 
 
@@ -384,6 +384,27 @@ def fit_active_info(model):
     return X_active, W, inverse, augmented, active_groups
 
 
+def _structured_small_data_factor(operator: CenteredBlockOperator) -> NDArray:
+    """Embed the exact centered dense-small Gram factor in global columns."""
+    raw = operator.raw
+    small_indices = np.asarray(raw.small_indices, dtype=np.intp)
+    if not len(small_indices):
+        return np.empty((0, operator.shape[0]))
+    cross = operator.cross[small_indices]
+    center = operator.center[small_indices]
+    data_gram = (
+        raw.A
+        - np.outer(cross, center)
+        - np.outer(center, cross)
+        + operator.total * np.outer(center, center)
+    )
+    eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
+    local_factor = (eigvecs * np.sqrt(np.maximum(eigvals, 0.0))).T
+    factor = np.zeros((len(small_indices), operator.shape[0]))
+    factor[:, small_indices] = local_factor
+    return factor
+
+
 def fit_inference_info(model):
     """All coefficient-space inference quantities for model.summary().
 
@@ -397,7 +418,7 @@ def fit_inference_info(model):
         XtWX_inv : (p_active, p_active) = (X'WX + S)^{-1}
         XtWX_inv_aug : (p_active+1, p_active+1) augmented inverse incl. intercept
         active_groups : list of GroupSlice re-indexed to active columns
-        R_a : (p_active, p_active) upper-triangular Cholesky factor of X'WX
+        R_a : rectangular factor whose Gram is the required centered X'WX block
         edf : per-coefficient EDF vector
         edf1 : Wood's alternative EDF vector
         group_edf_map : per-group summed EDF dict
@@ -457,20 +478,25 @@ def fit_inference_info(model):
             linear_state.centered_data_operator,
         )
         group_edf_map = {group.name: float(np.sum(edf[group.sl])) for group in active_groups}
+        coefficient_estimable = getattr(
+            linear_state.coefficient_factor,
+            "coefficient_estimable",
+            None,
+        )
         return {
             "W": W,
             "XtWX_inv": inverse,
             "XtWX_inv_aug": augmented,
             "active_groups": active_groups,
-            # Wood-style smooth tests require an explicit data factor. Keep a
-            # zero-row, correctly indexed placeholder rather than allocating
-            # the dominant K x K factor; selected covariance and EDF remain
-            # exact.
-            "R_a": np.empty((0, len(edf))),
+            "R_a": _structured_small_data_factor(linear_state.centered_data_operator),
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": group_edf_map,
-            "coefficient_estimable": np.ones(len(solver.beta), dtype=bool),
+            "coefficient_estimable": (
+                coefficient_estimable()
+                if coefficient_estimable is not None
+                else np.ones(len(solver.beta), dtype=bool)
+            ),
             "structured_covariance": True,
         }
     if solver.rank_info is not None:

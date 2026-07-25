@@ -525,6 +525,8 @@ def fit_irls_direct(
         groups,
         direct_solve=direct_solve,
         coefficient_width=p,
+        row_weights=weights,
+        lambda2=lambda2,
     )
     _use_structured = structured_decision.use_structured
     _structured_group_index = structured_decision.group_index

@@ -182,6 +182,18 @@ def _build_structured_linear_system_state(
         if not isinstance(group_matrix, RandomEffectGroupMatrix):
             continue
         base_eta = full_eta - result.beta[group.sl][group_matrix.codes]
+        unpooled_effect = None
+        if not model._retain_fit_state:
+            unpooled_effect = vectorized_conditional_unpooled_effect(
+                codes=group_matrix.codes,
+                n_levels=group_matrix.n_levels,
+                y=y,
+                sample_weight=sample_weight,
+                base_eta=base_eta,
+                distribution=model._distribution,
+                link=model._link,
+                initial=result.beta[group.sl],
+            )
         support_totals[group.name] = StructuredLevelSupport(
             count=np.bincount(
                 group_matrix.codes,
@@ -193,16 +205,7 @@ def _build_structured_linear_system_state(
                 minlength=group_matrix.n_levels,
             ),
             information=xtw[group.sl],
-            unpooled_effect=vectorized_conditional_unpooled_effect(
-                codes=group_matrix.codes,
-                n_levels=group_matrix.n_levels,
-                y=y,
-                sample_weight=sample_weight,
-                base_eta=base_eta,
-                distribution=model._distribution,
-                link=model._link,
-                initial=result.beta[group.sl],
-            ),
+            unpooled_effect=unpooled_effect,
         )
 
     return StructuredLinearSystemState(

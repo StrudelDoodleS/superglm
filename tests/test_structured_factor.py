@@ -194,6 +194,10 @@ def test_scalar_schur_uses_diagnostic_small_svd_fallback_for_singular_schur():
     assert factor.used_dense_fallback
     assert "Cholesky" in factor.fallback_reason
     assert np.isinf(factor.schur_condition_estimate)
+    np.testing.assert_array_equal(
+        factor.coefficient_estimable(),
+        [True, False, True, True, True],
+    )
 
 
 def test_symmetric_block_operator_is_frozen_and_owns_read_only_arrays():

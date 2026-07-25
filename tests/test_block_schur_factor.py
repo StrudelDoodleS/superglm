@@ -340,6 +340,7 @@ def test_block_schur_singular_schur_complement_has_diagnostic_fallback() -> None
     assert factor.used_dense_fallback
     assert factor.rank < factor.shape[0]
     assert "Schur" in factor.fallback_reason
+    assert not np.any(factor.coefficient_estimable()[factor.small_indices])
 
 
 def test_block_schur_refuses_large_structured_inverse_materialization() -> None:
