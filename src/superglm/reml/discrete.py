@@ -1058,16 +1058,10 @@ def optimize_discrete_reml_cached_w(
             _tensor_post_stall_unlocked = True
 
         if not accepted:
-            # Steepest descent fallback: unit-length in infinity norm
-            # Use proj_grad_d so that fixed components are not moved.
-            grad_max_d = float(np.max(np.abs(proj_grad_d)))
-            if grad_max_d > 1e-12:
-                rho = np.clip(
-                    rho - proj_grad_d / grad_max_d,
-                    log_lo,
-                    log_hi,
-                )
-            # else: keep rho unchanged
+            # Every trial was rejected, so retain the evaluated candidate.
+            # Installing an unscored fallback here can make a max-iteration
+            # refit report lambdas that were never accepted by the criterion.
+            rho = rho_clipped
 
         if use_tensor_surrogate_linesearch:
             tensor_names = [pc.name for pc in penalties if pc.group_name in shared_tensor_groups]

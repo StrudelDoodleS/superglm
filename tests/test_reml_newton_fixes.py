@@ -286,6 +286,76 @@ class TestNoPostLoopRescue:
 class TestTerminationAuthority:
     """Termination status must describe the optimizer state that was checked."""
 
+    def test_direct_rejected_search_stops_at_evaluated_lambdas(self, monkeypatch):
+        """Exact REML reports step failure without taking an unscored fallback."""
+        import superglm.reml.direct as direct_reml
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        evaluated_lambdas: dict[str, float] = {}
+
+        def reject_lambda_moves(*args, **kwargs):
+            candidate = args[6]
+            if not evaluated_lambdas:
+                evaluated_lambdas.update(candidate)
+                return 0.0
+            unchanged = all(
+                candidate[name] == pytest.approx(value) for name, value in evaluated_lambdas.items()
+            )
+            return 0.0 if unchanged else 1.0
+
+        monkeypatch.setattr(direct_reml, "reml_laml_objective", reject_lambda_moves)
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+        )
+
+        model.fit_reml(X, y, max_reml_iter=5, runtime_validation="skip")
+
+        result = model._reml_result
+        assert not result.converged
+        assert result.termination_reason == "line_search_failed"
+        assert result.n_reml_iter == 1
+        assert result.lambdas == pytest.approx(evaluated_lambdas)
+
+    def test_discrete_rejected_search_retains_evaluated_lambdas(self, monkeypatch):
+        """An exhausted line search must not install an unevaluated fallback."""
+        import superglm.reml.discrete as discrete_reml
+
+        rng = np.random.default_rng(20260726)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        evaluated_lambdas: dict[str, float] = {}
+
+        def reject_lambda_moves(*args, **kwargs):
+            candidate = args[6]
+            if not evaluated_lambdas:
+                evaluated_lambdas.update(candidate)
+                return 0.0
+            unchanged = all(
+                candidate[name] == pytest.approx(value) for name, value in evaluated_lambdas.items()
+            )
+            return 0.0 if unchanged else 1.0
+
+        monkeypatch.setattr(discrete_reml, "reml_laml_objective", reject_lambda_moves)
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+            discrete=True,
+        )
+
+        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+
+        result = model._reml_result
+        assert not result.converged
+        assert result.termination_reason == "max_reml_iter"
+        assert result.lambdas == pytest.approx(evaluated_lambdas)
+
     @pytest.mark.parametrize("discrete", [False, True])
     def test_all_fixed_random_effect_has_no_lambda_search(self, discrete):
         rng = np.random.default_rng(20260725)

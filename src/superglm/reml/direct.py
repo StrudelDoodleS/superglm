@@ -890,17 +890,13 @@ def optimize_direct_reml(
             step *= 0.5
 
         if not accepted:
-            # Steepest descent fallback: unit-length in infinity norm
-            # Use proj_grad so that fixed components are not moved.
-            grad_max = float(np.max(np.abs(proj_grad)))
-            if grad_max > 1e-12:
-                rho = np.clip(
-                    rho_clipped - proj_grad / grad_max,
-                    log_lo,
-                    log_hi,
-                )
-            else:
-                rho = rho_clipped
+            # The fully converged exact objective rejected every trial.
+            # Stop at the evaluated candidate rather than installing an
+            # unscored fallback and repeating expensive full PIRLS fits.
+            rho = rho_clipped
+            termination_reason = "line_search_failed"
+            _t_linesearch += _time.perf_counter() - _t0
+            break
         _t_linesearch += _time.perf_counter() - _t0
 
     if best_pirls is None:

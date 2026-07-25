@@ -45,7 +45,8 @@ reml = model.reml_diagnostics()
 
 `reml["lambda_history"]` is the reliable REML path history when REML was used.
 `reml["termination_reason"]` distinguishes score/objective convergence, an
-active-set stationary point, fixed smoothing parameters, and iteration exhaustion.
+active-set stationary point, fixed smoothing parameters, a rejected exact-REML
+line search, and iteration exhaustion.
 `objective_history` and `inner_iter_history` are optional and path-dependent:
 they are exposed when the underlying REML optimiser collected them, but callers
 should not assume they are populated for every REML backend.
