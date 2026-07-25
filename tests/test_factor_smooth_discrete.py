@@ -206,6 +206,27 @@ def test_discrete_cell_moments_match_explicit_row_level_reference(
         np.testing.assert_allclose(public_rhs, public_design.T @ rhs, rtol=2.0e-12)
 
 
+def test_discrete_cell_moments_do_not_use_raw_gram_einsum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gm = _cell_test_matrix(factor_basis="fs")
+    weights = np.linspace(-0.4, 1.7, gm.shape[0])
+    rhs = np.linspace(-1.2, 0.9, gm.shape[0])
+
+    def forbidden_einsum(*_args, **_kwargs):
+        raise AssertionError("discrete cell moments used raw-Gram einsum")
+
+    monkeypatch.setattr(np, "einsum", forbidden_einsum)
+    cell_weights, local_gram, xtw_nat, rhs_nat = gm.factor_smooth_discrete_cell_moments(
+        weights,
+        rhs,
+    )
+
+    assert cell_weights.shape == (gm.n_levels, gm.B_unique.shape[0])
+    assert local_gram.shape == (gm.n_levels, gm.block_size, gm.block_size)
+    assert xtw_nat.shape == rhs_nat.shape == (gm.n_levels, gm.block_size)
+
+
 def test_discrete_sufficient_stats_delegate_to_cell_moments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

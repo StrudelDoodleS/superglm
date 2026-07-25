@@ -20,7 +20,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_csr_matvec,
     _factor_smooth_csr_rmatvec,
     _factor_smooth_csr_sufficient_stats,
-    _factor_smooth_support_cell_sufficient_stats,
+    _factor_smooth_support_cell_aggregates,
     _factor_smooth_support_dense_cell_aggregates,
     _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
@@ -399,27 +399,31 @@ class FactorSmoothGroupMatrix:
         if not self.is_discrete:
             raise ValueError("cell moments require a discrete FactorSmooth matrix")
 
-        cell_weights, raw_gram, raw_xtw, raw_rhs = _factor_smooth_support_cell_sufficient_stats(
-            self.B_unique,
-            self.bin_idx,
+        basis = self.B_unique
+        support_index = self.bin_idx
+        if basis is None or support_index is None:  # pragma: no cover - constructor invariant
+            raise RuntimeError("discrete FactorSmooth support is unavailable")
+
+        cell_weights, cell_rhs = _factor_smooth_support_cell_aggregates(
+            support_index,
             self.codes,
             weights,
             rhs_values,
             self.n_levels,
+            basis.shape[0],
         )
-        local_gram = np.einsum(
-            "ai,kab,bj->kij",
-            self.natural_map,
-            raw_gram,
-            self.natural_map,
-            optimize=True,
+        effective_basis = np.ascontiguousarray(
+            basis @ self.natural_map,
+            dtype=np.float64,
         )
+        weighted_basis = cell_weights[:, :, None] * effective_basis[None, :, :]
+        local_gram = effective_basis.T[None, :, :] @ weighted_basis
         local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
         return (
-            cell_weights,
+            np.ascontiguousarray(cell_weights),
             np.ascontiguousarray(local_gram),
-            np.ascontiguousarray(raw_xtw @ self.natural_map),
-            np.ascontiguousarray(raw_rhs @ self.natural_map),
+            np.ascontiguousarray(cell_weights @ effective_basis),
+            np.ascontiguousarray(cell_rhs @ effective_basis),
         )
 
     def gram(self, W: NDArray) -> NDArray:
