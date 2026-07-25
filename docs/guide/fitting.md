@@ -121,6 +121,54 @@ dense-small side of this solve. The dominant factor smooth stays in compact
 kernels. This avoids expanding \(Kk\) columns into a generic sparse block and
 then paying for its full weighted sandwich products.
 
+### Measured SZ performance
+
+These measurements were taken on 2026-07-25 with Python 3.13.11, NumPy 2.4.2,
+nonuniform weights, Poisson REML, and `direct_solve="structured"`. Clean wall
+times exclude cProfile and tracemalloc. They describe this machine and these
+model geometries, not a universal performance promise.
+
+| Mode | Rows | Groups | `k` | Coefficients | REML iterations | Median clean wall | Peak Python allocation | Sampled process RSS | Prediction parity |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Exact | 6,000 | 50 | 6 | 304 | 7, converged | 2.47 s (3 runs) | 3.50 MiB | 383 MiB | \(2.3\times10^{-13}\) |
+| Discrete | 20,000 | 300 | 10 | 3,003 | 12, converged | 7.69 s (2 runs) | 24.23 MiB | 498 MiB | dense deliberately skipped |
+
+Allocation stacks were collected in separate three-REML-iteration passes; the
+iteration count changes runtime, not the compact matrix dimensions that set
+their peak. Exact parity is the maximum absolute prediction difference from a
+same-iteration dense Gram fit. The discrete case was structured-only to avoid
+the dense \(3{,}003^2\) allocation.
+
+With BLAS fixed to one thread, a five-repetition exact sweep at 2,000 rows,
+`k=6`, and four ordinary numeric columns bracketed the crossover:
+
+| Groups | Coefficients | Dense median | Structured median |
+|---:|---:|---:|---:|
+| 4 | 28 | 0.075 s | 0.146 s |
+| 8 | 52 | 0.086 s | 0.211 s |
+| 16 | 100 | 0.188 s | 0.225 s |
+| 32 | 196 | 0.435 s | 0.280 s |
+
+So the measured crossover lies between 16 and 32 groups for this case.
+`direct_solve="auto"` remains the recommendation because the crossover moves
+with row count, spline width, family, and hardware.
+
+Whole-fit cProfile runs on the converged cases reported these leading
+non-wrapper cumulative stacks:
+
+| Exact | Cumulative | Discrete | Cumulative |
+|---|---:|---|---:|
+| `fit_irls_direct` | 1.890 s | `optimize_discrete_reml_cached_w` | 7.685 s |
+| `build_block_structured_system` | 1.612 s | `reml_direct_hessian` | 3.108 s |
+| `MatrixExecutionPlan._moments_impl` | 0.875 s | `penalty_cross_trace` | 3.013 s |
+| Tabmat `DenseMatrix.sandwich` | 0.723 s | `fit_irls_direct` | 2.510 s |
+| `reml_w_correction` | 0.451 s | `_trace_general_bdlr_product` | 2.040 s |
+
+The dominant SZ raw-moment kernel itself took 0.091 s exact and 0.061 s
+discrete across each complete profiled fit. This is the intended hybrid:
+Tabmat handles the heterogeneous small partition, while fused SZ kernels
+handle the large grouped spline block without materializing it.
+
 ## `select=True` Versus `selection_penalty > 0`
 
 These are different tools and should not be documented as interchangeable.

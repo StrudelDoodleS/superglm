@@ -17,7 +17,7 @@ from superglm.solvers.structured import (
     _BlockDiagonalLowRank,
     _general_bdlr_diagonal,
     _general_bdlr_square_diagonal,
-    _multiply_symmetric_bdlr,
+    _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
     _trace_general_bdlr_product,
     _trace_symmetric_bdlr,
@@ -42,42 +42,82 @@ def _decompose_local_psd(
     level_label: Any,
 ) -> _LocalPSD:
     """Decompose a PSD block without requiring every level to be full rank."""
-    symmetric = 0.5 * (np.asarray(block, dtype=np.float64) + np.asarray(block, dtype=np.float64).T)
-    if not np.all(np.isfinite(symmetric)):
+    locals_, _minimum = _decompose_local_psd_batch(
+        np.asarray(block, dtype=np.float64)[None, :, :],
+        term_name=term_name,
+        level_labels=(level_label,),
+    )
+    return locals_[0]
+
+
+def _decompose_local_psd_batch(
+    blocks: NDArray,
+    *,
+    term_name: str,
+    level_labels: tuple[Any, ...],
+) -> tuple[tuple[_LocalPSD, ...], float]:
+    """Decompose every local PSD block in one batched LAPACK dispatch."""
+    values = np.asarray(blocks, dtype=np.float64)
+    if values.ndim != 3 or values.shape[1] != values.shape[2]:
+        raise ValueError("Local blocks must have shape (K, k, k).")
+    if values.shape[0] != len(level_labels):
+        raise ValueError("level_labels length must equal the number of local blocks.")
+    symmetric = 0.5 * (values + values.transpose(0, 2, 1))
+    finite = np.all(np.isfinite(symmetric), axis=(1, 2))
+    if not np.all(finite):
+        level = int(np.flatnonzero(~finite)[0])
         raise np.linalg.LinAlgError(
-            f"Structured term {term_name!r} level {level_label!r} has non-finite curvature."
+            f"Structured term {term_name!r} level {level_labels[level]!r} has non-finite curvature."
         )
+
     eigenvalues, eigenvectors = scipy.linalg.eigh(
         symmetric,
         driver="evr",
         check_finite=False,
     )
-    scale = max(float(np.max(np.abs(eigenvalues), initial=0.0)), 1.0)
+    scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), 1.0)
     # A large smoothing parameter can put O(1) data curvature beside an
     # O(1e11) wiggle penalty.  The usual dimension-scaled roundoff threshold
     # retains that real null-space information; eps**(2/3) would incorrectly
     # discard eigenvalues as large as about five at lambda=1e10.
-    threshold = np.finfo(np.float64).eps * symmetric.shape[0] * scale * 10.0
-    if eigenvalues.size and eigenvalues[0] < -threshold:
+    thresholds = np.finfo(np.float64).eps * symmetric.shape[1] * scales * 10.0
+    negative = eigenvalues[:, 0] < -thresholds
+    if np.any(negative):
+        level = int(np.flatnonzero(negative)[0])
         raise np.linalg.LinAlgError(
-            f"Structured term {term_name!r} level {level_label!r} "
-            f"has negative local curvature ({eigenvalues[0]:.17g})."
+            f"Structured term {term_name!r} level {level_labels[level]!r} "
+            f"has negative local curvature ({eigenvalues[level, 0]:.17g})."
         )
-    positive = eigenvalues > threshold
-    positive_values = np.asarray(eigenvalues[positive], dtype=np.float64)
-    positive_vectors = np.asarray(eigenvectors[:, positive], dtype=np.float64)
-    pinv = (
-        (positive_vectors / positive_values) @ positive_vectors.T
-        if positive_values.size
-        else np.zeros_like(symmetric)
-    )
-    null = np.asarray(eigenvectors[:, ~positive], dtype=np.float64)
-    return _LocalPSD(
-        pinv=0.5 * (pinv + pinv.T),
-        null=null,
-        positive_eigenvalues=positive_values,
-        rank=int(positive_values.size),
-    )
+
+    positive = eigenvalues > thresholds[:, None]
+    locals_list = []
+    for level in range(values.shape[0]):
+        positive_values = np.asarray(
+            eigenvalues[level][positive[level]],
+            dtype=np.float64,
+        )
+        positive_vectors = np.asarray(
+            eigenvectors[level][:, positive[level]],
+            dtype=np.float64,
+        )
+        pinv = (
+            (positive_vectors / positive_values) @ positive_vectors.T
+            if positive_values.size
+            else np.zeros_like(symmetric[level])
+        )
+        locals_list.append(
+            _LocalPSD(
+                pinv=0.5 * (pinv + pinv.T),
+                null=np.asarray(
+                    eigenvectors[level][:, ~positive[level]],
+                    dtype=np.float64,
+                ),
+                positive_eigenvalues=positive_values,
+                rank=int(positive_values.size),
+            )
+        )
+    locals_ = tuple(locals_list)
+    return locals_, float(np.min(eigenvalues))
 
 
 def _constraint_equilibration(matrix: NDArray) -> NDArray:
@@ -305,13 +345,10 @@ class SumToZeroBlockFactor:
             if len(self.level_labels) != self.n_levels:
                 raise ValueError("level_labels length must equal K.")
 
-        self._locals = tuple(
-            _decompose_local_psd(
-                self.D[level],
-                term_name=term_name,
-                level_label=self.level_labels[level],
-            )
-            for level in range(self.n_levels)
+        self._locals, self.minimum_local_eigenvalue = _decompose_local_psd_batch(
+            self.D,
+            term_name=term_name,
+            level_labels=self.level_labels,
         )
         self._pinv = np.stack([local.pinv for local in self._locals])
         self._positive_rank = sum(local.rank for local in self._locals)
@@ -320,8 +357,6 @@ class SumToZeroBlockFactor:
             for label, local in zip(self.level_labels, self._locals, strict=True)
             if local.rank < self.block_size
         )
-        local_minima = np.linalg.eigvalsh(self.D)[:, 0]
-        self.minimum_local_eigenvalue = float(np.min(local_minima))
         self.minimum_local_diagonal = self.minimum_local_eigenvalue
 
         null_widths = [local.null.shape[1] for local in self._locals]
@@ -666,7 +701,7 @@ class SumToZeroBlockFactor:
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
         return _general_bdlr_diagonal(
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 self._inverse_bdlr(),
                 _operator_bdlr(operator, self.structured_indices),
             )
@@ -679,7 +714,7 @@ class SumToZeroBlockFactor:
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
         return _general_bdlr_square_diagonal(
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 self._inverse_bdlr(),
                 _operator_bdlr(operator, self.structured_indices),
             )
@@ -694,11 +729,11 @@ class SumToZeroBlockFactor:
             raise ValueError("Operators and factor dimensions must match.")
         inverse = self._inverse_bdlr()
         return _trace_general_bdlr_product(
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 inverse,
                 _operator_bdlr(left, self.structured_indices),
             ),
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 inverse,
                 _operator_bdlr(right, self.structured_indices),
             ),
@@ -842,7 +877,7 @@ class ProfiledSumToZeroBlockFactor:
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
         return _general_bdlr_diagonal(
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 self._inverse_bdlr(),
                 _operator_bdlr(operator, self.structured_indices),
             )
@@ -855,7 +890,7 @@ class ProfiledSumToZeroBlockFactor:
         if operator.shape != self.shape:
             raise ValueError("Operator and factor dimensions must match.")
         return _general_bdlr_square_diagonal(
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 self._inverse_bdlr(),
                 _operator_bdlr(operator, self.structured_indices),
             )
@@ -870,11 +905,11 @@ class ProfiledSumToZeroBlockFactor:
             raise ValueError("Operators and factor dimensions must match.")
         inverse = self._inverse_bdlr()
         return _trace_general_bdlr_product(
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 inverse,
                 _operator_bdlr(left, self.structured_indices),
             ),
-            _multiply_symmetric_bdlr(
+            _multiply_symmetric_bdlr_coalesced(
                 inverse,
                 _operator_bdlr(right, self.structured_indices),
             ),

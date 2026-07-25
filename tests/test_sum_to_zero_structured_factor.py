@@ -8,12 +8,15 @@ import pytest
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
 from superglm.solvers.structured import (
     SumToZeroBlockOperator,
+    _multiply_symmetric_bdlr_coalesced,
+    _operator_bdlr,
     compact_operator_diagonal,
     materialize_compact_operator,
 )
 from superglm.solvers.sum_to_zero import (
     ProfiledSumToZeroBlockFactor,
     SumToZeroBlockFactor,
+    _decompose_local_psd_batch,
 )
 from superglm.types import PenaltyComponent
 
@@ -245,6 +248,32 @@ def test_sum_to_zero_factor_accepts_identifiable_singular_local_blocks() -> None
     assert factor.deficient_levels == ("thin", "medium")
 
 
+def test_local_psd_decomposition_batches_levels_and_preserves_rank() -> None:
+    blocks = np.array(
+        [
+            [[2.0, 0.0], [0.0, 0.0]],
+            [[0.0, 0.0], [0.0, 3.0]],
+            [[1.4, 0.2], [0.2, 1.1]],
+        ]
+    )
+
+    locals_, minimum = _decompose_local_psd_batch(
+        blocks,
+        term_name="x:g:sz",
+        level_labels=("thin", "medium", "rich"),
+    )
+
+    assert tuple(local.rank for local in locals_) == (1, 1, 2)
+    assert minimum == pytest.approx(0.0, abs=1e-15)
+    for block, local in zip(blocks, locals_, strict=True):
+        np.testing.assert_allclose(
+            block @ local.pinv @ block,
+            block,
+            rtol=2e-12,
+            atol=2e-12,
+        )
+
+
 def test_sum_to_zero_factor_names_globally_unidentifiable_levels() -> None:
     D = np.tile(np.diag([1.0, 0.0]), (3, 1, 1))
 
@@ -414,6 +443,33 @@ def test_sum_to_zero_factor_complete_hessian_protocol_matches_dense_reference() 
     )
     assert factor.penalty_operator_cross_trace(component, 1.9, operator) == pytest.approx(
         dense_factor.penalty_operator_cross_trace(component, 1.9, operator)
+    )
+
+
+def test_bdlr_product_coalesces_repeated_low_rank_bases() -> None:
+    factor, operator, dense = _factor_fixture(
+        n_levels=5,
+        block_size=2,
+        small_size=3,
+        seed=1663,
+    )
+    inverse = factor._inverse_bdlr()
+    compact = _operator_bdlr(operator, factor.structured_indices)
+
+    product = _multiply_symmetric_bdlr_coalesced(inverse, compact)
+
+    expected_rank_bound = inverse.basis.shape[1] + compact.basis.shape[1]
+    assert product.left.shape[1] <= expected_rank_bound
+    assert product.right.shape[1] <= expected_rank_bound
+    materialized = np.zeros_like(dense)
+    for level, indices in enumerate(product.structured_indices):
+        materialized[np.ix_(indices, indices)] = product.blocks[level]
+    materialized += product.left @ product.core @ product.right.T
+    np.testing.assert_allclose(
+        materialized,
+        np.linalg.solve(dense, dense),
+        rtol=3e-10,
+        atol=3e-11,
     )
 
 

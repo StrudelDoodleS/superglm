@@ -2610,6 +2610,82 @@ def _multiply_symmetric_bdlr(
     )
 
 
+def _multiply_symmetric_bdlr_coalesced(
+    left: _BlockDiagonalLowRank,
+    right: _BlockDiagonalLowRank,
+) -> _GeneralBlockDiagonalLowRank:
+    """Multiply BDLR operators while coalescing repeated low-rank bases."""
+    if left.shape != right.shape or not np.array_equal(
+        left.structured_indices,
+        right.structured_indices,
+    ):
+        raise ValueError("Block-diagonal-low-rank layouts must match.")
+    blocks = np.einsum("kij,kjl->kil", left.blocks, right.blocks, optimize=True)
+    if not left.core.size and not right.core.size:
+        empty = np.empty((left.shape[0], 0))
+        return _GeneralBlockDiagonalLowRank(
+            blocks=blocks,
+            structured_indices=left.structured_indices,
+            left=empty,
+            core=np.empty((0, 0)),
+            right=empty,
+            shape=left.shape,
+        )
+    if not left.core.size:
+        return _GeneralBlockDiagonalLowRank(
+            blocks=blocks,
+            structured_indices=left.structured_indices,
+            left=_apply_local_blocks(
+                left.blocks,
+                left.structured_indices,
+                right.basis,
+            ),
+            core=right.core,
+            right=right.basis,
+            shape=left.shape,
+        )
+    right_local_left = _apply_local_blocks(
+        right.blocks,
+        right.structured_indices,
+        left.basis,
+        transpose=True,
+    )
+    if not right.core.size:
+        return _GeneralBlockDiagonalLowRank(
+            blocks=blocks,
+            structured_indices=left.structured_indices,
+            left=left.basis,
+            core=left.core,
+            right=right_local_left,
+            shape=left.shape,
+        )
+
+    # In (B + U R U') (D + V S V'), coalesce the two occurrences
+    # of U and V instead of representing the three updates independently.
+    left_local_right = _apply_local_blocks(
+        left.blocks,
+        left.structured_indices,
+        right.basis,
+    )
+    left_width = left.core.shape[0]
+    right_width = right.core.shape[0]
+    core = np.zeros(
+        (right_width + left_width, right_width + left_width),
+        dtype=np.float64,
+    )
+    core[:right_width, :right_width] = right.core
+    core[right_width:, :right_width] = left.core @ (left.basis.T @ right.basis) @ right.core
+    core[right_width:, right_width:] = left.core
+    return _GeneralBlockDiagonalLowRank(
+        blocks=blocks,
+        structured_indices=left.structured_indices,
+        left=np.column_stack((left_local_right, left.basis)),
+        core=core,
+        right=np.column_stack((right.basis, right_local_left)),
+        shape=left.shape,
+    )
+
+
 def _general_bdlr_diagonal(operator: _GeneralBlockDiagonalLowRank) -> NDArray:
     diagonal = np.zeros(operator.shape[0], dtype=np.float64)
     diagonal[operator.structured_indices] = np.diagonal(

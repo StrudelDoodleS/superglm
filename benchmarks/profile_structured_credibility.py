@@ -15,7 +15,7 @@ import statistics
 import time
 import tracemalloc
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -53,16 +53,26 @@ class CaseConfig:
     structured_term: str = "random_effect"
     block_size: int = 1
     global_spline: bool = False
+    factor_basis: str = "fs"
 
     @property
     def dominant_width(self) -> int:
         """Coefficient width of the profiled structured term."""
-        return self.levels * self.block_size
+        coefficient_levels = (
+            self.levels - 1
+            if self.structured_term == "factor_smooth" and self.factor_basis == "sz"
+            else self.levels
+        )
+        return coefficient_levels * self.block_size
 
     @property
     def slug(self) -> str:
         mode = "discrete" if self.discrete else "exact"
-        term = "re" if self.structured_term == "random_effect" else f"fs_k{self.block_size}"
+        term = (
+            "re"
+            if self.structured_term == "random_effect"
+            else f"{self.factor_basis}_k{self.block_size}"
+        )
         global_suffix = "_global" if self.global_spline else ""
         return (
             f"{self.family}_{mode}_n{self.n}_k{self.levels}"
@@ -164,6 +174,20 @@ FACTOR_SMOOTH_MATRIX = (
         10,
         True,
     ),
+    CaseConfig(
+        30_000,
+        600,
+        "poisson",
+        False,
+        0,
+        None,
+        5,
+        "nonuniform",
+        7406,
+        "factor_smooth",
+        8,
+        True,
+    ),
 )
 
 
@@ -183,12 +207,22 @@ def prepare_case(config: CaseConfig) -> PreparedCase:
         raise ValueError("family must be gaussian, poisson, or gamma")
     if config.structured_term not in ("random_effect", "factor_smooth"):
         raise ValueError("structured_term must be random_effect or factor_smooth")
+    if config.factor_basis not in ("fs", "sz"):
+        raise ValueError("factor_basis must be fs or sz")
+    if config.structured_term == "random_effect" and config.factor_basis != "fs":
+        raise ValueError("factor_basis has no meaning for a random-effect case")
     if config.structured_term == "random_effect" and config.random_effects not in (1, 2):
         raise ValueError("random-effect cases require random_effects=1 or 2")
     if config.structured_term == "factor_smooth" and config.random_effects not in (0, 1):
         raise ValueError("factor-smooth cases support zero or one secondary random effect")
     if config.structured_term == "factor_smooth" and config.block_size < 5:
         raise ValueError("factor-smooth block_size must be at least 5")
+    if (
+        config.structured_term == "factor_smooth"
+        and config.factor_basis == "sz"
+        and not config.global_spline
+    ):
+        raise ValueError("factor_basis='sz' requires global_spline=True")
     if config.structured_term == "random_effect" and config.block_size != 1:
         raise ValueError("random-effect cases require block_size=1")
     if config.small_width < 0:
@@ -295,6 +329,7 @@ def _new_model(prepared: PreparedCase, backend: str) -> SuperGLM:
             FactorSmooth(
                 "curve_x",
                 group="curve_group",
+                basis=prepared.config.factor_basis,
                 k=prepared.config.block_size,
             )
         )
@@ -372,6 +407,7 @@ def model_diagnostics(
         "dominant_levels": prepared.config.levels,
         "dominant_block_size": prepared.config.block_size,
         "structured_term": prepared.config.structured_term,
+        "factor_basis": prepared.config.factor_basis,
         "small_width": p - dominant_width,
         "secondary_level_count": prepared.secondary_level_count,
         "pirls_iterations": result.n_iter,
@@ -672,6 +708,7 @@ def _case_from_args(args: argparse.Namespace) -> CaseConfig:
             else (5 if args.structured_term == "factor_smooth" else 1)
         ),
         global_spline=args.global_spline,
+        factor_basis=args.factor_basis,
     )
 
 
@@ -690,6 +727,11 @@ def parse_args() -> argparse.Namespace:
         default="random_effect",
     )
     parser.add_argument("--block-size", type=int, default=None)
+    parser.add_argument(
+        "--factor-basis",
+        choices=("fs", "sz"),
+        default="fs",
+    )
     parser.add_argument(
         "--global-spline",
         action=argparse.BooleanOptionalAction,
@@ -736,11 +778,28 @@ def main() -> None:
     output_root = args.output_dir or RESULTS_ROOT / timestamp
 
     if args.matrix == "core":
+        if args.factor_basis != "fs":
+            raise ValueError("--factor-basis has no meaning for --matrix core")
         configs = CORE_MATRIX
     elif args.matrix == "factor-smooth":
-        configs = FACTOR_SMOOTH_MATRIX
+        configs = tuple(
+            replace(
+                config,
+                factor_basis=args.factor_basis,
+                global_spline=config.global_spline or args.factor_basis == "sz",
+            )
+            for config in FACTOR_SMOOTH_MATRIX
+        )
     elif args.matrix == "all":
-        configs = (*CORE_MATRIX, *FACTOR_SMOOTH_MATRIX)
+        factor_configs = tuple(
+            replace(
+                config,
+                factor_basis=args.factor_basis,
+                global_spline=config.global_spline or args.factor_basis == "sz",
+            )
+            for config in FACTOR_SMOOTH_MATRIX
+        )
+        configs = (*CORE_MATRIX, *factor_configs)
     else:
         configs = (_case_from_args(args),)
     matrix_results = {}
