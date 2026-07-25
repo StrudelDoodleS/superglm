@@ -73,11 +73,11 @@ def _natural_parameterization(
 
 
 class FactorSmooth:
-    """An mgcv-style ``bs="fs"`` P-spline interaction.
+    """An mgcv-style factor-by-P-spline interaction.
 
-    The fitted representation is populated by the design-matrix builder.  One
-    shared marginal basis is repeated implicitly across every fitted factor
-    level, with no reference level and no centering side condition.
+    ``basis="fs"`` is fully penalized and retains independent level curves.
+    ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
+    geometry is populated by the design-matrix builder.
     """
 
     structured_kind = "factor_smooth"
@@ -88,6 +88,7 @@ class FactorSmooth:
         variable: str,
         *,
         group: str,
+        basis: Literal["fs", "sz"] = "fs",
         kind: str = "ps",
         k: int = 6,
         m: int = 2,
@@ -102,6 +103,8 @@ class FactorSmooth:
             raise ValueError("group must be a non-empty column name")
         if variable == group:
             raise ValueError("variable and group must name different columns")
+        if basis not in ("fs", "sz"):
+            raise ValueError(f"basis must be 'fs' or 'sz', got {basis!r}")
         if kind != "ps":
             raise NotImplementedError("FactorSmooth currently supports only kind='ps'.")
         if isinstance(k, bool) or not isinstance(k, int):
@@ -119,7 +122,9 @@ class FactorSmooth:
         if name is not None and (not isinstance(name, str) or not name):
             raise ValueError("name must be a non-empty string when supplied")
 
-        valid_components = {"wiggle", *(f"null_{index}" for index in range(m))}
+        valid_components = (
+            {"wiggle", *(f"null_{index}" for index in range(m))} if basis == "fs" else {"wiggle"}
+        )
         if isinstance(lambda_policy, dict):
             unknown = set(lambda_policy) - valid_components
             if unknown:
@@ -142,13 +147,14 @@ class FactorSmooth:
 
         self.variable = variable
         self.group = group
+        self.basis = basis
         self.kind = kind
         self.k = k
         self.m = m
         self.unseen = unseen
         self.missing = missing
         self._lambda_policy = lambda_policy
-        self.name = name or f"{variable}:{group}:fs"
+        self.name = name or f"{variable}:{group}:{basis}"
 
         self._levels: list[Any] = []
         self._level_to_code: dict[Any, int] = {}

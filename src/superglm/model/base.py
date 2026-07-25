@@ -562,6 +562,52 @@ def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
     return dict(zip(spline_cols, model._n_knots))
 
 
+def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> None:
+    """Validate factor-smooth geometry after explicit or inferred features exist."""
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import _SplineBase
+
+    terms = [
+        spec
+        for name in model._interaction_order
+        if isinstance((spec := model._interaction_specs[name]), FactorSmooth)
+    ]
+    seen: dict[tuple[str, str], str] = {}
+    for term in terms:
+        pair = (term.variable, term.group)
+        if pair in seen:
+            raise ValueError(
+                f"FactorSmooth pair {pair!r} is configured more than once "
+                f"({seen[pair]!r} and {term.name!r})."
+            )
+        seen[pair] = term.name
+
+    if not features_resolved:
+        return
+
+    for term in terms:
+        group_spec = model._specs.get(term.group)
+        if isinstance(group_spec, (Categorical, RandomEffect)):
+            raise ValueError(
+                f"FactorSmooth {term.name!r} group {term.group!r} duplicates "
+                "the constant null-space group-intercept geometry of "
+                f"{type(group_spec).__name__} on the same column; remove that "
+                "group main effect and use an explicit features map containing "
+                "only the intended main effects."
+            )
+        if term.basis == "sz" and not isinstance(
+            model._specs.get(term.variable),
+            _SplineBase,
+        ):
+            raise ValueError(
+                f"FactorSmooth {term.name!r} with basis='sz' requires a global "
+                f"Spline for {term.variable!r}; use "
+                f"features={{{term.variable!r}: Spline(...)}}."
+            )
+
+
 def init_model(
     model,
     family: str | Distribution = "poisson",
@@ -698,21 +744,15 @@ def init_model(
             model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
 
-    from superglm.features.factor_smooth import FactorSmooth
-    from superglm.features.random_effect import RandomEffect
-
     for interaction in explicit_interactions:
         owned = copy.deepcopy(interaction)
-        if isinstance(owned, FactorSmooth) and isinstance(
-            model._specs.get(owned.group),
-            RandomEffect,
-        ):
-            raise ValueError(
-                f"FactorSmooth group {owned.group!r} duplicates the constant null-space "
-                "geometry of the RandomEffect on the same column."
-            )
         model._interaction_specs[owned.name] = owned
         model._interaction_order.append(owned.name)
+
+    validate_factor_smooth_configuration(
+        model,
+        features_resolved=model._splines is None,
+    )
 
     from superglm.model.fit_state import ModelConfig
 
@@ -827,6 +867,7 @@ def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:
         specs=model._specs,
         feature_order=model._feature_order,
     )
+    validate_factor_smooth_configuration(model, features_resolved=True)
 
 
 def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None, **kwargs) -> None:

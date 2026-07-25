@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -31,6 +32,11 @@ from .fit_state import (
     configured_lambda2,
     configured_link,
     configured_penalty,
+)
+
+_SPLINES_DEPRECATION_MESSAGE = (
+    "`splines=` auto-detection is deprecated and will be removed in a future "
+    "release; use explicit features such as `features={'age': Spline(...)}`."
 )
 
 if TYPE_CHECKING:
@@ -111,9 +117,10 @@ class SuperGLM:
             objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
             Mutually exclusive with *splines*.
         splines : list[str], optional
-            Column names to treat as splines in auto-detect mode.  All other
-            columns are auto-detected as categorical or numeric.
-            Mutually exclusive with *features*.
+            Deprecated auto-detection shorthand. Column names in this list are
+            treated as splines and all other columns are inferred as categorical
+            or numeric. Use explicit ``features={"age": Spline(...)}`` for new
+            code. Mutually exclusive with *features*.
         n_knots : int or list[int]
             Number of interior knots for auto-detect splines.
         degree : int
@@ -161,6 +168,15 @@ class SuperGLM:
             training caches while preserving prediction, summaries, and term
             confidence intervals.
         """
+        if splines is not None:
+            import warnings
+
+            warnings.warn(
+                _SPLINES_DEPRECATION_MESSAGE,
+                FutureWarning,
+                stacklevel=2,
+            )
+
         base.init_model(
             self,
             family=family,
@@ -230,6 +246,11 @@ class SuperGLM:
                 "ignore",
                 message="convergence='coefficients' is experimental",
                 category=UserWarning,
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=re.escape(_SPLINES_DEPRECATION_MESSAGE) + r"\Z",
+                category=FutureWarning,
             )
             try:
                 cloned = type(self)(**self._config.constructor_kwargs())
