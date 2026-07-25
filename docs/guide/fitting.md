@@ -128,16 +128,32 @@ nonuniform weights, Poisson REML, and `direct_solve="structured"`. Clean wall
 times exclude cProfile and tracemalloc. They describe this machine and these
 model geometries, not a universal performance promise.
 
-| Mode | Rows | Groups | `k` | Coefficients | REML iterations | Median clean wall | Peak Python allocation | Sampled process RSS | Prediction parity |
+| Mode | Rows | Groups | `k` | Coefficients | REML iterations | Median clean wall | Peak Python allocation | Sampled process RSS | Numerical check |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Exact | 6,000 | 50 | 6 | 304 | 7, converged | 2.47 s (3 runs) | 3.50 MiB | 383 MiB | \(2.3\times10^{-13}\) |
-| Discrete | 20,000 | 300 | 10 | 3,003 | 12, converged | 7.69 s (2 runs) | 24.23 MiB | 498 MiB | dense deliberately skipped |
+| Discrete | 20,000 | 300 | 10 | 3,003 | 12, converged | 2.97 s (3 runs) | 24.23 MiB | 498 MiB | stable prediction checksum |
+| Discrete | 1,000,000 | 300 | 10 | 3,003 | 5, converged | 4.47 s (5 runs) | 250.19 MiB | 789 MiB | \(3.7\times10^{-8}\) from the pre-optimization checksum |
 
 Allocation stacks were collected in separate three-REML-iteration passes; the
 iteration count changes runtime, not the compact matrix dimensions that set
-their peak. Exact parity is the maximum absolute prediction difference from a
-same-iteration dense Gram fit. The discrete case was structured-only to avoid
-the dense \(3{,}003^2\) allocation.
+their peak. The million-row allocation run had a 59.10 MiB sampled RSS delta;
+its RSS peak includes the interpreter, input data, and retained model state.
+Exact parity is the maximum absolute prediction difference from a
+same-iteration dense Gram fit. The discrete cases were structured-only to
+avoid the dense \(3{,}003^2\) allocation.
+
+The million-row case previously took a 7.67 s median at the same five REML
+iterations. Compact `(group, spline-bin)` aggregation and batched dense/global
+spline crosses reduced that median by 41.7%. At 20,000 rows the same retained
+path reduced the 7.69 s reference by 61.3%, so there is no small-fit crossover
+penalty in this measured geometry.
+
+A bounded private-chunk Numba reduction was also tested with 1, 2, 4, and 8
+configured threads. Its apparent two-thread improvement did not repeat:
+a reversed five-run sweep measured 4.57 s at two threads versus 4.51 s on the
+serial path. The parallel layer was therefore discarded. The retained
+FactorSmooth cell reductions are serial and do not change global Numba or BLAS
+thread settings.
 
 With BLAS fixed to one thread, a five-repetition exact sweep at 2,000 rows,
 `k=6`, and four ordinary numeric columns bracketed the crossover:
@@ -153,21 +169,24 @@ So the measured crossover lies between 16 and 32 groups for this case.
 `direct_solve="auto"` remains the recommendation because the crossover moves
 with row count, spline width, family, and hardware.
 
-Whole-fit cProfile runs on the converged cases reported these leading
-non-wrapper cumulative stacks:
+The million-row whole-fit cProfile changed as follows:
 
-| Exact | Cumulative | Discrete | Cumulative |
-|---|---:|---|---:|
-| `fit_irls_direct` | 1.890 s | `optimize_discrete_reml_cached_w` | 7.685 s |
-| `build_block_structured_system` | 1.612 s | `reml_direct_hessian` | 3.108 s |
-| `MatrixExecutionPlan._moments_impl` | 0.875 s | `penalty_cross_trace` | 3.013 s |
-| Tabmat `DenseMatrix.sandwich` | 0.723 s | `fit_irls_direct` | 2.510 s |
-| `reml_w_correction` | 0.451 s | `_trace_general_bdlr_product` | 2.040 s |
+| Stack | Before cell aggregation | Retained path |
+|---|---:|---:|
+| Whole profiled fit | 7.92 s | 4.67 s |
+| `fit_irls_direct` | 5.50 s | 2.36 s |
+| `build_block_structured_system` | 3.91 s / 14 calls | 0.77 s / 14 calls |
+| Legacy FactorSmooth dense cross | 2.42 s / 182 calls | absent |
+| FactorSmooth sufficient statistics | 0.78 s / 14 calls | 0.10 s / 14 calls |
+| Batched FactorSmooth dense-cell cross | absent | 0.23 s / 56 calls |
 
-The dominant SZ raw-moment kernel itself took 0.091 s exact and 0.061 s
-discrete across each complete profiled fit. This is the intended hybrid:
-Tabmat handles the heterogeneous small partition, while fused SZ kernels
-handle the large grouped spline block without materializing it.
+This is the intended hybrid: Tabmat still assembles the heterogeneous ordinary
+small partition, while compiled SZ kernels aggregate the large grouped spline
+block and staged batched matrix products contract compact cells. No
+observation-by-factor-smooth matrix is materialized. Dense ordinary blocks and
+global discretized splines sharing the FactorSmooth bin map use the optimized
+cross path; unsupported or mismatched small groups retain the existing compact
+fallback.
 
 ## `select=True` Versus `selection_penalty > 0`
 
