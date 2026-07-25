@@ -23,6 +23,7 @@ from superglm.distributions import Gamma, Gaussian, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
+from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.penalty_algebra import (
@@ -673,39 +674,39 @@ def optimize_discrete_reml_cached_w(
             inverse_phi=inverse_phi,
             tensor_pair_evaluations=cand_tensor_pair_evals,
         )
-        # Wood (2011) Section 6.2: score_scale = 1 + |V_r|
-        score_scale_d = max(1.0 + abs(obj), 1.0)
-        proj_grad_d = grad.copy()
-        for i in range(m):
-            if not estimated_mask[i]:
-                # Fixed lambda — always zero out gradient contribution
-                proj_grad_d[i] = 0.0
-            elif rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
-                proj_grad_d[i] = 0.0
-            elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
-                proj_grad_d[i] = 0.0
-
         # The convergence decision belongs to this evaluated candidate.
         # Do not construct or install another Newton step before deciding
         # whether these exact lambdas are terminal.
-        proj_grad_norm = float(np.max(np.abs(proj_grad_d)))
-        obj_change = abs(obj - prev_obj) if poi_iter > 0 else np.inf
+        proj_grad_d = project_reml_gradient(
+            grad,
+            rho_clipped,
+            estimated_mask,
+            log_lower=log_lo,
+            log_upper=log_hi,
+        )
+        candidate_convergence = evaluate_reml_candidate(
+            iteration=poi_iter,
+            objective=obj,
+            previous_objective=prev_obj,
+            projected_gradient=proj_grad_d,
+            tolerance=_tol,
+        )
+        score_scale_d = candidate_convergence.score_scale
+        proj_grad_norm = candidate_convergence.projected_gradient_norm
+        obj_change = candidate_convergence.objective_change
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
             print(
                 f"  POI iter {poi_iter + 1}  obj={obj:.4f}  "
                 f"|grad|={proj_grad_norm:.6f}  delta_obj={obj_change:.6g}  [{lam_str}]"
             )
-        if poi_iter >= 1:
-            grad_converged_d = proj_grad_norm < _tol * score_scale_d
-            obj_converged_d = obj_change < _tol * score_scale_d
-            if grad_converged_d and obj_converged_d:
-                rho = rho_clipped
-                prev_obj = obj
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                _t_newton += _time.perf_counter() - _t0
-                break
+        if candidate_convergence.converged:
+            rho = rho_clipped
+            prev_obj = obj
+            converged = True
+            termination_reason = "score_objective_tolerance"
+            _t_newton += _time.perf_counter() - _t0
+            break
         prev_obj = obj
 
         hess = reml_direct_hessian(

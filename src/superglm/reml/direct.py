@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from superglm._fit_trace import TraceRun
 from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DesignMatrix
+from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
@@ -588,21 +589,23 @@ def optimize_direct_reml(
 
         lambda_history.append(cand_lambdas.copy())
 
-        proj_grad = grad.copy()
-        for i in range(m):
-            if not estimated_mask[i]:
-                # Fixed lambda — always zero out gradient contribution
-                proj_grad[i] = 0.0
-            elif rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
-                proj_grad[i] = 0.0
-            elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
-                proj_grad[i] = 0.0
-        proj_grad_norm = float(np.max(np.abs(proj_grad)))
-
-        # Compound convergence criterion (Wood 2011):
-        # Wood (2011) Section 6.2: max(|g_j|) < eps * (1 + |V_r|).
-        score_scale = max(1.0 + abs(obj), 1.0)
-        obj_change = abs(obj - prev_obj) if outer > 0 else np.inf
+        proj_grad = project_reml_gradient(
+            grad,
+            rho_clipped,
+            estimated_mask,
+            log_lower=log_lo,
+            log_upper=log_hi,
+        )
+        candidate_convergence = evaluate_reml_candidate(
+            iteration=outer,
+            objective=obj,
+            previous_objective=prev_obj,
+            projected_gradient=proj_grad,
+            tolerance=_tol,
+        )
+        proj_grad_norm = candidate_convergence.projected_gradient_norm
+        score_scale = candidate_convergence.score_scale
+        obj_change = candidate_convergence.objective_change
 
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
@@ -614,14 +617,10 @@ def optimize_direct_reml(
 
         prev_obj = obj
 
-        # Require at least 2 iterations before checking convergence
-        if outer >= 1:
-            grad_converged = proj_grad_norm < _tol * score_scale
-            obj_converged = obj_change < _tol * score_scale
-            if grad_converged and obj_converged:
-                converged = True
-                termination_reason = "score_objective_tolerance"
-                break
+        if candidate_convergence.converged:
+            converged = True
+            termination_reason = "score_objective_tolerance"
+            break
 
         # Wood outer-Hessian update.  With ``w_correction_order=2`` this
         # includes the exact available second curvature derivatives; the
