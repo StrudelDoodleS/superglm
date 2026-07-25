@@ -310,7 +310,7 @@ class PenaltyComponent:
     eigvals_omega: NDArray | None = None  # positive eigenvalues of omega_ssp
     component_type: str | None = None  # "selection" for null-space select penalty
     lambda_policy: LambdaPolicy | None = None  # per-component lambda control
-    penalty_kind: Literal["dense", "identity", "repeated"] = "dense"
+    penalty_kind: Literal["dense", "identity", "repeated", "sum_to_zero"] = "dense"
     repeat_count: int = 1
     block_width: int | None = None
 

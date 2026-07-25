@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.factor_smooth_geometry import sum_to_zero_penalty
 from superglm.types import PenaltyComponent
 
 if TYPE_CHECKING:
@@ -30,6 +31,19 @@ def _component_omega(component: PenaltyComponent, size: int) -> NDArray:
     if component.omega_ssp is None:
         raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
     omega = np.asarray(component.omega_ssp, dtype=np.float64)
+    if component.penalty_kind == "sum_to_zero":
+        n_levels = int(component.repeat_count)
+        block_width = component.block_width
+        if n_levels < 2 or block_width is None or (n_levels - 1) * int(block_width) != len(indices):
+            raise ValueError(
+                f"Sum-to-zero penalty component {component.name!r} has invalid geometry."
+            )
+        if omega.shape != (int(block_width), int(block_width)):
+            raise ValueError(
+                f"Sum-to-zero penalty component {component.name!r} has shape {omega.shape}; "
+                f"expected ({int(block_width)}, {int(block_width)})."
+            )
+        return sum_to_zero_penalty(omega, n_levels)
     if component.penalty_kind == "repeated":
         repeat_count = int(component.repeat_count)
         block_width = component.block_width

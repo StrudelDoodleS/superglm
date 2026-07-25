@@ -18,6 +18,12 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.factor_smooth_geometry import (
+    adjoint_sum_to_zero_blocks,
+    expand_sum_to_zero_blocks,
+    sum_to_zero_contrast,
+    sum_to_zero_penalty,
+)
 from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
@@ -90,6 +96,26 @@ def _repeated_penalty_geometry(
     return repeat_count, block_width
 
 
+def _sum_to_zero_penalty_geometry(
+    component: PenaltyComponent,
+) -> tuple[int, int]:
+    """Return and validate ``(raw_level_count, local_width)`` metadata."""
+    if component.penalty_kind != "sum_to_zero":
+        raise ValueError(f"Penalty component {component.name!r} is not sum-to-zero.")
+    n_levels = int(component.repeat_count)
+    block_width = component.block_width
+    if n_levels < 2 or block_width is None or int(block_width) < 1:
+        raise ValueError(f"Sum-to-zero penalty component {component.name!r} has invalid geometry.")
+    block_width = int(block_width)
+    group_width = component.group_sl.stop - component.group_sl.start
+    if (n_levels - 1) * block_width != group_width:
+        raise ValueError(
+            f"Sum-to-zero penalty component {component.name!r} geometry "
+            f"({n_levels} - 1) x {block_width} does not match group width {group_width}."
+        )
+    return n_levels, block_width
+
+
 def penalty_component_dense_matrix(
     component: PenaltyComponent,
     group_matrix: GroupMatrix | None = None,
@@ -102,6 +128,14 @@ def penalty_component_dense_matrix(
         _penalty_component_omega_ssp(component, group_matrix),
         dtype=np.float64,
     )
+    if component.penalty_kind == "sum_to_zero":
+        n_levels, block_width = _sum_to_zero_penalty_geometry(component)
+        if omega.shape != (block_width, block_width):
+            raise ValueError(
+                f"Sum-to-zero penalty component {component.name!r} has local shape "
+                f"{omega.shape}; expected {(block_width, block_width)}."
+            )
+        return sum_to_zero_penalty(omega, n_levels)
     if component.penalty_kind == "repeated":
         repeat_count, block_width = _repeated_penalty_geometry(component)
         if omega.shape != (block_width, block_width):
@@ -128,6 +162,11 @@ def penalty_component_quadratic(
     if component.penalty_kind == "identity":
         return float(beta @ beta)
     omega = _penalty_component_omega_ssp(component, group_matrix)
+    if component.penalty_kind == "sum_to_zero":
+        n_levels, block_width = _sum_to_zero_penalty_geometry(component)
+        free = beta.reshape(n_levels - 1, block_width)
+        raw = expand_sum_to_zero_blocks(free)
+        return float(np.einsum("ki,ij,kj->", raw, omega, raw, optimize=True))
     if component.penalty_kind == "repeated":
         repeat_count, block_width = _repeated_penalty_geometry(component)
         blocks = beta.reshape(repeat_count, block_width)
@@ -145,6 +184,11 @@ def penalty_component_matvec(
     if component.penalty_kind == "identity":
         return beta.copy()
     omega = _penalty_component_omega_ssp(component, group_matrix)
+    if component.penalty_kind == "sum_to_zero":
+        n_levels, block_width = _sum_to_zero_penalty_geometry(component)
+        free = beta.reshape(n_levels - 1, block_width)
+        raw_product = expand_sum_to_zero_blocks(free) @ omega.T
+        return adjoint_sum_to_zero_blocks(raw_product).ravel()
     if component.penalty_kind == "repeated":
         repeat_count, block_width = _repeated_penalty_geometry(component)
         blocks = beta.reshape(repeat_count, block_width)
@@ -165,6 +209,30 @@ def penalty_component_trace(
         if inverse.ndim == 2:
             return float(np.trace(inverse))
         raise ValueError("Identity penalty trace requires an inverse diagonal or square block.")
+    if component.penalty_kind == "sum_to_zero":
+        n_levels, block_width = _sum_to_zero_penalty_geometry(component)
+        omega = _penalty_component_omega_ssp(component, group_matrix)
+        if inverse.ndim != 2 or inverse.shape != (
+            (n_levels - 1) * block_width,
+            (n_levels - 1) * block_width,
+        ):
+            raise ValueError("Sum-to-zero penalty trace requires its full selected inverse block.")
+        contrast_gram = sum_to_zero_contrast(n_levels).T @ sum_to_zero_contrast(n_levels)
+        blocks = inverse.reshape(
+            n_levels - 1,
+            block_width,
+            n_levels - 1,
+            block_width,
+        )
+        return float(
+            np.einsum(
+                "aibj,ba,ji->",
+                blocks,
+                contrast_gram,
+                omega,
+                optimize=True,
+            )
+        )
     if component.penalty_kind == "repeated":
         repeat_count, block_width = _repeated_penalty_geometry(component)
         omega = _penalty_component_omega_ssp(component, group_matrix)
@@ -516,7 +584,7 @@ def build_penalty_matrix(
                 diagonal_indices = np.arange(pc.group_sl.start, pc.group_sl.stop)
                 S[diagonal_indices, diagonal_indices] += lam
                 continue
-            if pc.penalty_kind == "repeated":
+            if pc.penalty_kind in ("repeated", "sum_to_zero"):
                 S[pc.group_sl, pc.group_sl] += lam * penalty_component_dense_matrix(pc, gm)
                 continue
             omega_ssp = (
@@ -705,6 +773,46 @@ def build_penalty_components(
 
         if isinstance(gm, FactorSmoothGroupMatrix):
             lp_map = gm.lambda_policies or {}
+            if gm.factor_basis == "sz":
+                repeated_components = gm.repeated_penalty_components
+                if len(repeated_components) != 1 or repeated_components[0][0] != "wiggle":
+                    raise ValueError("SZ factor smooths require exactly one 'wiggle' component.")
+                suffix, omega_j = repeated_components[0]
+                local_rank, local_log_det, local_eigvals, omega_ssp_j = _rank_and_logdet(
+                    omega_j,
+                    omega_j,
+                )
+                n_levels = gm.n_levels
+                full_eigvals = np.sort(
+                    np.concatenate(
+                        (
+                            np.tile(local_eigvals, max(n_levels - 2, 0)),
+                            n_levels * local_eigvals,
+                        )
+                    )
+                )[::-1]
+                group_components.append(
+                    PenaltyComponent(
+                        name=f"{g.name}:{suffix}",
+                        group_name=g.name,
+                        group_index=idx,
+                        group_sl=g.sl,
+                        omega_raw=omega_j,
+                        omega_ssp=omega_ssp_j,
+                        rank=float((n_levels - 1) * local_rank),
+                        log_det_omega_plus=float(
+                            (n_levels - 1) * local_log_det + local_rank * np.log(n_levels)
+                        ),
+                        eigvals_omega=full_eigvals,
+                        component_type="wiggle",
+                        lambda_policy=lp_map.get(suffix),
+                        penalty_kind="sum_to_zero",
+                        repeat_count=n_levels,
+                        block_width=gm.block_size,
+                    )
+                )
+                components.extend(group_components)
+                continue
             for suffix, omega_j in gm.repeated_penalty_components:
                 local_rank, local_log_det, local_eigvals, omega_ssp_j = _rank_and_logdet(
                     omega_j,
