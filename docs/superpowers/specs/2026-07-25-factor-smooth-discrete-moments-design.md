@@ -61,6 +61,8 @@ linear solves about 0.2 seconds, so neither is the first optimization target.
 5. Use parallel reduction only when measured work is large enough to amortize
    scheduling and reduction overhead.
 6. Re-profile the complete fit and retain only changes supported by evidence.
+7. Use existing high-performance dependencies, including Numba and Tabmat,
+   wherever profiling demonstrates that they are the right execution layer.
 
 ## Non-goals
 
@@ -70,6 +72,7 @@ linear solves about 0.2 seconds, so neither is the first optimization target.
   design.
 - Optimizing multiple simultaneous dominant FactorSmooth terms.
 - Adding distributed, GPU, or stochastic REML fitting.
+- Adding Cython or native Rust, C, or C++ extensions.
 - Changing exact-mode algebra in the first experiment.
 - Changing selection penalties or LSS fitting.
 
