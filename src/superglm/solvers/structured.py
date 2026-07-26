@@ -3036,21 +3036,41 @@ def _independent_block_centered_estimability(
     C_augmented = np.empty((D.shape[0], D.shape[1], q + 1), dtype=np.float64)
     C_augmented[:, :, 0] = operator.cross[structured_indices]
     C_augmented[:, :, 1:] = C
-    schur = _augmented_small_data_block(operator)
     local_estimable = np.empty(D.shape[:2], dtype=bool)
-    local_inverse = np.empty_like(D)
+    inverse_cross = np.empty_like(C_augmented)
     for level, block in enumerate(D):
         decomposition = decompose_gram(block)
-        local_inverse[level] = decomposition.pseudo_inverse()
-        local_estimable[level] = decomposition.coefficient_estimable()
-        schur -= C_augmented[level].T @ local_inverse[level] @ C_augmented[level]
+        null_basis = _certified_local_null_basis(block, decomposition)
+        inverse, _null_projector = _local_range_inverse_and_null_projector(
+            block,
+            decomposition,
+            null_basis=null_basis,
+        )
+        inverse_cross[level] = inverse @ C_augmented[level]
+        local_estimable[level] = _coefficient_estimable_from_scaled_null_basis(
+            null_basis,
+            decomposition.column_scale,
+        )
 
-    small_rank = decompose_gram(0.5 * (schur + schur.T))
-    small_null = small_rank.null_basis()
-    structured_lift = -np.einsum(
-        "kij,kjq,qr->kir",
-        local_inverse,
-        C_augmented,
+    structured_map = -inverse_cross.copy()
+    kkt_residual = inverse_cross
+    np.einsum(
+        "kij,kjq->kiq",
+        D,
+        structured_map,
+        out=kkt_residual,
+        optimize=True,
+    )
+    kkt_residual += C_augmented
+    small_null = _certified_reduced_schur_null_basis(
+        source=_augmented_small_data_block(operator),
+        structured_cross=C_augmented,
+        structured_map=structured_map,
+        kkt_residual=kkt_residual,
+    )
+    structured_lift = np.einsum(
+        "kiq,qr->kir",
+        structured_map,
         small_null,
         optimize=True,
     )
@@ -3071,6 +3091,11 @@ def _orthonormal_column_span(values: NDArray) -> NDArray:
     basis = np.asarray(values, dtype=np.float64)
     if basis.shape[1] == 0:
         return np.empty((basis.shape[0], 0), dtype=np.float64)
+    column_norm = np.linalg.norm(basis, axis=0)
+    nonzero = column_norm > 0.0
+    if not np.any(nonzero):
+        return np.empty((basis.shape[0], 0), dtype=np.float64)
+    basis = basis[:, nonzero] / column_norm[nonzero]
     return np.asarray(
         scipy.linalg.orth(
             basis,
@@ -3078,6 +3103,29 @@ def _orthonormal_column_span(values: NDArray) -> NDArray:
         ),
         dtype=np.float64,
     )
+
+
+def _coefficient_estimable_from_scaled_null_basis(
+    null_basis: NDArray,
+    column_scale: NDArray,
+) -> NDArray:
+    """Apply the shared rank policy in equilibrated coefficient coordinates."""
+    null = np.asarray(null_basis, dtype=np.float64)
+    scale = np.asarray(column_scale, dtype=np.float64)
+    result = np.zeros(len(scale), dtype=bool)
+    active = scale > 0.0
+    if null.shape[1] == 0:
+        result[active] = True
+        return result
+    equilibrated_null = null[active] * scale[active, None]
+    null_norm = np.linalg.norm(equilibrated_null, axis=0)
+    retained = null_norm > np.finfo(float).eps
+    if not np.any(retained):
+        result[active] = True
+        return result
+    normalized_null = equilibrated_null[:, retained] / null_norm[retained]
+    result[active] = np.linalg.norm(normalized_null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+    return result
 
 
 def _certified_local_null_basis(
@@ -3099,10 +3147,16 @@ def _certified_local_null_basis(
 def _local_range_inverse_and_null_projector(
     block: NDArray,
     decomposition: RankDecomposition,
+    *,
+    null_basis: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return the inverse on a local PSD range and its Euclidean null projector."""
     width = block.shape[0]
-    null = _certified_local_null_basis(block, decomposition)
+    null = (
+        _certified_local_null_basis(block, decomposition)
+        if null_basis is None
+        else np.asarray(null_basis, dtype=np.float64)
+    )
     if null.shape[1] == 0:
         return decomposition.pseudo_inverse(), np.zeros_like(block)
 
@@ -3191,16 +3245,56 @@ def _null_basis_with_inherited_gram_scale(
     return np.column_stack(pieces)
 
 
-def _deficient_sum_to_zero_centered_estimability(
+def _certified_reduced_schur_null_basis(
+    *,
+    source: NDArray,
+    structured_cross: NDArray,
+    structured_map: NDArray,
+    kkt_residual: NDArray,
+    constraint_multiplier: NDArray | None = None,
+    constraint_residual: NDArray | None = None,
+) -> NDArray:
+    """Certify a reduced Schur null space from its source and KKT residual."""
+    schur = np.asarray(source, dtype=np.float64) + np.einsum(
+        "kiq,kir->qr",
+        structured_cross,
+        structured_map,
+        optimize=True,
+    )
+    roundoff_reference = np.abs(source) + np.einsum(
+        "kiq,kir->qr",
+        np.abs(structured_cross),
+        np.abs(structured_map),
+        optimize=True,
+    )
+    absolute_error = np.einsum(
+        "kiq,kir->qr",
+        np.abs(structured_map),
+        np.abs(kkt_residual),
+        optimize=True,
+    )
+    if (constraint_multiplier is None) != (constraint_residual is None):
+        raise ValueError("constraint multiplier and residual must be supplied together")
+    if constraint_multiplier is not None and constraint_residual is not None:
+        absolute_error += np.abs(constraint_multiplier).T @ np.abs(constraint_residual)
+    return _null_basis_with_inherited_gram_scale(
+        schur,
+        coordinate_gram=source,
+        roundoff_reference=roundoff_reference,
+        absolute_error=absolute_error,
+    )
+
+
+def _certified_sum_to_zero_centered_estimability(
     operator: CenteredBlockOperator,
     local_decompositions: tuple[RankDecomposition, ...],
 ) -> NDArray:
-    """Resolve wide deficient SZ null geometry through its small constraint space."""
+    """Resolve certification-limited SZ null geometry through its constraint space."""
     raw = operator.raw
     if not isinstance(raw, SumToZeroBlockOperator):  # pragma: no cover - caller dispatch
-        raise TypeError("deficient sum-to-zero rank requires SZ geometry")
+        raise TypeError("certified sum-to-zero rank requires SZ geometry")
     if operator.raw_structured_cross is None:  # pragma: no cover - caller validation
-        raise ValueError("deficient SZ rank requires all-level structured cross moments")
+        raise ValueError("certified SZ rank requires all-level structured cross moments")
 
     local_inverse = np.empty_like(raw.D)
     local_null_projector = np.empty_like(raw.D)
@@ -3289,23 +3383,6 @@ def _deficient_sum_to_zero_centered_estimability(
         null_dual,
         optimize=True,
     )
-    schur_source = _augmented_small_data_block(operator)
-    structured_projection = np.einsum(
-        "kiq,kir->qr",
-        C_augmented,
-        inverse_cross,
-        optimize=True,
-    )
-    constraint_projection = constraint_cross.T @ multiplier_map
-    schur = schur_source - structured_projection - constraint_projection
-    projection_magnitude = np.einsum(
-        "kiq,kir->qr",
-        np.abs(C_augmented),
-        np.abs(inverse_cross),
-        optimize=True,
-    )
-    constraint_magnitude = np.abs(constraint_cross).T @ np.abs(multiplier_map)
-
     # The reduced Schur block is a subtraction of fitted structured energy
     # from the raw small Gram.  Its KKT residual provides an a posteriori
     # floating-point error bound: exact aliases can otherwise leave positive
@@ -3322,18 +3399,13 @@ def _deficient_sum_to_zero_centered_estimability(
     kkt_residual += C_augmented
     kkt_residual += multiplier_map[None, :, :]
     constraint_map_residual = np.sum(structured_map, axis=0)
-    schur_absolute_error = np.einsum(
-        "kiq,kir->qr",
-        np.abs(structured_map),
-        np.abs(kkt_residual),
-        optimize=True,
-    )
-    schur_absolute_error += np.abs(multiplier_map).T @ np.abs(constraint_map_residual)
-    small_null = _null_basis_with_inherited_gram_scale(
-        schur,
-        coordinate_gram=schur_source,
-        roundoff_reference=np.abs(schur_source) + projection_magnitude + constraint_magnitude,
-        absolute_error=schur_absolute_error,
+    small_null = _certified_reduced_schur_null_basis(
+        source=_augmented_small_data_block(operator),
+        structured_cross=C_augmented,
+        structured_map=structured_map,
+        kkt_residual=kkt_residual,
+        constraint_multiplier=multiplier_map,
+        constraint_residual=constraint_map_residual,
     )
 
     structured_lift = np.einsum(
@@ -3353,21 +3425,21 @@ def _deficient_sum_to_zero_centered_estimability(
             # P_k - P_k sum(P_k)^+ P_k is the local diagonal block of the
             # constrained null projector.  Its diagonal tells whether each raw
             # coefficient can still move inside a zero-energy sum-to-zero vector.
-            constrained_projector = projector - projector @ constraint_null_inverse @ projector
-            constrained_diagonal = np.diag(constrained_projector).copy()
+            removed_projector = projector @ constraint_null_inverse @ projector
+            constrained_diagonal = np.diag(projector) - np.diag(removed_projector)
             projector_noise = (
                 SHARED_RANK_POLICY.certification_band
                 * SHARED_RANK_POLICY.gram_rcond
-                * max(float(np.linalg.norm(constrained_projector)), 1.0)
+                * (np.abs(np.diag(projector)) + np.abs(np.diag(removed_projector)))
             )
             constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
             inherent_null_norm[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
 
     result = np.empty(operator.shape[0], dtype=bool)
     result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
-    result[raw.structured_indices] = (
-        inherent_null_norm[:-1] <= SHARED_RANK_POLICY.factor_rcond
-    ) & (lifted_null_norm[:-1] <= SHARED_RANK_POLICY.factor_rcond)
+    result[raw.structured_indices] = (inherent_null_norm[:-1] <= SHARED_RANK_POLICY.gram_rcond) & (
+        lifted_null_norm[:-1] <= SHARED_RANK_POLICY.factor_rcond
+    )
     return result
 
 
@@ -3383,13 +3455,14 @@ def _sum_to_zero_centered_estimability(
         return _bounded_centered_estimability(operator)
 
     local_decompositions = tuple(decompose_gram(block) for block in raw.D)
-    if any(decomposition.rank < raw.block_size for decomposition in local_decompositions):
-        if operator.shape[0] > _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH:
-            return _deficient_sum_to_zero_centered_estimability(
-                operator,
-                local_decompositions,
-            )
-        return _bounded_centered_estimability(operator)
+    if any(
+        decomposition.rank < raw.block_size or needs_factor_certification(decomposition)
+        for decomposition in local_decompositions
+    ):
+        return _certified_sum_to_zero_centered_estimability(
+            operator,
+            local_decompositions,
+        )
     local_inverse = np.stack(
         [decomposition.pseudo_inverse() for decomposition in local_decompositions]
     )
@@ -3409,26 +3482,37 @@ def _sum_to_zero_centered_estimability(
         return _bounded_centered_estimability(operator)
     constraint_inverse = constraint_rank.pseudo_inverse()
     constraint_cross = np.sum(inverse_cross, axis=0)
-    schur = _augmented_small_data_block(operator)
-    schur -= np.einsum(
-        "kiq,kir->qr",
-        C_augmented,
-        inverse_cross,
+    multiplier_map = constraint_inverse @ constraint_cross
+    structured_map = -inverse_cross.copy()
+    structured_map += np.einsum(
+        "kij,jq->kiq",
+        local_inverse,
+        multiplier_map,
         optimize=True,
     )
-    schur += constraint_cross.T @ constraint_inverse @ constraint_cross
-    small_rank = decompose_gram(0.5 * (schur + schur.T))
-    small_null = small_rank.null_basis()
-    multiplier = constraint_inverse @ constraint_cross @ small_null
-    structured_lift = -np.einsum(
-        "kiq,qr->kir",
-        inverse_cross,
-        small_null,
+    kkt_residual = inverse_cross
+    np.einsum(
+        "kij,kjq->kiq",
+        raw.D,
+        structured_map,
+        out=kkt_residual,
         optimize=True,
-    ) + np.einsum(
-        "kij,jr->kir",
-        local_inverse,
-        multiplier,
+    )
+    kkt_residual += C_augmented
+    kkt_residual -= multiplier_map[None, :, :]
+    constraint_map_residual = np.sum(structured_map, axis=0)
+    small_null = _certified_reduced_schur_null_basis(
+        source=_augmented_small_data_block(operator),
+        structured_cross=C_augmented,
+        structured_map=structured_map,
+        kkt_residual=kkt_residual,
+        constraint_multiplier=multiplier_map,
+        constraint_residual=constraint_map_residual,
+    )
+    structured_lift = np.einsum(
+        "kiq,qr->kir",
+        structured_map,
+        small_null,
         optimize=True,
     )
     small_null_norm, lifted_null_norm = _lifted_null_row_norms(

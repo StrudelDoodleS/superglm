@@ -6,12 +6,17 @@ import numpy as np
 import pytest
 
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
-from superglm.solvers.rank import decompose_factor, decompose_gram
+from superglm.solvers.rank import (
+    decompose_factor,
+    decompose_gram,
+    needs_factor_certification,
+)
 from superglm.solvers.structured import (
     CenteredBlockOperator,
     SumToZeroBlockOperator,
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
+    _orthonormal_column_span,
     centered_operator_coefficient_estimable,
     compact_operator_diagonal,
     materialize_compact_operator,
@@ -22,6 +27,60 @@ from superglm.solvers.sum_to_zero import (
     _decompose_local_psd_batch,
 )
 from superglm.types import PenaltyComponent
+
+
+def _sum_to_zero_free_design(local_factors: np.ndarray) -> np.ndarray:
+    n_levels, rows_per_level, block_size = local_factors.shape
+    free_structured = np.zeros((n_levels * rows_per_level, (n_levels - 1) * block_size))
+    for level, factor in enumerate(local_factors[:-1]):
+        row_slice = slice(level * rows_per_level, (level + 1) * rows_per_level)
+        column_slice = slice(level * block_size, (level + 1) * block_size)
+        free_structured[row_slice, column_slice] = factor
+    final_rows = slice((n_levels - 1) * rows_per_level, n_levels * rows_per_level)
+    free_structured[final_rows] = np.hstack([-local_factors[-1]] * (n_levels - 1))
+    return free_structured
+
+
+def _sum_to_zero_centered_operator(
+    local_factors: np.ndarray,
+    small: np.ndarray,
+) -> tuple[CenteredBlockOperator, np.ndarray]:
+    n_levels, rows_per_level, block_size = local_factors.shape
+    free_structured = _sum_to_zero_free_design(local_factors)
+    public_design = np.column_stack((small, free_structured))
+    cross = public_design.T @ np.ones(len(public_design))
+    C = np.stack(
+        [
+            factor.T @ small[level * rows_per_level : (level + 1) * rows_per_level]
+            for level, factor in enumerate(local_factors)
+        ]
+    )
+    D = np.stack([factor.T @ factor for factor in local_factors])
+    raw_structured_cross = np.stack(
+        [factor.T @ np.ones(rows_per_level) for factor in local_factors]
+    )
+    A = small.T @ small
+    raw = SumToZeroBlockOperator(
+        A=0.5 * (A + A.T),
+        C=C,
+        D=D,
+        small_indices=np.arange(small.shape[1], dtype=np.intp),
+        structured_indices=np.arange(
+            small.shape[1],
+            small.shape[1] + (n_levels - 1) * block_size,
+            dtype=np.intp,
+        ).reshape(n_levels - 1, block_size),
+    )
+    return (
+        CenteredBlockOperator(
+            raw=raw,
+            cross=cross,
+            total=float(len(public_design)),
+            center=cross / len(public_design),
+            raw_structured_cross=raw_structured_cross,
+        ),
+        public_design,
+    )
 
 
 def _sum_to_zero_operator_fixture():
@@ -608,9 +667,8 @@ def test_centered_sum_to_zero_estimability_matches_dense_without_fallback(
         center=cross / np.sum(weights),
         raw_structured_cross=raw_structured_cross,
     )
-    dense = public_design.T @ (weights[:, None] * public_design)
-    dense -= np.outer(cross, cross) / np.sum(weights)
-    expected = decompose_gram(dense).coefficient_estimable()
+    centered_design = public_design - np.average(public_design, axis=0, weights=weights)
+    expected = decompose_factor(np.sqrt(weights)[:, None] * centered_design).coefficient_estimable()
 
     def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
         raise AssertionError("full-rank SZ estimability must remain on the compact path")
@@ -797,3 +855,110 @@ def test_wide_deficient_sum_to_zero_schur_rank_uses_augmented_scale(
     actual = centered_operator_coefficient_estimable(operator)
 
     np.testing.assert_array_equal(actual, expected)
+
+
+def test_orthonormal_column_span_is_invariant_to_candidate_scale() -> None:
+    candidates = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1e-14],
+            [0.0, 0.0],
+            [0.0, 0.0],
+        ]
+    )
+
+    span = _orthonormal_column_span(candidates)
+
+    assert span.shape == (4, 2)
+    np.testing.assert_allclose(span @ span.T, np.diag([1.0, 1.0, 0.0, 0.0]))
+
+
+def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 129
+    block_size = 4
+    local_factor = np.random.default_rng(1).normal(size=(3, block_size))
+    local_factors = np.tile(local_factor, (n_levels, 1, 1))
+    small = np.tile(local_factor[:, :2], (n_levels, 1))
+    operator, public_design = _sum_to_zero_centered_operator(local_factors, small)
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    local_decomposition = decompose_gram(local_factor.T @ local_factor)
+
+    assert decompose_factor(local_factor).rank == 3
+    assert local_decomposition.rank == block_size
+    assert needs_factor_certification(local_decomposition)
+    assert np.all(expected.coefficient_estimable()[: small.shape[1]])
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide certification-limited SZ inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_wide_sum_to_zero_null_span_is_invariant_to_coordinate_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 129
+    block_size = 4
+    rng = np.random.default_rng(4)
+    local_factor = rng.normal(size=(4, 2)) @ rng.normal(size=(2, block_size))
+    local_factor *= np.array([1.0, 1e-5, 1e-10, 1e-14])
+    local_factors = np.tile(local_factor, (n_levels, 1, 1))
+    small = np.tile(local_factor[:, :2], (n_levels, 1))
+    operator, public_design = _sum_to_zero_centered_operator(local_factors, small)
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+
+    assert decompose_factor(local_factor).rank == 2
+    assert not np.any(expected.coefficient_estimable()[small.shape[1] :])
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("scaled wide SZ inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_full_rank_sum_to_zero_schur_exact_alias_uses_factor_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 5
+    block_size = 2
+    rng = np.random.default_rng(2)
+    local_factors = rng.normal(size=(n_levels, block_size, block_size))
+    free_structured = _sum_to_zero_free_design(local_factors)
+    alias_map = rng.normal(size=(free_structured.shape[1], 3))
+    operator, public_design = _sum_to_zero_centered_operator(
+        local_factors,
+        free_structured @ alias_map,
+    )
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    assert not np.any(expected.coefficient_estimable()[: alias_map.shape[1]])
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("full-rank SZ inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )

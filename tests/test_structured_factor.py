@@ -8,12 +8,15 @@ import numpy as np
 import pytest
 
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
+from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
+    BlockSymmetricOperator,
     CenteredBlockOperator,
     LowRankSymmetricOperator,
     ScalarSchurFactor,
     SumBlockOperator,
     SymmetricBlockOperator,
+    centered_operator_coefficient_estimable,
     materialize_compact_operator,
 )
 from superglm.types import PenaltyComponent
@@ -34,6 +37,48 @@ def _spd_scalar_blocks():
     H[np.ix_(small_indices, structured_indices)] = C.T
     H[structured_indices, structured_indices] = d
     return A, C, d, small_indices, structured_indices, H
+
+
+def _independent_centered_operator(
+    local_factors: np.ndarray,
+    small: np.ndarray,
+) -> tuple[CenteredBlockOperator, np.ndarray]:
+    n_levels, rows_per_level, block_size = local_factors.shape
+    structured = np.zeros((n_levels * rows_per_level, n_levels * block_size))
+    for level, factor in enumerate(local_factors):
+        row_slice = slice(level * rows_per_level, (level + 1) * rows_per_level)
+        column_slice = slice(level * block_size, (level + 1) * block_size)
+        structured[row_slice, column_slice] = factor
+    public_design = np.column_stack((small, structured))
+    cross = public_design.T @ np.ones(len(public_design))
+    C = np.stack(
+        [
+            factor.T @ small[level * rows_per_level : (level + 1) * rows_per_level]
+            for level, factor in enumerate(local_factors)
+        ]
+    )
+    D = np.stack([factor.T @ factor for factor in local_factors])
+    A = small.T @ small
+    raw = BlockSymmetricOperator(
+        A=0.5 * (A + A.T),
+        C=C,
+        D=D,
+        small_indices=np.arange(small.shape[1], dtype=np.intp),
+        structured_indices=np.arange(
+            small.shape[1],
+            small.shape[1] + n_levels * block_size,
+            dtype=np.intp,
+        ).reshape(n_levels, block_size),
+    )
+    return (
+        CenteredBlockOperator(
+            raw=raw,
+            cross=cross,
+            total=float(len(public_design)),
+            center=cross / len(public_design),
+        ),
+        public_design,
+    )
 
 
 def _contiguous_scalar_factor():
@@ -461,3 +506,80 @@ def test_compact_centered_and_low_rank_operator_products_match_dense():
             np.trace(inverse @ identity_matrix @ inverse @ combined_dense),
             atol=2e-12,
         )
+
+
+def test_centered_independent_blocks_certify_formed_full_rank_local_moments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 129
+    block_size = 4
+    rng = np.random.default_rng(0)
+    local_factor = rng.normal(size=(4, 3)) @ rng.normal(size=(3, block_size))
+    local_factors = np.tile(local_factor, (n_levels, 1, 1))
+    row_null = np.linalg.svd(local_factor.T, full_matrices=True)[0][:, -1]
+    small = np.vstack(
+        [
+            np.column_stack(
+                (
+                    row_null * np.sin((level + 1) * 0.37),
+                    row_null * np.cos((level + 1) * 0.23),
+                )
+            )
+            for level in range(n_levels)
+        ]
+    )
+    operator, public_design = _independent_centered_operator(local_factors, small)
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    local_gram = local_factor.T @ local_factor
+    local_decomposition = decompose_gram(local_gram)
+
+    assert decompose_factor(local_factor).rank == 3
+    assert local_decomposition.rank == block_size
+    assert needs_factor_certification(local_decomposition)
+    assert np.count_nonzero(expected.coefficient_estimable()) == small.shape[1]
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide certification-limited FS inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_centered_independent_schur_exact_alias_uses_factor_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 5
+    block_size = 2
+    rng = np.random.default_rng(0)
+    local_factors = rng.normal(size=(n_levels, block_size, block_size))
+    structured = np.zeros((n_levels * block_size, n_levels * block_size))
+    for level, factor in enumerate(local_factors):
+        block_slice = slice(level * block_size, (level + 1) * block_size)
+        structured[block_slice, block_slice] = factor
+    alias_map = rng.normal(size=(structured.shape[1], 3))
+    operator, public_design = _independent_centered_operator(
+        local_factors,
+        structured @ alias_map,
+    )
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    assert not np.any(expected.coefficient_estimable()[: alias_map.shape[1]])
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("independent structured inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
