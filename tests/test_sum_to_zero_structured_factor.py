@@ -17,6 +17,7 @@ from superglm.solvers.structured import (
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
     _orthonormal_column_span,
+    _sum_to_zero_scaled_basis_null_row_norms,
     centered_operator_coefficient_estimable,
     compact_operator_diagonal,
     materialize_compact_operator,
@@ -904,6 +905,132 @@ def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
     )
 
 
+def test_sum_to_zero_certifies_full_local_blocks_in_public_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_basis = np.eye(6, 5)
+    local_basis -= np.mean(local_basis, axis=0)
+    local_factors = np.stack(
+        [local_basis.copy() for _level in range(5)]
+        + [local_basis * np.array([1e8, 1.0, 1.0, 1.0, 1.0])]
+    )
+    operator, public_design = _sum_to_zero_centered_operator(
+        local_factors,
+        np.empty((36, 0)),
+    )
+    expected = decompose_factor(public_design)
+    local_decompositions = tuple(decompose_gram(factor.T @ factor) for factor in local_factors)
+
+    assert all(decomposition.rank == 5 for decomposition in local_decompositions)
+    assert not any(
+        needs_factor_certification(decomposition) for decomposition in local_decompositions
+    )
+    assert expected.rank == 21
+    np.testing.assert_array_equal(
+        np.flatnonzero(~expected.coefficient_estimable()),
+        np.arange(0, 25, 5),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("public-coordinate SZ certification must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_wide_sum_to_zero_public_rank_certificate_stays_block_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 258
+    block_size = 3
+    structured_indices = np.arange(
+        (n_levels - 1) * block_size,
+        dtype=np.intp,
+    ).reshape(n_levels - 1, block_size)
+    D = np.tile(np.eye(block_size), (n_levels, 1, 1))
+    D[-1, 0, 0] = 1e16
+    raw = SumToZeroBlockOperator(
+        A=np.empty((0, 0)),
+        C=np.empty((n_levels, block_size, 0)),
+        D=D,
+        small_indices=np.empty(0, dtype=np.intp),
+        structured_indices=structured_indices,
+    )
+    cross = np.zeros(raw.shape[0])
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=1.0,
+        center=cross,
+        raw_structured_cross=np.zeros((n_levels, block_size)),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide public-coordinate SZ certification must remain block-bounded")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    actual = centered_operator_coefficient_estimable(operator).reshape(
+        n_levels - 1,
+        block_size,
+    )
+    assert not np.any(actual[:, 0])
+    assert np.all(actual[:, 1:])
+
+
+def test_sum_to_zero_constraint_rank_uses_scaled_parameter_factor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    centered_row = np.array([-1.0, 0.0, 1.0])
+    local_factors = np.stack(
+        (
+            np.outer(centered_row, np.array([1e8, 1e8])),
+            np.outer(centered_row, np.array([1.0, 0.0])),
+            np.array(
+                [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [-1.0, -1.0],
+                ]
+            ),
+        )
+    )
+    operator, public_design = _sum_to_zero_centered_operator(
+        local_factors,
+        np.empty((9, 0)),
+    )
+    expected = decompose_factor(public_design)
+
+    assert [decompose_factor(factor).rank for factor in local_factors] == [1, 1, 2]
+    np.testing.assert_array_equal(
+        expected.coefficient_estimable(),
+        np.array([False, False, True, True]),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("parameter-scaled SZ constraint rank must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
 def test_wide_sum_to_zero_null_span_is_invariant_to_coordinate_scale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1039,6 +1166,69 @@ def test_sum_to_zero_heterogeneous_null_projector_uses_solve_error_bound(
 
     def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
         raise AssertionError("heterogeneous-null SZ inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_sum_to_zero_scaled_null_leverage_preserves_resolved_small_residual() -> None:
+    delta = 1e-7
+    retained_row_space = np.array([[np.sqrt(1.0 - delta**2), delta]])
+    scaled_bases = (
+        np.array([[1.0], [0.0]]),
+        np.array([[1.0], [0.0]]),
+    )
+
+    row_norms, null_dimension, ambiguous = _sum_to_zero_scaled_basis_null_row_norms(
+        scaled_bases,
+        retained_row_space,
+    )
+
+    assert null_dimension == 1
+    assert ambiguous[0, 0]
+    assert row_norms[0, 0] > np.sqrt(np.finfo(np.float64).eps)
+    np.testing.assert_allclose(row_norms[1, 0], np.sqrt(1.0 - delta**2))
+
+
+@pytest.mark.parametrize(
+    ("seed", "scale_bound", "expected_estimable"),
+    [
+        (131011, 4.0, np.array([], dtype=np.intp)),
+        (121016, 3.0, np.array([0, 4], dtype=np.intp)),
+    ],
+)
+def test_sum_to_zero_scaled_null_leverage_matches_public_factor(
+    monkeypatch: pytest.MonkeyPatch,
+    seed: int,
+    scale_bound: float,
+    expected_estimable: np.ndarray,
+) -> None:
+    rng = np.random.default_rng(seed)
+    local_factors = []
+    for rank in (2, 3, 4):
+        left = rng.normal(size=(7, rank))
+        right = rng.normal(size=(rank, 5))
+        coordinate_scale = 10.0 ** rng.uniform(-scale_bound, scale_bound, size=5)
+        local_factors.append((left @ right) * coordinate_scale)
+    operator, public_design = _sum_to_zero_centered_operator(
+        np.stack(local_factors),
+        np.empty((21, 0)),
+    )
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    np.testing.assert_array_equal(
+        np.flatnonzero(expected.coefficient_estimable()),
+        expected_estimable,
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("scaled SZ null inference must remain compact")
 
     monkeypatch.setattr(
         "superglm.solvers.structured._bounded_centered_estimability",

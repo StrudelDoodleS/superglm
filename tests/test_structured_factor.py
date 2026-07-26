@@ -552,6 +552,32 @@ def test_centered_independent_blocks_certify_formed_full_rank_local_moments(
     )
 
 
+def test_centered_independent_column_scale_certifies_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(0)
+    local_factors = rng.normal(size=(2, 3, 2))
+    small = (1e9 + np.arange(6, dtype=np.float64))[:, None]
+    operator, public_design = _independent_centered_operator(local_factors, small)
+    centered_design = public_design - np.mean(public_design, axis=0)
+    expected = decompose_factor(centered_design).coefficient_estimable()
+
+    assert np.all(expected)
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("cancellation-certified FS inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
+    )
+
+
 def test_centered_independent_schur_exact_alias_uses_factor_scale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
