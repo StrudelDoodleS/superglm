@@ -46,10 +46,10 @@ model.fit_reml(df, y, sample_weight=exposure, max_reml_iter=30)
 
 Auto-detection remains available for compatibility, but explicit feature
 specs are the canonical API. Passing the legacy `splines` keyword emits a
-`FutureWarning`; migrate each named spline to
-`features={"column": Spline(...)}`. The companion `n_knots`, `degree`, and
-`categorical_base` controls continue to configure that legacy path during the
-compatibility window.
+`FutureWarning`; calls continue to run during the 0.15 compatibility window,
+including with `n_knots`, `degree`, and `categorical_base`. Warning-as-error
+environments should migrate named smooths to
+`features={"column": Spline(kind="ps")}` before upgrading.
 
 ```python
 from superglm import Spline, SuperGLM
