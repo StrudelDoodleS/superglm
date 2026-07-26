@@ -217,6 +217,21 @@ def drop1(
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling drop1().")
 
+    reml_only_terms = [
+        name
+        for name, spec in (
+            [(name, model._specs[name]) for name in model._feature_order]
+            + [(name, model._interaction_specs[name]) for name in model._interaction_order]
+        )
+        if getattr(spec, "requires_reml", False)
+    ]
+    if reml_only_terms:
+        raise NotImplementedError(
+            "drop1() does not support variance-component terms "
+            f"{reml_only_terms!r}; boundary-aware REML comparison requires "
+            "a dedicated model-comparison contract."
+        )
+
     dev_full = model._result.deviance
     edf_full = model._result.effective_df
     n = len(y) if not hasattr(y, "__len__") else len(y)

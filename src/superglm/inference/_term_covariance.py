@@ -86,6 +86,7 @@ def feature_se_from_cov(
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
+    from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
 
     beta = result.beta
@@ -127,6 +128,8 @@ def feature_se_from_cov(
             return np.zeros(n_points)
         if isinstance(spec, Categorical):
             return np.zeros(len(spec._levels))
+        if isinstance(spec, RandomEffect):
+            return np.zeros(len(spec._levels))
         return np.zeros(1)
 
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
@@ -157,6 +160,9 @@ def feature_se_from_cov(
                 idx = spec._non_base.index(lev)
                 se_all[i] = se_nonbase[idx]
         return se_all
+
+    if isinstance(spec, RandomEffect):
+        return cast(NDArray, np.sqrt(np.maximum(np.diag(Cov_g), 0.0)))
 
     if isinstance(spec, Numeric):
         return np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])

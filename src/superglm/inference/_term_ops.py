@@ -109,6 +109,7 @@ def term_inference(
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
+    from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
 
     beta = result.beta
@@ -152,6 +153,46 @@ def term_inference(
     lam = _resolve_term_lambda(name, feature_groups, reml_lambdas, lambda2)
 
     z_alpha = float(__import__("scipy").stats.norm.ppf(1.0 - alpha / 2.0))
+
+    # ── RandomEffect ─────────────────────────────────────────────
+    if isinstance(spec, RandomEffect):
+        raw = spec.reconstruct(beta_combined)
+        levels = raw["levels"]
+        log_rels = np.asarray([raw["effects"][level] for level in levels])
+        rels = np.exp(log_rels)
+        se = ci_lo = ci_hi = None
+        if with_se and active and Cov_active is not None:
+            assert active_groups_cov is not None
+            se = feature_se_from_cov(
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            )
+            ci_lo = _safe_exp(log_rels - z_alpha * se)
+            ci_hi = _safe_exp(log_rels + z_alpha * se)
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="categorical",
+                active=active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=rels,
+                se_log_relativity=se,
+                ci_lower=_maybe_array(ci_lo),
+                ci_upper=_maybe_array(ci_hi),
+                absorbs_intercept=False,
+                centering_mode="population_zero",
+                edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
+            ),
+            centering,
+        )
 
     # ── OrderedCategorical ────────────────────────────────────────
     if isinstance(spec, OrderedCategorical):

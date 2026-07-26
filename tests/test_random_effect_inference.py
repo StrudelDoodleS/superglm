@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -57,6 +59,40 @@ def _fit_pair(
         max_reml_iter=max_reml_iter,
     )
     return dense, structured, X, y, exposure
+
+
+def test_random_effect_generic_term_surfaces_are_consistent():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    _, model, X, _, _ = _fit_pair(fit_dense=False, max_reml_iter=2)
+    group = next(group for group in model._groups if group.name == "broker")
+
+    term = model.term_inference("broker")
+    assert term.kind == "categorical"
+    assert term.levels == model._specs["broker"]._levels
+    np.testing.assert_allclose(term.log_relativity, model.result.beta[group.sl])
+    assert term.centering_mode == "population_zero"
+
+    rel = model.relativities(with_se=True)["broker"]
+    assert list(rel["level"]) == term.levels
+    np.testing.assert_allclose(rel["log_relativity"], term.log_relativity)
+
+    selected = model.plot_data(terms="broker", ci="pointwise")
+    default = model.plot_data(ci=None)
+    assert selected["terms"][0]["name"] == "broker"
+    assert any(item["name"] == "broker" for item in default["terms"])
+
+    axes = model.plot(terms="broker", ci=None)
+    assert axes is not None
+    default_axes = model.plot(ci=None)
+    assert default_axes is not None
+
+    assert model.summary()["fit"]["n_obs"] == len(X)
+    assert np.all(np.isfinite(model.predict(X.iloc[:5])))
+    restored = pickle.loads(pickle.dumps(model))
+    restored_term = restored.term_inference("broker")
+    np.testing.assert_allclose(restored_term.log_relativity, term.log_relativity)
 
 
 def test_structured_selected_covariance_matches_dense_augmented_inverse(monkeypatch):

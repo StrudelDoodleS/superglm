@@ -14,6 +14,8 @@ from superglm.types import GroupInfo, LambdaPolicy
 class RandomEffect:
     """All-level categorical effect with a REML-estimated variance component."""
 
+    requires_reml = True
+
     def __init__(
         self,
         *,
@@ -100,4 +102,9 @@ class RandomEffect:
             level: float(value)
             for level, value in zip(self._levels, np.asarray(beta).ravel(), strict=True)
         }
-        return {"levels": self._levels.copy(), "effects": effects}
+        return {
+            "levels": self._levels.copy(),
+            "effects": effects,
+            "log_relativities": effects.copy(),
+            "relativities": {level: float(np.exp(value)) for level, value in effects.items()},
+        }
