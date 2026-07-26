@@ -2,6 +2,12 @@
 
 **Status:** Approved for planning on 2026-07-25
 
+> **Scope update (2026-07-26):** The package-level structured-solver
+> extraction originally deferred below is now authorized as a pre-merge
+> follow-up. The governing design is
+> `2026-07-26-structured-solver-package-extraction-design.md`. The prohibition
+> on numerical redesign remains in force.
+
 ## Purpose
 
 Prepare the `RandomEffect` and `FactorSmooth` (`fs` and `sz`) implementation
