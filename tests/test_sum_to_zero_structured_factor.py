@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import scipy.sparse.linalg
 
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
 from superglm.solvers.rank import (
@@ -14,6 +15,7 @@ from superglm.solvers.rank import (
 from superglm.solvers.structured import (
     CenteredBlockOperator,
     SumToZeroBlockOperator,
+    _certified_ritz_discarded,
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
     _orthonormal_column_span,
@@ -81,6 +83,29 @@ def _sum_to_zero_centered_operator(
             raw_structured_cross=raw_structured_cross,
         ),
         public_design,
+    )
+
+
+def _sum_to_zero_diagonal_moment_operator(D: np.ndarray) -> CenteredBlockOperator:
+    n_levels, block_size, _ = D.shape
+    structured_indices = np.arange(
+        (n_levels - 1) * block_size,
+        dtype=np.intp,
+    ).reshape(n_levels - 1, block_size)
+    raw = SumToZeroBlockOperator(
+        A=np.empty((0, 0)),
+        C=np.empty((n_levels, block_size, 0)),
+        D=D,
+        small_indices=np.empty(0, dtype=np.intp),
+        structured_indices=structured_indices,
+    )
+    cross = np.zeros(raw.shape[0])
+    return CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=1.0,
+        center=cross,
+        raw_structured_cross=np.zeros((n_levels, block_size)),
     )
 
 
@@ -874,6 +899,34 @@ def test_orthonormal_column_span_is_invariant_to_candidate_scale() -> None:
     np.testing.assert_allclose(span @ span.T, np.diag([1.0, 1.0, 0.0, 0.0]))
 
 
+def test_ritz_rank_certificate_rejects_cutoff_crossing_residual() -> None:
+    operator = scipy.sparse.linalg.LinearOperator(
+        (2, 2),
+        matvec=lambda values: np.array([0.0, values[1]]),
+        dtype=np.float64,
+    )
+    eigenvalues = np.array([0.0])
+    exact_vector = np.array([[1.0], [0.0]])
+    np.testing.assert_array_equal(
+        _certified_ritz_discarded(
+            operator,
+            eigenvalues,
+            exact_vector,
+            np.finfo(np.float64).eps,
+        ),
+        np.array([True]),
+    )
+
+    unresolved_vector = np.array([[np.sqrt(1.0 - 1e-16)], [1e-8]])
+    with pytest.raises(np.linalg.LinAlgError, match="residual crosses"):
+        _certified_ritz_discarded(
+            operator,
+            eigenvalues,
+            unresolved_vector,
+            np.finfo(np.float64).eps,
+        )
+
+
 def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -942,6 +995,61 @@ def test_sum_to_zero_certifies_full_local_blocks_in_public_coordinates(
     np.testing.assert_array_equal(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
+    )
+
+
+@pytest.mark.parametrize("n_levels", [5, 40])
+def test_sum_to_zero_weak_candidates_are_ranked_at_gram_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+    n_levels: int,
+) -> None:
+    D = np.ones((n_levels, 1, 1))
+    D[-1, 0, 0] = 1e9
+    operator = _sum_to_zero_diagonal_moment_operator(D)
+    expected = decompose_gram(materialize_compact_operator(operator))
+    assert np.all(expected.coefficient_estimable())
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("weak SZ candidates must be certified compactly")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+@pytest.mark.parametrize("n_levels", [5, 258])
+def test_sum_to_zero_positive_columns_are_certified_with_structural_zeros(
+    monkeypatch: pytest.MonkeyPatch,
+    n_levels: int,
+) -> None:
+    D = np.zeros((n_levels, 2, 2))
+    D[:-1, 1, 1] = 1.0
+    D[-1, 1, 1] = 1e16
+    operator = _sum_to_zero_diagonal_moment_operator(D)
+    expected = np.zeros(operator.shape[0], dtype=bool)
+    if n_levels == 5:
+        np.testing.assert_array_equal(
+            decompose_gram(materialize_compact_operator(operator)).coefficient_estimable(),
+            expected,
+        )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("positive SZ columns must remain compact with structural zeros")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
     )
 
 
