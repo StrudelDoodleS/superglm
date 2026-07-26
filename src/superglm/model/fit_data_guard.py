@@ -35,6 +35,7 @@ class FitGeometryGuard:
     x_backend: FrameBackend
     x_digest: bytes
     n_rows: int
+    y_digest: bytes
     weight_digest: bytes
     offset_digest: bytes
     x_columns: tuple[object, ...] | None = None
@@ -43,6 +44,7 @@ class FitGeometryGuard:
     def capture(
         cls,
         X: EagerFrame | FrameLike,
+        y: NDArray,
         sample_weight: NDArray,
         offset: NDArray,
         *,
@@ -50,14 +52,16 @@ class FitGeometryGuard:
     ) -> FitGeometryGuard:
         frame = as_eager_frame(X)
         x_columns = None if columns is None else tuple(columns)
+        n_y, y_digest = _numeric_vector_digest(y)
         n_weights, weight_digest = _numeric_vector_digest(sample_weight)
         n_offsets, offset_digest = _numeric_vector_digest(offset)
-        if n_weights != len(frame) or n_offsets != len(frame):
+        if n_y != len(frame) or n_weights != len(frame) or n_offsets != len(frame):
             raise ValueError("fit geometry vectors must match the fitted frame")
         return cls(
             x_backend=frame.backend,
             x_digest=frame.digest(x_columns, include_index=False),
             n_rows=len(frame),
+            y_digest=y_digest,
             weight_digest=weight_digest,
             offset_digest=offset_digest,
             x_columns=x_columns,
@@ -77,6 +81,18 @@ class FitGeometryGuard:
                 and frame.digest(self.x_columns, include_index=False) == self.x_digest
                 and weight_digest == self.weight_digest
                 and offset_digest == self.offset_digest
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+    def matches_training(self, X, y, sample_weight, offset) -> bool:
+        """Return whether all supplied rows reproduce the fitted training inputs."""
+        try:
+            n_y, y_digest = _numeric_vector_digest(y)
+            return bool(
+                n_y == self.n_rows
+                and y_digest == self.y_digest
+                and self.matches(X, sample_weight, offset)
             )
         except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
             return False

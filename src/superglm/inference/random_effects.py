@@ -17,7 +17,7 @@ from superglm.features.random_effect import RandomEffect
 from superglm.group_matrix import RandomEffectGroupMatrix
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.links import LogLink, stabilize_eta
-from superglm.model.fit_data_guard import require_unchanged_fit_data
+from superglm.model.fit_data_guard import FitGeometryGuard, require_unchanged_fit_data
 from superglm.model.state_ops import _solver_space_working_weights
 from superglm.solvers.structured import (
     StructuredLevelSupport,
@@ -266,6 +266,19 @@ def _reporting_rows(
     )
     if offset_values.shape != (n,):
         raise ValueError("offset must be one-dimensional and match X")
+    if explicit:
+        guard = getattr(model, "_fit_geometry_guard", None)
+        if not isinstance(guard, FitGeometryGuard) or not guard.matches_training(
+            frame,
+            y_values,
+            weights,
+            offset_values,
+        ):
+            raise ValueError(
+                "random-effect reporting rows must reproduce fitted training rows, "
+                "response, sample_weight, and offset; out-of-time evaluation "
+                "diagnostics are not supported by random_effects()."
+            )
     eta = model._predict_eta_exact(
         frame,
         offset=offset_values,
@@ -427,6 +440,7 @@ def random_effect_result(
         "lambda_upper_bound": _LAMBDA_UPPER_BOUND,
         "backend": getattr(model.result, "direct_backend", None),
         "fallback_reason": getattr(model.result, "direct_fallback_reason", None),
+        "row_source": "fit",
     }
     return RandomEffectResult(
         name=group.name,

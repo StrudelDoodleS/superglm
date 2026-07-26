@@ -115,6 +115,68 @@ def test_released_random_effect_report_is_backend_neutral(direct_solve: str):
     pd.testing.assert_frame_equal(restored.table, report.table)
 
 
+def test_explicit_random_effect_rows_must_reproduce_training_inputs():
+    _, model, X, y, exposure = _fit_pair(
+        retain_fit_state=False,
+        fit_dense=False,
+        max_reml_iter=2,
+    )
+    weights = np.ones(len(y))
+    offset = np.log(exposure)
+
+    report = model.random_effects(
+        "broker",
+        X=X.copy(),
+        y=y.copy(),
+        sample_weight=weights,
+        offset=offset,
+    )
+    assert report.diagnostics["row_source"] == "fit"
+
+    changed_y = y.copy()
+    changed_y[0] += 1.0
+    with pytest.raises(ValueError, match="must reproduce fitted training rows"):
+        model.random_effects(
+            "broker",
+            X=X,
+            y=changed_y,
+            sample_weight=weights,
+            offset=offset,
+        )
+
+    evaluation = X.iloc[: len(X) // 2]
+    with pytest.raises(ValueError, match="must reproduce fitted training rows"):
+        model.random_effects(
+            "broker",
+            X=evaluation,
+            y=y[: len(evaluation)],
+            sample_weight=weights[: len(evaluation)],
+            offset=offset[: len(evaluation)],
+        )
+
+    changed_weights = weights.copy()
+    changed_weights[0] = 2.0
+    with pytest.raises(ValueError, match="must reproduce fitted training rows"):
+        model.random_effects(
+            "broker",
+            X=X,
+            y=y,
+            sample_weight=changed_weights,
+            offset=offset,
+        )
+
+    changed_offset = offset.copy()
+    changed_offset[0] += 0.1
+    with pytest.raises(ValueError, match="must reproduce fitted training rows"):
+        model.random_effects(
+            "broker",
+            X=X,
+            y=y,
+            sample_weight=weights,
+            offset=changed_offset,
+        )
+
+
 def test_structured_selected_covariance_matches_dense_augmented_inverse(monkeypatch):
     dense, structured, _, _, _ = _fit_pair()
     assert dense is not None

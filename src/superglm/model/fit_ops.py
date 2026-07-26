@@ -543,19 +543,16 @@ def _prime_fit_caches(
         if getattr(model, "_retain_fit_state", True)
         else None
     )
-    model._fit_geometry_guard = (
-        None
-        if getattr(model, "_retain_fit_state", True)
-        else FitGeometryGuard.capture(
-            X_ref,
-            model._fit_weights,
-            (
-                np.zeros(len(y_arr), dtype=np.float64)
-                if model._fit_offset is None
-                else model._fit_offset
-            ),
-            columns=tuple(guard_columns),
-        )
+    model._fit_geometry_guard = FitGeometryGuard.capture(
+        X_ref,
+        y_arr,
+        model._fit_weights,
+        (
+            np.zeros(len(y_arr), dtype=np.float64)
+            if model._fit_offset is None
+            else model._fit_offset
+        ),
+        columns=tuple(guard_columns),
     )
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
