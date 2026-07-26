@@ -55,6 +55,7 @@ def _profile_model(
     term_kind: str,
     direct_solve: str,
     constrained_mode: str | None = None,
+    retain_fit_state: bool = False,
 ) -> tuple[SuperGLM, str]:
     fixed = LambdaPolicy.fixed
     features: dict[str, FeatureSpec] = {"z": Numeric()}
@@ -114,7 +115,7 @@ def _profile_model(
             interactions=interactions,
             selection_penalty=0.0,
             direct_solve=direct_solve,
-            retain_fit_state=False,
+            retain_fit_state=retain_fit_state,
             max_iter=60,
         ),
         term_name,
@@ -163,6 +164,15 @@ def _assert_report_pickle_parity(model: SuperGLM, term_kind: str, term_name: str
     restored_report = restored.factor_smooth(term_name, grid=9)
     pd.testing.assert_frame_equal(restored_report.table, report.table)
     pd.testing.assert_frame_equal(restored_report.curves, report.curves)
+
+
+def _assert_profile_scratch_released(model: SuperGLM) -> None:
+    assert getattr(model, "_reporting_support_state") is None
+    assert getattr(model, "_dm") is None
+    assert getattr(model, "_fit_weights") is None
+    assert getattr(model, "_fit_mu") is None
+    assert getattr(model, "_fit_X_ref") is None
+    assert getattr(model, "_fit_state").retained is False
 
 
 @pytest.mark.parametrize("family_name", ["nb", "tweedie"])
@@ -309,14 +319,17 @@ def test_constrained_reporting_failure_preserves_installed_revision(
     pd.testing.assert_frame_equal(model.random_effects(term_name).table, report.table)
 
 
-def test_tweedie_reml_profile_builds_reporting_support_only_for_public_fit(
+@pytest.mark.parametrize("retain_fit_state", [False, True])
+def test_tweedie_reml_profile_keeps_only_authoritative_public_row_state(
     monkeypatch: pytest.MonkeyPatch,
+    retain_fit_state: bool,
 ) -> None:
     X, y = _profile_data()
     model, term_name = _profile_model(
         family_name="tweedie",
         term_kind="re",
         direct_solve="auto",
+        retain_fit_state=retain_fit_state,
     )
     real_builder = reml_finalize_module.build_reporting_support_state
     builder_calls = []
@@ -342,17 +355,25 @@ def test_tweedie_reml_profile_builds_reporting_support_only_for_public_fit(
 
     context = result._objective.__self__
     scratch_model = context.model
-    assert len(builder_calls) == 1
-    assert getattr(scratch_model, "_reporting_support_state") is None
-    assert getattr(scratch_model, "_dm") is None
-    assert getattr(scratch_model, "_fit_state").retained is False
+    expected_builds = int(not retain_fit_state)
+    assert len(builder_calls) == expected_builds
+    _assert_profile_scratch_released(scratch_model)
     assert "_suppress_reporting_support" not in model.__dict__
-    assert term_name in getattr(model, "_reporting_support_state").support_totals
+    assert (getattr(model, "_dm") is not None) is retain_fit_state
+    assert getattr(model, "_fit_state").retained is retain_fit_state
+    if retain_fit_state:
+        assert getattr(model, "_reporting_support_state") is None
+    else:
+        assert term_name in getattr(model, "_reporting_support_state").support_totals
 
     result._objective(1.5, source="ci_probe")
 
-    assert len(builder_calls) == 1
-    assert getattr(scratch_model, "_reporting_support_state") is None
-    assert getattr(scratch_model, "_dm") is None
-    assert getattr(scratch_model, "_fit_state").retained is False
+    assert len(builder_calls) == expected_builds
+    _assert_profile_scratch_released(scratch_model)
+
+    restored_result = pickle.loads(pickle.dumps(result))
+    restored_result._objective(1.55, source="ci_probe")
+    restored_scratch_model = restored_result._objective.__self__.model
+    assert len(builder_calls) == expected_builds
+    _assert_profile_scratch_released(restored_scratch_model)
     _assert_report_pickle_parity(model, "re", term_name)

@@ -3942,12 +3942,20 @@ class _ProfileContext:
         )
 
 
-def _clone_profile_model(model, X, sample_weight):
+def _clone_profile_model(
+    model,
+    X,
+    sample_weight,
+    *,
+    retain_fit_state: bool | None = None,
+):
     """Clone configured profile state and resolve shorthand only on the clone."""
     profile_model = model._clone_without_features(
         set(),
         lambda2=copy.deepcopy(configured_lambda2(model)),
     )
+    if retain_fit_state is not None:
+        profile_model._retain_fit_state = bool(retain_fit_state)
     profile_model._interaction_specs = copy.deepcopy(model._interaction_specs)
     profile_model._interaction_order = list(model._interaction_order)
     profile_model._pending_interactions = copy.deepcopy(model._pending_interactions)
@@ -4249,7 +4257,12 @@ def _build_profile_context_reml(
     # REML profile evaluations call fit_reml(), which rewrites the fitted model
     # state. Keep that mutation inside an isolated scratch model so result.ci()
     # and profile plots cannot leave the caller's model at a probe p.
-    profile_model = _clone_profile_model(model, X_snapshot, weight_snapshot)
+    profile_model = _clone_profile_model(
+        model,
+        X_snapshot,
+        weight_snapshot,
+        retain_fit_state=False,
+    )
     # Candidate fits and lazy CI probes need compact coefficient/inference
     # state, but their reporting tables are never public. Suppress that
     # potentially row-scale work while retaining the ordinary release path for
