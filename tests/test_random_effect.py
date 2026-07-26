@@ -148,10 +148,14 @@ def test_random_effect_transform_and_reconstruct_keep_all_levels():
             ]
         ),
     )
-    assert spec.reconstruct(beta) == {
-        "levels": ["a", "b", "c"],
-        "effects": {"a": 0.1, "b": -0.2, "c": 0.3},
-    }
+    reconstructed = spec.reconstruct(beta)
+    effects = {"a": 0.1, "b": -0.2, "c": 0.3}
+    assert reconstructed["levels"] == ["a", "b", "c"]
+    assert reconstructed["effects"] == effects
+    assert reconstructed["log_relativities"] == effects
+    assert reconstructed["relativities"] == pytest.approx(
+        {level: np.exp(effect) for level, effect in effects.items()}
+    )
 
 
 def test_superglm_accepts_structured_direct_solver_mode():

@@ -162,12 +162,13 @@ class EagerFrame:
             digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
             metadata = tuple((repr(name), str(dtype)) for name, dtype in guarded.dtypes.items())
             digest.update(repr((guarded.shape, metadata)).encode("utf-8"))
-            row_hashes = pd.util.hash_pandas_object(
-                guarded,
-                index=include_index,
-                categorize=True,
-            ).to_numpy(dtype=np.uint64, copy=False)
-            digest.update(np.ascontiguousarray(row_hashes).data)
+            if guarded.shape[1] or include_index:
+                row_hashes = pd.util.hash_pandas_object(
+                    guarded,
+                    index=include_index,
+                    categorize=True,
+                ).to_numpy(dtype=np.uint64, copy=False)
+                digest.update(np.ascontiguousarray(row_hashes).data)
             return digest.digest()
 
         selected = self.columns if columns is None else tuple(columns)

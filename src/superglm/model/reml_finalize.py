@@ -386,6 +386,7 @@ def finalize_reml_fit(
             ProfiledSumToZeroBlockFactor,
         ),
     )
+    retain_fit_state = bool(getattr(model, "_retain_fit_state", True))
     reporting_state = (
         build_reporting_support_state(
             dm=model._dm,
@@ -396,10 +397,10 @@ def finalize_reml_fit(
             sample_weight=sample_weight,
             y=y,
             offset=offset_arr,
-            retain_fit_state=model._retain_fit_state,
+            retain_fit_state=retain_fit_state,
             information_by_group_index=_structured_information_by_group(final_cache),
         )
-        if not model._retain_fit_state or structured_terminal
+        if not retain_fit_state or structured_terminal
         else None
     )
     structured_linear_state = (
