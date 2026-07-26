@@ -2985,17 +2985,34 @@ def _lifted_null_row_norms(
     small_null: NDArray,
     structured_lift: NDArray,
 ) -> tuple[NDArray, NDArray]:
-    """Orthonormalize a compact lifted null basis through its small Gram."""
+    """Return lifted-null row norms after factor-scale column equilibration."""
     if small_null.shape[1] == 0:
         return (
             np.zeros(small_null.shape[0], dtype=np.float64),
             np.zeros(structured_lift.shape[:-1], dtype=np.float64),
         )
-    null_gram = small_null.T @ small_null + np.einsum(
+
+    # A reduced-Schur null basis is free to scale each direction differently.
+    # Forming its lifted Gram before equilibrating the columns can therefore
+    # discard a valid smaller direction relative to an unrelated large one.
+    # Normalize in the implicit lifted factor first, matching decompose_factor.
+    raw_null_gram = small_null.T @ small_null + np.einsum(
         "kir,kis->rs",
         structured_lift,
         structured_lift,
         optimize=True,
+    )
+    squared_column_norm = np.maximum(np.diag(raw_null_gram), 0.0)
+    active = squared_column_norm > 0.0
+    if not np.any(active):
+        return (
+            np.zeros(small_null.shape[0], dtype=np.float64),
+            np.zeros(structured_lift.shape[:-1], dtype=np.float64),
+        )
+    column_scale = np.sqrt(squared_column_norm[active])
+    null_gram = raw_null_gram[np.ix_(active, active)] / np.outer(
+        column_scale,
+        column_scale,
     )
     eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (null_gram + null_gram.T))
     scale = max(float(np.max(eigenvalues, initial=0.0)), 1.0)
@@ -3008,8 +3025,13 @@ def _lifted_null_row_norms(
     whitening = (eigenvectors[:, positive] / np.sqrt(eigenvalues[positive])) @ (
         eigenvectors[:, positive].T
     )
-    orthogonal_small = small_null @ whitening
-    orthogonal_structured = structured_lift @ whitening
+    lifted_transform = np.zeros(
+        (small_null.shape[1], whitening.shape[1]),
+        dtype=np.float64,
+    )
+    lifted_transform[active] = whitening / column_scale[:, None]
+    orthogonal_small = small_null @ lifted_transform
+    orthogonal_structured = structured_lift @ lifted_transform
     return (
         np.linalg.norm(orthogonal_small, axis=1),
         np.linalg.norm(orthogonal_structured, axis=2),
@@ -3128,6 +3150,42 @@ def _coefficient_estimable_from_scaled_null_basis(
     return result
 
 
+def _orthonormal_scaled_parameter_null_span(
+    values: NDArray,
+    column_scale: NDArray,
+) -> NDArray:
+    """Build a parameter-null span through the rank policy's scaled coordinates."""
+    candidates = np.asarray(values, dtype=np.float64)
+    scale = np.asarray(column_scale, dtype=np.float64)
+    width = len(scale)
+    active = np.flatnonzero(scale > 0.0)
+    inactive = np.flatnonzero(scale == 0.0)
+    pieces: list[NDArray] = []
+    if inactive.size:
+        structural_null = np.zeros((width, len(inactive)), dtype=np.float64)
+        structural_null[inactive, np.arange(len(inactive))] = 1.0
+        pieces.append(structural_null)
+    if active.size and candidates.shape[1]:
+        equilibrated = candidates[active] * scale[active, None]
+        equilibrated_span = _orthonormal_column_span(equilibrated)
+        if equilibrated_span.shape[1]:
+            # Rows below the factor-policy threshold are estimable coordinates,
+            # not support to be magnified again when returning to parameter
+            # coordinates. Restricting before the second orthogonalization also
+            # prevents raw-coordinate SVD leakage into those rows.
+            supported = np.linalg.norm(equilibrated_span, axis=1) > SHARED_RANK_POLICY.factor_rcond
+            if np.any(supported):
+                supported_span = _orthonormal_column_span(equilibrated_span[supported])
+                supported_indices = active[supported]
+                raw_values = supported_span / scale[supported_indices, None]
+                raw_span = np.zeros((width, supported_span.shape[1]), dtype=np.float64)
+                raw_span[supported_indices] = _orthonormal_column_span(raw_values)
+                pieces.append(raw_span)
+    if not pieces:
+        return np.empty((width, 0), dtype=np.float64)
+    return np.column_stack(pieces)
+
+
 def _certified_local_null_basis(
     block: NDArray,
     decomposition: RankDecomposition,
@@ -3141,7 +3199,10 @@ def _certified_local_null_basis(
             roundoff_reference=np.abs(block),
         )
         candidates = np.column_stack((candidates, inherited_null))
-    return _orthonormal_column_span(candidates)
+    return _orthonormal_scaled_parameter_null_span(
+        candidates,
+        decomposition.column_scale,
+    )
 
 
 def _local_range_inverse_and_null_projector(
@@ -3189,7 +3250,10 @@ def _local_range_inverse_and_null_projector(
             return 0.5 * (inverse + inverse.T), null_projector
 
         expanded_null = range_basis @ residual_null
-        null = _orthonormal_column_span(np.column_stack((null, expanded_null)))
+        null = _orthonormal_scaled_parameter_null_span(
+            np.column_stack((null, expanded_null)),
+            decomposition.column_scale,
+        )
 
     raise np.linalg.LinAlgError("local null-space refinement did not converge")
 
@@ -3421,16 +3485,27 @@ def _certified_sum_to_zero_centered_estimability(
 
     inherent_null_norm = np.zeros((raw.n_levels, raw.block_size), dtype=np.float64)
     if constrained_null_dimension:
+        absolute_constraint_inverse = np.abs(constraint_null_inverse)
         for level, projector in enumerate(local_null_projector):
             # P_k - P_k sum(P_k)^+ P_k is the local diagonal block of the
             # constrained null projector.  Its diagonal tells whether each raw
             # coefficient can still move inside a zero-energy sum-to-zero vector.
-            removed_projector = projector @ constraint_null_inverse @ projector
+            inverse_projector = constraint_null_inverse @ projector
+            removed_projector = projector @ inverse_projector
             constrained_diagonal = np.diag(projector) - np.diag(removed_projector)
+            solve_residual = projector - constraint_null_gram @ inverse_projector
+            # The subtraction can lose all digits in an exactly removed
+            # direction. Bound that cancellation by propagating the observed
+            # solve residual through the retained inverse; its magnitude
+            # incorporates the conditioning of sum(P_k), while the first term
+            # covers the two final matrix products themselves.
             projector_noise = (
                 SHARED_RANK_POLICY.certification_band
                 * SHARED_RANK_POLICY.gram_rcond
                 * (np.abs(np.diag(projector)) + np.abs(np.diag(removed_projector)))
+            )
+            projector_noise += np.diag(
+                np.abs(projector) @ absolute_constraint_inverse @ np.abs(solve_residual)
             )
             constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
             inherent_null_norm[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))

@@ -962,3 +962,90 @@ def test_full_rank_sum_to_zero_schur_exact_alias_uses_factor_scale(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
     )
+
+
+def test_sum_to_zero_scale_separated_aliases_preserve_null_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 4
+    block_size = 2
+    rng = np.random.default_rng(0)
+    local_factors = rng.normal(size=(n_levels, block_size, block_size))
+    local_factors *= np.array([1.0, 1e6])[None, None, :]
+    free_structured = _sum_to_zero_free_design(local_factors)
+    alias_map = rng.normal(size=(free_structured.shape[1], 3))
+    alias_map *= np.array([1.0, 1e-5, 1e-10])
+    operator, public_design = _sum_to_zero_centered_operator(
+        local_factors,
+        free_structured @ alias_map,
+    )
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    assert not np.any(expected.coefficient_estimable())
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("scale-separated SZ inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_sum_to_zero_heterogeneous_null_projector_uses_solve_error_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(42)
+    angle_1, angle_2 = rng.uniform(-np.pi, np.pi, size=2)
+    delta = 1e-1
+    direction_1 = np.array([np.cos(angle_1), np.sin(angle_1), 0.0, 0.0, 0.0])
+    direction_2 = np.array([-np.sin(angle_1), np.cos(angle_1), 0.0, 0.0, 0.0])
+    direction_3 = np.array([0.0, 0.0, np.cos(angle_2), np.sin(angle_2), 0.0])
+    direction_4 = np.array([0.0, 0.0, -np.sin(angle_2), np.cos(angle_2), 0.0])
+    direction_5 = np.array([0.0, 0.0, 0.0, 0.0, 1.0])
+    local_ranges = (
+        np.stack((direction_3, direction_4, direction_5)),
+        np.stack((direction_2, direction_4, direction_5)),
+        np.stack((direction_1, direction_3, direction_5)),
+        np.stack(
+            (
+                direction_1,
+                direction_2,
+                (direction_5 - delta * direction_4) / np.sqrt(1.0 + delta**2),
+            )
+        ),
+    )
+    coordinate_scale = 10.0 ** rng.uniform(-1.0, 1.0, size=5)
+    local_factors = []
+    for local_range in local_ranges:
+        row_map = rng.normal(size=(6, 3))
+        row_map -= np.mean(row_map, axis=0)
+        local_factors.append((row_map @ local_range) * coordinate_scale)
+    local_factors_array = np.stack(local_factors)
+    operator, public_design = _sum_to_zero_centered_operator(
+        local_factors_array,
+        np.empty((24, 0)),
+    )
+    expected = decompose_factor(public_design)
+    np.testing.assert_allclose(np.mean(public_design, axis=0), 0.0, atol=1e-15)
+    np.testing.assert_array_equal(
+        np.flatnonzero(expected.coefficient_estimable()),
+        np.array([2, 3, 4, 9, 12, 13, 14]),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("heterogeneous-null SZ inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
