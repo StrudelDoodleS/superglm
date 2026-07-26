@@ -36,7 +36,10 @@ from superglm.model.reml_execute import (
     run_fixed_monotone_reml,
     run_scop_efs_reml,
 )
-from superglm.model.reml_finalize import finalize_reml_fit
+from superglm.model.reml_finalize import (
+    _build_reml_reporting_support_state,
+    finalize_reml_fit,
+)
 from superglm.model.reml_ops import (
     model_compute_dW_deta,
     model_optimize_direct_reml,
@@ -1236,6 +1239,14 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 debug_recorder=debug_recorder,
             )
+            model._reporting_support_state = _build_reml_reporting_support_state(
+                model,
+                result=model._solver_result,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                durable_retain_fit_state=durable_retain_fit_state,
+            )
             _prime_fit_caches(
                 model,
                 X_ref=X_ref,
@@ -1274,6 +1285,14 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 compute_fit_stats=_compute_fit_stats,
                 debug_recorder=debug_recorder,
+            )
+            model._reporting_support_state = _build_reml_reporting_support_state(
+                model,
+                result=model._solver_result,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                durable_retain_fit_state=durable_retain_fit_state,
             )
             _prime_fit_caches(
                 model,

@@ -159,6 +159,39 @@ def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
     return {}
 
 
+def _build_reml_reporting_support_state(
+    model,
+    *,
+    result,
+    y,
+    sample_weight,
+    offset_arr,
+    durable_retain_fit_state: bool | None = None,
+    force: bool = False,
+    information_by_group_index: dict[int, np.ndarray] | None = None,
+):
+    """Distill structured report support under the durable retention contract."""
+    retain_reporting_rows = (
+        bool(getattr(model, "_retain_fit_state", True))
+        if durable_retain_fit_state is None
+        else bool(durable_retain_fit_state)
+    )
+    if retain_reporting_rows and not force:
+        return None
+    return build_reporting_support_state(
+        dm=model._dm,
+        groups=model._groups,
+        result=result,
+        distribution=model._distribution,
+        link=model._link,
+        sample_weight=sample_weight,
+        y=y,
+        offset=offset_arr,
+        retain_fit_state=retain_reporting_rows,
+        information_by_group_index=information_by_group_index,
+    )
+
+
 def restore_qp_group_state(model, qp_saved_state) -> None:
     """Restore monotone-engine/constraint state for QP passthrough groups."""
     for gi, engine, constraints in qp_saved_state:
@@ -390,26 +423,15 @@ def finalize_reml_fit(
     # Profiled-family publication may retain rows transiently so it can
     # synchronize phi and fit statistics after this refit. Compact reporting
     # must still follow the durable public retention contract.
-    retain_reporting_rows = (
-        bool(getattr(model, "_retain_fit_state", True))
-        if durable_retain_fit_state is None
-        else bool(durable_retain_fit_state)
-    )
-    reporting_state = (
-        build_reporting_support_state(
-            dm=model._dm,
-            groups=model._groups,
-            result=final_pirls,
-            distribution=model._distribution,
-            link=model._link,
-            sample_weight=sample_weight,
-            y=y,
-            offset=offset_arr,
-            retain_fit_state=retain_reporting_rows,
-            information_by_group_index=_structured_information_by_group(final_cache),
-        )
-        if not retain_reporting_rows or structured_terminal
-        else None
+    reporting_state = _build_reml_reporting_support_state(
+        model,
+        result=final_pirls,
+        y=y,
+        sample_weight=sample_weight,
+        offset_arr=offset_arr,
+        durable_retain_fit_state=durable_retain_fit_state,
+        force=structured_terminal,
+        information_by_group_index=_structured_information_by_group(final_cache),
     )
     structured_linear_state = (
         _build_structured_linear_system_state(
