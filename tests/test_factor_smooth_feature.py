@@ -6,7 +6,191 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.features.factor_smooth as factor_smooth_module
 from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, SuperGLM
+from superglm.features.spline import PSpline
+
+
+def _built_discrete_spec(*, basis="fs", m=2, lambda_policy=None):
+    x = np.linspace(-2.0, 2.0, 5000)
+    group = np.array([f"g-{index % 20}" for index in range(len(x))], dtype=object)
+    spec = FactorSmooth(
+        "x",
+        group="group",
+        basis=basis,
+        k=max(6, m + 4),
+        m=m,
+        lambda_policy=lambda_policy,
+    )
+    info = spec.build_discrete(x, group, {}, 256)
+    return spec, info
+
+
+def _legacy_natural_parameterization(basis, penalty, *, rank):
+    import scipy.linalg as la
+
+    X = np.asarray(basis, dtype=np.float64)
+    _Q, R = np.linalg.qr(X, mode="reduced")
+    R_inv = la.solve_triangular(R, np.eye(R.shape[0]), lower=False)
+    transformed = R_inv.T @ penalty @ R_inv
+    eigenvalues, eigenvectors = la.eigh(
+        0.5 * (transformed + transformed.T),
+        driver="evr",
+    )
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    natural_map = R_inv @ eigenvectors
+    natural_map[:, :rank] /= np.sqrt(eigenvalues[:rank])
+    natural_basis = X @ natural_map
+    penalized_scale = 1.0 / np.sqrt(np.mean(natural_basis[:, :rank] ** 2))
+    natural_map[:, :rank] *= penalized_scale
+    null_dim = X.shape[1] - rank
+    if null_dim:
+        null_scale = 1.0 / np.sqrt(np.mean(natural_basis[:, rank:] ** 2))
+        natural_map[:, rank:] *= null_scale
+    wiggle = np.zeros((X.shape[1], X.shape[1]))
+    wiggle[np.arange(rank), np.arange(rank)] = penalized_scale**2
+    components = [("wiggle", wiggle)]
+    for null_index in range(null_dim):
+        component = np.zeros_like(wiggle)
+        coordinate = rank + null_index
+        component[coordinate, coordinate] = 1.0
+        components.append((f"null_{null_index}", component))
+    return natural_map, tuple(components)
+
+
+def test_default_fs_and_sz_use_streamed_marginal_qr():
+    fs, fs_info = _built_discrete_spec()
+    sz, sz_info = _built_discrete_spec(basis="sz")
+
+    assert fs._marginal_build_backend == "streamed_tsqr"
+    assert sz._marginal_build_backend == "streamed_tsqr"
+    assert fs_info.factor_smooth_basis is None
+    assert fs_info.factor_smooth_basis_unique.shape == (256, fs.k)
+    assert sz_info.factor_smooth_basis_unique.shape == (256, sz.k)
+
+
+def test_streamed_discrete_marginal_bounds_basis_evaluation(monkeypatch):
+    chunk_rows = 64
+    monkeypatch.setattr(
+        factor_smooth_module,
+        "_MARGINAL_QR_CHUNK_ROWS",
+        chunk_rows,
+    )
+    original_basis = PSpline._basis_matrix
+    original_raw_basis = PSpline._raw_basis_matrix
+    basis_rows = []
+    raw_basis_rows = []
+
+    def bounded_basis(self, values):
+        basis_rows.append(len(values))
+        return original_basis(self, values)
+
+    def bounded_raw_basis(self, values):
+        raw_basis_rows.append(len(values))
+        return original_raw_basis(self, values)
+
+    monkeypatch.setattr(PSpline, "_basis_matrix", bounded_basis)
+    monkeypatch.setattr(PSpline, "_raw_basis_matrix", bounded_raw_basis)
+
+    spec, info = _built_discrete_spec()
+
+    assert spec._marginal_build_backend == "streamed_tsqr"
+    assert len(basis_rows) > 1
+    assert max(basis_rows) <= chunk_rows
+    assert raw_basis_rows == [256]
+    assert info.factor_smooth_basis is None
+
+
+def test_streamed_tsqr_matches_legacy_geometry_up_to_null_permutation(monkeypatch):
+    monkeypatch.setattr(
+        factor_smooth_module,
+        "_MARGINAL_QR_CHUNK_ROWS",
+        64,
+    )
+    x = np.linspace(-2.0, 2.0, 5000)
+    group = np.arange(len(x), dtype=np.intp) % 20
+    spec = FactorSmooth("x", group="group", k=6)
+    spec.build_discrete(x, group, {}, 256)
+    raw = np.asarray(spec._spline._raw_basis_matrix(x), dtype=np.float64)
+    penalty = np.asarray(spec._spline._build_penalty(), dtype=np.float64)
+    legacy_map, _components = _legacy_natural_parameterization(
+        raw,
+        penalty,
+        rank=spec.k - spec.m,
+    )
+    streamed_basis = raw @ spec._natural_map
+    legacy_basis = raw @ legacy_map
+    rank = spec.k - spec.m
+
+    streamed_penalized = streamed_basis[:, :rank]
+    streamed_penalized /= np.linalg.norm(streamed_penalized, axis=0)
+    legacy_penalized = legacy_basis[:, :rank]
+    legacy_penalized /= np.linalg.norm(legacy_penalized, axis=0)
+    np.testing.assert_allclose(
+        np.abs(streamed_penalized.T @ legacy_penalized),
+        np.eye(rank),
+        atol=2e-11,
+    )
+
+    streamed_null, _ = np.linalg.qr(streamed_basis[:, rank:], mode="reduced")
+    legacy_null, _ = np.linalg.qr(legacy_basis[:, rank:], mode="reduced")
+    null_alignment = np.abs(streamed_null.T @ legacy_null)
+    np.testing.assert_allclose(null_alignment.max(axis=0), 1.0, atol=2e-11)
+    np.testing.assert_allclose(null_alignment.max(axis=1), 1.0, atol=2e-11)
+    np.testing.assert_allclose(null_alignment.min(axis=0), 0.0, atol=2e-11)
+    np.testing.assert_allclose(null_alignment.min(axis=1), 0.0, atol=2e-11)
+
+
+def test_asymmetric_or_high_order_fs_uses_dense_compatibility_qr():
+    asymmetric = {
+        "wiggle": LambdaPolicy.fixed(1.0),
+        "null_0": LambdaPolicy.fixed(0.7),
+        "null_1": LambdaPolicy.fixed(1.3),
+    }
+
+    custom, _ = _built_discrete_spec(lambda_policy=asymmetric)
+    high_order, _ = _built_discrete_spec(m=3)
+
+    assert custom._marginal_build_backend == "dense_qr_compat"
+    assert high_order._marginal_build_backend == "dense_qr_compat"
+
+
+def test_dense_qr_compat_matches_legacy_transform_and_penalties():
+    x = np.linspace(-2.0, 2.0, 5000)
+    group = np.arange(len(x), dtype=np.intp) % 20
+    policies = {
+        "wiggle": LambdaPolicy.fixed(1.0),
+        "null_0": LambdaPolicy.fixed(0.7),
+        "null_1": LambdaPolicy.fixed(1.3),
+    }
+    spec = FactorSmooth(
+        "x",
+        group="group",
+        k=6,
+        m=2,
+        lambda_policy=policies,
+    )
+    spec.build_discrete(x, group, {}, 256)
+    raw = np.asarray(spec._spline._raw_basis_matrix(x), dtype=np.float64)
+    penalty = np.asarray(spec._spline._build_penalty(), dtype=np.float64)
+    expected_map, expected_components = _legacy_natural_parameterization(
+        raw,
+        penalty,
+        rank=spec.k - spec.m,
+    )
+
+    np.testing.assert_allclose(spec._natural_map, expected_map, atol=2e-12)
+    assert [name for name, _ in spec._base_penalty_components] == [
+        name for name, _ in expected_components
+    ]
+    for (_, actual), (_, expected) in zip(
+        spec._base_penalty_components,
+        expected_components,
+        strict=True,
+    ):
+        np.testing.assert_allclose(actual, expected, atol=2e-12)
 
 
 def test_factor_smooth_constructor_contract() -> None:

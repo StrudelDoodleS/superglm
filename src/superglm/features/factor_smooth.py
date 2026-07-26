@@ -17,25 +17,46 @@ if TYPE_CHECKING:
     from superglm.features.spline import PSpline
 
 
-def _natural_parameterization(
-    basis: NDArray,
+_MARGINAL_QR_CHUNK_ROWS = 65_536
+_MarginalBuildBackend = Literal["streamed_tsqr", "dense_qr_compat"]
+
+
+def _combine_qr_r(
+    current: NDArray | None,
+    basis_chunk: sp.csr_matrix,
+) -> NDArray:
+    """Merge one bounded basis chunk into a tall-skinny QR factor."""
+    chunk_r = np.asarray(np.linalg.qr(basis_chunk.toarray(), mode="r"), dtype=np.float64)
+    if current is None:
+        return chunk_r
+    return np.asarray(
+        np.linalg.qr(np.vstack((current, chunk_r)), mode="r"),
+        dtype=np.float64,
+    )
+
+
+def _natural_parameterization_from_r(
+    R: NDArray,
     penalty: NDArray,
     *,
     rank: int,
+    n_rows: int,
 ) -> tuple[NDArray, tuple[tuple[str, NDArray], ...]]:
-    """Build a QR-whitened, RMS-scaled parameterization of one marginal smooth."""
-    X = np.asarray(basis, dtype=np.float64)
+    """Build a QR-whitened natural parameterization without materializing ``Q``."""
+    R_array = np.asarray(R, dtype=np.float64)
     S = np.asarray(penalty, dtype=np.float64)
-    if X.ndim != 2 or S.shape != (X.shape[1], X.shape[1]):
-        raise ValueError("factor-smooth basis and penalty dimensions do not agree")
-    if X.shape[0] < X.shape[1] or np.linalg.matrix_rank(X) < X.shape[1]:
+    if R_array.ndim != 2 or R_array.shape[0] != R_array.shape[1]:
+        raise ValueError("factor-smooth QR factor must be square")
+    if S.shape != R_array.shape:
+        raise ValueError("factor-smooth QR factor and penalty dimensions do not agree")
+    k = R_array.shape[0]
+    if n_rows < k or np.linalg.matrix_rank(R_array) < k:
         raise ValueError(
             "FactorSmooth marginal basis is rank deficient; use more distinct numeric values "
             "or a smaller k, or choose a suitable non-smooth feature."
         )
 
-    _Q, R = np.linalg.qr(X, mode="reduced")
-    R_inv = la.solve_triangular(R, np.eye(R.shape[0]), lower=False)
+    R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
     transformed_penalty = R_inv.T @ S @ R_inv
     # The zero-eigenvalue eigenspace can rotate freely.  Each FS null
     # coordinate has its own smoothing parameter, so explicitly select the
@@ -49,24 +70,19 @@ def _natural_parameterization(
     eigenvalues = eigenvalues[order]
     eigenvectors = eigenvectors[:, order]
     positive = eigenvalues[:rank]
-    if rank < 1 or rank > X.shape[1] or np.any(positive <= 0.0):
+    if rank < 1 or rank > k or np.any(positive <= 0.0):
         raise ValueError("FactorSmooth marginal penalty has an invalid numerical rank")
 
     natural_map = R_inv @ eigenvectors
     natural_map[:, :rank] /= np.sqrt(positive)
-    natural_basis = X @ natural_map
-
-    penalized_scale = 1.0 / np.sqrt(np.mean(natural_basis[:, :rank] ** 2))
+    penalized_scale = np.sqrt(n_rows * rank / np.sum(1.0 / positive))
     natural_map[:, :rank] *= penalized_scale
-    wiggle_diagonal = np.full(rank, penalized_scale**2, dtype=np.float64)
-
-    null_dim = X.shape[1] - rank
+    null_dim = k - rank
     if null_dim:
-        null_scale = 1.0 / np.sqrt(np.mean(natural_basis[:, rank:] ** 2))
-        natural_map[:, rank:] *= null_scale
+        natural_map[:, rank:] *= np.sqrt(n_rows)
 
-    wiggle = np.zeros((X.shape[1], X.shape[1]), dtype=np.float64)
-    wiggle[np.arange(rank), np.arange(rank)] = wiggle_diagonal
+    wiggle = np.zeros((k, k), dtype=np.float64)
+    wiggle[np.arange(rank), np.arange(rank)] = penalized_scale**2
     components: list[tuple[str, NDArray]] = [("wiggle", wiggle)]
     for null_index in range(null_dim):
         component = np.zeros_like(wiggle)
@@ -165,6 +181,7 @@ class FactorSmooth:
         self._spline: PSpline | None = None
         self._natural_map = None
         self._base_penalty_components: tuple[tuple[str, Any], ...] = ()
+        self._marginal_build_backend: _MarginalBuildBackend | None = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -202,16 +219,33 @@ class FactorSmooth:
             return {name: self._lambda_policy for name in names}
         return {name: self._lambda_policy.get(name, LambdaPolicy.estimate()) for name in names}
 
-    def _build_marginal(
+    def _streaming_safe(self) -> bool:
+        """Return whether QR sign/null rotations preserve the declared penalty geometry."""
+        if self.basis == "sz":
+            return True
+        if self.m > 2:
+            return False
+        if self.m <= 1:
+            return True
+        if self._lambda_policy is None or isinstance(self._lambda_policy, LambdaPolicy):
+            return True
+        policies = [
+            self._lambda_policy.get(f"null_{index}", LambdaPolicy.estimate())
+            for index in range(self.m)
+        ]
+        return all(policy == policies[0] for policy in policies[1:])
+
+    def _initialize_marginal_spline(
         self,
         x: NDArray,
-    ) -> tuple[sp.csr_matrix, NDArray]:
+    ) -> tuple[PSpline, NDArray]:
+        """Place the shared marginal knots and return its raw penalty."""
         from superglm.features.spline import PSpline, Spline
 
         spline = cast(PSpline, Spline(kind="ps", k=self.k, penalty="none", m=self.m))
         spline._place_knots(x)
         # Factor-smooth marginals place one equally spaced knot sequence
-        # across boundaries expanded by 0.1% of the data range.  Ordinary
+        # across boundaries expanded by 0.1% of the data range. Ordinary
         # SuperGLM P-splines preserve their pre-expansion interior knots for
         # backwards compatibility, so align this owned marginal explicitly.
         boundary = spline.fitted_boundary
@@ -228,29 +262,70 @@ class FactorSmooth:
         )[1:-1]
         spline._assemble_knot_vector(interior)
         spline._validate_m_orders_build()
-        exact_basis = sp.csr_matrix(spline._basis_matrix(x), dtype=np.float64)
-        raw_dense = exact_basis.toarray()
+        return spline, np.asarray(spline._build_penalty(), dtype=np.float64)
+
+    def _build_marginal(
+        self,
+        x: NDArray,
+        *,
+        retain_basis: bool,
+    ) -> sp.csr_matrix | None:
+        """Build the marginal with bounded QR memory when its coordinates permit it."""
+        spline, penalty = self._initialize_marginal_spline(x)
+        exact_basis: sp.csr_matrix | None
+
+        if self._streaming_safe():
+            qr_r: NDArray | None = None
+            chunks: list[sp.csr_matrix] | None = [] if retain_basis else None
+            for start in range(0, len(x), _MARGINAL_QR_CHUNK_ROWS):
+                basis_chunk = sp.csr_matrix(
+                    spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
+                    dtype=np.float64,
+                )
+                qr_r = _combine_qr_r(qr_r, basis_chunk)
+                if chunks is not None:
+                    chunks.append(basis_chunk)
+            if qr_r is None:  # pragma: no cover - group validation rejects zero rows
+                raise RuntimeError("FactorSmooth marginal QR received no rows.")
+            exact_basis = (
+                sp.csr_matrix(sp.vstack(chunks, format="csr"), dtype=np.float64)
+                if chunks is not None
+                else None
+            )
+            self._marginal_build_backend = "streamed_tsqr"
+        else:
+            if retain_basis:
+                exact_basis = sp.csr_matrix(spline._basis_matrix(x), dtype=np.float64)
+                raw_dense = exact_basis.toarray()
+            else:
+                exact_basis = None
+                raw_dense = np.asarray(spline._raw_basis_matrix(x), dtype=np.float64)
+            qr_r = np.asarray(np.linalg.qr(raw_dense, mode="r"), dtype=np.float64)
+            self._marginal_build_backend = "dense_qr_compat"
+
         if self.basis == "sz" and (
-            raw_dense.shape[0] < self.k or np.linalg.matrix_rank(raw_dense) < self.k
+            qr_r.shape != (self.k, self.k)
+            or len(x) < self.k
+            or np.linalg.matrix_rank(qr_r) < self.k
         ):
             raise ValueError(
                 "FactorSmooth marginal basis is rank deficient; use more distinct "
                 "numeric values or a smaller k, or choose a suitable non-smooth feature."
             )
-        penalty = spline._build_penalty()
         if self.basis == "fs":
-            natural_map, components = _natural_parameterization(
-                raw_dense,
+            natural_map, components = _natural_parameterization_from_r(
+                qr_r,
                 penalty,
                 rank=self.k - self.m,
+                n_rows=len(x),
             )
         else:
             natural_map = np.eye(self.k, dtype=np.float64)
-            components = (("wiggle", np.asarray(penalty, dtype=np.float64)),)
+            components = (("wiggle", penalty),)
         self._spline = spline
         self._natural_map = natural_map
         self._base_penalty_components = components
-        return exact_basis, raw_dense
+        return exact_basis
 
     def _group_info(
         self,
@@ -293,7 +368,9 @@ class FactorSmooth:
         codes = self._factorize_group(group)
         if len(numeric) != len(codes):
             raise ValueError("FactorSmooth variable and group lengths differ.")
-        exact_basis, _raw_dense = self._build_marginal(numeric)
+        exact_basis = self._build_marginal(numeric, retain_basis=True)
+        if exact_basis is None:  # pragma: no cover - required by retain_basis
+            raise RuntimeError("FactorSmooth exact marginal basis was not retained.")
         return self._group_info(codes=codes, basis=exact_basis)
 
     def build_discrete(
@@ -312,7 +389,7 @@ class FactorSmooth:
         codes = self._factorize_group(group)
         if len(numeric) != len(codes):
             raise ValueError("FactorSmooth variable and group lengths differ.")
-        self._build_marginal(numeric)
+        self._build_marginal(numeric, retain_basis=False)
         support, bin_idx = _discretize_column(numeric, n_bins)
         spline = self._spline
         if spline is None:  # pragma: no cover - populated by _build_marginal

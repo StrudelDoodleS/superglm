@@ -302,6 +302,11 @@ credibility and curve tables, and `credibility_demo.png`.
 
 - `FactorSmooth` supports `basis="fs"` and `basis="sz"`, currently with
   `kind="ps"`, and requires `fit_reml()`.
+- Discrete FS/SZ constructs the normal `m <= 2` marginal in bounded QR
+  chunks before evaluating the final support basis. FS declarations with
+  asymmetric null-component policies or `m > 2` retain a reduced-memory dense
+  compatibility construction so those custom penalty coordinates do not
+  change silently.
 - `fit()` and `fit_path()` reject factor smooths.
 - Factor-smooth `k` must be at least 5.
 - Missing numeric or grouping values are rejected.

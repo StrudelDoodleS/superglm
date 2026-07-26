@@ -70,6 +70,25 @@ def _model(*, discrete: bool, direct_solve: str) -> SuperGLM:
     )
 
 
+def _fixed_policy_model(*, discrete: bool, lambda_policy) -> SuperGLM:
+    return SuperGLM(
+        family="poisson",
+        features={},
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="segment",
+                k=6,
+                lambda_policy=lambda_policy,
+            )
+        ],
+        selection_penalty=0.0,
+        discrete=discrete,
+        n_bins=256,
+        direct_solve="gram",
+    )
+
+
 def _fit(model: SuperGLM, X, y, weights, offset) -> SuperGLM:
     return model.fit_reml(
         X,
@@ -379,6 +398,58 @@ def test_discrete_factor_smooth_matches_exact_at_full_support_resolution() -> No
         exact._reml_result.objective,
         abs=3e-2,
     )
+
+
+@pytest.mark.parametrize(
+    ("lambda_policy", "backend"),
+    [
+        (LambdaPolicy.fixed(1.0), "streamed_tsqr"),
+        (
+            {
+                "wiggle": LambdaPolicy.fixed(1.0),
+                "null_0": LambdaPolicy.fixed(0.7),
+                "null_1": LambdaPolicy.fixed(1.3),
+            },
+            "dense_qr_compat",
+        ),
+    ],
+    ids=["symmetric", "asymmetric"],
+)
+def test_factor_smooth_marginal_backend_preserves_exact_discrete_fit(
+    lambda_policy,
+    backend: str,
+) -> None:
+    X, y, weights, offset = _data()
+    exact = _fixed_policy_model(
+        discrete=False,
+        lambda_policy=lambda_policy,
+    ).fit_reml(
+        X,
+        y,
+        sample_weight=weights,
+        offset=offset,
+        runtime_validation="skip",
+    )
+    discrete = _fixed_policy_model(
+        discrete=True,
+        lambda_policy=lambda_policy,
+    ).fit_reml(
+        X,
+        y,
+        sample_weight=weights,
+        offset=offset,
+        runtime_validation="skip",
+    )
+
+    assert exact._interaction_specs["x:segment:fs"]._marginal_build_backend == backend
+    assert discrete._interaction_specs["x:segment:fs"]._marginal_build_backend == backend
+    np.testing.assert_allclose(
+        discrete.predict(X),
+        exact.predict(X),
+        rtol=2e-5,
+        atol=2e-6,
+    )
+    assert discrete.result.deviance == pytest.approx(exact.result.deviance, rel=2e-6)
 
 
 def test_forced_block_structured_discrete_matches_gram_and_uses_cache(
