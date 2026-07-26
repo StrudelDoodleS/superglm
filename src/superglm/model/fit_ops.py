@@ -337,6 +337,7 @@ def _clear_fit_inference_caches(model) -> None:
     model.__dict__.pop("_group_edf", None)
     model._solver_result = None
     model._linear_system_state = None
+    model._reporting_support_state = None
     model._runtime_canonical_state = None
     model._fast_prediction_state = None
     model._prediction_plan = None

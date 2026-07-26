@@ -8,8 +8,12 @@ from dataclasses import replace
 import numpy as np
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian, Tweedie, clip_mu
-from superglm.group_matrix import FactorSmoothGroupMatrix, RandomEffectGroupMatrix
+from superglm._reporting_state import (
+    FactorSmoothLevelSupport,
+    StructuredLevelSupport,
+    build_reporting_support_state,
+)
+from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_state import update_reml_r_inv
@@ -40,12 +44,10 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
-    FactorSmoothLevelSupport,
     ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
     ScalarSchurFactor,
     ScalarStructuredSystem,
-    StructuredLevelSupport,
     StructuredLinearSystemState,
     SumToZeroBlockOperator,
     SumToZeroBlockStructuredSystem,
@@ -58,15 +60,14 @@ from superglm.solvers.sum_to_zero import (
 
 
 def _build_structured_linear_system_state(
-    model,
     *,
     factor,
     data_operator,
     cache: dict,
-    sample_weight: np.ndarray,
-    y: np.ndarray,
-    offset_arr: np.ndarray,
-    result,
+    support_totals: dict[
+        str,
+        StructuredLevelSupport | FactorSmoothLevelSupport,
+    ],
 ) -> StructuredLinearSystemState | None:
     """Distill a final structured refit into compact persistent state."""
     if not isinstance(
@@ -133,86 +134,6 @@ def _build_structured_linear_system_state(
         ),
     )
 
-    from superglm.inference.random_effects import vectorized_conditional_unpooled_effect
-
-    full_eta = stabilize_eta(
-        model._dm.matvec(result.beta) + result.intercept + offset_arr,
-        model._link,
-    )
-    fitted_mu = clip_mu(model._link.inverse(full_eta), model._distribution)
-    fitted_variance = np.maximum(
-        model._distribution.variance(fitted_mu),
-        _VARIANCE_FLOOR,
-    )
-    fitted_derivative = model._link.deriv_inverse(full_eta)
-    working_weights = sample_weight * fitted_derivative**2 / fitted_variance
-    support_totals: dict[
-        str,
-        StructuredLevelSupport | FactorSmoothLevelSupport,
-    ] = {}
-    for group_index, (group_matrix, group) in enumerate(
-        zip(
-            model._dm.group_matrices,
-            model._groups,
-            strict=True,
-        )
-    ):
-        if isinstance(group_matrix, FactorSmoothGroupMatrix):
-            if (
-                isinstance(
-                    system,
-                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
-                )
-                and system.dominant_group_index == group_index
-            ):
-                information = system.operator.D
-            else:
-                information, _xtw, _xtwz = group_matrix.factor_smooth_sufficient_stats(
-                    working_weights,
-                    np.zeros_like(working_weights),
-                )
-            support_totals[group.name] = FactorSmoothLevelSupport(
-                count=np.bincount(
-                    group_matrix.codes,
-                    minlength=group_matrix.n_levels,
-                ),
-                fit_weight=np.bincount(
-                    group_matrix.codes,
-                    weights=sample_weight,
-                    minlength=group_matrix.n_levels,
-                ),
-                information=information,
-            )
-            continue
-        if not isinstance(group_matrix, RandomEffectGroupMatrix):
-            continue
-        base_eta = full_eta - result.beta[group.sl][group_matrix.codes]
-        unpooled_effect = None
-        if not model._retain_fit_state:
-            unpooled_effect = vectorized_conditional_unpooled_effect(
-                codes=group_matrix.codes,
-                n_levels=group_matrix.n_levels,
-                y=y,
-                sample_weight=sample_weight,
-                base_eta=base_eta,
-                distribution=model._distribution,
-                link=model._link,
-                initial=result.beta[group.sl],
-            )
-        support_totals[group.name] = StructuredLevelSupport(
-            count=np.bincount(
-                group_matrix.codes,
-                minlength=group_matrix.n_levels,
-            ),
-            fit_weight=np.bincount(
-                group_matrix.codes,
-                weights=sample_weight,
-                minlength=group_matrix.n_levels,
-            ),
-            information=xtw[group.sl],
-            unpooled_effect=unpooled_effect,
-        )
-
     return StructuredLinearSystemState(
         coefficient_factor=coefficient_factor,
         profiled_factor=factor,
@@ -223,6 +144,19 @@ def _build_structured_linear_system_state(
         support_totals=support_totals,
         fallback_reason=getattr(factor, "fallback_reason", None),
     )
+
+
+def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
+    """Reuse dominant Fisher blocks already assembled by a structured refit."""
+    system = cache.get("structured_system")
+    if isinstance(system, ScalarStructuredSystem):
+        return {system.dominant_group_index: system.operator.d}
+    if isinstance(
+        system,
+        BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+    ):
+        return {system.dominant_group_index: system.operator.D}
+    return {}
 
 
 def restore_qp_group_state(model, qp_saved_state) -> None:
@@ -444,16 +378,36 @@ def finalize_reml_fit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
     )
+    structured_terminal = not qp_passthrough and isinstance(
+        final_factor,
+        (
+            ProfiledScalarSchurFactor,
+            ProfiledBlockSchurFactor,
+            ProfiledSumToZeroBlockFactor,
+        ),
+    )
+    reporting_state = (
+        build_reporting_support_state(
+            dm=model._dm,
+            groups=model._groups,
+            result=final_pirls,
+            distribution=model._distribution,
+            link=model._link,
+            sample_weight=sample_weight,
+            y=y,
+            offset=offset_arr,
+            retain_fit_state=model._retain_fit_state,
+            information_by_group_index=_structured_information_by_group(final_cache),
+        )
+        if not model._retain_fit_state or structured_terminal
+        else None
+    )
     structured_linear_state = (
         _build_structured_linear_system_state(
-            model,
             factor=final_factor,
             data_operator=final_xtwx,
             cache=final_cache,
-            sample_weight=sample_weight,
-            y=y,
-            offset_arr=offset_arr,
-            result=final_pirls,
+            support_totals=({} if reporting_state is None else reporting_state.support_totals),
         )
         if use_direct and not qp_passthrough
         else None
@@ -669,6 +623,7 @@ def finalize_reml_fit(
     corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
+    model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state
 
     update_reml_r_inv(model, reml_groups, lambdas)

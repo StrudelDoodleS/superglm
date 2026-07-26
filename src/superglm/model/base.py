@@ -682,6 +682,7 @@ def init_model(
     model._result: PIRLSResult | None = None
     model._solver_result: PIRLSResult | None = None
     model._linear_system_state = None
+    model._reporting_support_state = None
     model._dm: DesignMatrix | None = None
     model._fit_weights: NDArray | None = None
     model._fit_offset: NDArray | None = None

@@ -11,6 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
+from superglm._reporting_state import ReportingSupportState
 from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
 from superglm.features.random_effect import RandomEffect
 from superglm.group_matrix import RandomEffectGroupMatrix
@@ -208,6 +209,11 @@ def _support_from_retained_design(
 
 
 def _stored_support(model, group: GroupSlice) -> StructuredLevelSupport | None:
+    reporting = getattr(model, "_reporting_support_state", None)
+    if isinstance(reporting, ReportingSupportState):
+        support = reporting.support_totals.get(group.name)
+        if isinstance(support, StructuredLevelSupport):
+            return support
     state = getattr(model, "_linear_system_state", None)
     if isinstance(state, StructuredLinearSystemState):
         support = state.support_totals.get(group.name)

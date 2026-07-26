@@ -18,7 +18,7 @@
 
 ### New files
 
-- `src/superglm/model/reporting_state.py`
+- `src/superglm/_reporting_state.py`
   - Owns immutable RE/FS support records, the backend-neutral reporting-state
     container, and final-fit sufficient-statistic construction.
 - `benchmarks/profile_factor_smooth_construction.py`
@@ -30,7 +30,7 @@
 - `src/superglm/solvers/_structured/selection.py`
   - Enforces the one-dominant-FS topology before cost selection.
 - `src/superglm/solvers/_structured/state.py`
-  - Imports compatibility support types from model reporting state.
+  - Imports compatibility support types from package-internal reporting state.
 - `src/superglm/solvers/structured.py`
   - Retains existing compatibility re-exports.
 - `src/superglm/export/rating_tables.py`
@@ -795,7 +795,7 @@ rtk git commit -m "Integrate random effects with term APIs"
 ### Task 5: Retain Backend-Neutral Reporting Support
 
 **Files:**
-- Create: `src/superglm/model/reporting_state.py`
+- Create: `src/superglm/_reporting_state.py`
 - Modify: `src/superglm/solvers/_structured/state.py`
 - Modify: `src/superglm/model/reml_finalize.py`
 - Modify: `src/superglm/model/base.py`
@@ -901,7 +901,9 @@ Gram-backed models.
 - [ ] **Step 3: Create backend-neutral immutable support types**
 
 Move the existing validation bodies into
-`src/superglm/model/reporting_state.py` and add:
+`src/superglm/_reporting_state.py` and add. This package-internal location is
+below both `model` and `solvers`, avoiding a solver → model-package import
+cycle:
 
 ```python
 @dataclass(frozen=True)
@@ -921,7 +923,7 @@ so `solvers.structured` continues to re-export the same symbols.
 
 - [ ] **Step 4: Implement one final-fit support builder**
 
-In `model/reporting_state.py`, implement:
+In `_reporting_state.py`, implement:
 
 ```python
 def build_reporting_support_state(
@@ -1108,7 +1110,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-rtk git add src/superglm/model/reporting_state.py src/superglm/solvers/_structured/state.py src/superglm/model/reml_finalize.py src/superglm/model/base.py src/superglm/model/fit_state.py src/superglm/model/fit_ops.py src/superglm/inference/random_effects.py src/superglm/inference/factor_smooths.py tests/test_random_effect_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_sz_inference.py
+rtk git add src/superglm/_reporting_state.py src/superglm/solvers/_structured/state.py src/superglm/model/reml_finalize.py src/superglm/model/base.py src/superglm/model/fit_state.py src/superglm/model/fit_ops.py src/superglm/inference/random_effects.py src/superglm/inference/factor_smooths.py tests/test_random_effect_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_sz_inference.py
 rtk git commit -m "Retain backend-neutral credibility support"
 ```
 
@@ -1764,7 +1766,7 @@ environments should migrate named smooths to
 - [ ] **Step 2: Run touched-surface formatting and static checks**
 
 ```bash
-rtk proxy uv run ruff format src/superglm/solvers/_structured/selection.py src/superglm/solvers/_structured/state.py src/superglm/export/rating_tables.py src/superglm/dm_builder.py src/superglm/model/base.py src/superglm/model/fit_state.py src/superglm/model/fit_ops.py src/superglm/model/fit_data_guard.py src/superglm/model/reporting_state.py src/superglm/model/reml_finalize.py src/superglm/features/random_effect.py src/superglm/features/factor_smooth.py src/superglm/inference/_term_covariance.py src/superglm/inference/_term_ops.py src/superglm/inference/_term_model_ops.py src/superglm/inference/random_effects.py src/superglm/inference/factor_smooths.py tests/test_structured_allocations.py tests/test_factor_smooth_structured_parity.py tests/test_rating_table_export.py tests/test_factor_smooth_feature.py tests/test_interactions.py tests/test_plot_api.py tests/test_drop1.py tests/test_random_effect_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_sz_inference.py tests/test_fit_data_guard.py tests/test_factor_smooth_discrete.py benchmarks/profile_factor_smooth_construction.py
+rtk proxy uv run ruff format src/superglm/solvers/_structured/selection.py src/superglm/solvers/_structured/state.py src/superglm/export/rating_tables.py src/superglm/dm_builder.py src/superglm/model/base.py src/superglm/model/fit_state.py src/superglm/model/fit_ops.py src/superglm/model/fit_data_guard.py src/superglm/_reporting_state.py src/superglm/model/reml_finalize.py src/superglm/features/random_effect.py src/superglm/features/factor_smooth.py src/superglm/inference/_term_covariance.py src/superglm/inference/_term_ops.py src/superglm/inference/_term_model_ops.py src/superglm/inference/random_effects.py src/superglm/inference/factor_smooths.py tests/test_structured_allocations.py tests/test_factor_smooth_structured_parity.py tests/test_rating_table_export.py tests/test_factor_smooth_feature.py tests/test_interactions.py tests/test_plot_api.py tests/test_drop1.py tests/test_random_effect_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_sz_inference.py tests/test_fit_data_guard.py tests/test_factor_smooth_discrete.py benchmarks/profile_factor_smooth_construction.py
 rtk ruff check src/ tests/ benchmarks/profile_factor_smooth_construction.py
 rtk mypy src/
 ```

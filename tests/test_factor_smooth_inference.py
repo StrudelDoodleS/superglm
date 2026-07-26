@@ -84,6 +84,33 @@ def _model(
     )
 
 
+@pytest.mark.parametrize("direct_solve", ["gram", "auto"])
+def test_released_fs_report_is_backend_neutral(direct_solve: str):
+    X, y = _data()
+    keep = X["segment"].isin(["segment-0", "segment-1", "segment-2", "segment-3"])
+    X = X.loc[keep].reset_index(drop=True)
+    y = y[keep.to_numpy()]
+    model = _model(
+        discrete=False,
+        retain_fit_state=False,
+        direct_solve=direct_solve,
+    ).fit_reml(
+        X,
+        y,
+        max_reml_iter=2,
+        runtime_validation="skip",
+    )
+
+    assert model.result.direct_backend == "gram"
+    report = model.factor_smooth("x:segment:fs", grid=9)
+    restored = pickle.loads(pickle.dumps(model)).factor_smooth(
+        "x:segment:fs",
+        grid=9,
+    )
+    pd.testing.assert_frame_equal(restored.table, report.table)
+    pd.testing.assert_frame_equal(restored.curves, report.curves)
+
+
 @pytest.mark.parametrize("basis", ["fs", "sz"])
 def test_factor_smooth_evaluation_metrics_expand_structured_penalties(
     basis: str,

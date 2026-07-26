@@ -95,6 +95,26 @@ def test_random_effect_generic_term_surfaces_are_consistent():
     np.testing.assert_allclose(restored_term.log_relativity, term.log_relativity)
 
 
+@pytest.mark.parametrize("direct_solve", ["gram", "auto"])
+def test_released_random_effect_report_is_backend_neutral(direct_solve: str):
+    rng = np.random.default_rng(81)
+    codes = np.repeat(np.arange(12), 10)
+    X = pd.DataFrame({"group": np.array([f"g-{code}" for code in codes], dtype=object)})
+    y = rng.normal(size=len(codes))
+    model = SuperGLM(
+        family="gaussian",
+        features={"group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.2))},
+        selection_penalty=0.0,
+        direct_solve=direct_solve,
+        retain_fit_state=False,
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    assert model.result.direct_backend == "gram"
+    report = model.random_effects("group")
+    restored = pickle.loads(pickle.dumps(model)).random_effects("group")
+    pd.testing.assert_frame_equal(restored.table, report.table)
+
+
 def test_structured_selected_covariance_matches_dense_augmented_inverse(monkeypatch):
     dense, structured, _, _, _ = _fit_pair()
     assert dense is not None

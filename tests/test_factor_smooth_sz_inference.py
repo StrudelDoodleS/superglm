@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pickle
 import warnings
 
 import numpy as np
@@ -94,6 +95,31 @@ def _fit(model: SuperGLM, X: pd.DataFrame, y: np.ndarray) -> SuperGLM:
         pirls_tol=1e-10,
         runtime_validation="skip",
     )
+
+
+@pytest.mark.parametrize("direct_solve", ["gram", "auto"])
+def test_released_sz_report_is_backend_neutral(direct_solve: str):
+    X, y = _data()
+    keep = X["segment"].isin(["alpha", "beta"])
+    X = X.loc[keep].reset_index(drop=True)
+    y = y[keep.to_numpy()]
+    model = _fit(
+        _model(
+            direct_solve=direct_solve,
+            retain_fit_state=False,
+        ),
+        X,
+        y,
+    )
+
+    assert model.result.direct_backend == "gram"
+    report = model.factor_smooth("x:segment:sz", grid=9)
+    restored = pickle.loads(pickle.dumps(model)).factor_smooth(
+        "x:segment:sz",
+        grid=9,
+    )
+    pd.testing.assert_frame_equal(restored.table, report.table)
+    pd.testing.assert_frame_equal(restored.curves, report.curves)
 
 
 @pytest.mark.parametrize("discrete", [False, True])

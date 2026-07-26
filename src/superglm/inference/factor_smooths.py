@@ -11,6 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import norm
 
+from superglm._reporting_state import ReportingSupportState
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.group_matrix import FactorSmoothGroupMatrix
 from superglm.inference.covariance import (
@@ -147,6 +148,11 @@ def _stored_support(
     model,
     group: GroupSlice,
 ) -> FactorSmoothLevelSupport | None:
+    reporting = getattr(model, "_reporting_support_state", None)
+    if isinstance(reporting, ReportingSupportState):
+        support = reporting.support_totals.get(group.name)
+        if isinstance(support, FactorSmoothLevelSupport):
+            return support
     state = getattr(model, "_linear_system_state", None)
     if isinstance(state, StructuredLinearSystemState):
         support = state.support_totals.get(group.name)
