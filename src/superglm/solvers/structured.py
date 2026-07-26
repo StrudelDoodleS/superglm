@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse
 import scipy.sparse.linalg
 from numpy.typing import NDArray
 
@@ -3432,7 +3433,10 @@ def _sum_to_zero_retained_constraint_row_space(
         structured_column_scale,
         strict=True,
     ):
-        constraint_maps.append(final_range_projector @ (scaled_basis / column_scale[:, None]))
+        unscaled_basis = np.zeros_like(scaled_basis)
+        active = column_scale > 0.0
+        unscaled_basis[active] = scaled_basis[active] / column_scale[active, None]
+        constraint_maps.append(final_range_projector @ unscaled_basis)
 
     constraint_factor = np.column_stack(constraint_maps)
     if constraint_factor.shape[1] == 0:
@@ -3463,14 +3467,22 @@ def _sum_to_zero_scaled_null_constraint_geometry(
         structured_column_scale,
         strict=True,
     ):
-        _eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (projector + projector.T))
-        null_width = int(np.rint(np.trace(projector)))
-        raw_basis = (
-            np.empty((block_size, 0), dtype=np.float64)
-            if null_width == 0
-            else eigenvectors[:, -null_width:]
+        active = np.flatnonzero(column_scale > 0.0)
+        if active.size == 0:
+            scaled_bases.append(np.empty((block_size, 0), dtype=np.float64))
+            continue
+        active_projector = projector[np.ix_(active, active)]
+        _eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (active_projector + active_projector.T))
+        null_width = int(np.rint(np.trace(active_projector)))
+        if null_width == 0:
+            scaled_bases.append(np.empty((block_size, 0), dtype=np.float64))
+            continue
+        active_basis = _orthonormal_column_span(
+            column_scale[active, None] * eigenvectors[:, -null_width:]
         )
-        scaled_bases.append(_orthonormal_column_span(column_scale[:, None] * raw_basis))
+        scaled_basis = np.zeros((block_size, active_basis.shape[1]), dtype=np.float64)
+        scaled_basis[active] = active_basis
+        scaled_bases.append(scaled_basis)
     bases = tuple(scaled_bases)
     retained_row_space = _sum_to_zero_retained_constraint_row_space(
         bases,
@@ -3523,81 +3535,69 @@ def _sum_to_zero_scaled_basis_null_row_norms(
     return result, null_dimension, ambiguous
 
 
-def _sum_to_zero_inherent_null_row_norms(
-    *,
+@dataclass(frozen=True)
+class _SumToZeroPublicNullGeometry:
+    """Reusable exact-null geometry in active, scaled public coordinates."""
+
+    local_projector: NDArray
+    scaled_bases: tuple[NDArray, ...]
+    retained_constraint_row_space: NDArray
+    row_norm: NDArray
+    ambiguous: NDArray
+
+
+def _sum_to_zero_public_null_geometry(
     local_null_projector: NDArray,
-    constraint_null_gram: NDArray,
-    constraint_null_inverse: NDArray,
     structured_column_scale: NDArray,
-) -> tuple[NDArray, float, NDArray]:
-    """Return constrained local-null leverage in public SZ coordinates."""
-    n_free, block_size = structured_column_scale.shape
-    result = np.zeros((n_free, block_size), dtype=np.float64)
-
-    if np.all(structured_column_scale > 0.0):
-        # Public SZ parameters are the first K-1 raw blocks; the final block
-        # equals their negative sum but is not part of the parameter norm.
-        # Move each free local null space into z_k = scale_k * b_k coordinates.
-        # In those coordinates the only remaining constraint is
-        # (I - P_final) sum(scale_k^-1 z_k) = 0, whose row dimension is at most
-        # the marginal block width regardless of the number of levels.
-        scaled_bases, retained_row_space = _sum_to_zero_scaled_null_constraint_geometry(
-            local_null_projector,
-            structured_column_scale,
-        )
-        if not any(basis.shape[1] for basis in scaled_bases):
-            return (
-                result,
-                SHARED_RANK_POLICY.factor_rcond,
-                np.zeros_like(result, dtype=bool),
-            )
-
-        result, _null_dimension, ambiguous = _sum_to_zero_scaled_basis_null_row_norms(
+) -> _SumToZeroPublicNullGeometry:
+    """Build the compact exact-null geometry shared by SZ rank certificates."""
+    scaled_bases, retained_row_space = _sum_to_zero_scaled_null_constraint_geometry(
+        local_null_projector,
+        structured_column_scale,
+    )
+    if any(basis.shape[1] for basis in scaled_bases):
+        row_norm, _null_dimension, ambiguous = _sum_to_zero_scaled_basis_null_row_norms(
             scaled_bases,
             retained_row_space,
         )
-        return result, SHARED_RANK_POLICY.factor_rcond, ambiguous
-
-    # Structural zero columns are already non-estimable at the caller. Keep
-    # the raw projector certificate for the remaining coordinates rather than
-    # dividing through a zero public-design norm.
-    absolute_constraint_inverse = np.abs(constraint_null_inverse)
-    for level, projector in enumerate(local_null_projector[:-1]):
-        inverse_projector = constraint_null_inverse @ projector
-        removed_projector = projector @ inverse_projector
-        constrained_diagonal = np.diag(projector) - np.diag(removed_projector)
-        solve_residual = projector - constraint_null_gram @ inverse_projector
-        projector_noise = (
-            SHARED_RANK_POLICY.certification_band
-            * SHARED_RANK_POLICY.gram_rcond
-            * (np.abs(np.diag(projector)) + np.abs(np.diag(removed_projector)))
-        )
-        projector_noise += np.diag(
-            np.abs(projector) @ absolute_constraint_inverse @ np.abs(solve_residual)
-        )
-        constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
-        result[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
-    return result, SHARED_RANK_POLICY.gram_rcond, np.zeros_like(result, dtype=bool)
+    else:
+        row_norm = np.zeros_like(structured_column_scale)
+        ambiguous = np.zeros_like(structured_column_scale, dtype=bool)
+    return _SumToZeroPublicNullGeometry(
+        local_projector=local_null_projector,
+        scaled_bases=scaled_bases,
+        retained_constraint_row_space=retained_row_space,
+        row_norm=row_norm,
+        ambiguous=ambiguous,
+    )
 
 
-def _sum_to_zero_public_weak_bases(
+def _sum_to_zero_inherent_null_row_norms(
+    geometry: _SumToZeroPublicNullGeometry,
+) -> tuple[NDArray, float, NDArray]:
+    """Return constrained local-null leverage in public SZ coordinates."""
+    return (
+        geometry.row_norm,
+        SHARED_RANK_POLICY.factor_rcond,
+        geometry.ambiguous,
+    )
+
+
+def _sum_to_zero_public_spectral_bound(
     operator: CenteredBlockOperator,
     structured_column_scale: NDArray,
-    local_decompositions: tuple[RankDecomposition, ...],
-) -> tuple[NDArray, ...]:
-    """Return locally retained SZ directions weak in public coordinates."""
+) -> float:
+    """Bound the normalized public SZ Gram by its absolute row sums."""
     raw = operator.raw
     if not isinstance(raw, SumToZeroBlockOperator):  # pragma: no cover - caller dispatch
         raise TypeError("public SZ rank certification requires SZ geometry")
     n_free, block_size = structured_column_scale.shape
-    empty = tuple(np.empty((block_size, 0), dtype=np.float64) for _ in range(n_free))
     if n_free == 0:
-        return empty
+        return 0.0
 
-    # Bound the largest eigenvalue of the centered, column-normalized public
-    # structured Gram by its absolute row sum.  The off-diagonal final-level
-    # block and the centering outer products factor across levels, so this
-    # remains O(K k²) rather than constructing the public p-by-p matrix.
+    # The off-diagonal final-level block and the centering outer products
+    # factor across levels, so this remains O(K k²) rather than constructing
+    # the public p-by-p matrix.
     inverse_scale = np.zeros_like(structured_column_scale)
     np.divide(
         1.0,
@@ -3643,6 +3643,23 @@ def _sum_to_zero_public_weak_bases(
             spectral_bound,
             float(np.max(diagonal_row_sum + off_diagonal_row_sum)),
         )
+    return spectral_bound
+
+
+def _sum_to_zero_public_weak_bases(
+    operator: CenteredBlockOperator,
+    structured_column_scale: NDArray,
+    local_decompositions: tuple[RankDecomposition, ...],
+    spectral_bound: float,
+) -> tuple[NDArray, ...]:
+    """Return locally retained SZ directions weak in public coordinates."""
+    raw = operator.raw
+    if not isinstance(raw, SumToZeroBlockOperator):  # pragma: no cover - caller dispatch
+        raise TypeError("public SZ rank certification requires SZ geometry")
+    n_free, block_size = structured_column_scale.shape
+    empty = tuple(np.empty((block_size, 0), dtype=np.float64) for _ in range(n_free))
+    if n_free == 0:
+        return empty
 
     # A retained local direction can still participate in a globally
     # unresolved cancellation through the shared final level.  Use the
@@ -3763,6 +3780,8 @@ def _sum_to_zero_public_spectral_estimability(
     structured_column_scale: NDArray,
     local_decompositions: tuple[RankDecomposition, ...],
     public_weak_bases: tuple[NDArray, ...],
+    spectral_bound: float,
+    exact_null_geometry: _SumToZeroPublicNullGeometry | None = None,
 ) -> NDArray:
     """Certify public SZ rank with block solves and a thin spectral subspace."""
     raw = operator.raw
@@ -3775,75 +3794,62 @@ def _sum_to_zero_public_spectral_estimability(
     if width == 0:
         return result
 
-    exact_null_row_norm: NDArray | None = None
-    combined_null_row_norm: NDArray | None = None
-    scaled_null_bases: tuple[NDArray, ...] | None = None
-    retained_constraint_row_space: NDArray | None = None
-    if np.all(active_columns):
-        local_null_projector = np.empty_like(raw.D)
-        for level, (block, decomposition) in enumerate(
-            zip(raw.D, local_decompositions, strict=True)
-        ):
-            _inverse, local_null_projector[level] = _local_range_inverse_and_null_projector(
-                block,
-                decomposition,
-            )
-        scaled_null_bases, retained_constraint_row_space = (
-            _sum_to_zero_scaled_null_constraint_geometry(
-                local_null_projector,
-                structured_column_scale,
-            )
-        )
-        (
-            exact_null_row_norm,
-            _exact_null_dimension,
-            _exact_ambiguous,
-        ) = _sum_to_zero_scaled_basis_null_row_norms(
-            scaled_null_bases,
-            retained_constraint_row_space,
-        )
-        combined_bases = tuple(
-            _orthonormal_column_span(np.column_stack((exact_basis, weak_basis)))
-            for exact_basis, weak_basis in zip(
-                scaled_null_bases,
-                public_weak_bases,
-                strict=True,
-            )
-        )
-        combined_row_space = _sum_to_zero_retained_constraint_row_space(
-            combined_bases,
-            np.eye(block_size) - local_null_projector[-1],
+    if exact_null_geometry is None:
+        if all(decomposition.rank == block_size for decomposition in local_decompositions):
+            local_null_projector = np.zeros_like(raw.D)
+        else:
+            local_null_projector = np.empty_like(raw.D)
+            for level, (block, decomposition) in enumerate(
+                zip(raw.D, local_decompositions, strict=True)
+            ):
+                _inverse, local_null_projector[level] = _local_range_inverse_and_null_projector(
+                    block,
+                    decomposition,
+                )
+        exact_null_geometry = _sum_to_zero_public_null_geometry(
+            local_null_projector,
             structured_column_scale,
         )
-        (
-            combined_null_row_norm,
-            _combined_null_dimension,
-            _combined_ambiguous,
-        ) = _sum_to_zero_scaled_basis_null_row_norms(
-            combined_bases,
-            combined_row_space,
+    local_null_projector = exact_null_geometry.local_projector
+    scaled_null_bases = exact_null_geometry.scaled_bases
+    retained_constraint_row_space = exact_null_geometry.retained_constraint_row_space
+    exact_null_row_norm = exact_null_geometry.row_norm
+    active_null_basis_map = scipy.sparse.block_diag(
+        scaled_null_bases,
+        format="csr",
+    )[active_columns]
+    combined_bases = tuple(
+        _orthonormal_column_span(np.column_stack((exact_basis, weak_basis)))
+        for exact_basis, weak_basis in zip(
+            scaled_null_bases,
+            public_weak_bases,
+            strict=True,
         )
+    )
+    combined_row_space = _sum_to_zero_retained_constraint_row_space(
+        combined_bases,
+        np.eye(block_size) - local_null_projector[-1],
+        structured_column_scale,
+    )
+    (
+        combined_null_row_norm,
+        _combined_null_dimension,
+        _combined_ambiguous,
+    ) = _sum_to_zero_scaled_basis_null_row_norms(
+        combined_bases,
+        combined_row_space,
+    )
 
     def project_exact_null(vectors: NDArray) -> NDArray:
-        if scaled_null_bases is None or retained_constraint_row_space is None:
-            return np.zeros_like(vectors)
-        local_coordinates = np.vstack(
-            [
-                basis.T @ vectors[level * block_size : (level + 1) * block_size]
-                for level, basis in enumerate(scaled_null_bases)
-            ]
-        )
+        values = np.asarray(vectors, dtype=np.float64)
+        was_vector = values.ndim == 1
+        matrix = values[:, None] if was_vector else values
+        local_coordinates = active_null_basis_map.T @ matrix
         null_coordinates = local_coordinates - retained_constraint_row_space.T @ (
             retained_constraint_row_space @ local_coordinates
         )
-        projection = np.zeros_like(vectors)
-        offset = 0
-        for level, basis in enumerate(scaled_null_bases):
-            basis_width = basis.shape[1]
-            row_slice = slice(level * block_size, (level + 1) * block_size)
-            projection[row_slice] = basis @ null_coordinates[offset : offset + basis_width]
-            offset += basis_width
-        return projection
+        active_projection = np.asarray(active_null_basis_map @ null_coordinates)
+        return active_projection[:, 0] if was_vector else active_projection
 
     def normalized_matvec(rhs: NDArray) -> NDArray:
         full_rhs = np.zeros(active_columns.size, dtype=np.float64)
@@ -3861,7 +3867,6 @@ def _sum_to_zero_public_spectral_estimability(
     )
     if width == 1:
         largest_eigenvalue_lower = max(float(normalized_matvec(np.ones(1))[0]), 0.0)
-        largest_eigenvalue_upper = largest_eigenvalue_lower
     else:
         largest_values, largest_vectors = scipy.sparse.linalg.eigsh(
             normalized_operator,
@@ -3880,7 +3885,11 @@ def _sum_to_zero_public_spectral_estimability(
             )[0]
         )
         largest_eigenvalue_lower = max(float(largest_values[0]) - largest_residual, 0.0)
-        largest_eigenvalue_upper = max(float(largest_values[0]) + largest_residual, 0.0)
+    largest_eigenvalue_upper = max(
+        float(spectral_bound)
+        * (1.0 + SHARED_RANK_POLICY.certification_band * SHARED_RANK_POLICY.gram_rcond),
+        largest_eigenvalue_lower,
+    )
     if not np.isfinite(largest_eigenvalue_upper) or largest_eigenvalue_upper <= 0.0:
         raise np.linalg.LinAlgError("centered public SZ Gram has no positive spectral scale")
 
@@ -3894,6 +3903,19 @@ def _sum_to_zero_public_spectral_estimability(
         factor = np.column_stack([normalized_matvec(column) for column in np.eye(width)])
         eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (factor + factor.T))
     else:
+
+        def deflated_matvec(rhs: NDArray) -> NDArray:
+            exact_component = project_exact_null(rhs)
+            complement = np.asarray(rhs, dtype=np.float64) - exact_component
+            applied = normalized_matvec(complement)
+            applied -= project_exact_null(applied)
+            return applied + largest_eigenvalue_upper * exact_component
+
+        deflated_operator = scipy.sparse.linalg.LinearOperator(
+            (width, width),
+            matvec=deflated_matvec,
+            dtype=np.float64,
+        )
         # In normalized public coordinates the SZ structured Gram is a block
         # diagonal local term plus a rank-(k + 2) update: k final-level rows
         # and the two centering vectors.  A modest negative shift makes every
@@ -3954,7 +3976,7 @@ def _sum_to_zero_public_spectral_estimability(
         border = np.eye(block_size + 2) + core @ (update.T @ inverse_update)
         border_factor = scipy.linalg.lu_factor(border, check_finite=False)
 
-        def shifted_inverse_matvec(rhs: NDArray) -> NDArray:
+        def original_shifted_inverse_matvec(rhs: NDArray) -> NDArray:
             local_solution = np.empty(width, dtype=np.float64)
             values = np.asarray(rhs, dtype=np.float64)
             for row_slice, local_factor in local_factors:
@@ -3970,6 +3992,13 @@ def _sum_to_zero_public_spectral_estimability(
             )
             return local_solution - inverse_update @ multiplier
 
+        def shifted_inverse_matvec(rhs: NDArray) -> NDArray:
+            exact_component = project_exact_null(rhs)
+            complement = np.asarray(rhs, dtype=np.float64) - exact_component
+            complement_solution = original_shifted_inverse_matvec(complement)
+            complement_solution -= project_exact_null(complement_solution)
+            return complement_solution + exact_component / (largest_eigenvalue_upper - shift)
+
         shifted_inverse = scipy.sparse.linalg.LinearOperator(
             (width, width),
             matvec=shifted_inverse_matvec,
@@ -3978,13 +4007,13 @@ def _sum_to_zero_public_spectral_estimability(
         probe = np.sin(np.arange(width, dtype=np.float64) + 0.25)
         probe_solution = shifted_inverse_matvec(probe)
         relative_residual = np.linalg.norm(
-            normalized_matvec(probe_solution) - shift * probe_solution - probe
+            deflated_matvec(probe_solution) - shift * probe_solution - probe
         ) / max(float(np.linalg.norm(probe)), np.finfo(np.float64).tiny)
         if not np.isfinite(relative_residual) or relative_residual > 1e-5:
             raise np.linalg.LinAlgError("shifted public SZ inverse failed its residual check")
 
         eigenvalues, eigenvectors = scipy.sparse.linalg.eigsh(
-            normalized_operator,
+            deflated_operator,
             k=max_null_modes,
             sigma=shift,
             which="LM",
@@ -4005,36 +4034,34 @@ def _sum_to_zero_public_spectral_estimability(
         discarded = eigenvalues <= dense_cutoff
     else:
         discarded, _retained, ambiguous = _ritz_rank_masks(
-            normalized_operator,
+            deflated_operator,
             eigenvalues,
             eigenvectors,
             discarded_cutoff,
             retained_cutoff,
         )
         if np.any(ambiguous):
-            unresolved = eigenvectors[:, ambiguous] - project_exact_null(eigenvectors[:, ambiguous])
-            unresolved_norm = np.linalg.norm(unresolved, axis=0)
-            if exact_null_row_norm is None or np.any(
-                unresolved_norm > SHARED_RANK_POLICY.factor_rcond
-            ):
-                # The constrained candidate geometry is the compact
-                # conservative fallback when a genuinely additional Ritz
-                # direction straddles the cutoff.
-                if combined_null_row_norm is None:
-                    return result
-                return combined_null_row_norm <= SHARED_RANK_POLICY.factor_rcond
+            # Exact nulls were lifted out of this spectrum, so every crossing
+            # interval is genuinely additional and uses the compact
+            # conservative candidate certificate.
+            result.ravel()[active_columns] = (
+                combined_null_row_norm.ravel()[active_columns] <= SHARED_RANK_POLICY.factor_rcond
+            )
+            return result
     discarded_dimension = int(np.count_nonzero(discarded))
     if not use_dense_spectrum and discarded_dimension == max_null_modes:
-        if combined_null_row_norm is None:
-            return result
-        return combined_null_row_norm <= SHARED_RANK_POLICY.factor_rcond
-    if not use_dense_spectrum and exact_null_row_norm is not None:
-        additional_candidates = eigenvectors[:, discarded] - project_exact_null(
-            eigenvectors[:, discarded]
+        result.ravel()[active_columns] = (
+            combined_null_row_norm.ravel()[active_columns] <= SHARED_RANK_POLICY.factor_rcond
         )
-        additional_basis = _orthonormal_column_span(additional_candidates)
+        return result
+    if not use_dense_spectrum:
+        additional_candidates = eigenvectors[:, discarded]
+        additional_candidates -= project_exact_null(additional_candidates)
+        candidate_norm = np.linalg.norm(additional_candidates, axis=0)
+        resolved = candidate_norm > SHARED_RANK_POLICY.factor_rcond
+        additional_basis = _orthonormal_column_span(additional_candidates[:, resolved])
         null_row_norm = np.sqrt(
-            exact_null_row_norm.ravel() ** 2 + np.sum(additional_basis**2, axis=1)
+            exact_null_row_norm.ravel()[active_columns] ** 2 + np.sum(additional_basis**2, axis=1)
         )
     else:
         null_row_norm = np.linalg.norm(eigenvectors[:, discarded], axis=1)
@@ -4046,6 +4073,7 @@ def _certified_sum_to_zero_centered_estimability(
     operator: CenteredBlockOperator,
     local_decompositions: tuple[RankDecomposition, ...],
     public_weak_bases: tuple[NDArray, ...],
+    public_spectral_bound: float,
 ) -> NDArray:
     """Resolve certification-limited SZ null geometry through its constraint space."""
     raw = operator.raw
@@ -4183,16 +4211,15 @@ def _certified_sum_to_zero_centered_estimability(
         structured_column_scale=structured_column_scale,
     )
 
+    exact_null_geometry = _sum_to_zero_public_null_geometry(
+        local_null_projector,
+        structured_column_scale,
+    )
     (
         inherent_null_norm,
         inherent_null_cutoff,
         inherent_rank_ambiguity,
-    ) = _sum_to_zero_inherent_null_row_norms(
-        local_null_projector=local_null_projector,
-        constraint_null_gram=constraint_null_gram,
-        constraint_null_inverse=constraint_null_inverse,
-        structured_column_scale=structured_column_scale,
-    )
+    ) = _sum_to_zero_inherent_null_row_norms(exact_null_geometry)
     inherent_estimable = inherent_null_norm <= inherent_null_cutoff
     needs_public_certificate = any(basis.shape[1] for basis in public_weak_bases)
     if np.any(inherent_rank_ambiguity) or needs_public_certificate:
@@ -4201,6 +4228,8 @@ def _certified_sum_to_zero_centered_estimability(
             structured_column_scale,
             local_decompositions,
             public_weak_bases,
+            public_spectral_bound,
+            exact_null_geometry,
         )
         inherent_estimable = public_estimable
 
@@ -4230,10 +4259,15 @@ def _sum_to_zero_centered_estimability(
     local_decompositions = tuple(decompose_gram(block) for block in raw.D)
     public_column_scale = _centered_operator_column_scale(operator)
     structured_column_scale = public_column_scale[raw.structured_indices]
+    public_spectral_bound = _sum_to_zero_public_spectral_bound(
+        operator,
+        structured_column_scale,
+    )
     public_weak_bases = _sum_to_zero_public_weak_bases(
         operator,
         structured_column_scale,
         local_decompositions,
+        public_spectral_bound,
     )
     needs_public_certificate = any(basis.shape[1] for basis in public_weak_bases)
     if any(
@@ -4244,6 +4278,7 @@ def _sum_to_zero_centered_estimability(
             operator,
             local_decompositions,
             public_weak_bases,
+            public_spectral_bound,
         )
         return result
     local_inverse = np.stack(
@@ -4321,6 +4356,7 @@ def _sum_to_zero_centered_estimability(
             structured_column_scale,
             local_decompositions,
             public_weak_bases,
+            public_spectral_bound,
         )
     return result
 

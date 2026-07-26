@@ -19,6 +19,9 @@ from superglm.solvers.structured import (
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
     _orthonormal_column_span,
+    _sum_to_zero_inherent_null_row_norms,
+    _sum_to_zero_public_null_geometry,
+    _sum_to_zero_public_spectral_bound,
     _sum_to_zero_scaled_basis_null_row_norms,
     centered_operator_coefficient_estimable,
     compact_operator_diagonal,
@@ -927,6 +930,28 @@ def test_ritz_rank_certificate_rejects_cutoff_crossing_residual() -> None:
         )
 
 
+def test_sum_to_zero_public_spectral_bound_covers_the_structured_gram() -> None:
+    rng = np.random.default_rng(8712)
+    local_factors = rng.normal(size=(7, 5, 3))
+    small = rng.normal(size=(35, 2))
+    operator, _public_design = _sum_to_zero_centered_operator(local_factors, small)
+    raw = operator.raw
+    assert isinstance(raw, SumToZeroBlockOperator)
+    structured_scale = np.sqrt(compact_operator_diagonal(operator)[raw.structured_indices])
+
+    bound = _sum_to_zero_public_spectral_bound(operator, structured_scale)
+    structured_indices = raw.structured_indices.ravel()
+    structured_gram = materialize_compact_operator(operator)[
+        np.ix_(structured_indices, structured_indices)
+    ]
+    flat_scale = structured_scale.ravel()
+    normalized_gram = structured_gram / np.outer(flat_scale, flat_scale)
+
+    assert np.linalg.eigvalsh(normalized_gram)[-1] <= bound * (
+        1.0 + 10.0 * np.finfo(np.float64).eps
+    )
+
+
 def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1051,6 +1076,89 @@ def test_sum_to_zero_positive_columns_are_certified_with_structural_zeros(
         centered_operator_coefficient_estimable(operator),
         expected,
     )
+
+
+def test_sum_to_zero_exact_nulls_do_not_saturate_weak_rank_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 40
+    D = np.zeros((n_levels, 2, 2))
+    D[:-1, 1, 1] = 1.0
+    D[-1] = np.diag([1.0, 1e9])
+    operator = _sum_to_zero_diagonal_moment_operator(D)
+    expected = np.tile(np.array([False, True]), n_levels - 1)
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("exact SZ nulls must be deflated before weak rank certification")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
+    )
+
+
+def test_sum_to_zero_active_null_geometry_survives_structural_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 40
+    D = np.zeros((n_levels, 4, 4))
+    D[:-1] = np.diag([0.0, 0.0, 1.0, 1.0])
+    D[-1] = np.diag([0.0, 1.0, 1e9, 1.0])
+    operator = _sum_to_zero_diagonal_moment_operator(D)
+    expected = np.tile(np.array([False, False, True, True]), n_levels - 1)
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("active SZ null geometry must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
+    )
+
+
+def test_sum_to_zero_exact_projection_noise_is_not_an_additional_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 40
+    D = np.ones((n_levels, 2, 2)) * np.eye(2)
+    D[:2, 0, 0] = 0.0
+    D[-1, 1, 1] = 1e9
+    operator = _sum_to_zero_diagonal_moment_operator(D)
+    expected = np.ones((n_levels - 1, 2), dtype=bool)
+    expected[:2, 0] = False
+    expected = expected.ravel()
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("exact-null projection noise must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
+    )
+
+
+def test_sum_to_zero_structural_null_norm_uses_factor_cutoff() -> None:
+    local_null_projector = np.zeros((3, 2, 2))
+    geometry = _sum_to_zero_public_null_geometry(
+        local_null_projector,
+        np.array([[0.0, 1.0], [0.0, 1.0]]),
+    )
+    row_norm, cutoff, _ambiguous = _sum_to_zero_inherent_null_row_norms(geometry)
+
+    np.testing.assert_array_equal(row_norm, np.zeros((2, 2)))
+    assert cutoff == np.sqrt(np.finfo(np.float64).eps)
 
 
 def test_wide_sum_to_zero_public_rank_certificate_stays_block_bounded(
