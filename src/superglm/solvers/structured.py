@@ -2981,36 +2981,74 @@ def _augmented_small_data_block(operator: CenteredBlockOperator) -> NDArray:
     return augmented
 
 
+def _centered_operator_column_scale(operator: CenteredBlockOperator) -> NDArray:
+    """Return centered public-design column norms from compact moments."""
+    return np.sqrt(np.maximum(compact_operator_diagonal(operator), 0.0))
+
+
 def _lifted_null_row_norms(
     small_null: NDArray,
     structured_lift: NDArray,
+    *,
+    small_column_scale: NDArray,
+    structured_column_scale: NDArray,
 ) -> tuple[NDArray, NDArray]:
-    """Return lifted-null row norms after factor-scale column equilibration."""
+    """Return lifted-null leverage in centered design-column coordinates."""
     if small_null.shape[1] == 0:
         return (
             np.zeros(small_null.shape[0], dtype=np.float64),
             np.zeros(structured_lift.shape[:-1], dtype=np.float64),
         )
 
-    # A reduced-Schur null basis is free to scale each direction differently.
-    # Forming its lifted Gram before equilibrating the columns can therefore
-    # discard a valid smaller direction relative to an unrelated large one.
-    # Normalize in the implicit lifted factor first, matching decompose_factor.
-    raw_null_gram = small_null.T @ small_null + np.einsum(
-        "kir,kis->rs",
+    small_scale = np.asarray(small_column_scale, dtype=np.float64)
+    structured_scale = np.asarray(structured_column_scale, dtype=np.float64)
+    if small_scale.shape != small_null.shape[:1]:
+        raise ValueError("small lifted-null scale does not match its rows")
+    if structured_scale.shape != structured_lift.shape[:2]:
+        raise ValueError("structured lifted-null scale does not match its rows")
+
+    # Parameter-null leverage is defined after multiplying each parameter row
+    # by its centered design-column norm. A reduced-Schur basis is also free to
+    # scale its columns independently, so equilibrate those lifted directions
+    # before the Gram cutoff as decompose_factor does.
+    scaled_null_gram = small_null.T @ ((small_scale**2)[:, None] * small_null)
+    scaled_null_gram += np.einsum(
+        "kir,ki,kis->rs",
+        structured_lift,
+        structured_scale**2,
+        structured_lift,
+        optimize=True,
+    )
+    raw_squared_norm = np.sum(small_null * small_null, axis=0)
+    raw_squared_norm += np.einsum(
+        "kir,kir->r",
         structured_lift,
         structured_lift,
         optimize=True,
     )
-    squared_column_norm = np.maximum(np.diag(raw_null_gram), 0.0)
-    active = squared_column_norm > 0.0
+    active_raw_squared_norm = np.sum(
+        small_null[small_scale > 0.0] ** 2,
+        axis=0,
+    )
+    active_raw_squared_norm += np.einsum(
+        "kir,ki,kir->r",
+        structured_lift,
+        structured_scale > 0.0,
+        structured_lift,
+        optimize=True,
+    )
+    squared_column_norm = np.maximum(np.diag(scaled_null_gram), 0.0)
+    meaningful_support = np.sqrt(active_raw_squared_norm) > (
+        SHARED_RANK_POLICY.factor_rcond * np.sqrt(raw_squared_norm)
+    )
+    active = (squared_column_norm > 0.0) & meaningful_support
     if not np.any(active):
         return (
             np.zeros(small_null.shape[0], dtype=np.float64),
             np.zeros(structured_lift.shape[:-1], dtype=np.float64),
         )
     column_scale = np.sqrt(squared_column_norm[active])
-    null_gram = raw_null_gram[np.ix_(active, active)] / np.outer(
+    null_gram = scaled_null_gram[np.ix_(active, active)] / np.outer(
         column_scale,
         column_scale,
     )
@@ -3030,8 +3068,8 @@ def _lifted_null_row_norms(
         dtype=np.float64,
     )
     lifted_transform[active] = whitening / column_scale[:, None]
-    orthogonal_small = small_null @ lifted_transform
-    orthogonal_structured = structured_lift @ lifted_transform
+    orthogonal_small = (small_null @ lifted_transform) * small_scale[:, None]
+    orthogonal_structured = (structured_lift @ lifted_transform) * structured_scale[:, :, None]
     return (
         np.linalg.norm(orthogonal_small, axis=1),
         np.linalg.norm(orthogonal_structured, axis=2),
@@ -3096,14 +3134,24 @@ def _independent_block_centered_estimability(
         small_null,
         optimize=True,
     )
+    public_column_scale = _centered_operator_column_scale(operator)
+    small_column_scale = np.zeros(q + 1, dtype=np.float64)
+    small_column_scale[1:] = public_column_scale[raw.small_indices]
+    structured_column_scale = public_column_scale[structured_indices]
     small_null_norm, lifted_null_norm = _lifted_null_row_norms(
         small_null,
         structured_lift,
+        small_column_scale=small_column_scale,
+        structured_column_scale=structured_column_scale,
     )
     result = np.empty(operator.shape[0], dtype=bool)
-    result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
-    result[structured_indices] = local_estimable & (
-        lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond
+    result[raw.small_indices] = (small_column_scale[1:] > 0.0) & (
+        small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
+    )
+    result[structured_indices] = (
+        local_estimable
+        & (structured_column_scale > 0.0)
+        & (lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond)
     )
     return result
 
@@ -3178,8 +3226,17 @@ def _orthonormal_scaled_parameter_null_span(
                 supported_span = _orthonormal_column_span(equilibrated_span[supported])
                 supported_indices = active[supported]
                 raw_values = supported_span / scale[supported_indices, None]
-                raw_span = np.zeros((width, supported_span.shape[1]), dtype=np.float64)
-                raw_span[supported_indices] = _orthonormal_column_span(raw_values)
+                # The span width was already certified in equilibrated
+                # coordinates. Raw rescaling is invertible, so re-rank-testing
+                # it can only discard a valid direction. QR preserves that
+                # width while restoring a Euclidean parameter-space projector.
+                raw_orthogonal, _triangular = scipy.linalg.qr(
+                    raw_values,
+                    mode="economic",
+                    check_finite=False,
+                )
+                raw_span = np.zeros((width, raw_orthogonal.shape[1]), dtype=np.float64)
+                raw_span[supported_indices] = raw_orthogonal
                 pieces.append(raw_span)
     if not pieces:
         return np.empty((width, 0), dtype=np.float64)
@@ -3349,6 +3406,102 @@ def _certified_reduced_schur_null_basis(
     )
 
 
+def _sum_to_zero_inherent_null_row_norms(
+    *,
+    local_null_projector: NDArray,
+    constraint_null_gram: NDArray,
+    constraint_null_inverse: NDArray,
+    constrained_null_dimension: int,
+    structured_column_scale: NDArray,
+) -> tuple[NDArray, float]:
+    """Return constrained local-null leverage in public SZ coordinates."""
+    n_free, block_size = structured_column_scale.shape
+    result = np.zeros((n_free, block_size), dtype=np.float64)
+    if constrained_null_dimension == 0:
+        return result, SHARED_RANK_POLICY.factor_rcond
+
+    if np.all(structured_column_scale > 0.0):
+        # Public SZ parameters are the first K-1 raw blocks; the final block
+        # equals their negative sum but is not part of the parameter norm.
+        # Move each free local null space into z_k = scale_k * b_k coordinates.
+        # In those coordinates the only remaining constraint is
+        # (I - P_final) sum(scale_k^-1 z_k) = 0, whose row dimension is at most
+        # the marginal block width regardless of the number of levels.
+        final_range_projector = np.eye(block_size) - local_null_projector[-1]
+        scaled_bases: list[NDArray] = []
+        constraint_maps: list[NDArray] = []
+        constraint_gram = np.zeros((block_size, block_size), dtype=np.float64)
+        for projector, column_scale in zip(
+            local_null_projector[:-1],
+            structured_column_scale,
+            strict=True,
+        ):
+            _eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (projector + projector.T))
+            null_width = int(np.rint(np.trace(projector)))
+            raw_basis = (
+                np.empty((block_size, 0), dtype=np.float64)
+                if null_width == 0
+                else eigenvectors[:, -null_width:]
+            )
+            scaled_basis = _orthonormal_column_span(column_scale[:, None] * raw_basis)
+            constraint_map = final_range_projector @ (scaled_basis / column_scale[:, None])
+            scaled_bases.append(scaled_basis)
+            constraint_maps.append(constraint_map)
+            constraint_gram += constraint_map @ constraint_map.T
+
+        constraint_rank = decompose_gram(0.5 * (constraint_gram + constraint_gram.T))
+        scaled_constraint_inverse, _null_projector = _local_range_inverse_and_null_projector(
+            constraint_gram,
+            constraint_rank,
+        )
+        absolute_inverse = np.abs(scaled_constraint_inverse)
+        for level, (scaled_basis, constraint_map) in enumerate(
+            zip(scaled_bases, constraint_maps, strict=True)
+        ):
+            if scaled_basis.shape[1] == 0:
+                continue
+            inverse_map = scaled_constraint_inverse @ constraint_map
+            removed = constraint_map.T @ inverse_map
+            alpha_projector = np.eye(scaled_basis.shape[1]) - removed
+            scaled_projector = scaled_basis @ alpha_projector @ scaled_basis.T
+            constrained_diagonal = np.diag(scaled_projector).copy()
+
+            solve_residual = constraint_map - constraint_gram @ inverse_map
+            alpha_error = np.abs(constraint_map).T @ absolute_inverse @ np.abs(solve_residual)
+            local_projector = scaled_basis @ scaled_basis.T
+            removed_projector = scaled_basis @ removed @ scaled_basis.T
+            projector_noise = (
+                SHARED_RANK_POLICY.certification_band
+                * SHARED_RANK_POLICY.gram_rcond
+                * (np.abs(np.diag(local_projector)) + np.abs(np.diag(removed_projector)))
+            )
+            projector_noise += np.diag(np.abs(scaled_basis) @ alpha_error @ np.abs(scaled_basis).T)
+            constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
+            result[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
+        return result, SHARED_RANK_POLICY.factor_rcond
+
+    # Structural zero columns are already non-estimable at the caller. Keep
+    # the raw projector certificate for the remaining coordinates rather than
+    # dividing through a zero public-design norm.
+    absolute_constraint_inverse = np.abs(constraint_null_inverse)
+    for level, projector in enumerate(local_null_projector[:-1]):
+        inverse_projector = constraint_null_inverse @ projector
+        removed_projector = projector @ inverse_projector
+        constrained_diagonal = np.diag(projector) - np.diag(removed_projector)
+        solve_residual = projector - constraint_null_gram @ inverse_projector
+        projector_noise = (
+            SHARED_RANK_POLICY.certification_band
+            * SHARED_RANK_POLICY.gram_rcond
+            * (np.abs(np.diag(projector)) + np.abs(np.diag(removed_projector)))
+        )
+        projector_noise += np.diag(
+            np.abs(projector) @ absolute_constraint_inverse @ np.abs(solve_residual)
+        )
+        constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
+        result[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
+    return result, SHARED_RANK_POLICY.gram_rcond
+
+
 def _certified_sum_to_zero_centered_estimability(
     operator: CenteredBlockOperator,
     local_decompositions: tuple[RankDecomposition, ...],
@@ -3478,42 +3631,33 @@ def _certified_sum_to_zero_centered_estimability(
         small_null,
         optimize=True,
     )
+    public_column_scale = _centered_operator_column_scale(operator)
+    small_column_scale = np.zeros(q + 1, dtype=np.float64)
+    small_column_scale[1:] = public_column_scale[raw.small_indices]
+    structured_column_scale = public_column_scale[raw.structured_indices]
     small_null_norm, lifted_null_norm = _lifted_null_row_norms(
         small_null,
-        structured_lift,
+        structured_lift[:-1],
+        small_column_scale=small_column_scale,
+        structured_column_scale=structured_column_scale,
     )
 
-    inherent_null_norm = np.zeros((raw.n_levels, raw.block_size), dtype=np.float64)
-    if constrained_null_dimension:
-        absolute_constraint_inverse = np.abs(constraint_null_inverse)
-        for level, projector in enumerate(local_null_projector):
-            # P_k - P_k sum(P_k)^+ P_k is the local diagonal block of the
-            # constrained null projector.  Its diagonal tells whether each raw
-            # coefficient can still move inside a zero-energy sum-to-zero vector.
-            inverse_projector = constraint_null_inverse @ projector
-            removed_projector = projector @ inverse_projector
-            constrained_diagonal = np.diag(projector) - np.diag(removed_projector)
-            solve_residual = projector - constraint_null_gram @ inverse_projector
-            # The subtraction can lose all digits in an exactly removed
-            # direction. Bound that cancellation by propagating the observed
-            # solve residual through the retained inverse; its magnitude
-            # incorporates the conditioning of sum(P_k), while the first term
-            # covers the two final matrix products themselves.
-            projector_noise = (
-                SHARED_RANK_POLICY.certification_band
-                * SHARED_RANK_POLICY.gram_rcond
-                * (np.abs(np.diag(projector)) + np.abs(np.diag(removed_projector)))
-            )
-            projector_noise += np.diag(
-                np.abs(projector) @ absolute_constraint_inverse @ np.abs(solve_residual)
-            )
-            constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
-            inherent_null_norm[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
+    inherent_null_norm, inherent_null_cutoff = _sum_to_zero_inherent_null_row_norms(
+        local_null_projector=local_null_projector,
+        constraint_null_gram=constraint_null_gram,
+        constraint_null_inverse=constraint_null_inverse,
+        constrained_null_dimension=constrained_null_dimension,
+        structured_column_scale=structured_column_scale,
+    )
 
     result = np.empty(operator.shape[0], dtype=bool)
-    result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
-    result[raw.structured_indices] = (inherent_null_norm[:-1] <= SHARED_RANK_POLICY.gram_rcond) & (
-        lifted_null_norm[:-1] <= SHARED_RANK_POLICY.factor_rcond
+    result[raw.small_indices] = (small_column_scale[1:] > 0.0) & (
+        small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
+    )
+    result[raw.structured_indices] = (
+        (structured_column_scale > 0.0)
+        & (inherent_null_norm <= inherent_null_cutoff)
+        & (lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond)
     )
     return result
 
@@ -3590,13 +3734,23 @@ def _sum_to_zero_centered_estimability(
         small_null,
         optimize=True,
     )
+    public_column_scale = _centered_operator_column_scale(operator)
+    small_column_scale = np.zeros(q + 1, dtype=np.float64)
+    small_column_scale[1:] = public_column_scale[raw.small_indices]
+    structured_column_scale = public_column_scale[raw.structured_indices]
     small_null_norm, lifted_null_norm = _lifted_null_row_norms(
         small_null,
-        structured_lift,
+        structured_lift[:-1],
+        small_column_scale=small_column_scale,
+        structured_column_scale=structured_column_scale,
     )
     result = np.empty(operator.shape[0], dtype=bool)
-    result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
-    result[raw.structured_indices] = lifted_null_norm[:-1] <= SHARED_RANK_POLICY.factor_rcond
+    result[raw.small_indices] = (small_column_scale[1:] > 0.0) & (
+        small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
+    )
+    result[raw.structured_indices] = (structured_column_scale > 0.0) & (
+        lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond
+    )
     return result
 
 

@@ -410,7 +410,7 @@ def _predict_eta(
     for term in plan["interactions"]:
         if random_effects == "population" and isinstance(term["spec"], FactorSmooth):
             left_name, right_name = term["parent_names"]
-            term["spec"].validate_prediction_values(
+            term["spec"].validate_population_prediction_values(
                 frame.column_array(left_name),
                 frame.column_array(right_name),
             )

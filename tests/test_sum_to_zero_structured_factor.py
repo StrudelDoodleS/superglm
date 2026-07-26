@@ -1049,3 +1049,73 @@ def test_sum_to_zero_heterogeneous_null_projector_uses_solve_error_bound(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
     )
+
+
+def test_sum_to_zero_lifted_null_uses_design_column_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_factor = np.array(
+        [
+            [1e-2, 0.0],
+            [0.0, 1.0],
+            [-1e-2, -1.0],
+        ]
+    )
+    local_factors = np.tile(local_factor, (2, 1, 1))
+    free_structured = _sum_to_zero_free_design(local_factors)
+    small = (1e-7 * free_structured[:, 0] + free_structured[:, 1])[:, None]
+    operator, public_design = _sum_to_zero_centered_operator(local_factors, small)
+    expected = decompose_factor(public_design)
+    np.testing.assert_array_equal(
+        expected.coefficient_estimable(),
+        np.array([False, True, False]),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("equilibrated SZ lifted-null inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_sum_to_zero_inherent_null_uses_public_design_column_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(8279)
+    local_factors = []
+    for _level in range(4):
+        row = rng.normal(size=3)
+        row -= np.mean(row)
+        coefficients = rng.normal(size=2) * 10.0 ** rng.uniform(-3.0, 3.0, size=2)
+        local_factors.append(np.outer(row, coefficients))
+    local_factors_array = np.stack(local_factors)
+    operator, public_design = _sum_to_zero_centered_operator(
+        local_factors_array,
+        np.empty((12, 0)),
+    )
+    expected = decompose_factor(public_design)
+    np.testing.assert_allclose(np.mean(public_design, axis=0), 0.0, atol=1e-12)
+    np.testing.assert_array_equal(
+        expected.coefficient_estimable(),
+        np.array([False, True, False, False, False, False]),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("equilibrated inherent SZ null inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )

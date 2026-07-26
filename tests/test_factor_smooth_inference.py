@@ -124,8 +124,14 @@ def test_factor_smooth_prediction_policies_validate_unseen_and_missing(
     )
     unseen = X.iloc[:4].copy()
     unseen["segment"] = "never-seen"
-    with pytest.raises(ValueError, match="unseen FactorSmooth"):
-        model.predict(unseen, random_effects=random_effects)
+    if random_effects == "conditional":
+        with pytest.raises(ValueError, match="unseen FactorSmooth"):
+            model.predict(unseen, random_effects=random_effects)
+    else:
+        np.testing.assert_allclose(
+            model.predict(unseen, random_effects=random_effects),
+            model.predict(X.iloc[:4], random_effects=random_effects),
+        )
 
     missing_group = X.iloc[:4].copy()
     missing_group.loc[missing_group.index[0], "segment"] = None
@@ -136,6 +142,33 @@ def test_factor_smooth_prediction_policies_validate_unseen_and_missing(
     missing_x.loc[missing_x.index[0], "x"] = np.nan
     with pytest.raises(ValueError, match="missing|non-finite"):
         model.predict(missing_x, random_effects=random_effects)
+
+
+@pytest.mark.parametrize(
+    "predictor_name",
+    ["_predict_eta_exact", "_predict_eta_fast_discrete"],
+)
+def test_factor_smooth_population_prediction_ignores_unseen_policy(
+    predictor_name: str,
+) -> None:
+    X, y = _data()
+    model = _model(discrete=True, unseen="error").fit_reml(
+        X,
+        y,
+        max_reml_iter=2,
+        runtime_validation="skip",
+    )
+    known = X.iloc[:4].copy()
+    unseen = known.copy()
+    unseen["segment"] = "never-seen"
+    predictor = getattr(model, predictor_name)
+
+    np.testing.assert_allclose(
+        predictor(unseen, random_effects="population"),
+        predictor(known, random_effects="population"),
+    )
+    with pytest.raises(ValueError, match="unseen FactorSmooth"):
+        predictor(unseen, random_effects="conditional")
 
 
 @pytest.mark.parametrize("discrete", [False, True])

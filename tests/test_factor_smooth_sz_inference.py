@@ -173,8 +173,10 @@ def test_sz_prediction_population_and_unseen_policies() -> None:
     error_model = _fit(_model(unseen="error"), X, y)
     with pytest.raises(ValueError, match="not-fitted"):
         error_model.predict(unseen)
-    with pytest.raises(ValueError, match="not-fitted"):
-        error_model.predict(unseen, random_effects="population")
+    np.testing.assert_allclose(
+        error_model.predict(unseen, random_effects="population"),
+        error_model.predict(X.iloc[:4], random_effects="population"),
+    )
 
 
 def test_sz_numeric_zero_and_negative_zero_group_keys_predict_identically() -> None:

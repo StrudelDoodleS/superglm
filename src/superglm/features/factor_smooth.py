@@ -324,18 +324,35 @@ class FactorSmooth:
             bin_idx=np.asarray(bin_idx, dtype=np.intp),
         )
 
-    def validate_prediction_values(
+    def _validated_prediction_inputs(
         self,
         x: NDArray,
         group: NDArray,
-    ) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
-        """Validate new rows and return the numeric marginal and fitted-level codes."""
+    ) -> tuple[NDArray[np.float64], NDArray]:
+        """Validate prediction shape and missingness without applying unseen policy."""
         numeric = self._validate_numeric(x)
         group_values = np.asarray(group).ravel()
         if len(numeric) != len(group_values):
             raise ValueError("FactorSmooth variable and group lengths differ.")
         if np.any(pd.isna(group_values)):
             raise ValueError("FactorSmooth group contains missing values (NaN or None).")
+        return numeric, group_values
+
+    def validate_population_prediction_values(
+        self,
+        x: NDArray,
+        group: NDArray,
+    ) -> None:
+        """Validate rows for a population prediction that skips this deviation."""
+        self._validated_prediction_inputs(x, group)
+
+    def validate_prediction_values(
+        self,
+        x: NDArray,
+        group: NDArray,
+    ) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
+        """Validate new rows and return the numeric marginal and fitted-level codes."""
+        numeric, group_values = self._validated_prediction_inputs(x, group)
         codes = pd.Index(self._levels).get_indexer(group_values).astype(np.intp, copy=False)
         unseen_mask = codes < 0
         if self.unseen == "error" and np.any(unseen_mask):

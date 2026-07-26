@@ -654,3 +654,76 @@ def test_centered_independent_mixed_scaled_deficiency_preserves_independent_coor
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
     )
+
+
+def test_wide_centered_independent_multidimensional_scaled_null_preserves_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 74
+    rows_per_level = 4
+    block_size = 7
+    rng = np.random.default_rng(1894)
+    independent = rng.normal(size=rows_per_level)
+    deficient = rng.normal(size=(rows_per_level, 2)) @ rng.normal(size=(2, block_size - 1))
+    local_factor = np.column_stack((independent, deficient))
+    local_factor *= np.geomspace(8e-6, 2e5, block_size)
+    local_factors = np.tile(local_factor, (n_levels, 1, 1))
+    operator, public_design = _independent_centered_operator(
+        local_factors,
+        np.empty((n_levels * rows_per_level, 0)),
+    )
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    independent_indices = np.arange(0, n_levels * block_size, block_size)
+    np.testing.assert_array_equal(
+        np.flatnonzero(expected.coefficient_estimable()),
+        independent_indices,
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide multidimensional FS null inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_centered_independent_lifted_null_uses_design_column_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_factor = np.array(
+        [
+            [1e-2, 0.0],
+            [0.0, 1.0],
+            [-1e-2, -1.0],
+        ]
+    )
+    local_factors = np.tile(local_factor, (2, 1, 1))
+    structured = np.zeros((6, 4))
+    structured[:3, :2] = local_factor
+    structured[3:, 2:] = local_factor
+    small = (1e-7 * structured[:, 0] + structured[:, 1])[:, None]
+    operator, public_design = _independent_centered_operator(local_factors, small)
+    expected = decompose_factor(public_design)
+    np.testing.assert_array_equal(
+        expected.coefficient_estimable(),
+        np.array([False, True, False, True, True]),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("equilibrated FS lifted-null inference must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
