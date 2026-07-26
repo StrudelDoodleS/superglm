@@ -9,6 +9,7 @@ import scipy.sparse as sp
 
 from superglm import FactorSmooth
 from superglm._frame import as_eager_frame
+from superglm._group_matrix import _group_matrix_core
 from superglm.dm_builder import build_design_matrix
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -181,6 +182,22 @@ def test_factor_smooth_vector_products_never_allocate_expanded_design(
     expanded_shape = gm.shape
     original_zeros = np.zeros
     original_empty = np.empty
+
+    # Numba 0.64 re-types cached kernels when their NumPy globals are
+    # monkeypatched and cannot type the Python allocation guards below.
+    # Exercise the same kernel bodies through ``py_func`` so the guards still
+    # see every allocation, including allocations made inside a kernel.
+    kernel_names = (
+        "_factor_smooth_csr_matvec",
+        "_factor_smooth_csr_rmatvec",
+        "_factor_smooth_csr_sufficient_stats",
+        "_factor_smooth_support_matvec",
+        "_factor_smooth_support_rmatvec",
+        "_factor_smooth_support_cell_aggregates",
+    )
+    for kernel_name in kernel_names:
+        kernel = getattr(_group_matrix_core, kernel_name)
+        monkeypatch.setattr(_group_matrix_core, kernel_name, kernel.py_func)
 
     def guarded_zeros(shape, *args, **kwargs):
         if tuple(np.atleast_1d(shape)) == expanded_shape:
