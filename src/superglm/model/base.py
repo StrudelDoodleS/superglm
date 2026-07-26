@@ -19,6 +19,7 @@ from superglm.dm_builder import (
     resolve_discrete_n_bins,
     should_discretize,
     should_discretize_tensor_interaction,
+    validate_term_name_namespace,
 )
 from superglm.group_matrix import DesignMatrix, _discretize_column
 from superglm.links import Link, stabilize_eta
@@ -750,6 +751,7 @@ def init_model(
         model._interaction_specs[owned.name] = owned
         model._interaction_order.append(owned.name)
 
+    validate_term_name_namespace(model._specs, model._interaction_specs)
     validate_factor_smooth_configuration(
         model,
         features_resolved=model._splines is None,
@@ -868,6 +870,7 @@ def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:
         specs=model._specs,
         feature_order=model._feature_order,
     )
+    validate_term_name_namespace(model._specs, model._interaction_specs)
     validate_factor_smooth_configuration(model, features_resolved=True)
 
 

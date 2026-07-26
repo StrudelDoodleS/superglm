@@ -12,6 +12,7 @@ model.py focused on orchestration.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -43,6 +44,33 @@ from superglm.links import Link, resolve_link
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
 logger = logging.getLogger(__name__)
+
+
+def validate_term_name_namespace(
+    specs: dict[str, FeatureSpec],
+    interaction_specs: dict[str, Any],
+    *,
+    additional_interactions: Iterable[str] = (),
+) -> None:
+    """Require one public name to identify exactly one model term."""
+    interaction_names = set(interaction_specs)
+    interaction_names.update(additional_interactions)
+    collisions = sorted(set(specs).intersection(interaction_names))
+    if collisions:
+        names = ", ".join(repr(name) for name in collisions)
+        raise ValueError(
+            f"Term name(s) {names} are registered as both a main feature and an interaction."
+        )
+
+
+def validate_fitted_group_names(groups: list[GroupSlice]) -> None:
+    """Reject fitted coefficient groups whose public names would alias."""
+    counts: dict[str, int] = {}
+    for group in groups:
+        counts[group.name] = counts.get(group.name, 0) + 1
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"Generated fitted group names must be unique; found {duplicates!r}.")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -354,6 +382,11 @@ def add_interaction(
 
     if iname in interaction_specs:
         raise ValueError(f"Interaction already added: {iname}")
+    validate_term_name_namespace(
+        specs,
+        interaction_specs,
+        additional_interactions=(iname,),
+    )
 
     interaction_specs[iname] = ispec
     interaction_order.append(iname)
@@ -1046,6 +1079,8 @@ def build_design_matrix(
             groups.append(g_new)
             col_offset = g_new.end
 
+    validate_term_name_namespace(specs, interaction_specs)
+    validate_fitted_group_names(groups)
     dm = DesignMatrix(group_matrices, n, col_offset)
     return BuildResult(
         dm=dm,

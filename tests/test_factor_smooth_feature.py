@@ -66,6 +66,15 @@ def test_constructor_accepts_explicit_factor_smooth_without_parent_main_effects(
     assert stored.parent_names == ("age", "broker")
 
 
+def test_explicit_factor_smooth_name_cannot_collide_with_main_feature():
+    with pytest.raises(ValueError, match="risk.*main feature.*interaction"):
+        SuperGLM(
+            family="gaussian",
+            features={"risk": Numeric()},
+            interactions=[FactorSmooth("age", group="broker", name="risk")],
+        )
+
+
 def test_clone_unfitted_owns_factor_smooth_configuration() -> None:
     model = SuperGLM(
         family="gaussian",
