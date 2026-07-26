@@ -9,8 +9,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.solvers.hessian_factor import _component_indices, _component_omega
-from superglm.solvers.structured import (
+from superglm.solvers._structured.operators import (
     BlockSymmetricOperator,
     CompactSymmetricOperator,
     SumToZeroBlockOperator,
@@ -22,6 +21,7 @@ from superglm.solvers.structured import (
     _trace_general_bdlr_product,
     _trace_symmetric_bdlr,
 )
+from superglm.solvers.hessian_factor import _component_indices, _component_omega
 from superglm.types import PenaltyComponent
 
 
