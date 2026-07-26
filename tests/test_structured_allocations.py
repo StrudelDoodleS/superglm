@@ -9,7 +9,7 @@ import pytest
 import scipy.sparse as sp
 
 import superglm._group_matrix._group_matrix_algebra as group_algebra
-import superglm.solvers.structured as structured_module
+import superglm.solvers._structured.moments as structured_moments
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -510,7 +510,7 @@ def test_large_dominant_builder_never_requests_full_p_by_p_storage(monkeypatch):
             raise AssertionError("full p x p allocation requested")
         return original_zeros(shape, *args, **kwargs)
 
-    monkeypatch.setattr(structured_module.np, "zeros", guarded_zeros)
+    monkeypatch.setattr(structured_moments.np, "zeros", guarded_zeros)
 
     system = build_scalar_structured_system(
         group_matrices,

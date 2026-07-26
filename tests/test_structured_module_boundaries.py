@@ -73,3 +73,30 @@ def test_backend_selection_has_internal_owner() -> None:
             "resolve_structured_backend",
         ),
     )
+
+
+def test_structured_layouts_have_internal_owner() -> None:
+    _assert_owned(
+        "layout",
+        (
+            "ScalarStructuredLayout",
+            "BlockStructuredLayout",
+            "get_structured_layout",
+            "structured_design_matvec",
+            "structured_design_rmatvec",
+        ),
+    )
+
+
+def test_structured_moments_have_internal_owner() -> None:
+    _assert_owned(
+        "moments",
+        (
+            "ScalarStructuredSystem",
+            "BlockStructuredSystem",
+            "SumToZeroBlockStructuredSystem",
+            "build_scalar_structured_system",
+            "build_block_structured_system",
+            "build_structured_system",
+        ),
+    )

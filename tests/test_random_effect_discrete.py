@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.solvers.structured as structured_module
+import superglm.solvers._structured.moments as structured_moments
 from superglm import RandomEffect, Spline, SuperGLM
 from superglm._frame import as_eager_frame
 from superglm.dm_builder import build_design_matrix, should_discretize
@@ -299,12 +299,12 @@ def test_cached_structured_trial_has_no_data_pass_or_dense_p_squared_state(monke
     monkeypatch.setattr(RandomEffectGroupMatrix, "matvec", fail_data_pass)
     monkeypatch.setattr(RandomEffectGroupMatrix, "rmatvec", fail_data_pass)
     monkeypatch.setattr(
-        structured_module,
+        structured_moments,
         "_random_effect_cross_gram",
         fail_data_pass,
     )
     monkeypatch.setattr(
-        structured_module,
+        structured_moments,
         "_random_effect_sufficient_stats",
         fail_data_pass,
     )
