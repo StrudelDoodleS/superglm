@@ -542,7 +542,7 @@ def test_centered_independent_blocks_certify_formed_full_rank_local_moments(
         raise AssertionError("wide certification-limited FS inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -568,7 +568,7 @@ def test_centered_independent_column_scale_certifies_cancellation(
         raise AssertionError("cancellation-certified FS inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -601,7 +601,7 @@ def test_centered_independent_schur_exact_alias_uses_factor_scale(
         raise AssertionError("independent structured inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -636,7 +636,7 @@ def test_centered_independent_scale_separated_aliases_preserve_null_span(
         raise AssertionError("scale-separated FS inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -672,7 +672,7 @@ def test_centered_independent_mixed_scaled_deficiency_preserves_independent_coor
         raise AssertionError("mixed scaled FS inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -709,7 +709,7 @@ def test_wide_centered_independent_multidimensional_scaled_null_preserves_width(
         raise AssertionError("wide multidimensional FS null inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -745,7 +745,7 @@ def test_centered_independent_lifted_null_uses_design_column_scale(
         raise AssertionError("equilibrated FS lifted-null inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 

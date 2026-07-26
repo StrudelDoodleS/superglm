@@ -703,7 +703,7 @@ def test_centered_sum_to_zero_estimability_matches_dense_without_fallback(
         raise AssertionError("full-rank SZ estimability must remain on the compact path")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -747,7 +747,7 @@ def test_wide_deficient_sum_to_zero_estimability_matches_dense_compactly(
         raise AssertionError("wide deficient SZ estimability must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -798,7 +798,7 @@ def test_wide_deficient_sum_to_zero_expands_roundoff_local_null(
         raise AssertionError("wide deficient SZ estimability must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -877,7 +877,7 @@ def test_wide_deficient_sum_to_zero_schur_rank_uses_augmented_scale(
         raise AssertionError("wide deficient SZ estimability must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -973,7 +973,7 @@ def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
         raise AssertionError("wide certification-limited SZ inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1013,7 +1013,7 @@ def test_sum_to_zero_certifies_full_local_blocks_in_public_coordinates(
         raise AssertionError("public-coordinate SZ certification must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1038,7 +1038,7 @@ def test_sum_to_zero_weak_candidates_are_ranked_at_gram_cutoff(
         raise AssertionError("weak SZ candidates must be certified compactly")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1068,7 +1068,7 @@ def test_sum_to_zero_positive_columns_are_certified_with_structural_zeros(
         raise AssertionError("positive SZ columns must remain compact with structural zeros")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1092,7 +1092,7 @@ def test_sum_to_zero_exact_nulls_do_not_saturate_weak_rank_certificate(
         raise AssertionError("exact SZ nulls must be deflated before weak rank certification")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
     np.testing.assert_array_equal(
@@ -1115,7 +1115,7 @@ def test_sum_to_zero_active_null_geometry_survives_structural_sibling(
         raise AssertionError("active SZ null geometry must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
     np.testing.assert_array_equal(
@@ -1140,7 +1140,7 @@ def test_sum_to_zero_exact_projection_noise_is_not_an_additional_null(
         raise AssertionError("exact-null projection noise must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
     np.testing.assert_array_equal(
@@ -1189,7 +1189,7 @@ def test_wide_sum_to_zero_deflated_inverse_handles_heterogeneous_scales(
         raise AssertionError("deflated SZ shift-invert must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
     np.testing.assert_array_equal(
@@ -1237,7 +1237,7 @@ def test_small_sum_to_zero_spectrum_filters_gram_eigenspace_leakage(
         ).coefficient_estimable()
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         certified_dense_fallback,
     )
     np.testing.assert_array_equal(
@@ -1278,7 +1278,7 @@ def test_wide_sum_to_zero_public_rank_certificate_stays_block_bounded(
         raise AssertionError("wide public-coordinate SZ certification must remain block-bounded")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1323,7 +1323,7 @@ def test_sum_to_zero_constraint_rank_uses_scaled_parameter_factor(
         raise AssertionError("parameter-scaled SZ constraint rank must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1353,7 +1353,7 @@ def test_wide_sum_to_zero_null_span_is_invariant_to_coordinate_scale(
         raise AssertionError("scaled wide SZ inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1383,7 +1383,7 @@ def test_full_rank_sum_to_zero_schur_exact_alias_uses_factor_scale(
         raise AssertionError("full-rank SZ inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1415,7 +1415,7 @@ def test_sum_to_zero_scale_separated_aliases_preserve_null_span(
         raise AssertionError("scale-separated SZ inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1470,7 +1470,7 @@ def test_sum_to_zero_heterogeneous_null_projector_uses_solve_error_bound(
         raise AssertionError("heterogeneous-null SZ inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1533,7 +1533,7 @@ def test_sum_to_zero_scaled_null_leverage_matches_public_factor(
         raise AssertionError("scaled SZ null inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1567,7 +1567,7 @@ def test_sum_to_zero_lifted_null_uses_design_column_scale(
         raise AssertionError("equilibrated SZ lifted-null inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 
@@ -1603,7 +1603,7 @@ def test_sum_to_zero_inherent_null_uses_public_design_column_scale(
         raise AssertionError("equilibrated inherent SZ null inference must remain compact")
 
     monkeypatch.setattr(
-        "superglm.solvers.structured._bounded_centered_estimability",
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
         reject_dense_fallback,
     )
 

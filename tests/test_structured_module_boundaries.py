@@ -36,3 +36,16 @@ def test_compact_operators_have_internal_owner() -> None:
             "compact_operator_diagonal",
         ),
     )
+
+
+def test_estimability_geometry_has_internal_owner() -> None:
+    _assert_owned(
+        "geometry",
+        (
+            "_bounded_centered_estimability",
+            "_orthonormal_column_span",
+            "_sum_to_zero_public_null_geometry",
+            "_certified_ritz_discarded",
+            "centered_operator_coefficient_estimable",
+        ),
+    )
