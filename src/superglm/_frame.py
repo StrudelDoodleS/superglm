@@ -149,7 +149,12 @@ class EagerFrame:
             return cast(pd.DataFrame, self.native).loc[:, list(columns)]
         return cast(Any, self.native).select(list(columns))
 
-    def digest(self, columns: tuple[object, ...] | None = None) -> bytes:
+    def digest(
+        self,
+        columns: tuple[object, ...] | None = None,
+        *,
+        include_index: bool = True,
+    ) -> bytes:
         """Hash selected logical contents for retained fit-data verification."""
         if self.backend == "pandas":
             native = cast(pd.DataFrame, self.native)
@@ -159,7 +164,7 @@ class EagerFrame:
             digest.update(repr((guarded.shape, metadata)).encode("utf-8"))
             row_hashes = pd.util.hash_pandas_object(
                 guarded,
-                index=True,
+                index=include_index,
                 categorize=True,
             ).to_numpy(dtype=np.uint64, copy=False)
             digest.update(np.ascontiguousarray(row_hashes).data)

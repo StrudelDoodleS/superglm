@@ -165,6 +165,26 @@ def test_released_metrics_reuse_compact_inference_for_equal_fit_geometry():
     )
 
 
+def test_released_metrics_ignore_pandas_index_labels_when_geometry_matches():
+    X, y, sample_weight = _sample_data(n=240)
+    X.index = np.arange(1000, 1000 + 3 * len(X), 3)
+    model = _model(retain_fit_state=False).fit(X, y, sample_weight=sample_weight)
+
+    metrics = model.metrics(
+        X.reset_index(drop=True),
+        y.copy(),
+        sample_weight=sample_weight.copy(),
+    )
+
+    assert metrics._uses_compact_fit_inference
+    np.testing.assert_allclose(
+        metrics._active_info[2],
+        model.__dict__["_fit_inference_info"]["XtWX_inv"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
 @pytest.mark.parametrize("changed_geometry", ["rows", "weights", "offset"])
 def test_released_metrics_reject_changed_inference_geometry(changed_geometry: str):
     X, y, sample_weight = _sample_data(n=240)

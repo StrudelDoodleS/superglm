@@ -300,29 +300,35 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
     terms: list[SummaryTermRow] = []
     for row in source.rows:
         source_groups = _source_groups_for_row(model, row)
-        is_group_test = bool(row.is_spline or row.structured_kind is not None)
+        is_group_test = bool(row.is_spline)
+        is_structured_metadata = row.structured_kind is not None
+        is_group_row = is_group_test or is_structured_metadata
         kind = (
             _group_test_kind(model, row, source_groups)
-            if is_group_test
+            if is_group_row
             else ("level" if row.name in level_names else "coefficient")
         )
-        statistic = _finite_float(row.wald_chi2 if is_group_test else row.z)
-        p_value = _finite_float(row.wald_p if is_group_test else row.p)
+        statistic = _finite_float(
+            row.wald_chi2 if is_group_test else (None if is_structured_metadata else row.z)
+        )
+        p_value = _finite_float(
+            row.wald_p if is_group_test else (None if is_structured_metadata else row.p)
+        )
         quasi_separated = bool(row.quasi_separated)
         terms.append(
             SummaryTermRow(
                 term=str(row.name),
                 group=str(row.group or ""),
                 kind=kind,
-                estimate=None if is_group_test else _finite_float(row.coef),
-                std_error=None if is_group_test else _finite_float(row.se),
+                estimate=None if is_group_row else _finite_float(row.coef),
+                std_error=None if is_group_row else _finite_float(row.se),
                 statistic=statistic,
                 statistic_type=(
                     "chi2" if is_group_test else ("z" if statistic is not None else "")
                 ),
                 p_value=p_value,
-                ci_lower=None if is_group_test else _finite_float(row.ci_low),
-                ci_upper=None if is_group_test else _finite_float(row.ci_high),
+                ci_lower=None if is_group_row else _finite_float(row.ci_low),
+                ci_upper=None if is_group_row else _finite_float(row.ci_high),
                 edf=_finite_float(row.edf),
                 smoothing_lambda=_finite_float(row.smoothing_lambda),
                 active=(
@@ -353,7 +359,7 @@ def _summary_notes(
     if not inference_stale:
         if any(row.kind == "smooth" for row in terms):
             notes.append(_SMOOTH_WOOD_NOTE)
-        if any(row.kind == "group" for row in terms):
+        if any(row.kind == "group" and row.statistic_type == "chi2" for row in terms):
             notes.append(_GROUP_WALD_NOTE)
         notes.append(_PARAMETRIC_WALD_NOTE)
     if any(row.warning for row in terms):

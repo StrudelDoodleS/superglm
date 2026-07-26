@@ -56,7 +56,7 @@ class FitGeometryGuard:
             raise ValueError("fit geometry vectors must match the fitted frame")
         return cls(
             x_backend=frame.backend,
-            x_digest=frame.digest(x_columns),
+            x_digest=frame.digest(x_columns, include_index=False),
             n_rows=len(frame),
             weight_digest=weight_digest,
             offset_digest=offset_digest,
@@ -74,7 +74,7 @@ class FitGeometryGuard:
                 and n_weights == self.n_rows
                 and n_offsets == self.n_rows
                 and frame.backend == self.x_backend
-                and frame.digest(self.x_columns) == self.x_digest
+                and frame.digest(self.x_columns, include_index=False) == self.x_digest
                 and weight_digest == self.weight_digest
                 and offset_digest == self.offset_digest
             )

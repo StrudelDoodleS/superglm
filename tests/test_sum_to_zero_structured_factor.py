@@ -622,3 +622,49 @@ def test_centered_sum_to_zero_estimability_matches_dense_without_fallback(
 
     np.testing.assert_array_equal(centered_operator_coefficient_estimable(operator), expected)
     assert not expected[0]
+
+
+@pytest.mark.parametrize("n_deficient_levels", [1, 258])
+def test_wide_deficient_sum_to_zero_estimability_matches_dense_compactly(
+    monkeypatch: pytest.MonkeyPatch,
+    n_deficient_levels: int,
+) -> None:
+    n_levels = 258
+    block_size = 2
+    small_indices = np.array([0], dtype=np.intp)
+    structured_indices = np.arange(
+        1,
+        1 + (n_levels - 1) * block_size,
+        dtype=np.intp,
+    ).reshape(n_levels - 1, block_size)
+    D = np.tile(np.eye(block_size), (n_levels, 1, 1))
+    D[:n_deficient_levels] = np.diag([1.0, 0.0])
+    raw = SumToZeroBlockOperator(
+        A=np.array([[2.0]]),
+        C=np.zeros((n_levels, block_size, 1)),
+        D=D,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+    )
+    cross = np.zeros(raw.shape[0])
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=1.0,
+        center=cross,
+        raw_structured_cross=np.zeros((n_levels, block_size)),
+    )
+    expected = decompose_gram(materialize_compact_operator(operator)).coefficient_estimable()
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide deficient SZ estimability must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    actual = centered_operator_coefficient_estimable(operator)
+
+    np.testing.assert_array_equal(actual, expected)
+    assert actual[small_indices[0]]

@@ -11,9 +11,12 @@ from openpyxl.utils.cell import range_boundaries
 
 from superglm import (
     Categorical,
+    FactorSmooth,
+    LambdaPolicy,
     Numeric,
     OrderedCategorical,
     Polynomial,
+    RandomEffect,
     Spline,
     SuperGLM,
     export_rating_tables,
@@ -310,6 +313,57 @@ def test_summary_export_maps_spline_to_one_global_wood_test():
     assert isinstance(smooth.smoothing_lambda, float)
     assert smooth.active is True
     assert "Wood (2013)" in "\n".join(payload.notes)
+
+
+@pytest.mark.parametrize("structured_kind", ["random_effect", "factor_smooth"])
+def test_summary_export_does_not_label_structured_metadata_as_wald_test(
+    structured_kind: str,
+):
+    rng = np.random.default_rng(20260726)
+    n_levels = 8
+    repeats = 10
+    codes = np.repeat(np.arange(n_levels), repeats)
+    groups = np.array([f"g{code}" for code in codes], dtype=object)
+    x = np.tile(np.linspace(0.0, 1.0, repeats), n_levels)
+    X = pd.DataFrame({"x": x, "group": groups})
+    y = np.sin(3.0 * x) + 0.2 * codes + rng.normal(scale=0.05, size=len(x))
+    if structured_kind == "random_effect":
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+            },
+            selection_penalty=0.0,
+            direct_solve="structured",
+        ).fit_reml(X, y, runtime_validation="skip")
+        term_name = "group"
+    else:
+        policies = {
+            "wiggle": LambdaPolicy.fixed(1.0),
+            "null_0": LambdaPolicy.fixed(1.0),
+            "null_1": LambdaPolicy.fixed(1.0),
+        }
+        model = SuperGLM(
+            family="gaussian",
+            interactions=[
+                FactorSmooth("x", group="group", k=5, lambda_policy=policies),
+            ],
+            selection_penalty=0.0,
+            direct_solve="structured",
+        ).fit_reml(X, y, runtime_validation="skip")
+        term_name = "x:group:fs"
+
+    payload = build_summary_export_payload(model)
+    row = next(item for item in payload.terms if item.term == term_name)
+    notes = "\n".join(payload.notes)
+
+    assert row.kind == "group"
+    assert row.estimate is None
+    assert row.std_error is None
+    assert row.statistic is None
+    assert row.statistic_type == ""
+    assert row.p_value is None
+    assert "Group chi-square p-values are Wald approximations" not in notes
 
 
 def test_summary_export_keeps_ordered_level_estimates_but_only_one_global_p_value():
