@@ -49,3 +49,15 @@ def test_estimability_geometry_has_internal_owner() -> None:
             "centered_operator_coefficient_estimable",
         ),
     )
+
+
+def test_schur_factors_have_internal_owner() -> None:
+    _assert_owned(
+        "factors",
+        (
+            "ScalarSchurFactor",
+            "BlockSchurFactor",
+            "ProfiledBlockSchurFactor",
+            "ProfiledScalarSchurFactor",
+        ),
+    )
