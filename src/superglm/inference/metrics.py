@@ -316,14 +316,26 @@ class ModelMetrics:
             and np.array_equal(self._offset, fit_offset_array)
         )
         fit_weights = getattr(model, "_fit_weights", None)
-        self._fit_geometry_matches = bool(
-            self._uses_fit_design
-            and fit_weights is not None
-            and np.shape(fit_weights) == np.shape(self._weights)
-            and np.array_equal(np.asarray(fit_weights), self._weights)
-        )
+        released_geometry_guard = getattr(model, "_fit_geometry_guard", None)
+        if self._dm is None and released_geometry_guard is not None:
+            self._fit_geometry_matches = released_geometry_guard.matches(
+                self._X,
+                self._weights,
+                self._offset,
+            )
+        else:
+            self._fit_geometry_matches = bool(
+                self._uses_fit_design
+                and fit_weights is not None
+                and np.shape(fit_weights) == np.shape(self._weights)
+                and np.array_equal(np.asarray(fit_weights), self._weights)
+            )
         self._uses_compact_fit_inference = bool(
-            (self._dm is None and "_fit_inference_info" in model.__dict__)
+            (
+                self._dm is None
+                and "_fit_inference_info" in model.__dict__
+                and self._fit_geometry_matches
+            )
             or (
                 getattr(model, "_linear_system_state", None) is not None
                 and self._fit_geometry_matches
@@ -681,9 +693,15 @@ class ModelMetrics:
         - XtWX_inv_aug: (p_active+1, p_active+1) augmented inverse incl. intercept
         - active_groups: list of GroupSlice for active groups (re-indexed to X_a columns)
         """
+        if self._dm is None and not self._uses_compact_fit_inference:
+            raise RuntimeError(
+                "retain_fit_state=False discarded the fitted design and the requested "
+                "inference geometry does not match the fit geometry; refit with "
+                "retain_fit_state=True for diagnostics on alternate rows, weights, or offsets"
+            )
         beta = self._result.beta
         rank_info = getattr(self._result, "rank_info", None)
-        if self._fit_geometry_matches:
+        if self._fit_geometry_matches and self._dm is not None:
             W = self._fit_working_weights
         else:
             eta, mu = self._working_eta_mu

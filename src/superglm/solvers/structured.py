@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
@@ -30,7 +31,7 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
-from superglm.solvers.rank import SHARED_RANK_POLICY
+from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 from superglm.types import GroupSlice, PenaltyComponent
 
 if TYPE_CHECKING:
@@ -452,6 +453,64 @@ def select_structured_group(
     )
 
 
+def _factor_smooth_singular_local_level(
+    matrix: FactorSmoothGroupMatrix,
+    group_name: str,
+    row_weights: NDArray,
+    lambda2: float | dict[str, float],
+) -> int | None:
+    """Return the first structurally singular penalized local block, if any."""
+    weights = np.asarray(row_weights, dtype=np.float64)
+    if weights.shape != (matrix.shape[0],):
+        raise ValueError("row_weights must match the structured design row count.")
+    active_components: list[str] = []
+    local_penalty = np.zeros((matrix.block_size, matrix.block_size), dtype=np.float64)
+    for suffix, omega in matrix.repeated_penalty_components:
+        if isinstance(lambda2, dict):
+            lam = float(
+                lambda2.get(
+                    f"{group_name}:{suffix}",
+                    lambda2.get(group_name, 0.0),
+                )
+            )
+        else:
+            lam = float(lambda2)
+        if lam:
+            active_components.append(suffix)
+            local_penalty += np.asarray(omega, dtype=np.float64)
+
+    penalty_eigenvalues = np.linalg.eigvalsh(local_penalty)
+    penalty_scale = max(float(np.max(np.abs(penalty_eigenvalues), initial=0.0)), 1.0)
+    penalty_threshold = np.finfo(np.float64).eps * max(matrix.block_size, 1) * penalty_scale * 10.0
+    if penalty_eigenvalues[0] > penalty_threshold:
+        return None
+
+    positive_rows = weights > 0.0
+    packed_support = np.packbits(positive_rows)
+    support_digest = hashlib.blake2b(
+        packed_support.data,
+        digest_size=16,
+    ).digest()
+    cache_key = (tuple(active_components), support_digest)
+    if getattr(matrix, "_structured_feasibility_key", None) == cache_key:
+        return getattr(matrix, "_structured_feasibility_level", None)
+
+    information, _xtw, _rhs = matrix.factor_smooth_sufficient_stats(
+        positive_rows.astype(np.float64),
+        np.zeros_like(weights),
+    )
+    local_blocks = np.asarray(information, dtype=np.float64) + local_penalty[None, :, :]
+
+    eigenvalues = np.linalg.eigvalsh(local_blocks)
+    scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), 1.0)
+    thresholds = np.finfo(np.float64).eps * max(matrix.block_size, 1) * scales * 10.0
+    singular = eigenvalues[:, 0] <= thresholds
+    singular_level = int(np.flatnonzero(singular)[0]) if np.any(singular) else None
+    matrix._structured_feasibility_key = cache_key
+    matrix._structured_feasibility_level = singular_level
+    return singular_level
+
+
 def resolve_structured_backend(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -479,11 +538,14 @@ def resolve_structured_backend(
             group_name=None,
             fallback_reason=selection.fallback_reason,
         )
+    group_name = selection.group_name
+    if group_name is None:  # pragma: no cover - StructuredGroupSelection invariant
+        raise RuntimeError("structured group selection omitted its group name")
     if mode == "structured":
         return StructuredBackendDecision(
             use_structured=True,
             group_index=selection.group_index,
-            group_name=selection.group_name,
+            group_name=group_name,
             fallback_reason=None,
         )
 
@@ -496,7 +558,7 @@ def resolve_structured_backend(
         and lambda2 is not None
     ):
         if isinstance(lambda2, dict):
-            dominant_lambda = lambda2.get(selection.group_name)
+            dominant_lambda = lambda2.get(group_name)
         else:
             dominant_lambda = float(lambda2)
         if dominant_lambda is not None and float(dominant_lambda) == 0.0:
@@ -512,12 +574,34 @@ def resolve_structured_backend(
                 return StructuredBackendDecision(
                     use_structured=False,
                     group_index=selection.group_index,
-                    group_name=selection.group_name,
+                    group_name=group_name,
                     fallback_reason=(
-                        f"RandomEffect group {selection.group_name!r} has a level with "
+                        f"RandomEffect group {group_name!r} has a level with "
                         "zero total weight and zero penalty"
                     ),
                 )
+    if (
+        isinstance(dominant_matrix, FactorSmoothGroupMatrix)
+        and row_weights is not None
+        and lambda2 is not None
+    ):
+        singular_level = _factor_smooth_singular_local_level(
+            dominant_matrix,
+            group_name,
+            row_weights,
+            lambda2,
+        )
+        if singular_level is not None:
+            level_label = dominant_matrix.levels[singular_level]
+            return StructuredBackendDecision(
+                use_structured=False,
+                group_index=selection.group_index,
+                group_name=group_name,
+                fallback_reason=(
+                    f"FactorSmooth group {group_name!r} has a singular local block "
+                    f"for level {level_label!r} under the requested weights and penalties"
+                ),
+            )
     if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
         if dominant_matrix.factor_basis == "sz":
             use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
@@ -2113,6 +2197,7 @@ class CenteredBlockOperator:
     cross: NDArray
     total: float
     center: NDArray
+    raw_structured_cross: NDArray | None = None
     shape: tuple[int, int] = field(init=False)
 
     def __post_init__(self):
@@ -2125,6 +2210,21 @@ class CenteredBlockOperator:
         center.setflags(write=False)
         object.__setattr__(self, "cross", cross)
         object.__setattr__(self, "center", center)
+        if self.raw_structured_cross is not None:
+            raw_structured_cross = np.array(
+                self.raw_structured_cross,
+                dtype=np.float64,
+                copy=True,
+            )
+            if not isinstance(self.raw, SumToZeroBlockOperator) or raw_structured_cross.shape != (
+                self.raw.n_levels,
+                self.raw.block_size,
+            ):
+                raise ValueError(
+                    "raw_structured_cross is only valid for all-level sum-to-zero geometry"
+                )
+            raw_structured_cross.setflags(write=False)
+            object.__setattr__(self, "raw_structured_cross", raw_structured_cross)
         object.__setattr__(self, "total", float(self.total))
         object.__setattr__(self, "shape", self.raw.shape)
 
@@ -2848,6 +2948,194 @@ def _trace_general_bdlr_product(
 def materialize_compact_operator(operator: CompactSymmetricOperator) -> NDArray:
     """Materialize a compact operator for dense-reference paths only."""
     return operator.matvec(np.eye(operator.shape[0]))
+
+
+_MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH = 512
+
+
+def _bounded_centered_estimability(operator: CenteredBlockOperator) -> NDArray:
+    """Use exact dense rank only below a fixed inference-memory bound."""
+    if operator.shape[0] > _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH:
+        # Large constrained systems with deficient local data can have a
+        # border as wide as the structured term. Refusing to claim any
+        # individual coordinate is safer than allocating a global p-by-p Gram.
+        return np.zeros(operator.shape[0], dtype=bool)
+    return decompose_gram(materialize_compact_operator(operator)).coefficient_estimable()
+
+
+def _augmented_small_data_block(operator: CenteredBlockOperator) -> NDArray:
+    """Return the intercept-plus-small raw data Gram."""
+    raw = operator.raw
+    cross_small = operator.cross[raw.small_indices]
+    q = len(raw.small_indices)
+    augmented = np.empty((q + 1, q + 1), dtype=np.float64)
+    augmented[0, 0] = operator.total
+    augmented[0, 1:] = cross_small
+    augmented[1:, 0] = cross_small
+    augmented[1:, 1:] = raw.A
+    return augmented
+
+
+def _lifted_null_row_norms(
+    small_null: NDArray,
+    structured_lift: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """Orthonormalize a compact lifted null basis through its small Gram."""
+    if small_null.shape[1] == 0:
+        return (
+            np.zeros(small_null.shape[0], dtype=np.float64),
+            np.zeros(structured_lift.shape[:-1], dtype=np.float64),
+        )
+    null_gram = small_null.T @ small_null + np.einsum(
+        "kir,kis->rs",
+        structured_lift,
+        structured_lift,
+        optimize=True,
+    )
+    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (null_gram + null_gram.T))
+    scale = max(float(np.max(eigenvalues, initial=0.0)), 1.0)
+    positive = eigenvalues > SHARED_RANK_POLICY.gram_rcond * scale
+    if not np.any(positive):
+        return (
+            np.zeros(small_null.shape[0], dtype=np.float64),
+            np.zeros(structured_lift.shape[:-1], dtype=np.float64),
+        )
+    whitening = (eigenvectors[:, positive] / np.sqrt(eigenvalues[positive])) @ (
+        eigenvectors[:, positive].T
+    )
+    orthogonal_small = small_null @ whitening
+    orthogonal_structured = structured_lift @ whitening
+    return (
+        np.linalg.norm(orthogonal_small, axis=1),
+        np.linalg.norm(orthogonal_structured, axis=2),
+    )
+
+
+def _independent_block_centered_estimability(
+    operator: CenteredBlockOperator,
+) -> NDArray:
+    """Exact compact centered-data estimability for RE and FS blocks."""
+    raw = operator.raw
+    if isinstance(raw, SymmetricBlockOperator):
+        D = raw.d[:, None, None]
+        C = raw.C[:, None, :]
+        structured_indices = raw.structured_indices[:, None]
+    elif isinstance(raw, BlockSymmetricOperator):
+        D = raw.D
+        C = raw.C
+        structured_indices = raw.structured_indices
+    else:  # pragma: no cover - caller dispatch
+        raise TypeError("independent block rank requires RE or FS geometry")
+
+    q = len(raw.small_indices)
+    C_augmented = np.empty((D.shape[0], D.shape[1], q + 1), dtype=np.float64)
+    C_augmented[:, :, 0] = operator.cross[structured_indices]
+    C_augmented[:, :, 1:] = C
+    schur = _augmented_small_data_block(operator)
+    local_estimable = np.empty(D.shape[:2], dtype=bool)
+    local_inverse = np.empty_like(D)
+    for level, block in enumerate(D):
+        decomposition = decompose_gram(block)
+        local_inverse[level] = decomposition.pseudo_inverse()
+        local_estimable[level] = decomposition.coefficient_estimable()
+        schur -= C_augmented[level].T @ local_inverse[level] @ C_augmented[level]
+
+    small_rank = decompose_gram(0.5 * (schur + schur.T))
+    small_null = small_rank.null_basis()
+    structured_lift = -np.einsum(
+        "kij,kjq,qr->kir",
+        local_inverse,
+        C_augmented,
+        small_null,
+        optimize=True,
+    )
+    small_null_norm, lifted_null_norm = _lifted_null_row_norms(
+        small_null,
+        structured_lift,
+    )
+    result = np.empty(operator.shape[0], dtype=bool)
+    result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
+    result[structured_indices] = local_estimable & (
+        lifted_null_norm <= SHARED_RANK_POLICY.factor_rcond
+    )
+    return result
+
+
+def _sum_to_zero_centered_estimability(
+    operator: CenteredBlockOperator,
+) -> NDArray:
+    """Compact centered-data estimability for full-rank local SZ blocks."""
+    raw = operator.raw
+    if not isinstance(raw, SumToZeroBlockOperator):  # pragma: no cover - caller dispatch
+        raise TypeError("sum-to-zero rank requires SZ geometry")
+    raw_structured_cross = operator.raw_structured_cross
+    if raw_structured_cross is None:
+        return _bounded_centered_estimability(operator)
+
+    local_decompositions = tuple(decompose_gram(block) for block in raw.D)
+    if any(decomposition.rank < raw.block_size for decomposition in local_decompositions):
+        return _bounded_centered_estimability(operator)
+    local_inverse = np.stack(
+        [decomposition.pseudo_inverse() for decomposition in local_decompositions]
+    )
+    q = len(raw.small_indices)
+    C_augmented = np.empty((raw.n_levels, raw.block_size, q + 1), dtype=np.float64)
+    C_augmented[:, :, 0] = raw_structured_cross
+    C_augmented[:, :, 1:] = raw.C
+    inverse_cross = np.einsum(
+        "kij,kjq->kiq",
+        local_inverse,
+        C_augmented,
+        optimize=True,
+    )
+    constraint_covariance = np.sum(local_inverse, axis=0)
+    constraint_rank = decompose_gram(constraint_covariance)
+    if constraint_rank.rank < raw.block_size:
+        return _bounded_centered_estimability(operator)
+    constraint_inverse = constraint_rank.pseudo_inverse()
+    constraint_cross = np.sum(inverse_cross, axis=0)
+    schur = _augmented_small_data_block(operator)
+    schur -= np.einsum(
+        "kiq,kir->qr",
+        C_augmented,
+        inverse_cross,
+        optimize=True,
+    )
+    schur += constraint_cross.T @ constraint_inverse @ constraint_cross
+    small_rank = decompose_gram(0.5 * (schur + schur.T))
+    small_null = small_rank.null_basis()
+    multiplier = constraint_inverse @ constraint_cross @ small_null
+    structured_lift = -np.einsum(
+        "kiq,qr->kir",
+        inverse_cross,
+        small_null,
+        optimize=True,
+    ) + np.einsum(
+        "kij,jr->kir",
+        local_inverse,
+        multiplier,
+        optimize=True,
+    )
+    small_null_norm, lifted_null_norm = _lifted_null_row_norms(
+        small_null,
+        structured_lift,
+    )
+    result = np.empty(operator.shape[0], dtype=bool)
+    result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond
+    result[raw.structured_indices] = lifted_null_norm[:-1] <= SHARED_RANK_POLICY.factor_rcond
+    return result
+
+
+def centered_operator_coefficient_estimable(
+    operator: CenteredBlockOperator,
+) -> NDArray:
+    """Return coefficient estimability from compact centered data geometry."""
+    try:
+        if isinstance(operator.raw, SumToZeroBlockOperator):
+            return _sum_to_zero_centered_estimability(operator)
+        return _independent_block_centered_estimability(operator)
+    except (np.linalg.LinAlgError, ValueError):
+        return _bounded_centered_estimability(operator)
 
 
 def compact_operator_diagonal(

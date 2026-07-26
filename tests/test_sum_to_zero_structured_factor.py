@@ -6,10 +6,13 @@ import numpy as np
 import pytest
 
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
+from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import (
+    CenteredBlockOperator,
     SumToZeroBlockOperator,
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
+    centered_operator_coefficient_estimable,
     compact_operator_diagonal,
     materialize_compact_operator,
 )
@@ -554,3 +557,68 @@ def test_profiled_sum_to_zero_factor_matches_centered_dense_reference() -> None:
     assert profile.penalty_operator_cross_trace(component, 1.4, slope_operator) == pytest.approx(
         dense_factor.penalty_operator_cross_trace(component, 1.4, slope_operator)
     )
+
+
+def test_centered_sum_to_zero_estimability_matches_dense_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 5
+    rows_per_level = 12
+    block_size = 2
+    codes = np.repeat(np.arange(n_levels), rows_per_level)
+    x = np.tile(np.linspace(-1.0, 1.0, rows_per_level), n_levels)
+    z = x**2 + 0.03 * codes
+    weights = 0.7 + np.linspace(0.0, 0.6, len(codes))
+    small = np.column_stack((np.ones(len(codes)), z))
+    local_basis = np.column_stack((np.ones(len(codes)), x))
+
+    level_masks = tuple(codes == level for level in range(n_levels))
+    C = np.stack(
+        [local_basis[mask].T @ (weights[mask, None] * small[mask]) for mask in level_masks]
+    )
+    D = np.stack(
+        [local_basis[mask].T @ (weights[mask, None] * local_basis[mask]) for mask in level_masks]
+    )
+    raw_structured_cross = np.stack([local_basis[mask].T @ weights[mask] for mask in level_masks])
+
+    structured_indices = np.arange(
+        small.shape[1],
+        small.shape[1] + (n_levels - 1) * block_size,
+        dtype=np.intp,
+    ).reshape(n_levels - 1, block_size)
+    free_structured = np.zeros((len(codes), structured_indices.size))
+    for level, mask in enumerate(level_masks[:-1]):
+        free_structured[mask, level * block_size : (level + 1) * block_size] = local_basis[mask]
+    final_mask = level_masks[-1]
+    free_structured[final_mask] = np.tile(-local_basis[final_mask], n_levels - 1)
+    public_design = np.column_stack((small, free_structured))
+    cross = public_design.T @ weights
+
+    raw = SumToZeroBlockOperator(
+        A=small.T @ (weights[:, None] * small),
+        C=C,
+        D=D,
+        small_indices=np.arange(small.shape[1], dtype=np.intp),
+        structured_indices=structured_indices,
+    )
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=float(np.sum(weights)),
+        center=cross / np.sum(weights),
+        raw_structured_cross=raw_structured_cross,
+    )
+    dense = public_design.T @ (weights[:, None] * public_design)
+    dense -= np.outer(cross, cross) / np.sum(weights)
+    expected = decompose_gram(dense).coefficient_estimable()
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("full-rank SZ estimability must remain on the compact path")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(centered_operator_coefficient_estimable(operator), expected)
+    assert not expected[0]

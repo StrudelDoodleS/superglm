@@ -195,6 +195,7 @@ def test_structured_summary_retains_ordinary_smooth_test_geometry():
     R_a = structured._fit_inference_info["R_a"]
 
     assert R_a.shape == (smooth_group.size, len(structured.result.beta))
+    assert R_a.storage_nbytes <= smooth_group.size**2 * np.dtype(np.float64).itemsize * 2
     assert structured_row.wald_chi2 > 0.0
     assert 0.0 < structured_row.wald_p < 1.0
     assert structured_row.wald_chi2 == pytest.approx(dense_row.wald_chi2, rel=2e-7)
@@ -226,6 +227,56 @@ def test_structured_summary_marks_dense_small_aliases_nonestimable():
         assert not rows[name].estimable
         assert np.isnan(rows[name].se)
         assert np.isnan(rows[name].p)
+
+
+def test_structured_estimability_uses_centered_data_geometry():
+    rng = np.random.default_rng(20260726)
+    n_levels = 40
+    codes = np.repeat(np.arange(n_levels), 4)
+    X = pd.DataFrame(
+        {
+            "constant": np.ones(len(codes)),
+            "group": np.array([f"g{code}" for code in codes], dtype=object),
+        }
+    )
+    y = np.sin(codes) + rng.normal(scale=0.01, size=len(codes))
+    common = {
+        "family": "gaussian",
+        "features": {
+            "constant": Numeric(),
+            "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        "selection_penalty": 0.0,
+    }
+    dense = SuperGLM(**common, direct_solve="gram").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+    structured = SuperGLM(**common, direct_solve="structured").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    dense_mask = dense._fit_inference_info["coefficient_estimable"]
+    structured_mask = structured._fit_inference_info["coefficient_estimable"]
+
+    np.testing.assert_array_equal(structured_mask, dense_mask)
+    assert not np.any(structured_mask)
+
+
+def test_random_effect_summary_uses_one_structured_group_row():
+    _, structured, _, _, _ = _fit_pair(fit_dense=False, max_reml_iter=2)
+
+    row = next(row for row in structured.summary()._coef_rows if row.name == "broker")
+
+    assert row.coef is None
+    assert row.structured_kind == "random_effect"
+    assert row.n_params == len(structured._specs["broker"]._levels)
+    assert row.n_levels == row.n_params
+    assert row.smoothing_lambdas == (("lambda", structured._reml_lambdas["broker"]),)
+    assert "random effect" in str(structured.summary()).lower()
 
 
 def test_released_structured_state_keeps_compact_factors_and_support():
@@ -450,6 +501,19 @@ def test_retained_random_effect_rows_defer_unpooled_solve(monkeypatch):
     assert calls == 0
     structured.random_effects("broker")
     assert calls == 1
+
+
+def test_retained_random_effect_report_rejects_mutated_fit_rows():
+    _, structured, X, y, _ = _fit_pair(
+        retain_fit_state=True,
+        fit_dense=False,
+        max_reml_iter=2,
+    )
+    X.iloc[0, X.columns.get_loc("broker")] = X.iloc[1]["broker"]
+    y[0] += 100.0
+
+    with pytest.raises(RuntimeError, match="retained fit data were mutated"):
+        structured.random_effects("broker")
 
 
 @pytest.mark.parametrize("discrete", [False, True])

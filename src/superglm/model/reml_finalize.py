@@ -126,6 +126,11 @@ def _build_structured_linear_system_state(
         cross=xtw,
         total=system.sum_w,
         center=xtw / system.sum_w,
+        raw_structured_cross=(
+            system.raw_xtw_structured
+            if isinstance(system, SumToZeroBlockStructuredSystem)
+            else None
+        ),
     )
 
     from superglm.inference.random_effects import vectorized_conditional_unpooled_effect

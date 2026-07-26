@@ -347,6 +347,7 @@ def _clear_fit_inference_caches(model) -> None:
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
     model._fit_data_guard = None
+    model._fit_geometry_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
@@ -501,7 +502,12 @@ def _prime_fit_caches(
     y_arr: NDArray,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
-    from superglm.model.fit_data_guard import FitDataGuard
+    from superglm.model.fit_data_guard import FitDataGuard, FitGeometryGuard
+
+    guard_columns = list(model._feature_order)
+    for name in model._interaction_order:
+        guard_columns.extend(model._interaction_specs[name].parent_names)
+    guard_columns = list(dict.fromkeys(guard_columns))
 
     fit_space_result = (
         model._solver_pirls_result() if model._solver_result is not None else model.result
@@ -531,12 +537,24 @@ def _prime_fit_caches(
     model._fit_y_ref = y_ref
     model._fit_sample_weight_ref = sample_weight_ref
     model._fit_offset_ref = offset_ref
-    # Compact fits release every retained row reference immediately below.
-    # Avoid an O(n) content hash that could never be consumed.
     model._fit_data_guard = (
-        FitDataGuard.capture(X_ref, y_arr, columns=tuple(model._feature_order))
+        FitDataGuard.capture(X_ref, y_arr, columns=tuple(guard_columns))
         if getattr(model, "_retain_fit_state", True)
         else None
+    )
+    model._fit_geometry_guard = (
+        None
+        if getattr(model, "_retain_fit_state", True)
+        else FitGeometryGuard.capture(
+            X_ref,
+            model._fit_weights,
+            (
+                np.zeros(len(y_arr), dtype=np.float64)
+                if model._fit_offset is None
+                else model._fit_offset
+            ),
+            columns=tuple(guard_columns),
+        )
     )
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None

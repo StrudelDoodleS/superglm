@@ -249,3 +249,54 @@ def test_sz_sparse_levels_keep_other_global_smooth_in_summary_and_reconstruction
     assert "z" in summary_text
     assert np.all(np.isfinite(reconstructed["x"]))
     assert np.all(np.isfinite(reconstructed["log_relativity"]))
+
+
+def test_sz_structured_estimability_uses_centered_data_geometry():
+    X, y = _data()
+    rare = X["segment"] == "omega"
+    keep = ~rare
+    keep[np.flatnonzero(rare)[:2]] = True
+    X = X.loc[keep].reset_index(drop=True)
+    y = y[keep.to_numpy()]
+
+    def model(direct_solve: str) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2)),
+            },
+            interactions=[
+                FactorSmooth(
+                    "x",
+                    group="segment",
+                    basis="sz",
+                    k=6,
+                    lambda_policy={"wiggle": LambdaPolicy.fixed(1.7)},
+                )
+            ],
+            selection_penalty=0.0,
+            direct_solve=direct_solve,
+        ).fit_reml(X, y, runtime_validation="skip")
+
+    dense = model("gram")
+    structured = model("structured")
+
+    np.testing.assert_array_equal(
+        structured._fit_inference_info["coefficient_estimable"],
+        dense._fit_inference_info["coefficient_estimable"],
+    )
+    assert not np.any(structured._fit_inference_info["coefficient_estimable"])
+
+
+def test_sz_summary_uses_one_structured_group_row():
+    X, y = _data()
+    model = _fit(_model(), X, y)
+
+    row = next(row for row in model.summary()._coef_rows if row.name == "x:segment:sz")
+
+    assert row.coef is None
+    assert row.structured_kind == "factor_smooth_sz"
+    assert row.n_levels == len(model._interaction_specs["x:segment:sz"]._levels)
+    assert row.n_params == (row.n_levels - 1) * 6
+    assert row.smoothing_lambdas == (("wiggle", 1.7),)
+    assert "factor smooth (sz)" in str(model.summary()).lower()

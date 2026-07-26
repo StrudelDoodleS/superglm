@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
 from superglm.group_matrix import DesignMatrix
+from superglm.inference._metrics_design import MappedColumnFactor
 from superglm.inference.covariance import (
     StructuredCovarianceAccessor,
     StructuredSlopeCovarianceAccessor,
@@ -21,7 +22,11 @@ from superglm.solvers.rank import (
     needs_factor_certification,
     selected_group_name_set,
 )
-from superglm.solvers.structured import CenteredBlockOperator, StructuredLinearSystemState
+from superglm.solvers.structured import (
+    CenteredBlockOperator,
+    StructuredLinearSystemState,
+    centered_operator_coefficient_estimable,
+)
 from superglm.types import GroupSlice
 
 
@@ -384,12 +389,12 @@ def fit_active_info(model):
     return X_active, W, inverse, augmented, active_groups
 
 
-def _structured_small_data_factor(operator: CenteredBlockOperator) -> NDArray:
-    """Embed the exact centered dense-small Gram factor in global columns."""
+def _structured_small_data_factor(operator: CenteredBlockOperator) -> MappedColumnFactor:
+    """Store the exact centered dense-small Gram factor on mapped columns."""
     raw = operator.raw
     small_indices = np.asarray(raw.small_indices, dtype=np.intp)
     if not len(small_indices):
-        return np.empty((0, operator.shape[0]))
+        return MappedColumnFactor(np.empty((0, 0)), small_indices, operator.shape[0])
     cross = operator.cross[small_indices]
     center = operator.center[small_indices]
     data_gram = (
@@ -400,9 +405,7 @@ def _structured_small_data_factor(operator: CenteredBlockOperator) -> NDArray:
     )
     eigvals, eigvecs = np.linalg.eigh(0.5 * (data_gram + data_gram.T))
     local_factor = (eigvecs * np.sqrt(np.maximum(eigvals, 0.0))).T
-    factor = np.zeros((len(small_indices), operator.shape[0]))
-    factor[:, small_indices] = local_factor
-    return factor
+    return MappedColumnFactor(local_factor, small_indices, operator.shape[0])
 
 
 def fit_inference_info(model):
@@ -478,11 +481,6 @@ def fit_inference_info(model):
             linear_state.centered_data_operator,
         )
         group_edf_map = {group.name: float(np.sum(edf[group.sl])) for group in active_groups}
-        coefficient_estimable = getattr(
-            linear_state.coefficient_factor,
-            "coefficient_estimable",
-            None,
-        )
         return {
             "W": W,
             "XtWX_inv": inverse,
@@ -492,10 +490,8 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": group_edf_map,
-            "coefficient_estimable": (
-                coefficient_estimable()
-                if coefficient_estimable is not None
-                else np.ones(len(solver.beta), dtype=bool)
+            "coefficient_estimable": centered_operator_coefficient_estimable(
+                linear_state.centered_data_operator
             ),
             "structured_covariance": True,
         }

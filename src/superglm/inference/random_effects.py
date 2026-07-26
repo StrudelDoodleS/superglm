@@ -16,6 +16,7 @@ from superglm.features.random_effect import RandomEffect
 from superglm.group_matrix import RandomEffectGroupMatrix
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.links import LogLink, stabilize_eta
+from superglm.model.fit_data_guard import require_unchanged_fit_data
 from superglm.model.state_ops import _solver_space_working_weights
 from superglm.solvers.structured import (
     StructuredLevelSupport,
@@ -232,6 +233,7 @@ def _reporting_rows(
     if X is None:
         if model._fit_X_ref is None or model._fit_y_ref is None or model._fit_weights is None:
             return None
+        require_unchanged_fit_data(model, model._fit_X_ref, model._fit_y_ref)
         X = model._fit_X_ref
         y = model._fit_y_ref
         sample_weight = model._fit_weights

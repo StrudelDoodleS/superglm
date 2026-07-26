@@ -195,6 +195,8 @@ class FactorSmoothGroupMatrix:
         "projection",
         "structured_kind",
         "factor_basis",
+        "_structured_feasibility_key",
+        "_structured_feasibility_level",
     )
 
     def __init__(
@@ -247,6 +249,8 @@ class FactorSmoothGroupMatrix:
         self.component_types = None
         self.projection = None
         self.structured_kind = "factor_smooth"
+        self._structured_feasibility_key = None
+        self._structured_feasibility_level = None
 
         if bin_idx is None:
             exact_basis = sp.csr_matrix(basis, dtype=np.float64)

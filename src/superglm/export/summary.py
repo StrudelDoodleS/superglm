@@ -300,7 +300,7 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
     terms: list[SummaryTermRow] = []
     for row in source.rows:
         source_groups = _source_groups_for_row(model, row)
-        is_group_test = bool(row.is_spline)
+        is_group_test = bool(row.is_spline or row.structured_kind is not None)
         kind = (
             _group_test_kind(model, row, source_groups)
             if is_group_test

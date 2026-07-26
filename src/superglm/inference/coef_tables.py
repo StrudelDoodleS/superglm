@@ -59,6 +59,7 @@ def build_coef_rows(
         intercept row/column, used for SE computation.
     """
     from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.interaction import (
         CategoricalInteraction,
         NumericCategorical,
@@ -71,6 +72,7 @@ def build_coef_rows(
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.polynomial import Polynomial
+    from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
     from superglm.group_matrix import CategoricalGroupMatrix
     from superglm.inference._ordered_reference import (
@@ -266,6 +268,19 @@ def build_coef_rows(
             d["boundary"],
         )
 
+    def _structured_lambdas(group_name: str) -> tuple[tuple[str, float], ...]:
+        source = reml_lambdas if reml_lambdas is not None else lambda2
+        if isinstance(source, dict):
+            exact = (("lambda", float(source[group_name])),) if group_name in source else ()
+            prefix = f"{group_name}:"
+            components = tuple(
+                (name[len(prefix) :], float(value))
+                for name, value in source.items()
+                if name.startswith(prefix)
+            )
+            return exact + components
+        return (("lambda", float(source)),)
+
     # Monotone repair info
     _mono_repairs = monotone_repairs or {}
     handled_ordered_features: set[str] = set()
@@ -276,6 +291,29 @@ def build_coef_rows(
         b_g = beta[g.sl]
         se_g = se_dict[g.name]
         active = g.name in selected_names
+
+        if isinstance(spec, RandomEffect | FactorSmooth):
+            edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
+            lambdas = _structured_lambdas(g.name)
+            if isinstance(spec, RandomEffect):
+                structured_kind = "random_effect"
+            else:
+                structured_kind = f"factor_smooth_{spec.basis}"
+            rows.append(
+                _CoefRow(
+                    name=g.name,
+                    group=g.feature_name or g.name,
+                    structured_kind=structured_kind,
+                    n_levels=len(spec._levels),
+                    n_params=g.size,
+                    active=active,
+                    group_norm=float(np.linalg.norm(b_g)) if active else 0.0,
+                    edf=edf,
+                    smoothing_lambda=(lambdas[0][1] if len(lambdas) == 1 else None),
+                    smoothing_lambdas=lambdas,
+                )
+            )
+            continue
 
         if isinstance(spec, OrderedCategorical):
             if g.feature_name in handled_ordered_features:

@@ -10,7 +10,7 @@ import pytest
 import scipy.sparse as sp
 
 import superglm.solvers.irls_direct as irls_direct
-from superglm import FactorSmooth, Numeric, RandomEffect, Spline, SuperGLM
+from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.distributions import Gamma, Gaussian, Poisson
 from superglm.group_matrix import (
     DenseGroupMatrix,
@@ -596,3 +596,118 @@ def test_factor_smooth_exact_reml_matches_dense_end_to_end(family: str) -> None:
         structured._linear_system_state.profiled_factor,
         ProfiledBlockSchurFactor,
     )
+
+
+def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
+    rng = np.random.default_rng(20260726)
+    n_levels = 10
+    repeats = 15
+    codes = np.repeat(np.arange(n_levels), repeats)
+    x = np.tile(np.linspace(0.0, 1.0, repeats), n_levels)
+    z = rng.normal(size=len(x))
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "z": z,
+            "group": np.array([f"g{code}" for code in codes], dtype=object),
+        }
+    )
+    y = np.sin(3.0 * x) + 0.1 * z + rng.normal(scale=0.05, size=len(x))
+    policies = {
+        "wiggle": LambdaPolicy.fixed(1.0),
+        "null_0": LambdaPolicy.fixed(1.0),
+        "null_1": LambdaPolicy.fixed(1.0),
+    }
+    common = {
+        "family": "gaussian",
+        "features": {"z": Numeric()},
+        "interactions": [
+            FactorSmooth("x", group="group", k=5, lambda_policy=policies),
+        ],
+        "selection_penalty": 0.0,
+    }
+    dense = SuperGLM(**common, direct_solve="gram").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+    structured = SuperGLM(**common, direct_solve="structured").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    np.testing.assert_array_equal(
+        structured._fit_inference_info["coefficient_estimable"],
+        dense._fit_inference_info["coefficient_estimable"],
+    )
+    factor_group = next(group for group in structured._groups if group.name == "x:group:fs")
+    assert np.any(~structured._fit_inference_info["coefficient_estimable"][factor_group.sl])
+    row = next(row for row in structured.summary()._coef_rows if row.name == "x:group:fs")
+    assert row.coef is None
+    assert row.structured_kind == "factor_smooth_fs"
+    assert row.n_levels == n_levels
+    assert row.n_params == n_levels * 5
+    assert {name for name, _value in row.smoothing_lambdas} == {
+        "wiggle",
+        "null_0",
+        "null_1",
+    }
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+@pytest.mark.parametrize("discrete", [False, True])
+def test_auto_factor_smooth_falls_back_for_singular_local_blocks(
+    basis: str,
+    discrete: bool,
+) -> None:
+    rng = np.random.default_rng(20260726)
+    n_levels = 10
+    repeats = 12
+    codes = np.repeat(np.arange(n_levels), repeats)
+    x = np.tile(np.linspace(0.0, 1.0, repeats), n_levels)
+    z = rng.normal(size=len(x))
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "z": z,
+            "group": np.array([f"g{code}" for code in codes], dtype=object),
+        }
+    )
+    y = np.sin(4.0 * x) + 0.1 * z + rng.normal(scale=0.05, size=len(x))
+    sample_weight = np.ones(len(x))
+    sample_weight[codes == n_levels - 1] = 0.0
+    policies = {"wiggle": LambdaPolicy.off()}
+    features = {"z": Numeric()}
+    if basis == "fs":
+        policies.update(
+            null_0=LambdaPolicy.off(),
+            null_1=LambdaPolicy.off(),
+        )
+    else:
+        features["x"] = Spline(k=5, lambda_policy=LambdaPolicy.fixed(1.0))
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="group",
+                basis=basis,
+                k=5,
+                lambda_policy=policies,
+            ),
+        ],
+        selection_penalty=0.0,
+        direct_solve="auto",
+        discrete=discrete,
+        n_bins=64,
+    ).fit_reml(
+        X,
+        y,
+        sample_weight=sample_weight,
+        runtime_validation="skip",
+    )
+
+    assert model.result.direct_backend == "gram"
+    assert "singular local block" in model.result.direct_fallback_reason

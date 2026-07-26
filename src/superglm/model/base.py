@@ -700,6 +700,7 @@ def init_model(
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
     model._fit_data_guard = None
+    model._fit_geometry_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
