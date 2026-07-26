@@ -100,3 +100,41 @@ def test_structured_moments_have_internal_owner() -> None:
             "build_structured_system",
         ),
     )
+
+
+def test_penalized_assembly_has_internal_owner() -> None:
+    _assert_owned(
+        "assembly",
+        (
+            "CachedScalarStructuredSolution",
+            "CachedBlockStructuredSolution",
+            "CachedSumToZeroStructuredSolution",
+            "build_penalized_structured_operator",
+            "build_augmented_structured_factor",
+            "solve_cached_structured",
+        ),
+    )
+
+
+def test_retained_structured_state_has_internal_owner() -> None:
+    _assert_owned(
+        "state",
+        (
+            "StructuredLevelSupport",
+            "FactorSmoothLevelSupport",
+            "StructuredLinearSystemState",
+        ),
+    )
+
+
+def test_structured_module_is_implementation_free_facade() -> None:
+    import ast
+
+    tree = ast.parse(Path(structured.__file__).read_text())
+    implementations = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    assert implementations == []
+    assert structured.__all__
