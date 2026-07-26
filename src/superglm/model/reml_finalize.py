@@ -171,6 +171,8 @@ def _build_reml_reporting_support_state(
     information_by_group_index: dict[int, np.ndarray] | None = None,
 ):
     """Distill structured report support under the durable retention contract."""
+    if bool(getattr(model, "_suppress_reporting_support", False)):
+        return None
     retain_reporting_rows = (
         bool(getattr(model, "_retain_fit_state", True))
         if durable_retain_fit_state is None

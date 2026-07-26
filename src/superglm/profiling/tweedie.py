@@ -4250,6 +4250,11 @@ def _build_profile_context_reml(
     # state. Keep that mutation inside an isolated scratch model so result.ci()
     # and profile plots cannot leave the caller's model at a probe p.
     profile_model = _clone_profile_model(model, X_snapshot, weight_snapshot)
+    # Candidate fits and lazy CI probes need compact coefficient/inference
+    # state, but their reporting tables are never public. Suppress that
+    # potentially row-scale work while retaining the ordinary release path for
+    # their design and fit rows. The final public refit uses a separate model.
+    profile_model._suppress_reporting_support = True
     if getattr(model, "_last_fit_meta", None) is not None:
         profile_model._last_fit_meta = dict(model._last_fit_meta)
 

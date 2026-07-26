@@ -20,6 +20,7 @@ from superglm import (
 )
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.model import fit_ops as fit_ops_module
+from superglm.model import reml_finalize as reml_finalize_module
 from superglm.profiling.nb import NBProfileResult
 from superglm.profiling.tweedie import TweedieProfileResult
 from superglm.types import FeatureSpec
@@ -306,3 +307,52 @@ def test_constrained_reporting_failure_preserves_installed_revision(
     assert getattr(model, "_fit_revision") == revision
     np.testing.assert_allclose(model.predict(X), predictions, rtol=0.0, atol=0.0)
     pd.testing.assert_frame_equal(model.random_effects(term_name).table, report.table)
+
+
+def test_tweedie_reml_profile_builds_reporting_support_only_for_public_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X, y = _profile_data()
+    model, term_name = _profile_model(
+        family_name="tweedie",
+        term_kind="re",
+        direct_solve="auto",
+    )
+    real_builder = reml_finalize_module.build_reporting_support_state
+    builder_calls = []
+
+    def record_builder(*args, **kwargs):
+        builder_calls.append(True)
+        return real_builder(*args, **kwargs)
+
+    monkeypatch.setattr(
+        reml_finalize_module,
+        "build_reporting_support_state",
+        record_builder,
+    )
+
+    result = model.estimate_p(
+        X,
+        y,
+        fit_mode="reml",
+        phi_method="pearson",
+        method="grid",
+        grid=np.array([1.4, 1.6]),
+    )
+
+    context = result._objective.__self__
+    scratch_model = context.model
+    assert len(builder_calls) == 1
+    assert getattr(scratch_model, "_reporting_support_state") is None
+    assert getattr(scratch_model, "_dm") is None
+    assert getattr(scratch_model, "_fit_state").retained is False
+    assert "_suppress_reporting_support" not in model.__dict__
+    assert term_name in getattr(model, "_reporting_support_state").support_totals
+
+    result._objective(1.5, source="ci_probe")
+
+    assert len(builder_calls) == 1
+    assert getattr(scratch_model, "_reporting_support_state") is None
+    assert getattr(scratch_model, "_dm") is None
+    assert getattr(scratch_model, "_fit_state").retained is False
+    _assert_report_pickle_parity(model, "re", term_name)
