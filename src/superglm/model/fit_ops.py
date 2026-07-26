@@ -1085,6 +1085,7 @@ def _fit_reml_in_workspace(
     runtime_validation="auto",
     verbose=False,
     w_correction_order=1,
+    durable_retain_fit_state: bool | None = None,
 ):
     """Run the complete REML attempt on private mutable model state."""
     from superglm.model.base import (
@@ -1336,6 +1337,7 @@ def _fit_reml_in_workspace(
             total_start=_t_total_start,
             compute_fit_stats=_compute_fit_stats,
             trace_run=getattr(debug_recorder, "trace_run", None),
+            durable_retain_fit_state=durable_retain_fit_state,
         )
         _t0 = _time.perf_counter()
         _prime_fit_caches(

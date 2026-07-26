@@ -298,6 +298,7 @@ def finalize_reml_fit(
     total_start: float,
     compute_fit_stats,
     trace_run: TraceRun | None = None,
+    durable_retain_fit_state: bool | None = None,
 ):
     """Finalize model state after a successful REML optimization run."""
     model._result = best.pirls_result
@@ -386,7 +387,14 @@ def finalize_reml_fit(
             ProfiledSumToZeroBlockFactor,
         ),
     )
-    retain_fit_state = bool(getattr(model, "_retain_fit_state", True))
+    # Profiled-family publication may retain rows transiently so it can
+    # synchronize phi and fit statistics after this refit. Compact reporting
+    # must still follow the durable public retention contract.
+    retain_reporting_rows = (
+        bool(getattr(model, "_retain_fit_state", True))
+        if durable_retain_fit_state is None
+        else bool(durable_retain_fit_state)
+    )
     reporting_state = (
         build_reporting_support_state(
             dm=model._dm,
@@ -397,10 +405,10 @@ def finalize_reml_fit(
             sample_weight=sample_weight,
             y=y,
             offset=offset_arr,
-            retain_fit_state=retain_fit_state,
+            retain_fit_state=retain_reporting_rows,
             information_by_group_index=_structured_information_by_group(final_cache),
         )
-        if not retain_fit_state or structured_terminal
+        if not retain_reporting_rows or structured_terminal
         else None
     )
     structured_linear_state = (
