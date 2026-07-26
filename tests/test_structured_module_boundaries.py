@@ -61,3 +61,15 @@ def test_schur_factors_have_internal_owner() -> None:
             "ProfiledScalarSchurFactor",
         ),
     )
+
+
+def test_backend_selection_has_internal_owner() -> None:
+    _assert_owned(
+        "selection",
+        (
+            "StructuredGroupSelection",
+            "StructuredBackendDecision",
+            "select_structured_group",
+            "resolve_structured_backend",
+        ),
+    )
