@@ -145,7 +145,7 @@ def select_structured_group(
     *,
     mode: Literal["auto", "structured"],
 ) -> StructuredGroupSelection:
-    """Select the largest eligible random-effect or factor-smooth block."""
+    """Select one algebraically supported dominant structured block."""
     if mode not in ("auto", "structured"):
         raise ValueError("Structured selection mode must be 'auto' or 'structured'.")
     if len(group_matrices) != len(groups):
@@ -163,15 +163,32 @@ def select_structured_group(
                 mode,
             )
 
-    candidates = [
+    factor_smooth_indices = [
         index
         for index, matrix in enumerate(group_matrices)
-        if isinstance(matrix, RandomEffectGroupMatrix | FactorSmoothGroupMatrix)
+        if isinstance(matrix, FactorSmoothGroupMatrix)
     ]
-    if not candidates:
+    random_effect_indices = [
+        index
+        for index, matrix in enumerate(group_matrices)
+        if isinstance(matrix, RandomEffectGroupMatrix)
+    ]
+    if len(factor_smooth_indices) > 1:
+        names = [groups[index].name for index in factor_smooth_indices]
+        return _selection_failure(
+            f"the structured backend supports at most one FactorSmooth term; found {names!r}",
+            mode,
+        )
+    if factor_smooth_indices:
+        dominant_index = factor_smooth_indices[0]
+    elif random_effect_indices:
+        dominant_index = max(
+            random_effect_indices,
+            key=lambda index: group_matrices[index].shape[1],
+        )
+    else:
         return _selection_failure("the model has no RandomEffect or FactorSmooth term", mode)
 
-    dominant_index = max(candidates, key=lambda index: group_matrices[index].shape[1])
     dominant_group = groups[dominant_index]
     dominant_matrix = group_matrices[dominant_index]
     if dominant_group.size != dominant_matrix.shape[1]:

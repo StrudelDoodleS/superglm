@@ -49,6 +49,24 @@ def _groups(group_matrices: list[GroupMatrix]) -> list[GroupSlice]:
     return groups
 
 
+def _factor_smooth_matrix(
+    n: int,
+    *,
+    levels: int,
+    k: int = 5,
+) -> FactorSmoothGroupMatrix:
+    x = np.linspace(-1.0, 1.0, n)
+    basis = np.column_stack([x**power for power in range(k)])
+    return FactorSmoothGroupMatrix(
+        sp.csr_matrix(basis),
+        np.arange(n, dtype=np.intp) % levels,
+        levels,
+        natural_map=np.eye(k),
+        levels=tuple(f"level-{index}" for index in range(levels)),
+        repeated_penalty_components=(("wiggle", np.eye(k)),),
+    )
+
+
 def _small_matrix_cases(n: int) -> list[tuple[str, GroupMatrix]]:
     rng = np.random.default_rng(843)
     numeric = DenseGroupMatrix(rng.normal(size=(n, 2)))
@@ -181,6 +199,36 @@ def test_select_structured_group_chooses_largest_random_effect_and_reports_ineli
     assert "RandomEffect" in auto.fallback_reason
     with pytest.raises(ValueError, match="RandomEffect"):
         select_structured_group(no_random_effect, no_random_groups, mode="structured")
+
+
+def test_structured_selection_rejects_multiple_factor_smooths_before_assembly():
+    matrices: list[GroupMatrix] = [
+        _factor_smooth_matrix(80, levels=8),
+        _factor_smooth_matrix(80, levels=6),
+    ]
+    groups = _groups(matrices)
+
+    auto = select_structured_group(matrices, groups, mode="auto")
+    assert auto.group_index is None
+    assert "at most one FactorSmooth" in auto.fallback_reason
+    assert groups[0].name in auto.fallback_reason
+    assert groups[1].name in auto.fallback_reason
+
+    with pytest.raises(ValueError, match="at most one FactorSmooth"):
+        select_structured_group(matrices, groups, mode="structured")
+
+
+def test_factor_smooth_is_dominant_candidate_even_when_random_effect_is_wider():
+    matrices: list[GroupMatrix] = [
+        RandomEffectGroupMatrix(np.arange(300) % 50, n_levels=50),
+        _factor_smooth_matrix(300, levels=8),
+    ]
+    groups = _groups(matrices)
+
+    selected = select_structured_group(matrices, groups, mode="structured")
+
+    assert selected.group_index == 1
+    assert selected.group_name == groups[1].name
 
 
 def test_select_structured_group_rejects_constraint_geometry():

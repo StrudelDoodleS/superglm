@@ -711,3 +711,101 @@ def test_auto_factor_smooth_falls_back_for_singular_local_blocks(
 
     assert model.result.direct_backend == "gram"
     assert "singular local block" in model.result.direct_fallback_reason
+
+
+def _multi_structured_data() -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(20260726)
+    n = 600
+    g1 = np.arange(n) % 8
+    g2 = np.arange(n) % 6
+    re = np.arange(n) % 50
+    x1 = rng.uniform(-1.0, 1.0, n)
+    x2 = rng.uniform(-1.0, 1.0, n)
+    y = 0.4 + 0.3 * x1 - 0.2 * x2 + rng.normal(scale=0.15, size=n)
+    X = pd.DataFrame(
+        {
+            "x1": x1,
+            "x2": x2,
+            "g1": np.array([f"a-{value}" for value in g1], dtype=object),
+            "g2": np.array([f"b-{value}" for value in g2], dtype=object),
+            "re": np.array([f"r-{value}" for value in re], dtype=object),
+        }
+    )
+    return X, y
+
+
+def test_two_factor_smooths_auto_fall_back_and_forced_structured_rejects():
+    X, y = _multi_structured_data()
+
+    def model(mode: str) -> SuperGLM:
+        return SuperGLM(
+            family="gaussian",
+            features={},
+            interactions=[
+                FactorSmooth(
+                    "x1",
+                    group="g1",
+                    k=5,
+                    lambda_policy=LambdaPolicy.fixed(1.0),
+                ),
+                FactorSmooth(
+                    "x2",
+                    group="g2",
+                    k=5,
+                    lambda_policy=LambdaPolicy.fixed(1.0),
+                ),
+            ],
+            selection_penalty=0.0,
+            direct_solve=mode,
+        )
+
+    gram = model("gram").fit_reml(X, y, runtime_validation="skip")
+    auto = model("auto").fit_reml(X, y, runtime_validation="skip")
+
+    assert auto.result.direct_backend == "gram"
+    assert "at most one FactorSmooth" in auto.result.direct_fallback_reason
+    np.testing.assert_allclose(auto.predict(X), gram.predict(X), atol=2e-8)
+
+    with pytest.raises(ValueError, match="at most one FactorSmooth"):
+        model("structured").fit_reml(X, y, runtime_validation="skip")
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_single_factor_smooth_dominates_wider_random_effect(basis: str):
+    X, y = _multi_structured_data()
+
+    def model(mode: str) -> SuperGLM:
+        features = {
+            "re": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.1)),
+        }
+        if basis == "sz":
+            features["x1"] = Spline(
+                n_knots=5,
+                lambda_policy=LambdaPolicy.fixed(1.2),
+            )
+        return SuperGLM(
+            family="gaussian",
+            features=features,
+            interactions=[
+                FactorSmooth(
+                    "x1",
+                    group="g1",
+                    basis=basis,
+                    k=5,
+                    lambda_policy=LambdaPolicy.fixed(0.9),
+                )
+            ],
+            selection_penalty=0.0,
+            direct_solve=mode,
+        )
+
+    gram = model("gram").fit_reml(X, y, runtime_validation="skip")
+    auto = model("auto").fit_reml(X, y, runtime_validation="skip")
+    structured = model("structured").fit_reml(X, y, runtime_validation="skip")
+
+    assert auto.result.direct_backend == "structured"
+    assert structured.result.direct_backend == "structured"
+    np.testing.assert_allclose(auto.predict(X), gram.predict(X), atol=3e-8)
+    np.testing.assert_allclose(structured.predict(X), gram.predict(X), atol=3e-8)
+    assert auto.result.deviance == pytest.approx(gram.result.deviance, abs=2e-8)
+    assert structured.result.deviance == pytest.approx(gram.result.deviance, abs=2e-8)
