@@ -303,7 +303,7 @@ class FactorSmooth:
             qr_r = np.asarray(np.linalg.qr(raw_dense, mode="r"), dtype=np.float64)
             self._marginal_build_backend = "dense_qr_compat"
 
-        if self.basis == "sz" and (
+        if (
             qr_r.shape != (self.k, self.k)
             or len(x) < self.k
             or np.linalg.matrix_rank(qr_r) < self.k

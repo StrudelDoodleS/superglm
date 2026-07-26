@@ -147,6 +147,23 @@ def test_factor_smooth_reports_clear_marginal_rank_error(basis) -> None:
         )
 
 
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+@pytest.mark.parametrize("discrete", [False, True])
+def test_factor_smooth_reports_clear_rank_error_when_rows_are_fewer_than_k(
+    basis: str,
+    discrete: bool,
+) -> None:
+    spec = FactorSmooth("x", group="g", basis=basis, k=6)
+    x = np.linspace(0.0, 1.0, 5)
+    group = np.array(["a", "b", "a", "b", "a"], dtype=object)
+
+    with pytest.raises(ValueError, match=r"smaller k.*non-smooth"):
+        if discrete:
+            spec.build_discrete(x, group, {}, 8)
+        else:
+            spec.build(x, group, {})
+
+
 def test_factor_smooth_basis_defaults_and_names() -> None:
     fs = FactorSmooth("age", group="region")
     sz = FactorSmooth("age", group="region", basis="sz")
