@@ -23,6 +23,51 @@ def _component_indices(component: PenaltyComponent, size: int) -> NDArray[np.int
     return indices
 
 
+def _expanded_component_omega(
+    component: PenaltyComponent,
+    omega: NDArray,
+    group_width: int,
+) -> NDArray:
+    """Expand one compact solver-space penalty to its coefficient block."""
+    values = np.asarray(omega, dtype=np.float64)
+    if component.penalty_kind == "sum_to_zero":
+        n_levels = int(component.repeat_count)
+        block_width = component.block_width
+        if n_levels < 2 or block_width is None or (n_levels - 1) * int(block_width) != group_width:
+            raise ValueError(
+                f"Sum-to-zero penalty component {component.name!r} has invalid geometry."
+            )
+        expected_shape = (int(block_width), int(block_width))
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"Sum-to-zero penalty component {component.name!r} has shape {values.shape}; "
+                f"expected {expected_shape}."
+            )
+        return sum_to_zero_penalty(values, n_levels)
+    if component.penalty_kind == "repeated":
+        repeat_count = int(component.repeat_count)
+        block_width = component.block_width
+        if (
+            repeat_count < 1
+            or block_width is None
+            or repeat_count * int(block_width) != group_width
+        ):
+            raise ValueError(f"Repeated penalty component {component.name!r} has invalid geometry.")
+        expected_shape = (int(block_width), int(block_width))
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"Repeated penalty component {component.name!r} has shape {values.shape}; "
+                f"expected {expected_shape}."
+            )
+        return np.kron(np.eye(repeat_count, dtype=np.float64), values)
+    if values.shape != (group_width, group_width):
+        raise ValueError(
+            f"Penalty component {component.name!r} has shape {values.shape}; "
+            f"expected ({group_width}, {group_width})."
+        )
+    return values
+
+
 def _component_omega(component: PenaltyComponent, size: int) -> NDArray:
     """Return a dense penalty block when the component is not implicit identity."""
     indices = _component_indices(component, size)
@@ -30,37 +75,11 @@ def _component_omega(component: PenaltyComponent, size: int) -> NDArray:
         raise ValueError("Implicit identity penalties do not have a dense matrix.")
     if component.omega_ssp is None:
         raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
-    omega = np.asarray(component.omega_ssp, dtype=np.float64)
-    if component.penalty_kind == "sum_to_zero":
-        n_levels = int(component.repeat_count)
-        block_width = component.block_width
-        if n_levels < 2 or block_width is None or (n_levels - 1) * int(block_width) != len(indices):
-            raise ValueError(
-                f"Sum-to-zero penalty component {component.name!r} has invalid geometry."
-            )
-        if omega.shape != (int(block_width), int(block_width)):
-            raise ValueError(
-                f"Sum-to-zero penalty component {component.name!r} has shape {omega.shape}; "
-                f"expected ({int(block_width)}, {int(block_width)})."
-            )
-        return sum_to_zero_penalty(omega, n_levels)
-    if component.penalty_kind == "repeated":
-        repeat_count = int(component.repeat_count)
-        block_width = component.block_width
-        if block_width is None or repeat_count * int(block_width) != len(indices):
-            raise ValueError(f"Repeated penalty component {component.name!r} has invalid geometry.")
-        if omega.shape != (int(block_width), int(block_width)):
-            raise ValueError(
-                f"Repeated penalty component {component.name!r} has shape {omega.shape}; "
-                f"expected ({int(block_width)}, {int(block_width)})."
-            )
-        return np.kron(np.eye(repeat_count, dtype=np.float64), omega)
-    if omega.shape != (len(indices), len(indices)):
-        raise ValueError(
-            f"Penalty component {component.name!r} has shape {omega.shape}; "
-            f"expected ({len(indices)}, {len(indices)})."
-        )
-    return omega
+    return _expanded_component_omega(
+        component,
+        component.omega_ssp,
+        len(indices),
+    )
 
 
 @runtime_checkable

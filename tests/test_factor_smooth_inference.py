@@ -13,6 +13,7 @@ from superglm import (
     FactorSmoothResult,
     LambdaPolicy,
     Numeric,
+    Spline,
     SuperGLM,
 )
 from superglm.solvers.structured import FactorSmoothLevelSupport
@@ -81,6 +82,54 @@ def _model(
         direct_solve=direct_solve,
         retain_fit_state=retain_fit_state,
     )
+
+
+@pytest.mark.parametrize("basis", ["fs", "sz"])
+def test_factor_smooth_evaluation_metrics_expand_structured_penalties(
+    basis: str,
+) -> None:
+    X, y = _data()
+    policies = (
+        {
+            "wiggle": LambdaPolicy.fixed(1.3),
+            "null_0": LambdaPolicy.fixed(0.7),
+            "null_1": LambdaPolicy.fixed(0.9),
+        }
+        if basis == "fs"
+        else {"wiggle": LambdaPolicy.fixed(1.3)}
+    )
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "z": Numeric(),
+            **(
+                {"x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))}
+                if basis == "sz"
+                else {}
+            ),
+        },
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="segment",
+                basis=basis,
+                k=6,
+                lambda_policy=policies,
+            )
+        ],
+        selection_penalty=0.0,
+        direct_solve="gram",
+    ).fit_reml(
+        X,
+        y,
+        max_reml_iter=1,
+        runtime_validation="skip",
+    )
+
+    leverage = model.metrics(X.copy(), y.copy()).leverage
+
+    assert leverage.shape == y.shape
+    assert np.all(np.isfinite(leverage))
 
 
 @pytest.mark.parametrize("discrete", [False, True])

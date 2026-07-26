@@ -3814,10 +3814,6 @@ def _sum_to_zero_public_spectral_estimability(
     scaled_null_bases = exact_null_geometry.scaled_bases
     retained_constraint_row_space = exact_null_geometry.retained_constraint_row_space
     exact_null_row_norm = exact_null_geometry.row_norm
-    active_null_basis_map = scipy.sparse.block_diag(
-        scaled_null_bases,
-        format="csr",
-    )[active_columns]
     combined_bases = tuple(
         _orthonormal_column_span(np.column_stack((exact_basis, weak_basis)))
         for exact_basis, weak_basis in zip(
@@ -3839,6 +3835,11 @@ def _sum_to_zero_public_spectral_estimability(
         combined_bases,
         combined_row_space,
     )
+
+    active_null_basis_map = scipy.sparse.block_diag(
+        scaled_null_bases,
+        format="csr",
+    )[active_columns]
 
     def project_exact_null(vectors: NDArray) -> NDArray:
         values = np.asarray(vectors, dtype=np.float64)
@@ -3992,12 +3993,46 @@ def _sum_to_zero_public_spectral_estimability(
             )
             return local_solution - inverse_update @ multiplier
 
-        def shifted_inverse_matvec(rhs: NDArray) -> NDArray:
+        def approximate_shifted_inverse_matvec(rhs: NDArray) -> NDArray:
             exact_component = project_exact_null(rhs)
             complement = np.asarray(rhs, dtype=np.float64) - exact_component
             complement_solution = original_shifted_inverse_matvec(complement)
             complement_solution -= project_exact_null(complement_solution)
             return complement_solution + exact_component / (largest_eigenvalue_upper - shift)
+
+        def deflated_shifted_matvec(rhs: NDArray) -> NDArray:
+            values = np.asarray(rhs, dtype=np.float64)
+            return deflated_matvec(values) - shift * values
+
+        deflated_shifted_operator = scipy.sparse.linalg.LinearOperator(
+            (width, width),
+            matvec=deflated_shifted_matvec,
+            dtype=np.float64,
+        )
+        approximate_shifted_inverse = scipy.sparse.linalg.LinearOperator(
+            (width, width),
+            matvec=approximate_shifted_inverse_matvec,
+            dtype=np.float64,
+        )
+        # Since |shift| is factor_rcond times the spectral scale, this relative
+        # solve tolerance keeps inverse error below one quarter of the Gram
+        # rank cutoff while usually accepting the Woodbury predictor directly.
+        shifted_solve_rtol = 0.25 * SHARED_RANK_POLICY.factor_rcond
+
+        def shifted_inverse_matvec(rhs: NDArray) -> NDArray:
+            values = np.asarray(rhs, dtype=np.float64)
+            solution, info = scipy.sparse.linalg.cg(
+                deflated_shifted_operator,
+                values,
+                x0=approximate_shifted_inverse_matvec(values),
+                M=approximate_shifted_inverse,
+                rtol=shifted_solve_rtol,
+                atol=0.0,
+                maxiter=min(width, max(20, 8 * block_size)),
+            )
+            if info != 0:
+                raise np.linalg.LinAlgError("deflated public SZ shifted solve did not converge")
+            return solution
 
         shifted_inverse = scipy.sparse.linalg.LinearOperator(
             (width, width),
@@ -4006,9 +4041,12 @@ def _sum_to_zero_public_spectral_estimability(
         )
         probe = np.sin(np.arange(width, dtype=np.float64) + 0.25)
         probe_solution = shifted_inverse_matvec(probe)
-        relative_residual = np.linalg.norm(
-            deflated_matvec(probe_solution) - shift * probe_solution - probe
-        ) / max(float(np.linalg.norm(probe)), np.finfo(np.float64).tiny)
+        relative_residual = np.linalg.norm(deflated_shifted_matvec(probe_solution) - probe) / max(
+            float(np.linalg.norm(probe)), np.finfo(np.float64).tiny
+        )
+        # This catches catastrophic preconditioner failure only.  Rank
+        # certification uses the residual interval of every returned Ritz
+        # pair below, rather than treating this single probe as an error bound.
         if not np.isfinite(relative_residual) or relative_residual > 1e-5:
             raise np.linalg.LinAlgError("shifted public SZ inverse failed its residual check")
 
@@ -4064,7 +4102,20 @@ def _sum_to_zero_public_spectral_estimability(
             exact_null_row_norm.ravel()[active_columns] ** 2 + np.sum(additional_basis**2, axis=1)
         )
     else:
-        null_row_norm = np.linalg.norm(eigenvectors[:, discarded], axis=1)
+        null_leverage = np.sum(eigenvectors[:, discarded] ** 2, axis=1)
+        # Leverage is the squared null-space row norm, so its policy boundary
+        # is gram_rcond.  A value inside the certification band can be mere
+        # Gram-eigenspace leakage; resolve only that bounded case against the
+        # complete centered Gram, where the small/structured geometry is joint.
+        ambiguous_leverage = (null_leverage > SHARED_RANK_POLICY.gram_rcond) & (
+            null_leverage <= SHARED_RANK_POLICY.certification_band * SHARED_RANK_POLICY.gram_rcond
+        )
+        if np.any(ambiguous_leverage):
+            if operator.shape[0] <= _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH:
+                dense_estimable = _bounded_centered_estimability(operator)
+                return dense_estimable[raw.structured_indices]
+            return result
+        null_row_norm = np.sqrt(null_leverage)
     result.ravel()[active_columns] = null_row_norm <= SHARED_RANK_POLICY.factor_rcond
     return result
 

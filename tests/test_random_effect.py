@@ -61,6 +61,11 @@ def test_random_effect_rejects_unsupported_missing_policy():
         RandomEffect(missing="level")
 
 
+def test_random_effect_rejects_invalid_lambda_policy_at_construction():
+    with pytest.raises(TypeError, match="LambdaPolicy"):
+        RandomEffect(lambda_policy="fixed")
+
+
 def test_random_effect_build_codes_every_fitted_level_without_a_base():
     policy = LambdaPolicy.fixed(3.0)
     spec = RandomEffect(lambda_policy=policy)

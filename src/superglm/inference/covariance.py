@@ -17,7 +17,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
-from superglm.solvers.hessian_factor import HessianFactor
+from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
 from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.solvers.structured import (
     ProfiledBlockSchurFactor,
@@ -408,6 +408,11 @@ def _active_penalty_matrix(
                 component.omega_ssp
                 if component.omega_ssp is not None
                 else gm.R_inv.T @ component.omega_raw @ gm.R_inv
+            )
+            omega = _expanded_component_omega(
+                component,
+                omega,
+                active_group.size,
             )
             S[active_group.sl, active_group.sl] += lam * omega
 

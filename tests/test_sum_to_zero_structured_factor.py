@@ -1161,6 +1161,92 @@ def test_sum_to_zero_structural_null_norm_uses_factor_cutoff() -> None:
     assert cutoff == np.sqrt(np.finfo(np.float64).eps)
 
 
+def test_wide_sum_to_zero_deflated_inverse_handles_heterogeneous_scales(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(18)
+    n_levels = 13
+    block_size = 4
+    rows_per_level = 6
+    local_factors = []
+    for _level in range(n_levels):
+        left = rng.normal(size=(rows_per_level, 3))
+        right = rng.normal(size=(3, block_size))
+        coordinate_scale = 10.0 ** rng.uniform(-6.0, 6.0, size=block_size)
+        local_factors.append((left @ right) * coordinate_scale)
+    small = rng.normal(size=(n_levels * rows_per_level, 3))
+    operator, public_design = _sum_to_zero_centered_operator(
+        np.stack(local_factors),
+        small,
+    )
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    np.testing.assert_array_equal(
+        np.flatnonzero(expected.coefficient_estimable()),
+        np.array([0, 1, 2, 22]),
+    )
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("deflated SZ shift-invert must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+
+
+def test_small_sum_to_zero_spectrum_filters_gram_eigenspace_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.default_rng(4)
+    n_levels = 16
+    block_size = 2
+    rows_per_level = 4
+    local_factors = []
+    for _level in range(n_levels):
+        local_rank = int(rng.integers(1, 3))
+        left = rng.normal(size=(rows_per_level, local_rank))
+        right = rng.normal(size=(local_rank, block_size))
+        coordinate_scale = 10.0 ** rng.uniform(-4.0, 4.0, size=block_size)
+        local_factors.append((left @ right) * coordinate_scale)
+    small = rng.normal(size=(n_levels * rows_per_level, 3))
+    operator, public_design = _sum_to_zero_centered_operator(
+        np.stack(local_factors),
+        small,
+    )
+    centered_design = public_design - np.mean(public_design, axis=0)
+    expected = decompose_factor(centered_design)
+    gram_expected = decompose_gram(centered_design.T @ centered_design)
+    np.testing.assert_array_equal(
+        gram_expected.coefficient_estimable(),
+        expected.coefficient_estimable(),
+    )
+
+    fallback_calls = 0
+
+    def certified_dense_fallback(
+        fallback_operator: CenteredBlockOperator,
+    ) -> np.ndarray:
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return decompose_gram(
+            materialize_compact_operator(fallback_operator)
+        ).coefficient_estimable()
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        certified_dense_fallback,
+    )
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected.coefficient_estimable(),
+    )
+    assert fallback_calls == 1
+
+
 def test_wide_sum_to_zero_public_rank_certificate_stays_block_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

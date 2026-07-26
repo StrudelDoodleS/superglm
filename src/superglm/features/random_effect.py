@@ -25,6 +25,8 @@ class RandomEffect:
             raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
         if missing != "error":
             raise ValueError(f"missing must be 'error', got {missing!r}")
+        if lambda_policy is not None and not isinstance(lambda_policy, LambdaPolicy):
+            raise TypeError("lambda_policy must be a LambdaPolicy or None")
 
         self.unseen = unseen
         self.missing = missing
