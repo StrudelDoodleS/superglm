@@ -31,7 +31,12 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
-from superglm.solvers.rank import SHARED_RANK_POLICY, RankDecomposition, decompose_gram
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    RankDecomposition,
+    decompose_gram,
+    needs_factor_certification,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 if TYPE_CHECKING:
@@ -3066,12 +3071,29 @@ def _orthonormal_column_span(values: NDArray) -> NDArray:
     basis = np.asarray(values, dtype=np.float64)
     if basis.shape[1] == 0:
         return np.empty((basis.shape[0], 0), dtype=np.float64)
-    orthonormal, _triangular = scipy.linalg.qr(
-        basis,
-        mode="economic",
-        check_finite=False,
+    return np.asarray(
+        scipy.linalg.orth(
+            basis,
+            rcond=SHARED_RANK_POLICY.factor_rcond,
+        ),
+        dtype=np.float64,
     )
-    return np.asarray(orthonormal, dtype=np.float64)
+
+
+def _certified_local_null_basis(
+    block: NDArray,
+    decomposition: RankDecomposition,
+) -> NDArray:
+    """Augment a local Gram null basis when factor certification is unavailable."""
+    candidates = decomposition.null_basis()
+    if decomposition.rank < decomposition.width or needs_factor_certification(decomposition):
+        inherited_null = _null_basis_with_inherited_gram_scale(
+            block,
+            coordinate_gram=block,
+            roundoff_reference=np.abs(block),
+        )
+        candidates = np.column_stack((candidates, inherited_null))
+    return _orthonormal_column_span(candidates)
 
 
 def _local_range_inverse_and_null_projector(
@@ -3079,28 +3101,94 @@ def _local_range_inverse_and_null_projector(
     decomposition: RankDecomposition,
 ) -> tuple[NDArray, NDArray]:
     """Return the inverse on a local PSD range and its Euclidean null projector."""
-    null_basis = decomposition.null_basis()
-    null_width = null_basis.shape[1]
-    if null_width == 0:
+    width = block.shape[0]
+    null = _certified_local_null_basis(block, decomposition)
+    if null.shape[1] == 0:
         return decomposition.pseudo_inverse(), np.zeros_like(block)
 
-    complete_basis, _triangular = scipy.linalg.qr(
-        null_basis,
-        mode="full",
-        check_finite=False,
-    )
-    null = np.asarray(complete_basis[:, :null_width], dtype=np.float64)
-    range_basis = np.asarray(complete_basis[:, null_width:], dtype=np.float64)
-    null_projector = null @ null.T
-    if range_basis.shape[1] == 0:
-        return np.zeros_like(block), null_projector
+    # A formed local moment can retain a roundoff eigenvalue that its first
+    # Gram decomposition cannot distinguish from data information.  Re-test
+    # the proposed range and fold any residual null directions back into the
+    # Euclidean null space.  Each pass strictly shrinks the range, so this
+    # bounded loop costs only small block-size decompositions.
+    for _pass in range(width + 1):
+        null_width = null.shape[1]
+        if null_width == 0:
+            range_basis = np.eye(width)
+        else:
+            complete_basis, _triangular = scipy.linalg.qr(
+                null,
+                mode="full",
+                check_finite=False,
+            )
+            null = np.asarray(complete_basis[:, :null_width], dtype=np.float64)
+            range_basis = np.asarray(complete_basis[:, null_width:], dtype=np.float64)
+        null_projector = null @ null.T
+        if range_basis.shape[1] == 0:
+            return np.zeros_like(block), null_projector
 
-    reduced = range_basis.T @ block @ range_basis
-    reduced_decomposition = decompose_gram(0.5 * (reduced + reduced.T))
-    if reduced_decomposition.rank != range_basis.shape[1]:
-        raise np.linalg.LinAlgError("local range remained singular after removing its null space")
-    inverse = range_basis @ reduced_decomposition.pseudo_inverse() @ range_basis.T
-    return 0.5 * (inverse + inverse.T), null_projector
+        reduced = range_basis.T @ block @ range_basis
+        reduced_decomposition = decompose_gram(0.5 * (reduced + reduced.T))
+        residual_null = _certified_local_null_basis(reduced, reduced_decomposition)
+        if residual_null.shape[1] == 0:
+            inverse = range_basis @ reduced_decomposition.pseudo_inverse() @ range_basis.T
+            return 0.5 * (inverse + inverse.T), null_projector
+
+        expanded_null = range_basis @ residual_null
+        null = _orthonormal_column_span(np.column_stack((null, expanded_null)))
+
+    raise np.linalg.LinAlgError("local null-space refinement did not converge")
+
+
+def _null_basis_with_inherited_gram_scale(
+    residual: NDArray,
+    *,
+    coordinate_gram: NDArray,
+    roundoff_reference: NDArray,
+    absolute_error: NDArray | None = None,
+) -> NDArray:
+    """Rank a residual against its source scale and a posteriori error bound."""
+    residual = 0.5 * (np.asarray(residual, dtype=np.float64) + residual.T)
+    coordinate_gram = np.asarray(coordinate_gram, dtype=np.float64)
+    width = residual.shape[0]
+    coordinate_scale = np.sqrt(np.maximum(np.diag(coordinate_gram), 0.0))
+    active = np.flatnonzero(coordinate_scale > 0.0)
+    inactive = np.flatnonzero(coordinate_scale == 0.0)
+
+    pieces: list[NDArray] = []
+    if inactive.size:
+        structural_null = np.zeros((width, len(inactive)), dtype=np.float64)
+        structural_null[inactive, np.arange(len(inactive))] = 1.0
+        pieces.append(structural_null)
+    if active.size:
+        active_scale = coordinate_scale[active]
+        scale_outer = np.outer(active_scale, active_scale)
+        active_residual = residual[np.ix_(active, active)] / scale_outer
+        active_reference = (
+            np.asarray(roundoff_reference, dtype=np.float64)[np.ix_(active, active)] / scale_outer
+        )
+        reference_scale = max(float(np.linalg.norm(active_reference, ord=2)), 1.0)
+        absolute_error_scale = 0.0
+        if absolute_error is not None:
+            active_error = (
+                np.asarray(absolute_error, dtype=np.float64)[np.ix_(active, active)] / scale_outer
+            )
+            absolute_error_scale = float(np.linalg.norm(active_error, ord=2))
+        cutoff = (
+            SHARED_RANK_POLICY.certification_band * SHARED_RANK_POLICY.gram_rcond * reference_scale
+        ) + absolute_error_scale
+        eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (active_residual + active_residual.T))
+        if eigenvalues[0] < -100.0 * cutoff:
+            raise np.linalg.LinAlgError("reduced SZ Schur complement is materially indefinite")
+        discarded = eigenvectors[:, eigenvalues <= cutoff]
+        if discarded.shape[1]:
+            numerical_null = np.zeros((width, discarded.shape[1]), dtype=np.float64)
+            numerical_null[active] = discarded / active_scale[:, None]
+            pieces.append(numerical_null)
+
+    if not pieces:
+        return np.empty((width, 0), dtype=np.float64)
+    return np.column_stack(pieces)
 
 
 def _deficient_sum_to_zero_centered_estimability(
@@ -3116,6 +3204,7 @@ def _deficient_sum_to_zero_centered_estimability(
 
     local_inverse = np.empty_like(raw.D)
     local_null_projector = np.empty_like(raw.D)
+    total_local_null_dimension = 0
     for level, (block, decomposition) in enumerate(zip(raw.D, local_decompositions, strict=True)):
         inverse, null_projector = _local_range_inverse_and_null_projector(
             block,
@@ -3123,14 +3212,24 @@ def _deficient_sum_to_zero_centered_estimability(
         )
         local_inverse[level] = inverse
         local_null_projector[level] = null_projector
+        total_local_null_dimension += int(np.rint(np.trace(null_projector)))
 
     # Zero local energy requires b_k in null(D_k).  The sum-to-zero
     # constraint couples those directions through only the k-by-k normal
     # matrix sum(P_k), regardless of the number of levels.
     constraint_null_gram = np.sum(local_null_projector, axis=0)
     constraint_null_rank = decompose_gram(0.5 * (constraint_null_gram + constraint_null_gram.T))
-    constraint_null_inverse = constraint_null_rank.pseudo_inverse()
-    multiplier_basis = _orthonormal_column_span(constraint_null_rank.null_basis())
+    constraint_null_inverse, constraint_common_range_projector = (
+        _local_range_inverse_and_null_projector(
+            constraint_null_gram,
+            constraint_null_rank,
+        )
+    )
+    multiplier_basis = _orthonormal_column_span(constraint_common_range_projector)
+    constraint_rank = raw.block_size - multiplier_basis.shape[1]
+    constrained_null_dimension = total_local_null_dimension - constraint_rank
+    if constrained_null_dimension < 0:  # pragma: no cover - numerical invariant
+        raise np.linalg.LinAlgError("SZ local-null constraint rank exceeds its domain")
 
     q = len(raw.small_indices)
     C_augmented = np.empty((raw.n_levels, raw.block_size, q + 1), dtype=np.float64)
@@ -3156,11 +3255,9 @@ def _deficient_sum_to_zero_centered_estimability(
             raise np.linalg.LinAlgError(
                 "SZ constraint multiplier is singular on the common local range"
             )
+        restricted_inverse = restricted_rank.pseudo_inverse()
         multiplier_map = (
-            -multiplier_basis
-            @ restricted_rank.pseudo_inverse()
-            @ multiplier_basis.T
-            @ constraint_cross
+            -multiplier_basis @ restricted_inverse @ multiplier_basis.T @ constraint_cross
         )
 
     constraint_residual = constraint_cross + constraint_covariance @ multiplier_map
@@ -3179,17 +3276,6 @@ def _deficient_sum_to_zero_centered_estimability(
             "SZ cross moments are incompatible with the constrained local ranges"
         )
 
-    schur = _augmented_small_data_block(operator)
-    schur -= np.einsum(
-        "kiq,kir->qr",
-        C_augmented,
-        inverse_cross,
-        optimize=True,
-    )
-    schur -= constraint_cross.T @ multiplier_map
-    small_rank = decompose_gram(0.5 * (schur + schur.T))
-    small_null = small_rank.null_basis()
-
     structured_map = -inverse_cross
     structured_map -= np.einsum(
         "kij,jq->kiq",
@@ -3203,6 +3289,53 @@ def _deficient_sum_to_zero_centered_estimability(
         null_dual,
         optimize=True,
     )
+    schur_source = _augmented_small_data_block(operator)
+    structured_projection = np.einsum(
+        "kiq,kir->qr",
+        C_augmented,
+        inverse_cross,
+        optimize=True,
+    )
+    constraint_projection = constraint_cross.T @ multiplier_map
+    schur = schur_source - structured_projection - constraint_projection
+    projection_magnitude = np.einsum(
+        "kiq,kir->qr",
+        np.abs(C_augmented),
+        np.abs(inverse_cross),
+        optimize=True,
+    )
+    constraint_magnitude = np.abs(constraint_cross).T @ np.abs(multiplier_map)
+
+    # The reduced Schur block is a subtraction of fitted structured energy
+    # from the raw small Gram.  Its KKT residual provides an a posteriori
+    # floating-point error bound: exact aliases can otherwise leave positive
+    # cancellation dust larger than a plain eps-scaled cutoff, while genuine
+    # weak residual directions remain certifiable when this bound is small.
+    kkt_residual = inverse_cross
+    np.einsum(
+        "kij,kjq->kiq",
+        raw.D,
+        structured_map,
+        out=kkt_residual,
+        optimize=True,
+    )
+    kkt_residual += C_augmented
+    kkt_residual += multiplier_map[None, :, :]
+    constraint_map_residual = np.sum(structured_map, axis=0)
+    schur_absolute_error = np.einsum(
+        "kiq,kir->qr",
+        np.abs(structured_map),
+        np.abs(kkt_residual),
+        optimize=True,
+    )
+    schur_absolute_error += np.abs(multiplier_map).T @ np.abs(constraint_map_residual)
+    small_null = _null_basis_with_inherited_gram_scale(
+        schur,
+        coordinate_gram=schur_source,
+        roundoff_reference=np.abs(schur_source) + projection_magnitude + constraint_magnitude,
+        absolute_error=schur_absolute_error,
+    )
+
     structured_lift = np.einsum(
         "kiq,qr->kir",
         structured_map,
@@ -3214,13 +3347,21 @@ def _deficient_sum_to_zero_centered_estimability(
         structured_lift,
     )
 
-    inherent_null_norm = np.empty((raw.n_levels, raw.block_size), dtype=np.float64)
-    for level, projector in enumerate(local_null_projector):
-        # P_k - P_k sum(P_k)^+ P_k is the local diagonal block of the
-        # constrained null projector.  Its diagonal tells whether each raw
-        # coefficient can still move inside a zero-energy sum-to-zero vector.
-        constrained_projector = projector - projector @ constraint_null_inverse @ projector
-        inherent_null_norm[level] = np.sqrt(np.maximum(np.diag(constrained_projector), 0.0))
+    inherent_null_norm = np.zeros((raw.n_levels, raw.block_size), dtype=np.float64)
+    if constrained_null_dimension:
+        for level, projector in enumerate(local_null_projector):
+            # P_k - P_k sum(P_k)^+ P_k is the local diagonal block of the
+            # constrained null projector.  Its diagonal tells whether each raw
+            # coefficient can still move inside a zero-energy sum-to-zero vector.
+            constrained_projector = projector - projector @ constraint_null_inverse @ projector
+            constrained_diagonal = np.diag(constrained_projector).copy()
+            projector_noise = (
+                SHARED_RANK_POLICY.certification_band
+                * SHARED_RANK_POLICY.gram_rcond
+                * max(float(np.linalg.norm(constrained_projector)), 1.0)
+            )
+            constrained_diagonal[np.abs(constrained_diagonal) <= projector_noise] = 0.0
+            inherent_null_norm[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
 
     result = np.empty(operator.shape[0], dtype=bool)
     result[raw.small_indices] = small_null_norm[1:] <= SHARED_RANK_POLICY.factor_rcond

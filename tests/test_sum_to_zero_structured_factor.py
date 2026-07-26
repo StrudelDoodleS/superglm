@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
-from superglm.solvers.rank import decompose_gram
+from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.solvers.structured import (
     CenteredBlockOperator,
     SumToZeroBlockOperator,
@@ -668,3 +668,132 @@ def test_wide_deficient_sum_to_zero_estimability_matches_dense_compactly(
 
     np.testing.assert_array_equal(actual, expected)
     assert actual[small_indices[0]]
+
+
+def test_wide_deficient_sum_to_zero_expands_roundoff_local_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 130
+    block_size = 4
+    small_indices = np.array([0], dtype=np.intp)
+    structured_indices = np.arange(
+        1,
+        1 + (n_levels - 1) * block_size,
+        dtype=np.intp,
+    ).reshape(n_levels - 1, block_size)
+    local_factor = np.random.default_rng(3).normal(size=(2, block_size))
+    D = np.tile(np.eye(block_size), (n_levels, 1, 1))
+    D[0] = local_factor.T @ local_factor
+    raw = SumToZeroBlockOperator(
+        A=np.array([[2.0]]),
+        C=np.zeros((n_levels, block_size, 1)),
+        D=D,
+        small_indices=small_indices,
+        structured_indices=structured_indices,
+    )
+    cross = np.zeros(raw.shape[0])
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=1.0,
+        center=cross,
+        raw_structured_cross=np.zeros((n_levels, block_size)),
+    )
+    expected = decompose_gram(materialize_compact_operator(operator)).coefficient_estimable()
+
+    # The formed moment retains one roundoff direction that the row factor
+    # correctly rejects.  The compact path must expand that residual null
+    # instead of abandoning all inference for this 517-column system.
+    assert decompose_factor(local_factor).rank == 2
+    assert decompose_gram(D[0]).rank == 3
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide deficient SZ estimability must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    np.testing.assert_array_equal(centered_operator_coefficient_estimable(operator), expected)
+
+
+def test_wide_deficient_sum_to_zero_schur_rank_uses_augmented_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_levels = 258
+    block_size = 2
+    codes = np.repeat(np.arange(n_levels), block_size)
+    local_basis = np.tile(np.eye(block_size), (n_levels, 1))
+    local_basis[: 2 * block_size] = np.tile(
+        np.array([[1.0, 0.0], [2.0, 0.0]]),
+        (2, 1),
+    )
+    level_masks = tuple(codes == level for level in range(n_levels))
+    free_structured = np.zeros((len(codes), (n_levels - 1) * block_size))
+    for level, mask in enumerate(level_masks[:-1]):
+        block_slice = slice(level * block_size, (level + 1) * block_size)
+        free_structured[mask, block_slice] = local_basis[mask]
+    free_structured[level_masks[-1]] = np.tile(
+        -local_basis[level_masks[-1]],
+        n_levels - 1,
+    )
+
+    alias_map = np.zeros((free_structured.shape[1], 2))
+    alias_map[:8] = np.array(
+        [
+            [0.0, 1.0],
+            [-1.0, -3.0],
+            [1.0, -3.0],
+            [-2.0, 2.0],
+            [0.0, 1.0],
+            [3.0, -2.0],
+            [2.0, 2.0],
+            [-1.0, -2.0],
+        ]
+    )
+    small = free_structured @ alias_map
+    public_design = np.column_stack((small, free_structured))
+    cross = public_design.T @ np.ones(len(codes))
+    C = np.stack(
+        [local_basis[mask].T @ small[mask] for mask in level_masks],
+    )
+    D = np.stack(
+        [local_basis[mask].T @ local_basis[mask] for mask in level_masks],
+    )
+    raw_structured_cross = np.stack(
+        [local_basis[mask].T @ np.ones(np.count_nonzero(mask)) for mask in level_masks],
+    )
+    raw = SumToZeroBlockOperator(
+        A=small.T @ small,
+        C=C,
+        D=D,
+        small_indices=np.arange(2, dtype=np.intp),
+        structured_indices=np.arange(
+            2,
+            2 + (n_levels - 1) * block_size,
+            dtype=np.intp,
+        ).reshape(n_levels - 1, block_size),
+    )
+    operator = CenteredBlockOperator(
+        raw=raw,
+        cross=cross,
+        total=float(len(codes)),
+        center=cross / len(codes),
+        raw_structured_cross=raw_structured_cross,
+    )
+    centered_design = public_design - np.mean(public_design, axis=0)
+    expected = decompose_factor(centered_design).coefficient_estimable()
+    assert not np.any(expected[raw.small_indices])
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide deficient SZ estimability must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers.structured._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
+    actual = centered_operator_coefficient_estimable(operator)
+
+    np.testing.assert_array_equal(actual, expected)
