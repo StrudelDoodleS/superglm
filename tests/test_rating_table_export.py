@@ -366,6 +366,94 @@ def test_summary_export_does_not_label_structured_metadata_as_wald_test(
     assert "Group chi-square p-values are Wald approximations" not in notes
 
 
+@pytest.mark.parametrize("basis", [None, "fs", "sz"])
+def test_rating_table_export_rejects_structured_terms_before_impact(
+    basis: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    rng = np.random.default_rng(20260726)
+    n = 160
+    x = rng.uniform(-1.0, 1.0, n)
+    codes = np.arange(n) % 5
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "group": np.array([f"g-{code}" for code in codes], dtype=object),
+        }
+    )
+    y = 0.5 + 0.3 * x + rng.normal(scale=0.15, size=n)
+    if basis is None:
+        features = {
+            "x": Spline(k=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+            "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        }
+        interactions = None
+        expected = "group"
+    else:
+        features = {"x": Spline(k=6, lambda_policy=LambdaPolicy.fixed(1.0))}
+        interactions = [
+            FactorSmooth(
+                "x",
+                group="group",
+                basis=basis,
+                k=5,
+                lambda_policy=LambdaPolicy.fixed(1.0),
+            )
+        ]
+        expected = f"x:group:{basis}"
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=interactions,
+        selection_penalty=0.0,
+        direct_solve="gram",
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    monkeypatch.setattr(
+        model,
+        "discretization_impact",
+        lambda *_args, **_kwargs: pytest.fail("impact analysis ran before export preflight"),
+    )
+    with pytest.raises(NotImplementedError, match=expected):
+        build_rating_table_payload(model, X, y)
+
+
+def test_rating_table_export_reports_every_unsupported_structured_term():
+    rng = np.random.default_rng(32)
+    n = 180
+    X = pd.DataFrame(
+        {
+            "x": rng.uniform(-1.0, 1.0, n),
+            "group": np.array([f"g-{index % 5}" for index in range(n)], dtype=object),
+            "broker": np.array([f"b-{index % 9}" for index in range(n)], dtype=object),
+        }
+    )
+    y = 0.5 + 0.3 * X["x"].to_numpy() + rng.normal(scale=0.15, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Spline(k=6, lambda_policy=LambdaPolicy.fixed(1.0)),
+            "broker": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="group",
+                k=5,
+                lambda_policy=LambdaPolicy.fixed(1.0),
+            )
+        ],
+        selection_penalty=0.0,
+        direct_solve="gram",
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        build_rating_table_payload(model, X, y)
+    message = str(exc_info.value)
+    assert "broker" in message
+    assert "x:group:fs" in message
+
+
 def test_summary_export_keeps_ordered_level_estimates_but_only_one_global_p_value():
     model, levels = _fit_ordered_export_model()
 
