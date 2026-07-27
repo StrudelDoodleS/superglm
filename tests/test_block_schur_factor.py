@@ -323,24 +323,23 @@ def test_block_schur_reports_singular_local_level() -> None:
         )
 
 
-def test_block_schur_singular_schur_complement_has_diagnostic_fallback() -> None:
+def test_block_schur_rejects_coupled_singular_schur_complement() -> None:
     _rng, operator, _factor, _dense = _fixture()
     D_inv_C = np.linalg.solve(operator.D, operator.C)
     singular_A = np.einsum("kiq,kir->qr", operator.C, D_inv_C)
 
-    factor = BlockSchurFactor(
-        A=singular_A,
-        C=operator.C,
-        D=operator.D,
-        small_indices=operator.small_indices,
-        structured_indices=operator.structured_indices,
-        term_name="x:group:fs",
-    )
-
-    assert factor.used_dense_fallback
-    assert factor.rank < factor.shape[0]
-    assert "Schur" in factor.fallback_reason
-    assert not np.any(factor.coefficient_estimable()[factor.small_indices])
+    with pytest.raises(
+        np.linalg.LinAlgError,
+        match=r"x:group:fs.*coupled rank-deficient Schur null space",
+    ):
+        BlockSchurFactor(
+            A=singular_A,
+            C=operator.C,
+            D=operator.D,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+            term_name="x:group:fs",
+        )
 
 
 def test_block_schur_refuses_large_structured_inverse_materialization() -> None:

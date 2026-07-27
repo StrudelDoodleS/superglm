@@ -211,13 +211,13 @@ def test_profiled_reml_retains_compact_structured_reports(
 
 @pytest.mark.parametrize("term_kind", ["re", "fs", "sz"])
 @pytest.mark.parametrize("constrained_mode", ["fixed", "estimated"])
-def test_constrained_reml_retains_compact_structured_reports(
+def test_constrained_reml_rejects_structured_terms_before_constraint_route(
     monkeypatch: pytest.MonkeyPatch,
     term_kind: str,
     constrained_mode: str,
 ) -> None:
     X, y = _profile_data()
-    model, term_name = _profile_model(
+    model, _term_name = _profile_model(
         family_name="gaussian",
         term_kind=term_kind,
         direct_solve="auto",
@@ -233,14 +233,15 @@ def test_constrained_reml_retains_compact_structured_reports(
 
     monkeypatch.setattr(fit_ops_module, route_name, record_route)
 
-    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    with pytest.raises(
+        NotImplementedError,
+        match=r"fit-time shape constraints.*(?:RandomEffect|FactorSmooth)",
+    ):
+        model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
 
-    assert route_calls == [True]
-    assert getattr(model, "_dm") is None
-    reporting_state = getattr(model, "_reporting_support_state")
-    assert reporting_state is not None
-    assert term_name in reporting_state.support_totals
-    _assert_report_pickle_parity(model, term_kind, term_name)
+    assert route_calls == []
+    with pytest.raises(RuntimeError, match="Not fitted"):
+        _ = model.result
 
 
 @pytest.mark.parametrize(
@@ -250,14 +251,14 @@ def test_constrained_reml_retains_compact_structured_reports(
         ("tweedie", "estimated", "sz"),
     ],
 )
-def test_profiled_constrained_reml_retains_compact_structured_reports(
+def test_profiled_constrained_reml_rejects_structured_terms(
     monkeypatch: pytest.MonkeyPatch,
     family_name: str,
     constrained_mode: str,
     term_kind: str,
 ) -> None:
     X, y = _profile_data()
-    model, term_name = _profile_model(
+    model, _term_name = _profile_model(
         family_name=family_name,
         term_kind=term_kind,
         direct_solve="auto",
@@ -274,20 +275,21 @@ def test_profiled_constrained_reml_retains_compact_structured_reports(
 
     monkeypatch.setattr(fit_ops_module, route_name, record_route)
 
-    if family_name == "nb":
-        model.estimate_theta(X, y, fit_mode="reml")
-    else:
-        model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
+    with pytest.raises(
+        NotImplementedError,
+        match=r"fit-time shape constraints.*(?:RandomEffect|FactorSmooth)",
+    ):
+        if family_name == "nb":
+            model.estimate_theta(X, y, fit_mode="reml")
+        else:
+            model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
 
-    assert route_calls == [True]
-    assert getattr(model, "_dm") is None
-    reporting_state = getattr(model, "_reporting_support_state")
-    assert reporting_state is not None
-    assert term_name in reporting_state.support_totals
-    _assert_report_pickle_parity(model, term_kind, term_name)
+    assert route_calls == []
+    with pytest.raises(RuntimeError, match="Not fitted"):
+        _ = model.result
 
 
-def test_constrained_reporting_failure_preserves_installed_revision(
+def test_reporting_failure_preserves_installed_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     X, y = _profile_data()
@@ -295,7 +297,6 @@ def test_constrained_reporting_failure_preserves_installed_revision(
         family_name="gaussian",
         term_kind="re",
         direct_solve="auto",
-        constrained_mode="fixed",
     )
     model.fit_reml(X, y, runtime_validation="skip")
     revision = getattr(model, "_fit_revision")
@@ -306,7 +307,7 @@ def test_constrained_reporting_failure_preserves_installed_revision(
         raise RuntimeError("report support failed")
 
     monkeypatch.setattr(
-        fit_ops_module,
+        reml_finalize_module,
         "_build_reml_reporting_support_state",
         fail_support,
     )
