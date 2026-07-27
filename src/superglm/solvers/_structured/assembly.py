@@ -120,7 +120,14 @@ def build_penalized_scalar_operator(
         if np.any(np.abs(cross) > 1e-12):
             raise ValueError("S_override couples the dominant and dense-small blocks.")
         A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
-        d += np.diag(penalty)[operator.structured_indices]
+        structured_penalty = penalty[
+            np.ix_(operator.structured_indices, operator.structured_indices)
+        ]
+        off_diagonal = np.array(structured_penalty, copy=True)
+        np.fill_diagonal(off_diagonal, 0.0)
+        if np.any(np.abs(off_diagonal) > 1e-12):
+            raise ValueError("S_override for the dominant RandomEffect block must be diagonal.")
+        d += np.diag(structured_penalty)
         return SymmetricBlockOperator(
             A=A,
             C=operator.C,

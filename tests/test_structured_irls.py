@@ -453,6 +453,62 @@ def test_structured_irls_handles_all_small_group_kernels_and_penalties():
     )
 
 
+def test_structured_correlated_override_rejects_dominant_random_effect_block():
+    dm, groups, _penalties, y, weights, offset = _structured_problem(_gaussian_response)
+    dominant = np.arange(groups[1].start, groups[1].end, dtype=np.intp)
+    diagonal_penalty = np.zeros((dm.p, dm.p), dtype=np.float64)
+    diagonal_penalty[dominant, dominant] = 1.3
+    correlated_penalty = diagonal_penalty.copy()
+    correlated_penalty[dominant[0], dominant[1]] = 0.2
+    correlated_penalty[dominant[1], dominant[0]] = 0.2
+
+    with pytest.raises(
+        ValueError,
+        match=r"S_override.*dominant RandomEffect block.*diagonal",
+    ):
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2={"policy": 1.3},
+            offset=offset,
+            direct_solve="structured",
+            S_override=correlated_penalty,
+            tol=1.0e-11,
+        )
+
+    structured, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2={"policy": 1.3},
+        offset=offset,
+        direct_solve="structured",
+        S_override=diagonal_penalty,
+        tol=1.0e-11,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2={"policy": 1.3},
+        offset=offset,
+        direct_solve="gram",
+        S_override=diagonal_penalty,
+        tol=1.0e-11,
+    )
+    np.testing.assert_allclose(structured.beta, gram.beta, atol=2.0e-9)
+
+
 def test_auto_records_dense_fallback_reason_for_constraints():
     dm, groups, penalties, y, weights, offset = _structured_problem(_gaussian_response)
     groups[0].constraints = LinearConstraintSet(
