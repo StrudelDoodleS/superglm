@@ -12,7 +12,10 @@ import scipy.optimize
 import superglm.model.state_ops as state_ops
 from superglm import LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.distributions import _VARIANCE_FLOOR, Binomial, Gamma, Gaussian, clip_mu
-from superglm.inference.covariance import StructuredCovarianceAccessor
+from superglm.inference.covariance import (
+    StructuredCovarianceAccessor,
+    StructuredSlopeCovarianceAccessor,
+)
 from superglm.inference.random_effects import (
     RandomEffectResult,
     vectorized_conditional_unpooled_effect,
@@ -93,6 +96,53 @@ def test_random_effect_generic_term_surfaces_are_consistent():
     restored = pickle.loads(pickle.dumps(model))
     restored_term = restored.term_inference("broker")
     np.testing.assert_allclose(restored_term.log_relativity, term.log_relativity)
+
+
+def test_large_random_effect_generic_term_surfaces_use_covariance_diagonal(monkeypatch):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    _, model, _, _, exposure = _fit_pair(
+        fit_dense=False,
+        n_levels=270,
+        max_reml_iter=2,
+    )
+    report = model.random_effects("broker", exposure=exposure)
+    covariance, _ = model._coef_covariance
+    assert isinstance(covariance, StructuredSlopeCovarianceAccessor)
+    original_selected_block = covariance.selected_block
+
+    def fail_selected_block(indices):
+        if len(indices) > 256:
+            raise AssertionError("full covariance block requested")
+        return original_selected_block(indices)
+
+    monkeypatch.setattr(covariance, "selected_block", fail_selected_block)
+
+    term = model.term_inference("broker")
+    assert term.se_log_relativity is not None
+    np.testing.assert_allclose(
+        term.se_log_relativity,
+        report.table["posterior_se"].to_numpy(),
+        rtol=2e-10,
+        atol=2e-10,
+    )
+
+    relativities = model.relativities(with_se=True)["broker"]
+    np.testing.assert_allclose(
+        relativities["se_log_relativity"].to_numpy(),
+        report.table["posterior_se"].to_numpy(),
+        rtol=2e-10,
+        atol=2e-10,
+    )
+
+    plot_data = model.plot_data(terms="broker")
+    assert plot_data["terms"][0]["name"] == "broker"
+    axes = model.plot(terms="broker")
+    assert axes is not None
+    plt.close("all")
 
 
 @pytest.mark.parametrize("direct_solve", ["gram", "auto"])

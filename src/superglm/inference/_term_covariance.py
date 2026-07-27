@@ -133,6 +133,13 @@ def feature_se_from_cov(
         return np.zeros(1)
 
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+
+    if isinstance(spec, RandomEffect):
+        from superglm.inference.covariance import covariance_selected_diagonal
+
+        variance = covariance_selected_diagonal(Cov_active, indices)
+        return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+
     Cov_g = Cov_active[np.ix_(indices, indices)]
 
     if isinstance(spec, _SplineBase):
@@ -160,9 +167,6 @@ def feature_se_from_cov(
                 idx = spec._non_base.index(lev)
                 se_all[i] = se_nonbase[idx]
         return se_all
-
-    if isinstance(spec, RandomEffect):
-        return cast(NDArray, np.sqrt(np.maximum(np.diag(Cov_g), 0.0)))
 
     if isinstance(spec, Numeric):
         return np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
