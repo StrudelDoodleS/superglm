@@ -201,6 +201,14 @@ def relativities(
     return out
 
 
+def _requires_reml_term_names(model) -> list[str]:
+    """Return configured terms that require variance-component fitting."""
+    configured_terms = [(name, model._specs[name]) for name in model._feature_order] + [
+        (name, model._interaction_specs[name]) for name in model._interaction_order
+    ]
+    return [name for name, spec in configured_terms if getattr(spec, "requires_reml", False)]
+
+
 def drop1(
     model,
     X: FrameLike,
@@ -217,14 +225,7 @@ def drop1(
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling drop1().")
 
-    reml_only_terms = [
-        name
-        for name, spec in (
-            [(name, model._specs[name]) for name in model._feature_order]
-            + [(name, model._interaction_specs[name]) for name in model._interaction_order]
-        )
-        if getattr(spec, "requires_reml", False)
-    ]
+    reml_only_terms = _requires_reml_term_names(model)
     if reml_only_terms:
         raise NotImplementedError(
             "drop1() does not support variance-component terms "
@@ -318,10 +319,18 @@ def refit_unpenalised(
     keep_smoothing: bool = True,
 ):
     """Refit the model with only the active features and no selection penalty."""
-    del sample_weight
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling refit_unpenalised().")
 
+    reml_only_terms = _requires_reml_term_names(model)
+    if reml_only_terms:
+        raise NotImplementedError(
+            "refit_unpenalised() does not support variance-component terms "
+            f"{reml_only_terms!r}; an ordinary unpenalised fit cannot preserve "
+            "their REML variance-component contract."
+        )
+
+    del sample_weight
     from superglm.solvers.rank import selected_group_name_set
 
     selected_names = selected_group_name_set(model._result, model._groups)

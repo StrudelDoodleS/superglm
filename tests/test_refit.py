@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import LambdaPolicy, RandomEffect, SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
@@ -122,3 +122,29 @@ class TestRefitBasic:
         refitted = model.refit_unpenalised(X, y, keep_smoothing=False)
 
         assert refitted.lambda2 == 0.0
+
+
+def test_refit_unpenalised_rejects_variance_component_terms_at_entry(monkeypatch):
+    rng = np.random.default_rng(20260727)
+    codes = np.repeat(np.arange(6), 12)
+    X = pd.DataFrame({"group": np.array([f"group-{code}" for code in codes], dtype=object)})
+    y = rng.normal(size=len(codes))
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        selection_penalty=0.0,
+        direct_solve="structured",
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    def fail_clone(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("model clone requested")
+
+    monkeypatch.setattr(model, "_clone_without_features", fail_clone)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"refit_unpenalised\(\).*variance-component.*group",
+    ):
+        model.refit_unpenalised(X, y)
