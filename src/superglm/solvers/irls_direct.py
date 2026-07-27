@@ -528,6 +528,18 @@ def fit_irls_direct(
         row_weights=weights,
         lambda2=lambda2,
     )
+    if structured_decision.use_structured and S_override is None and reml_penalties is None:
+        reason = (
+            "the structured candidate requires compact reml_penalties "
+            "when S_override is not supplied"
+        )
+        if direct_solve == "structured":
+            raise ValueError(f"direct_solve='structured' is ineligible: {reason}.")
+        structured_decision = replace(
+            structured_decision,
+            use_structured=False,
+            fallback_reason=reason,
+        )
     _use_structured = structured_decision.use_structured
     _structured_group_index = structured_decision.group_index
     _direct_fallback_reason = structured_decision.fallback_reason
@@ -558,11 +570,6 @@ def fit_irls_direct(
     S: NDArray | None
     if _use_structured:
         S = None if S_override is None else np.asarray(S_override, dtype=np.float64)
-        if S is None and reml_penalties is None:
-            raise ValueError(
-                "direct_solve='structured' requires compact reml_penalties "
-                "when S_override is not supplied."
-            )
     elif S_override is not None:
         S = S_override
     else:

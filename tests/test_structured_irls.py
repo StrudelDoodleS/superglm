@@ -524,6 +524,55 @@ def test_auto_backend_uses_measured_structured_crossover(
         assert "crossover" in decision.fallback_reason
 
 
+def test_auto_missing_compact_penalties_falls_back_but_forced_rejects():
+    rng = np.random.default_rng(20260727)
+    n_levels = 40
+    codes = np.repeat(np.arange(n_levels), 5)
+    dm = DesignMatrix(
+        [RandomEffectGroupMatrix(codes, n_levels)],
+        n=len(codes),
+        p=n_levels,
+    )
+    groups = [
+        GroupSlice(
+            name="policy",
+            start=0,
+            end=n_levels,
+            penalized=True,
+        )
+    ]
+    y = rng.normal(scale=0.2, size=len(codes))
+    weights = np.ones(len(codes))
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2={"policy": 1.0},
+        direct_solve="auto",
+    )
+
+    assert automatic.direct_backend == "gram"
+    assert "compact reml_penalties" in automatic.direct_fallback_reason
+    with pytest.raises(
+        ValueError,
+        match=r"direct_solve='structured'.*compact reml_penalties",
+    ):
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2={"policy": 1.0},
+            direct_solve="structured",
+        )
+
+
 def test_structured_factor_matches_dense_fixed_weight_reml_derivatives():
     dm, groups, penalties, y, weights, offset = _structured_problem(_poisson_response)
     lambdas = {"policy": 2.75}
