@@ -219,6 +219,10 @@ def test_sz_fit_matches_mgcv_reml_and_freml(
     report = model.factor_smooth("x:f:sz", grid=np.asarray(case["curve_grid"]))
 
     assert report.basis == "sz"
+    # Independently optimized smoothing coordinates can move along a shallow
+    # REML surface. The broader lambda tolerance is therefore diagnostic only;
+    # the following deviance, EDF, scale, prediction, and curve checks pin the
+    # fitted SZ geometry substantially more tightly.
     assert report.lambdas["wiggle"] == pytest.approx(
         reference["unscaled_lambdas"]["sz_wiggle"],
         rel=5.0e-2,

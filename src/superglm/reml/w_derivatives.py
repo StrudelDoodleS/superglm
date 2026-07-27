@@ -274,7 +274,7 @@ def reml_w_correction(
     p = factor.shape[0]
     m = len(penalties)
     grad_correction = np.zeros(m)
-    dH_extra: dict[int, NDArray] = {}
+    dH_extra: dict[int, NDArray | CompactSymmetricOperator] = {}
 
     gms = dm.group_matrices
     if geometry is not None:

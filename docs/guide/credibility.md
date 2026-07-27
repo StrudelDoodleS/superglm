@@ -45,6 +45,12 @@ model.fit_reml(
 )
 ```
 
+The explicit `selection_penalty=0.0` documents the fitting contract; it is not
+an additional tuning parameter. `fit_reml()` owns the smoothing and
+variance-component lambdas and therefore accepts only `None` or `0.0` for
+selection. Omitted, `None`, and zero are equivalent here. Sparse term
+selection belongs to `fit()` or `fit_path()`, not the REML fit.
+
 The estimated variance component is \(\tau^2 = \phi / \lambda\). At level
 \(j\), SuperGLM reports scalar credibility
 
@@ -271,6 +277,11 @@ The common baseline uses smooth driver age, vehicle age, and Bonus-Malus plus
 the remaining tariff controls. All challengers use Poisson claim counts with
 `log(Exposure)` as an offset. The test split contains 7,500 policies and 401
 observed claims.
+
+The table below is a 24 July 2026 snapshot generated with seed `20260724`
+against the OpenML and preprocessing versions available on that date. It is
+not a CI-pinned data or performance contract. Regenerate it when the upstream
+data set, preprocessing, solver, or material dependencies change.
 
 | Challenger | Credibility addition | Held-out deviance | Change vs baseline | Fit time |
 |---|---|---:|---:|---:|

@@ -46,27 +46,6 @@ def _same_slice(sl_i: slice, sl_j: slice) -> bool:
     return bool(sl_i.start == sl_j.start and sl_i.stop == sl_j.stop and sl_i.step == sl_j.step)
 
 
-def _penalty_component_cross_trace(
-    inverse: NDArray,
-    left: PenaltyComponent,
-    left_scale: float,
-    left_group_matrix: Any,
-    right: PenaltyComponent,
-    right_scale: float,
-    right_group_matrix: Any,
-) -> float:
-    """Return a penalty cross trace while keeping identity components implicit."""
-    H_ji = inverse[right.group_sl, :][:, left.group_sl]
-    H_ij = inverse[left.group_sl, :][:, right.group_sl]
-    left_product = H_ji
-    if left.penalty_kind != "identity":
-        left_product = left_product @ penalty_component_dense_matrix(left, left_group_matrix)
-    right_product = H_ij
-    if right.penalty_kind != "identity":
-        right_product = right_product @ penalty_component_dense_matrix(right, right_group_matrix)
-    return float(left_scale * right_scale * np.trace(left_product @ right_product))
-
-
 def reml_direct_gradient(
     group_matrices: list,
     result: PIRLSResult,

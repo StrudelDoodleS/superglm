@@ -236,13 +236,14 @@ def fit_variants(
             prediction,
             test["Exposure"].to_numpy(),
         )
+        fit_diagnostics = model.diagnostics()["_model"]
         rows.append(
             {
                 "variant": variant,
                 "fit_seconds": fit_seconds,
                 "backend": model.result.direct_backend,
-                "converged": bool(model.result.converged and model._reml_result.converged),
-                "reml_iterations": model._reml_result.n_reml_iter,
+                "converged": bool(fit_diagnostics["converged"]),
+                "reml_iterations": int(fit_diagnostics["n_iter"]),
                 "effective_df": model.result.effective_df,
                 **metrics,
             }
@@ -269,22 +270,20 @@ def write_outputs(
     """Write tabular reports and a compact visual explanation."""
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics.to_csv(output_dir / "heldout_metrics.csv", index=False)
-    credibility_model = models.get("re_fs") or models.get("re") or models.get("fs")
+    re_model = models.get("re_fs") or models.get("re")
+    fs_model = models.get("re_fs") or models.get("fs")
     re_report = None
     fs_report = None
-    if credibility_model is not None and "VehBrand" in credibility_model._specs:
-        re_report = credibility_model.random_effects(
+    if re_model is not None:
+        re_report = re_model.random_effects(
             "VehBrand",
             exposure=train["Exposure"].to_numpy(),
         )
         re_report.table.to_csv(output_dir / "vehicle_brand_random_effect.csv", index=False)
-    if (
-        credibility_model is not None
-        and "DrivAge:Region:fs" in credibility_model._interaction_specs
-    ):
-        full_report = credibility_model.factor_smooth("DrivAge:Region:fs", grid=80)
+    if fs_model is not None:
+        full_report = fs_model.factor_smooth("DrivAge:Region:fs", grid=80)
         selected = full_report.table.nlargest(plot_levels, "fit_weight")["level"].tolist()
-        fs_report = credibility_model.factor_smooth(
+        fs_report = fs_model.factor_smooth(
             "DrivAge:Region:fs",
             grid=80,
             levels=selected,

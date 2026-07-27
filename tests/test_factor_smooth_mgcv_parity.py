@@ -150,6 +150,10 @@ def test_factor_smooth_fit_matches_mgcv_reml_and_freml(
     actual_wiggle = report.lambdas["wiggle"]
     expected_wiggle = reference["unscaled_lambdas"]["wiggle"]
     assert actual_wiggle == pytest.approx(expected_wiggle, rel=2.5e-2)
+    # The two null penalties occupy a shallow, nearly exchangeable REML
+    # optimum, so their optimizer coordinates are allowed to move or swap.
+    # Predictions, deviance, EDF, and scale are pinned much more tightly above
+    # and below; this broad tolerance does not relax fitted-model parity.
     np.testing.assert_allclose(
         np.sort([report.lambdas["null_0"], report.lambdas["null_1"]]),
         np.sort(
