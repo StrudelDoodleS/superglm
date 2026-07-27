@@ -20,8 +20,8 @@
 Run:
 
 ```bash
-rtk grep -F -- '--model "claude-opus-5"' .github/workflows/claude.yml
-rtk grep -F -- '--effort "max"' .github/workflows/claude.yml
+rtk rg -F -- '--model "claude-opus-5"' .github/workflows/claude.yml
+rtk rg -F -- '--effort "max"' .github/workflows/claude.yml
 ```
 
 Expected: both commands report zero matches and return a non-zero status.
@@ -44,8 +44,8 @@ Change the existing block to:
 Run:
 
 ```bash
-rtk grep -n -F -- '--model "claude-opus-5"' .github/workflows/claude.yml
-rtk grep -n -F -- '--effort "max"' .github/workflows/claude.yml
+rtk rg -n -F -- '--model "claude-opus-5"' .github/workflows/claude.yml
+rtk rg -n -F -- '--effort "max"' .github/workflows/claude.yml
 ```
 
 Expected: one match for each argument in the `claude_args` block.
@@ -55,8 +55,8 @@ Expected: one match for each argument in the `claude_args` block.
 Run:
 
 ```bash
-rtk proxy uv run python -c 'from pathlib import Path; import yaml; [yaml.safe_load(path.read_text(encoding="utf-8")) for path in Path(".github/workflows").glob("*.yml")]'
-rtk proxy uv run pytest tests/test_supply_chain_governance.py -q
+rtk uv run python -c 'from pathlib import Path; import yaml; [yaml.safe_load(path.read_text(encoding="utf-8")) for path in Path(".github/workflows").glob("*.yml")]'
+rtk pytest tests/test_supply_chain_governance.py -q
 rtk git diff --check
 ```
 
@@ -98,7 +98,7 @@ Run:
 
 ```bash
 rtk git push -u origin chore/claude-opus-5-max
-rtk gh pr create --base master --head chore/claude-opus-5-max --title "Run Claude reviews with Opus 5 max" --body "Pin every manually triggered Claude PR review to claude-opus-5 with max effort. Preserve the existing trigger and reviewer-only permission boundary. Validation: workflow YAML parse, supply-chain governance tests, and clean rebased non-slow baseline."
+rtk gh pr create --base master --head chore/claude-opus-5-max --title "Run Claude reviews with Opus 5 max" --body "Release impact: release:none. Rationale: this changes review automation only and does not alter the packaged library or runtime behavior. Pin every manually triggered Claude PR review to claude-opus-5 with max effort. Preserve the existing trigger and reviewer-only permission boundary. Validation: workflow YAML parse, supply-chain governance tests, and clean rebased non-slow baseline."
 ```
 
 Expected: GitHub creates a non-draft pull request targeting `master`.
@@ -146,9 +146,9 @@ Run:
 ```bash
 review_run_id=$(rtk gh run list --workflow "Claude PR Review" --event issue_comment --limit 1 --json databaseId --jq '.[0].databaseId')
 rtk gh run watch "$review_run_id" --exit-status
-rtk gh run view "$review_run_id" --log | rtk grep -F '"model": "claude-opus-5"'
+rtk gh run view "$review_run_id" --log | rtk rg -F '"model": "claude-opus-5"'
 rtk git fetch origin master
-rtk git show origin/master:.github/workflows/claude.yml | rtk grep -F -- '--effort "max"'
+rtk git show origin/master:.github/workflows/claude.yml | rtk rg -F -- '--effort "max"'
 ```
 
 Expected: the run succeeds, its initialization identifies
