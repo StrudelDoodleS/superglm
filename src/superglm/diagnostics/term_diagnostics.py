@@ -58,6 +58,11 @@ def term_importance(
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
     lambda2 = getattr(model, "lambda2", None)
 
+    from superglm.model import base
+
+    plan = base._prediction_plan(model)
+    terms_by_name = {term["name"]: term for term in (*plan["features"], *plan["interactions"])}
+
     def _diag_lambda(g_name):
         return _resolve_group_lambda(g_name, reml_lam, lambda2)
 
@@ -81,19 +86,18 @@ def term_importance(
             )
             continue
 
-        # Compute partial eta for this group
-        spec = model._specs.get(g.feature_name)
-        ispec = model._interaction_specs.get(g.feature_name) if spec is None else None
-
-        if spec is not None:
-            B_g = spec.transform(frame.column_array(g.feature_name))
-            eta_g = B_g @ b_g
-        elif ispec is not None:
-            p1, p2 = ispec.parent_names
-            B_g = ispec.transform(frame.column_array(p1), frame.column_array(p2))
-            eta_g = B_g @ b_g
-        else:
-            eta_g = np.zeros(len(frame))
+        term = terms_by_name.get(g.feature_name)
+        if term is None:
+            raise RuntimeError(f"prediction plan does not define fitted term {g.feature_name!r}")
+        term_indices = np.asarray(term["beta_idx"], dtype=np.intp)
+        group_positions = (term_indices >= g.start) & (term_indices < g.end)
+        if np.count_nonzero(group_positions) != g.size:
+            raise RuntimeError(
+                f"prediction plan coefficient layout disagrees with group {g.name!r}"
+            )
+        term_beta = np.zeros(len(term_indices), dtype=np.float64)
+        term_beta[group_positions] = beta[term_indices[group_positions]]
+        eta_g = base._score_prediction_term_local_exact(term, frame, term_beta)
 
         # Centered weighted variance
         wmean = np.sum(weights * eta_g) / w_sum

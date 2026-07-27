@@ -333,13 +333,18 @@ def _score_interaction_fast_discrete(
     return support_values[np.asarray(pair_idx, dtype=np.intp)]
 
 
-def _score_prediction_term_exact(
+def _score_prediction_term_local_exact(
     term: dict[str, Any],
     X: EagerFrame,
-    beta_all: NDArray,
+    beta: NDArray,
 ) -> NDArray[np.floating]:
-    """Score one canonical term exactly on the requested rows."""
-    beta = beta_all[term["beta_idx"]]
+    """Score one canonical term from its term-local coefficient vector."""
+    beta = np.asarray(beta, dtype=np.float64).ravel()
+    expected_width = len(term["beta_idx"])
+    if beta.shape != (expected_width,):
+        raise ValueError(
+            f"term {term['name']!r} requires {expected_width} coefficients, got {len(beta)}"
+        )
     if term["kind"] == "feature":
         return _score_feature(term["spec"], X.column_array(term["name"]), beta)
 
@@ -349,6 +354,19 @@ def _score_prediction_term_exact(
         X.column_array(left_name),
         X.column_array(right_name),
         beta,
+    )
+
+
+def _score_prediction_term_exact(
+    term: dict[str, Any],
+    X: EagerFrame,
+    beta_all: NDArray,
+) -> NDArray[np.floating]:
+    """Score one canonical term exactly on the requested rows."""
+    return _score_prediction_term_local_exact(
+        term,
+        X,
+        beta_all[term["beta_idx"]],
     )
 
 
