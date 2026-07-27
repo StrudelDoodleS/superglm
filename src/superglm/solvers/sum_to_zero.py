@@ -70,11 +70,7 @@ def _decompose_local_psd_batch(
             f"Structured term {term_name!r} level {level_labels[level]!r} has non-finite curvature."
         )
 
-    eigenvalues, eigenvectors = scipy.linalg.eigh(
-        symmetric,
-        driver="evr",
-        check_finite=False,
-    )
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
     scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), 1.0)
     # A large smoothing parameter can put O(1) data curvature beside an
     # O(1e11) wiggle penalty.  The usual dimension-scaled roundoff threshold

@@ -365,6 +365,71 @@ def test_local_psd_decomposition_batches_levels_and_preserves_rank() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("n_levels", "block_size", "deficient_levels", "seed", "scaled"),
+    [
+        pytest.param(300, 10, 0, 20260727, False, id="full-rank-300x10"),
+        pytest.param(300, 10, 40, 20260728, False, id="mixed-rank-300x10"),
+        pytest.param(129, 4, 20, 20260729, True, id="scaled-mixed-rank-129x4"),
+    ],
+)
+def test_local_psd_batch_matches_rank_reconstruction_and_null_geometry(
+    n_levels: int,
+    block_size: int,
+    deficient_levels: int,
+    seed: int,
+    scaled: bool,
+) -> None:
+    rng = np.random.default_rng(seed)
+    eigenvectors, _triangular = np.linalg.qr(rng.normal(size=(n_levels, block_size, block_size)))
+    planted_eigenvalues = rng.uniform(0.5, 2.0, size=(n_levels, block_size))
+    if deficient_levels:
+        planted_eigenvalues[:deficient_levels, -1] = 0.0
+    if scaled:
+        scales = 10.0 ** rng.uniform(-3.0, 3.0, size=n_levels)
+        planted_eigenvalues *= scales[:, None]
+    blocks = np.einsum(
+        "kij,kj,klj->kil",
+        eigenvectors,
+        planted_eigenvalues,
+        eigenvectors,
+        optimize=True,
+    )
+    labels = tuple(f"level-{level}" for level in range(n_levels))
+
+    locals_, minimum = _decompose_local_psd_batch(
+        blocks,
+        term_name="x:g:sz",
+        level_labels=labels,
+    )
+
+    reference_eigenvalues, _reference_eigenvectors = np.linalg.eigh(blocks)
+    scales = np.maximum(np.max(np.abs(reference_eigenvalues), axis=1), 1.0)
+    thresholds = np.finfo(np.float64).eps * block_size * scales * 10.0
+    expected_positive = reference_eigenvalues > thresholds[:, None]
+    assert minimum == pytest.approx(float(np.min(reference_eigenvalues)), abs=1.0e-12)
+    for level, (block, local) in enumerate(zip(blocks, locals_, strict=True)):
+        expected_values = reference_eigenvalues[level][expected_positive[level]]
+        assert local.rank == int(np.count_nonzero(expected_positive[level]))
+        np.testing.assert_allclose(
+            block @ local.pinv @ block,
+            block,
+            rtol=3.0e-9,
+            atol=max(2.0e-9, thresholds[level] * 50.0),
+        )
+        np.testing.assert_allclose(
+            block @ local.null,
+            0.0,
+            rtol=0.0,
+            atol=max(2.0e-9, thresholds[level] * 50.0),
+        )
+        assert np.sum(np.log(local.positive_eigenvalues)) == pytest.approx(
+            np.sum(np.log(expected_values)),
+            rel=2.0e-11,
+            abs=2.0e-10,
+        )
+
+
 def test_sum_to_zero_factor_names_globally_unidentifiable_levels() -> None:
     D = np.tile(np.diag([1.0, 0.0]), (3, 1, 1))
 
