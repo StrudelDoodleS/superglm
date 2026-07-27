@@ -15,6 +15,7 @@ from superglm.solvers.rank import (
 from superglm.solvers.structured import (
     CenteredBlockOperator,
     SumToZeroBlockOperator,
+    SumToZeroBlockStructuredSystem,
     _certified_ritz_discarded,
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
@@ -23,6 +24,7 @@ from superglm.solvers.structured import (
     _sum_to_zero_public_null_geometry,
     _sum_to_zero_public_spectral_bound,
     _sum_to_zero_scaled_basis_null_row_norms,
+    build_penalized_sum_to_zero_operator,
     centered_operator_coefficient_estimable,
     compact_operator_diagonal,
     materialize_compact_operator,
@@ -165,6 +167,49 @@ def _sum_to_zero_operator_fixture():
         structured_indices=structured_indices,
     )
     return operator, expected
+
+
+def test_sum_to_zero_override_cross_validation_uses_participating_coordinate_scale() -> None:
+    operator, _expected = _sum_to_zero_operator_fixture()
+    free_levels = operator.n_levels - 1
+    block_size = operator.block_size
+    system = SumToZeroBlockStructuredSystem(
+        operator=operator,
+        xtw_small=np.zeros(len(operator.small_indices)),
+        xtw_structured=np.zeros((free_levels, block_size)),
+        xtwz_small=np.zeros(len(operator.small_indices)),
+        xtwz_structured=np.zeros((free_levels, block_size)),
+        raw_xtw_structured=np.zeros((operator.n_levels, block_size)),
+        raw_xtwz_structured=np.zeros((operator.n_levels, block_size)),
+        sum_w=1.0,
+        sum_wz=0.0,
+        dominant_group_index=1,
+        dominant_group_name="sz",
+        level_labels=tuple(range(operator.n_levels)),
+    )
+    penalty = np.zeros(operator.shape)
+    penalty[operator.small_indices, operator.small_indices] = 1.0
+    penalty[operator.small_indices[0], operator.small_indices[0]] = 1.0e12
+    local = np.eye(block_size)
+    structured_penalty = np.empty((free_levels * block_size,) * 2)
+    for left in range(free_levels):
+        left_slice = slice(left * block_size, (left + 1) * block_size)
+        for right in range(free_levels):
+            right_slice = slice(right * block_size, (right + 1) * block_size)
+            structured_penalty[left_slice, right_slice] = (2.0 if left == right else 1.0) * local
+    flat_structured = operator.structured_indices.ravel()
+    penalty[np.ix_(flat_structured, flat_structured)] = structured_penalty
+    penalty[flat_structured[0], operator.small_indices[1]] = 1.0e-3
+    penalty[operator.small_indices[1], flat_structured[0]] = 1.0e-3
+
+    with pytest.raises(ValueError, match="couples the SZ and dense-small blocks"):
+        build_penalized_sum_to_zero_operator(
+            system,
+            [],
+            [],
+            0.0,
+            S_override=penalty,
+        )
 
 
 def test_sum_to_zero_operator_matches_dense_free_coordinates() -> None:

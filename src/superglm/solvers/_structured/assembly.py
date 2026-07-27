@@ -29,6 +29,7 @@ from superglm.solvers._structured.operators import (
     SumToZeroBlockOperator,
     SymmetricBlockOperator,
 )
+from superglm.solvers._structured.overrides import _structured_override_incompatibility
 from superglm.solvers.hessian_factor import _component_indices
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -79,12 +80,6 @@ def _lambda_for_component(
     return float(lambda2[name]) if isinstance(lambda2, dict) else float(lambda2)
 
 
-def _override_structural_tolerance(penalty: NDArray) -> float:
-    """Return a scale-relative roundoff band for unsupported override mass."""
-    scale = float(np.max(np.abs(penalty), initial=0.0))
-    return float(64.0 * np.finfo(np.float64).eps * max(scale, np.finfo(np.float64).tiny))
-
-
 def _dense_component_omega(
     component: PenaltyComponent,
     group_matrix: GroupMatrix,
@@ -122,19 +117,18 @@ def build_penalized_scalar_operator(
         penalty = np.asarray(S_override, dtype=np.float64)
         if penalty.shape != (p, p):
             raise ValueError(f"S_override must have shape ({p}, {p}).")
-        structural_tolerance = _override_structural_tolerance(penalty)
-        cross = penalty[np.ix_(operator.structured_indices, operator.small_indices)]
-        if np.any(np.abs(cross) > structural_tolerance):
-            raise ValueError("S_override couples the dominant and dense-small blocks.")
+        incompatibility = _structured_override_incompatibility(
+            penalty,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+            geometry="random_effect",
+        )
+        if incompatibility is not None:
+            raise ValueError(incompatibility)
         A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
         structured_penalty = penalty[
             np.ix_(operator.structured_indices, operator.structured_indices)
         ]
-        dominant_tolerance = _override_structural_tolerance(structured_penalty)
-        off_diagonal = np.array(structured_penalty, copy=True)
-        np.fill_diagonal(off_diagonal, 0.0)
-        if np.any(np.abs(off_diagonal) > dominant_tolerance):
-            raise ValueError("S_override for the dominant RandomEffect block must be diagonal.")
         d += np.diag(structured_penalty)
         return SymmetricBlockOperator(
             A=A,
@@ -250,24 +244,23 @@ def build_penalized_block_operator(
         penalty = np.asarray(S_override, dtype=np.float64)
         if penalty.shape != (p, p):
             raise ValueError(f"S_override must have shape ({p}, {p}).")
-        structural_tolerance = _override_structural_tolerance(penalty)
         flat_structured = operator.structured_indices.ravel()
-        cross = penalty[np.ix_(flat_structured, operator.small_indices)]
-        if np.any(np.abs(cross) > structural_tolerance):
-            raise ValueError("S_override couples the dominant and dense-small blocks.")
+        incompatibility = _structured_override_incompatibility(
+            penalty,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+            geometry="factor_smooth",
+        )
+        if incompatibility is not None:
+            raise ValueError(incompatibility)
         A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
         structured_penalty = penalty[np.ix_(flat_structured, flat_structured)]
-        dominant_tolerance = _override_structural_tolerance(structured_penalty)
-        residual = np.array(structured_penalty, copy=True)
         for level in range(operator.n_levels):
             local = slice(
                 level * operator.block_size,
                 (level + 1) * operator.block_size,
             )
             D[level] += structured_penalty[local, local]
-            residual[local, local] = 0.0
-        if np.any(np.abs(residual) > dominant_tolerance):
-            raise ValueError("S_override couples distinct factor-smooth levels.")
         return BlockSymmetricOperator(
             A=A,
             C=operator.C,
@@ -424,24 +417,21 @@ def build_penalized_sum_to_zero_operator(
         penalty = np.asarray(S_override, dtype=np.float64)
         if penalty.shape != (p, p):
             raise ValueError(f"S_override must have shape ({p}, {p}).")
-        structural_tolerance = _override_structural_tolerance(penalty)
         flat_structured = operator.structured_indices.ravel()
-        cross = penalty[np.ix_(flat_structured, operator.small_indices)]
-        if np.any(np.abs(cross) > structural_tolerance):
-            raise ValueError("S_override couples the SZ and dense-small blocks.")
+        incompatibility = _structured_override_incompatibility(
+            penalty,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+            geometry="sum_to_zero",
+        )
+        if incompatibility is not None:
+            raise ValueError(incompatibility)
         A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
         public = penalty[np.ix_(flat_structured, flat_structured)]
-        dominant_tolerance = _override_structural_tolerance(public)
         free_levels = operator.n_levels - 1
         k = operator.block_size
         blocks = public.reshape(free_levels, k, free_levels, k)
         local = 0.5 * blocks[0, :, 0, :] if free_levels == 1 else blocks[0, :, 1, :]
-        expected = np.empty_like(blocks)
-        for left in range(free_levels):
-            for right in range(free_levels):
-                expected[left, :, right, :] = (2.0 if left == right else 1.0) * local
-        if np.any(np.abs(blocks - expected) > dominant_tolerance):
-            raise ValueError("S_override has noncanonical sum-to-zero penalty geometry.")
         D += local[None, :, :]
         return SumToZeroBlockOperator(
             A=A,

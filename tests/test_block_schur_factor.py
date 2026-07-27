@@ -7,11 +7,13 @@ import pytest
 
 from superglm.solvers.structured import (
     BlockSchurFactor,
+    BlockStructuredSystem,
     BlockSymmetricOperator,
     CenteredBlockOperator,
     LowRankSymmetricOperator,
     ProfiledBlockSchurFactor,
     _block_operator_bdlr,
+    build_penalized_block_operator,
     materialize_compact_operator,
 )
 from superglm.types import PenaltyComponent
@@ -76,6 +78,37 @@ def _components(factor: BlockSchurFactor) -> tuple[PenaltyComponent, PenaltyComp
         rank=float(len(factor.small_indices)),
     )
     return repeated, dense_small
+
+
+def test_block_override_cross_validation_uses_participating_coordinate_scale() -> None:
+    _rng, operator, _factor, _dense = _fixture()
+    system = BlockStructuredSystem(
+        operator=operator,
+        xtw_small=np.zeros(len(operator.small_indices)),
+        xtw_structured=np.zeros((operator.n_levels, operator.block_size)),
+        xtwz_small=np.zeros(len(operator.small_indices)),
+        xtwz_structured=np.zeros((operator.n_levels, operator.block_size)),
+        sum_w=1.0,
+        sum_wz=0.0,
+        dominant_group_index=1,
+        dominant_group_name="fs",
+    )
+    penalty = np.zeros(operator.shape)
+    flat_structured = operator.structured_indices.ravel()
+    penalty[operator.small_indices, operator.small_indices] = 1.0
+    penalty[operator.small_indices[0], operator.small_indices[0]] = 1.0e12
+    penalty[flat_structured, flat_structured] = 1.0
+    penalty[flat_structured[0], operator.small_indices[1]] = 1.0e-3
+    penalty[operator.small_indices[1], flat_structured[0]] = 1.0e-3
+
+    with pytest.raises(ValueError, match="couples the dominant and dense-small blocks"):
+        build_penalized_block_operator(
+            system,
+            [],
+            [],
+            0.0,
+            S_override=penalty,
+        )
 
 
 def _expanded(component: PenaltyComponent, width: int) -> np.ndarray:

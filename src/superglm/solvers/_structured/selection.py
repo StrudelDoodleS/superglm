@@ -14,6 +14,7 @@ from superglm.group_matrix import (
     GroupMatrix,
     RandomEffectGroupMatrix,
 )
+from superglm.solvers._structured.overrides import _structured_override_incompatibility
 from superglm.types import GroupSlice
 
 
@@ -338,18 +339,63 @@ def resolve_structured_backend(
     dominant_matrix = group_matrices[selection.group_index]
     dominant_size = dominant_matrix.shape[1]
     small_size = coefficient_width - dominant_size
+    dominant_group = groups[selection.group_index]
+    override_penalty: NDArray | None = None
+    if S_override is not None:
+        override_penalty = np.asarray(S_override, dtype=np.float64)
+        if override_penalty.shape != (coefficient_width, coefficient_width):
+            raise ValueError(
+                f"S_override must have shape ({coefficient_width}, {coefficient_width})."
+            )
+        flat_structured = np.arange(
+            dominant_group.start,
+            dominant_group.end,
+            dtype=np.intp,
+        )
+        small_mask = np.ones(coefficient_width, dtype=bool)
+        small_mask[flat_structured] = False
+        small_indices = np.flatnonzero(small_mask)
+        override_geometry: Literal[
+            "random_effect",
+            "factor_smooth",
+            "sum_to_zero",
+        ]
+        if isinstance(dominant_matrix, RandomEffectGroupMatrix):
+            structured_indices = flat_structured
+            override_geometry = "random_effect"
+        elif isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+            public_levels = (
+                dominant_matrix.n_levels - 1
+                if dominant_matrix.factor_basis == "sz"
+                else dominant_matrix.n_levels
+            )
+            structured_indices = flat_structured.reshape(
+                public_levels,
+                dominant_matrix.block_size,
+            )
+            override_geometry = (
+                "sum_to_zero" if dominant_matrix.factor_basis == "sz" else "factor_smooth"
+            )
+        else:  # pragma: no cover - StructuredGroupSelection invariant
+            raise RuntimeError("structured selection chose an unsupported group matrix")
+        incompatibility = _structured_override_incompatibility(
+            override_penalty,
+            small_indices=small_indices,
+            structured_indices=structured_indices,
+            geometry=override_geometry,
+        )
+        if incompatibility is not None:
+            return _backend_ineligibility(
+                incompatibility,
+                mode,
+                selection,
+            )
     if isinstance(dominant_matrix, RandomEffectGroupMatrix) and (
         lambda2 is not None or S_override is not None
     ):
         override_diagonal: NDArray | None = None
-        if S_override is not None:
-            penalty = np.asarray(S_override, dtype=np.float64)
-            if penalty.shape != (coefficient_width, coefficient_width):
-                raise ValueError(
-                    f"S_override must have shape ({coefficient_width}, {coefficient_width})."
-                )
-            dominant_group = groups[selection.group_index]
-            override_diagonal = np.diag(penalty[dominant_group.sl, dominant_group.sl])
+        if override_penalty is not None:
+            override_diagonal = np.diag(override_penalty[dominant_group.sl, dominant_group.sl])
             has_dominant_penalty = bool(np.any(override_diagonal > 0.0))
         elif isinstance(lambda2, dict):
             has_dominant_penalty = float(lambda2.get(group_name, 0.0)) != 0.0

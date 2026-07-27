@@ -593,6 +593,68 @@ def test_structured_override_is_authoritative_for_zero_lambda_eligibility(
     np.testing.assert_allclose(structured.beta, gram.beta, atol=2.0e-9)
 
 
+@pytest.mark.parametrize("unsupported_geometry", ["dominant_correlation", "cross_block"])
+def test_auto_falls_back_for_incompatible_authoritative_override(
+    unsupported_geometry: str,
+):
+    base_dm, _base_groups, _penalties, y, weights, offset = _structured_problem(_gaussian_response)
+    n_levels = 40
+    dm = DesignMatrix(
+        [
+            base_dm.group_matrices[0],
+            RandomEffectGroupMatrix(base_dm.group_matrices[1].codes, n_levels),
+        ],
+        n=base_dm.n,
+        p=2 + n_levels,
+    )
+    groups = [
+        GroupSlice(name="numeric", start=0, end=2, penalized=False),
+        GroupSlice(name="policy", start=2, end=2 + n_levels, penalized=True),
+    ]
+    dominant = np.arange(groups[1].start, groups[1].end, dtype=np.intp)
+    penalty = np.zeros((dm.p, dm.p), dtype=np.float64)
+    penalty[dominant, dominant] = 1.3
+    if unsupported_geometry == "dominant_correlation":
+        penalty[dominant[0], dominant[1]] = 0.2
+        penalty[dominant[1], dominant[0]] = 0.2
+    else:
+        penalty[0, 0] = 1.0e12
+        penalty[1, 1] = 1.0
+        penalty[dominant[0], 1] = 1.0e-3
+        penalty[1, dominant[0]] = 1.0e-3
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=0.0,
+        offset=offset,
+        direct_solve="auto",
+        S_override=penalty,
+        tol=1.0e-11,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=0.0,
+        offset=offset,
+        direct_solve="gram",
+        S_override=penalty,
+        tol=1.0e-11,
+    )
+
+    assert automatic.direct_backend == "gram"
+    assert "S_override" in automatic.direct_fallback_reason
+    np.testing.assert_allclose(automatic.beta, gram.beta, atol=2.0e-9)
+
+
 def test_auto_records_dense_fallback_reason_for_constraints():
     dm, groups, penalties, y, weights, offset = _structured_problem(_gaussian_response)
     groups[0].constraints = LinearConstraintSet(
