@@ -1492,9 +1492,14 @@ def centered_operator_coefficient_estimable(
         np.linalg.LinAlgError,
         scipy.sparse.linalg.ArpackError,
         scipy.sparse.linalg.ArpackNoConvergence,
-        ValueError,
-    ):
-        return _bounded_centered_estimability(operator)
+    ) as error:
+        if operator.shape[0] <= _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH:
+            return _bounded_centered_estimability(operator)
+        raise RuntimeError(
+            "Compact structured estimability certification failed for a system "
+            "wider than the bounded dense fallback; coefficient standard errors "
+            "cannot be reported safely."
+        ) from error
 
 
 def _coefficient_estimable_from_null_basis(

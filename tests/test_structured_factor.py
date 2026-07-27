@@ -82,6 +82,16 @@ def _independent_centered_operator(
     )
 
 
+def _unit_level_centered_operator(width: int) -> CenteredBlockOperator:
+    local_factors = np.ones((width, 1, 1), dtype=np.float64)
+    small = np.empty((width, 0), dtype=np.float64)
+    operator, _public_design = _independent_centered_operator(
+        local_factors,
+        small,
+    )
+    return operator
+
+
 def _contiguous_scalar_factor():
     A, C, d, _, _, _ = _spd_scalar_blocks()
     small_indices = np.arange(3, dtype=np.intp)
@@ -618,6 +628,73 @@ def test_centered_independent_column_scale_certifies_cancellation(
         centered_operator_coefficient_estimable(operator),
         expected,
     )
+
+
+def test_centered_estimability_certification_failure_propagates_contract_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers._structured.geometry as structured_geometry
+
+    operator = _unit_level_centered_operator(8)
+
+    def fail_contract(_operator):
+        raise ValueError("contract bug")
+
+    monkeypatch.setattr(
+        structured_geometry,
+        "_independent_block_centered_estimability",
+        fail_contract,
+    )
+
+    with pytest.raises(ValueError, match="contract bug"):
+        centered_operator_coefficient_estimable(operator)
+
+
+def test_centered_estimability_certification_failure_uses_bounded_dense_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers._structured.geometry as structured_geometry
+
+    operator = _unit_level_centered_operator(128)
+    expected = structured_geometry._bounded_centered_estimability(operator)
+
+    def fail_numerically(_operator):
+        raise np.linalg.LinAlgError("non-convergence")
+
+    monkeypatch.setattr(
+        structured_geometry,
+        "_independent_block_centered_estimability",
+        fail_numerically,
+    )
+
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
+    )
+
+
+def test_centered_estimability_certification_failure_raises_when_wide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.solvers._structured.geometry as structured_geometry
+
+    operator = _unit_level_centered_operator(513)
+
+    def fail_numerically(_operator):
+        raise np.linalg.LinAlgError("non-convergence")
+
+    monkeypatch.setattr(
+        structured_geometry,
+        "_independent_block_centered_estimability",
+        fail_numerically,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Compact structured estimability certification failed.*bounded dense fallback",
+    ) as caught:
+        centered_operator_coefficient_estimable(operator)
+    assert isinstance(caught.value.__cause__, np.linalg.LinAlgError)
 
 
 def test_centered_independent_schur_exact_alias_uses_factor_scale(

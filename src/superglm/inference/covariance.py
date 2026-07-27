@@ -34,6 +34,11 @@ def _selector_indices(selector, size: int) -> tuple[NDArray[np.intp], bool]:
     values = np.asarray(selector)
     scalar = values.ndim == 0
     if values.dtype == bool:
+        if values.ndim != 1 or values.shape[0] != size:
+            raise IndexError(
+                "boolean covariance index must be one-dimensional and match "
+                f"the indexed dimension of {size}"
+            )
         values = np.flatnonzero(values)
     else:
         values = values.astype(np.intp, copy=False).ravel()

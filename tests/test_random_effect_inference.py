@@ -284,6 +284,37 @@ def test_structured_selected_covariance_matches_dense_augmented_inverse(monkeypa
     )
 
 
+def test_structured_covariance_boolean_selector_requires_exact_dimension():
+    _, structured, _, _, _ = _fit_pair(
+        fit_dense=False,
+        max_reml_iter=2,
+    )
+    compact = structured._fit_inference_info["XtWX_inv_aug"]
+    assert isinstance(compact, StructuredCovarianceAccessor)
+    slopes = compact.slopes
+
+    with pytest.raises(IndexError, match="boolean covariance index"):
+        compact[np.ones(compact.shape[0] - 1, dtype=bool), 0]
+    with pytest.raises(IndexError, match="boolean covariance index"):
+        slopes[np.ones(slopes.shape[0] - 1, dtype=bool), 0]
+
+    augmented_mask = np.zeros(compact.shape[0], dtype=bool)
+    augmented_mask[[0, 2, 5]] = True
+    augmented_indices = np.flatnonzero(augmented_mask)
+    np.testing.assert_allclose(
+        compact[augmented_mask, augmented_indices],
+        compact.selected_block(augmented_indices),
+    )
+
+    slope_mask = np.zeros(slopes.shape[0], dtype=bool)
+    slope_mask[[0, 1, 4]] = True
+    slope_indices = np.flatnonzero(slope_mask)
+    np.testing.assert_allclose(
+        slopes[slope_mask, slope_indices],
+        slopes.selected_block(slope_indices),
+    )
+
+
 def test_structured_summary_uses_selected_covariance_only(monkeypatch):
     _, structured, X, y, _ = _fit_pair()
 
