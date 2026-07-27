@@ -14,7 +14,10 @@ from superglm.group_matrix import (
     GroupMatrix,
     RandomEffectGroupMatrix,
 )
-from superglm.solvers._structured.overrides import _structured_override_incompatibility
+from superglm.solvers._structured.overrides import (
+    _factor_smooth_override_local_blocks,
+    _structured_override_incompatibility,
+)
 from superglm.types import GroupSlice
 
 
@@ -267,6 +270,42 @@ def _factor_smooth_singular_local_level(
     return singular_level
 
 
+def _first_singular_factor_smooth_block(
+    local_blocks: NDArray,
+    *,
+    scale_floor: float = 1.0,
+) -> int | None:
+    """Return the first local block that is not numerically positive definite."""
+    eigenvalues = np.linalg.eigvalsh(local_blocks)
+    block_size = local_blocks.shape[1]
+    scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), scale_floor)
+    thresholds = np.finfo(np.float64).eps * max(block_size, 1) * scales * 10.0
+    singular = eigenvalues[:, 0] <= thresholds
+    return int(np.flatnonzero(singular)[0]) if np.any(singular) else None
+
+
+def _factor_smooth_override_singular_local_level(
+    matrix: FactorSmoothGroupMatrix,
+    row_weights: NDArray,
+    local_penalties: NDArray,
+) -> int | None:
+    """Check override-defined local blocks against positive-weight row support."""
+    weights = np.asarray(row_weights, dtype=np.float64)
+    if weights.shape != (matrix.shape[0],):
+        raise ValueError("row_weights must match the structured design row count.")
+    expected_shape = (matrix.n_levels, matrix.block_size, matrix.block_size)
+    if local_penalties.shape != expected_shape:
+        raise ValueError(f"FactorSmooth override local penalties must have shape {expected_shape}.")
+    positive_rows = weights > 0.0
+    information, _xtw, _rhs = matrix.factor_smooth_sufficient_stats(
+        positive_rows.astype(np.float64),
+        np.zeros_like(weights),
+    )
+    return _first_singular_factor_smooth_block(
+        np.asarray(information, dtype=np.float64) + local_penalties
+    )
+
+
 def _backend_ineligibility(
     reason: str,
     mode: Literal["auto", "structured"],
@@ -341,6 +380,7 @@ def resolve_structured_backend(
     small_size = coefficient_width - dominant_size
     dominant_group = groups[selection.group_index]
     override_penalty: NDArray | None = None
+    override_local_penalties: NDArray | None = None
     if S_override is not None:
         override_penalty = np.asarray(S_override, dtype=np.float64)
         if override_penalty.shape != (coefficient_width, coefficient_width):
@@ -389,6 +429,12 @@ def resolve_structured_backend(
                 incompatibility,
                 mode,
                 selection,
+            )
+        if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+            override_local_penalties = _factor_smooth_override_local_blocks(
+                override_penalty,
+                structured_indices,
+                sum_to_zero=dominant_matrix.factor_basis == "sz",
             )
     if isinstance(dominant_matrix, RandomEffectGroupMatrix) and (
         lambda2 is not None or S_override is not None
@@ -446,39 +492,75 @@ def resolve_structured_backend(
                     mode,
                     selection,
                 )
-    if isinstance(dominant_matrix, FactorSmoothGroupMatrix) and lambda2 is not None:
-        if dominant_matrix.factor_basis != "sz":
-            zero_component = _factor_smooth_zero_penalty_component(
-                dominant_matrix,
-                group_name,
-                lambda2,
+    if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+        if override_local_penalties is not None:
+            singular_penalty_level = _first_singular_factor_smooth_block(
+                override_local_penalties,
+                scale_floor=0.0,
             )
-            if zero_component is not None:
+            if dominant_matrix.factor_basis != "sz" and singular_penalty_level is not None:
+                level_label = dominant_matrix.levels[singular_penalty_level]
                 return _backend_ineligibility(
                     (
-                        f"FactorSmooth group {group_name!r} has zero penalty component "
-                        f"{zero_component!r}, which can alias the intercept or population smooth"
+                        f"FactorSmooth group {group_name!r} authoritative S_override "
+                        f"has a zero penalty component or singular local penalty block "
+                        f"for level {level_label!r}, which can alias the intercept "
+                        "or population smooth"
                     ),
                     mode,
                     selection,
                 )
-        if row_weights is not None:
-            singular_level = _factor_smooth_singular_local_level(
-                dominant_matrix,
-                group_name,
-                row_weights,
-                lambda2,
-            )
-            if singular_level is not None:
-                level_label = dominant_matrix.levels[singular_level]
-                return _backend_ineligibility(
-                    (
-                        f"FactorSmooth group {group_name!r} has a singular local block "
-                        f"for level {level_label!r} under the requested weights and penalties"
-                    ),
-                    mode,
-                    selection,
+            if row_weights is not None and singular_penalty_level is not None:
+                singular_level = _factor_smooth_override_singular_local_level(
+                    dominant_matrix,
+                    row_weights,
+                    override_local_penalties,
                 )
+                if singular_level is not None:
+                    level_label = dominant_matrix.levels[singular_level]
+                    return _backend_ineligibility(
+                        (
+                            f"FactorSmooth group {group_name!r} has a singular local block "
+                            f"for level {level_label!r} under the authoritative S_override"
+                        ),
+                        mode,
+                        selection,
+                    )
+        elif lambda2 is not None:
+            if dominant_matrix.factor_basis != "sz":
+                zero_component = _factor_smooth_zero_penalty_component(
+                    dominant_matrix,
+                    group_name,
+                    lambda2,
+                )
+                if zero_component is not None:
+                    return _backend_ineligibility(
+                        (
+                            f"FactorSmooth group {group_name!r} has zero penalty component "
+                            f"{zero_component!r}, which can alias the intercept "
+                            "or population smooth"
+                        ),
+                        mode,
+                        selection,
+                    )
+            if row_weights is not None:
+                singular_level = _factor_smooth_singular_local_level(
+                    dominant_matrix,
+                    group_name,
+                    row_weights,
+                    lambda2,
+                )
+                if singular_level is not None:
+                    level_label = dominant_matrix.levels[singular_level]
+                    return _backend_ineligibility(
+                        (
+                            f"FactorSmooth group {group_name!r} has a singular local block "
+                            f"for level {level_label!r} under the requested weights "
+                            "and penalties"
+                        ),
+                        mode,
+                        selection,
+                    )
     if mode == "structured":
         return StructuredBackendDecision(
             use_structured=True,

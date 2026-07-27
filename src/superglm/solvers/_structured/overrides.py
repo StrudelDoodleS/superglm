@@ -117,3 +117,30 @@ def _structured_override_incompatibility(
     if _has_noncanonical_sum_to_zero_mass(public, expected):
         return "S_override has noncanonical sum-to-zero penalty geometry."
     return None
+
+
+def _factor_smooth_override_local_blocks(
+    penalty: NDArray,
+    structured_indices: NDArray,
+    *,
+    sum_to_zero: bool,
+) -> NDArray:
+    """Extract the all-level local penalties represented by a valid override."""
+    if structured_indices.ndim != 2:
+        raise ValueError("Factor-smooth structured indices must be two-dimensional.")
+    public_levels, block_size = structured_indices.shape
+    flat_structured = structured_indices.ravel()
+    public = penalty[np.ix_(flat_structured, flat_structured)]
+    blocks = public.reshape(
+        public_levels,
+        block_size,
+        public_levels,
+        block_size,
+    )
+    if sum_to_zero:
+        local = 0.5 * blocks[0, :, 0, :] if public_levels == 1 else blocks[0, :, 1, :]
+        return np.repeat(local[None, :, :], public_levels + 1, axis=0)
+    return np.stack(
+        [blocks[level, :, level, :] for level in range(public_levels)],
+        axis=0,
+    )

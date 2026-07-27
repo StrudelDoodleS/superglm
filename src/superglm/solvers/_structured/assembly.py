@@ -29,7 +29,10 @@ from superglm.solvers._structured.operators import (
     SumToZeroBlockOperator,
     SymmetricBlockOperator,
 )
-from superglm.solvers._structured.overrides import _structured_override_incompatibility
+from superglm.solvers._structured.overrides import (
+    _factor_smooth_override_local_blocks,
+    _structured_override_incompatibility,
+)
 from superglm.solvers.hessian_factor import _component_indices
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -244,7 +247,6 @@ def build_penalized_block_operator(
         penalty = np.asarray(S_override, dtype=np.float64)
         if penalty.shape != (p, p):
             raise ValueError(f"S_override must have shape ({p}, {p}).")
-        flat_structured = operator.structured_indices.ravel()
         incompatibility = _structured_override_incompatibility(
             penalty,
             small_indices=operator.small_indices,
@@ -254,13 +256,11 @@ def build_penalized_block_operator(
         if incompatibility is not None:
             raise ValueError(incompatibility)
         A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
-        structured_penalty = penalty[np.ix_(flat_structured, flat_structured)]
-        for level in range(operator.n_levels):
-            local = slice(
-                level * operator.block_size,
-                (level + 1) * operator.block_size,
-            )
-            D[level] += structured_penalty[local, local]
+        D += _factor_smooth_override_local_blocks(
+            penalty,
+            operator.structured_indices,
+            sum_to_zero=False,
+        )
         return BlockSymmetricOperator(
             A=A,
             C=operator.C,
@@ -417,7 +417,6 @@ def build_penalized_sum_to_zero_operator(
         penalty = np.asarray(S_override, dtype=np.float64)
         if penalty.shape != (p, p):
             raise ValueError(f"S_override must have shape ({p}, {p}).")
-        flat_structured = operator.structured_indices.ravel()
         incompatibility = _structured_override_incompatibility(
             penalty,
             small_indices=operator.small_indices,
@@ -427,12 +426,11 @@ def build_penalized_sum_to_zero_operator(
         if incompatibility is not None:
             raise ValueError(incompatibility)
         A += penalty[np.ix_(operator.small_indices, operator.small_indices)]
-        public = penalty[np.ix_(flat_structured, flat_structured)]
-        free_levels = operator.n_levels - 1
-        k = operator.block_size
-        blocks = public.reshape(free_levels, k, free_levels, k)
-        local = 0.5 * blocks[0, :, 0, :] if free_levels == 1 else blocks[0, :, 1, :]
-        D += local[None, :, :]
+        D += _factor_smooth_override_local_blocks(
+            penalty,
+            operator.structured_indices,
+            sum_to_zero=True,
+        )
         return SumToZeroBlockOperator(
             A=A,
             C=operator.C,

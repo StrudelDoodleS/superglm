@@ -22,6 +22,7 @@ from superglm.group_matrix import (
 from superglm.links import IdentityLink, LogLink
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
+from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.structured import (
     BlockSymmetricOperator,
@@ -34,6 +35,8 @@ from superglm.types import GroupSlice, PenaltyComponent
 
 def _factor_smooth_problem(
     response_factory: Callable[[np.random.Generator, np.ndarray], np.ndarray],
+    *,
+    factor_basis: str = "fs",
 ):
     rng = np.random.default_rng(819)
     n = 480
@@ -48,20 +51,26 @@ def _factor_smooth_problem(
 
     main = SparseSSPGroupMatrix(sp.csr_matrix(main_basis), np.eye(4))
     main.omega = np.diag([0.2, 0.7, 1.4, 2.1])
-    wiggle = np.diag([0.0, 0.0, 0.8, 1.7])
+    wiggle = np.diag([0.0, 0.0, 0.8, 1.7]) if factor_basis == "fs" else np.eye(block_size)
     null_0 = np.diag([1.0, 0.0, 0.0, 0.0])
     null_1 = np.diag([0.0, 1.0, 0.0, 0.0])
+    repeated_components = (
+        (
+            ("wiggle", wiggle),
+            ("null_0", null_0),
+            ("null_1", null_1),
+        )
+        if factor_basis == "fs"
+        else (("wiggle", wiggle),)
+    )
     factor_smooth = FactorSmoothGroupMatrix(
         sp.csr_matrix(local_basis),
         codes,
         n_levels,
         natural_map=np.eye(block_size),
         levels=tuple(f"segment-{level}" for level in range(n_levels)),
-        repeated_penalty_components=(
-            ("wiggle", wiggle),
-            ("null_0", null_0),
-            ("null_1", null_1),
-        ),
+        repeated_penalty_components=repeated_components,
+        factor_basis=factor_basis,
     )
     matrices = [
         DenseGroupMatrix(numeric),
@@ -71,8 +80,9 @@ def _factor_smooth_problem(
     ]
     groups: list[GroupSlice] = []
     start = 0
+    factor_group_name = f"x:segment:{factor_basis}"
     for name, matrix, penalized in zip(
-        ("numeric", "x:main", "branch", "x:segment:fs"),
+        ("numeric", "x:main", "branch", factor_group_name),
         matrices,
         (False, True, True, True),
         strict=True,
@@ -108,16 +118,17 @@ def _factor_smooth_problem(
         ),
     ]
     for suffix, omega in factor_smooth.repeated_penalty_components:
+        coefficient_levels = n_levels if factor_basis == "fs" else n_levels - 1
         penalties.append(
             PenaltyComponent(
-                name=f"x:segment:fs:{suffix}",
-                group_name="x:segment:fs",
+                name=f"{factor_group_name}:{suffix}",
+                group_name=factor_group_name,
                 group_index=3,
                 group_sl=groups[3].sl,
                 omega_raw=omega,
                 omega_ssp=omega,
-                rank=float(n_levels * np.linalg.matrix_rank(omega)),
-                penalty_kind="repeated",
+                rank=float(coefficient_levels * np.linalg.matrix_rank(omega)),
+                penalty_kind=("repeated" if factor_basis == "fs" else "sum_to_zero"),
                 repeat_count=n_levels,
                 block_width=block_size,
             )
@@ -138,10 +149,15 @@ def _factor_smooth_problem(
     lambdas = {
         "x:main": 1.3,
         "branch": 2.2,
-        "x:segment:fs:wiggle": 1.7,
-        "x:segment:fs:null_0": 0.65,
-        "x:segment:fs:null_1": 0.9,
+        f"{factor_group_name}:wiggle": 1.7,
     }
+    if factor_basis == "fs":
+        lambdas.update(
+            {
+                f"{factor_group_name}:null_0": 0.65,
+                f"{factor_group_name}:null_1": 0.9,
+            }
+        )
     return DesignMatrix(matrices, n=n, p=start), groups, penalties, y, weights, offset, lambdas
 
 
@@ -156,6 +172,167 @@ def _poisson_response(rng: np.random.Generator, eta: np.ndarray) -> np.ndarray:
 def _gamma_response(rng: np.random.Generator, eta: np.ndarray) -> np.ndarray:
     mean = np.exp(eta)
     return rng.gamma(shape=4.0, scale=mean / 4.0)
+
+
+def _factor_smooth_override(
+    dm: DesignMatrix,
+    groups: list[GroupSlice],
+    penalties: list[PenaltyComponent],
+    lambdas: dict[str, float],
+    *,
+    local_penalty: np.ndarray | None,
+) -> np.ndarray:
+    override = build_penalty_matrix(
+        dm.group_matrices,
+        groups,
+        lambdas,
+        dm.p,
+        reml_penalties=penalties,
+    )
+    matrix = dm.group_matrices[3]
+    assert isinstance(matrix, FactorSmoothGroupMatrix)
+    group = groups[3]
+    override[group.sl, group.sl] = 0.0
+    if local_penalty is None:
+        return override
+    if matrix.factor_basis == "fs":
+        override[group.sl, group.sl] = np.kron(
+            np.eye(matrix.n_levels),
+            local_penalty,
+        )
+        return override
+    free_levels = matrix.n_levels - 1
+    sum_to_zero_level_geometry = np.ones((free_levels, free_levels)) + np.eye(free_levels)
+    override[group.sl, group.sl] = np.kron(
+        sum_to_zero_level_geometry,
+        local_penalty,
+    )
+    return override
+
+
+@pytest.mark.parametrize("factor_basis", ["fs", "sz"])
+def test_authoritative_factor_smooth_override_supersedes_stale_zero_lambdas(
+    factor_basis: str,
+) -> None:
+    dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
+        _gaussian_response,
+        factor_basis=factor_basis,
+    )
+    matrix = dm.group_matrices[3]
+    assert isinstance(matrix, FactorSmoothGroupMatrix)
+    weights = np.array(weights, copy=True)
+    weights[matrix.codes == matrix.n_levels - 1] = 0.0
+    override = _factor_smooth_override(
+        dm,
+        groups,
+        penalties,
+        lambdas,
+        local_penalty=np.eye(matrix.block_size),
+    )
+    stale_lambdas = dict(lambdas)
+    for component in penalties:
+        if component.group_name == groups[3].name:
+            stale_lambdas[component.name] = 0.0
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=stale_lambdas,
+        offset=offset,
+        direct_solve="auto",
+        S_override=override,
+        tol=1.0e-10,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=stale_lambdas,
+        offset=offset,
+        direct_solve="gram",
+        S_override=override,
+        tol=1.0e-10,
+    )
+
+    assert automatic.direct_backend == "structured"
+    assert automatic.direct_fallback_reason is None
+    np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
+
+
+@pytest.mark.parametrize("factor_basis", ["fs", "sz"])
+def test_authoritative_singular_factor_smooth_override_falls_back_to_gram(
+    factor_basis: str,
+) -> None:
+    dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
+        _gaussian_response,
+        factor_basis=factor_basis,
+    )
+    matrix = dm.group_matrices[3]
+    assert isinstance(matrix, FactorSmoothGroupMatrix)
+    weights = np.array(weights, copy=True)
+    weights[matrix.codes == matrix.n_levels - 1] = 0.0
+    override = _factor_smooth_override(
+        dm,
+        groups,
+        penalties,
+        lambdas,
+        local_penalty=None,
+    )
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="auto",
+        S_override=override,
+        tol=1.0e-10,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        S_override=override,
+        tol=1.0e-10,
+    )
+
+    assert automatic.direct_backend == "gram"
+    assert "authoritative S_override" in automatic.direct_fallback_reason
+    np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
+    with pytest.raises(
+        ValueError,
+        match=r"direct_solve='structured'.*authoritative S_override",
+    ):
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=lambdas,
+            offset=offset,
+            direct_solve="structured",
+            S_override=override,
+            tol=1.0e-10,
+        )
 
 
 @pytest.mark.parametrize(
