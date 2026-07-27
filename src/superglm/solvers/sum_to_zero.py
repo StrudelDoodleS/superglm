@@ -86,6 +86,13 @@ def _decompose_local_psd_batch(
         )
 
     positive = eigenvalues > thresholds[:, None]
+    full_rank = np.all(positive, axis=1)
+    full_inverses = (
+        np.linalg.inv(symmetric[full_rank])
+        if np.any(full_rank)
+        else np.empty((0, symmetric.shape[1], symmetric.shape[2]), dtype=np.float64)
+    )
+    full_inverse_index = 0
     locals_list = []
     for level in range(values.shape[0]):
         positive_values = np.asarray(
@@ -96,11 +103,19 @@ def _decompose_local_psd_batch(
             eigenvectors[level][:, positive[level]],
             dtype=np.float64,
         )
-        pinv = (
-            (positive_vectors / positive_values) @ positive_vectors.T
-            if positive_values.size
-            else np.zeros_like(symmetric[level])
-        )
+        if full_rank[level]:
+            # Divide-and-conquer eigenvectors can lose relative inverse
+            # accuracy when O(1) data curvature shares a block with an
+            # O(1e11) smoothing penalty.  Once the spectrum has certified
+            # full rank, a batched direct inverse is both more accurate and
+            # still compact.  Rank-deficient blocks retain the spectral
+            # pseudo-inverse and null geometry below.
+            pinv = full_inverses[full_inverse_index]
+            full_inverse_index += 1
+        elif positive_values.size:
+            pinv = (positive_vectors / positive_values) @ positive_vectors.T
+        else:
+            pinv = np.zeros_like(symmetric[level])
         locals_list.append(
             _LocalPSD(
                 pinv=0.5 * (pinv + pinv.T),
