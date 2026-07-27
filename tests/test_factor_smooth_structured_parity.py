@@ -655,10 +655,17 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
     }
 
 
-@pytest.mark.parametrize("basis", ["fs", "sz"])
+@pytest.mark.parametrize(
+    ("basis", "fallback_reason"),
+    [
+        ("fs", "zero penalty component"),
+        ("sz", "singular local block"),
+    ],
+)
 @pytest.mark.parametrize("discrete", [False, True])
-def test_auto_factor_smooth_falls_back_for_singular_local_blocks(
+def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
     basis: str,
+    fallback_reason: str,
     discrete: bool,
 ) -> None:
     rng = np.random.default_rng(20260726)
@@ -710,7 +717,7 @@ def test_auto_factor_smooth_falls_back_for_singular_local_blocks(
     )
 
     assert model.result.direct_backend == "gram"
-    assert "singular local block" in model.result.direct_fallback_reason
+    assert fallback_reason in model.result.direct_fallback_reason
 
 
 def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
