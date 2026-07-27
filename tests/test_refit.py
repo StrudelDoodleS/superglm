@@ -97,6 +97,41 @@ class TestRefitBasic:
             # Not identical — shrinkage removed
             assert not np.allclose(orig_beta, refit_beta, atol=1e-6)
 
+    def test_preserves_nonuniform_sample_weight(self):
+        x = np.linspace(-2.0, 2.0, 160)
+        y = 0.6 + 0.9 * x
+        y[x > 0.8] += 2.5
+        sample_weight = np.where(x > 0.8, 0.05, 3.0)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        ).fit(X, y, sample_weight=sample_weight)
+
+        weighted = model.refit_unpenalised(X, y, sample_weight=sample_weight)
+        unweighted = model.refit_unpenalised(X, y)
+
+        np.testing.assert_allclose(
+            weighted.result.beta,
+            model.result.beta,
+            rtol=1e-9,
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            weighted.result.intercept,
+            model.result.intercept,
+            rtol=1e-9,
+            atol=1e-9,
+        )
+        assert not np.allclose(
+            weighted.result.beta,
+            unweighted.result.beta,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
     def test_unfitted_raises(self):
         model = SuperGLM(features={"x": Numeric()})
         X = pd.DataFrame({"x": [1, 2, 3]})

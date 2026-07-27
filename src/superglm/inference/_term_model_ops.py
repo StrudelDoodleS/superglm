@@ -330,7 +330,6 @@ def refit_unpenalised(
             "their REML variance-component contract."
         )
 
-    del sample_weight
     from superglm.solvers.rank import selected_group_name_set
 
     selected_names = selected_group_name_set(model._result, model._groups)
@@ -354,7 +353,12 @@ def refit_unpenalised(
         lam2 = ...
 
     new_model = model._clone_without_features(inactive, lambda1=0.0, lambda2=lam2)
-    new_model.fit(X, y, offset=offset)
+    new_model.fit(
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
     return new_model
 
 
