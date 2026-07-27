@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft for written review. The model and effort choice was approved on 2026-07-27.
+Implemented and merged through PR #169 on 2026-07-27.
 
 ## Context
 

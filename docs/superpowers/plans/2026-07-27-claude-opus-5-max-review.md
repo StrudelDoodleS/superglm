@@ -56,7 +56,7 @@ Run:
 
 ```bash
 rtk uv run python -c 'from pathlib import Path; import yaml; [yaml.safe_load(path.read_text(encoding="utf-8")) for path in Path(".github/workflows").glob("*.yml")]'
-rtk pytest tests/test_supply_chain_governance.py -q
+rtk uv run pytest tests/test_supply_chain_governance.py -q
 rtk git diff --check
 ```
 
@@ -98,7 +98,34 @@ Run:
 
 ```bash
 rtk git push -u origin chore/claude-opus-5-max
-rtk gh pr create --base master --head chore/claude-opus-5-max --title "Run Claude reviews with Opus 5 max" --body "Release impact: release:none. Rationale: this changes review automation only and does not alter the packaged library or runtime behavior. Pin every manually triggered Claude PR review to claude-opus-5 with max effort. Preserve the existing trigger and reviewer-only permission boundary. Validation: workflow YAML parse, supply-chain governance tests, and clean rebased non-slow baseline."
+rtk gh pr create --base master --head chore/claude-opus-5-max --title "Run Claude reviews with Opus 5 max" --body-file - <<'EOF'
+## Summary
+
+Pin every manually triggered Claude PR review to `claude-opus-5` with max
+effort while preserving the existing trigger and reviewer-only permission
+boundary.
+
+## Release impact
+
+Release impact: `release:none`
+
+Release version: `none`
+
+### Rationale
+
+This changes review automation only and does not alter the packaged library or
+runtime behavior.
+
+### Compatibility and migration
+
+None.
+
+## Validation
+
+- Parsed every workflow YAML file.
+- Ran the supply-chain governance tests.
+- Confirmed the rebased non-slow baseline and final branch scope.
+EOF
 ```
 
 Expected: GitHub creates a non-draft pull request targeting `master`.
