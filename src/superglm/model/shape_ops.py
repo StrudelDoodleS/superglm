@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 
 import numpy as np
 
 from superglm._frame import as_eager_frame
+from superglm.group_matrix import GroupMatrix
 from superglm.model.fit_state import FittedStateRevision
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+from superglm.types import PenaltyComponent
 
 
 def _constraint_kind(spec) -> str | None:
@@ -110,7 +113,19 @@ def _synchronize_repaired_intercept_state(model) -> None:
         term_state["intercept_shift"] = term_shift
 
 
-def _build_smooth_penalty_terms(model) -> tuple[tuple[slice, float, object, object], ...]:
+@dataclass(frozen=True)
+class _CompactPenaltyTerms:
+    """Owned compact penalty geometry for one fitted REML result."""
+
+    lambdas: float | dict[str, float]
+    penalties: tuple[PenaltyComponent, ...]
+    group_matrices: tuple[GroupMatrix, ...]
+
+
+_LegacyPenaltyTerms = tuple[tuple[slice, float, object, object], ...]
+
+
+def _build_smooth_penalty_terms(model) -> _CompactPenaltyTerms | _LegacyPenaltyTerms:
     """Prepare block/component quadratic terms without allocating a global ``p x p`` S."""
     from superglm.group_matrix import (
         DiscretizedSplineCategoricalGroupMatrix,
@@ -124,40 +139,14 @@ def _build_smooth_penalty_terms(model) -> tuple[tuple[slice, float, object, obje
     group_matrices = model._dm.group_matrices
     groups = model._groups
     reml_penalties = getattr(model, "_reml_penalties", None)
-    terms: list[tuple[slice, float, object, object]] = []
-
     if reml_penalties is not None:
-        represented_group_indices = {component.group_index for component in reml_penalties}
-        for component in reml_penalties:
-            lam = lambda2[component.name] if isinstance(lambda2, dict) else lambda2
-            lam_float = float(lam)
-            if lam_float == 0.0:
-                continue
-            gm = group_matrices[component.group_index]
-            if component.omega_ssp is not None:
-                terms.append((component.group_sl, lam_float, component.omega_ssp, None))
-            else:
-                terms.append((component.group_sl, lam_float, component.omega_raw, gm.R_inv))
+        return _CompactPenaltyTerms(
+            lambdas=lambda2,
+            penalties=tuple(reml_penalties),
+            group_matrices=tuple(group_matrices),
+        )
 
-        for group_index, group in enumerate(groups):
-            if group_index in represented_group_indices:
-                continue
-            reparameterization = group.scop_reparameterization
-            if reparameterization is None or not group.penalized:
-                continue
-            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
-            lam_float = float(lam)
-            if lam_float > 0.0:
-                terms.append(
-                    (
-                        group.sl,
-                        lam_float,
-                        reparameterization.penalty_matrix(),
-                        None,
-                    )
-                )
-        return tuple(terms)
-
+    terms: list[tuple[slice, float, object, object]] = []
     penalty_matrix_types = (
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
@@ -189,10 +178,21 @@ def _build_smooth_penalty_terms(model) -> tuple[tuple[slice, float, object, obje
 
 def _smooth_penalty_value(
     beta,
-    terms: tuple[tuple[slice, float, object, object], ...],
+    terms: _CompactPenaltyTerms | _LegacyPenaltyTerms,
 ) -> float:
     """Evaluate exact ``beta' S beta`` from compact block/component terms."""
     beta_arr = np.asarray(beta, dtype=np.float64)
+    if isinstance(terms, _CompactPenaltyTerms):
+        from superglm.reml.penalty_algebra import total_penalty_quadratic
+
+        return float(
+            total_penalty_quadratic(
+                beta_arr,
+                terms.lambdas,
+                list(terms.penalties),
+                list(terms.group_matrices),
+            )
+        )
     value = 0.0
     for group_slice, lam, omega, raw_projection in terms:
         group_beta = beta_arr[group_slice]

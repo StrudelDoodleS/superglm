@@ -192,6 +192,51 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
         )
 
 
+def _reject_structured_fit_constraints(model) -> None:
+    """Reject constrained REML geometry that compact penalties do not define."""
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import _SplineBase
+
+    constrained_splines = [
+        name
+        for name, spec in model._specs.items()
+        if isinstance(spec, _SplineBase)
+        and getattr(spec, "constraint_kind", getattr(spec, "monotone", None)) is not None
+        and getattr(
+            spec,
+            "constraint_mode",
+            getattr(spec, "monotone_mode", "postfit"),
+        )
+        == "fit"
+    ]
+    if not constrained_splines:
+        return
+
+    random_effects = [name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)]
+    factor_smooths = [
+        name for name, spec in model._interaction_specs.items() if isinstance(spec, FactorSmooth)
+    ]
+    if not random_effects and not factor_smooths:
+        return
+
+    structured_terms = []
+    if random_effects:
+        structured_terms.append(
+            "RandomEffect term(s) " + ", ".join(repr(name) for name in random_effects)
+        )
+    if factor_smooths:
+        structured_terms.append(
+            "FactorSmooth term(s) " + ", ".join(repr(name) for name in factor_smooths)
+        )
+    constrained = ", ".join(repr(name) for name in constrained_splines)
+    raise NotImplementedError(
+        f"fit-time shape constraints on spline term(s) {constrained} are not "
+        f"supported with {' and '.join(structured_terms)}; use separate models "
+        "or a post-fit shape constraint."
+    )
+
+
 def _compute_null_mu(
     y: NDArray,
     weights: NDArray,
@@ -1106,6 +1151,7 @@ def _fit_reml_in_workspace(
     model._reml_profile = None
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _reject_structured_fit_constraints(model)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 
