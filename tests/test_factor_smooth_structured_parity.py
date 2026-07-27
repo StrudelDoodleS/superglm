@@ -29,6 +29,7 @@ from superglm.solvers.structured import (
     ProfiledBlockSchurFactor,
     StructuredLinearSystemState,
     materialize_compact_operator,
+    resolve_structured_backend,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -208,6 +209,191 @@ def _factor_smooth_override(
         local_penalty,
     )
     return override
+
+
+def _selection_factor_smooth_matrix(
+    *,
+    factor_basis: str,
+    n_levels: int,
+    local_basis: np.ndarray,
+    repeated_penalty_components: tuple[tuple[str, np.ndarray], ...],
+) -> tuple[FactorSmoothGroupMatrix, GroupSlice]:
+    rows_per_level = local_basis.shape[0] // n_levels
+    codes = np.repeat(np.arange(n_levels, dtype=np.intp), rows_per_level)
+    block_size = local_basis.shape[1]
+    matrix = FactorSmoothGroupMatrix(
+        sp.csr_matrix(local_basis),
+        codes,
+        n_levels,
+        natural_map=np.eye(block_size),
+        levels=tuple(f"level-{level}" for level in range(n_levels)),
+        repeated_penalty_components=repeated_penalty_components,
+        factor_basis=factor_basis,
+    )
+    return matrix, GroupSlice(
+        name=f"x:group:{factor_basis}",
+        start=0,
+        end=matrix.shape[1],
+        penalized=True,
+    )
+
+
+def test_auto_sz_cost_fallback_precedes_override_feasibility_scan(monkeypatch) -> None:
+    n_levels = 4
+    x = np.tile(np.linspace(-1.0, 1.0, 6), n_levels)
+    matrix, group = _selection_factor_smooth_matrix(
+        factor_basis="sz",
+        n_levels=n_levels,
+        local_basis=np.column_stack((np.ones_like(x), x)),
+        repeated_penalty_components=(("wiggle", np.eye(2)),),
+    )
+    weights = np.ones(matrix.shape[0])
+    weights[matrix.codes == n_levels - 1] = 0.0
+    override = np.zeros((matrix.shape[1], matrix.shape[1]))
+    original = FactorSmoothGroupMatrix.factor_smooth_sufficient_stats
+    calls = 0
+
+    def counted(self, W, rhs):
+        nonlocal calls
+        calls += 1
+        return original(self, W, rhs)
+
+    monkeypatch.setattr(
+        FactorSmoothGroupMatrix,
+        "factor_smooth_sufficient_stats",
+        counted,
+    )
+    automatic = resolve_structured_backend(
+        [matrix],
+        [group],
+        direct_solve="auto",
+        coefficient_width=matrix.shape[1],
+        row_weights=weights,
+        lambda2={f"{group.name}:wiggle": 1.0},
+        S_override=override,
+    )
+    assert not automatic.use_structured
+    assert "crossover" in automatic.fallback_reason
+    assert calls == 0
+
+    with pytest.raises(ValueError, match="authoritative S_override"):
+        resolve_structured_backend(
+            [matrix],
+            [group],
+            direct_solve="structured",
+            coefficient_width=matrix.shape[1],
+            row_weights=weights,
+            lambda2={f"{group.name}:wiggle": 1.0},
+            S_override=override,
+        )
+    assert calls == 1
+
+
+def test_authoritative_sz_override_preserves_tiny_weight_rank() -> None:
+    dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
+        _gaussian_response,
+        factor_basis="sz",
+    )
+    matrix = dm.group_matrices[3]
+    assert isinstance(matrix, FactorSmoothGroupMatrix)
+    weights = np.array(weights, copy=True)
+    weights[matrix.codes == matrix.n_levels - 1] = 1.0e-20
+    override = _factor_smooth_override(
+        dm,
+        groups,
+        penalties,
+        lambdas,
+        local_penalty=None,
+    )
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="auto",
+        S_override=override,
+        tol=1.0e-10,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        S_override=override,
+        tol=1.0e-10,
+    )
+
+    assert automatic.direct_backend == "gram"
+    assert "authoritative S_override" in automatic.direct_fallback_reason
+    np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
+    with pytest.raises(ValueError, match="authoritative S_override"):
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=lambdas,
+            offset=offset,
+            direct_solve="structured",
+            S_override=override,
+            tol=1.0e-10,
+        )
+
+
+def test_factor_smooth_feasibility_cache_includes_lambda_scales() -> None:
+    n_levels = 20
+    local_basis = np.tile(
+        np.array([[0.0, 1.0], [0.0, 2.0]]),
+        (n_levels, 1),
+    )
+    matrix, group = _selection_factor_smooth_matrix(
+        factor_basis="fs",
+        n_levels=n_levels,
+        local_basis=local_basis,
+        repeated_penalty_components=(("wiggle", np.diag([1.0, 0.0])),),
+    )
+    weights = np.ones(matrix.shape[0])
+    moderate = resolve_structured_backend(
+        [matrix],
+        [group],
+        direct_solve="auto",
+        coefficient_width=matrix.shape[1],
+        row_weights=weights,
+        lambda2={f"{group.name}:wiggle": 1.0},
+    )
+    tiny = resolve_structured_backend(
+        [matrix],
+        [group],
+        direct_solve="auto",
+        coefficient_width=matrix.shape[1],
+        row_weights=weights,
+        lambda2={f"{group.name}:wiggle": 1.0e-20},
+    )
+
+    assert moderate.use_structured
+    assert not tiny.use_structured
+    assert "singular local block" in tiny.fallback_reason
+    with pytest.raises(ValueError, match="singular local block"):
+        resolve_structured_backend(
+            [matrix],
+            [group],
+            direct_solve="structured",
+            coefficient_width=matrix.shape[1],
+            row_weights=weights,
+            lambda2={f"{group.name}:wiggle": 1.0e-20},
+        )
 
 
 @pytest.mark.parametrize("factor_basis", ["fs", "sz"])

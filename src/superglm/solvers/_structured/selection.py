@@ -130,6 +130,54 @@ def _sum_to_zero_structured_auto_is_beneficial(
     )
 
 
+def _structured_auto_cost_decision(
+    dominant_matrix: GroupMatrix,
+    selection: StructuredGroupSelection,
+    coefficient_width: int,
+    small_size: int,
+) -> StructuredBackendDecision:
+    """Return the measured automatic crossover decision for one selected block."""
+    if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+        if dominant_matrix.factor_basis == "sz":
+            use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
+                dominant_matrix.n_levels,
+                dominant_matrix.block_size,
+                small_size,
+            )
+        else:
+            use_structured, cost_ratio = _block_structured_auto_is_beneficial(
+                dominant_matrix.n_levels,
+                dominant_matrix.block_size,
+                small_size,
+            )
+        geometry_name = "FactorSmooth"
+        dimensions = f"K={dominant_matrix.n_levels}, k={dominant_matrix.block_size}, q={small_size}"
+    elif isinstance(dominant_matrix, RandomEffectGroupMatrix):
+        use_structured, cost_ratio = _structured_auto_is_beneficial(
+            dominant_matrix.shape[1],
+            small_size,
+        )
+        geometry_name = "RandomEffect"
+        dimensions = f"K={dominant_matrix.shape[1]}, q={small_size}"
+    else:  # pragma: no cover - StructuredGroupSelection invariant
+        raise RuntimeError("structured selection chose an unsupported group matrix")
+
+    fallback_reason = None
+    if not use_structured:
+        fallback_reason = (
+            f"{geometry_name} geometry is below the measured structured crossover "
+            f"(p={coefficient_width}, {dimensions}, estimated_cost_ratio={cost_ratio:.3f}; "
+            f"require p >= {_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
+            f"{_AUTO_MAX_STRUCTURED_COST_RATIO:.2f})"
+        )
+    return StructuredBackendDecision(
+        use_structured=use_structured,
+        group_index=selection.group_index,
+        group_name=selection.group_name,
+        fallback_reason=fallback_reason,
+    )
+
+
 def _selection_failure(
     reason: str,
     mode: Literal["auto", "structured"],
@@ -212,59 +260,63 @@ def select_structured_group(
     )
 
 
-def _factor_smooth_singular_local_level(
+def _factor_smooth_component_lambda(
+    group_name: str,
+    suffix: str,
+    lambda2: float | dict[str, float],
+) -> float:
+    """Resolve one repeated factor-smooth component lambda."""
+    if isinstance(lambda2, dict):
+        return float(
+            lambda2.get(
+                f"{group_name}:{suffix}",
+                lambda2.get(group_name, 0.0),
+            )
+        )
+    return float(lambda2)
+
+
+def _factor_smooth_local_penalty(
     matrix: FactorSmoothGroupMatrix,
     group_name: str,
-    row_weights: NDArray,
     lambda2: float | dict[str, float],
+) -> tuple[NDArray, tuple[tuple[str, float], ...]]:
+    """Build the exact lambda-scaled local penalty and its cache identity."""
+    local_penalty = np.zeros((matrix.block_size, matrix.block_size), dtype=np.float64)
+    resolved_components: list[tuple[str, float]] = []
+    for suffix, omega in matrix.repeated_penalty_components:
+        lam = _factor_smooth_component_lambda(group_name, suffix, lambda2)
+        resolved_components.append((suffix, lam))
+        values = np.asarray(omega, dtype=np.float64)
+        local_penalty += lam * (0.5 * (values + values.T))
+    return local_penalty, tuple(resolved_components)
+
+
+def _factor_smooth_singular_local_level(
+    matrix: FactorSmoothGroupMatrix,
+    row_weights: NDArray,
+    local_penalty: NDArray,
+    penalty_identity: tuple[tuple[str, float], ...],
 ) -> int | None:
-    """Return the first structurally singular penalized local block, if any."""
+    """Return the first numerically singular weighted local block, if any."""
     weights = np.asarray(row_weights, dtype=np.float64)
     if weights.shape != (matrix.shape[0],):
         raise ValueError("row_weights must match the structured design row count.")
-    active_components: list[str] = []
-    local_penalty = np.zeros((matrix.block_size, matrix.block_size), dtype=np.float64)
-    for suffix, omega in matrix.repeated_penalty_components:
-        if isinstance(lambda2, dict):
-            lam = float(
-                lambda2.get(
-                    f"{group_name}:{suffix}",
-                    lambda2.get(group_name, 0.0),
-                )
-            )
-        else:
-            lam = float(lambda2)
-        if lam:
-            active_components.append(suffix)
-            local_penalty += np.asarray(omega, dtype=np.float64)
-
-    penalty_eigenvalues = np.linalg.eigvalsh(local_penalty)
-    penalty_scale = max(float(np.max(np.abs(penalty_eigenvalues), initial=0.0)), 1.0)
-    penalty_threshold = np.finfo(np.float64).eps * max(matrix.block_size, 1) * penalty_scale * 10.0
-    if penalty_eigenvalues[0] > penalty_threshold:
-        return None
-
-    positive_rows = weights > 0.0
-    packed_support = np.packbits(positive_rows)
-    support_digest = hashlib.blake2b(
-        packed_support.data,
+    weight_bytes = np.ascontiguousarray(weights).view(np.uint8)
+    weight_digest = hashlib.blake2b(
+        weight_bytes,
         digest_size=16,
     ).digest()
-    cache_key = (tuple(active_components), support_digest)
+    cache_key = (penalty_identity, weight_digest)
     if getattr(matrix, "_structured_feasibility_key", None) == cache_key:
         return getattr(matrix, "_structured_feasibility_level", None)
 
     information, _xtw, _rhs = matrix.factor_smooth_sufficient_stats(
-        positive_rows.astype(np.float64),
+        weights,
         np.zeros_like(weights),
     )
     local_blocks = np.asarray(information, dtype=np.float64) + local_penalty[None, :, :]
-
-    eigenvalues = np.linalg.eigvalsh(local_blocks)
-    scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), 1.0)
-    thresholds = np.finfo(np.float64).eps * max(matrix.block_size, 1) * scales * 10.0
-    singular = eigenvalues[:, 0] <= thresholds
-    singular_level = int(np.flatnonzero(singular)[0]) if np.any(singular) else None
+    singular_level = _first_singular_factor_smooth_block(local_blocks)
     matrix._structured_feasibility_key = cache_key
     matrix._structured_feasibility_level = singular_level
     return singular_level
@@ -276,7 +328,8 @@ def _first_singular_factor_smooth_block(
     scale_floor: float = 1.0,
 ) -> int | None:
     """Return the first local block that is not numerically positive definite."""
-    eigenvalues = np.linalg.eigvalsh(local_blocks)
+    symmetric = 0.5 * (local_blocks + local_blocks.transpose(0, 2, 1))
+    eigenvalues = np.linalg.eigvalsh(symmetric)
     block_size = local_blocks.shape[1]
     scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), scale_floor)
     thresholds = np.finfo(np.float64).eps * max(block_size, 1) * scales * 10.0
@@ -296,9 +349,8 @@ def _factor_smooth_override_singular_local_level(
     expected_shape = (matrix.n_levels, matrix.block_size, matrix.block_size)
     if local_penalties.shape != expected_shape:
         raise ValueError(f"FactorSmooth override local penalties must have shape {expected_shape}.")
-    positive_rows = weights > 0.0
     information, _xtw, _rhs = matrix.factor_smooth_sufficient_stats(
-        positive_rows.astype(np.float64),
+        weights,
         np.zeros_like(weights),
     )
     return _first_singular_factor_smooth_block(
@@ -329,15 +381,7 @@ def _factor_smooth_zero_penalty_component(
 ) -> str | None:
     """Return the first repeated component whose requested penalty is zero."""
     for suffix, _omega in matrix.repeated_penalty_components:
-        if isinstance(lambda2, dict):
-            lam = float(
-                lambda2.get(
-                    f"{group_name}:{suffix}",
-                    lambda2.get(group_name, 0.0),
-                )
-            )
-        else:
-            lam = float(lambda2)
+        lam = _factor_smooth_component_lambda(group_name, suffix, lambda2)
         if lam == 0.0:
             return suffix
     return None
@@ -378,6 +422,16 @@ def resolve_structured_backend(
     dominant_matrix = group_matrices[selection.group_index]
     dominant_size = dominant_matrix.shape[1]
     small_size = coefficient_width - dominant_size
+    auto_cost_decision = (
+        _structured_auto_cost_decision(
+            dominant_matrix,
+            selection,
+            coefficient_width,
+            small_size,
+        )
+        if mode == "auto"
+        else None
+    )
     dominant_group = groups[selection.group_index]
     override_penalty: NDArray | None = None
     override_local_penalties: NDArray | None = None
@@ -494,12 +548,12 @@ def resolve_structured_backend(
                 )
     if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
         if override_local_penalties is not None:
-            singular_penalty_level = _first_singular_factor_smooth_block(
+            structurally_singular_level = _first_singular_factor_smooth_block(
                 override_local_penalties,
                 scale_floor=0.0,
             )
-            if dominant_matrix.factor_basis != "sz" and singular_penalty_level is not None:
-                level_label = dominant_matrix.levels[singular_penalty_level]
+            if dominant_matrix.factor_basis != "sz" and structurally_singular_level is not None:
+                level_label = dominant_matrix.levels[structurally_singular_level]
                 return _backend_ineligibility(
                     (
                         f"FactorSmooth group {group_name!r} authoritative S_override "
@@ -510,7 +564,12 @@ def resolve_structured_backend(
                     mode,
                     selection,
                 )
-            if row_weights is not None and singular_penalty_level is not None:
+            numerically_singular_level = _first_singular_factor_smooth_block(
+                override_local_penalties
+            )
+            if row_weights is not None and numerically_singular_level is not None:
+                if auto_cost_decision is not None and not auto_cost_decision.use_structured:
+                    return auto_cost_decision
                 singular_level = _factor_smooth_override_singular_local_level(
                     dominant_matrix,
                     row_weights,
@@ -527,6 +586,11 @@ def resolve_structured_backend(
                         selection,
                     )
         elif lambda2 is not None:
+            local_penalty, penalty_identity = _factor_smooth_local_penalty(
+                dominant_matrix,
+                group_name,
+                lambda2,
+            )
             if dominant_matrix.factor_basis != "sz":
                 zero_component = _factor_smooth_zero_penalty_component(
                     dominant_matrix,
@@ -543,12 +607,17 @@ def resolve_structured_backend(
                         mode,
                         selection,
                     )
-            if row_weights is not None:
+            numerically_singular_penalty = (
+                _first_singular_factor_smooth_block(local_penalty[None, :, :]) is not None
+            )
+            if row_weights is not None and numerically_singular_penalty:
+                if auto_cost_decision is not None and not auto_cost_decision.use_structured:
+                    return auto_cost_decision
                 singular_level = _factor_smooth_singular_local_level(
                     dominant_matrix,
-                    group_name,
                     row_weights,
-                    lambda2,
+                    local_penalty,
+                    penalty_identity,
                 )
                 if singular_level is not None:
                     level_label = dominant_matrix.levels[singular_level]
@@ -568,49 +637,6 @@ def resolve_structured_backend(
             group_name=group_name,
             fallback_reason=None,
         )
-    if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
-        if dominant_matrix.factor_basis == "sz":
-            use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
-                dominant_matrix.n_levels,
-                dominant_matrix.block_size,
-                small_size,
-            )
-        else:
-            use_structured, cost_ratio = _block_structured_auto_is_beneficial(
-                dominant_matrix.n_levels,
-                dominant_matrix.block_size,
-                small_size,
-            )
-    else:
-        use_structured, cost_ratio = _structured_auto_is_beneficial(
-            dominant_size,
-            small_size,
-        )
-    fallback_reason = None
-    if not use_structured:
-        geometry_name = (
-            "FactorSmooth"
-            if isinstance(
-                group_matrices[selection.group_index],
-                FactorSmoothGroupMatrix,
-            )
-            else "RandomEffect"
-        )
-        if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
-            dimensions = (
-                f"K={dominant_matrix.n_levels}, k={dominant_matrix.block_size}, q={small_size}"
-            )
-        else:
-            dimensions = f"K={dominant_size}, q={small_size}"
-        fallback_reason = (
-            f"{geometry_name} geometry is below the measured structured crossover "
-            f"(p={coefficient_width}, {dimensions}, estimated_cost_ratio={cost_ratio:.3f}; "
-            f"require p >= {_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
-            f"{_AUTO_MAX_STRUCTURED_COST_RATIO:.2f})"
-        )
-    return StructuredBackendDecision(
-        use_structured=use_structured,
-        group_index=selection.group_index,
-        group_name=selection.group_name,
-        fallback_reason=fallback_reason,
-    )
+    if auto_cost_decision is None:  # pragma: no cover - mode invariant
+        raise RuntimeError("automatic structured resolution omitted its cost decision")
+    return auto_cost_decision
