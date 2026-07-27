@@ -124,7 +124,7 @@ None.
 
 - Parsed every workflow YAML file.
 - Ran the supply-chain governance tests.
-- Confirmed the rebased non-slow baseline and final branch scope.
+- Confirmed the final branch scope.
 EOF
 ```
 
