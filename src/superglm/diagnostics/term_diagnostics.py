@@ -187,49 +187,40 @@ def _drop_term_holdout(
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
-    beta = model.result.beta.copy()
-    mu_full = model.predict(X_val)
+    from superglm.distributions import clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.model import base
+
+    beta = model.result.beta
     dist = model._distribution
     w = sample_weight if sample_weight is not None else np.ones(len(y_val))
-
-    # Full model deviance
     y_arr = np.asarray(y_val, dtype=np.float64)
+
+    plan = base._prediction_plan(model)
+    terms = [*plan["features"], *plan["interactions"]]
+    eta_raw = np.full(len(X_val), model.result.intercept, dtype=np.float64)
+    contributions: dict[str, NDArray[np.floating]] = {}
+    for term in terms:
+        contribution = base._score_prediction_term_exact(term, X_val, beta)
+        contributions[term["name"]] = contribution
+        eta_raw += contribution
+
+    eta_full = stabilize_eta(eta_raw, model._link)
+    mu_full = clip_mu(model._link.inverse(eta_full), dist)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
     rows = []
-    seen_features = set()
-    for g in model._groups:
-        if g.feature_name in seen_features:
-            continue
-        seen_features.add(g.feature_name)
-
-        # Zero this feature's coefficients
-        feature_groups = [fg for fg in model._groups if fg.feature_name == g.feature_name]
-        beta_zeroed = beta.copy()
-        for fg in feature_groups:
-            beta_zeroed[fg.sl] = 0.0
-
-        # Predict with zeroed feature
-        blocks = []
-        for name in model._feature_order:
-            spec = model._specs[name]
-            blocks.append(spec.transform(X_val.column_array(name)))
-        for iname in model._interaction_order:
-            ispec = model._interaction_specs[iname]
-            p1, p2 = ispec.parent_names
-            blocks.append(ispec.transform(X_val.column_array(p1), X_val.column_array(p2)))
-
-        from superglm.distributions import clip_mu
-        from superglm.links import stabilize_eta
-
-        eta = np.hstack(blocks) @ beta_zeroed + model.result.intercept
-        eta = stabilize_eta(eta, model._link)
-        mu_drop = clip_mu(model._link.inverse(eta), model._distribution)
+    for term in terms:
+        eta_drop = stabilize_eta(
+            eta_raw - contributions[term["name"]],
+            model._link,
+        )
+        mu_drop = clip_mu(model._link.inverse(eta_drop), dist)
         dev_drop = float(np.sum(w * dist.deviance_unit(y_arr, mu_drop)))
 
         rows.append(
             {
-                "feature": g.feature_name,
+                "feature": term["name"],
                 "delta_deviance": dev_drop - dev_full,
             }
         )

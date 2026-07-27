@@ -14,6 +14,9 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm._frame import as_eager_frame
+from superglm.distributions import clip_mu
+from superglm.links import stabilize_eta
 
 
 def _fit_structured_diagnostic_case(
@@ -97,6 +100,51 @@ def _structured_spec(model):
     )
 
 
+def _dense_holdout_drop_reference(
+    model,
+    X: pd.DataFrame,
+    y: np.ndarray,
+    weights: np.ndarray,
+) -> pd.DataFrame:
+    frame = as_eager_frame(X)
+    blocks = [
+        model._specs[name].transform(frame.column_array(name)) for name in model._feature_order
+    ]
+    blocks.extend(
+        model._interaction_specs[name].transform(
+            frame.column_array(model._interaction_specs[name].parent_names[0]),
+            frame.column_array(model._interaction_specs[name].parent_names[1]),
+        )
+        for name in model._interaction_order
+    )
+    design = np.hstack(blocks)
+    beta = model.result.beta
+    eta_full = stabilize_eta(design @ beta + model.result.intercept, model._link)
+    mu_full = clip_mu(model._link.inverse(eta_full), model._distribution)
+    dev_full = float(np.sum(weights * model._distribution.deviance_unit(y, mu_full)))
+
+    rows = []
+    seen_features = set()
+    for group in model._groups:
+        if group.feature_name in seen_features:
+            continue
+        seen_features.add(group.feature_name)
+        beta_drop = beta.copy()
+        for feature_group in model._groups:
+            if feature_group.feature_name == group.feature_name:
+                beta_drop[feature_group.sl] = 0.0
+        eta_drop = stabilize_eta(design @ beta_drop + model.result.intercept, model._link)
+        mu_drop = clip_mu(model._link.inverse(eta_drop), model._distribution)
+        dev_drop = float(np.sum(weights * model._distribution.deviance_unit(y, mu_drop)))
+        rows.append(
+            {
+                "feature": group.feature_name,
+                "delta_deviance": dev_drop - dev_full,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def test_term_importance_uses_compact_structured_score(
     structured_diagnostic_case,
     monkeypatch,
@@ -113,3 +161,46 @@ def test_term_importance_uses_compact_structured_score(
     actual = model.term_importance(X)
 
     pd.testing.assert_frame_equal(actual, expected, rtol=2e-11, atol=2e-11)
+
+
+def test_holdout_drop_uses_compact_structured_score(
+    structured_diagnostic_case,
+    monkeypatch,
+):
+    model, X, y = structured_diagnostic_case
+    weights = np.linspace(0.7, 1.3, len(y))
+    expected = _dense_holdout_drop_reference(model, X, y, weights)
+    spec = _structured_spec(model)
+    original_score = spec.score
+    scored_betas = []
+
+    def fail_transform(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("structured transform must not be called")
+
+    def record_score(*args, **kwargs):
+        beta = np.asarray(args[-1], dtype=np.float64)
+        scored_betas.append(beta.copy())
+        return original_score(*args, **kwargs)
+
+    monkeypatch.setattr(spec, "transform", fail_transform)
+    monkeypatch.setattr(spec, "score", record_score)
+    actual = model.term_drop_diagnostics(
+        X,
+        y,
+        sample_weight=weights,
+        mode="holdout",
+        X_val=X,
+        y_val=y,
+    )
+
+    pd.testing.assert_frame_equal(actual, expected, rtol=2e-11, atol=2e-11)
+    from superglm.model import base
+
+    plan = base._prediction_plan(model)
+    term = next(term for term in (*plan["features"], *plan["interactions"]) if term["spec"] is spec)
+    assert len(scored_betas) == 1
+    np.testing.assert_array_equal(
+        scored_betas[0],
+        model.result.beta[term["beta_idx"]],
+    )
