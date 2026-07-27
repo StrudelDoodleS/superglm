@@ -157,7 +157,12 @@ def term_drop_diagnostics(
 def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
     """Refit-based drop-term diagnostics using drop1()."""
 
-    drop1_df = model.drop1(X, y, offset=offset)
+    drop1_df = model.drop1(
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
 
     # Compute IC deltas
     full_ll = model._fit_stats.log_likelihood if model._fit_stats else 0.0

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Spline, SuperGLM
+from superglm import Categorical, Numeric, Spline, SuperGLM
 
 # ── Fixtures ─────────────────────────────────────────────────────
 
@@ -88,6 +88,50 @@ class TestDropTermDiagnostics:
         m, X, y, sample_weight = fitted_model
         df = m.term_drop_diagnostics(X, y, sample_weight=sample_weight, mode="refit")
         assert isinstance(df, pd.DataFrame)
+
+    def test_refit_mode_forwards_nonuniform_sample_weight(self):
+        rng = np.random.default_rng(20260727)
+        n = 220
+        x = rng.normal(size=n)
+        z = rng.normal(size=n)
+        y = 0.4 + 0.8 * x - 0.35 * z + rng.normal(scale=0.25, size=n)
+        y[x > 1.0] += 1.5
+        sample_weight = np.where(x > 1.0, 0.08, 2.5)
+        X = pd.DataFrame({"x": x, "z": z})
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Numeric(), "z": Numeric()},
+            selection_penalty=0.0,
+        ).fit(X, y, sample_weight=sample_weight)
+
+        expected = model.drop1(X, y, sample_weight=sample_weight)
+        unweighted = model.drop1(X, y)
+        actual = model.term_drop_diagnostics(
+            X,
+            y,
+            sample_weight=sample_weight,
+            mode="refit",
+        )
+
+        columns = [
+            "feature",
+            "deviance_reduced",
+            "delta_deviance",
+            "statistic",
+            "p_value",
+        ]
+        pd.testing.assert_frame_equal(
+            actual[columns].reset_index(drop=True),
+            expected[columns].reset_index(drop=True),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        assert not np.allclose(
+            actual["deviance_reduced"],
+            unweighted["deviance_reduced"],
+            rtol=1e-6,
+            atol=1e-6,
+        )
 
     def test_holdout_mode_returns_dataframe(self, fitted_model):
         m, X, y, sample_weight = fitted_model
