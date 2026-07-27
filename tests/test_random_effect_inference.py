@@ -710,6 +710,78 @@ def test_auto_falls_back_for_unpenalized_zero_weight_random_effect_level(discret
     assert "zero total weight" in model.result.direct_fallback_reason
 
 
+def test_unpenalized_random_effect_intercept_alias_falls_back_or_rejects():
+    rng = np.random.default_rng(20260727)
+    n_levels = 40
+    codes = np.repeat(np.arange(n_levels), 6)
+    X = pd.DataFrame({"group": np.array([f"g{code}" for code in codes], dtype=object)})
+    y = rng.normal(scale=0.2, size=len(codes))
+    common = {
+        "family": "gaussian",
+        "features": {
+            "group": RandomEffect(lambda_policy=LambdaPolicy.off()),
+        },
+        "selection_penalty": 0.0,
+    }
+
+    automatic = SuperGLM(**common, direct_solve="auto").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    assert automatic.result.direct_backend == "gram"
+    assert "zero penalty" in automatic.result.direct_fallback_reason
+    assert "intercept" in automatic.result.direct_fallback_reason
+    with pytest.raises(
+        ValueError,
+        match=r"direct_solve='structured'.*zero penalty.*intercept",
+    ):
+        SuperGLM(**common, direct_solve="structured").fit_reml(
+            X,
+            y,
+            runtime_validation="skip",
+        )
+
+
+def test_near_zero_positive_random_effect_penalty_remains_structured():
+    rng = np.random.default_rng(20260727)
+    n_levels = 40
+    codes = np.repeat(np.arange(n_levels), 6)
+    effects = rng.normal(scale=0.25, size=n_levels)
+    X = pd.DataFrame({"group": np.array([f"g{code}" for code in codes], dtype=object)})
+    y = 0.3 + effects[codes] + rng.normal(scale=0.1, size=len(codes))
+    common = {
+        "family": "gaussian",
+        "features": {
+            "group": RandomEffect(
+                lambda_policy=LambdaPolicy.fixed(1.0e-8),
+            ),
+        },
+        "selection_penalty": 0.0,
+    }
+
+    automatic = SuperGLM(**common, direct_solve="auto").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+    gram = SuperGLM(**common, direct_solve="gram").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    assert automatic.result.direct_backend == "structured"
+    assert automatic._reml_lambdas["group"] == pytest.approx(1.0e-8)
+    np.testing.assert_allclose(
+        automatic.predict(X),
+        gram.predict(X),
+        rtol=1.0e-8,
+        atol=1.0e-8,
+    )
+
+
 def test_unpenalized_random_effect_reports_infinite_variance_component():
     X = pd.DataFrame({"group": np.repeat(["a", "b", "c"], 30)})
     y = np.tile([0.6, 1.0, 1.4], 30)

@@ -713,6 +713,114 @@ def test_auto_factor_smooth_falls_back_for_singular_local_blocks(
     assert "singular local block" in model.result.direct_fallback_reason
 
 
+def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:
+    rng = np.random.default_rng(20260727)
+    n_levels = 10
+    repeats = 16
+    codes = np.repeat(np.arange(n_levels), repeats)
+    x = np.tile(np.linspace(-1.0, 1.0, repeats), n_levels)
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "group": np.array([f"g{code}" for code in codes], dtype=object),
+        }
+    )
+    y = np.sin(2.5 * x) + rng.normal(scale=0.05, size=len(x))
+    policies = {
+        "wiggle": LambdaPolicy.off(),
+        "null_0": LambdaPolicy.off(),
+        "null_1": LambdaPolicy.off(),
+    }
+    common = {
+        "family": "gaussian",
+        "features": {"x": Spline(k=5, lambda_policy=LambdaPolicy.fixed(1.0))},
+        "interactions": [
+            FactorSmooth(
+                "x",
+                group="group",
+                basis="fs",
+                k=5,
+                lambda_policy=policies,
+            )
+        ],
+        "selection_penalty": 0.0,
+    }
+
+    automatic = SuperGLM(**common, direct_solve="auto").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+    gram = SuperGLM(**common, direct_solve="gram").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    assert automatic.result.direct_backend == "gram"
+    assert "zero penalty component" in automatic.result.direct_fallback_reason
+    np.testing.assert_allclose(automatic.predict(X), gram.predict(X), atol=1.0e-8)
+    with pytest.raises(
+        ValueError,
+        match=r"direct_solve='structured'.*zero penalty component",
+    ):
+        SuperGLM(**common, direct_solve="structured").fit_reml(
+            X,
+            y,
+            runtime_validation="skip",
+        )
+
+
+def test_zero_penalty_sz_wiggle_remains_structured_and_matches_gram() -> None:
+    rng = np.random.default_rng(20260727)
+    n_levels = 10
+    repeats = 16
+    codes = np.repeat(np.arange(n_levels), repeats)
+    x = np.tile(np.linspace(-1.0, 1.0, repeats), n_levels)
+    deviations = rng.normal(scale=0.15, size=n_levels)
+    deviations -= np.mean(deviations)
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "group": np.array([f"g{code}" for code in codes], dtype=object),
+        }
+    )
+    y = np.sin(2.5 * x) + deviations[codes] * x + rng.normal(scale=0.05, size=len(x))
+    common = {
+        "family": "gaussian",
+        "features": {"x": Spline(k=5, lambda_policy=LambdaPolicy.fixed(1.0))},
+        "interactions": [
+            FactorSmooth(
+                "x",
+                group="group",
+                basis="sz",
+                k=5,
+                lambda_policy={"wiggle": LambdaPolicy.off()},
+            )
+        ],
+        "selection_penalty": 0.0,
+    }
+
+    structured = SuperGLM(**common, direct_solve="structured").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+    gram = SuperGLM(**common, direct_solve="gram").fit_reml(
+        X,
+        y,
+        runtime_validation="skip",
+    )
+
+    assert structured.result.direct_backend == "structured"
+    np.testing.assert_allclose(
+        structured.predict(X),
+        gram.predict(X),
+        rtol=1.0e-7,
+        atol=1.0e-8,
+    )
+
+
 def _multi_structured_data() -> tuple[pd.DataFrame, np.ndarray]:
     rng = np.random.default_rng(20260726)
     n = 600

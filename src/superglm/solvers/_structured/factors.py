@@ -35,6 +35,40 @@ from superglm.solvers.hessian_factor import _component_indices, _component_omega
 from superglm.types import PenaltyComponent
 
 
+def _schur_absolute_cutoff(reference_scale: float, width: int) -> float:
+    """Return the absolute rank floor for a cancellation-prone Schur block."""
+    return np.finfo(np.float64).eps * float(reference_scale) * max(int(width), 1) * 10.0
+
+
+def _reject_coupled_schur_null_space(
+    F: NDArray,
+    Vh: NDArray,
+    positive: NDArray,
+    *,
+    term_name: str,
+) -> None:
+    """Reject singular Schur geometry whose null space couples to local blocks.
+
+    The compact determinant and generalized-inverse formulae remain valid for
+    an uncoupled Schur null space.  A coupled null direction is changed by the
+    non-orthogonal block elimination, so multiplying local determinants by a
+    Schur pseudo-determinant would publish the wrong REML geometry.
+    """
+    if np.all(positive):
+        return
+    null_basis = Vh[~positive].T
+    flat_F = np.asarray(F, dtype=np.float64).reshape(-1, F.shape[-1])
+    coupling = flat_F @ null_basis
+    reference = max(float(np.linalg.norm(flat_F, ord=2)), 1.0)
+    tolerance = (
+        np.finfo(np.float64).eps * max(flat_F.shape[0], flat_F.shape[1], 1) * reference * 10.0
+    )
+    if float(np.linalg.norm(coupling, ord=2)) > tolerance:
+        raise np.linalg.LinAlgError(
+            f"Structured term {term_name!r} has a coupled rank-deficient Schur null space."
+        )
+
+
 class ScalarSchurFactor:
     """Factorization of one diagonal random-effect block and a dense remainder."""
 
@@ -89,8 +123,15 @@ class ScalarSchurFactor:
         self._structured_position[self.structured_indices] = np.arange(k)
         self._d_inv = 1.0 / self.d
         self._F = self._d_inv[:, None] * self.C
-        Q = self.A - self.C.T @ self._F
+        eliminated = self.C.T @ self._F
+        Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
+        schur_reference_scale = max(
+            float(np.linalg.norm(self.A, ord=2)) if q else 0.0,
+            float(np.linalg.norm(eliminated, ord=2)) if q else 0.0,
+            1.0,
+        )
+        absolute_cutoff = _schur_absolute_cutoff(schur_reference_scale, q)
         self._Q_cholesky: NDArray | None = None
         self._Q_svd: tuple[NDArray, NDArray, NDArray] | None = None
         self.used_dense_fallback = False
@@ -120,6 +161,10 @@ class ScalarSchurFactor:
                         f"Schur Cholesky residual {residual:.3g} exceeds 1e-6"
                     )
                 diagonal = np.abs(np.diag(self._Q_cholesky))
+                if float(np.min(diagonal * diagonal)) <= absolute_cutoff:
+                    raise np.linalg.LinAlgError(
+                        "Schur Cholesky pivot is below the absolute cancellation floor"
+                    )
                 self.schur_condition_estimate = float(
                     (diagonal.max() / max(diagonal.min(), 1e-300)) ** 2
                 )
@@ -130,8 +175,18 @@ class ScalarSchurFactor:
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
-                threshold = singular_values[0] * 1e-10 if len(singular_values) else 0.0
+                threshold = (
+                    max(singular_values[0] * 1e-10, absolute_cutoff)
+                    if len(singular_values)
+                    else absolute_cutoff
+                )
                 positive = singular_values > threshold
+                _reject_coupled_schur_null_space(
+                    self._F,
+                    Vh,
+                    positive,
+                    term_name=term_name,
+                )
                 inverse_singular_values = np.zeros_like(singular_values)
                 np.divide(
                     1.0,
@@ -556,6 +611,7 @@ class BlockSchurFactor:
             float(np.linalg.norm(eliminated, ord=2)) if q else 0.0,
             1.0,
         )
+        absolute_cutoff = _schur_absolute_cutoff(schur_reference_scale, q)
         self._Q_cholesky: NDArray | None = None
         self._Q_svd: tuple[NDArray, NDArray, NDArray] | None = None
         self.used_dense_fallback = False
@@ -585,6 +641,10 @@ class BlockSchurFactor:
                         f"Schur Cholesky residual {residual:.3g} exceeds 1e-6"
                     )
                 diagonal = np.abs(np.diag(self._Q_cholesky))
+                if float(np.min(diagonal * diagonal)) <= absolute_cutoff:
+                    raise np.linalg.LinAlgError(
+                        "Schur Cholesky pivot is below the absolute cancellation floor"
+                    )
                 self.schur_condition_estimate = float(
                     (diagonal.max() / max(diagonal.min(), 1e-300)) ** 2
                 )
@@ -596,14 +656,17 @@ class BlockSchurFactor:
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (
-                    max(
-                        singular_values[0] * 1e-10,
-                        np.finfo(np.float64).eps * schur_reference_scale * max(q, 1) * 10.0,
-                    )
+                    max(singular_values[0] * 1e-10, absolute_cutoff)
                     if len(singular_values)
-                    else 0.0
+                    else absolute_cutoff
                 )
                 positive = singular_values > threshold
+                _reject_coupled_schur_null_space(
+                    self._F,
+                    Vh,
+                    positive,
+                    term_name=term_name,
+                )
                 inverse_singular_values = np.zeros_like(singular_values)
                 np.divide(
                     1.0,

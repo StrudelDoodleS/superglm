@@ -10,6 +10,7 @@ import pytest
 from superglm.solvers.hessian_factor import DenseHessianFactor, HessianFactor
 from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
 from superglm.solvers.structured import (
+    BlockSchurFactor,
     BlockSymmetricOperator,
     CenteredBlockOperator,
     LowRankSymmetricOperator,
@@ -243,6 +244,47 @@ def test_scalar_schur_uses_diagnostic_small_svd_fallback_for_singular_schur():
         factor.coefficient_estimable(),
         [True, False, True, True, True],
     )
+
+
+def test_scalar_schur_rejects_cancellation_created_coupled_null_space():
+    rng = np.random.default_rng(0)
+    d = 10.0 ** rng.uniform(-6.0, 6.0, 42)
+    C = d[:, None]
+    A = np.array([[np.sum(d)]])
+
+    with pytest.raises(
+        np.linalg.LinAlgError,
+        match="coupled rank-deficient Schur null space",
+    ):
+        ScalarSchurFactor(
+            A=A,
+            C=C,
+            d=d,
+            small_indices=np.array([0], dtype=np.intp),
+            structured_indices=np.arange(1, len(d) + 1, dtype=np.intp),
+            term_name="group",
+        )
+
+
+def test_block_schur_rejects_cancellation_created_coupled_null_space():
+    rng = np.random.default_rng(0)
+    d = 10.0 ** rng.uniform(-6.0, 6.0, 42)
+    C = d[:, None, None]
+    D = d[:, None, None]
+    A = np.array([[np.sum(d)]])
+
+    with pytest.raises(
+        np.linalg.LinAlgError,
+        match="coupled rank-deficient Schur null space",
+    ):
+        BlockSchurFactor(
+            A=A,
+            C=C,
+            D=D,
+            small_indices=np.array([0], dtype=np.intp),
+            structured_indices=np.arange(1, len(d) + 1, dtype=np.intp)[:, None],
+            term_name="factor_smooth",
+        )
 
 
 def test_symmetric_block_operator_is_frozen_and_owns_read_only_arrays():

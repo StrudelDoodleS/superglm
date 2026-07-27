@@ -266,6 +266,43 @@ def _factor_smooth_singular_local_level(
     return singular_level
 
 
+def _backend_ineligibility(
+    reason: str,
+    mode: Literal["auto", "structured"],
+    selection: StructuredGroupSelection,
+) -> StructuredBackendDecision:
+    """Return an automatic fallback or reject an unsafe forced backend."""
+    if mode == "structured":
+        raise ValueError(f"direct_solve='structured' is ineligible: {reason}")
+    return StructuredBackendDecision(
+        use_structured=False,
+        group_index=selection.group_index,
+        group_name=selection.group_name,
+        fallback_reason=reason,
+    )
+
+
+def _factor_smooth_zero_penalty_component(
+    matrix: FactorSmoothGroupMatrix,
+    group_name: str,
+    lambda2: float | dict[str, float],
+) -> str | None:
+    """Return the first repeated component whose requested penalty is zero."""
+    for suffix, _omega in matrix.repeated_penalty_components:
+        if isinstance(lambda2, dict):
+            lam = float(
+                lambda2.get(
+                    f"{group_name}:{suffix}",
+                    lambda2.get(group_name, 0.0),
+                )
+            )
+        else:
+            lam = float(lambda2)
+        if lam == 0.0:
+            return suffix
+    return None
+
+
 def resolve_structured_backend(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -296,6 +333,75 @@ def resolve_structured_backend(
     group_name = selection.group_name
     if group_name is None:  # pragma: no cover - StructuredGroupSelection invariant
         raise RuntimeError("structured group selection omitted its group name")
+
+    dominant_matrix = group_matrices[selection.group_index]
+    dominant_size = dominant_matrix.shape[1]
+    small_size = coefficient_width - dominant_size
+    if isinstance(dominant_matrix, RandomEffectGroupMatrix) and lambda2 is not None:
+        if isinstance(lambda2, dict):
+            dominant_lambda = float(lambda2.get(group_name, 0.0))
+        else:
+            dominant_lambda = float(lambda2)
+        if dominant_lambda == 0.0:
+            if row_weights is not None:
+                weights = np.asarray(row_weights, dtype=np.float64)
+                if weights.shape != (dominant_matrix.shape[0],):
+                    raise ValueError("row_weights must match the structured design row count.")
+                level_weight = np.bincount(
+                    dominant_matrix.codes,
+                    weights=weights,
+                    minlength=dominant_matrix.n_levels,
+                )
+                if np.any(level_weight <= 0.0):
+                    return _backend_ineligibility(
+                        (
+                            f"RandomEffect group {group_name!r} has a level with "
+                            "zero total weight and zero penalty"
+                        ),
+                        mode,
+                        selection,
+                    )
+            return _backend_ineligibility(
+                (
+                    f"RandomEffect group {group_name!r} has zero penalty and is "
+                    "aliased with the fitted intercept"
+                ),
+                mode,
+                selection,
+            )
+    if isinstance(dominant_matrix, FactorSmoothGroupMatrix) and lambda2 is not None:
+        if dominant_matrix.factor_basis != "sz":
+            zero_component = _factor_smooth_zero_penalty_component(
+                dominant_matrix,
+                group_name,
+                lambda2,
+            )
+            if zero_component is not None:
+                return _backend_ineligibility(
+                    (
+                        f"FactorSmooth group {group_name!r} has zero penalty component "
+                        f"{zero_component!r}, which can alias the intercept or population smooth"
+                    ),
+                    mode,
+                    selection,
+                )
+        if row_weights is not None:
+            singular_level = _factor_smooth_singular_local_level(
+                dominant_matrix,
+                group_name,
+                row_weights,
+                lambda2,
+            )
+            if singular_level is not None:
+                level_label = dominant_matrix.levels[singular_level]
+                return _backend_ineligibility(
+                    (
+                        f"FactorSmooth group {group_name!r} has a singular local block "
+                        f"for level {level_label!r} under the requested weights and penalties"
+                    ),
+                    mode,
+                    selection,
+                )
     if mode == "structured":
         return StructuredBackendDecision(
             use_structured=True,
@@ -303,60 +409,6 @@ def resolve_structured_backend(
             group_name=group_name,
             fallback_reason=None,
         )
-
-    dominant_matrix = group_matrices[selection.group_index]
-    dominant_size = dominant_matrix.shape[1]
-    small_size = coefficient_width - dominant_size
-    if (
-        isinstance(dominant_matrix, RandomEffectGroupMatrix)
-        and row_weights is not None
-        and lambda2 is not None
-    ):
-        if isinstance(lambda2, dict):
-            dominant_lambda = lambda2.get(group_name)
-        else:
-            dominant_lambda = float(lambda2)
-        if dominant_lambda is not None and float(dominant_lambda) == 0.0:
-            weights = np.asarray(row_weights, dtype=np.float64)
-            if weights.shape != (dominant_matrix.shape[0],):
-                raise ValueError("row_weights must match the structured design row count.")
-            level_weight = np.bincount(
-                dominant_matrix.codes,
-                weights=weights,
-                minlength=dominant_matrix.n_levels,
-            )
-            if np.any(level_weight <= 0.0):
-                return StructuredBackendDecision(
-                    use_structured=False,
-                    group_index=selection.group_index,
-                    group_name=group_name,
-                    fallback_reason=(
-                        f"RandomEffect group {group_name!r} has a level with "
-                        "zero total weight and zero penalty"
-                    ),
-                )
-    if (
-        isinstance(dominant_matrix, FactorSmoothGroupMatrix)
-        and row_weights is not None
-        and lambda2 is not None
-    ):
-        singular_level = _factor_smooth_singular_local_level(
-            dominant_matrix,
-            group_name,
-            row_weights,
-            lambda2,
-        )
-        if singular_level is not None:
-            level_label = dominant_matrix.levels[singular_level]
-            return StructuredBackendDecision(
-                use_structured=False,
-                group_index=selection.group_index,
-                group_name=group_name,
-                fallback_reason=(
-                    f"FactorSmooth group {group_name!r} has a singular local block "
-                    f"for level {level_label!r} under the requested weights and penalties"
-                ),
-            )
     if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
         if dominant_matrix.factor_basis == "sz":
             use_structured, cost_ratio = _sum_to_zero_structured_auto_is_beneficial(
