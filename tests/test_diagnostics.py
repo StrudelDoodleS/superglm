@@ -7,6 +7,8 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, Numeric, Spline, SuperGLM
+from superglm.distributions import clip_mu
+from superglm.links import stabilize_eta
 
 # ── Fixtures ─────────────────────────────────────────────────────
 
@@ -42,6 +44,24 @@ def fitted_model(mixed_data):
     )
     m.fit(X, y, sample_weight=sample_weight)
     return m, X, y, sample_weight
+
+
+def _fit_offset_diagnostic_model():
+    rng = np.random.default_rng(20260729)
+    n = 120
+    x = rng.normal(size=n)
+    z = rng.normal(size=n)
+    exposure = rng.uniform(0.2, 2.5, size=n)
+    offset = np.log(exposure)
+    weights = rng.uniform(0.5, 2.0, size=n)
+    y = rng.poisson(np.exp(0.15 + 0.45 * x - 0.2 * z + offset))
+    X = pd.DataFrame({"x": x, "z": z})
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Numeric(), "z": Numeric()},
+        selection_penalty=0.0,
+    ).fit(X, y, sample_weight=weights, offset=offset)
+    return model, X, y, weights, offset
 
 
 # ── Phase 7: Term importance tests ──────────────────────────────
@@ -160,6 +180,200 @@ class TestDropTermDiagnostics:
         )
         strong_delta = df.loc[df["feature"] == "strong", "delta_deviance"].values[0]
         assert strong_delta > 0  # dropping strong feature should increase deviance
+
+    def test_holdout_uses_validation_weights_and_offset(self):
+        rng = np.random.default_rng(20260728)
+        n_train, n_val = 240, 80
+        x_train = rng.normal(size=n_train)
+        z_train = rng.normal(size=n_train)
+        x_val = rng.normal(size=n_val)
+        z_val = rng.normal(size=n_val)
+        exposure_train = rng.uniform(0.2, 2.5, size=n_train)
+        exposure_val = rng.uniform(0.1, 3.0, size=n_val)
+        offset_train = np.log(exposure_train)
+        offset_val = np.log(exposure_val)
+        weights_train = rng.uniform(0.5, 2.0, size=n_train)
+        weights_val = rng.uniform(0.4, 2.3, size=n_val)
+        y_train = rng.poisson(np.exp(0.2 + 0.55 * x_train - 0.3 * z_train + offset_train))
+        y_val = rng.poisson(np.exp(0.2 + 0.55 * x_val - 0.3 * z_val + offset_val))
+        X_train = pd.DataFrame({"x": x_train, "z": z_train})
+        X_val = pd.DataFrame({"x": x_val, "z": z_val})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Numeric(), "z": Numeric()},
+            selection_penalty=0.0,
+        ).fit(
+            X_train,
+            y_train,
+            sample_weight=weights_train,
+            offset=offset_train,
+        )
+
+        actual = model.term_drop_diagnostics(
+            X_train,
+            y_train,
+            sample_weight=weights_train,
+            offset=offset_train,
+            mode="holdout",
+            X_val=X_val,
+            y_val=y_val,
+            sample_weight_val=weights_val,
+            offset_val=offset_val,
+        )
+
+        eta = np.full(n_val, model.result.intercept, dtype=np.float64) + offset_val
+        contributions = {}
+        for name in model._feature_order:
+            group = model._feature_groups(name)[0]
+            contribution = X_val[name].to_numpy() * model.result.beta[group.sl][0]
+            contributions[name] = contribution
+            eta += contribution
+        mu_full = clip_mu(
+            model._link.inverse(stabilize_eta(eta, model._link)),
+            model._distribution,
+        )
+        dev_full = np.sum(weights_val * model._distribution.deviance_unit(y_val, mu_full))
+        expected = []
+        for name, contribution in contributions.items():
+            mu_drop = clip_mu(
+                model._link.inverse(stabilize_eta(eta - contribution, model._link)),
+                model._distribution,
+            )
+            dev_drop = np.sum(weights_val * model._distribution.deviance_unit(y_val, mu_drop))
+            expected.append(
+                {
+                    "feature": name,
+                    "delta_deviance": dev_drop - dev_full,
+                }
+            )
+
+        pd.testing.assert_frame_equal(
+            actual.reset_index(drop=True),
+            pd.DataFrame(expected).reset_index(drop=True),
+            rtol=2e-10,
+            atol=2e-10,
+        )
+
+    def test_holdout_same_objects_reuse_training_weight_and_offset(self):
+        model, X, y, weights, offset = _fit_offset_diagnostic_model()
+        actual = model.term_drop_diagnostics(
+            X,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            mode="holdout",
+            X_val=X,
+            y_val=y,
+        )
+        explicit = model.term_drop_diagnostics(
+            X,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            mode="holdout",
+            X_val=X,
+            y_val=y,
+            sample_weight_val=weights,
+            offset_val=offset,
+        )
+        pd.testing.assert_frame_equal(actual, explicit)
+
+    def test_holdout_separate_rows_reject_training_weight_fallback(self, fitted_model):
+        model, X, y, weights = fitted_model
+        with pytest.raises(ValueError, match="sample_weight_val"):
+            model.term_drop_diagnostics(
+                X,
+                y,
+                sample_weight=weights,
+                mode="holdout",
+                X_val=X.copy(),
+                y_val=y.copy(),
+            )
+
+    def test_holdout_offset_fit_requires_validation_offset(self):
+        model, X, y, weights, offset = _fit_offset_diagnostic_model()
+        with pytest.raises(ValueError, match="offset_val"):
+            model.term_drop_diagnostics(
+                X,
+                y,
+                sample_weight=weights,
+                offset=offset,
+                mode="holdout",
+                X_val=X.copy(),
+                y_val=y.copy(),
+                sample_weight_val=weights.copy(),
+            )
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.ones((4, 1)), "one-dimensional"),
+            (np.ones(3), "length 4"),
+            (np.array([1.0, np.nan, 1.0, 1.0]), "finite"),
+            (np.array([1.0, -1.0, 1.0, 1.0]), "nonnegative"),
+            (np.zeros(4), "all zero"),
+        ],
+    )
+    def test_holdout_validates_sample_weight_val(self, fitted_model, weights, message):
+        model, X, y, _ = fitted_model
+        with pytest.raises(ValueError, match=message):
+            model.term_drop_diagnostics(
+                X,
+                y,
+                mode="holdout",
+                X_val=X.iloc[:4].copy(),
+                y_val=np.asarray(y[:4]),
+                sample_weight_val=weights,
+            )
+
+    @pytest.mark.parametrize(
+        ("offset_val", "message"),
+        [
+            (np.ones((4, 1)), "one-dimensional"),
+            (np.ones(3), "length 4"),
+            (np.array([0.0, np.inf, 0.0, 0.0]), "finite"),
+        ],
+    )
+    def test_holdout_validates_offset_val(self, fitted_model, offset_val, message):
+        model, X, y, _ = fitted_model
+        with pytest.raises(ValueError, match=message):
+            model.term_drop_diagnostics(
+                X,
+                y,
+                mode="holdout",
+                X_val=X.iloc[:4].copy(),
+                y_val=np.asarray(y[:4]),
+                offset_val=offset_val,
+            )
+
+    def test_holdout_validates_y_val_length(self, fitted_model):
+        model, X, y, _ = fitted_model
+        with pytest.raises(ValueError, match="y_val must have length 4"):
+            model.term_drop_diagnostics(
+                X,
+                y,
+                mode="holdout",
+                X_val=X.iloc[:4].copy(),
+                y_val=np.asarray(y[:3]),
+            )
+
+    @pytest.mark.parametrize(
+        ("y_val", "message"),
+        [
+            (np.array([1.0, np.nan, 1.0, 1.0]), "finite"),
+            (np.array([1.0, -1.0, 1.0, 1.0]), "nonnegative"),
+        ],
+    )
+    def test_holdout_validates_y_val_domain(self, fitted_model, y_val, message):
+        model, X, y, _ = fitted_model
+        with pytest.raises(ValueError, match=message):
+            model.term_drop_diagnostics(
+                X,
+                y,
+                mode="holdout",
+                X_val=X.iloc[:4].copy(),
+                y_val=y_val,
+            )
 
     def test_holdout_requires_validation_data(self, fitted_model):
         m, X, y, sample_weight = fitted_model

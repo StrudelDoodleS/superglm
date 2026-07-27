@@ -133,6 +133,8 @@ def term_drop_diagnostics(
     mode: str = "refit",
     X_val: FrameLike | None = None,
     y_val: NDArray | None = None,
+    sample_weight_val: NDArray | None = None,
+    offset_val: NDArray | None = None,
 ) -> pd.DataFrame:
     """Drop-term diagnostics wrapper.
 
@@ -149,7 +151,35 @@ def term_drop_diagnostics(
     elif mode == "holdout":
         if X_val is None or y_val is None:
             raise ValueError("mode='holdout' requires X_val and y_val.")
-        return _drop_term_holdout(model, as_eager_frame(X_val), y_val, sample_weight)
+        same_validation_rows = X_val is X and y_val is y
+        if sample_weight_val is None:
+            if same_validation_rows:
+                sample_weight_val = sample_weight
+            elif sample_weight is not None:
+                raise ValueError(
+                    "separate validation rows require sample_weight_val; "
+                    "training sample_weight is not reused by length"
+                )
+        if offset_val is None:
+            if same_validation_rows:
+                offset_val = offset
+            elif offset is not None or getattr(model, "_fit_used_offset", False):
+                raise ValueError(
+                    "offset-based holdout diagnostics on separate validation rows "
+                    "require offset_val"
+                )
+        if offset_val is None and getattr(model, "_fit_used_offset", False):
+            raise ValueError(
+                "holdout diagnostics for an offset-fitted model require offset_val "
+                "or the matching training offset on same-object validation rows"
+            )
+        return _drop_term_holdout(
+            model,
+            as_eager_frame(X_val),
+            y_val,
+            sample_weight_val=sample_weight_val,
+            offset_val=offset_val,
+        )
     else:
         raise ValueError(f"mode must be 'refit' or 'holdout', got {mode!r}")
 
@@ -185,25 +215,49 @@ def _drop_term_holdout(
     model,
     X_val: EagerFrame,
     y_val,
-    sample_weight,
+    sample_weight_val=None,
+    offset_val=None,
 ) -> pd.DataFrame:
     """Holdout-based drop-term diagnostics (zero each term, compute loss delta)."""
 
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
-    from superglm.distributions import clip_mu
+    from superglm.distributions import clip_mu, validate_response
     from superglm.links import stabilize_eta
     from superglm.model import base
+    from superglm.model.input_validation import _finite_vector
 
     beta = model.result.beta
     dist = model._distribution
-    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
-    y_arr = np.asarray(y_val, dtype=np.float64)
+    n_val = len(X_val)
+    y_arr = _finite_vector(
+        "y_val",
+        y_val,
+        n_val,
+        require_nonempty=True,
+        check_finite=False,
+    )
+    validate_response(y_arr, dist)
+    w = (
+        np.ones(n_val, dtype=np.float64)
+        if sample_weight_val is None
+        else _finite_vector("sample_weight_val", sample_weight_val, n_val)
+    )
+    if np.any(w < 0.0):
+        raise ValueError("sample_weight_val must be nonnegative")
+    if not np.any(w > 0.0):
+        raise ValueError("sample_weight_val must not be all zero")
+    offset_arr = (
+        np.zeros(n_val, dtype=np.float64)
+        if offset_val is None
+        else _finite_vector("offset_val", offset_val, n_val)
+    )
 
     plan = base._prediction_plan(model)
     terms = [*plan["features"], *plan["interactions"]]
-    eta_raw = np.full(len(X_val), model.result.intercept, dtype=np.float64)
+    eta_raw = np.full(n_val, model.result.intercept, dtype=np.float64)
+    eta_raw += offset_arr
     contributions: dict[str, NDArray[np.floating]] = {}
     for term in terms:
         contribution = base._score_prediction_term_exact(term, X_val, beta)

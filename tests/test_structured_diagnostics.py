@@ -105,6 +105,7 @@ def _dense_holdout_drop_reference(
     X: pd.DataFrame,
     y: np.ndarray,
     weights: np.ndarray,
+    offset: np.ndarray,
 ) -> pd.DataFrame:
     frame = as_eager_frame(X)
     blocks = [
@@ -119,7 +120,10 @@ def _dense_holdout_drop_reference(
     )
     design = np.hstack(blocks)
     beta = model.result.beta
-    eta_full = stabilize_eta(design @ beta + model.result.intercept, model._link)
+    eta_full = stabilize_eta(
+        design @ beta + model.result.intercept + offset,
+        model._link,
+    )
     mu_full = clip_mu(model._link.inverse(eta_full), model._distribution)
     dev_full = float(np.sum(weights * model._distribution.deviance_unit(y, mu_full)))
 
@@ -133,7 +137,10 @@ def _dense_holdout_drop_reference(
         for feature_group in model._groups:
             if feature_group.feature_name == group.feature_name:
                 beta_drop[feature_group.sl] = 0.0
-        eta_drop = stabilize_eta(design @ beta_drop + model.result.intercept, model._link)
+        eta_drop = stabilize_eta(
+            design @ beta_drop + model.result.intercept + offset,
+            model._link,
+        )
         mu_drop = clip_mu(model._link.inverse(eta_drop), model._distribution)
         dev_drop = float(np.sum(weights * model._distribution.deviance_unit(y, mu_drop)))
         rows.append(
@@ -169,7 +176,8 @@ def test_holdout_drop_uses_compact_structured_score(
 ):
     model, X, y = structured_diagnostic_case
     weights = np.linspace(0.7, 1.3, len(y))
-    expected = _dense_holdout_drop_reference(model, X, y, weights)
+    offset = np.linspace(-0.15, 0.2, len(y))
+    expected = _dense_holdout_drop_reference(model, X, y, weights, offset)
     spec = _structured_spec(model)
     original_score = spec.score
     scored_betas = []
@@ -188,10 +196,11 @@ def test_holdout_drop_uses_compact_structured_score(
     actual = model.term_drop_diagnostics(
         X,
         y,
-        sample_weight=weights,
         mode="holdout",
-        X_val=X,
-        y_val=y,
+        X_val=X.copy(),
+        y_val=y.copy(),
+        sample_weight_val=weights,
+        offset_val=offset,
     )
 
     pd.testing.assert_frame_equal(actual, expected, rtol=2e-11, atol=2e-11)

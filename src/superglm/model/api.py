@@ -1440,6 +1440,8 @@ class SuperGLM:
         mode: str = "refit",
         X_val: FrameLike | None = None,
         y_val: NDArray | None = None,
+        sample_weight_val: NDArray | None = None,
+        offset_val: NDArray | None = None,
     ) -> pd.DataFrame:
         """Drop-term diagnostics: AIC/BIC deltas or holdout loss deltas.
 
@@ -1460,6 +1462,8 @@ class SuperGLM:
             mode=mode,
             X_val=X_val,
             y_val=y_val,
+            sample_weight_val=sample_weight_val,
+            offset_val=offset_val,
         )
 
     def spline_redundancy(
