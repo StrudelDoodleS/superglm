@@ -125,7 +125,7 @@ def test_demo_factor_smooth_variant_has_public_fitted_report() -> None:
     assert model.result.direct_backend == "structured"
 
 
-def test_fit_variants_reads_public_model_diagnostics(monkeypatch) -> None:
+def test_fit_variants_requires_outer_and_inner_convergence(monkeypatch) -> None:
     frame = _DEMO.prepare_frame(_tiny_frame())
 
     class PublicModel:
@@ -133,7 +133,7 @@ def test_fit_variants_reads_public_model_diagnostics(monkeypatch) -> None:
             self.result = SimpleNamespace(
                 direct_backend="gram",
                 effective_df=2.5,
-                converged=True,
+                converged=False,
             )
 
         def fit_reml(self, *_args, **_kwargs):
@@ -158,7 +158,7 @@ def test_fit_variants_reads_public_model_diagnostics(monkeypatch) -> None:
         reml_tol=1.0e-5,
     )
 
-    assert bool(metrics.loc[0, "converged"])
+    assert not bool(metrics.loc[0, "converged"])
     assert metrics.loc[0, "reml_iterations"] == 3
 
 

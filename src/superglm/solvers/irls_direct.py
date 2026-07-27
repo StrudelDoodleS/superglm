@@ -527,6 +527,7 @@ def fit_irls_direct(
         coefficient_width=p,
         row_weights=weights,
         lambda2=lambda2,
+        S_override=S_override,
     )
     if structured_decision.use_structured and S_override is None and reml_penalties is None:
         reason = (

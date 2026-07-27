@@ -509,6 +509,90 @@ def test_structured_correlated_override_rejects_dominant_random_effect_block():
     np.testing.assert_allclose(structured.beta, gram.beta, atol=2.0e-9)
 
 
+def test_structured_tiny_scaled_correlated_override_is_not_silently_diagonalized():
+    dm, groups, _penalties, y, weights, offset = _structured_problem(_gaussian_response)
+    dominant = np.arange(groups[1].start, groups[1].end, dtype=np.intp)
+    correlated_penalty = np.zeros((dm.p, dm.p), dtype=np.float64)
+    correlated_penalty[0, 0] = 1.0
+    correlated_penalty[dominant, dominant] = 1.3e-13
+    correlated_penalty[dominant[0], dominant[1]] = 0.2e-14
+    correlated_penalty[dominant[1], dominant[0]] = 0.2e-14
+
+    with pytest.raises(
+        ValueError,
+        match=r"S_override.*dominant RandomEffect block.*diagonal",
+    ):
+        irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2={"policy": 1.3e-13},
+            offset=offset,
+            direct_solve="structured",
+            S_override=correlated_penalty,
+            tol=1.0e-11,
+        )
+
+
+@pytest.mark.parametrize("direct_solve", ["auto", "structured"])
+@pytest.mark.parametrize("lambda2", [0.0, {}])
+def test_structured_override_is_authoritative_for_zero_lambda_eligibility(
+    direct_solve: str,
+    lambda2: float | dict[str, float],
+):
+    base_dm, _base_groups, _penalties, y, weights, offset = _structured_problem(_gaussian_response)
+    n_levels = 40
+    dm = DesignMatrix(
+        [
+            base_dm.group_matrices[0],
+            RandomEffectGroupMatrix(base_dm.group_matrices[1].codes, n_levels),
+        ],
+        n=base_dm.n,
+        p=2 + n_levels,
+    )
+    groups = [
+        GroupSlice(name="numeric", start=0, end=2, penalized=False),
+        GroupSlice(name="policy", start=2, end=2 + n_levels, penalized=True),
+    ]
+    dominant = np.arange(groups[1].start, groups[1].end, dtype=np.intp)
+    diagonal_penalty = np.zeros((dm.p, dm.p), dtype=np.float64)
+    diagonal_penalty[dominant, dominant] = 1.3
+
+    structured, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambda2,
+        offset=offset,
+        direct_solve=direct_solve,
+        S_override=diagonal_penalty,
+        tol=1.0e-11,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambda2,
+        offset=offset,
+        direct_solve="gram",
+        S_override=diagonal_penalty,
+        tol=1.0e-11,
+    )
+
+    assert structured.direct_backend == "structured"
+    assert structured.direct_fallback_reason is None
+    np.testing.assert_allclose(structured.beta, gram.beta, atol=2.0e-9)
+
+
 def test_auto_records_dense_fallback_reason_for_constraints():
     dm, groups, penalties, y, weights, offset = _structured_problem(_gaussian_response)
     groups[0].constraints = LinearConstraintSet(

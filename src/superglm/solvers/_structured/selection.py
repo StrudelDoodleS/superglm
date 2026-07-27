@@ -311,6 +311,7 @@ def resolve_structured_backend(
     coefficient_width: int,
     row_weights: NDArray | None = None,
     lambda2: float | dict[str, float] | None = None,
+    S_override: NDArray | None = None,
 ) -> StructuredBackendDecision:
     """Resolve forced/automatic scalar Schur use once for a direct fit."""
     if direct_solve not in ("auto", "structured"):
@@ -337,12 +338,24 @@ def resolve_structured_backend(
     dominant_matrix = group_matrices[selection.group_index]
     dominant_size = dominant_matrix.shape[1]
     small_size = coefficient_width - dominant_size
-    if isinstance(dominant_matrix, RandomEffectGroupMatrix) and lambda2 is not None:
-        if isinstance(lambda2, dict):
-            dominant_lambda = float(lambda2.get(group_name, 0.0))
+    if isinstance(dominant_matrix, RandomEffectGroupMatrix) and (
+        lambda2 is not None or S_override is not None
+    ):
+        override_diagonal: NDArray | None = None
+        if S_override is not None:
+            penalty = np.asarray(S_override, dtype=np.float64)
+            if penalty.shape != (coefficient_width, coefficient_width):
+                raise ValueError(
+                    f"S_override must have shape ({coefficient_width}, {coefficient_width})."
+                )
+            dominant_group = groups[selection.group_index]
+            override_diagonal = np.diag(penalty[dominant_group.sl, dominant_group.sl])
+            has_dominant_penalty = bool(np.any(override_diagonal > 0.0))
+        elif isinstance(lambda2, dict):
+            has_dominant_penalty = float(lambda2.get(group_name, 0.0)) != 0.0
         else:
-            dominant_lambda = float(lambda2)
-        if dominant_lambda == 0.0:
+            has_dominant_penalty = lambda2 is not None and float(lambda2) != 0.0
+        if not has_dominant_penalty:
             if row_weights is not None:
                 weights = np.asarray(row_weights, dtype=np.float64)
                 if weights.shape != (dominant_matrix.shape[0],):
@@ -369,6 +382,24 @@ def resolve_structured_backend(
                 mode,
                 selection,
             )
+        if row_weights is not None and override_diagonal is not None:
+            weights = np.asarray(row_weights, dtype=np.float64)
+            if weights.shape != (dominant_matrix.shape[0],):
+                raise ValueError("row_weights must match the structured design row count.")
+            level_weight = np.bincount(
+                dominant_matrix.codes,
+                weights=weights,
+                minlength=dominant_matrix.n_levels,
+            )
+            if np.any(level_weight + override_diagonal <= 0.0):
+                return _backend_ineligibility(
+                    (
+                        f"RandomEffect group {group_name!r} has non-positive local "
+                        "information under the authoritative S_override"
+                    ),
+                    mode,
+                    selection,
+                )
     if isinstance(dominant_matrix, FactorSmoothGroupMatrix) and lambda2 is not None:
         if dominant_matrix.factor_basis != "sz":
             zero_component = _factor_smooth_zero_penalty_component(

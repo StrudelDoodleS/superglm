@@ -242,7 +242,7 @@ def fit_variants(
                 "variant": variant,
                 "fit_seconds": fit_seconds,
                 "backend": model.result.direct_backend,
-                "converged": bool(fit_diagnostics["converged"]),
+                "converged": bool(model.result.converged and fit_diagnostics["converged"]),
                 "reml_iterations": int(fit_diagnostics["n_iter"]),
                 "effective_df": model.result.effective_df,
                 **metrics,
