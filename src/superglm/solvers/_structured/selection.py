@@ -302,9 +302,9 @@ def _factor_smooth_singular_local_level(
     weights = np.asarray(row_weights, dtype=np.float64)
     if weights.shape != (matrix.shape[0],):
         raise ValueError("row_weights must match the structured design row count.")
-    weight_bytes = np.ascontiguousarray(weights).view(np.uint8)
+    contiguous_weights = np.ascontiguousarray(weights)
     weight_digest = hashlib.blake2b(
-        weight_bytes,
+        contiguous_weights.data,
         digest_size=16,
     ).digest()
     cache_key = (penalty_identity, weight_digest)
