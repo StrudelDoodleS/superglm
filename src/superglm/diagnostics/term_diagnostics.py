@@ -38,7 +38,7 @@ def term_importance(
         A fitted model.
     X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
-    sample_weight, sample_weight : array-like, optional
+    sample_weight : array-like, optional
         Frequency weights for weighted variance.
 
     Returns
@@ -140,10 +140,22 @@ def term_drop_diagnostics(
 
     Parameters
     ----------
+    X, y : training rows and response
+        Rows used by ``mode="refit"``. They also identify the training-row
+        objects eligible for same-object holdout fallback.
+    sample_weight, offset : array-like, optional
+        Training/refit weights and offset. In holdout mode these are reused
+        only when ``X_val is X`` and ``y_val is y``.
     mode : {"refit", "holdout"}
         ``"refit"``: calls ``drop1()`` and adds delta_aic, delta_bic columns.
         ``"holdout"``: zeros each term's contribution on validation set,
         computes loss delta without refitting.
+    X_val, y_val : validation rows and response, optional
+        Required by ``mode="holdout"``.
+    sample_weight_val, offset_val : array-like, optional
+        Validation-specific weights and offset. Separate validation objects
+        never inherit training vectors merely because their lengths match.
+        Offset-fitted models require an evaluation offset.
     """
 
     if mode == "refit":

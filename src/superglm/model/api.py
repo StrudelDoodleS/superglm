@@ -1447,11 +1447,22 @@ class SuperGLM:
 
         Parameters
         ----------
+        X, y : training rows and response
+            Used for refit mode and as the identity anchor for same-object
+            holdout fallback.
+        sample_weight, offset : array-like, optional
+            Training/refit weights and offset.
         mode : {"refit", "holdout"}
             ``"refit"`` calls ``drop1()`` and adds delta IC columns.
             ``"holdout"`` zeros each term on a validation set (no refit).
         X_val, y_val : optional
             Validation data for ``mode="holdout"``.
+        sample_weight_val, offset_val : array-like, optional
+            Validation-specific geometry for holdout mode. Training vectors
+            are reused only when ``X_val is X`` and ``y_val is y``; separate
+            validation objects require ``sample_weight_val`` when
+            ``sample_weight`` is supplied and require ``offset_val`` for an
+            offset-fitted model.
         """
         return explain_ops.term_drop_diagnostics(
             self,
