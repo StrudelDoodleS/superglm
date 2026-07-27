@@ -139,8 +139,10 @@ def _factor_smooth_override_local_blocks(
     )
     if sum_to_zero:
         local = 0.5 * blocks[0, :, 0, :] if public_levels == 1 else blocks[0, :, 1, :]
-        return np.repeat(local[None, :, :], public_levels + 1, axis=0)
-    return np.stack(
-        [blocks[level, :, level, :] for level in range(public_levels)],
-        axis=0,
-    )
+        local_blocks = np.repeat(local[None, :, :], public_levels + 1, axis=0)
+    else:
+        local_blocks = np.stack(
+            [blocks[level, :, level, :] for level in range(public_levels)],
+            axis=0,
+        )
+    return 0.5 * (local_blocks + local_blocks.transpose(0, 2, 1))

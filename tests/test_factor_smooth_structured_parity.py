@@ -521,6 +521,59 @@ def test_authoritative_singular_factor_smooth_override_falls_back_to_gram(
         )
 
 
+@pytest.mark.parametrize("factor_basis", ["fs", "sz"])
+def test_authoritative_factor_smooth_override_roundoff_asymmetry_matches_gram(
+    factor_basis: str,
+) -> None:
+    dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
+        _gaussian_response,
+        factor_basis=factor_basis,
+    )
+    matrix = dm.group_matrices[3]
+    assert isinstance(matrix, FactorSmoothGroupMatrix)
+    local_penalty = 2.0 * np.eye(matrix.block_size)
+    local_penalty[0, 1] = 0.2
+    local_penalty[1, 0] = 0.2 + 1.0e-10
+    override = _factor_smooth_override(
+        dm,
+        groups,
+        penalties,
+        lambdas,
+        local_penalty=local_penalty,
+    )
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="auto",
+        S_override=override,
+        tol=1.0e-10,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        S_override=override,
+        tol=1.0e-10,
+    )
+
+    assert automatic.direct_backend == "structured"
+    assert automatic.direct_fallback_reason is None
+    np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
+
+
 @pytest.mark.parametrize(
     ("family", "link", "response_factory"),
     [
