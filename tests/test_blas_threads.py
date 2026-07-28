@@ -44,3 +44,43 @@ def test_native_disables_capping(monkeypatch):
     before = _blas_thread_counts()
     with solver_blas_threads():
         assert _blas_thread_counts() == before
+
+
+def test_off_synonyms_disable_capping(monkeypatch):
+    for token in ("off", "none", "false"):
+        monkeypatch.setenv("SUPERGLM_BLAS_THREADS", token)
+        assert _resolve_limit() is None
+
+
+def test_unparseable_value_warns_and_caps(monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "fastest")
+    with pytest.warns(UserWarning, match="SUPERGLM_BLAS_THREADS"):
+        assert _resolve_limit() == 1
+
+
+def test_overlapping_scopes_restore_native_state(monkeypatch):
+    """Concurrent fits must not leave the process pinned at the cap."""
+    import threading
+    import time
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _blas_thread_counts()
+    both_inside = threading.Barrier(2)
+
+    def worker(hold_seconds):
+        with solver_blas_threads():
+            both_inside.wait(timeout=10)
+            time.sleep(hold_seconds)
+
+    threads = [
+        threading.Thread(target=worker, args=(0.0,)),
+        threading.Thread(target=worker, args=(0.15,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert _blas_thread_counts() == before

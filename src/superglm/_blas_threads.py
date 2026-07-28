@@ -20,9 +20,20 @@ capping and leaves the user's BLAS configuration alone.
 from __future__ import annotations
 
 import os
+import threading
+import warnings
 from contextlib import contextmanager
 
 _ENV_VAR = "SUPERGLM_BLAS_THREADS"
+
+# threadpool_limits mutates process-global BLAS state and restores whatever it
+# observed at entry, so overlapping scopes in different threads would restore
+# in the wrong order and leave the process pinned at the cap after all fits
+# returned.  A refcount keeps exactly one registration alive: the first
+# entrant records the true native state and the last exit restores it.
+_scope_lock = threading.Lock()
+_active_scopes = 0
+_registration = None
 
 
 def _resolve_limit() -> int | None:
@@ -30,23 +41,44 @@ def _resolve_limit() -> int | None:
     raw = os.environ.get(_ENV_VAR, "auto").strip().lower()
     if raw in ("", "auto"):
         return 1
-    if raw == "native":
+    if raw in ("native", "off", "none", "false"):
         return None
     try:
         value = int(raw)
     except ValueError:
+        warnings.warn(
+            f"{_ENV_VAR}={raw!r} is not an integer, 'auto', or 'native'; "
+            "applying the default single-thread cap",
+            stacklevel=3,
+        )
         return 1
     return value if value > 0 else None
 
 
 @contextmanager
 def solver_blas_threads():
-    """Cap BLAS pools for the duration of a fit, restoring them on exit."""
+    """Cap BLAS pools for the duration of a fit, restoring them on exit.
+
+    Safe under concurrent fits: nested or overlapping scopes share one
+    registration, and the native BLAS configuration is restored when the
+    last scope exits.
+    """
+    global _active_scopes, _registration
     limit = _resolve_limit()
     if limit is None:
         yield
         return
     from threadpoolctl import threadpool_limits
 
-    with threadpool_limits(limits=limit, user_api="blas"):
+    with _scope_lock:
+        _active_scopes += 1
+        if _active_scopes == 1:
+            _registration = threadpool_limits(limits=limit, user_api="blas")
+    try:
         yield
+    finally:
+        with _scope_lock:
+            _active_scopes -= 1
+            if _active_scopes == 0 and _registration is not None:
+                _registration.unregister()
+                _registration = None
