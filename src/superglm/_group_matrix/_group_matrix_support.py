@@ -107,6 +107,55 @@ def _row_index_chunked(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
     return row_index
 
 
+# Fixed odd multipliers for the row-hash mix, one per basis column.  A fixed
+# seed keeps grouping deterministic across runs and machines; correctness never
+# depends on hash quality because every grouping is verified bitwise below.
+_ROW_HASH_SEED = 0x5EED_0001
+
+
+def _row_hash_multipliers(p_b: int) -> NDArray:
+    mults = np.random.default_rng(_ROW_HASH_SEED).integers(
+        1, np.iinfo(np.uint64).max, size=max(p_b, 1), dtype=np.uint64
+    )
+    return mults | np.uint64(1)
+
+
+def _row_index_hashed(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
+    """Exact row grouping via vectorized 64-bit mixing, verified bitwise.
+
+    Each dense row's raw float bits are mixed column-wise into one uint64, so
+    grouping needs a single 8-byte sort instead of a lexicographic sort of
+    ``p_b``-wide records — the cost that dominates :func:`_row_index_chunked`.
+    The result is then verified exactly: every row's bits must equal its
+    group representative's bits.  A verification failure (a true 64-bit
+    collision) falls back to the byte-keyed path, so exactness never rests on
+    the hash.  Comparing raw bits keeps NaN rows mergeable only when
+    bit-identical and keeps ``-0.0`` distinct from ``0.0``, matching the
+    byte-keyed semantics.
+    """
+    n_rows, p_b = B_csr.shape
+    mults = _row_hash_multipliers(p_b)
+    hashes = np.empty(n_rows, dtype=np.uint64)
+    for start in range(0, n_rows, chunk_rows):
+        stop = min(start + chunk_rows, n_rows)
+        block = np.ascontiguousarray(B_csr[start:stop].toarray(), dtype=np.float64)
+        # Per-column multipliers make the mix position-dependent; uint64
+        # arithmetic wraps, which is what a mix wants.
+        hashes[start:stop] = (block.view(np.uint64) * mults).sum(axis=1, dtype=np.uint64)
+    _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
+    row_index = np.asarray(row_index, dtype=np.intp).ravel()
+
+    representatives = np.ascontiguousarray(
+        B_csr[np.asarray(first_occurrence, dtype=np.intp)].toarray(), dtype=np.float64
+    ).view(np.uint64)
+    for start in range(0, n_rows, chunk_rows):
+        stop = min(start + chunk_rows, n_rows)
+        block = np.ascontiguousarray(B_csr[start:stop].toarray(), dtype=np.float64)
+        if not np.array_equal(representatives[row_index[start:stop]], block.view(np.uint64)):
+            return _row_index_chunked(B_csr, chunk_rows=chunk_rows)
+    return row_index
+
+
 def plan_row_support(
     B_csr: sp.spmatrix,
     row_index: NDArray,
@@ -157,19 +206,21 @@ def detect_row_support(
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
 
-    Rows are keyed on their raw bytes a chunk at a time, so transient memory is
-    bounded at ``chunk_rows * p_b`` floats, but the scan is O(n * p_b) and is
-    paid even when compression is declined.  Callers that already know the
-    grouping can skip it via :func:`plan_row_support`.
+    Rows are grouped by a vectorized 64-bit mix of their raw float bits and the
+    grouping is verified bitwise, falling back to byte keying on a collision,
+    so transient memory stays bounded at ``chunk_rows * p_b`` floats and the
+    scan is O(n * p_b) either way.  The cost is paid even when compression is
+    declined; callers that already know the grouping can skip it via
+    :func:`plan_row_support`.
 
-    Byte keying merges only bit-identical rows, which keeps reconstruction
-    exact even for non-finite values: NaN rows merge only when their bit
-    patterns match, and ``-0.0`` stays distinct from ``0.0``.
+    Only bit-identical rows merge, which keeps reconstruction exact even for
+    non-finite values: NaN rows merge only when their bit patterns match, and
+    ``-0.0`` stays distinct from ``0.0``.
     """
     n_rows = B_csr.shape[0]
     if n_rows == 0:
         return None
-    row_index = _row_index_chunked(B_csr)
+    row_index = _row_index_hashed(B_csr)
     return plan_row_support(
         B_csr,
         row_index,
