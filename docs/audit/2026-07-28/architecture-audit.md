@@ -656,6 +656,89 @@ approximation breaks parity by construction).
 
 ---
 
+## J. perf/cheap-interactions — landed work, re-validation, superseding decisions (2026-07-28)
+
+Written after the branch review + continuation session on the **16-core workstation** (the new benchmark
+reference box; the 5950X numbers above no longer bind). All numbers below are same-machine, same-data
+(freMTPL2 n=100k, `benchmarks/benchmark_tensor_cost.py`), measured at the stated commits. Items below
+**supersede** the corresponding entries in §E/§F/§I.
+
+### J.1 Landed on the branch (verified: math review + full suite + re-measurement)
+
+| work item | verdict | measured effect (this box) |
+|---|---|---|
+| **Support-compressed SSP groups** (lossless row dedup; calibrated gate ×6.0) | exact; algebra = weight aggregation over bit-identical rows; external formalization arXiv:2511.12732 Thm 3.2 | the dominant win in tensor exact 51.8→11.9 s pre-RFC-12a; gate re-measured here: 9/9 crossover signs hold, implied BLAS advantage 6.8–30 vs conservative 6.0 |
+| **RFC-1 raw-moment centering rung** | sound; certificate bounds cancellation ratio ≤2; rejection latches per fit, success re-certifies per W. ⚠ **anchor shift NOT implemented** — ill-located Dense numerics (VehPower-shape) still latch to chunked | part of the 51.8→11.9 s composite |
+| **RFC-3 λ_max calibration** | correct; score `w·(dμ/dη)(y−μ)/V` matches solver KKT threshold exactly; α division for elastic net; behaviorally pinned 24/24 @1.01×, 23/24 @0.99× | `selection_penalty="auto"`/`fit_path` now meaningful (bugfix release + changelog) |
+| **Line-search trial carry-forward** | sound; not bit-identical (different warm start, same fixed point), honestly documented; call-site parameter parity verified | 7 of 8 candidate fits eliminated on the flagship |
+| **Discrete tensor cross-constraint removal** | correct root-cause fix: null(C) ⊇ the block's own null space, so the projection either no-ops or retains garbage; ti() marginal centering keeps shared-marginal tensors jointly identifiable; matches exact path & mgcv | discrete shared-marginal models fit instead of raising; deviance parity 2.6e-5 |
+| **RFC-6a spike: AI-REML** | **rejection CONFIRMED** — REML Hessian is 0.04–0.49% of wall; 6 outer Newton iters ≤ AIREMLF90's own 5–15; the research headline compared AI vs EM-REML, and AI-REML keeps the exact gradient so it never touched the W-correction cost either | RFC-6 deletion path unblocked (deprecation cycle for `run_reml_once`/`optimize_efs_reml` re-exports, then delete ~950+290 LOC) |
+| **NEW · RFC-12a: in-loop fits skip rank metadata** (commit 096c171) | in-loop candidates/trials never consumed fit statistics; the three O(p) quantities the gradient/objective read (mean_x, sum_w, data-gram column scales) now travel on a `REMLGeometrySummary`; terminal refit unchanged → published stats unchanged; trace/debug runs keep full stats | tensor exact **11.90→5.99 s**, base exact 2.92→2.25 s; streamed-QR certifications 11→2 per fit; trajectory identical (8 iters, 7 reuses) |
+| **NEW · hashed row grouping** (commit bb9ed48) | detection was the last big cost (byte-keyed lexicographic sort, 1.34 s of a 5.7 s fit); now a verified 64-bit mix: 8-byte sort + bitwise verification, collision → byte-keyed fallback; deterministic across machines; NaN/−0.0 semantics preserved | base exact **2.25→1.12 s**, tensor exact **5.99→4.70 s** |
+
+**Cumulative, master f082e9b → branch HEAD, same box:** base exact 8.59→**1.12 s (7.7×)**, tensor exact
+51.77→**4.70 s (11.0×)**; plain-spline exact is now *faster than discrete* at n=100k (0.89×); exact-over-discrete
+on the tensor model 17.6×→**1.35×**. The suite is green throughout (4723 passed incl. mgcv parity, Wood oracles,
+FD gradients, freMTPL2 real-data parity).
+
+### J.2 Superseding corrections to the backlog
+
+- **RFC-2 (batched/leverage W-correction) is DEMOTED, not superseded-by-implementation:** compression already
+  made each signed Gram cheap — W-correction is 0.36 s of the 4.7 s tensor fit here. It matters only for designs
+  whose covariates don't compress (truly continuous). Do not schedule ahead of RFC-12b.
+- **RFC-12 splits:** 12a landed (above). **12b — cached-factorization trial evaluation with exact Armijo
+  re-check at acceptance — is the next big exact-path item** (line search still 1.5 s of the 4.7 s tensor fit;
+  trials still run full PIRLS). Template: Wood's NCV machinery (arXiv:2404.16490) — rank-1 Givens/hyperbolic
+  up/downdates of the retained Cholesky, Woodbury fallback; mgcv-grade production precedent. Prerequisite is a
+  retained factor on the result (RFC-7's factor protocol seam).
+- **RFC-18 (detection cost) resolved** by the hashed grouping — the `plan_row_support` covariate-plumbing
+  variant is no longer worth its GroupInfo surface change; keep `plan_row_support` as the seam for callers that
+  already own a grouping.
+- **RFC-14/§H.4 caution (research):** for **crossed** high-cardinality factors the sparse Cholesky factor is
+  provably dense (arXiv:2411.04729, random-multipartite fill; arXiv:2505.11674 measures the same on MovieLens —
+  the *second* crossed factor is what goes dense). Takahashi selected inversion pays for nested /
+  one-dominant-factor / banded-spatiotemporal structure only. Exact REML traces for 2+ crossed factors remain
+  open (published answers are stochastic — rejected here); CG covers the *solves* (dimension-free iterations).
+- **§G additions (rejected, new evidence):** safe screening for smooth-group lasso re-confirmed dead (only
+  Group-OWL/SLOPE progress exists); TabPFN-distilled interaction selection (TabDistill 2604.13332) is capped at
+  ~50k rows — irrelevant at this niche's n. Working-set + KKT-recheck remains the philosophically matching
+  pattern (Hessian Screening Rule, arXiv:2104.13026).
+- **Row-tensor G-operator:** audit §I claimed the identity verified 5e-15; the branch's implementation attempt
+  failed sign-gauge recovery. The identity is textbook (it's XWXd's tensor trick) — the failure is
+  SSP-reparametrisation-specific. Moot while compression handles tensor Grams; revisit only if a
+  large-support tensor (gate-declined) shows up in profiles.
+
+### J.3 Interaction discovery — promoted to first-class objective
+
+Fitting interactions is now cheap; *finding* them is the unclaimed differentiator and the point of the branch
+name. Plan written: `docs/superpowers/plans/2026-07-28-interaction-screening.md` (commit 517fe41). One-line
+summary: rank every candidate `ti(a,b)` by a **penalized efficient-score statistic** assembled from per-pair
+2-D weighted cell moments — the same sufficient statistics the fit already computes (score vector = RFC-3's
+family-factor score; histograms = the disc×disc cross-gram path; codes = compression's exact `bin_idx`). One
+O(n) bincount pass per pair, no refits; confirmatory `fit_reml` refit of the top-k is the gate. Published
+foundations: BOLT-SSI (1902.03525, sure screening + quantified binning loss ≤1.21) and sprinter-GLM
+(2401.08159, frozen-offset score ranking ≡ conditional-covariance ranking); **neither covers penalized smooth
+groups — publishable gap.**
+
+### J.4 Updated ranked backlog (fit_reml GAM path first)
+
+1. **Interaction screening plan, Tasks 1–5** (J.3) — the value-prop item; all infrastructure exists.
+2. **RFC-12b** cached-factor line-search trials (NCV up/downdates; exact re-check at acceptance) — the last
+   structural exact-path cost at ~1.5 s/4.7 s.
+3. **RFC-15 CI perf gate** — five landed wins now protected by nothing; wire `benchmark_tensor_cost.py`
+   (reduced n) + the 30-rep flagship into CI with thresholds against this box's baselines.
+4. **RFC-1 anchor shift** for Dense numerics — completes centering for splines+cats+numerics books.
+5. **RFC-6** deprecation warnings now, dead-optimizer deletion next release (~950+290 LOC), plus the
+   uncontroversial adapter/orphaned-algebra deletions and `gradient.py:353` M_p fallback fix.
+6. **RFC-8 bug-half** (lambda2 `=`-assembly silent penalty drop) and **RFC-13** behavioural batch — small,
+   correctness-first.
+7. Candidates, unmeasured: Demmler–Reinsch λ-bracket init (arXiv:2205.15157) to replace fixed log-λ clips and
+   possibly shave 1–2 outer iterations; subsample-λ warm start (measured d log λ̂/d log n = 0.43 — also a
+   publishable gap, nothing in the literature); deterministic reduction-tree design for future threading
+   (arXiv:2607.18758).
+
+---
+
 ## Appendix: evidence trail
 
 - Subsystem maps (9): `~/.claude/jobs/e3eef6ba/tmp/audit/reports/*.md`
@@ -665,3 +748,4 @@ approximation breaks parity by construction).
 - Profiles: `~/.claude/jobs/e3eef6ba/tmp/audit/profiles/` (`.prof`/`.pstats.txt` per config + two analysis
   reports); probe scripts: `findings/probes*/`.
 - Worktree under audit: `.worktrees/audit-master` @ f082e9b (read-only; venv built for measurement).
+
