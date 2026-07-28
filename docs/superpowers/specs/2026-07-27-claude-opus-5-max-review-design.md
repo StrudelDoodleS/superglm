@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft for written review. The model and effort choice was approved on 2026-07-27.
+Implemented and merged through PR #169 on 2026-07-27.
 
 ## Context
 
@@ -51,8 +51,8 @@ will remain as they are.
 ## Validation and Rollout
 
 1. Parse every workflow YAML file to catch syntax errors.
-2. Confirm the branch diff changes only the design document and the two Claude
-   launch arguments.
+2. Confirm the branch diff changes only the design document, implementation
+   plan, and the two Claude launch arguments.
 3. Run the repository's workflow-policy and supply-chain tests.
 4. Open a dedicated pull request and require the normal protected-branch checks.
 5. After merge, trigger a fresh `@claude` review on PR #165.
