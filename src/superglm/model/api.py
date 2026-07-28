@@ -619,7 +619,7 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         *,
         candidates: list[tuple[str, str]] | None = None,
-        edf0: float = 4.0,
+        edf0: float | tuple[float, ...] = (2.0, 4.0, 8.0, 16.0),
         max_cells: int = 5_000_000,
     ) -> pd.DataFrame:
         """Rank candidate spline-pair interactions by PSST.
@@ -627,11 +627,14 @@ class SuperGLM:
         PSST (Penalized Smooth Score Test) asks, for each candidate pair of
         fitted spline features, how much of the model's leftover working
         signal the pair's actual ``ti()`` tensor smooth could absorb at a
-        fixed screening complexity (``edf0`` effective degrees of freedom),
-        after profiling out what the pair's own main effects already explain.
-        One O(n) cell pass per pair; no refits.
+        fixed screening complexity, after profiling out what the pair's own
+        main effects already explain.  ``edf0`` is a probe bandwidth; the
+        default ladder evaluates each pair at several budgets and ranks by
+        the best noise-normalized score ``z``, so smooth and high-frequency
+        interactions are both visible.  One O(n) cell pass per pair; no
+        refits.
 
-        The returned frame is sorted by ``statistic`` descending.  The
+        The returned frame is sorted by ``z`` descending.  The
         statistic is a ranking device, not a calibrated p-value: confirm the
         top-ranked pairs by refitting them as ``ti()`` terms.
         """

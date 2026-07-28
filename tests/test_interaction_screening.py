@@ -388,7 +388,8 @@ def test_null_statistics_stay_bounded_across_seeds():
         table = model.screen_interactions(frame, y, sample_weight=w)
 
         assert np.isfinite(table["statistic"]).all()
-        assert table["statistic"].max() < 60.0, table
+        assert np.isfinite(table["z"]).all()
+        assert table["z"].max() < 10.0, table
 
 
 def test_candidates_restricts_the_sweep():

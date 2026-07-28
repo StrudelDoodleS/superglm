@@ -34,15 +34,26 @@ def screen_interactions(
     sample_weight=None,
     *,
     candidates=None,
-    edf0: float = 4.0,
+    edf0=(2.0, 4.0, 8.0, 16.0),
     max_cells: int = 5_000_000,
 ) -> pd.DataFrame:
     """Rank candidate spline-pair interactions of a fitted model by PSST.
 
-    Returns a frame sorted by ``statistic`` (descending) with one row per
-    screened pair: ``feature_a, feature_b, statistic, edf0, lambda0,
-    n_cells``.  Pairs whose joint cell grid exceeds ``max_cells`` are
-    skipped with ``statistic = NaN`` rather than silently binned.
+    ``edf0`` is the probe bandwidth: a smooth surface is detected best by a
+    small budget, a high-frequency one only by a budget at least as complex
+    as its shape (measured: a sin x sin signal is invisible at edf0<=4).  The
+    default is therefore a LADDER — each pair is evaluated at every budget,
+    each T is normalized against its own noise floor,
+    ``z = (T - edf0) / sqrt(2 * edf0)``, and the pair is ranked by its best
+    normalized score, a scan statistic over bandwidths.  Pass a single float
+    to probe one bandwidth.  The expensive per-pair work (cells, menus,
+    profiling) happens once; the ladder re-solves a small system per rung.
+
+    Returns a frame sorted by ``z`` (descending) with one row per screened
+    pair: ``feature_a, feature_b, statistic, z, edf0, lambda0, n_cells``,
+    where ``statistic``/``edf0``/``lambda0`` describe the winning rung.
+    Pairs whose joint cell grid exceeds ``max_cells`` are skipped with NaN
+    rather than silently binned.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -78,7 +89,7 @@ def screen_interactions(
         uniq_b, first_b, codes_b = np.unique(x_b, return_index=True, return_inverse=True)
         n_a, n_b = len(uniq_a), len(uniq_b)
         if n_a * n_b > max_cells:
-            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, n_a * n_b))
+            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b))
             continue
 
         spec = TensorInteraction(feat_a, feat_b)
@@ -91,13 +102,18 @@ def screen_interactions(
         )
         U, V = pair_score_curvature(menu_a, menu_b, S_cell, W_cell)
         M, C, u_m = pair_overlap_moments(menu_a, menu_b, S_cell, W_cell)
-        result = penalized_score_statistic(
-            U, V, C, M, tensor_penalty(S1, S2), edf0=edf0, U_nuisance=u_m
-        )
-        rows.append((feat_a, feat_b, result.statistic, result.edf0, result.lambda0, n_a * n_b))
+        budgets = (edf0,) if np.isscalar(edf0) else tuple(edf0)
+        S_ti = tensor_penalty(S1, S2)
+        best_z, best = -np.inf, None
+        for budget in budgets:
+            result = penalized_score_statistic(U, V, C, M, S_ti, edf0=float(budget), U_nuisance=u_m)
+            z = (result.statistic - result.edf0) / np.sqrt(2.0 * result.edf0)
+            if z > best_z:
+                best_z, best = z, result
+        rows.append((feat_a, feat_b, best.statistic, best_z, best.edf0, best.lambda0, n_a * n_b))
 
     table = pd.DataFrame(
         rows,
-        columns=["feature_a", "feature_b", "statistic", "edf0", "lambda0", "n_cells"],
+        columns=["feature_a", "feature_b", "statistic", "z", "edf0", "lambda0", "n_cells"],
     )
-    return table.sort_values("statistic", ascending=False, ignore_index=True)
+    return table.sort_values("z", ascending=False, ignore_index=True)
