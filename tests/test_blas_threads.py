@@ -60,6 +60,30 @@ def test_unparseable_value_warns_and_caps(monkeypatch):
         assert _resolve_limit() == 1
 
 
+def test_wide_design_releases_auto_cap(monkeypatch):
+    from superglm._blas_threads import allow_wide_design
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _blas_thread_counts()
+    with solver_blas_threads():
+        allow_wide_design(500)
+        assert all(count == 1 for count in _blas_thread_counts())
+        allow_wide_design(1_500)
+        assert _blas_thread_counts() == before
+    assert _blas_thread_counts() == before
+
+
+def test_wide_design_respects_explicit_cap(monkeypatch):
+    from superglm._blas_threads import allow_wide_design
+
+    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "2")
+    before = _blas_thread_counts()
+    with solver_blas_threads():
+        allow_wide_design(5_000)
+        assert all(count == 2 for count in _blas_thread_counts())
+    assert _blas_thread_counts() == before
+
+
 def test_overlapping_scopes_restore_native_state(monkeypatch):
     """Concurrent fits must not leave the process pinned at the cap."""
     import threading

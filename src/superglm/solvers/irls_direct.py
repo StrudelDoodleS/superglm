@@ -2483,10 +2483,12 @@ def _fit_irls_direct_once(
         phi = pearson_chi2 / df_resid
     else:
         phi = 1.0
-    if not _compute_reml_geometry:
-        # Private SCOP candidates have no retained-fit statistics. NaN makes
-        # accidental publication fail visibly instead of presenting 0 EDF or
-        # unit dispersion as if either had been evaluated.
+    if not _compute_reml_geometry or not _compute_fit_statistics:
+        # Private SCOP candidates and stats-skipping in-loop REML fits have no
+        # retained-fit statistics. NaN makes accidental publication fail
+        # visibly instead of presenting 0 EDF or unit dispersion as if either
+        # had been evaluated; published statistics come from the terminal
+        # refit, which always computes them.
         p_eff = float("nan")
         phi = float("nan")
 
