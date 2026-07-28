@@ -427,3 +427,20 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         return sub
+
+
+class SupportCompressedSSPGroupMatrix(DiscretizedSSPGroupMatrix):
+    """Exact SSP basis stored one row per distinct row.
+
+    Numerically identical to :class:`SparseSSPGroupMatrix` over the same basis;
+    only the storage differs.  Kept distinct from its binned parent because
+    ``discrete=True`` is a lossy fREML path and this is not: no binning occurs
+    and no discretisation error is introduced, so ``bin_idx`` here indexes exact
+    distinct rows rather than bins.
+    """
+
+    __slots__ = ()
+
+    @property
+    def is_lossless_support(self) -> bool:
+        return True
