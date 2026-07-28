@@ -172,3 +172,84 @@ def test_working_score_carries_family_factor_for_noncanonical_link():
 
     score = working_score(y, mu, eta, w, Gamma(), LogLink())
     np.testing.assert_allclose(score, w * (y - mu) / mu, rtol=1e-12)
+
+
+def _pd_matrix(rng, p, strength=1.0):
+    A = rng.normal(size=(p, 2 * p))
+    return strength * (A @ A.T) / p
+
+
+def test_statistic_reduces_to_unpenalized_without_penalty():
+    from superglm.screening import penalized_score_statistic
+
+    rng = np.random.default_rng(5)
+    p = 6
+    V = _pd_matrix(rng, p)
+    U = rng.normal(size=p)
+
+    result = penalized_score_statistic(U, V, S_ti=None)
+
+    np.testing.assert_allclose(result.statistic, U @ np.linalg.solve(V, U), rtol=1e-11)
+    assert result.lambda0 == 0.0
+
+
+def test_edf_solver_hits_target():
+    from superglm.screening import penalized_score_statistic
+
+    rng = np.random.default_rng(6)
+    p = 8
+    V = _pd_matrix(rng, p)
+    S = _pd_matrix(rng, p, strength=0.3)
+    U = rng.normal(size=p)
+
+    result = penalized_score_statistic(U, V, S_ti=S, edf0=3.5)
+
+    achieved = np.trace(np.linalg.solve(V + result.lambda0 * S, V))
+    assert abs(achieved - 3.5) <= 1e-6
+    assert abs(result.edf0 - 3.5) <= 1e-6
+
+
+def test_profiling_removes_overlap_explained_score():
+    """A purely additive signal must screen at the null level."""
+    from superglm.screening import penalized_score_statistic
+
+    rng = np.random.default_rng(7)
+    p, q = 6, 4
+    V = _pd_matrix(rng, p)
+    M = _pd_matrix(rng, q)
+    C = rng.normal(size=(q, p))
+    u_m = rng.normal(size=q)
+    U = C.T @ np.linalg.solve(M, u_m)  # score fully explained by the overlap
+    S = _pd_matrix(rng, p, strength=0.2)
+
+    result = penalized_score_statistic(U, V, C, M, S, edf0=3.0, U_nuisance=u_m)
+
+    assert abs(result.statistic) < 1e-18
+
+
+def test_infinite_penalty_limit_restricts_to_null_space():
+    """With edf0 = penalty null dimension, T approaches the null-space statistic."""
+    from superglm.screening import penalized_score_statistic
+
+    rng = np.random.default_rng(8)
+    p, null_dim = 6, 2
+    V = _pd_matrix(rng, p)
+    S = np.zeros((p, p))
+    S[null_dim:, null_dim:] = _pd_matrix(rng, p - null_dim)
+    U = rng.normal(size=p)
+
+    result = penalized_score_statistic(U, V, S_ti=S, edf0=float(null_dim))
+
+    V_nn = V[:null_dim, :null_dim]
+    expected = U[:null_dim] @ np.linalg.solve(V_nn, U[:null_dim])
+    assert result.lambda0 > 1e4
+    np.testing.assert_allclose(result.statistic, expected, rtol=1e-3)
+
+
+def test_c_without_m_raises():
+    import pytest
+
+    from superglm.screening import penalized_score_statistic
+
+    with pytest.raises(ValueError, match="supply both"):
+        penalized_score_statistic(np.ones(2), np.eye(2), C=np.ones((1, 2)))
