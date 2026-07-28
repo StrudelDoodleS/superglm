@@ -18,6 +18,7 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
 )
 
 _StorageRows = Literal[
@@ -74,6 +75,13 @@ _REPRESENTATION_BY_TYPE = MappingProxyType(
             True,
             "unique-basis",
             specialised_discrete_route="binned-ssp",
+        ),
+        # Registered explicitly: the MRO fallback below would otherwise report a
+        # lossless exact group as the lossy binned route on a discrete=False fit.
+        SupportCompressedSSPGroupMatrix: _RepresentationMetadata(
+            "support-compressed-ssp",
+            True,
+            "unique-basis",
         ),
         DiscretizedSCOPGroupMatrix: _RepresentationMetadata(
             "discretized-scop",
