@@ -1345,7 +1345,9 @@ def rebuild_design_matrix_with_lambdas(
                 R_inv_new = P @ R_inv_local
             else:
                 R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
-            new_gm = DiscretizedSSPGroupMatrix(gm.B_unique, R_inv_new, gm.bin_idx)
+            # type(gm) preserves subclass semantics (e.g. lossless support
+            # compression) across the per-lambda rebuild.
+            new_gm = type(gm)(gm.B_unique, R_inv_new, gm.bin_idx)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
             new_gm.omega_components = gm.omega_components

@@ -141,3 +141,56 @@ def test_cross_gram_uses_fast_path_for_compressed_groups():
     assert "block_cross_fallback_s" not in profile, (
         f"compressed groups took the column-at-a-time fallback; profile={profile}"
     )
+
+
+def test_row_subset_preserves_lossless_type():
+    """A CV split must not silently convert a lossless group into a binned one."""
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    rng = np.random.default_rng(2)
+    b_unique = rng.normal(size=(12, 4))
+    row_index = rng.integers(0, 12, 400)
+    r_inv = rng.normal(size=(4, 3))
+    compressed = SupportCompressedSSPGroupMatrix(b_unique, r_inv, row_index)
+
+    subset = compressed.row_subset(np.arange(0, 400, 3))
+
+    assert type(subset) is SupportCompressedSSPGroupMatrix
+    assert subset.is_lossless_support is True
+
+
+def test_rebuild_with_lambdas_preserves_lossless_type():
+    """Every REML lambda update rebuilds the design; the marker must survive."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm.dm_builder import rebuild_design_matrix_with_lambdas
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(4)
+    n = 3000
+    frame = pd.DataFrame({"age": rng.integers(18, 90, n).astype(float)})
+    weights = np.full(n, 1.0)
+    response = rng.poisson(0.2, n).astype(float)
+
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={"age": Spline(kind="ps", k=8)},
+    )
+    model._build_design_matrix(frame, response, weights, None)
+
+    original = model._dm.group_matrices[0]
+    if not isinstance(original, SupportCompressedSSPGroupMatrix):
+        import pytest
+
+        pytest.skip("design build does not yet produce compressed groups (Task 4)")
+
+    rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, {"age": 2.0}, weights)
+    assert type(rebuilt.group_matrices[0]) is SupportCompressedSSPGroupMatrix
