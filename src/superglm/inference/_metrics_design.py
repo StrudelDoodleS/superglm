@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Iterator
 
 import numpy as np
@@ -18,6 +19,99 @@ from superglm.group_matrix import DesignMatrix
 _MAX_DESIGN_CHUNK_BYTES = 16 * 1024 * 1024
 _MAX_DESIGN_CHUNK_ROWS = 8192
 _LIVE_ALGEBRA_ROW_BUFFERS = 5
+
+
+class MappedColumnFactor:
+    """Rectangular factor stored only on a narrow set of global columns."""
+
+    def __init__(
+        self,
+        local_factor: NDArray,
+        column_indices: NDArray,
+        width: int,
+    ):
+        local = np.asarray(local_factor, dtype=np.float64)
+        indices = np.asarray(column_indices, dtype=np.intp)
+        if local.ndim != 2 or indices.shape != (local.shape[1],):
+            raise ValueError("local factor columns must match mapped column indices")
+        if width < 0 or np.any((indices < 0) | (indices >= width)):
+            raise ValueError("mapped factor columns must lie within its global width")
+        if len(indices) and not np.array_equal(indices, np.unique(indices)):
+            raise ValueError("mapped factor columns must be sorted and unique")
+        self.local_factor = np.array(local, copy=True)
+        self.column_indices = np.array(indices, copy=True)
+        self.width = int(width)
+        self.shape = (local.shape[0], self.width)
+        self.ndim = 2
+        self.dtype = self.local_factor.dtype
+
+    @property
+    def storage_nbytes(self) -> int:
+        """Bytes owned by the compact representation."""
+        return int(self.local_factor.nbytes + self.column_indices.nbytes)
+
+    def _selected_columns(self, selector) -> tuple[NDArray[np.intp], bool]:
+        if isinstance(selector, slice):
+            start, stop, step = selector.indices(self.width)
+            selected = np.arange(start, stop, step, dtype=np.intp)
+            scalar = False
+        elif isinstance(selector, (int, np.integer)):
+            column = operator.index(selector)
+            if column < 0:
+                column += self.width
+            if not 0 <= column < self.width:
+                raise IndexError("mapped factor column is out of bounds")
+            selected = np.array([column], dtype=np.intp)
+            scalar = True
+        else:
+            scalar = False
+            selected = np.asarray(selector)
+            if selected.dtype == bool:
+                if selected.shape != (self.width,):
+                    raise IndexError("boolean mapped factor index has the wrong width")
+                selected = np.flatnonzero(selected)
+            else:
+                selected = np.asarray(selected, dtype=np.intp)
+                selected = np.where(selected < 0, selected + self.width, selected)
+                if np.any((selected < 0) | (selected >= self.width)):
+                    raise IndexError("mapped factor column is out of bounds")
+        return np.asarray(selected, dtype=np.intp), bool(scalar)
+
+    def selected_columns(self, selector) -> NDArray:
+        """Materialize only the requested global columns."""
+        selected, _scalar = self._selected_columns(selector)
+        result = np.zeros((self.shape[0], len(selected)), dtype=np.float64)
+        if len(selected) and len(self.column_indices):
+            positions = np.searchsorted(self.column_indices, selected)
+            present = positions < len(self.column_indices)
+            present[present] &= self.column_indices[positions[present]] == selected[present]
+            result[:, present] = self.local_factor[:, positions[present]]
+        return result
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise IndexError("mapped factors require two-dimensional indexing")
+        rows, columns = key
+        selected, scalar_column = self._selected_columns(columns)
+        result = self.selected_columns(selected)[rows]
+        if scalar_column:
+            result = result[..., 0]
+        return result
+
+    def __array__(self, dtype=None, copy=None) -> NDArray:
+        """Materialize the global rectangle only on explicit NumPy conversion."""
+        result = np.zeros(self.shape, dtype=np.float64)
+        result[:, self.column_indices] = self.local_factor
+        if dtype is not None:
+            result = result.astype(dtype, copy=False)
+        if copy:
+            result = result.copy()
+        return result
+
+    @property
+    def T(self) -> NDArray:
+        """Dense transpose for explicit legacy matrix algebra."""
+        return np.asarray(self).T
 
 
 def _bounded_chunk_rows(*, algebra_width: int, transform_width: int = 0) -> int:

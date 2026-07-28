@@ -193,6 +193,7 @@ def _is_tabmat_centering_candidate(gms) -> bool:
         DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
+        FactorSmoothGroupMatrix,
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     )
@@ -203,6 +204,7 @@ def _is_tabmat_centering_candidate(gms) -> bool:
         | DiscretizedSplineCategoricalGroupMatrix
         | DiscretizedSSPGroupMatrix
         | DiscretizedSCOPGroupMatrix
+        | FactorSmoothGroupMatrix
     )
     return (
         not any(isinstance(gm, unsupported) for gm in gms)
@@ -245,6 +247,8 @@ def _build_tabmat_split(gms):
         DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
+        FactorSmoothGroupMatrix,
+        RandomEffectGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
@@ -257,7 +261,8 @@ def _build_tabmat_split(gms):
             | SplineCategoricalGroupMatrix
             | DiscretizedSplineCategoricalGroupMatrix
             | DiscretizedSSPGroupMatrix
-            | DiscretizedSCOPGroupMatrix,
+            | DiscretizedSCOPGroupMatrix
+            | FactorSmoothGroupMatrix,
         )
         for gm in gms
     ):
@@ -270,7 +275,18 @@ def _build_tabmat_split(gms):
 
     matrices = []
     for gm in gms:
-        if isinstance(gm, CategoricalGroupMatrix):
+        if isinstance(gm, RandomEffectGroupMatrix):
+            if gm.n_levels > 100:
+                matrices.append(
+                    tabmat.CategoricalMatrix(
+                        gm.codes.astype(np.int32, copy=False),
+                        categories=np.arange(gm.n_levels),
+                        drop_first=False,
+                    )
+                )
+            else:
+                matrices.append(tabmat.DenseMatrix(gm.toarray()))
+        elif isinstance(gm, CategoricalGroupMatrix):
             if gm.n_levels > 100:
                 matrices.append(_native_categorical_matrix(gm.codes, gm.n_levels))
             else:

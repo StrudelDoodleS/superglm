@@ -27,6 +27,8 @@ from ._group_matrix._group_matrix_bins import discretize_column
 from ._group_matrix._group_matrix_core import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
+    FactorSmoothGroupMatrix,
+    RandomEffectGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -53,6 +55,8 @@ from ._group_matrix._group_matrix_tabmat import (
 DenseGroupMatrix.__module__ = __name__
 SparseGroupMatrix.__module__ = __name__
 CategoricalGroupMatrix.__module__ = __name__
+RandomEffectGroupMatrix.__module__ = __name__
+FactorSmoothGroupMatrix.__module__ = __name__
 SparseSSPGroupMatrix.__module__ = __name__
 SplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedSSPGroupMatrix.__module__ = __name__
@@ -70,6 +74,8 @@ GroupMatrix = (
     DenseGroupMatrix
     | SparseGroupMatrix
     | CategoricalGroupMatrix
+    | RandomEffectGroupMatrix
+    | FactorSmoothGroupMatrix
     | SparseSSPGroupMatrix
     | SplineCategoricalGroupMatrix
     | DiscretizedSSPGroupMatrix
@@ -255,6 +261,7 @@ class DesignMatrix:
         self._mixed_bin_space_centering_plan_attempted = False
         self._centered_pattern_plan = None
         self._centered_solver_supports = None
+        self._scalar_structured_layout_cache: dict[object, Any] = {}
 
     def __getstate__(self) -> dict[str, Any]:
         """Serialize durable matrix state without the rebuildable execution plan."""
@@ -267,6 +274,7 @@ class DesignMatrix:
         state.pop("_mixed_centering_execution_plan", None)
         state["_mixed_bin_space_centering_plan"] = None
         state["_mixed_bin_space_centering_plan_attempted"] = False
+        state["_scalar_structured_layout_cache"] = {}
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -294,6 +302,7 @@ class DesignMatrix:
         state.pop("_mixed_centering_execution_plan", None)
         state["_mixed_bin_space_centering_plan"] = None
         state["_mixed_bin_space_centering_plan_attempted"] = False
+        state["_scalar_structured_layout_cache"] = {}
         state.setdefault("_tabmat_centering_candidate", None)
         state["_tabmat_vector_candidate"] = _is_retained_tabmat_vector_candidate(
             group_matrices,

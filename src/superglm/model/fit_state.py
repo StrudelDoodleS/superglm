@@ -201,6 +201,8 @@ class ModelConfig:
             "_link": None,
             "_result": None,
             "_solver_result": None,
+            "_linear_system_state": None,
+            "_reporting_support_state": None,
             "_dm": None,
             "_fit_weights": None,
             "_fit_offset": None,
@@ -220,6 +222,7 @@ class ModelConfig:
             "_fit_sample_weight_ref": None,
             "_fit_offset_ref": None,
             "_fit_data_guard": None,
+            "_fit_geometry_guard": None,
             "_fit_metrics_cache": None,
             "_fit_metrics_cache_signature": None,
             "_summary_cache": None,
@@ -409,6 +412,8 @@ def invalidate_revised_coefficient_mode(model) -> None:
 
     # Profile likelihoods and confidence intervals are functions of the old
     # fitted mean, so they cannot survive an arbitrary coefficient revision.
+    model._linear_system_state = None
+    model._reporting_support_state = None
     model._nb_profile_result = None
     model._tweedie_profile_result = None
 
@@ -416,6 +421,8 @@ def invalidate_revised_coefficient_mode(model) -> None:
 _FIT_PROJECTION_NAMES = (
     "_result",
     "_solver_result",
+    "_linear_system_state",
+    "_reporting_support_state",
     "_dm",
     "_groups",
     "_specs",
@@ -441,6 +448,7 @@ _FIT_PROJECTION_NAMES = (
     "_fit_sample_weight_ref",
     "_fit_offset_ref",
     "_fit_data_guard",
+    "_fit_geometry_guard",
     "_fit_metrics_cache",
     "_fit_metrics_cache_signature",
     "_summary_cache",

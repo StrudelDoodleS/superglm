@@ -19,6 +19,7 @@ from superglm.dm_builder import (
     resolve_discrete_n_bins,
     should_discretize,
     should_discretize_tensor_interaction,
+    validate_term_name_namespace,
 )
 from superglm.group_matrix import DesignMatrix, _discretize_column
 from superglm.links import Link, stabilize_eta
@@ -332,13 +333,18 @@ def _score_interaction_fast_discrete(
     return support_values[np.asarray(pair_idx, dtype=np.intp)]
 
 
-def _score_prediction_term_exact(
+def _score_prediction_term_local_exact(
     term: dict[str, Any],
     X: EagerFrame,
-    beta_all: NDArray,
+    beta: NDArray,
 ) -> NDArray[np.floating]:
-    """Score one canonical term exactly on the requested rows."""
-    beta = beta_all[term["beta_idx"]]
+    """Score one canonical term from its term-local coefficient vector."""
+    beta = np.asarray(beta, dtype=np.float64).ravel()
+    expected_width = len(term["beta_idx"])
+    if beta.shape != (expected_width,):
+        raise ValueError(
+            f"term {term['name']!r} requires {expected_width} coefficients, got {len(beta)}"
+        )
     if term["kind"] == "feature":
         return _score_feature(term["spec"], X.column_array(term["name"]), beta)
 
@@ -348,6 +354,19 @@ def _score_prediction_term_exact(
         X.column_array(left_name),
         X.column_array(right_name),
         beta,
+    )
+
+
+def _score_prediction_term_exact(
+    term: dict[str, Any],
+    X: EagerFrame,
+    beta_all: NDArray,
+) -> NDArray[np.floating]:
+    """Score one canonical term exactly on the requested rows."""
+    return _score_prediction_term_local_exact(
+        term,
+        X,
+        beta_all[term["beta_idx"]],
     )
 
 
@@ -373,8 +392,17 @@ def _predict_eta(
     offset: NDArray | None,
     *,
     fast_discrete: bool,
+    random_effects: str,
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor on exact or fast-discrete blocks."""
+    if random_effects not in ("conditional", "population"):
+        raise ValueError(
+            f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
+        )
+
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
     frame = as_eager_frame(X)
     plan = _prediction_plan(model)
     required_columns = tuple(
@@ -390,12 +418,22 @@ def _predict_eta(
     scorer = _score_prediction_term_fast_discrete if fast_discrete else _score_prediction_term_exact
 
     for term in plan["features"]:
+        if random_effects == "population" and isinstance(term["spec"], RandomEffect):
+            term["spec"].validate_prediction_values(frame.column_array(term["name"]))
+            continue
         if fast_discrete:
             eta += scorer(model, term, frame, beta_all)
         else:
             eta += scorer(term, frame, beta_all)
 
     for term in plan["interactions"]:
+        if random_effects == "population" and isinstance(term["spec"], FactorSmooth):
+            left_name, right_name = term["parent_names"]
+            term["spec"].validate_population_prediction_values(
+                frame.column_array(left_name),
+                frame.column_array(right_name),
+            )
+            continue
         if fast_discrete:
             eta += scorer(model, term, frame, beta_all)
         else:
@@ -410,18 +448,34 @@ def predict_eta_exact(
     model,
     X: EagerFrame | FrameLike,
     offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the exact canonical contract."""
-    return _predict_eta(model, X, offset, fast_discrete=False)
+    return _predict_eta(
+        model,
+        X,
+        offset,
+        fast_discrete=False,
+        random_effects=random_effects,
+    )
 
 
 def predict_eta_fast_discrete(
     model,
     X: FrameLike,
     offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
 ) -> NDArray[np.floating]:
     """Predict the stabilized linear predictor through the fast discrete contract."""
-    return _predict_eta(model, X, offset, fast_discrete=True)
+    return _predict_eta(
+        model,
+        X,
+        offset,
+        fast_discrete=True,
+        random_effects=random_effects,
+    )
 
 
 def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
@@ -429,14 +483,32 @@ def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
     return clip_mu(model._link.inverse(eta), model._distribution)
 
 
-def predict_exact(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+def predict_exact(
+    model,
+    X: FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray:
     """Predict the response mean through the exact canonical contract."""
-    return _eta_to_mu(model, predict_eta_exact(model, X, offset))
+    return _eta_to_mu(
+        model,
+        predict_eta_exact(model, X, offset, random_effects=random_effects),
+    )
 
 
-def predict_fast_discrete(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+def predict_fast_discrete(
+    model,
+    X: FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray:
     """Predict the response mean through the fast discrete contract."""
-    return _eta_to_mu(model, predict_eta_fast_discrete(model, X, offset))
+    return _eta_to_mu(
+        model,
+        predict_eta_fast_discrete(model, X, offset, random_effects=random_effects),
+    )
 
 
 def resolve_penalty(
@@ -509,6 +581,52 @@ def resolve_knots(model, spline_cols: list[str]) -> dict[str, int]:
     return dict(zip(spline_cols, model._n_knots))
 
 
+def validate_factor_smooth_configuration(model, *, features_resolved: bool) -> None:
+    """Validate factor-smooth geometry after explicit or inferred features exist."""
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import _SplineBase
+
+    terms = [
+        spec
+        for name in model._interaction_order
+        if isinstance((spec := model._interaction_specs[name]), FactorSmooth)
+    ]
+    seen: dict[tuple[str, str], str] = {}
+    for term in terms:
+        pair = (term.variable, term.group)
+        if pair in seen:
+            raise ValueError(
+                f"FactorSmooth pair {pair!r} is configured more than once "
+                f"({seen[pair]!r} and {term.name!r})."
+            )
+        seen[pair] = term.name
+
+    if not features_resolved:
+        return
+
+    for term in terms:
+        group_spec = model._specs.get(term.group)
+        if isinstance(group_spec, (Categorical, RandomEffect)):
+            raise ValueError(
+                f"FactorSmooth {term.name!r} group {term.group!r} duplicates "
+                "the constant null-space group-intercept geometry of "
+                f"{type(group_spec).__name__} on the same column; remove that "
+                "group main effect and use an explicit features map containing "
+                "only the intended main effects."
+            )
+        if term.basis == "sz" and not isinstance(
+            model._specs.get(term.variable),
+            _SplineBase,
+        ):
+            raise ValueError(
+                f"FactorSmooth {term.name!r} with basis='sz' requires a global "
+                f"Spline for {term.variable!r}; use "
+                f"features={{{term.variable!r}: Spline(...)}}."
+            )
+
+
 def init_model(
     model,
     family: str | Distribution = "poisson",
@@ -522,7 +640,7 @@ def init_model(
     n_knots: int | list[int] = 10,
     degree: int = 3,
     categorical_base: str = "most_exposed",
-    interactions: list[tuple[str, str]] | None = None,
+    interactions: list[tuple[str, str] | object] | None = None,
     active_set: bool = False,
     direct_solve: str = "auto",
     discrete: bool = False,
@@ -549,8 +667,10 @@ def init_model(
     model._degree = degree
     model._categorical_base = categorical_base
     model._active_set = active_set
-    if direct_solve not in ("auto", "gram", "qr"):
-        raise ValueError(f"direct_solve must be 'auto', 'gram', or 'qr', got {direct_solve!r}")
+    if direct_solve not in ("auto", "gram", "qr", "structured"):
+        raise ValueError(
+            f"direct_solve must be 'auto', 'gram', 'qr', or 'structured', got {direct_solve!r}"
+        )
     model._direct_solve = direct_solve
     model._discrete = discrete
     model._n_bins = copy.deepcopy(n_bins)
@@ -579,6 +699,8 @@ def init_model(
     model._link: Link | None = None
     model._result: PIRLSResult | None = None
     model._solver_result: PIRLSResult | None = None
+    model._linear_system_state = None
+    model._reporting_support_state = None
     model._dm: DesignMatrix | None = None
     model._fit_weights: NDArray | None = None
     model._fit_offset: NDArray | None = None
@@ -598,20 +720,61 @@ def init_model(
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
     model._fit_data_guard = None
+    model._fit_geometry_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
 
-    # Interaction support
+    # Interaction support. Tuple interactions are resolved after feature
+    # construction; explicit specs already own their parent-column contract.
     model._interaction_specs: dict[str, Any] = {}
     model._interaction_order: list[str] = []
-    model._pending_interactions: tuple[tuple[str, str], ...] = tuple(interactions or ())
+    pending_interactions: list[tuple[str, str]] = []
+    explicit_interactions: list[Any] = []
+    for interaction in interactions or ():
+        if (
+            isinstance(interaction, tuple)
+            and len(interaction) == 2
+            and all(isinstance(name, str) for name in interaction)
+        ):
+            pending_interactions.append(interaction)
+            continue
+        parent_names = getattr(interaction, "parent_names", None)
+        interaction_name = getattr(interaction, "name", None)
+        if (
+            not isinstance(parent_names, tuple)
+            or len(parent_names) != 2
+            or not all(isinstance(parent, str) and parent for parent in parent_names)
+            or not isinstance(interaction_name, str)
+            or not interaction_name
+        ):
+            raise TypeError(
+                "interactions entries must be (left, right) tuples or explicit "
+                "interaction specs with parent_names and name"
+            )
+        if interaction_name in model._interaction_specs or any(
+            existing.name == interaction_name for existing in explicit_interactions
+        ):
+            raise ValueError(f"Interaction already added: {interaction_name}")
+        explicit_interactions.append(interaction)
+    model._pending_interactions = tuple(pending_interactions)
 
     # Register explicit features dict
     if features is not None:
         for name, spec in features.items():
             model._specs[name] = copy.deepcopy(spec)
             model._feature_order.append(name)
+
+    for interaction in explicit_interactions:
+        owned = copy.deepcopy(interaction)
+        model._interaction_specs[owned.name] = owned
+        model._interaction_order.append(owned.name)
+
+    validate_term_name_namespace(model._specs, model._interaction_specs)
+    validate_factor_smooth_configuration(
+        model,
+        features_resolved=model._splines is None,
+    )
 
     from superglm.model.fit_state import ModelConfig
 
@@ -639,13 +802,17 @@ def clone_without_features(
     keep_features = {n: s for n, s in model._specs.items() if n not in drop}
 
     # Filter interactions: drop any whose parent is being dropped
-    keep_interactions: list[tuple[str, str]] = []
+    from superglm.features.factor_smooth import FactorSmooth
+
+    keep_interactions: list[tuple[str, str] | object] = []
     # Check resolved interactions (fitted model)
     for iname in model._interaction_order:
         ispec = model._interaction_specs[iname]
         p1, p2 = ispec.parent_names
         if p1 not in drop and p2 not in drop:
-            keep_interactions.append((p1, p2))
+            keep_interactions.append(
+                copy.deepcopy(ispec) if isinstance(ispec, FactorSmooth) else (p1, p2)
+            )
     # Check pending interactions (unfitted model)
     for p1, p2 in model._pending_interactions:
         if p1 not in drop and p2 not in drop:
@@ -722,6 +889,8 @@ def auto_detect(model, X: EagerFrame, sample_weight: NDArray | None) -> None:
         specs=model._specs,
         feature_order=model._feature_order,
     )
+    validate_term_name_namespace(model._specs, model._interaction_specs)
+    validate_factor_smooth_configuration(model, features_resolved=True)
 
 
 def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None, **kwargs) -> None:
@@ -850,6 +1019,12 @@ def rebuild_dm_with_lambdas(
     )
 
 
-def predict(model, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+def predict(
+    model,
+    X: FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray:
     """Predict the response mean for new data."""
-    return predict_exact(model, X, offset)
+    return predict_exact(model, X, offset, random_effects=random_effects)

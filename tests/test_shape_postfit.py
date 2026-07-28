@@ -5,7 +5,15 @@ import pandas as pd
 import pytest
 from scipy.interpolate import BSpline, PPoly
 
-from superglm import Constraint, Numeric, PSpline, SuperGLM
+from superglm import (
+    Constraint,
+    FactorSmooth,
+    LambdaPolicy,
+    Numeric,
+    PSpline,
+    RandomEffect,
+    SuperGLM,
+)
 from superglm.constraints import (
     MonotoneRepairResult,
     curvature_violation,
@@ -1065,6 +1073,94 @@ def test_compact_shape_penalty_quadratic_matches_dense_component_algebra():
         rel=3e-13,
         abs=3e-13,
     )
+
+
+@pytest.mark.parametrize("structured_kind", ["re", "fs", "sz"])
+def test_structured_postfit_shape_repair_uses_compact_penalties(
+    structured_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from superglm.reml import penalty_algebra
+
+    rng = np.random.default_rng(20260727)
+    n_levels = 36
+    repeats = 8
+    codes = np.repeat(np.arange(n_levels), repeats)
+    x = np.tile(np.linspace(0.0, 1.0, repeats), n_levels)
+    level_effects = rng.normal(scale=0.12, size=n_levels)
+    y = 1.0 - 1.5 * x + level_effects[codes] + rng.normal(scale=0.02, size=len(x))
+    X = pd.DataFrame(
+        {
+            "x": x,
+            "group": np.array([f"g{code}" for code in codes], dtype=object),
+        }
+    )
+    features = {
+        "x": PSpline(
+            n_knots=7,
+            constraint=Constraint.postfit.increasing,
+            lambda_policy=LambdaPolicy.fixed(0.8),
+        )
+    }
+    interactions = []
+    if structured_kind == "re":
+        features["group"] = RandomEffect(
+            lambda_policy=LambdaPolicy.fixed(1.1),
+        )
+    else:
+        policies = {"wiggle": LambdaPolicy.fixed(1.2)}
+        if structured_kind == "fs":
+            policies.update(
+                null_0=LambdaPolicy.fixed(0.9),
+                null_1=LambdaPolicy.fixed(0.9),
+            )
+        interactions.append(
+            FactorSmooth(
+                "x",
+                group="group",
+                basis=structured_kind,
+                k=5,
+                lambda_policy=policies,
+            )
+        )
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=interactions,
+        selection_penalty=0.0,
+        direct_solve="structured",
+    ).fit_reml(
+        X,
+        y,
+        max_reml_iter=2,
+        runtime_validation="skip",
+    )
+    x_groups = [group for group in model._groups if group.feature_name == "x"]
+    beta_before = np.concatenate([model.result.beta[group.sl] for group in x_groups])
+    revision_before = model._fit_revision
+
+    def reject_dense_component(*_args, **_kwargs):
+        raise AssertionError("post-fit repair expanded a structured penalty component")
+
+    monkeypatch.setattr(
+        penalty_algebra,
+        "penalty_component_dense_matrix",
+        reject_dense_component,
+    )
+
+    model.apply_shape_postfit(X, n_grid=120)
+
+    beta_after = np.concatenate([model.result.beta[group.sl] for group in x_groups])
+    certificate = shape_constraint_certificate(
+        model._specs["x"],
+        beta_after,
+        "increasing",
+    )
+    assert model._fit_revision == revision_before + 1
+    assert not np.allclose(beta_after, beta_before)
+    assert certificate.minimum_scaled_slack >= -2.0e-11
+    assert np.all(np.isfinite(model.predict(X)))
+    assert model.result.direct_backend == "structured"
 
 
 @pytest.mark.parametrize("spline_penalty", [0.0, 0.5])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,6 +17,85 @@ def _same_numeric_vector(value, snapshot: NDArray[np.float64]) -> bool:
     except (TypeError, ValueError, OverflowError):
         return False
     return current.shape == snapshot.shape and bool(np.array_equal(current, snapshot))
+
+
+def _numeric_vector_digest(value) -> tuple[int, bytes]:
+    """Return an exact, constant-size digest for one fitted numeric vector."""
+    array = np.ascontiguousarray(np.asarray(value, dtype=np.float64))
+    if array.ndim != 1:
+        raise ValueError("fit geometry vectors must be one-dimensional")
+    digest = hashlib.blake2b(array.data, digest_size=16).digest()
+    return len(array), digest
+
+
+@dataclass(frozen=True)
+class FitGeometryGuard:
+    """Constant-size fingerprint for inference geometry after row-state release."""
+
+    x_backend: FrameBackend
+    x_digest: bytes
+    n_rows: int
+    y_digest: bytes
+    weight_digest: bytes
+    offset_digest: bytes
+    x_columns: tuple[object, ...] | None = None
+
+    @classmethod
+    def capture(
+        cls,
+        X: EagerFrame | FrameLike,
+        y: NDArray,
+        sample_weight: NDArray,
+        offset: NDArray,
+        *,
+        columns: tuple[object, ...] | None = None,
+    ) -> FitGeometryGuard:
+        frame = as_eager_frame(X)
+        x_columns = None if columns is None else tuple(columns)
+        n_y, y_digest = _numeric_vector_digest(y)
+        n_weights, weight_digest = _numeric_vector_digest(sample_weight)
+        n_offsets, offset_digest = _numeric_vector_digest(offset)
+        if n_y != len(frame) or n_weights != len(frame) or n_offsets != len(frame):
+            raise ValueError("fit geometry vectors must match the fitted frame")
+        return cls(
+            x_backend=frame.backend,
+            x_digest=frame.digest(x_columns, include_index=False),
+            n_rows=len(frame),
+            y_digest=y_digest,
+            weight_digest=weight_digest,
+            offset_digest=offset_digest,
+            x_columns=x_columns,
+        )
+
+    def matches(self, X, sample_weight, offset) -> bool:
+        """Return whether evaluation rows, weights, and offset match the fit."""
+        try:
+            frame = as_eager_frame(X)
+            n_weights, weight_digest = _numeric_vector_digest(sample_weight)
+            n_offsets, offset_digest = _numeric_vector_digest(offset)
+            return bool(
+                len(frame) == self.n_rows
+                and n_weights == self.n_rows
+                and n_offsets == self.n_rows
+                and frame.backend == self.x_backend
+                and frame.digest(self.x_columns, include_index=False) == self.x_digest
+                and weight_digest == self.weight_digest
+                and offset_digest == self.offset_digest
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+    def matches_training(self, X, y, sample_weight, offset) -> bool:
+        """Return whether all supplied rows reproduce the fitted training inputs."""
+        try:
+            n_y, y_digest = _numeric_vector_digest(y)
+            return bool(
+                n_y == self.n_rows
+                and y_digest == self.y_digest
+                and self.matches(X, sample_weight, offset)
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+            return False
 
 
 @dataclass(frozen=True)
@@ -104,4 +184,4 @@ def require_unchanged_fit_data(model, X, y) -> None:
         )
 
 
-__all__ = ["FitDataGuard", "require_unchanged_fit_data"]
+__all__ = ["FitDataGuard", "FitGeometryGuard", "require_unchanged_fit_data"]

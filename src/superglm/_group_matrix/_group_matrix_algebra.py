@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         GroupMatrix,
+        RandomEffectGroupMatrix,
     )
 else:
     GroupMatrix = Any
@@ -145,14 +146,16 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
     """
     (
         CategoricalGroupMatrix,
-        _DiscretizedSCOPGroupMatrix,
+        DiscretizedSCOPGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
-        _DiscretizedSSPGroupMatrix,
+        DiscretizedSSPGroupMatrix,
         _DiscretizedTensorGroupMatrix,
         SparseGroupMatrix,
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
+    from ..group_matrix import FactorSmoothGroupMatrix
+
     if isinstance(gm, CategoricalGroupMatrix):
         return _cat_weighted_bincount(gm.codes, bin_idx, W, n_bins, gm.n_levels)
     if isinstance(gm, SparseGroupMatrix):
@@ -186,8 +189,69 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
             n_bins,
         )
         return B_agg @ gm.R_inv
+    if isinstance(gm, DiscretizedSCOPGroupMatrix):
+        n_cells = n_bins * gm.n_bins
+        if n_cells <= _MAX_DISC_DISC_HIST_CELLS:
+            weight_grid = _disc_disc_2d_hist(
+                bin_idx,
+                gm.bin_idx,
+                W,
+                n_bins,
+                gm.n_bins,
+            )
+            return weight_grid @ gm.B_scop_unique
+        return _aggregate_group_matrix_columns(gm, bin_idx, W, n_bins)
+    if isinstance(gm, DiscretizedSSPGroupMatrix):
+        n_cells = n_bins * gm.n_bins
+        if n_cells <= _MAX_DISC_DISC_HIST_CELLS:
+            weight_grid = _disc_disc_2d_hist(
+                bin_idx,
+                gm.bin_idx,
+                W,
+                n_bins,
+                gm.n_bins,
+            )
+            return (weight_grid @ gm.B_unique) @ gm.R_inv
+        return _aggregate_group_matrix_columns(gm, bin_idx, W, n_bins)
+    if isinstance(gm, FactorSmoothGroupMatrix):
+        return _aggregate_group_matrix_columns(gm, bin_idx, W, n_bins)
     X = gm.toarray()
     return _weighted_bincount_2d(bin_idx, W, X, n_bins)
+
+
+def _aggregate_group_matrix_columns(
+    gm: GroupMatrix,
+    bin_idx: NDArray,
+    W: NDArray,
+    n_bins: int,
+) -> NDArray:
+    """Aggregate a compact matrix by bins without an observation-by-column temporary."""
+    result = np.empty((n_bins, gm.shape[1]), dtype=np.float64)
+    unit = np.zeros(gm.shape[1], dtype=np.float64)
+    for column in range(gm.shape[1]):
+        unit[column] = 1.0
+        values = gm.matvec(unit)
+        result[:, column] = np.bincount(
+            bin_idx,
+            weights=W * values,
+            minlength=n_bins,
+        )
+        unit[column] = 0.0
+    return result
+
+
+def _random_effect_cross_gram(
+    random_effect: RandomEffectGroupMatrix,
+    other: GroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """Return ``X_re.T @ diag(W) @ X_other`` by direct level aggregation."""
+    return _agg_by_bin(
+        other,
+        random_effect.codes,
+        W,
+        random_effect.n_levels,
+    )
 
 
 def _cross_gram_tensor_tensor(
@@ -707,6 +771,8 @@ def _cross_gram(
         _SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
+    from ..group_matrix import FactorSmoothGroupMatrix
+
     SplineCatTypes = (SplineCategoricalGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
 
     if isinstance(gm_i, SplineCatTypes) and isinstance(gm_j, SplineCatTypes):
@@ -907,7 +973,7 @@ def _cross_gram(
     # Factored support-space groups must never be selected for the generic
     # observation-matrix materialization below. Generate the narrower side a
     # column at a time and retain O(n) working memory instead.
-    support_space_types = (_SparseSSPGroupMatrix, *SplineCatTypes)
+    support_space_types = (_SparseSSPGroupMatrix, FactorSmoothGroupMatrix, *SplineCatTypes)
     if isinstance(gm_i, support_space_types) or isinstance(gm_j, support_space_types):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_by_columns(gm_i, gm_j, W)
@@ -947,6 +1013,8 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
         SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
+    from ..group_matrix import FactorSmoothGroupMatrix
+
     if isinstance(
         gm,
         SparseSSPGroupMatrix
@@ -955,6 +1023,8 @@ def _gram_any_sign(gm: GroupMatrix, W: NDArray) -> NDArray:
         | DiscretizedSSPGroupMatrix
         | DiscretizedSCOPGroupMatrix,
     ):
+        return gm.gram(W)
+    if isinstance(gm, FactorSmoothGroupMatrix):
         return gm.gram(W)
     if isinstance(gm, CategoricalGroupMatrix):
         return gm.gram(W)  # bincount-based diagonal, handles any-sign W

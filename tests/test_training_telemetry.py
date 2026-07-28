@@ -86,6 +86,7 @@ def _dummy_model():
             lambdas={"DrivAge": 2.0, "DrivAge:Area": 3.5},
             n_reml_iter=5,
             converged=True,
+            termination_reason="score_objective_tolerance",
             objective=42.0,
             lambda_history=[
                 {"DrivAge": 1.0, "DrivAge:Area": 1.0},
@@ -146,6 +147,7 @@ def test_reml_diagnostics_returns_reml_only_payload():
     assert diagnostics["enabled"] is True
     assert diagnostics["n_reml_iter"] == 5
     assert diagnostics["converged"] is True
+    assert diagnostics["termination_reason"] == "score_objective_tolerance"
     assert diagnostics["objective"] == pytest.approx(42.0)
     assert diagnostics["lambdas"]["DrivAge"] == pytest.approx(2.0)
     assert diagnostics["objective_history"] == [45.0, 42.0]

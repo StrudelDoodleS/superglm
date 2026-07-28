@@ -5,7 +5,11 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 
-_ATTEMPT_RUNTIME_OPTIONS = ("_max_analytical_per_w", "_select_snap")
+_ATTEMPT_RUNTIME_OPTIONS = (
+    "_max_analytical_per_w",
+    "_select_snap",
+    "_suppress_reporting_support",
+)
 _SUBCLASS_STATE_NAMES = "_fit_workspace_subclass_state_names"
 
 

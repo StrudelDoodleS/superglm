@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import LambdaPolicy, RandomEffect, SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
@@ -97,6 +97,41 @@ class TestRefitBasic:
             # Not identical — shrinkage removed
             assert not np.allclose(orig_beta, refit_beta, atol=1e-6)
 
+    def test_preserves_nonuniform_sample_weight(self):
+        x = np.linspace(-2.0, 2.0, 160)
+        y = 0.6 + 0.9 * x
+        y[x > 0.8] += 2.5
+        sample_weight = np.where(x > 0.8, 0.05, 3.0)
+        X = pd.DataFrame({"x": x})
+
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        ).fit(X, y, sample_weight=sample_weight)
+
+        weighted = model.refit_unpenalised(X, y, sample_weight=sample_weight)
+        unweighted = model.refit_unpenalised(X, y)
+
+        np.testing.assert_allclose(
+            weighted.result.beta,
+            model.result.beta,
+            rtol=1e-9,
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            weighted.result.intercept,
+            model.result.intercept,
+            rtol=1e-9,
+            atol=1e-9,
+        )
+        assert not np.allclose(
+            weighted.result.beta,
+            unweighted.result.beta,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
     def test_unfitted_raises(self):
         model = SuperGLM(features={"x": Numeric()})
         X = pd.DataFrame({"x": [1, 2, 3]})
@@ -122,3 +157,29 @@ class TestRefitBasic:
         refitted = model.refit_unpenalised(X, y, keep_smoothing=False)
 
         assert refitted.lambda2 == 0.0
+
+
+def test_refit_unpenalised_rejects_variance_component_terms_at_entry(monkeypatch):
+    rng = np.random.default_rng(20260727)
+    codes = np.repeat(np.arange(6), 12)
+    X = pd.DataFrame({"group": np.array([f"group-{code}" for code in codes], dtype=object)})
+    y = rng.normal(size=len(codes))
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0)),
+        },
+        selection_penalty=0.0,
+        direct_solve="structured",
+    ).fit_reml(X, y, runtime_validation="skip")
+
+    def fail_clone(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("model clone requested")
+
+    monkeypatch.setattr(model, "_clone_without_features", fail_clone)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"refit_unpenalised\(\).*variance-component.*group",
+    ):
+        model.refit_unpenalised(X, y)

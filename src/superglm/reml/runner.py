@@ -32,6 +32,8 @@ from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     compute_penalty_nullity,
     compute_total_penalty_rank,
+    penalty_component_quadratic,
+    penalty_component_trace,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.solvers.irls_direct import _invert_xtwx_plus_penalty, fit_irls_direct
@@ -257,17 +259,14 @@ def run_reml_once(
             if np.linalg.norm(beta_g) < 1e-12:
                 continue
 
-            omega_ssp = (
-                pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
-            )
-            quad = float(beta_g @ omega_ssp @ beta_g)
+            quad = penalty_component_quadratic(pc, beta_g, gm)
 
             ag = next((a for a in active_groups if a.name == pc.group_name), None)
             if ag is None:
                 continue
 
             H_inv_jj = XtWX_S_inv[ag.sl, ag.sl]
-            trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+            trace_term = penalty_component_trace(pc, H_inv_jj, gm)
 
             r_j = pc.rank if pc.rank > 0 else penalty_ranks.get(pc.name, 0.0)
             denom = inv_phi * quad + trace_term

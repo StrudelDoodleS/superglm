@@ -434,6 +434,17 @@ def estimate_nb_theta(
     _use_direct = penalty.lambda1 is not None and (
         penalty.lambda1 == 0 or not penalty_has_targets(penalty, groups)
     )
+    reml_penalties = None
+    if _use_direct:
+        from superglm.model.reml_setup import collect_reml_groups
+        from superglm.reml.penalty_algebra import build_penalty_context
+
+        reml_groups = collect_reml_groups(groups, dm.group_matrices)
+        if reml_groups:
+            reml_penalties, _penalty_caches, _penalty_ranks = build_penalty_context(
+                dm.group_matrices,
+                reml_groups,
+            )
 
     # --- Alternating estimation ---
     theta = 1.0  # initial value (MASS also starts simple)
@@ -458,6 +469,7 @@ def estimate_nb_theta(
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
                 direct_solve=getattr(model, "_direct_solve", "auto"),
+                reml_penalties=reml_penalties,
             )
         else:
             pirls_result = fit_pirls(

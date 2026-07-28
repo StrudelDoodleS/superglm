@@ -513,8 +513,10 @@ class TestLargeNStability:
             discrete=True,
             n_bins=128,
         )
-        top3.fit_reml(X_train, y_train, offset=off_train, max_reml_iter=10)
+        top3.fit_reml(X_train, y_train, offset=off_train, max_reml_iter=20)
         assert top3.result.converged
+        assert top3._reml_result.converged
+        assert top3._reml_result.termination_reason == "score_objective_tolerance"
 
         bootstrap = top3._reml_profile["reml_bootstrap_summary"]
         assert bootstrap["n_components_at_lower_bound"] < bootstrap["n_components"]

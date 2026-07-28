@@ -2,6 +2,7 @@ import pickle
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import Categorical, Constraint, Numeric, Spline, SuperGLM
 from superglm.features.spline import PSpline
@@ -147,3 +148,64 @@ def test_scop_metrics_use_compact_inference_after_fit_state_release():
     np.testing.assert_allclose(augmented, compact["XtWX_inv_aug"])
     assert np.all(np.isfinite(metrics.leverage))
     assert "_fit_active_info" not in model.__dict__
+
+
+def test_released_metrics_reuse_compact_inference_for_equal_fit_geometry():
+    X, y, sample_weight = _sample_data(n=240)
+    model = _model(retain_fit_state=False).fit(X, y, sample_weight=sample_weight)
+
+    metrics = model.metrics(X.copy(), y.copy(), sample_weight=sample_weight.copy())
+
+    assert metrics._uses_compact_fit_inference
+    np.testing.assert_allclose(
+        metrics._active_info[2],
+        model.__dict__["_fit_inference_info"]["XtWX_inv"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_released_metrics_ignore_pandas_index_labels_when_geometry_matches():
+    X, y, sample_weight = _sample_data(n=240)
+    X.index = np.arange(1000, 1000 + 3 * len(X), 3)
+    model = _model(retain_fit_state=False).fit(X, y, sample_weight=sample_weight)
+
+    metrics = model.metrics(
+        X.reset_index(drop=True),
+        y.copy(),
+        sample_weight=sample_weight.copy(),
+    )
+
+    assert metrics._uses_compact_fit_inference
+    np.testing.assert_allclose(
+        metrics._active_info[2],
+        model.__dict__["_fit_inference_info"]["XtWX_inv"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.parametrize("changed_geometry", ["rows", "weights", "offset"])
+def test_released_metrics_reject_changed_inference_geometry(changed_geometry: str):
+    X, y, sample_weight = _sample_data(n=240)
+    model = _model(retain_fit_state=False).fit(X, y, sample_weight=sample_weight)
+    evaluation_X = X.copy()
+    evaluation_weights = sample_weight.copy()
+    evaluation_offset = None
+    if changed_geometry == "rows":
+        evaluation_X["density"] = evaluation_X["density"].to_numpy()[::-1]
+    elif changed_geometry == "weights":
+        evaluation_weights *= np.linspace(0.5, 1.5, len(evaluation_weights))
+    else:
+        evaluation_offset = np.linspace(-0.2, 0.2, len(evaluation_X))
+
+    metrics = model.metrics(
+        evaluation_X,
+        y,
+        sample_weight=evaluation_weights,
+        offset=evaluation_offset,
+    )
+
+    assert not metrics._uses_compact_fit_inference
+    with pytest.raises(RuntimeError, match="fit geometry"):
+        _ = metrics.coefficient_se

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import LambdaPolicy, RandomEffect, SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
@@ -80,6 +80,18 @@ class TestDrop1Basic:
         X = pd.DataFrame({"x": [1, 2, 3]})
         with pytest.raises(RuntimeError, match="fitted"):
             model.drop1(X, np.array([1, 2, 3]))
+
+    def test_drop1_rejects_variance_component_models_before_refitting(self):
+        X = pd.DataFrame({"group": np.repeat(["a", "b", "c"], 20)})
+        y = np.tile([0.2, 0.7, 1.1], 20)
+        model = SuperGLM(
+            family="gaussian",
+            features={"group": RandomEffect(lambda_policy=LambdaPolicy.fixed(1.0))},
+            selection_penalty=0.0,
+        ).fit_reml(X, y, runtime_validation="skip")
+
+        with pytest.raises(NotImplementedError, match="drop1.*variance-component.*REML"):
+            model.drop1(X, y)
 
 
 class TestDrop1Spline:

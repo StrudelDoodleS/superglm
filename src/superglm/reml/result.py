@@ -30,10 +30,10 @@ class PenaltyCache:
     fixed-point iterations, avoiding redundant eigendecompositions of Ω.
     """
 
-    omega_ssp: NDArray  # (p_g, p_g) = R_inv.T @ omega @ R_inv
+    omega_ssp: NDArray | None  # (p_g, p_g) = R_inv.T @ omega @ R_inv
     log_det_omega_plus: float  # log|Ω|₊ (constant across lambda iterations)
     rank: float  # rank(Ω) = r_j
-    eigvals_omega: NDArray  # positive eigenvalues of Ω_ssp
+    eigvals_omega: NDArray | None  # positive eigenvalues of Ω_ssp
 
 
 @dataclass

@@ -38,7 +38,7 @@ def term_importance(
         A fitted model.
     X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
-    sample_weight, sample_weight : array-like, optional
+    sample_weight : array-like, optional
         Frequency weights for weighted variance.
 
     Returns
@@ -57,6 +57,11 @@ def term_importance(
     group_edf = model._group_edf or {}
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
     lambda2 = getattr(model, "lambda2", None)
+
+    from superglm.model import base
+
+    plan = base._prediction_plan(model)
+    terms_by_name = {term["name"]: term for term in (*plan["features"], *plan["interactions"])}
 
     def _diag_lambda(g_name):
         return _resolve_group_lambda(g_name, reml_lam, lambda2)
@@ -81,19 +86,18 @@ def term_importance(
             )
             continue
 
-        # Compute partial eta for this group
-        spec = model._specs.get(g.feature_name)
-        ispec = model._interaction_specs.get(g.feature_name) if spec is None else None
-
-        if spec is not None:
-            B_g = spec.transform(frame.column_array(g.feature_name))
-            eta_g = B_g @ b_g
-        elif ispec is not None:
-            p1, p2 = ispec.parent_names
-            B_g = ispec.transform(frame.column_array(p1), frame.column_array(p2))
-            eta_g = B_g @ b_g
-        else:
-            eta_g = np.zeros(len(frame))
+        term = terms_by_name.get(g.feature_name)
+        if term is None:
+            raise RuntimeError(f"prediction plan does not define fitted term {g.feature_name!r}")
+        term_indices = np.asarray(term["beta_idx"], dtype=np.intp)
+        group_positions = (term_indices >= g.start) & (term_indices < g.end)
+        if np.count_nonzero(group_positions) != g.size:
+            raise RuntimeError(
+                f"prediction plan coefficient layout disagrees with group {g.name!r}"
+            )
+        term_beta = np.zeros(len(term_indices), dtype=np.float64)
+        term_beta[group_positions] = beta[term_indices[group_positions]]
+        eta_g = base._score_prediction_term_local_exact(term, frame, term_beta)
 
         # Centered weighted variance
         wmean = np.sum(weights * eta_g) / w_sum
@@ -129,15 +133,29 @@ def term_drop_diagnostics(
     mode: str = "refit",
     X_val: FrameLike | None = None,
     y_val: NDArray | None = None,
+    sample_weight_val: NDArray | None = None,
+    offset_val: NDArray | None = None,
 ) -> pd.DataFrame:
     """Drop-term diagnostics wrapper.
 
     Parameters
     ----------
+    X, y : training rows and response
+        Rows used by ``mode="refit"``. They also identify the training-row
+        objects eligible for same-object holdout fallback.
+    sample_weight, offset : array-like, optional
+        Training/refit weights and offset. In holdout mode these are reused
+        only when ``X_val is X`` and ``y_val is y``.
     mode : {"refit", "holdout"}
         ``"refit"``: calls ``drop1()`` and adds delta_aic, delta_bic columns.
         ``"holdout"``: zeros each term's contribution on validation set,
         computes loss delta without refitting.
+    X_val, y_val : validation rows and response, optional
+        Required by ``mode="holdout"``.
+    sample_weight_val, offset_val : array-like, optional
+        Validation-specific weights and offset. Separate validation objects
+        never inherit training vectors merely because their lengths match.
+        Offset-fitted models require an evaluation offset.
     """
 
     if mode == "refit":
@@ -145,7 +163,35 @@ def term_drop_diagnostics(
     elif mode == "holdout":
         if X_val is None or y_val is None:
             raise ValueError("mode='holdout' requires X_val and y_val.")
-        return _drop_term_holdout(model, as_eager_frame(X_val), y_val, sample_weight)
+        same_validation_rows = X_val is X and y_val is y
+        if sample_weight_val is None:
+            if same_validation_rows:
+                sample_weight_val = sample_weight
+            elif sample_weight is not None:
+                raise ValueError(
+                    "separate validation rows require sample_weight_val; "
+                    "training sample_weight is not reused by length"
+                )
+        if offset_val is None:
+            if same_validation_rows:
+                offset_val = offset
+            elif offset is not None or getattr(model, "_fit_used_offset", False):
+                raise ValueError(
+                    "offset-based holdout diagnostics on separate validation rows "
+                    "require offset_val"
+                )
+        if offset_val is None and getattr(model, "_fit_used_offset", False):
+            raise ValueError(
+                "holdout diagnostics for an offset-fitted model require offset_val "
+                "or the matching training offset on same-object validation rows"
+            )
+        return _drop_term_holdout(
+            model,
+            as_eager_frame(X_val),
+            y_val,
+            sample_weight_val=sample_weight_val,
+            offset_val=offset_val,
+        )
     else:
         raise ValueError(f"mode must be 'refit' or 'holdout', got {mode!r}")
 
@@ -153,7 +199,12 @@ def term_drop_diagnostics(
 def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
     """Refit-based drop-term diagnostics using drop1()."""
 
-    drop1_df = model.drop1(X, y, offset=offset)
+    drop1_df = model.drop1(
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+    )
 
     # Compute IC deltas
     full_ll = model._fit_stats.log_likelihood if model._fit_stats else 0.0
@@ -176,56 +227,71 @@ def _drop_term_holdout(
     model,
     X_val: EagerFrame,
     y_val,
-    sample_weight,
+    sample_weight_val=None,
+    offset_val=None,
 ) -> pd.DataFrame:
     """Holdout-based drop-term diagnostics (zero each term, compute loss delta)."""
 
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
-    beta = model.result.beta.copy()
-    mu_full = model.predict(X_val)
-    dist = model._distribution
-    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
+    from superglm.distributions import clip_mu, validate_response
+    from superglm.links import stabilize_eta
+    from superglm.model import base
+    from superglm.model.input_validation import _finite_vector
 
-    # Full model deviance
-    y_arr = np.asarray(y_val, dtype=np.float64)
+    beta = model.result.beta
+    dist = model._distribution
+    n_val = len(X_val)
+    y_arr = _finite_vector(
+        "y_val",
+        y_val,
+        n_val,
+        require_nonempty=True,
+        check_finite=False,
+    )
+    validate_response(y_arr, dist)
+    w = (
+        np.ones(n_val, dtype=np.float64)
+        if sample_weight_val is None
+        else _finite_vector("sample_weight_val", sample_weight_val, n_val)
+    )
+    if np.any(w < 0.0):
+        raise ValueError("sample_weight_val must be nonnegative")
+    if not np.any(w > 0.0):
+        raise ValueError("sample_weight_val must not be all zero")
+    offset_arr = (
+        np.zeros(n_val, dtype=np.float64)
+        if offset_val is None
+        else _finite_vector("offset_val", offset_val, n_val)
+    )
+
+    plan = base._prediction_plan(model)
+    terms = [*plan["features"], *plan["interactions"]]
+    eta_raw = np.full(n_val, model.result.intercept, dtype=np.float64)
+    eta_raw += offset_arr
+    contributions: dict[str, NDArray[np.floating]] = {}
+    for term in terms:
+        contribution = base._score_prediction_term_exact(term, X_val, beta)
+        contributions[term["name"]] = contribution
+        eta_raw += contribution
+
+    eta_full = stabilize_eta(eta_raw, model._link)
+    mu_full = clip_mu(model._link.inverse(eta_full), dist)
     dev_full = float(np.sum(w * dist.deviance_unit(y_arr, mu_full)))
 
     rows = []
-    seen_features = set()
-    for g in model._groups:
-        if g.feature_name in seen_features:
-            continue
-        seen_features.add(g.feature_name)
-
-        # Zero this feature's coefficients
-        feature_groups = [fg for fg in model._groups if fg.feature_name == g.feature_name]
-        beta_zeroed = beta.copy()
-        for fg in feature_groups:
-            beta_zeroed[fg.sl] = 0.0
-
-        # Predict with zeroed feature
-        blocks = []
-        for name in model._feature_order:
-            spec = model._specs[name]
-            blocks.append(spec.transform(X_val.column_array(name)))
-        for iname in model._interaction_order:
-            ispec = model._interaction_specs[iname]
-            p1, p2 = ispec.parent_names
-            blocks.append(ispec.transform(X_val.column_array(p1), X_val.column_array(p2)))
-
-        from superglm.distributions import clip_mu
-        from superglm.links import stabilize_eta
-
-        eta = np.hstack(blocks) @ beta_zeroed + model.result.intercept
-        eta = stabilize_eta(eta, model._link)
-        mu_drop = clip_mu(model._link.inverse(eta), model._distribution)
+    for term in terms:
+        eta_drop = stabilize_eta(
+            eta_raw - contributions[term["name"]],
+            model._link,
+        )
+        mu_drop = clip_mu(model._link.inverse(eta_drop), dist)
         dev_drop = float(np.sum(w * dist.deviance_unit(y_arr, mu_drop)))
 
         rows.append(
             {
-                "feature": g.feature_name,
+                "feature": term["name"],
                 "delta_deviance": dev_drop - dev_full,
             }
         )

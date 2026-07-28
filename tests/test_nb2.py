@@ -5,7 +5,15 @@ import pandas as pd
 import pytest
 from scipy.stats import nbinom
 
-from superglm import NegativeBinomial, Spline, SuperGLM, SuperGLMRegressor
+from superglm import (
+    FactorSmooth,
+    LambdaPolicy,
+    NegativeBinomial,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+    SuperGLMRegressor,
+)
 from superglm._frame import EagerFrame
 from superglm.distributions import resolve_distribution
 from superglm.features.numeric import Numeric
@@ -409,6 +417,100 @@ class TestNB2AutoTheta:
         assert model.selection_penalty is None
         assert model.selection_penalty_ == pytest.approx(0.0)
         assert model.theta_ > 0.0
+
+    def test_auto_theta_reml_with_random_effect_keeps_structured_credibility(self):
+        rng = np.random.default_rng(20260727)
+        n_levels = 60
+        repeats = 8
+        codes = np.repeat(np.arange(n_levels), repeats)
+        x = rng.normal(size=len(codes))
+        effects = rng.normal(scale=0.3, size=n_levels)
+        mu = np.exp(0.2 + 0.15 * x + effects[codes])
+        theta = 2.5
+        y = rng.negative_binomial(theta, theta / (theta + mu)).astype(np.float64)
+        X = pd.DataFrame(
+            {
+                "x": x,
+                "group": np.array([f"g{code}" for code in codes], dtype=object),
+            }
+        )
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            selection_penalty=None,
+            features={"x": Numeric(), "group": RandomEffect()},
+            direct_solve="auto",
+        ).fit_reml(
+            X,
+            y,
+            max_reml_iter=2,
+            max_pirls_iter=60,
+            runtime_validation="skip",
+        )
+
+        assert np.isfinite(model.theta_)
+        assert model.theta_ > 0.0
+        assert model.result.direct_backend == "structured"
+
+    def test_auto_theta_reml_with_factor_smooth_matches_gram_credibility(self):
+        rng = np.random.default_rng(20260727)
+        n_levels = 8
+        repeats = 30
+        codes = np.repeat(np.arange(n_levels), repeats)
+        x = np.tile(np.linspace(-1.0, 1.0, repeats), n_levels)
+        slopes = rng.normal(scale=0.2, size=n_levels)
+        mu = np.exp(0.1 + 0.25 * x + slopes[codes] * x)
+        theta = 3.0
+        y = rng.negative_binomial(theta, theta / (theta + mu)).astype(np.float64)
+        X = pd.DataFrame(
+            {
+                "x": x,
+                "group": np.array([f"g{code}" for code in codes], dtype=object),
+            }
+        )
+        policies = {
+            "wiggle": LambdaPolicy.fixed(1.2),
+            "null_0": LambdaPolicy.fixed(0.8),
+            "null_1": LambdaPolicy.fixed(0.8),
+        }
+
+        def fit(direct_solve: str) -> SuperGLM:
+            return SuperGLM(
+                family=NegativeBinomial(theta="auto"),
+                selection_penalty=None,
+                features={
+                    "x": Spline(
+                        k=5,
+                        lambda_policy=LambdaPolicy.fixed(1.1),
+                    )
+                },
+                interactions=[
+                    FactorSmooth(
+                        "x",
+                        group="group",
+                        k=5,
+                        lambda_policy=policies,
+                    )
+                ],
+                direct_solve=direct_solve,
+            ).fit_reml(
+                X,
+                y,
+                max_reml_iter=2,
+                max_pirls_iter=60,
+                runtime_validation="skip",
+            )
+
+        structured = fit("auto")
+        gram = fit("gram")
+
+        assert structured.result.direct_backend == "structured"
+        assert structured.theta_ == pytest.approx(gram.theta_, rel=1.0e-7)
+        np.testing.assert_allclose(
+            structured.predict(X),
+            gram.predict(X),
+            rtol=2.0e-6,
+            atol=2.0e-7,
+        )
 
     def test_nb_profile_bcd_forwards_configured_smoothing(self, monkeypatch):
         rng = np.random.default_rng(20260719)

@@ -28,6 +28,10 @@ class _CoefRow:
     ci_low: float | None = None
     ci_high: float | None = None
     estimable: bool = True
+    # Structured multi-column term summary (RE / factor smooth).
+    structured_kind: str | None = None
+    n_levels: int | None = None
+    smoothing_lambdas: tuple[tuple[str, float], ...] = ()
     # Spline summary row (group-level Wald test)
     is_spline: bool = False
     n_params: int = 0
@@ -247,9 +251,15 @@ class ModelSummary:
         has_level_groups = bool(self._level_groups)
 
         # Compute EDF breakdown from coef rows
-        smooth_edf = sum(r.edf for r in self._coef_rows if r.is_spline and r.edf is not None)
+        smooth_edf = sum(
+            r.edf
+            for r in self._coef_rows
+            if (r.is_spline or r.structured_kind is not None) and r.edf is not None
+        )
         parametric_edf = sum(
-            r.edf for r in self._coef_rows if not r.is_spline and r.edf is not None
+            r.edf
+            for r in self._coef_rows
+            if not r.is_spline and r.structured_kind is None and r.edf is not None
         )
         total_edf = info["effective_df"]
         edf_str = _fmt(total_edf)
@@ -407,6 +417,26 @@ class ModelSummary:
                 lines.append(_group_sep(row.group))
                 lines.append(_row(""))
             prev_group = row.group
+
+            if row.structured_kind is not None:
+                kind = {
+                    "random_effect": "random effect",
+                    "factor_smooth_fs": "factor smooth (fs)",
+                    "factor_smooth_sz": "factor smooth (sz)",
+                }.get(row.structured_kind, row.structured_kind.replace("_", " "))
+                detail = [f"{row.n_params} params"]
+                if row.n_levels is not None:
+                    detail.insert(0, f"{row.n_levels} levels")
+                if row.edf is not None:
+                    detail.append(f"edf={row.edf:.1f}")
+                detail.extend(f"{name}={value:.2g}" for name, value in row.smoothing_lambdas)
+                lines.append(
+                    _row(
+                        f"{_coef_prefix(row)}  "
+                        f"[{kind}, {', '.join(detail)}; use dedicated term report]"
+                    )
+                )
+                continue
 
             if row.is_spline:
                 has_test = (
@@ -648,7 +678,11 @@ class ModelSummary:
         )
 
         # Compute EDF breakdown (same as ASCII path)
-        smooth_edf_html = sum(r.edf for r in self._coef_rows if r.is_spline and r.edf is not None)
+        smooth_edf_html = sum(
+            r.edf
+            for r in self._coef_rows
+            if (r.is_spline or r.structured_kind is not None) and r.edf is not None
+        )
         total_edf_html = info["effective_df"]
         edf_str_html = _fmt(total_edf_html)
         if smooth_edf_html > 0:
@@ -743,6 +777,31 @@ class ModelSummary:
                     f"{html_escape(row.group)}</td></tr>"
                 )
             prev_group = row.group
+
+            if row.structured_kind is not None:
+                kind = {
+                    "random_effect": "random effect",
+                    "factor_smooth_fs": "factor smooth (fs)",
+                    "factor_smooth_sz": "factor smooth (sz)",
+                }.get(row.structured_kind, row.structured_kind.replace("_", " "))
+                detail = [f"{row.n_params} params"]
+                if row.n_levels is not None:
+                    detail.insert(0, f"{row.n_levels} levels")
+                if row.edf is not None:
+                    detail.append(f"edf={row.edf:.1f}")
+                detail.extend(
+                    f"{html_escape(name)}={value:.2g}" for name, value in row.smoothing_lambdas
+                )
+                text = f"[{html_escape(kind)}, {', '.join(detail)}; use dedicated term report]"
+                parts.append(
+                    f"<tr>"
+                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
+                    f"{_level_group_cell(row)}"
+                    f'<td colspan="{ncols - 1 - int(has_level_groups)}" '
+                    f'style="{cell_l};color:#666;font-style:italic;">{text}</td>'
+                    f"</tr>"
+                )
+                continue
 
             if row.is_spline:
                 has_test = (

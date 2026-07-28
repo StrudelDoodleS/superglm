@@ -1,5 +1,7 @@
 """Tests for the new SuperGLM constructor API."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -173,6 +175,21 @@ class TestSplinesAutoDetect:
         model.fit(X, y)
         # Should have used base="first" since no sample_weight
         assert model._specs["region"].base == "first"
+
+
+@pytest.mark.parametrize("splines", [[], ["age"]])
+def test_splines_shorthand_emits_one_future_warning(splines) -> None:
+    with pytest.warns(FutureWarning, match=r"splines=.*features=.*Spline") as caught:
+        SuperGLM(splines=splines)
+
+    assert len(caught) == 1
+
+
+def test_splines_none_and_explicit_features_are_silent() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        SuperGLM(splines=None)
+        SuperGLM(features={"age": Spline()})
 
 
 class TestMutualExclusivity:

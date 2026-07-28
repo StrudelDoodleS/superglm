@@ -344,7 +344,11 @@ def test_polars_digest_is_deterministic_and_sensitive_to_values_order_and_schema
 
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
-def test_empty_selected_digest_preserves_row_count_without_native_selection(backend: str) -> None:
+@pytest.mark.parametrize("include_index", [True, False])
+def test_empty_selected_digest_preserves_row_count_without_native_selection(
+    backend: str,
+    include_index: bool,
+) -> None:
     two_rows = (
         pd.DataFrame({"unused": [1, 2]})
         if backend == "pandas"
@@ -356,4 +360,10 @@ def test_empty_selected_digest_preserves_row_count_without_native_selection(back
         else pl.DataFrame({"unused": [1, 2, 3]})
     )
 
-    assert as_eager_frame(two_rows).digest(()) != as_eager_frame(three_rows).digest(())
+    assert as_eager_frame(two_rows).digest(
+        (),
+        include_index=include_index,
+    ) != as_eager_frame(three_rows).digest(
+        (),
+        include_index=include_index,
+    )
