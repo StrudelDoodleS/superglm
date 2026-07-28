@@ -199,3 +199,12 @@ plateau, matched to the low-complexity prior for pricing interactions.
 Recommended protocol in docs: screen at edf0=4 and once more at 8-12; stable
 ranks are trustworthy, disagreements flag high-frequency candidates for a
 refit rather than a bigger screen.
+
+**Ladder default (2026-07-29):** edf0 is now a scan — default (2,4,8,16),
+ranked by z = (T-edf0)/sqrt(2*edf0) at each pair's best rung; per-pair cost
+is unchanged (cells/menus/profiling once, one small solve per rung). The
+wiggly synthetic goes rank 9/10 -> 2/10 (all seeds, winning at 16). On
+freMTPL2 the scan surfaces VehAge:VehPower as the top signal (z=9.2 at
+edf0=16, T=68 nearly unpenalized) ahead of DrivAge:BonusMalus (z=8.9 at 8),
+and the winning-rung column doubles as a shape diagnostic: Density pairs win
+at rung 2 (tilt-level evidence only). Sweep still 2.0 s; suite 4754.
