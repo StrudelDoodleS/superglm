@@ -324,3 +324,63 @@ not hardcoded constants; (2) opt-in calibrate= flag adding mm-route
 calibration conditional on the working model, not confirmatory
 inference — ranking-only stance and the confirmatory-refit gate stand.
 Whatever lands folds into the pending Tasks 2+3 Opus 5 max review.
+
+---
+
+## Review 3 (Opus 5 max, Tasks 2+3) and fixes (2026-07-29)
+
+Verified sound by independent reconstruction (not merely read): coordinate
+consistency end-to-end at 3e-15 with asymmetric margins/penalties (the
+dense pins DO catch transpositions); span invariance of the profiled
+statistic to 1e-11; pinv-fallback consistency (single MinvC reused);
+achieved edf is what feeds z, clamped rungs report honest achieved values;
+sqrt(2*edf0) conservative as claimed; working score/weights match the
+fitting path to 2.8e-16 across Poisson/Gamma/Binomial; NaN-row path and
+Task-1 interface consumption correct.
+
+Five CONFIRMED findings, all fixed same day:
+
+1. OFFSET (correctness): screening dropped model._fit_offset — an
+   offset-fitted model was linearized at the wrong mean and leftover main
+   effects screened as interaction signal (silent, plausible-looking).
+   Fix: offset= parameter defaulting to the fit offset (shape_ops
+   precedent). Regression test pins default==explicit and the offset null.
+2. DISPERSION (statistical validity): E[T] = phi*edf0, so z assumed
+   phi=1; a sigma=3 Gaussian pure null hit z=25 with the winning rung
+   pinned at the endpoint (null mean of z is (phi-1)*sqrt(edf0/2), an
+   increasing function of the budget — the scan's argmax was
+   deterministic off phi=1). Fix: T is reported on the T/phi_hat scale,
+   phi_hat = Pearson dispersion of the mains fit with (n - edf_mains)
+   denominator, floored at tiny. Unit-dispersion families unchanged.
+3. best=None crash: NaN y / zero weights / empty edf0 killed the sweep
+   with AttributeError. Fix: explicit input validation up front + NaN row
+   if every rung degenerates.
+4. edf0 validation: 0-d arrays now work; empty/NaN/<=0 budgets raise
+   (a <=0 budget used to clamp to the null dimension and WIN the scan).
+5. candidates/select validation: malformed pairs, unknown or duplicate
+   features raise with the screenable-feature list; select=True parents
+   raise one clear error up front instead of NotImplementedError per pair
+   three modules down. Docstrings: statistic column is winning-rung and
+   not row-comparable (rank by z); clamped lambda0 is a bracket edge.
+
+MEASURED CONSEQUENCE — the honest freMTPL2 table: phi_hat = 2.480 on the
+100k Poisson mains (edf 29.2), so all previously recorded freMTPL2 z
+values carried ~2.5x dispersion inflation plus a rightward rung drift.
+Post-fix: DrivAge:BonusMalus z=2.53 @ rung 4 (was 8.9 @ 8),
+VehAge:VehPower z=2.14 @ rung 8 (was 9.2 @ 16), DrivAge:VehPower 1.94 @ 2,
+VehAge:BonusMalus 1.91 @ 2; Density pairs sink to z <= 0.78. Same top-4
+membership — the domain-expected pair is back on top; the confirmatory
+refit gain is unchanged at 116.49 deviance for the same top-2. Ranking
+robust, magnitudes now honest, and the "wants to wiggle at rung 16" story
+about VehAge:VehPower was partly a dispersion artifact (it now wins at 8).
+
+SUPERSESSION: freMTPL2-specific z magnitudes, winning rungs, and z(h)
+curve geometry in ALL earlier entries (Task 5, ladder default, grid-vs-
+optimizer, fork prototypes) predate the dispersion fix — treat as shape
+evidence only. Unit-dispersion synthetic results (oracle, wiggly rank
+recovery, fork null calibration) stand as recorded. The extended-ladder
+ADOPT verdict and the fork freMTPL2 numbers must be RE-MEASURED post-fix
+before any landing decision; the multimodality mechanism and the wiggly
+Brent counterexample are unaffected.
+
+Suite: 4759 passed / 152 skipped (5 new regression tests).

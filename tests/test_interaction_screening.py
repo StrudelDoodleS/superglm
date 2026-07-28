@@ -405,3 +405,132 @@ def test_candidates_restricts_the_sweep():
         ("x1", "x2"),
         ("x3", "x4"),
     }
+
+
+def test_screen_uses_the_fit_offset():
+    """Review finding: predict() dropped model._fit_offset, so an offset-fitted
+    model was screened at the wrong mean and leftover main-effect mass showed
+    up as interaction signal."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(7)
+    n = 2500
+    frame = pd.DataFrame(
+        {f"x{i}": rng.integers(0, 25 + 3 * i, n).astype(float) for i in range(1, 4)}
+    )
+    z1 = (frame["x1"] - frame["x1"].mean()) / frame["x1"].std()
+    z2 = (frame["x2"] - frame["x2"].mean()) / frame["x2"].std()
+    off = np.log(rng.uniform(0.2, 3.0, n))
+    y = rng.poisson(np.exp(-1.2 + 0.3 * z1 + 0.25 * z2 + off)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={name: Spline(kind="ps", k=6) for name in frame.columns},
+    ).fit_reml(frame, y, offset=off)
+
+    table_default = model.screen_interactions(frame, y)
+    table_explicit = model.screen_interactions(frame, y, offset=off)
+
+    pd.testing.assert_frame_equal(table_default, table_explicit)
+    # the offset genuinely flows: suppressing it must change the screen
+    table_zero = model.screen_interactions(frame, y, offset=np.zeros(n))
+    assert not np.allclose(table_default["z"], table_zero["z"])
+    # and the properly-offset null stays inside the null bound
+    assert table_default["z"].max() < 10.0, table_default
+
+
+def test_screen_dispersed_gaussian_null_stays_bounded():
+    """Review finding: z assumed phi=1; a sigma=3 Gaussian null hit z=25 and
+    the winning rung collapsed to the endpoint before Pearson scaling."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(11)
+    n = 2500
+    frame = pd.DataFrame(
+        {f"x{i}": rng.integers(0, 25 + 3 * i, n).astype(float) for i in range(1, 6)}
+    )
+    z1 = (frame["x1"] - frame["x1"].mean()) / frame["x1"].std()
+    z2 = (frame["x2"] - frame["x2"].mean()) / frame["x2"].std()
+    y = 0.5 * z1 + 0.4 * z2 + rng.normal(0.0, 3.0, n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=None,
+        discrete=False,
+        features={name: Spline(kind="ps", k=6) for name in frame.columns},
+    ).fit_reml(frame, y)
+
+    table = model.screen_interactions(frame, y)
+
+    assert np.isfinite(table["statistic"]).all()
+    assert np.isfinite(table["z"]).all()
+    assert table["z"].max() < 10.0, table
+
+
+def test_screen_validates_inputs():
+    """Review findings: NaN y / zero weights / bad edf0 / bad candidates must
+    raise clear errors instead of AttributeError or silent nonsense."""
+    import pytest
+
+    frame, y, w = _screening_data(3)
+    model = _fit_mains(frame, y, w)
+
+    y_bad = y.copy()
+    y_bad[0] = np.nan
+    with pytest.raises(ValueError, match="finite y"):
+        model.screen_interactions(frame, y_bad, sample_weight=w)
+    with pytest.raises(ValueError, match="positive sum"):
+        model.screen_interactions(frame, y, sample_weight=np.zeros_like(w))
+    with pytest.raises(ValueError, match="non-empty"):
+        model.screen_interactions(frame, y, sample_weight=w, edf0=())
+    with pytest.raises(ValueError, match="finite and positive"):
+        model.screen_interactions(frame, y, sample_weight=w, edf0=-1.0)
+    with pytest.raises(ValueError, match="finite and positive"):
+        model.screen_interactions(frame, y, sample_weight=w, edf0=float("nan"))
+    with pytest.raises(ValueError, match="distinct fitted spline"):
+        model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x1")])
+    with pytest.raises(ValueError, match="screenable features"):
+        model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "nope")])
+    with pytest.raises(ValueError, match="distinct fitted spline"):
+        model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x2", "x3")])
+
+
+def test_screen_scalar_edf0_variants_agree():
+    """Review finding: a 0-d numpy array crashed the budget normalization."""
+    import pandas as pd
+
+    frame, y, w = _screening_data(4, interaction=0.5)
+    model = _fit_mains(frame, y, w)
+
+    t_float = model.screen_interactions(frame, y, sample_weight=w, edf0=4.0)
+    t_0d = model.screen_interactions(frame, y, sample_weight=w, edf0=np.array(4.0))
+    t_np = model.screen_interactions(frame, y, sample_weight=w, edf0=np.float64(4.0))
+
+    pd.testing.assert_frame_equal(t_float, t_0d)
+    pd.testing.assert_frame_equal(t_float, t_np)
+
+
+def test_screen_select_parents_raise_upfront():
+    """Review finding: select=True mains died per-pair three modules down;
+    now one clear error at the top names the offending features."""
+    import pytest
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    frame, y, w = _screening_data(5)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={name: Spline(kind="ps", k=6, select=True) for name in frame.columns},
+    ).fit_reml(frame, y, sample_weight=w)
+
+    with pytest.raises(ValueError, match="select=True"):
+        model.screen_interactions(frame, y, sample_weight=w)
