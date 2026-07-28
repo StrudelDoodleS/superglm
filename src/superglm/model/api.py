@@ -612,6 +612,41 @@ class SuperGLM:
                 w_correction_order=w_correction_order,
             )
 
+    def screen_interactions(
+        self,
+        X: FrameLike,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        *,
+        candidates: list[tuple[str, str]] | None = None,
+        edf0: float = 4.0,
+        max_cells: int = 5_000_000,
+    ) -> pd.DataFrame:
+        """Rank candidate spline-pair interactions by PSST.
+
+        PSST (Penalized Smooth Score Test) asks, for each candidate pair of
+        fitted spline features, how much of the model's leftover working
+        signal the pair's actual ``ti()`` tensor smooth could absorb at a
+        fixed screening complexity (``edf0`` effective degrees of freedom),
+        after profiling out what the pair's own main effects already explain.
+        One O(n) cell pass per pair; no refits.
+
+        The returned frame is sorted by ``statistic`` descending.  The
+        statistic is a ranking device, not a calibrated p-value: confirm the
+        top-ranked pairs by refitting them as ``ti()`` terms.
+        """
+        from superglm.model.screening_ops import screen_interactions
+
+        return screen_interactions(
+            self,
+            X,
+            y,
+            sample_weight,
+            candidates=candidates,
+            edf0=edf0,
+            max_cells=max_cells,
+        )
+
     # ── Properties ────────────────────────────────────────────────
 
     @property
