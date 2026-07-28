@@ -1294,6 +1294,29 @@ class TestTensorInteractionModelSpecifics:
         raw = model.reconstruct_feature("age:bm")
         assert raw["log_relativity"].ndim == 2
 
+    def test_generated_fitted_group_names_cannot_alias(self):
+        X = pd.DataFrame(
+            {
+                "a": np.linspace(-1.0, 1.0, 80),
+                "b": np.linspace(0.0, 2.0, 80),
+                "a:b:bilinear": np.linspace(-2.0, 2.0, 80),
+            }
+        )
+        y = 0.4 + np.sin(X["a"].to_numpy()) + 0.2 * X["b"].to_numpy()
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "a": Spline(n_knots=5),
+                "b": Spline(n_knots=5),
+                "a:b:bilinear": Numeric(),
+            },
+            selection_penalty=0.0,
+        )
+        model._add_interaction("a", "b", decompose=True)
+
+        with pytest.raises(ValueError, match="group names must be unique.*a:b:bilinear"):
+            model.fit(X, y)
+
     def test_decomposed_fit_reml_updates_both_subgroups(self, interaction_data):
         X, y, sample_weight = interaction_data
         model = SuperGLM(

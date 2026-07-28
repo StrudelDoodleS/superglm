@@ -121,12 +121,15 @@ class MatrixExecutionPlan:
         self._ordinary_split = prepared_ordinary_split
         self._ordinary_split_built = prepared_ordinary_split is not None
         runtime_types = _runtime_group_matrix_types()
+        from ..group_matrix import FactorSmoothGroupMatrix
+
         self._tensor_group_type = runtime_types[4]
         self._fused_group_types = (
             runtime_types[1],
             runtime_types[2],
             runtime_types[3],
             runtime_types[7],
+            FactorSmoothGroupMatrix,
         )
         self._group_entries = tuple(zip(self.group_spans, self.group_matrices, strict=True))
         self._n_groups = len(self._group_entries)

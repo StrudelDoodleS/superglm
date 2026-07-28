@@ -94,6 +94,225 @@ def _fused_bincount_2(bin_idx, W, Wz, n_bins):
 
 
 @njit(cache=True)
+def _random_effect_sufficient_stats(codes, W, Wz, n_levels):
+    """Aggregate local Hessian diagonals and working RHS in one observation pass."""
+    level_W = np.zeros(n_levels)
+    level_Wz = np.zeros(n_levels)
+    for i in range(len(codes)):
+        level = codes[i]
+        level_W[level] += W[i]
+        level_Wz[level] += Wz[i]
+    return level_W, level_Wz
+
+
+@njit(cache=True)
+def _factor_smooth_csr_matvec(data, indices, indptr, codes, raw_coefficients):
+    """Apply a level-specific raw spline coefficient block to CSR rows."""
+    result = np.zeros(len(codes))
+    for row in range(len(codes)):
+        level = codes[row]
+        value = 0.0
+        for ptr in range(indptr[row], indptr[row + 1]):
+            value += data[ptr] * raw_coefficients[level, indices[ptr]]
+        result[row] = value
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_support_matvec(basis, bin_idx, codes, raw_coefficients):
+    """Apply level-specific coefficients through a shared discrete support basis."""
+    result = np.zeros(len(codes))
+    width = basis.shape[1]
+    for row in range(len(codes)):
+        support_row = bin_idx[row]
+        level = codes[row]
+        value = 0.0
+        for column in range(width):
+            value += basis[support_row, column] * raw_coefficients[level, column]
+        result[row] = value
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_csr_rmatvec(data, indices, indptr, codes, values, n_levels, width):
+    """Aggregate an observation vector into level-by-raw-basis coordinates."""
+    result = np.zeros((n_levels, width))
+    for row in range(len(codes)):
+        level = codes[row]
+        value = values[row]
+        for ptr in range(indptr[row], indptr[row + 1]):
+            result[level, indices[ptr]] += data[ptr] * value
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_support_rmatvec(basis, bin_idx, codes, values, n_levels):
+    """Aggregate an observation vector through a shared discrete support basis."""
+    width = basis.shape[1]
+    result = np.zeros((n_levels, width))
+    for row in range(len(codes)):
+        support_row = bin_idx[row]
+        level = codes[row]
+        value = values[row]
+        for column in range(width):
+            result[level, column] += basis[support_row, column] * value
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_csr_sufficient_stats(
+    data,
+    indices,
+    indptr,
+    codes,
+    weights,
+    rhs,
+    n_levels,
+    width,
+):
+    """Fuse exact factor-smooth local Grams and two transpose products."""
+    gram = np.zeros((n_levels, width, width))
+    xtw = np.zeros((n_levels, width))
+    xt_rhs = np.zeros((n_levels, width))
+    for row in range(len(codes)):
+        level = codes[row]
+        weight = weights[row]
+        rhs_value = rhs[row]
+        start = indptr[row]
+        end = indptr[row + 1]
+        for left_ptr in range(start, end):
+            left = indices[left_ptr]
+            left_value = data[left_ptr]
+            xtw[level, left] += left_value * weight
+            xt_rhs[level, left] += left_value * rhs_value
+            weighted_left = left_value * weight
+            for right_ptr in range(left_ptr, end):
+                right = indices[right_ptr]
+                product = weighted_left * data[right_ptr]
+                gram[level, left, right] += product
+                if left != right:
+                    gram[level, right, left] += product
+    return gram, xtw, xt_rhs
+
+
+@njit(cache=True)
+def _factor_smooth_support_cell_aggregates(
+    bin_idx,
+    codes,
+    weights,
+    rhs,
+    n_levels,
+    n_bins,
+):
+    """Aggregate changing FactorSmooth values by level/support cell."""
+    cell_weights = np.zeros((n_levels, n_bins))
+    cell_rhs = np.zeros((n_levels, n_bins))
+    for row in range(len(codes)):
+        level = codes[row]
+        support = bin_idx[row]
+        cell_weights[level, support] += weights[row]
+        cell_rhs[level, support] += rhs[row]
+    return cell_weights, cell_rhs
+
+
+@njit(cache=True)
+def _factor_smooth_csr_dense_cross(
+    data,
+    indices,
+    indptr,
+    codes,
+    weights,
+    dense_small,
+    n_levels,
+    width,
+):
+    """Aggregate exact factor-smooth by dense-small weighted cross-products."""
+    small_width = dense_small.shape[1]
+    result = np.zeros((n_levels, width, small_width))
+    for row in range(len(codes)):
+        level = codes[row]
+        weight = weights[row]
+        for ptr in range(indptr[row], indptr[row + 1]):
+            basis_column = indices[ptr]
+            weighted_basis = weight * data[ptr]
+            for small_column in range(small_width):
+                result[level, basis_column, small_column] += (
+                    weighted_basis * dense_small[row, small_column]
+                )
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_support_dense_cross(
+    basis,
+    bin_idx,
+    codes,
+    weights,
+    dense_small,
+    n_levels,
+):
+    """Aggregate discrete factor-smooth by dense-small weighted cross-products."""
+    width = basis.shape[1]
+    small_width = dense_small.shape[1]
+    result = np.zeros((n_levels, width, small_width))
+    for row in range(len(codes)):
+        level = codes[row]
+        support_row = bin_idx[row]
+        weight = weights[row]
+        for basis_column in range(width):
+            weighted_basis = weight * basis[support_row, basis_column]
+            for small_column in range(small_width):
+                result[level, basis_column, small_column] += (
+                    weighted_basis * dense_small[row, small_column]
+                )
+    return result
+
+
+@njit(cache=True)
+def _factor_smooth_support_dense_cell_aggregates(
+    bin_idx,
+    codes,
+    weights,
+    dense_small,
+    n_levels,
+    n_bins,
+):
+    """Aggregate weighted dense values once by level/support cell."""
+    small_width = dense_small.shape[1]
+    cells = np.zeros((n_levels, n_bins, small_width), dtype=np.float64)
+    for row in range(len(codes)):
+        level = codes[row]
+        support = bin_idx[row]
+        weight = weights[row]
+        for small_column in range(small_width):
+            cells[level, support, small_column] += weight * dense_small[row, small_column]
+    return cells
+
+
+@njit(cache=True)
+def _dense_small_weighted_moments(X, W, Wz):
+    """Fuse ``X'WX``, ``X'W``, and ``X'Wz`` for a narrow dense Schur block."""
+    n, width = X.shape
+    gram = np.zeros((width, width))
+    xtw = np.zeros(width)
+    xtwz = np.zeros(width)
+    for row in range(n):
+        weight = W[row]
+        weighted_rhs = Wz[row]
+        for left in range(width):
+            value = X[row, left]
+            xtw[left] += weight * value
+            xtwz[left] += weighted_rhs * value
+            weighted_value = weight * value
+            for right in range(left, width):
+                product = weighted_value * X[row, right]
+                gram[left, right] += product
+                if left != right:
+                    gram[right, left] += product
+    return gram, xtw, xtwz
+
+
+@njit(cache=True)
 def _fused_2d_bincount_2(idx1, idx2, W, Wz, n_bins1, n_bins2):
     """Fused dual 2D bincount for tensor gram_rmatvec."""
     n = len(idx1)

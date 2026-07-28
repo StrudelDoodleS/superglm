@@ -12,6 +12,7 @@ model.py focused on orchestration.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -30,7 +31,9 @@ from superglm.group_matrix import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    FactorSmoothGroupMatrix,
     GroupMatrix,
+    RandomEffectGroupMatrix,
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
@@ -41,6 +44,33 @@ from superglm.links import Link, resolve_link
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
 logger = logging.getLogger(__name__)
+
+
+def validate_term_name_namespace(
+    specs: dict[str, FeatureSpec],
+    interaction_specs: dict[str, Any],
+    *,
+    additional_interactions: Iterable[str] = (),
+) -> None:
+    """Require one public name to identify exactly one model term."""
+    interaction_names = set(interaction_specs)
+    interaction_names.update(additional_interactions)
+    collisions = sorted(set(specs).intersection(interaction_names))
+    if collisions:
+        names = ", ".join(repr(name) for name in collisions)
+        raise ValueError(
+            f"Term name(s) {names} are registered as both a main feature and an interaction."
+        )
+
+
+def validate_fitted_group_names(groups: list[GroupSlice]) -> None:
+    """Reject fitted coefficient groups whose public names would alias."""
+    counts: dict[str, int] = {}
+    for group in groups:
+        counts[group.name] = counts.get(group.name, 0) + 1
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"Generated fitted group names must be unique; found {duplicates!r}.")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -142,6 +172,13 @@ def should_discretize_spline_categorical_interaction(
         return False
     spline_name, _cat_name = ispec.parent_names
     return should_discretize(specs[spline_name], model_discrete)
+
+
+def should_discretize_factor_smooth(ispec: Any, model_discrete: bool) -> bool:
+    """Use compact marginal support bins for factor smooths in discrete models."""
+    from superglm.features.factor_smooth import FactorSmooth
+
+    return isinstance(ispec, FactorSmooth) and model_discrete
 
 
 def resolve_discrete_n_bins(
@@ -345,6 +382,11 @@ def add_interaction(
 
     if iname in interaction_specs:
         raise ValueError(f"Interaction already added: {iname}")
+    validate_term_name_namespace(
+        specs,
+        interaction_specs,
+        additional_interactions=(iname,),
+    )
 
     interaction_specs[iname] = ispec
     interaction_order.append(iname)
@@ -556,6 +598,29 @@ def _process_info(
         elif use_discrete and info.scop_reparameterization is not None and bin_idx is not None:
             # SCOP discrete: columns holds the bin-level centered design
             gm = DiscretizedSCOPGroupMatrix(info.columns, bin_idx)
+        elif info.structured_kind == "factor_smooth":
+            factor_basis = (
+                info.factor_smooth_basis_unique
+                if info.factor_smooth_basis_unique is not None
+                else info.factor_smooth_basis
+            )
+            gm = FactorSmoothGroupMatrix(
+                factor_basis,
+                info.factor_smooth_codes,
+                info.factor_smooth_n_levels,
+                natural_map=info.factor_smooth_transform,
+                levels=info.factor_smooth_levels,
+                repeated_penalty_components=info.repeated_penalty_components,
+                factor_basis=info.factor_smooth_factor_basis,
+                lambda_policies=info.lambda_policies,
+                bin_idx=info.factor_smooth_bin_idx,
+            )
+        elif info.structured_kind == "random_effect":
+            gm = RandomEffectGroupMatrix(
+                info.cat_codes,
+                info.n_cols,
+                lambda_policies=info.lambda_policies,
+            )
         elif info.cat_codes is not None:
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
@@ -870,12 +935,25 @@ def build_design_matrix(
             specs,
             model_discrete,
         )
+        use_discrete_factor_smooth = should_discretize_factor_smooth(
+            ispec,
+            model_discrete,
+        )
         B_unique_inter = None
         bin_idx_inter = None
         exposure_agg_inter = None
         tensor_build: DiscreteTensorBuildResult | None = None
         tensor_id = -1
-        if use_discrete_tensor:
+        if use_discrete_factor_smooth:
+            n_bins_factor_smooth = resolve_discrete_n_bins(p1, ispec, n_bins_config)
+            result = ispec.build_discrete(
+                x1,
+                x2,
+                specs,
+                n_bins_factor_smooth,
+                sample_weight=sample_weight,
+            )
+        elif use_discrete_tensor:
             n_bins1 = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
             n_bins2 = resolve_discrete_n_bins(p2, specs[p2], n_bins_config)
             tensor_build = ispec.build_discrete(
@@ -1001,6 +1079,8 @@ def build_design_matrix(
             groups.append(g_new)
             col_offset = g_new.end
 
+    validate_term_name_namespace(specs, interaction_specs)
+    validate_fitted_group_names(groups)
     dm = DesignMatrix(group_matrices, n, col_offset)
     return BuildResult(
         dm=dm,

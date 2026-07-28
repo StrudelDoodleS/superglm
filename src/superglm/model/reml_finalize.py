@@ -8,6 +8,11 @@ from dataclasses import replace
 import numpy as np
 
 from superglm._fit_trace import TraceRun
+from superglm._reporting_state import (
+    FactorSmoothLevelSupport,
+    StructuredLevelSupport,
+    build_reporting_support_state,
+)
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
@@ -24,6 +29,7 @@ from superglm.reml.penalty_algebra import (
     build_tensor_pair_logdet_summaries,
     compute_penalty_nullity,
     evaluate_tensor_pair_logdet_summaries,
+    total_penalty_quadratic,
 )
 from superglm.reml.result import _map_beta_between_bases
 from superglm.reml.scale import (
@@ -33,6 +39,159 @@ from superglm.reml.scale import (
     profile_gaussian_reml_scale,
 )
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.structured import (
+    BlockSchurFactor,
+    BlockStructuredSystem,
+    BlockSymmetricOperator,
+    CenteredBlockOperator,
+    ProfiledBlockSchurFactor,
+    ProfiledScalarSchurFactor,
+    ScalarSchurFactor,
+    ScalarStructuredSystem,
+    StructuredLinearSystemState,
+    SumToZeroBlockOperator,
+    SumToZeroBlockStructuredSystem,
+    SymmetricBlockOperator,
+)
+from superglm.solvers.sum_to_zero import (
+    ProfiledSumToZeroBlockFactor,
+    SumToZeroBlockFactor,
+)
+
+
+def _build_structured_linear_system_state(
+    *,
+    factor,
+    data_operator,
+    cache: dict,
+    support_totals: dict[
+        str,
+        StructuredLevelSupport | FactorSmoothLevelSupport,
+    ],
+) -> StructuredLinearSystemState | None:
+    """Distill a final structured refit into compact persistent state."""
+    if not isinstance(
+        factor,
+        ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor,
+    ):
+        return None
+    system = cache.get("structured_system")
+    penalized_operator = cache.get("penalized_operator")
+    if not isinstance(
+        system,
+        ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+    ) or not isinstance(
+        penalized_operator,
+        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+    ):
+        raise RuntimeError("terminal structured refit omitted its compact system state")
+    if not isinstance(
+        data_operator,
+        SymmetricBlockOperator | BlockSymmetricOperator | SumToZeroBlockOperator,
+    ):
+        raise RuntimeError("terminal structured refit omitted its compact data operator")
+
+    if isinstance(penalized_operator, SumToZeroBlockOperator):
+        coefficient_factor = SumToZeroBlockFactor(
+            A=penalized_operator.A,
+            C=penalized_operator.C,
+            D=penalized_operator.D,
+            small_indices=penalized_operator.small_indices,
+            structured_indices=penalized_operator.structured_indices,
+            term_name=system.dominant_group_name,
+            level_labels=system.level_labels,
+        )
+    elif isinstance(penalized_operator, BlockSymmetricOperator):
+        coefficient_factor = BlockSchurFactor(
+            A=penalized_operator.A,
+            C=penalized_operator.C,
+            D=penalized_operator.D,
+            small_indices=penalized_operator.small_indices,
+            structured_indices=penalized_operator.structured_indices,
+            term_name=system.dominant_group_name,
+        )
+    else:
+        coefficient_factor = ScalarSchurFactor(
+            A=penalized_operator.A,
+            C=penalized_operator.C,
+            d=penalized_operator.d,
+            small_indices=penalized_operator.small_indices,
+            structured_indices=penalized_operator.structured_indices,
+            term_name=system.dominant_group_name,
+        )
+    xtw = np.empty(system.operator.shape[0], dtype=np.float64)
+    xtw[system.operator.small_indices] = system.xtw_small
+    xtw[system.operator.structured_indices] = system.xtw_structured
+    centered_data_operator = CenteredBlockOperator(
+        raw=data_operator,
+        cross=xtw,
+        total=system.sum_w,
+        center=xtw / system.sum_w,
+        raw_structured_cross=(
+            system.raw_xtw_structured
+            if isinstance(system, SumToZeroBlockStructuredSystem)
+            else None
+        ),
+    )
+
+    return StructuredLinearSystemState(
+        coefficient_factor=coefficient_factor,
+        profiled_factor=factor,
+        augmented_factor=factor.augmented_factor,
+        system=system,
+        penalized_operator=penalized_operator,
+        centered_data_operator=centered_data_operator,
+        support_totals=support_totals,
+        fallback_reason=getattr(factor, "fallback_reason", None),
+    )
+
+
+def _structured_information_by_group(cache: dict) -> dict[int, np.ndarray]:
+    """Reuse dominant Fisher blocks already assembled by a structured refit."""
+    system = cache.get("structured_system")
+    if isinstance(system, ScalarStructuredSystem):
+        return {system.dominant_group_index: system.operator.d}
+    if isinstance(
+        system,
+        BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+    ):
+        return {system.dominant_group_index: system.operator.D}
+    return {}
+
+
+def _build_reml_reporting_support_state(
+    model,
+    *,
+    result,
+    y,
+    sample_weight,
+    offset_arr,
+    durable_retain_fit_state: bool | None = None,
+    force: bool = False,
+    information_by_group_index: dict[int, np.ndarray] | None = None,
+):
+    """Distill structured report support under the durable retention contract."""
+    if bool(getattr(model, "_suppress_reporting_support", False)):
+        return None
+    retain_reporting_rows = (
+        bool(getattr(model, "_retain_fit_state", True))
+        if durable_retain_fit_state is None
+        else bool(durable_retain_fit_state)
+    )
+    if retain_reporting_rows and not force:
+        return None
+    return build_reporting_support_state(
+        dm=model._dm,
+        groups=model._groups,
+        result=result,
+        distribution=model._distribution,
+        link=model._link,
+        sample_weight=sample_weight,
+        y=y,
+        offset=offset_arr,
+        retain_fit_state=retain_reporting_rows,
+        information_by_group_index=information_by_group_index,
+    )
 
 
 def restore_qp_group_state(model, qp_saved_state) -> None:
@@ -59,14 +218,12 @@ def compute_profiled_phi(
         return 1.0
 
     p_dim = model._dm.p
-    S_final = build_penalty_matrix(
-        model._dm.group_matrices,
-        model._groups,
+    pq_final = total_penalty_quadratic(
+        pirls_result.beta,
         lambdas,
-        p_dim,
-        reml_penalties=reml_penalties,
+        reml_penalties,
+        list(model._dm.group_matrices),
     )
-    pq_final = float(pirls_result.beta @ S_final @ pirls_result.beta)
     penalized_deviance = float(pirls_result.deviance + pq_final)
 
     distribution = model._distribution
@@ -75,10 +232,11 @@ def compute_profiled_phi(
         if hessian_rank is None:
             hessian_rank = 1 + p_dim
         M_p = compute_penalty_nullity(
-            S_final,
+            None,
             hessian_rank=hessian_rank,
             penalties=reml_penalties,
             lambdas=lambdas,
+            coefficient_width=p_dim,
         )
         if isinstance(distribution, Gaussian):
             if likelihood_size is None:
@@ -105,10 +263,11 @@ def compute_profiled_phi(
     if hessian_rank is None:
         hessian_rank = 1 + p_dim
     M_p = compute_penalty_nullity(
-        S_final,
+        None,
         hessian_rank=hessian_rank,
         penalties=reml_penalties,
         lambdas=lambdas,
+        coefficient_width=p_dim,
     )
     return float(max(penalized_deviance / max(len(y) - M_p, 1.0), 1e-10))
 
@@ -174,6 +333,7 @@ def finalize_reml_fit(
     total_start: float,
     compute_fit_stats,
     trace_run: TraceRun | None = None,
+    durable_retain_fit_state: bool | None = None,
 ):
     """Finalize model state after a successful REML optimization run."""
     model._result = best.pirls_result
@@ -189,6 +349,8 @@ def finalize_reml_fit(
 
     solver_result = best.pirls_result
     final_xtwx = None
+    final_factor = None
+    final_cache: dict = {}
     terminal_curvature = None
     if use_direct:
         terminal_curvature = best.curvature_source
@@ -228,6 +390,7 @@ def finalize_reml_fit(
             tol=final_tolerance,
             convergence="coefficients" if observed_terminal else "deviance",
             return_xtwx=True,
+            cache_out=final_cache,
             direct_solve=model._direct_solve,
             reml_penalties=reml_penalties,
             trace_run=trace_run,
@@ -235,7 +398,7 @@ def finalize_reml_fit(
         )
         if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
             raise RuntimeError("terminal direct REML refit omitted its working Gram")
-        solver_result, _, final_xtwx = final_output
+        solver_result, final_factor, final_xtwx = final_output
 
     final_pirls = maybe_qp_passthrough_refit(
         model,
@@ -250,6 +413,37 @@ def finalize_reml_fit(
         pirls_tol=pirls_tol,
         reml_penalties=reml_penalties,
         trace_run=trace_run,
+    )
+    structured_terminal = not qp_passthrough and isinstance(
+        final_factor,
+        (
+            ProfiledScalarSchurFactor,
+            ProfiledBlockSchurFactor,
+            ProfiledSumToZeroBlockFactor,
+        ),
+    )
+    # Profiled-family publication may retain rows transiently so it can
+    # synchronize phi and fit statistics after this refit. Compact reporting
+    # must still follow the durable public retention contract.
+    reporting_state = _build_reml_reporting_support_state(
+        model,
+        result=final_pirls,
+        y=y,
+        sample_weight=sample_weight,
+        offset_arr=offset_arr,
+        durable_retain_fit_state=durable_retain_fit_state,
+        force=structured_terminal,
+        information_by_group_index=_structured_information_by_group(final_cache),
+    )
+    structured_linear_state = (
+        _build_structured_linear_system_state(
+            factor=final_factor,
+            data_operator=final_xtwx,
+            cache=final_cache,
+            support_totals=({} if reporting_state is None else reporting_state.support_totals),
+        )
+        if use_direct and not qp_passthrough
+        else None
     )
 
     terminal_evaluation: REMLObjectiveEvaluation | None = None
@@ -305,12 +499,16 @@ def finalize_reml_fit(
     if terminal_curvature == "observed" and not qp_passthrough:
         if not final_pirls.converged:
             raise RuntimeError("terminal observed REML refit did not converge")
-        S_final = build_penalty_matrix(
-            model._dm.group_matrices,
-            model._groups,
-            lambdas,
-            model._dm.p,
-            reml_penalties=reml_penalties,
+        S_final = (
+            None
+            if structured_linear_state is not None
+            else build_penalty_matrix(
+                model._dm.group_matrices,
+                model._groups,
+                lambdas,
+                model._dm.p,
+                reml_penalties=reml_penalties,
+            )
         )
         geometry_start = _time.perf_counter()
         terminal_geometry = build_observed_reml_geometry(
@@ -324,6 +522,14 @@ def finalize_reml_fit(
             penalty=S_final,
             derivative_order=0,
             compute_inverse=False,
+            groups=model._groups if structured_linear_state is not None else None,
+            lambdas=lambdas if structured_linear_state is not None else None,
+            reml_penalties=reml_penalties if structured_linear_state is not None else None,
+            structured_group_index=(
+                structured_linear_state.system.dominant_group_index
+                if structured_linear_state is not None
+                else None
+            ),
         )
         profile["reml_terminal_observed_geometry_s"] = _time.perf_counter() - geometry_start
         mode_score = observed_penalized_mode_score(
@@ -335,6 +541,8 @@ def finalize_reml_fit(
             result=final_pirls,
             penalty=S_final,
             geometry=terminal_geometry,
+            lambdas=lambdas if structured_linear_state is not None else None,
+            reml_penalties=reml_penalties if structured_linear_state is not None else None,
         )
         terminal_mode_tolerance = max(
             10.0 * min(pirls_tol, 1e-10),
@@ -384,12 +592,16 @@ def finalize_reml_fit(
             raise RuntimeError("terminal Fisher REML refit omitted its working Gram")
         if final_pirls.log_det_H is None or final_pirls.reml_hessian_rank is None:
             raise RuntimeError("terminal Fisher REML refit omitted its retained geometry")
-        S_final = build_penalty_matrix(
-            model._dm.group_matrices,
-            model._groups,
-            lambdas,
-            model._dm.p,
-            reml_penalties=reml_penalties,
+        S_final = (
+            None
+            if structured_linear_state is not None
+            else build_penalty_matrix(
+                model._dm.group_matrices,
+                model._groups,
+                lambdas,
+                model._dm.p,
+                reml_penalties=reml_penalties,
+            )
         )
         terminal_value = reml_laml_objective(
             model._dm,
@@ -444,6 +656,8 @@ def finalize_reml_fit(
     corrected = replace(final_pirls, phi=phi_fixed)
     model._result = corrected
     model._reml_result.pirls_result = corrected
+    model._reporting_support_state = reporting_state
+    model._linear_system_state = structured_linear_state
 
     update_reml_r_inv(model, reml_groups, lambdas)
 
@@ -464,6 +678,8 @@ def finalize_reml_fit(
     model._solver_result = corrected
 
     meta = {"method": "fit_reml", "discrete": model._discrete}
+    meta["direct_backend"] = corrected.direct_backend
+    meta["direct_fallback_reason"] = corrected.direct_fallback_reason
     if qp_passthrough:
         meta["lambda_strategy"] = "qp_passthrough"
     model._last_fit_meta = meta

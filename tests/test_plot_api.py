@@ -82,6 +82,26 @@ def interaction_model(sample_data):
 # ── terms=None: all main effects ───────────────────────────────
 
 
+def test_generated_interaction_name_cannot_collide_with_main_feature():
+    X = pd.DataFrame(
+        {
+            "a": np.linspace(0.0, 1.0, 40),
+            "b": np.linspace(1.0, 2.0, 40),
+            "a:b": np.linspace(-1.0, 1.0, 40),
+        }
+    )
+    y = np.linspace(0.2, 1.1, 40)
+    model = SuperGLM(
+        family="gaussian",
+        features={"a": Numeric(), "b": Numeric(), "a:b": Numeric()},
+        interactions=[("a", "b")],
+        selection_penalty=0.0,
+    )
+
+    with pytest.raises(ValueError, match="a:b.*main feature.*interaction"):
+        model.fit(X, y)
+
+
 class TestPlotAllTerms:
     def test_returns_figure(self, fitted_model):
         import matplotlib
@@ -449,6 +469,25 @@ class TestDensity:
 # ── Error cases ────────────────────────────────────────────────
 
 
+def _fitted_model_with_injected_name_collision() -> SuperGLM:
+    rng = np.random.default_rng(42)
+    n = 200
+    a = rng.uniform(0, 10, n)
+    b = rng.choice(["X", "Y"], n)
+    y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
+    X = pd.DataFrame({"a": a, "b": b})
+    model = SuperGLM(
+        features={
+            "a": Spline(n_knots=5),
+            "b": Categorical(),
+        },
+        interactions=[("a", "b")],
+    ).fit(X, y)
+    model._specs["a:b"] = Spline(n_knots=5)
+    model._feature_order.append("a:b")
+    return model
+
+
 class TestPlotErrors:
     def test_mixed_terms_raises(self, interaction_model):
         with pytest.raises(ValueError, match="Cannot mix"):
@@ -476,86 +515,26 @@ class TestPlotErrors:
             model.plot()
 
     def test_ambiguous_term_raises(self):
-        """Feature named 'a:b' + interaction ('a','b') → ambiguity error."""
-        rng = np.random.default_rng(42)
-        n = 200
-        a = rng.uniform(0, 10, n)
-        b = rng.choice(["X", "Y"], n)
-        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
-        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
-
-        model = SuperGLM(
-            features={
-                "a": Spline(n_knots=5),
-                "b": Categorical(),
-                "a:b": Spline(n_knots=5),
-            },
-            interactions=[("a", "b")],
-        )
-        model.fit(X, y)
+        """Defensive plotting guard rejects an impossible injected collision."""
+        model = _fitted_model_with_injected_name_collision()
         with pytest.raises(ValueError, match="Ambiguous"):
             model.plot("a:b")
 
     def test_ambiguous_term_in_list_raises(self):
-        """Ambiguity error also fires from list path."""
-        rng = np.random.default_rng(42)
-        n = 200
-        a = rng.uniform(0, 10, n)
-        b = rng.choice(["X", "Y"], n)
-        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
-        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
-
-        model = SuperGLM(
-            features={
-                "a": Spline(n_knots=5),
-                "b": Categorical(),
-                "a:b": Spline(n_knots=5),
-            },
-            interactions=[("a", "b")],
-        )
-        model.fit(X, y)
+        """Defensive ambiguity guard also fires from the list path."""
+        model = _fitted_model_with_injected_name_collision()
         with pytest.raises(ValueError, match="Ambiguous"):
             model.plot(["a:b"])
 
     def test_reconstruct_feature_ambiguous_raises(self):
-        """reconstruct_feature() also raises on name collision."""
-        rng = np.random.default_rng(42)
-        n = 200
-        a = rng.uniform(0, 10, n)
-        b = rng.choice(["X", "Y"], n)
-        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
-        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
-
-        model = SuperGLM(
-            features={
-                "a": Spline(n_knots=5),
-                "b": Categorical(),
-                "a:b": Spline(n_knots=5),
-            },
-            interactions=[("a", "b")],
-        )
-        model.fit(X, y)
+        """reconstruct_feature() retains a defensive collision guard."""
+        model = _fitted_model_with_injected_name_collision()
         with pytest.raises(ValueError, match="Ambiguous"):
             model.reconstruct_feature("a:b")
 
     def test_term_inference_ambiguous_raises(self):
-        """term_inference() also raises on name collision."""
-        rng = np.random.default_rng(42)
-        n = 200
-        a = rng.uniform(0, 10, n)
-        b = rng.choice(["X", "Y"], n)
-        y = rng.poisson(np.exp(0.5 + 0.1 * a)).astype(float)
-        X = pd.DataFrame({"a": a, "b": b, "a:b": a})
-
-        model = SuperGLM(
-            features={
-                "a": Spline(n_knots=5),
-                "b": Categorical(),
-                "a:b": Spline(n_knots=5),
-            },
-            interactions=[("a", "b")],
-        )
-        model.fit(X, y)
+        """term_inference() retains a defensive collision guard."""
+        model = _fitted_model_with_injected_name_collision()
         with pytest.raises(ValueError, match="Ambiguous"):
             model.term_inference("a:b")
 

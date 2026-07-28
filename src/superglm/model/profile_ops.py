@@ -114,6 +114,7 @@ def estimate_p(
             offset_ref=offset_ref,
             pirls_tol=final_workspace.model._tol,
             max_pirls_iter=final_workspace.model._max_iter,
+            durable_retain_fit_state=bool(model._retain_fit_state),
         )
     else:
         fit_ops._fit_in_workspace(
@@ -356,6 +357,7 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
             offset_ref=offset_ref,
             pirls_tol=final_workspace.model._tol,
             max_pirls_iter=final_workspace.model._max_iter,
+            durable_retain_fit_state=bool(model._retain_fit_state),
         )
     else:
         fit_ops._fit_in_workspace(

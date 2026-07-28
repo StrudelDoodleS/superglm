@@ -222,6 +222,8 @@ def term_drop_diagnostics(
     mode="refit",
     X_val=None,
     y_val=None,
+    sample_weight_val=None,
+    offset_val=None,
 ):
     """Drop-term diagnostics wrapper."""
     from superglm.diagnostics.term_diagnostics import (
@@ -237,6 +239,8 @@ def term_drop_diagnostics(
         mode=mode,
         X_val=X_val,
         y_val=y_val,
+        sample_weight_val=sample_weight_val,
+        offset_val=offset_val,
     )
 
 

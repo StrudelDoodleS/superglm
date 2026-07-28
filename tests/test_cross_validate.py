@@ -1,6 +1,8 @@
 """Tests for cross_validate() free function."""
 
 import inspect
+import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -1386,6 +1388,21 @@ class TestCloneContract:
         assert cloned._result is None
         assert cloned._fit_revision == 0
 
+    def test_subclass_clone_does_not_repeat_splines_deprecation_warning(self):
+        class WrapperSuperGLM(SuperGLM):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+        with pytest.warns(FutureWarning, match=r"splines=.*features=.*Spline") as caught:
+            model = WrapperSuperGLM(splines=["x"])
+        assert len(caught) == 1
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            cloned = model.clone_unfitted()
+
+        assert isinstance(cloned, WrapperSuperGLM)
+
     def test_clone_unfitted_requires_override_for_required_subclass_configuration(self):
         class TaggedSuperGLM(SuperGLM):
             def __init__(self, tag, **kwargs):
@@ -1433,6 +1450,32 @@ class TestCloneContract:
 
 
 class TestAutoDetectClone:
+    def test_autodetect_cross_validation_and_pickle_do_not_repeat_warning(
+        self,
+        poisson_data,
+    ):
+        df, y, sw = poisson_data
+        with pytest.warns(FutureWarning, match=r"splines=.*features=.*Spline") as caught:
+            model = SuperGLM(
+                family="poisson",
+                penalty=GroupLasso(lambda1=0.0),
+                splines=["x"],
+            )
+        assert len(caught) == 1
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            restored = pickle.loads(pickle.dumps(model))
+            result = cross_validate(
+                restored,
+                df,
+                y,
+                cv=SimpleKFold(2),
+                sample_weight=sw,
+            )
+
+        assert all(np.isfinite(result.fold_scores["deviance"]))
+
     def test_unfitted_autodetect_model(self, poisson_data):
         """Unfitted auto-detect (splines=) model clones correctly."""
         df, y, sw = poisson_data

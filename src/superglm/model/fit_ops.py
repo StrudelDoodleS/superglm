@@ -36,7 +36,10 @@ from superglm.model.reml_execute import (
     run_fixed_monotone_reml,
     run_scop_efs_reml,
 )
-from superglm.model.reml_finalize import finalize_reml_fit
+from superglm.model.reml_finalize import (
+    _build_reml_reporting_support_state,
+    finalize_reml_fit,
+)
 from superglm.model.reml_ops import (
     model_compute_dW_deta,
     model_optimize_direct_reml,
@@ -163,6 +166,75 @@ class PathResult:
         if self.edf_path is not None:
             telemetry["edf_path"] = np.asarray(self.edf_path, dtype=np.float64).tolist()
         return telemetry
+
+
+def _reject_random_effect_selection_fit(model, method: str) -> None:
+    """Keep structured variance components out of selection-penalty fit paths."""
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
+    random_effect_names = [
+        name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)
+    ]
+    factor_smooth_names = [
+        name for name, spec in model._interaction_specs.items() if isinstance(spec, FactorSmooth)
+    ]
+    if random_effect_names:
+        joined = ", ".join(repr(name) for name in random_effect_names)
+        raise NotImplementedError(
+            f"RandomEffect feature(s) {joined} are only supported with fit_reml(), not {method}()."
+        )
+    if factor_smooth_names:
+        joined = ", ".join(repr(name) for name in factor_smooth_names)
+        raise NotImplementedError(
+            f"FactorSmooth interaction(s) {joined} are only supported with "
+            f"fit_reml(), not {method}()."
+        )
+
+
+def _reject_structured_fit_constraints(model) -> None:
+    """Reject constrained REML geometry that compact penalties do not define."""
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import _SplineBase
+
+    constrained_splines = [
+        name
+        for name, spec in model._specs.items()
+        if isinstance(spec, _SplineBase)
+        and getattr(spec, "constraint_kind", getattr(spec, "monotone", None)) is not None
+        and getattr(
+            spec,
+            "constraint_mode",
+            getattr(spec, "monotone_mode", "postfit"),
+        )
+        == "fit"
+    ]
+    if not constrained_splines:
+        return
+
+    random_effects = [name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)]
+    factor_smooths = [
+        name for name, spec in model._interaction_specs.items() if isinstance(spec, FactorSmooth)
+    ]
+    if not random_effects and not factor_smooths:
+        return
+
+    structured_terms = []
+    if random_effects:
+        structured_terms.append(
+            "RandomEffect term(s) " + ", ".join(repr(name) for name in random_effects)
+        )
+    if factor_smooths:
+        structured_terms.append(
+            "FactorSmooth term(s) " + ", ".join(repr(name) for name in factor_smooths)
+        )
+    constrained = ", ".join(repr(name) for name in constrained_splines)
+    raise NotImplementedError(
+        f"fit-time shape constraints on spline term(s) {constrained} are not "
+        f"supported with {' and '.join(structured_terms)}; use separate models "
+        "or a post-fit shape constraint."
+    )
 
 
 def _compute_null_mu(
@@ -312,6 +384,8 @@ def _clear_fit_inference_caches(model) -> None:
     model.__dict__.pop("_fit_inference_info", None)
     model.__dict__.pop("_group_edf", None)
     model._solver_result = None
+    model._linear_system_state = None
+    model._reporting_support_state = None
     model._runtime_canonical_state = None
     model._fast_prediction_state = None
     model._prediction_plan = None
@@ -322,6 +396,7 @@ def _clear_fit_inference_caches(model) -> None:
     model._fit_sample_weight_ref = None
     model._fit_offset_ref = None
     model._fit_data_guard = None
+    model._fit_geometry_guard = None
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
     model._summary_cache = None
@@ -476,7 +551,12 @@ def _prime_fit_caches(
     y_arr: NDArray,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
-    from superglm.model.fit_data_guard import FitDataGuard
+    from superglm.model.fit_data_guard import FitDataGuard, FitGeometryGuard
+
+    guard_columns = list(model._feature_order)
+    for name in model._interaction_order:
+        guard_columns.extend(model._interaction_specs[name].parent_names)
+    guard_columns = list(dict.fromkeys(guard_columns))
 
     fit_space_result = (
         model._solver_pirls_result() if model._solver_result is not None else model.result
@@ -506,12 +586,21 @@ def _prime_fit_caches(
     model._fit_y_ref = y_ref
     model._fit_sample_weight_ref = sample_weight_ref
     model._fit_offset_ref = offset_ref
-    # Compact fits release every retained row reference immediately below.
-    # Avoid an O(n) content hash that could never be consumed.
     model._fit_data_guard = (
-        FitDataGuard.capture(X_ref, y_arr, columns=tuple(model._feature_order))
+        FitDataGuard.capture(X_ref, y_arr, columns=tuple(guard_columns))
         if getattr(model, "_retain_fit_state", True)
         else None
+    )
+    model._fit_geometry_guard = FitGeometryGuard.capture(
+        X_ref,
+        y_arr,
+        model._fit_weights,
+        (
+            np.zeros(len(y_arr), dtype=np.float64)
+            if model._fit_offset is None
+            else model._fit_offset
+        ),
+        columns=tuple(guard_columns),
     )
     model._fit_metrics_cache = None
     model._fit_metrics_cache_signature = None
@@ -528,8 +617,13 @@ def _maybe_release_fit_state(model) -> None:
     # directly without needing model._dm.
     inf = model._fit_inference_info
     model.__dict__["_group_edf"] = dict(inf["group_edf_map"])
+    augmented = inf["XtWX_inv_aug"]
+    if hasattr(augmented, "scaled") and hasattr(augmented, "slopes"):
+        coefficient_covariance = augmented.scaled(model.result.phi).slopes
+    else:
+        coefficient_covariance = model.result.phi * augmented[1:, 1:]
     model.__dict__["_coef_covariance"] = (
-        model.result.phi * inf["XtWX_inv_aug"][1:, 1:],
+        coefficient_covariance,
         inf["active_groups"],
     )
     inf["W"] = np.empty(0, dtype=np.float64)
@@ -688,6 +782,8 @@ def _fit_in_workspace(
     convergence = convergence if convergence is not None else model._convergence
     penalty = configured_penalty(model)
     lambda2 = configured_lambda2(model)
+
+    _reject_random_effect_selection_fit(model, "fit")
 
     # lambda_policy is only supported in fit_reml(); reject here.
     for name, spec in model._specs.items():
@@ -854,6 +950,7 @@ def _fit_path_in_workspace(
     lambda_seq=None,
 ):
     """Build and solve a regularization path on private mutable state."""
+    _reject_random_effect_selection_fit(model, "fit_path")
     from superglm.model.base import (
         compute_lambda_max,
         model_build_design_matrix,
@@ -1036,6 +1133,7 @@ def _fit_reml_in_workspace(
     runtime_validation="auto",
     verbose=False,
     w_correction_order=1,
+    durable_retain_fit_state: bool | None = None,
 ):
     """Run the complete REML attempt on private mutable model state."""
     from superglm.model.base import (
@@ -1053,6 +1151,7 @@ def _fit_reml_in_workspace(
     model._reml_profile = None
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
+    _reject_structured_fit_constraints(model)
     _maybe_estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
     configured_smoothing = configured_lambda2(model)
 
@@ -1186,6 +1285,14 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 debug_recorder=debug_recorder,
             )
+            model._reporting_support_state = _build_reml_reporting_support_state(
+                model,
+                result=model._solver_result,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                durable_retain_fit_state=durable_retain_fit_state,
+            )
             _prime_fit_caches(
                 model,
                 X_ref=X_ref,
@@ -1224,6 +1331,14 @@ def _fit_reml_in_workspace(
                 total_start=_t_total_start,
                 compute_fit_stats=_compute_fit_stats,
                 debug_recorder=debug_recorder,
+            )
+            model._reporting_support_state = _build_reml_reporting_support_state(
+                model,
+                result=model._solver_result,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                durable_retain_fit_state=durable_retain_fit_state,
             )
             _prime_fit_caches(
                 model,
@@ -1287,6 +1402,7 @@ def _fit_reml_in_workspace(
             total_start=_t_total_start,
             compute_fit_stats=_compute_fit_stats,
             trace_run=getattr(debug_recorder, "trace_run", None),
+            durable_retain_fit_state=durable_retain_fit_state,
         )
         _t0 = _time.perf_counter()
         _prime_fit_caches(

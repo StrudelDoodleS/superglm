@@ -9,7 +9,11 @@ import polars as pl
 import pytest
 
 from superglm import Numeric, SuperGLM
-from superglm.model.fit_data_guard import FitDataGuard, require_unchanged_fit_data
+from superglm.model.fit_data_guard import (
+    FitDataGuard,
+    FitGeometryGuard,
+    require_unchanged_fit_data,
+)
 
 
 def test_capture_hashes_frame_without_making_a_shallow_copy(monkeypatch):
@@ -25,6 +29,31 @@ def test_capture_hashes_frame_without_making_a_shallow_copy(monkeypatch):
     guard = FitDataGuard.capture(X, y)
 
     assert guard.matches(X, y, None, None, fit_weights=None, fit_offset=None)
+
+
+def test_geometry_guard_can_require_the_training_response():
+    X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 12)})
+    y = 0.5 + 0.2 * X["x"].to_numpy()
+    weights = np.linspace(0.5, 1.5, len(X))
+    offset = np.linspace(-0.1, 0.1, len(X))
+    guard = FitGeometryGuard.capture(
+        X,
+        y,
+        weights,
+        offset,
+        columns=("x",),
+    )
+
+    assert guard.matches(X.copy(), weights.copy(), offset.copy())
+    assert guard.matches_training(
+        X.copy(),
+        y.copy(),
+        weights.copy(),
+        offset.copy(),
+    )
+    changed = y.copy()
+    changed[0] += 1.0
+    assert not guard.matches_training(X, changed, weights, offset)
 
 
 def test_explicit_fit_guard_ignores_unhashable_values_in_unused_columns():

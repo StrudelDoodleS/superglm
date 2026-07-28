@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -33,9 +34,16 @@ from .fit_state import (
     configured_penalty,
 )
 
+_SPLINES_DEPRECATION_MESSAGE = (
+    "`splines=` auto-detection is deprecated and will be removed in a future "
+    "release; use explicit features such as `features={'age': Spline(...)}`."
+)
+
 if TYPE_CHECKING:
     from superglm.diagnostics.discretize import DiscretizationResult
+    from superglm.inference.factor_smooths import FactorSmoothResult
     from superglm.inference.metrics import ModelMetrics
+    from superglm.inference.random_effects import RandomEffectResult
     from superglm.inference.term import InteractionInference, TermInference
     from superglm.model.fit_ops import PathResult
     from superglm.types import GroupSlice
@@ -64,7 +72,7 @@ class SuperGLM:
         degree: int = 3,
         categorical_base: str = "most_exposed",
         # Interactions
-        interactions: list[tuple[str, str]] | None = None,
+        interactions: list[tuple[str, str] | object] | None = None,
         # Solver options
         active_set: bool = False,
         direct_solve: str = "auto",
@@ -109,27 +117,33 @@ class SuperGLM:
             objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
             Mutually exclusive with *splines*.
         splines : list[str], optional
-            Column names to treat as splines in auto-detect mode.  All other
-            columns are auto-detected as categorical or numeric.
-            Mutually exclusive with *features*.
+            Deprecated auto-detection shorthand. Column names in this list are
+            treated as splines and all other columns are inferred as categorical
+            or numeric. Use explicit ``features={"age": Spline(...)}`` for new
+            code. Mutually exclusive with *features*.
         n_knots : int or list[int]
             Number of interior knots for auto-detect splines.
         degree : int
             B-spline degree for auto-detect splines.
         categorical_base : str
             Base level strategy for auto-detected categoricals.
-        interactions : list[tuple[str, str]], optional
-            Pairs of feature names to interact.  Interaction type is
-            auto-detected from the parent feature specs.
+        interactions : list[tuple[str, str] or interaction spec], optional
+            Pairs of feature names to interact, or explicit interaction
+            specifications such as ``FactorSmooth``. Tuple interaction types
+            are auto-detected from their parent feature specs.
         active_set : bool
             Use active-set cycling in the BCD solver.
-        direct_solve : {"auto", "gram", "qr"}
+        direct_solve : {"auto", "gram", "qr", "structured"}
             Strategy for the direct IRLS solver (lambda1=0).
-            ``"auto"`` uses gram-based Cholesky with residual-checked SVD
-            fallback, warning after repeated fallbacks.  ``"gram"`` forces
-            the gram path without warnings.  ``"qr"`` uses QR on the
+            ``"auto"`` selects compact structured elimination for eligible
+            random-effect and factor-smooth terms above the measured crossover,
+            otherwise using Gram. A globally unidentifiable SZ system also
+            retries on Gram with an explicit recorded reason. ``"gram"`` forces
+            the gram path. ``"qr"`` uses QR on the
             materialised weighted design matrix — backward-stable but
             O(n·p²) per iteration.  Intended for smaller datasets.
+            ``"structured"`` forces structured elimination for an eligible
+            random-effect, FS, or SZ block.
         discrete : bool
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]
@@ -156,6 +170,15 @@ class SuperGLM:
             training caches while preserving prediction, summaries, and term
             confidence intervals.
         """
+        if splines is not None:
+            import warnings
+
+            warnings.warn(
+                _SPLINES_DEPRECATION_MESSAGE,
+                FutureWarning,
+                stacklevel=2,
+            )
+
         base.init_model(
             self,
             family=family,
@@ -225,6 +248,11 @@ class SuperGLM:
                 "ignore",
                 message="convergence='coefficients' is experimental",
                 category=UserWarning,
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=re.escape(_SPLINES_DEPRECATION_MESSAGE) + r"\Z",
+                category=FutureWarning,
             )
             try:
                 cloned = type(self)(**self._config.constructor_kwargs())
@@ -615,6 +643,48 @@ class SuperGLM:
         return state_ops.group_edf(self)
 
     # ── Diagnostics & summary ─────────────────────────────────────
+
+    def random_effects(
+        self,
+        name: str,
+        *,
+        exposure: NDArray | None = None,
+        X: FrameLike | None = None,
+        y: NDArray | None = None,
+        sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
+    ) -> RandomEffectResult:
+        """Return variance-component and per-level credibility diagnostics."""
+        from superglm.inference.random_effects import random_effect_result
+
+        return random_effect_result(
+            self,
+            name,
+            exposure=exposure,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+
+    def factor_smooth(
+        self,
+        name: str,
+        *,
+        grid: int | NDArray | None = 100,
+        levels: list[object] | tuple[object, ...] | None = None,
+        confidence_level: float = 0.95,
+    ) -> FactorSmoothResult:
+        """Return basis-aware penalties, level diagnostics, and smooth curves."""
+        from superglm.inference.factor_smooths import factor_smooth_result
+
+        return factor_smooth_result(
+            self,
+            name,
+            grid=grid,
+            levels=levels,
+            confidence_level=confidence_level,
+        )
 
     def iteration_diagnostics(self):
         """Return per-iteration IRLS diagnostics as a DataFrame.
@@ -1208,23 +1278,63 @@ class SuperGLM:
 
     # ── Prediction ────────────────────────────────────────────────
 
-    def _predict_eta_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_exact(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private exact canonical predictor on the link scale."""
-        return base.predict_eta_exact(self, X, offset)
+        return base.predict_eta_exact(self, X, offset, random_effects=random_effects)
 
-    def _predict_eta_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_eta_fast_discrete(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private fast discrete predictor on the link scale."""
-        return base.predict_eta_fast_discrete(self, X, offset)
+        return base.predict_eta_fast_discrete(
+            self,
+            X,
+            offset,
+            random_effects=random_effects,
+        )
 
-    def _predict_exact(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_exact(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private exact canonical predictor on the response scale."""
-        return base.predict_exact(self, X, offset)
+        return base.predict_exact(self, X, offset, random_effects=random_effects)
 
-    def _predict_fast_discrete(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def _predict_fast_discrete(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Private fast discrete predictor on the response scale."""
-        return base.predict_fast_discrete(self, X, offset)
+        return base.predict_fast_discrete(
+            self,
+            X,
+            offset,
+            random_effects=random_effects,
+        )
 
-    def predict(self, X: FrameLike, offset: NDArray | None = None) -> NDArray:
+    def predict(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
         """Predict the response mean for new data.
 
         Parameters
@@ -1234,13 +1344,17 @@ class SuperGLM:
         offset : NDArray or None
             Optional offset added to the linear predictor before
             applying the inverse link.
+        random_effects : {"conditional", "population"}
+            Whether to include fitted random-effect and factor-smooth
+            deviations. Population prediction sets all such contributions to
+            zero.
 
         Returns
         -------
         NDArray
             Predicted mean on the response scale (inverse-link of eta).
         """
-        return self._predict_exact(X, offset)
+        return self._predict_exact(X, offset, random_effects=random_effects)
 
     # ── Monotone repair ─────────────────────────────────────────
 
@@ -1328,16 +1442,29 @@ class SuperGLM:
         mode: str = "refit",
         X_val: FrameLike | None = None,
         y_val: NDArray | None = None,
+        sample_weight_val: NDArray | None = None,
+        offset_val: NDArray | None = None,
     ) -> pd.DataFrame:
         """Drop-term diagnostics: AIC/BIC deltas or holdout loss deltas.
 
         Parameters
         ----------
+        X, y : training rows and response
+            Used for refit mode and as the identity anchor for same-object
+            holdout fallback.
+        sample_weight, offset : array-like, optional
+            Training/refit weights and offset.
         mode : {"refit", "holdout"}
             ``"refit"`` calls ``drop1()`` and adds delta IC columns.
             ``"holdout"`` zeros each term on a validation set (no refit).
         X_val, y_val : optional
             Validation data for ``mode="holdout"``.
+        sample_weight_val, offset_val : array-like, optional
+            Validation-specific geometry for holdout mode. Training vectors
+            are reused only when ``X_val is X`` and ``y_val is y``; separate
+            validation objects require ``sample_weight_val`` when
+            ``sample_weight`` is supplied and require ``offset_val`` for an
+            offset-fitted model.
         """
         return explain_ops.term_drop_diagnostics(
             self,
@@ -1348,6 +1475,8 @@ class SuperGLM:
             mode=mode,
             X_val=X_val,
             y_val=y_val,
+            sample_weight_val=sample_weight_val,
+            offset_val=offset_val,
         )
 
     def spline_redundancy(

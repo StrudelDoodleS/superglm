@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from ._group_matrix_kernels import _csr_weighted_gram
+from superglm.factor_smooth_geometry import (
+    adjoint_sum_to_zero_blocks,
+    expand_sum_to_zero_blocks,
+)
+
+from ._group_matrix_discretized import DiscretizedSSPGroupMatrix
+from ._group_matrix_kernels import (
+    _csr_weighted_gram,
+    _factor_smooth_csr_dense_cross,
+    _factor_smooth_csr_matvec,
+    _factor_smooth_csr_rmatvec,
+    _factor_smooth_csr_sufficient_stats,
+    _factor_smooth_support_cell_aggregates,
+    _factor_smooth_support_dense_cell_aggregates,
+    _factor_smooth_support_dense_cross,
+    _factor_smooth_support_matvec,
+    _factor_smooth_support_rmatvec,
+)
 
 
 class DenseGroupMatrix:
@@ -112,6 +131,503 @@ class CategoricalGroupMatrix:
         c = self.codes[idx].copy()
         c[c == self.n_levels] = -1
         return CategoricalGroupMatrix(c, self.n_levels)
+
+
+class RandomEffectGroupMatrix(CategoricalGroupMatrix):
+    """All-level categorical matrix used by structured random effects."""
+
+    __slots__ = ("lambda_policies",)
+
+    def __init__(
+        self,
+        codes: NDArray,
+        n_levels: int,
+        *,
+        lambda_policies=None,
+    ):
+        c = np.asarray(codes, dtype=np.intp)
+        if n_levels < 1:
+            raise ValueError(f"n_levels must be positive, got {n_levels}")
+        if np.any((c < 0) | (c >= n_levels)):
+            raise ValueError("RandomEffect codes must be between 0 and n_levels - 1.")
+        super().__init__(c, n_levels)
+        self.lambda_policies = lambda_policies
+
+    def row_subset(self, idx: NDArray) -> RandomEffectGroupMatrix:
+        return RandomEffectGroupMatrix(
+            self.codes[idx],
+            self.n_levels,
+            lambda_policies=self.lambda_policies,
+        )
+
+
+class FactorSmoothGroupMatrix:
+    """Compact all-level factor-by-spline matrix.
+
+    FS coefficients have one natural-basis block per level. SZ coefficients
+    have ``K-1`` free blocks and reconstruct the final raw level by contrast.
+    The observation-level interaction matrix is never retained: exact matrices
+    store one shared CSR marginal basis, while discrete matrices store one
+    support basis and an observation-to-bin index.
+    """
+
+    __slots__ = (
+        "B",
+        "B_unique",
+        "_data",
+        "_indices",
+        "_indptr",
+        "bin_idx",
+        "codes",
+        "n_levels",
+        "coefficient_levels",
+        "block_size",
+        "raw_width",
+        "natural_map",
+        "levels",
+        "shape",
+        "is_discrete",
+        "repeated_penalty_components",
+        "lambda_policies",
+        "omega",
+        "omega_components",
+        "component_types",
+        "projection",
+        "structured_kind",
+        "factor_basis",
+        "_structured_feasibility_key",
+        "_structured_feasibility_level",
+    )
+
+    def __init__(
+        self,
+        basis: sp.spmatrix | NDArray,
+        codes: NDArray,
+        n_levels: int,
+        *,
+        natural_map: NDArray,
+        levels: tuple[object, ...] | list[object],
+        repeated_penalty_components: tuple[tuple[str, NDArray], ...],
+        factor_basis: Literal["fs", "sz"] = "fs",
+        lambda_policies=None,
+        bin_idx: NDArray | None = None,
+    ):
+        if n_levels < 1:
+            raise ValueError(f"n_levels must be positive, got {n_levels}")
+        if factor_basis not in ("fs", "sz"):
+            raise ValueError(f"factor_basis must be 'fs' or 'sz', got {factor_basis!r}")
+        if factor_basis == "sz" and n_levels < 2:
+            raise ValueError("factor_basis='sz' requires at least two levels")
+        level_codes = np.asarray(codes, dtype=np.intp)
+        if level_codes.ndim != 1:
+            raise ValueError("FactorSmooth codes must be one-dimensional.")
+        if np.any((level_codes < 0) | (level_codes >= n_levels)):
+            raise ValueError("FactorSmooth codes must be between 0 and n_levels - 1.")
+
+        transform = np.asarray(natural_map, dtype=np.float64)
+        if transform.ndim != 2:
+            raise ValueError("natural_map must be a two-dimensional matrix")
+        raw_width, block_size = transform.shape
+        if raw_width < 1 or block_size < 1:
+            raise ValueError("natural_map dimensions must be positive")
+        fitted_levels = tuple(levels)
+        if len(fitted_levels) != n_levels:
+            raise ValueError("levels length must equal n_levels")
+
+        self.codes = level_codes
+        self.n_levels = int(n_levels)
+        self.factor_basis = factor_basis
+        self.coefficient_levels = self.n_levels if factor_basis == "fs" else self.n_levels - 1
+        self.block_size = int(block_size)
+        self.raw_width = int(raw_width)
+        self.natural_map = transform
+        self.levels = fitted_levels
+        self.repeated_penalty_components = repeated_penalty_components
+        self.lambda_policies = lambda_policies
+        self.omega = None
+        self.omega_components = None
+        self.component_types = None
+        self.projection = None
+        self.structured_kind = "factor_smooth"
+        self._structured_feasibility_key = None
+        self._structured_feasibility_level = None
+
+        if bin_idx is None:
+            exact_basis = sp.csr_matrix(basis, dtype=np.float64)
+            if exact_basis.shape != (len(level_codes), raw_width):
+                raise ValueError(
+                    "exact FactorSmooth basis shape must match row count and natural_map"
+                )
+            self.B = exact_basis
+            self.B_unique = None
+            self._data = exact_basis.data.astype(np.float64, copy=False)
+            self._indices = exact_basis.indices
+            self._indptr = exact_basis.indptr
+            self.bin_idx = None
+            n_rows = exact_basis.shape[0]
+            self.is_discrete = False
+        else:
+            support_basis = np.asarray(basis, dtype=np.float64)
+            support_index = np.asarray(bin_idx, dtype=np.intp)
+            if support_basis.ndim != 2 or support_basis.shape[1] != raw_width:
+                raise ValueError("discrete FactorSmooth support basis has the wrong width")
+            if support_index.shape != level_codes.shape:
+                raise ValueError("FactorSmooth bin_idx must match the code row count")
+            if np.any((support_index < 0) | (support_index >= support_basis.shape[0])):
+                raise ValueError("FactorSmooth bin_idx contains an out-of-range support row")
+            self.B = None
+            self.B_unique = np.ascontiguousarray(support_basis)
+            self._data = None
+            self._indices = None
+            self._indptr = None
+            self.bin_idx = support_index
+            n_rows = len(level_codes)
+            self.is_discrete = True
+
+        for suffix, component in repeated_penalty_components:
+            block = np.asarray(component)
+            if block.shape != (block_size, block_size):
+                raise ValueError(
+                    f"repeated penalty component {suffix!r} has shape {block.shape}, "
+                    f"expected {(block_size, block_size)}"
+                )
+        self.shape = (n_rows, self.coefficient_levels * self.block_size)
+
+    def _discrete_support(self) -> tuple[NDArray, NDArray] | None:
+        """Return discrete basis/index support, or ``None`` for exact geometry."""
+        if not self.is_discrete:
+            return None
+        basis = self.B_unique
+        support_index = self.bin_idx
+        if basis is None or support_index is None:  # pragma: no cover - constructor invariant
+            raise RuntimeError("discrete FactorSmooth support is unavailable")
+        return basis, support_index
+
+    def matvec(self, v: NDArray) -> NDArray:
+        """Apply the implicit level-major design to a coefficient vector."""
+        coefficients = np.asarray(v, dtype=np.float64)
+        if coefficients.shape != (self.shape[1],):
+            raise ValueError(f"coefficient vector must have shape {(self.shape[1],)}")
+        natural_coefficients = coefficients.reshape(self.coefficient_levels, self.block_size)
+        if self.factor_basis == "sz":
+            natural_coefficients = expand_sum_to_zero_blocks(natural_coefficients)
+        raw_coefficients = natural_coefficients @ self.natural_map.T
+        if self.is_discrete:
+            return _factor_smooth_support_matvec(
+                self.B_unique,
+                self.bin_idx,
+                self.codes,
+                raw_coefficients,
+            )
+        return _factor_smooth_csr_matvec(
+            self._data,
+            self._indices,
+            self._indptr,
+            self.codes,
+            raw_coefficients,
+        )
+
+    def rmatvec(self, w: NDArray) -> NDArray:
+        """Aggregate observations into implicit level-major coordinates."""
+        values = np.asarray(w, dtype=np.float64)
+        if values.shape != (self.shape[0],):
+            raise ValueError(f"observation vector must have shape {(self.shape[0],)}")
+        if self.is_discrete:
+            raw = _factor_smooth_support_rmatvec(
+                self.B_unique,
+                self.bin_idx,
+                self.codes,
+                values,
+                self.n_levels,
+            )
+        else:
+            raw = _factor_smooth_csr_rmatvec(
+                self._data,
+                self._indices,
+                self._indptr,
+                self.codes,
+                values,
+                self.n_levels,
+                self.raw_width,
+            )
+        natural = np.asarray(raw @ self.natural_map, dtype=np.float64)
+        if self.factor_basis == "sz":
+            natural = adjoint_sum_to_zero_blocks(natural)
+        return natural.ravel()
+
+    def factor_smooth_sufficient_stats(
+        self,
+        W: NDArray,
+        rhs: NDArray,
+    ) -> tuple[NDArray, NDArray, NDArray]:
+        """Return per-level natural-basis Gram, ``X'W``, and ``X'rhs``."""
+        weights = np.asarray(W, dtype=np.float64)
+        rhs_values = np.asarray(rhs, dtype=np.float64)
+        expected = (self.shape[0],)
+        if weights.shape != expected or rhs_values.shape != expected:
+            raise ValueError("weights and rhs must match the FactorSmooth row count")
+        if self.is_discrete:
+            _cell_weights, local_gram, xtw_nat, rhs_nat = self.factor_smooth_discrete_cell_moments(
+                weights, rhs_values
+            )
+            return local_gram, xtw_nat, rhs_nat
+        raw_gram, raw_xtw, raw_rhs = _factor_smooth_csr_sufficient_stats(
+            self._data,
+            self._indices,
+            self._indptr,
+            self.codes,
+            weights,
+            rhs_values,
+            self.n_levels,
+            self.raw_width,
+        )
+        local_gram = np.einsum(
+            "ai,kab,bj->kij",
+            self.natural_map,
+            raw_gram,
+            self.natural_map,
+            optimize=True,
+        )
+        # The raw kernels update symmetric entries identically.  BLAS
+        # contraction through the natural map can still leave round-off at
+        # opposite triangle entries, large enough to trip exact structured
+        # factor validation on production-sized data.
+        local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
+        return (
+            local_gram,
+            raw_xtw @ self.natural_map,
+            raw_rhs @ self.natural_map,
+        )
+
+    def factor_smooth_discrete_cell_moments(
+        self,
+        W: NDArray,
+        rhs: NDArray,
+    ) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+        """Return compact cells and natural-basis moments for a discrete block."""
+        weights = np.asarray(W, dtype=np.float64)
+        rhs_values = np.asarray(rhs, dtype=np.float64)
+        expected = (self.shape[0],)
+        if weights.shape != expected or rhs_values.shape != expected:
+            raise ValueError("weights and rhs must match the FactorSmooth row count")
+        support = self._discrete_support()
+        if support is None:
+            raise ValueError("cell moments require a discrete FactorSmooth matrix")
+        basis, support_index = support
+
+        cell_weights, cell_rhs = _factor_smooth_support_cell_aggregates(
+            support_index,
+            self.codes,
+            weights,
+            rhs_values,
+            self.n_levels,
+            basis.shape[0],
+        )
+        effective_basis = np.ascontiguousarray(
+            basis @ self.natural_map,
+            dtype=np.float64,
+        )
+        weighted_basis = cell_weights[:, :, None] * effective_basis[None, :, :]
+        local_gram = effective_basis.T[None, :, :] @ weighted_basis
+        local_gram = 0.5 * (local_gram + local_gram.transpose(0, 2, 1))
+        return (
+            np.ascontiguousarray(cell_weights),
+            np.ascontiguousarray(local_gram),
+            np.ascontiguousarray(cell_weights @ effective_basis),
+            np.ascontiguousarray(cell_rhs @ effective_basis),
+        )
+
+    def gram(self, W: NDArray) -> NDArray:
+        """Materialize the block-diagonal Gram for small dense-reference fits."""
+        zeros = np.zeros(self.shape[0], dtype=np.float64)
+        local_gram, _xtw, _rhs = self.factor_smooth_sufficient_stats(W, zeros)
+        return self._public_gram(local_gram)
+
+    def _public_gram(self, local_gram: NDArray) -> NDArray[np.float64]:
+        """Convert raw independent level Grams to public FS/SZ coordinates."""
+        result = np.zeros((self.shape[1], self.shape[1]), dtype=np.float64)
+        if self.factor_basis == "fs":
+            for level, block in enumerate(local_gram):
+                start = level * self.block_size
+                result[start : start + self.block_size, start : start + self.block_size] = block
+            return result
+
+        last = local_gram[-1]
+        for left in range(self.coefficient_levels):
+            left_sl = slice(left * self.block_size, (left + 1) * self.block_size)
+            result[left_sl, left_sl] += local_gram[left]
+            for right in range(self.coefficient_levels):
+                right_sl = slice(right * self.block_size, (right + 1) * self.block_size)
+                result[left_sl, right_sl] += last
+        return result
+
+    def factor_smooth_dense_cross_gram(
+        self,
+        W: NDArray,
+        dense_small: NDArray,
+    ) -> NDArray:
+        """Return ``(K, k, q)`` cross blocks against one narrow dense matrix."""
+        weights = np.asarray(W, dtype=np.float64)
+        small = np.asarray(dense_small, dtype=np.float64)
+        if weights.shape != (self.shape[0],):
+            raise ValueError("weights must match the FactorSmooth row count")
+        if small.ndim != 2 or small.shape[0] != self.shape[0]:
+            raise ValueError("dense_small must be a row-aligned two-dimensional matrix")
+        if self.is_discrete:
+            raw = _factor_smooth_support_dense_cross(
+                self.B_unique,
+                self.bin_idx,
+                self.codes,
+                weights,
+                small,
+                self.n_levels,
+            )
+        else:
+            raw = _factor_smooth_csr_dense_cross(
+                self._data,
+                self._indices,
+                self._indptr,
+                self.codes,
+                weights,
+                small,
+                self.n_levels,
+                self.raw_width,
+            )
+        return np.einsum(
+            "ai,kaq->kiq",
+            self.natural_map,
+            raw,
+            optimize=True,
+        )
+
+    def factor_smooth_discrete_dense_cell_cross_gram(
+        self,
+        W: NDArray,
+        dense_small: NDArray,
+    ) -> NDArray:
+        """Return raw level crosses after one dense-small cell aggregation."""
+        weights = np.asarray(W, dtype=np.float64)
+        small = np.asarray(dense_small, dtype=np.float64)
+        if weights.shape != (self.shape[0],):
+            raise ValueError("weights must match the FactorSmooth row count")
+        if small.ndim != 2 or small.shape[0] != self.shape[0]:
+            raise ValueError("dense_small must be a row-aligned two-dimensional matrix")
+        support = self._discrete_support()
+        if support is None:
+            raise ValueError("dense cell crosses require a discrete FactorSmooth matrix")
+        basis, support_index = support
+
+        dense_cells = _factor_smooth_support_dense_cell_aggregates(
+            support_index,
+            self.codes,
+            weights,
+            small,
+            self.n_levels,
+            basis.shape[0],
+        )
+        raw_cross = basis.T[None, :, :] @ dense_cells
+        return np.ascontiguousarray(
+            self.natural_map.T[None, :, :] @ raw_cross,
+            dtype=np.float64,
+        )
+
+    def factor_smooth_discrete_shared_bin_cross_gram(
+        self,
+        cell_weights: NDArray,
+        other: object,
+    ) -> NDArray | None:
+        """Return raw level crosses for an SSP sharing the exact support map."""
+        support = self._discrete_support()
+        if (
+            support is None
+            or not isinstance(other, DiscretizedSSPGroupMatrix)
+            or type(other) is not DiscretizedSSPGroupMatrix
+        ):
+            return None
+        basis, support_index = support
+        if support_index.shape != other.bin_idx.shape or not np.array_equal(
+            support_index,
+            other.bin_idx,
+        ):
+            return None
+
+        cells = np.asarray(cell_weights, dtype=np.float64)
+        expected_cells = (self.n_levels, basis.shape[0])
+        if cells.shape != expected_cells:
+            raise ValueError(f"cell_weights must have shape {expected_cells}")
+        other_basis = np.asarray(other.B_unique, dtype=np.float64)
+        other_transform = np.asarray(other.R_inv, dtype=np.float64)
+        if (
+            other_basis.ndim != 2
+            or other_transform.ndim != 2
+            or other_basis.shape[0] != basis.shape[0]
+            or other_basis.shape[1] != other_transform.shape[0]
+        ):
+            return None
+
+        other_support = np.ascontiguousarray(
+            other_basis @ other_transform,
+            dtype=np.float64,
+        )
+        weighted_other = cells[:, :, None] * other_support[None, :, :]
+        raw_cross = basis.T[None, :, :] @ weighted_other
+        return np.ascontiguousarray(
+            self.natural_map.T[None, :, :] @ raw_cross,
+            dtype=np.float64,
+        )
+
+    def gram_rmatvec(
+        self,
+        W: NDArray,
+        Wz: NDArray,
+    ) -> tuple[NDArray, NDArray, NDArray]:
+        """Fuse the dense-reference Gram and two transpose products."""
+        local_gram, local_xtw, local_rhs = self.factor_smooth_sufficient_stats(W, Wz)
+        if self.factor_basis == "sz":
+            local_xtw = adjoint_sum_to_zero_blocks(local_xtw)
+            local_rhs = adjoint_sum_to_zero_blocks(local_rhs)
+        return self._public_gram(local_gram), local_xtw.ravel(), local_rhs.ravel()
+
+    def toarray(self) -> NDArray:
+        """Materialize the implicit matrix as an explicit small-model oracle."""
+        if self.is_discrete:
+            natural_basis = self.B_unique[self.bin_idx] @ self.natural_map
+        else:
+            natural_basis = np.asarray(self.B @ self.natural_map)
+        result = np.zeros(self.shape, dtype=np.float64)
+        blocks = result.reshape(self.shape[0], self.coefficient_levels, self.block_size)
+        free_rows = np.flatnonzero(self.codes < self.coefficient_levels)
+        blocks[free_rows, self.codes[free_rows]] = natural_basis[free_rows]
+        if self.factor_basis == "sz":
+            final_rows = np.flatnonzero(self.codes == self.n_levels - 1)
+            blocks[final_rows] = -natural_basis[final_rows, None, :]
+        return result
+
+    def row_subset(self, idx: NDArray) -> FactorSmoothGroupMatrix:
+        """Subset observations while retaining the global fitted level layout."""
+        row_index = np.asarray(idx, dtype=np.intp)
+        if self.is_discrete:
+            return FactorSmoothGroupMatrix(
+                self.B_unique,
+                self.codes[row_index],
+                self.n_levels,
+                natural_map=self.natural_map,
+                levels=self.levels,
+                repeated_penalty_components=self.repeated_penalty_components,
+                factor_basis=self.factor_basis,
+                lambda_policies=self.lambda_policies,
+                bin_idx=self.bin_idx[row_index],
+            )
+        return FactorSmoothGroupMatrix(
+            self.B[row_index],
+            self.codes[row_index],
+            self.n_levels,
+            natural_map=self.natural_map,
+            levels=self.levels,
+            repeated_penalty_components=self.repeated_penalty_components,
+            factor_basis=self.factor_basis,
+            lambda_policies=self.lambda_policies,
+        )
 
 
 class SparseSSPGroupMatrix:

@@ -1,5 +1,6 @@
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint, ConstraintSpec
+from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -11,6 +12,7 @@ from superglm.features.interaction import (
 )
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.random_effect import RandomEffect
 from superglm.features.spline import (
     BSplineSmooth,
     CubicRegressionSpline,
@@ -29,6 +31,8 @@ __all__ = [
     "OrderedCategorical",
     "Constraint",
     "ConstraintSpec",
+    "FactorSmooth",
+    "RandomEffect",
     "LevelGrouping",
     "collapse_levels",
     "Numeric",

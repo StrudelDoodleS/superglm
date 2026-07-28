@@ -1,16 +1,6 @@
-"""
-SuperGLM: Penalised GLMs for insurance pricing.
+"""SuperGLM: Penalised GLMs for insurance pricing.
 
-Core API (auto-detect):
-    from superglm import SuperGLM
-
-    model = SuperGLM(
-        penalty="group_lasso", selection_penalty=0.01,
-        splines=["driver_age"],
-    )
-    model.fit(X, y, sample_weight=weights)
-
-Core API (explicit):
+Core API:
     from superglm import SuperGLM, Spline, Categorical, Numeric
 
     model = SuperGLM(
@@ -41,6 +31,7 @@ from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, 
 from superglm.export import export_rating_tables
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import Constraint, ConstraintSpec
+from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
     CategoricalInteraction,
@@ -54,6 +45,7 @@ from superglm.features.interaction import (
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
+from superglm.features.random_effect import RandomEffect
 from superglm.features.spline import (
     BSplineSmooth,
     CubicRegressionSpline,
@@ -62,7 +54,9 @@ from superglm.features.spline import (
     Spline,
     n_knots_from_k,
 )
+from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
+from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
 from superglm.inference.term import InteractionInference, SmoothCurve, SplineMetadata, TermInference
 from superglm.links import (
@@ -133,6 +127,7 @@ __all__ = [
     "export_rating_tables",
     "ModelMetrics",
     "ModelSummary",
+    "RandomEffectResult",
     "SuperGLMRegressor",
     "SuperGLMClassifier",
     "Poisson",
@@ -161,6 +156,9 @@ __all__ = [
     "OrderedCategorical",
     "Constraint",
     "ConstraintSpec",
+    "FactorSmooth",
+    "FactorSmoothResult",
+    "RandomEffect",
     "LevelGrouping",
     "collapse_levels",
     "Numeric",
@@ -224,4 +222,4 @@ __all__ = [
     "dispersion_test",
     "vuong_test",
 ]
-__version__ = "0.14.0"
+__version__ = "0.15.0"

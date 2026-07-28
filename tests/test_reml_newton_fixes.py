@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import LambdaPolicy, RandomEffect, SuperGLM
 from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -268,6 +268,7 @@ class TestNoPostLoopRescue:
         )
         model.fit_reml(X[["x1", "x2"]], y, sample_weight=w, max_reml_iter=2)
         assert not model._reml_result.converged
+        assert model._reml_result.termination_reason == "max_reml_iter"
 
     def test_genuine_convergence_still_true(self, poisson_data):
         """Models that genuinely converge still report converged=True."""
@@ -279,6 +280,155 @@ class TestNoPostLoopRescue:
         )
         model.fit_reml(X[["x1"]], y, sample_weight=w)
         assert model._reml_result.converged
+        assert model._reml_result.termination_reason == "score_objective_tolerance"
+
+
+class TestTerminationAuthority:
+    """Termination status must describe the optimizer state that was checked."""
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_loose_tolerance_still_evaluates_two_candidates(self, discrete):
+        rng = np.random.default_rng(20260728)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+            discrete=discrete,
+        )
+
+        model.fit_reml(
+            X,
+            y,
+            max_reml_iter=8,
+            reml_tol=1e9,
+            runtime_validation="skip",
+        )
+
+        assert model._reml_result.converged
+        assert model._reml_result.n_reml_iter == 2
+
+    def test_direct_rejected_search_stops_at_evaluated_lambdas(self, monkeypatch):
+        """Exact REML reports step failure without taking an unscored fallback."""
+        import superglm.reml.direct as direct_reml
+
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        evaluated_lambdas: dict[str, float] = {}
+
+        def reject_lambda_moves(*args, **kwargs):
+            candidate = args[6]
+            if not evaluated_lambdas:
+                evaluated_lambdas.update(candidate)
+                return 0.0
+            unchanged = all(
+                candidate[name] == pytest.approx(value) for name, value in evaluated_lambdas.items()
+            )
+            return 0.0 if unchanged else 1.0
+
+        monkeypatch.setattr(direct_reml, "reml_laml_objective", reject_lambda_moves)
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+        )
+
+        model.fit_reml(X, y, max_reml_iter=5, runtime_validation="skip")
+
+        result = model._reml_result
+        assert not result.converged
+        assert result.termination_reason == "line_search_failed"
+        assert result.n_reml_iter == 1
+        assert result.lambdas == pytest.approx(evaluated_lambdas)
+
+    def test_final_accepted_trial_is_recorded_in_histories(self):
+        rng = np.random.default_rng(20260727)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+        )
+
+        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+
+        result = model._reml_result
+        assert model._reml_profile["reml_n_linesearch_fits"] > 0
+        assert result.lambda_history[-1] == pytest.approx(result.lambdas)
+        assert result.objective_history[-1] == pytest.approx(result.objective)
+
+    def test_discrete_rejected_search_retains_evaluated_lambdas(self, monkeypatch):
+        """An exhausted line search must not install an unevaluated fallback."""
+        import superglm.reml.discrete as discrete_reml
+
+        rng = np.random.default_rng(20260726)
+        x = rng.uniform(0.0, 1.0, 240)
+        y = rng.poisson(np.exp(0.2 + np.sin(2.0 * np.pi * x))).astype(float)
+        X = pd.DataFrame({"x": x})
+        evaluated_lambdas: dict[str, float] = {}
+
+        def reject_lambda_moves(*args, **kwargs):
+            candidate = args[6]
+            if not evaluated_lambdas:
+                evaluated_lambdas.update(candidate)
+                return 0.0
+            unchanged = all(
+                candidate[name] == pytest.approx(value) for name, value in evaluated_lambdas.items()
+            )
+            return 0.0 if unchanged else 1.0
+
+        monkeypatch.setattr(discrete_reml, "reml_laml_objective", reject_lambda_moves)
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(k=7)},
+            selection_penalty=0,
+            discrete=True,
+        )
+
+        model.fit_reml(X, y, max_reml_iter=1, runtime_validation="skip")
+
+        result = model._reml_result
+        assert not result.converged
+        assert result.termination_reason == "max_reml_iter"
+        assert result.lambdas == pytest.approx(evaluated_lambdas)
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_all_fixed_random_effect_has_no_lambda_search(self, discrete):
+        rng = np.random.default_rng(20260725)
+        n_levels = 12
+        repeats = 20
+        codes = np.repeat(np.arange(n_levels), repeats)
+        effects = rng.normal(scale=0.35, size=n_levels)
+        y = rng.poisson(np.exp(-0.2 + effects[codes])).astype(float)
+        X = pd.DataFrame({"group": np.array([f"g{i}" for i in codes], dtype=object)})
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "group": RandomEffect(
+                    lambda_policy=LambdaPolicy.fixed(2.0),
+                )
+            },
+            selection_penalty=0,
+            discrete=discrete,
+            direct_solve="structured",
+        )
+
+        model.fit_reml(X, y, max_reml_iter=20, runtime_validation="skip")
+
+        result = model._reml_result
+        profile = model._reml_profile
+        assert result.converged
+        assert result.termination_reason == "fixed_lambdas"
+        assert result.n_reml_iter == 1
+        assert profile["reml_n_linesearch_fits"] == 0
+        if discrete:
+            assert profile["reml_n_analytical_iters"] == 0
 
 
 # ── Bug 6: Summary iter count ────────────────────────────────────

@@ -23,6 +23,7 @@ from superglm.distributions import Gamma, Gaussian, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
+from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.penalty_algebra import (
@@ -33,6 +34,8 @@ from superglm.reml.penalty_algebra import (
     compute_penalty_nullity,
     compute_total_penalty_rank,
     evaluate_tensor_pair_logdet_summaries,
+    penalty_component_quadratic,
+    total_penalty_quadratic,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.reml.scale import (
@@ -41,9 +44,17 @@ from superglm.reml.scale import (
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
 )
+from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
+from superglm.solvers.structured import (
+    BlockStructuredSystem,
+    ScalarStructuredSystem,
+    SumToZeroBlockStructuredSystem,
+    resolve_structured_backend,
+    solve_cached_structured,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -220,6 +231,8 @@ def optimize_discrete_reml_cached_w(
     _t_newton = 0.0
     _t_linesearch = 0.0
     _t_linesearch_solve = 0.0
+    _t_structured_cache_solve = 0.0
+    _t_block_structured_cache_solve = 0.0
     _t_linesearch_surrogate = 0.0
     _t_linesearch_full_obj = 0.0
     _t_rebuild_dm = 0.0
@@ -243,6 +256,15 @@ def optimize_discrete_reml_cached_w(
         estimated_mask = np.ones(m, dtype=bool)
     log_lo, log_hi = np.log(1e-6), np.log(1e10)
     p = dm.p
+    structured_decision = resolve_structured_backend(
+        list(dm.group_matrices),
+        groups,
+        direct_solve=direct_solve,
+        coefficient_width=p,
+        row_weights=sample_weight,
+        lambda2=lambdas,
+    )
+    use_structured = structured_decision.use_structured
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None
@@ -257,15 +279,45 @@ def optimize_discrete_reml_cached_w(
     best_lambdas = lambdas.copy()
     best_pirls = None
     converged = False
+    termination_reason = "max_reml_iter"
+    all_lambdas_fixed = not bool(np.any(estimated_mask))
 
     _n_pirls_steps = 0
     _n_newton_steps = 0
     _n_linesearch_evals = 0
+    _n_structured_cache_solves = 0
+    _n_block_structured_cache_solves = 0
     _n_linesearch_surrogate_evals = 0
     _n_linesearch_full_evals = 0
     _outer_step_stats: list[dict[str, float | int | bool | None | dict[str, float]]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
+    structured_runtime_fallback_reason: str | None = None
+
+    def latch_runtime_backend(
+        pirls_result: PIRLSResult,
+        lambda_values: dict[str, float],
+        penalty: NDArray | None,
+        *,
+        design: DesignMatrix,
+        penalty_components: list[PenaltyComponent],
+    ) -> NDArray | None:
+        """Pin later REML work to Gram after an automatic structured retry."""
+        nonlocal direct_solve, structured_runtime_fallback_reason, use_structured
+        if not use_structured or pirls_result.direct_backend == "structured":
+            return penalty
+        use_structured = False
+        direct_solve = "gram"
+        structured_runtime_fallback_reason = pirls_result.direct_fallback_reason
+        if penalty is not None:
+            return penalty
+        return build_penalty_matrix(
+            list(design.group_matrices),
+            groups,
+            lambda_values,
+            design.p,
+            reml_penalties=penalty_components,
+        )
 
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
@@ -288,12 +340,16 @@ def optimize_discrete_reml_cached_w(
         cache=penalty_context_cache,
     )
     _t_penalty_context += _time.perf_counter() - _t0
-    S_boot = build_penalty_matrix(
-        dm_boot.group_matrices,
-        groups,
-        boot_lambdas,
-        p,
-        reml_penalties=penalties_boot,
+    S_boot = (
+        None
+        if use_structured
+        else build_penalty_matrix(
+            dm_boot.group_matrices,
+            groups,
+            boot_lambdas,
+            p,
+            reml_penalties=penalties_boot,
+        )
     )
     _pirls_start = _time.perf_counter()
     cache: dict = {}
@@ -316,12 +372,20 @@ def optimize_discrete_reml_cached_w(
         cache_out=cache,
         direct_solve=direct_solve,
         S_override=S_boot,
+        reml_penalties=penalties_boot,
         debug_recorder=debug_recorder,
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _pirls_start
+    S_boot = latch_runtime_backend(
+        boot_result,
+        boot_lambdas,
+        S_boot,
+        design=dm_boot,
+        penalty_components=penalties_boot,
+    )
     dm = dm_boot
     penalties = penalties_boot
     penalty_caches = penalty_caches_boot
@@ -345,7 +409,12 @@ def optimize_discrete_reml_cached_w(
     boot_inv_phi = 1.0
     boot_penalty_rank_total = compute_total_penalty_rank(penalties)
     if not scale_known and penalty_caches is not None:
-        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        pq_boot = total_penalty_quadratic(
+            boot_result.beta,
+            boot_lambdas,
+            penalties,
+            list(dm.group_matrices),
+        )
         if boot_result.reml_hessian_rank is None:
             raise RuntimeError("discrete REML bootstrap is missing full-H rank metadata")
         M_p = compute_penalty_nullity(
@@ -353,6 +422,7 @@ def optimize_discrete_reml_cached_w(
             hessian_rank=boot_result.reml_hessian_rank,
             penalties=penalties,
             lambdas=boot_lambdas,
+            coefficient_width=p,
         )
         penalized_deviance = float(boot_result.deviance + pq_boot)
         if isinstance(distribution, Gaussian):
@@ -380,7 +450,12 @@ def optimize_discrete_reml_cached_w(
             )
             boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
     else:
-        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        pq_boot = total_penalty_quadratic(
+            boot_result.beta,
+            boot_lambdas,
+            penalties,
+            list(dm.group_matrices),
+        )
     bootstrap_log_step_cap = 4.0
 
     # Store original fixed lambda values for exact restoration after exp->clip
@@ -396,14 +471,10 @@ def optimize_discrete_reml_cached_w(
             fixed_val = fixed_lambdas[pc.name]
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
             continue
-        omega_ssp = pc.omega_ssp
-        if omega_ssp is None:
-            gm = dm.group_matrices[pc.group_index]
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
         beta_g = boot_result.beta[pc.group_sl]
-        quad = float(beta_g @ omega_ssp @ beta_g)
-        H_inv_jj = boot_inv[pc.group_sl, pc.group_sl]
-        trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+        gm = dm.group_matrices[pc.group_index]
+        quad = penalty_component_quadratic(pc, beta_g, gm)
+        trace_term = as_hessian_factor(boot_inv).trace_inverse_penalty(pc)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
@@ -419,7 +490,11 @@ def optimize_discrete_reml_cached_w(
                 "lam_fp_raw": float(lam_fp),
                 "lam_fp_clipped": lam_fp_clipped,
                 "beta_norm": float(np.linalg.norm(beta_g)),
-                "omega_frob": float(np.linalg.norm(omega_ssp)),
+                "omega_frob": (
+                    float(np.sqrt(pc.group_sl.stop - pc.group_sl.start))
+                    if pc.penalty_kind == "identity"
+                    else float(np.linalg.norm(pc.omega_ssp))
+                ),
                 "block_dim": int(beta_g.shape[0]),
             }
         )
@@ -459,13 +534,16 @@ def optimize_discrete_reml_cached_w(
         cand_lambdas.update(fixed_lambdas)
 
         # --- Step 1: One PIRLS step (W update) ---
-        # Pre-build S once for this candidate
-        S_cand = build_penalty_matrix(
-            dm.group_matrices,
-            groups,
-            cand_lambdas,
-            p,
-            reml_penalties=penalties,
+        S_cand = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                cand_lambdas,
+                p,
+                reml_penalties=penalties,
+            )
         )
 
         _t0 = _time.perf_counter()
@@ -492,18 +570,32 @@ def optimize_discrete_reml_cached_w(
             cache_out=cache,
             direct_solve=direct_solve,
             S_override=S_cand,
+            reml_penalties=penalties,
             debug_recorder=debug_recorder,
             debug_context={"phase": "candidate", "reml_iteration": poi_iter + 1},
             trace_run=trace_run,
             trace_purpose="reml_candidate",
         )
         _t_pirls += _time.perf_counter() - _t0
+        S_cand = latch_runtime_backend(
+            pirls_result,
+            cand_lambdas,
+            S_cand,
+            design=dm,
+            penalty_components=penalties,
+        )
         _n_pirls_steps += 1
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
         warm_deviance = float(pirls_result.deviance)
 
-        c_centered_XtWX = cache["centered_XtWX"]
+        c_centered_XtWX = cache.get("centered_XtWX")
+        c_structured_system = cache.get("structured_system")
+        if use_structured and not isinstance(
+            c_structured_system,
+            ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+        ):
+            raise RuntimeError("Structured discrete REML cache is missing its block system.")
         c_centered_XtWz = cache["centered_rhs"]
         c_mean_x = cache["mean_x"]
         c_mean_z = cache["mean_z"]
@@ -562,11 +654,17 @@ def optimize_discrete_reml_cached_w(
                         hessian_rank=pirls_result.reml_hessian_rank,
                         penalties=penalties,
                         lambdas=cand_lambdas,
+                        coefficient_width=p,
                     )
                 if isinstance(objective_evaluation, REMLObjectiveEvaluation):
                     penalized_deviance = objective_evaluation.penalized_deviance
                 else:
-                    pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
+                    pq = total_penalty_quadratic(
+                        pirls_result.beta,
+                        cand_lambdas,
+                        penalties,
+                        list(dm.group_matrices),
+                    )
                     penalized_deviance = float(pirls_result.deviance + pq)
                 phi_hat = max(
                     penalized_deviance / max(len(y) - penalty_nullity, 1.0),
@@ -600,6 +698,12 @@ def optimize_discrete_reml_cached_w(
             best_pirls = pirls_result
         lambda_history.append(cand_lambdas.copy())
 
+        if all_lambdas_fixed:
+            rho = rho_clipped
+            converged = True
+            termination_reason = "fixed_lambdas"
+            break
+
         # --- Step 2: Newton step on lambda ---
         _t0 = _time.perf_counter()
         grad = reml_direct_gradient(
@@ -612,6 +716,41 @@ def optimize_discrete_reml_cached_w(
             inverse_phi=inverse_phi,
             tensor_pair_evaluations=cand_tensor_pair_evals,
         )
+        # The convergence decision belongs to this evaluated candidate.
+        # Do not construct or install another Newton step before deciding
+        # whether these exact lambdas are terminal.
+        proj_grad_d = project_reml_gradient(
+            grad,
+            rho_clipped,
+            estimated_mask,
+            log_lower=log_lo,
+            log_upper=log_hi,
+        )
+        candidate_convergence = evaluate_reml_candidate(
+            iteration=poi_iter,
+            objective=obj,
+            previous_objective=prev_obj,
+            projected_gradient=proj_grad_d,
+            tolerance=_tol,
+        )
+        score_scale_d = candidate_convergence.score_scale
+        proj_grad_norm = candidate_convergence.projected_gradient_norm
+        obj_change = candidate_convergence.objective_change
+        if verbose:
+            lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
+            print(
+                f"  POI iter {poi_iter + 1}  obj={obj:.4f}  "
+                f"|grad|={proj_grad_norm:.6f}  delta_obj={obj_change:.6g}  [{lam_str}]"
+            )
+        if candidate_convergence.converged:
+            rho = rho_clipped
+            prev_obj = obj
+            converged = True
+            termination_reason = "score_objective_tolerance"
+            _t_newton += _time.perf_counter() - _t0
+            break
+        prev_obj = obj
+
         hess = reml_direct_hessian(
             dm.group_matrices,
             distribution,
@@ -630,20 +769,7 @@ def optimize_discrete_reml_cached_w(
         )
 
         # Active-set: freeze components with negligible gradient and Hessian
-        # Wood (2011) Section 6.2: score_scale = 1 + |V_r|
-        score_scale_d = max(1.0 + abs(obj), 1.0)
         freeze_tol_d = 0.1 * _tol
-
-        proj_grad_d = grad.copy()
-        for i in range(m):
-            if not estimated_mask[i]:
-                # Fixed lambda — always zero out gradient contribution
-                proj_grad_d[i] = 0.0
-            elif rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
-                proj_grad_d[i] = 0.0
-            elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
-                proj_grad_d[i] = 0.0
-
         frozen_d = np.zeros(m, dtype=bool)
         for i in range(m):
             if not estimated_mask[i]:
@@ -658,29 +784,40 @@ def optimize_discrete_reml_cached_w(
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
         if active_idx_d.size == 0:
-            delta = np.zeros(m)
-        else:
-            if active_idx_d.size < m:
-                hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
-                grad_sub_d = grad[active_idx_d]
-            else:
-                hess_sub_d = hess
-                grad_sub_d = grad
+            rho = rho_clipped
+            _t_newton += _time.perf_counter() - _t0
+            if poi_iter == 0:
+                # Do not let a deliberately loose tolerance bypass the
+                # two-evaluation convergence contract.
+                continue
+            converged = True
+            termination_reason = "active_set_stationary"
+            break
 
-            eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
-            max_eig_d = max(abs(eigvals_h).max(), 1e-12)
-            eig_floor_d = max_eig_d * _eps**0.7
-            eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
-            delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
-            delta = np.zeros(m)
-            delta[active_idx_d] = delta_sub_d
+        if active_idx_d.size < m:
+            hess_sub_d = hess[np.ix_(active_idx_d, active_idx_d)]
+            grad_sub_d = grad[active_idx_d]
+        else:
+            hess_sub_d = hess
+            grad_sub_d = grad
+
+        eigvals_h, eigvecs_h = np.linalg.eigh(hess_sub_d)
+        max_eig_d = max(abs(eigvals_h).max(), 1e-12)
+        eig_floor_d = max_eig_d * _eps**0.7
+        eigvals_pd = np.maximum(np.abs(eigvals_h), eig_floor_d)
+        delta_sub_d = -(eigvecs_h * (1.0 / eigvals_pd)) @ (eigvecs_h.T @ grad_sub_d)
+        delta = np.zeros(m)
+        delta[active_idx_d] = delta_sub_d
 
         tensor_step_diag = None
         if use_tensor_surrogate_linesearch:
             base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
             delta = np.clip(delta, -base_cap, base_cap)
             for group_name, (i, j) in shared_tensor_pairs:
-                if not estimated_mask[i] or not estimated_mask[j]:
+                # Preserve the active-set Newton scatter. A two-dimensional
+                # pair solve must not reintroduce a frozen margin or overwrite
+                # the live margin with curvature from a settled coordinate.
+                if frozen_d[i] or frozen_d[j]:
                     continue
                 grad_pair = grad[[i, j]]
                 hess_pair = hess[np.ix_([i, j], [i, j])]
@@ -695,7 +832,10 @@ def optimize_discrete_reml_cached_w(
                 raw_u = float(delta_uv[0])
                 raw_v = float(delta_uv[1])
                 cap_u = 2.5 if not _tensor_post_stall_unlocked else 5.0
-                cap_v = 0.25 if not _tensor_post_stall_unlocked else 0.35
+                # Keep the bootstrap ratio conservative. After one clean full
+                # step, allow a one-log-unit ratio move so a finite margin does
+                # not crawl when its partner is heading to working infinity.
+                cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
                 used_u = float(np.clip(raw_u, -cap_u, cap_u))
                 used_v = float(np.clip(raw_v, -cap_v, cap_v))
                 delta_pair = J @ np.array([used_u, used_v])
@@ -745,13 +885,16 @@ def optimize_discrete_reml_cached_w(
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
             trial_lambdas.update(fixed_lambdas)
 
-            # Build the trial penalty before the cached profiled solve.
-            S_trial = build_penalty_matrix(
-                dm.group_matrices,
-                groups,
-                trial_lambdas,
-                p,
-                reml_penalties=penalties,
+            S_trial = (
+                None
+                if use_structured
+                else build_penalty_matrix(
+                    dm.group_matrices,
+                    groups,
+                    trial_lambdas,
+                    p,
+                    reml_penalties=penalties,
+                )
             )
 
             _n_linesearch_evals += 1
@@ -774,17 +917,47 @@ def optimize_discrete_reml_cached_w(
             # Solve the cached profiled-intercept system analytically
             # (O(p^3), no data pass).
             _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
-                _solve_cached_profiled_system(
-                    c_centered_XtWX,
-                    S_trial,
-                    c_centered_XtWz,
-                    c_mean_x,
-                    c_sum_W,
-                    c_mean_z,
+            if use_structured:
+                if not isinstance(
+                    c_structured_system,
+                    ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                ):  # pragma: no cover - validated above
+                    raise RuntimeError("Structured cached solve has no block system.")
+                cached_solution = solve_cached_structured(
+                    c_structured_system,
+                    list(dm.group_matrices),
+                    groups,
+                    trial_lambdas,
+                    reml_penalties=penalties,
                 )
-            )
-            _t_linesearch_solve += _time.perf_counter() - _tls0
+                beta_trial = cached_solution.beta
+                intercept_trial = cached_solution.intercept
+                log_det_H_trial = cached_solution.log_det_H
+                hessian_rank_trial = cached_solution.hessian_rank
+            else:
+                if c_centered_XtWX is None or S_trial is None:
+                    raise RuntimeError("Dense cached solve is missing matrix geometry.")
+                beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
+                    _solve_cached_profiled_system(
+                        c_centered_XtWX,
+                        S_trial,
+                        c_centered_XtWz,
+                        c_mean_x,
+                        c_sum_W,
+                        c_mean_z,
+                    )
+                )
+            cached_solve_elapsed = _time.perf_counter() - _tls0
+            _t_linesearch_solve += cached_solve_elapsed
+            if use_structured:
+                _t_structured_cache_solve += cached_solve_elapsed
+                _n_structured_cache_solves += 1
+                if isinstance(
+                    c_structured_system,
+                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                ):
+                    _t_block_structured_cache_solve += cached_solve_elapsed
+                    _n_block_structured_cache_solves += 1
 
             # Evaluate full REML at trial point once the cached surrogate
             # suggests an improving direction (or for all trials on the
@@ -841,16 +1014,47 @@ def optimize_discrete_reml_cached_w(
         if use_tensor_surrogate_linesearch and candidate is not None and not accepted:
             rho_trial, trial_lambdas, S_trial = candidate
             _tls0 = _time.perf_counter()
-            beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
-                _solve_cached_profiled_system(
-                    c_centered_XtWX,
-                    S_trial,
-                    c_centered_XtWz,
-                    c_mean_x,
-                    c_sum_W,
-                    c_mean_z,
+            if use_structured:
+                if not isinstance(
+                    c_structured_system,
+                    ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                ):  # pragma: no cover - validated above
+                    raise RuntimeError("Structured cached solve has no block system.")
+                cached_solution = solve_cached_structured(
+                    c_structured_system,
+                    list(dm.group_matrices),
+                    groups,
+                    trial_lambdas,
+                    reml_penalties=penalties,
                 )
-            )
+                beta_trial = cached_solution.beta
+                intercept_trial = cached_solution.intercept
+                log_det_H_trial = cached_solution.log_det_H
+                hessian_rank_trial = cached_solution.hessian_rank
+            else:
+                if c_centered_XtWX is None or S_trial is None:
+                    raise RuntimeError("Dense cached solve is missing matrix geometry.")
+                beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
+                    _solve_cached_profiled_system(
+                        c_centered_XtWX,
+                        S_trial,
+                        c_centered_XtWz,
+                        c_mean_x,
+                        c_sum_W,
+                        c_mean_z,
+                    )
+                )
+            cached_solve_elapsed = _time.perf_counter() - _tls0
+            _t_linesearch_solve += cached_solve_elapsed
+            if use_structured:
+                _t_structured_cache_solve += cached_solve_elapsed
+                _n_structured_cache_solves += 1
+                if isinstance(
+                    c_structured_system,
+                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
+                ):
+                    _t_block_structured_cache_solve += cached_solve_elapsed
+                    _n_block_structured_cache_solves += 1
             eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
@@ -901,19 +1105,11 @@ def optimize_discrete_reml_cached_w(
             _tensor_post_stall_unlocked = True
 
         if not accepted:
-            # Steepest descent fallback: unit-length in infinity norm
-            # Use proj_grad_d so that fixed components are not moved.
-            grad_max_d = float(np.max(np.abs(proj_grad_d)))
-            if grad_max_d > 1e-12:
-                rho = np.clip(
-                    rho - proj_grad_d / grad_max_d,
-                    log_lo,
-                    log_hi,
-                )
-            # else: keep rho unchanged
+            # Every trial was rejected, so retain the evaluated candidate.
+            # Installing an unscored fallback here can make a max-iteration
+            # refit report lambdas that were never accepted by the criterion.
+            rho = rho_clipped
 
-        # Convergence check -- compound criterion with score_scale
-        proj_grad_norm = float(np.max(np.abs(proj_grad_d)))
         if use_tensor_surrogate_linesearch:
             tensor_names = [pc.name for pc in penalties if pc.group_name in shared_tensor_groups]
             tensor_lams = {name: float(cand_lambdas[name]) for name in tensor_names}
@@ -947,23 +1143,6 @@ def optimize_discrete_reml_cached_w(
             )
             if tensor_log_ratio is not None:
                 _prev_tensor_v = tensor_log_ratio
-
-        if verbose:
-            lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
-            obj_change_d = abs(obj - prev_obj) if poi_iter > 0 else np.inf
-            print(
-                f"  POI iter {poi_iter + 1}  obj={obj:.4f}  "
-                f"|grad|={proj_grad_norm:.6f}  delta_obj={obj_change_d:.6g}  [{lam_str}]"
-            )
-
-        obj_change = abs(obj - prev_obj) if poi_iter > 0 else np.inf
-        prev_obj = obj
-        if poi_iter >= 1:
-            grad_converged_d = proj_grad_norm < _tol * score_scale_d
-            obj_converged_d = obj_change < _tol * score_scale_d
-            if grad_converged_d and obj_converged_d:
-                converged = True
-                break
 
         current_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(np.clip(rho, log_lo, log_hi)), strict=False):
@@ -1047,8 +1226,16 @@ def optimize_discrete_reml_cached_w(
         cache=penalty_context_cache,
     )
     _t_tensor_summary += _time.perf_counter() - _t0
-    S_final = build_penalty_matrix(
-        dm.group_matrices, groups, final_lambdas, dm.p, reml_penalties=penalties
+    S_final = (
+        None
+        if use_structured
+        else build_penalty_matrix(
+            dm.group_matrices,
+            groups,
+            final_lambdas,
+            dm.p,
+            reml_penalties=penalties,
+        )
     )
     _t0 = _time.perf_counter()
     final_result, final_inv, final_xtwx = fit_irls_direct(
@@ -1068,12 +1255,20 @@ def optimize_discrete_reml_cached_w(
         profile=profile,
         direct_solve=direct_solve,
         S_override=S_final,
+        reml_penalties=penalties,
         debug_recorder=debug_recorder,
         debug_context={"phase": "optimizer_final", "reml_iteration": poi_iter + 1},
         trace_run=trace_run,
         trace_purpose="reml_optimizer_final",
     )
     _t_pirls += _time.perf_counter() - _t0
+    S_final = latch_runtime_backend(
+        final_result,
+        final_lambdas,
+        S_final,
+        design=dm,
+        penalty_components=penalties,
+    )
     _t0 = _time.perf_counter()
     final_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
         tensor_pair_summaries, final_lambdas
@@ -1104,9 +1299,13 @@ def optimize_discrete_reml_cached_w(
     best_obj = final_obj
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
+    if structured_runtime_fallback_reason is not None:
+        best_pirls.direct_fallback_reason = structured_runtime_fallback_reason
     lambda_history.append(final_lambdas.copy())
 
     if profile is not None:
+        if structured_runtime_fallback_reason is not None:
+            profile["direct_fallback_reason"] = structured_runtime_fallback_reason
         if _bootstrap_component_stats:
             profile["reml_bootstrap_summary"] = {
                 "boot_phi": float(boot_phi),
@@ -1134,6 +1333,15 @@ def optimize_discrete_reml_cached_w(
         profile["reml_hessian_newton_s"] = _t_newton
         profile["reml_linesearch_s"] = _t_linesearch
         profile["reml_linesearch_solve_s"] = _t_linesearch_solve
+        profile["reml_structured_cache_solve_s"] = _t_structured_cache_solve
+        profile["reml_n_structured_cache_solves"] = _n_structured_cache_solves
+        profile["reml_block_structured_cache_solve_s"] = _t_block_structured_cache_solve
+        profile["reml_n_block_structured_cache_solves"] = _n_block_structured_cache_solves
+        # Lambda-only Schur re-solves consume cached O(q² + Kq) moments.
+        # Objective evaluation may score eta separately, but the solve itself
+        # never traverses row-scale design data.
+        profile["reml_structured_cache_data_passes"] = 0
+        profile["reml_block_structured_cache_data_passes"] = 0
         profile["reml_linesearch_surrogate_s"] = _t_linesearch_surrogate
         profile["reml_linesearch_full_obj_s"] = _t_linesearch_full_obj
         profile["reml_rebuild_dm_s"] = _t_rebuild_dm
@@ -1157,4 +1365,5 @@ def optimize_discrete_reml_cached_w(
         lambda_history=lambda_history,
         objective=float(best_obj),
         curvature_source="fisher",
+        termination_reason=termination_reason,
     )

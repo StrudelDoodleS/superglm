@@ -62,6 +62,7 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "lambda_history": getattr(reml, "lambda_history", None) or [],
             "n_reml_iter": getattr(reml, "n_reml_iter", None),
             "converged": getattr(reml, "converged", None),
+            "termination_reason": getattr(reml, "termination_reason", None),
             "objective": getattr(reml, "objective", None),
             "objective_history": getattr(reml, "objective_history", None),
             "inner_iter_history": getattr(reml, "inner_iter_history", None),

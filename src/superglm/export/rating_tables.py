@@ -57,6 +57,30 @@ class RatingTablePayload:
 _OFFSET_SOURCE_RESERVED_COLUMNS = frozenset({"Relativity", "Weight"})
 
 
+def _unsupported_structured_export_terms(model: SuperGLM) -> list[str]:
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.random_effect import RandomEffect
+
+    unsupported = [
+        name for name in model._feature_order if isinstance(model._specs[name], RandomEffect)
+    ]
+    unsupported.extend(
+        name
+        for name in model._interaction_order
+        if isinstance(model._interaction_specs[name], FactorSmooth)
+    )
+    return unsupported
+
+
+def _preflight_rating_table_terms(model: SuperGLM) -> None:
+    unsupported = _unsupported_structured_export_terms(model)
+    if unsupported:
+        raise NotImplementedError(
+            "Rating-table export does not yet support conditional or population-only "
+            f"RandomEffect/FactorSmooth terms {unsupported!r}; no payload was produced."
+        )
+
+
 def _resolve_format(file_path: str | Path, format: str | None) -> str:
     if format is not None:
         fmt = format.lower().lstrip(".")
@@ -526,6 +550,7 @@ def build_rating_table_payload(
 ) -> RatingTablePayload:
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
+    _preflight_rating_table_terms(model)
 
     native_X = X
     frame = as_eager_frame(X)

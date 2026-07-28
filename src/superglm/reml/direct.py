@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from superglm._fit_trace import TraceRun
 from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DesignMatrix
+from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
@@ -33,6 +34,8 @@ from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     coerce_reml_penalties,
     compute_penalty_nullity,
+    penalty_component_quadratic,
+    total_penalty_quadratic,
 )
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import (
@@ -43,7 +46,10 @@ from superglm.reml.scale import (
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
 from superglm.solvers.centered_system import TabmatCenteringState
+from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.pirls import PIRLSResult
+from superglm.solvers.structured import resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -141,6 +147,15 @@ def optimize_direct_reml(
         )
         == "observed"
     )
+    structured_decision = resolve_structured_backend(
+        list(dm.group_matrices),
+        groups,
+        direct_solve=direct_solve,
+        coefficient_width=dm.p,
+        row_weights=sample_weight,
+        lambda2=lambdas,
+    )
+    use_structured = structured_decision.use_structured
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
@@ -168,7 +183,9 @@ def optimize_direct_reml(
     best_lambdas = lambdas.copy()
     best_pirls = None
     converged = False
+    termination_reason = "max_reml_iter"
     n_iter = 0
+    all_lambdas_fixed = not bool(np.any(estimated_mask))
 
     _t_reml_start = _time.perf_counter()
     _t_pirls = 0.0
@@ -182,14 +199,45 @@ def optimize_direct_reml(
     _observed_mode_rejected_trial_count = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
+    structured_runtime_fallback_reason: str | None = None
+
+    def latch_runtime_backend(
+        pirls_result: PIRLSResult,
+        lambda_values: dict[str, float],
+        penalty: NDArray | None,
+    ) -> NDArray | None:
+        """Pin later REML work to Gram after an automatic structured retry."""
+        nonlocal direct_solve, structured_runtime_fallback_reason, use_structured
+        if not use_structured or pirls_result.direct_backend == "structured":
+            return penalty
+        use_structured = False
+        direct_solve = "gram"
+        structured_runtime_fallback_reason = pirls_result.direct_fallback_reason
+        if penalty is not None:
+            return penalty
+        return build_penalty_matrix(
+            list(dm.group_matrices),
+            groups,
+            lambda_values,
+            dm.p,
+            reml_penalties=penalties,
+        )
 
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
     # bootstrap fit. Keep main-effect bootstrap lambdas tiny, but start
     # interaction penalty components from a materially stronger seed.
     boot_lambdas = {pc.name: (1.0 if ":" in pc.group_name else 1e-4) for pc in penalties}
-    S_boot = build_penalty_matrix(
-        dm.group_matrices, groups, boot_lambdas, dm.p, reml_penalties=penalties
+    S_boot = (
+        None
+        if use_structured
+        else build_penalty_matrix(
+            dm.group_matrices,
+            groups,
+            boot_lambdas,
+            dm.p,
+            reml_penalties=penalties,
+        )
     )
     _t0 = _time.perf_counter()
     boot_result, boot_inv, boot_xtwx = fit_irls_direct(
@@ -207,19 +255,26 @@ def optimize_direct_reml(
         profile=profile,
         direct_solve=direct_solve,
         S_override=S_boot,
+        reml_penalties=penalties,
         debug_recorder=debug_recorder,
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _t0
+    S_boot = latch_runtime_backend(boot_result, boot_lambdas, S_boot)
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
 
     boot_phi = 1.0
     boot_inv_phi = 1.0
     if not scale_known:
-        pq_boot = float(boot_result.beta @ S_boot @ boot_result.beta)
+        pq_boot = total_penalty_quadratic(
+            boot_result.beta,
+            boot_lambdas,
+            penalties,
+            dm.group_matrices,
+        )
         boot_hessian_rank = boot_result.reml_hessian_rank
         if boot_hessian_rank is None:
             boot_hessian_rank = 1 + dm.p
@@ -228,6 +283,7 @@ def optimize_direct_reml(
             hessian_rank=boot_hessian_rank,
             penalties=penalties,
             lambdas=boot_lambdas,
+            coefficient_width=dm.p,
         )
         penalized_deviance = float(boot_result.deviance + pq_boot)
         if isinstance(distribution, Gaussian):
@@ -270,11 +326,9 @@ def optimize_direct_reml(
             rho[i] = np.clip(np.log(max(fixed_val, 1e-6)), log_lo, log_hi)
             continue
         gm = dm.group_matrices[pc.group_index]
-        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else gm.R_inv.T @ gm.omega @ gm.R_inv
         beta_g = boot_result.beta[pc.group_sl]
-        quad = float(beta_g @ omega_ssp @ beta_g)
-        H_inv_jj = boot_inv[pc.group_sl, pc.group_sl]
-        trace_term = float(np.trace(H_inv_jj @ omega_ssp))
+        quad = penalty_component_quadratic(pc, beta_g, gm)
+        trace_term = as_hessian_factor(boot_inv).trace_inverse_penalty(pc)
         r_j = pc.rank if pc.rank > 0 else (penalty_ranks[pc.name] if penalty_ranks else 0.0)
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
@@ -317,13 +371,16 @@ def optimize_direct_reml(
         # Restore exact fixed values (exp->clip would clamp 0.0 to 1e-6)
         cand_lambdas.update(fixed_lambdas)
 
-        # Pre-build penalty matrix S once for this lambda candidate
-        S_cand = build_penalty_matrix(
-            dm.group_matrices,
-            groups,
-            cand_lambdas,
-            dm.p,
-            reml_penalties=penalties,
+        S_cand = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                cand_lambdas,
+                dm.p,
+                reml_penalties=penalties,
+            )
         )
 
         _t0 = _time.perf_counter()
@@ -345,12 +402,14 @@ def optimize_direct_reml(
             profile=profile,
             direct_solve=direct_solve,
             S_override=S_cand,
+            reml_penalties=penalties,
             debug_recorder=debug_recorder,
             debug_context={"phase": "candidate", "reml_iteration": n_iter},
             trace_run=trace_run,
             trace_purpose="reml_candidate",
         )
         _t_pirls += _time.perf_counter() - _t0
+        S_cand = latch_runtime_backend(pirls_result, cand_lambdas, S_cand)
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
 
@@ -373,6 +432,12 @@ def optimize_direct_reml(
                 penalty=S_cand,
                 tabmat_state=observed_tabmat_state,
                 derivative_order=w_correction_order,
+                groups=groups if use_structured else None,
+                lambdas=cand_lambdas if use_structured else None,
+                reml_penalties=penalties if use_structured else None,
+                structured_group_index=(
+                    structured_decision.group_index if use_structured else None
+                ),
             )
             _t_observed_geometry += _time.perf_counter() - _t0
             if geometry.hessian_inverse is None:  # pragma: no cover - requested above
@@ -389,6 +454,8 @@ def optimize_direct_reml(
                 result=pirls_result,
                 penalty=S_cand,
                 geometry=geometry,
+                lambdas=cand_lambdas if use_structured else None,
+                reml_penalties=penalties if use_structured else None,
             )
             _accepted_observed_mode_residual_max = max(
                 _accepted_observed_mode_residual_max,
@@ -451,11 +518,17 @@ def optimize_direct_reml(
                         hessian_rank=hessian_rank,
                         penalties=penalties,
                         lambdas=cand_lambdas,
+                        coefficient_width=dm.p,
                     )
                 if isinstance(objective_evaluation, REMLObjectiveEvaluation):
                     penalized_deviance = objective_evaluation.penalized_deviance
                 else:
-                    pq = float(pirls_result.beta @ S_cand @ pirls_result.beta)
+                    pq = total_penalty_quadratic(
+                        pirls_result.beta,
+                        cand_lambdas,
+                        penalties,
+                        dm.group_matrices,
+                    )
                     penalized_deviance = float(pirls_result.deviance + pq)
                 phi_hat = max(
                     penalized_deviance / max(len(y) - penalty_nullity, 1.0),
@@ -484,6 +557,15 @@ def optimize_direct_reml(
                 purpose="reml_candidate",
                 authoritative=False,
             )
+
+        if all_lambdas_fixed:
+            best_obj = obj
+            best_lambdas = cand_lambdas.copy()
+            best_pirls = pirls_result
+            lambda_history.append(cand_lambdas.copy())
+            converged = True
+            termination_reason = "fixed_lambdas"
+            break
 
         _t0 = _time.perf_counter()
         grad_partial = reml_direct_gradient(
@@ -535,21 +617,23 @@ def optimize_direct_reml(
 
         lambda_history.append(cand_lambdas.copy())
 
-        proj_grad = grad.copy()
-        for i in range(m):
-            if not estimated_mask[i]:
-                # Fixed lambda — always zero out gradient contribution
-                proj_grad[i] = 0.0
-            elif rho_clipped[i] >= log_hi - 0.01 and grad[i] < 0:
-                proj_grad[i] = 0.0
-            elif rho_clipped[i] <= log_lo + 0.01 and grad[i] > 0:
-                proj_grad[i] = 0.0
-        proj_grad_norm = float(np.max(np.abs(proj_grad)))
-
-        # Compound convergence criterion (Wood 2011):
-        # Wood (2011) Section 6.2: max(|g_j|) < eps * (1 + |V_r|).
-        score_scale = max(1.0 + abs(obj), 1.0)
-        obj_change = abs(obj - prev_obj) if outer > 0 else np.inf
+        proj_grad = project_reml_gradient(
+            grad,
+            rho_clipped,
+            estimated_mask,
+            log_lower=log_lo,
+            log_upper=log_hi,
+        )
+        candidate_convergence = evaluate_reml_candidate(
+            iteration=outer,
+            objective=obj,
+            previous_objective=prev_obj,
+            projected_gradient=proj_grad,
+            tolerance=_tol,
+        )
+        proj_grad_norm = candidate_convergence.projected_gradient_norm
+        score_scale = candidate_convergence.score_scale
+        obj_change = candidate_convergence.objective_change
 
         if verbose:
             lam_str = ", ".join(f"{name}={cand_lambdas[name]:.4g}" for name in group_names)
@@ -561,13 +645,10 @@ def optimize_direct_reml(
 
         prev_obj = obj
 
-        # Require at least 2 iterations before checking convergence
-        if outer >= 1:
-            grad_converged = proj_grad_norm < _tol * score_scale
-            obj_converged = obj_change < _tol * score_scale
-            if grad_converged and obj_converged:
-                converged = True
-                break
+        if candidate_convergence.converged:
+            converged = True
+            termination_reason = "score_objective_tolerance"
+            break
 
         # Wood outer-Hessian update.  With ``w_correction_order=2`` this
         # includes the exact available second curvature derivatives; the
@@ -611,9 +692,15 @@ def optimize_direct_reml(
         active_idx = np.where(~frozen)[0]
 
         if active_idx.size == 0:
-            # All components frozen -- converged
+            rho = rho_clipped
             _t_hessian += _time.perf_counter() - _t0
+            if outer == 0:
+                # Do not let a deliberately loose tolerance bypass the
+                # two-evaluation convergence contract.
+                continue
+            # All components frozen -- converged
             converged = True
+            termination_reason = "active_set_stationary"
             break
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
@@ -649,20 +736,28 @@ def optimize_direct_reml(
         armijo_c = 1e-4
         descent = float(grad @ delta)
         accepted = False
+        had_feasible_trial = False
         for _ls in range(max_ls):
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
+            if np.all(np.abs(rho_trial - rho_clipped) <= 1e-12):
+                break
+            had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_fits += 1
-            S_trial = build_penalty_matrix(
-                dm.group_matrices,
-                groups,
-                trial_lambdas,
-                dm.p,
-                reml_penalties=penalties,
+            S_trial = (
+                None
+                if use_structured
+                else build_penalty_matrix(
+                    dm.group_matrices,
+                    groups,
+                    trial_lambdas,
+                    dm.p,
+                    reml_penalties=penalties,
+                )
             )
             trial_result, _trial_inv, trial_xtwx = fit_irls_direct(
                 X=dm,
@@ -682,6 +777,7 @@ def optimize_direct_reml(
                 profile=profile,
                 direct_solve=direct_solve,
                 S_override=S_trial,
+                reml_penalties=penalties,
                 debug_recorder=debug_recorder,
                 debug_context={
                     "phase": "line_search",
@@ -692,6 +788,7 @@ def optimize_direct_reml(
                 trace_run=trace_run,
                 trace_purpose="reml_line_search",
             )
+            S_trial = latch_runtime_backend(trial_result, trial_lambdas, S_trial)
 
             trial_logdet = trial_result.log_det_H
             trial_hessian_rank: int | None = None
@@ -713,6 +810,12 @@ def optimize_direct_reml(
                         penalty=S_trial,
                         tabmat_state=observed_tabmat_state,
                         compute_inverse=False,
+                        groups=groups if use_structured else None,
+                        lambdas=trial_lambdas if use_structured else None,
+                        reml_penalties=penalties if use_structured else None,
+                        structured_group_index=(
+                            structured_decision.group_index if use_structured else None
+                        ),
                     )
                 except ValueError:
                     _t_observed_geometry += _time.perf_counter() - _t_geometry
@@ -731,6 +834,8 @@ def optimize_direct_reml(
                     result=trial_result,
                     penalty=S_trial,
                     geometry=trial_geometry,
+                    lambdas=trial_lambdas if use_structured else None,
+                    reml_penalties=penalties if use_structured else None,
                 )
                 trial_mode_residual = trial_mode_score.relative_max
                 if trial_mode_score.relative_max > observed_mode_tol:
@@ -811,6 +916,9 @@ def optimize_direct_reml(
                     best_obj = float(trial_obj)
                     best_lambdas = trial_lambdas.copy()
                     best_pirls = trial_result
+                    if outer == max_reml_iter - 1:
+                        lambda_history.append(trial_lambdas.copy())
+                        objective_history.append(float(trial_obj))
                 accepted = True
                 break
             if trial_mode_residual is not None:
@@ -822,23 +930,27 @@ def optimize_direct_reml(
             step *= 0.5
 
         if not accepted:
-            # Steepest descent fallback: unit-length in infinity norm
-            # Use proj_grad so that fixed components are not moved.
-            grad_max = float(np.max(np.abs(proj_grad)))
-            if grad_max > 1e-12:
-                rho = np.clip(
-                    rho_clipped - proj_grad / grad_max,
-                    log_lo,
-                    log_hi,
-                )
-            else:
-                rho = rho_clipped
+            rho = rho_clipped
+            _t_linesearch += _time.perf_counter() - _t0
+            if not had_feasible_trial:
+                # All projected coordinates are stationary at a bound.
+                # Re-evaluate this same point once so the compound objective
+                # criterion can confirm stability without redundant trial fits.
+                continue
+            # The fully converged exact objective rejected every feasible
+            # trial. Stop rather than installing an unscored fallback.
+            termination_reason = "line_search_failed"
+            break
         _t_linesearch += _time.perf_counter() - _t0
 
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
+    if structured_runtime_fallback_reason is not None:
+        best_pirls.direct_fallback_reason = structured_runtime_fallback_reason
 
     if profile is not None:
+        if structured_runtime_fallback_reason is not None:
+            profile["direct_fallback_reason"] = structured_runtime_fallback_reason
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
         profile["reml_pirls_s"] = _t_pirls
         profile["reml_objective_s"] = _t_objective
@@ -865,4 +977,5 @@ def optimize_direct_reml(
         objective=float(best_obj),
         objective_history=objective_history,
         curvature_source="observed" if use_observed_geometry else "fisher",
+        termination_reason=termination_reason,
     )

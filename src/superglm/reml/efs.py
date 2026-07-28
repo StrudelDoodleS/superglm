@@ -28,6 +28,8 @@ from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     coerce_reml_penalties,
     compute_total_penalty_rank,
+    penalty_component_quadratic,
+    penalty_component_trace,
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.solvers.irls_direct import _safe_decompose_H
@@ -139,9 +141,13 @@ def optimize_efs_reml(
         beta_g = boot_result.beta[pc.group_sl]
         if np.linalg.norm(beta_g) < 1e-12:
             continue
-        omega_ssp = pc.omega_ssp if pc.omega_ssp is not None else penalty_caches[pc.name].omega_ssp
-        quad = float(beta_g @ omega_ssp @ beta_g)
-        trace_term = float(np.trace(H_boot_inv[pc.group_sl, pc.group_sl] @ omega_ssp))
+        gm = dm.group_matrices[pc.group_index]
+        quad = penalty_component_quadratic(pc, beta_g, gm)
+        trace_term = penalty_component_trace(
+            pc,
+            H_boot_inv[pc.group_sl, pc.group_sl],
+            gm,
+        )
         r_j = pc.rank if pc.rank > 0 else penalty_ranks[pc.name]
         denom = boot_inv_phi * quad + trace_term
         lam_fp = r_j / denom if denom > 1e-12 else 1.0
@@ -239,11 +245,13 @@ def optimize_efs_reml(
             if np.linalg.norm(beta_g) < 1e-12:
                 continue
 
-            omega_ssp = (
-                pc.omega_ssp if pc.omega_ssp is not None else penalty_caches[pc.name].omega_ssp
+            gm = dm.group_matrices[pc.group_index]
+            quad = penalty_component_quadratic(pc, beta_g, gm)
+            trace_term = penalty_component_trace(
+                pc,
+                H_inv[pc.group_sl, pc.group_sl],
+                gm,
             )
-            quad = float(beta_g @ omega_ssp @ beta_g)
-            trace_term = float(np.trace(H_inv[pc.group_sl, pc.group_sl] @ omega_ssp))
 
             r_j = pc.rank if pc.rank > 0 else penalty_ranks[pc.name]
             denom = inv_phi * quad + trace_term

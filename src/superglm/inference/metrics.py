@@ -22,6 +22,9 @@ from superglm.inference.coef_tables import build_basis_detail, build_coef_rows  
 from superglm.inference.covariance import (  # noqa: F401
     _active_penalty_matrix,
     _second_diff_penalty,
+    covariance_selected_block,
+    covariance_selected_diagonal,
+    covariance_slope_view,
 )
 from superglm.inference.summary import ModelSummary, _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
@@ -298,9 +301,6 @@ class ModelMetrics:
                     )
                 )
         self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
-        self._uses_compact_fit_inference = bool(
-            self._dm is None and "_fit_inference_info" in model.__dict__
-        )
 
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
@@ -316,11 +316,30 @@ class ModelMetrics:
             and np.array_equal(self._offset, fit_offset_array)
         )
         fit_weights = getattr(model, "_fit_weights", None)
-        self._fit_geometry_matches = bool(
-            self._uses_fit_design
-            and fit_weights is not None
-            and np.shape(fit_weights) == np.shape(self._weights)
-            and np.array_equal(np.asarray(fit_weights), self._weights)
+        released_geometry_guard = getattr(model, "_fit_geometry_guard", None)
+        if self._dm is None and released_geometry_guard is not None:
+            self._fit_geometry_matches = released_geometry_guard.matches(
+                self._X,
+                self._weights,
+                self._offset,
+            )
+        else:
+            self._fit_geometry_matches = bool(
+                self._uses_fit_design
+                and fit_weights is not None
+                and np.shape(fit_weights) == np.shape(self._weights)
+                and np.array_equal(np.asarray(fit_weights), self._weights)
+            )
+        self._uses_compact_fit_inference = bool(
+            (
+                self._dm is None
+                and "_fit_inference_info" in model.__dict__
+                and self._fit_geometry_matches
+            )
+            or (
+                getattr(model, "_linear_system_state", None) is not None
+                and self._fit_geometry_matches
+            )
         )
 
         if _mu is not None:
@@ -674,9 +693,15 @@ class ModelMetrics:
         - XtWX_inv_aug: (p_active+1, p_active+1) augmented inverse incl. intercept
         - active_groups: list of GroupSlice for active groups (re-indexed to X_a columns)
         """
+        if self._dm is None and not self._uses_compact_fit_inference:
+            raise RuntimeError(
+                "retain_fit_state=False discarded the fitted design and the requested "
+                "inference geometry does not match the fit geometry; refit with "
+                "retain_fit_state=True for diagnostics on alternate rows, weights, or offsets"
+            )
         beta = self._result.beta
         rank_info = getattr(self._result, "rank_info", None)
-        if self._fit_geometry_matches:
+        if self._fit_geometry_matches and self._dm is not None:
             W = self._fit_working_weights
         else:
             eta, mu = self._working_eta_mu
@@ -976,8 +1001,15 @@ class ModelMetrics:
             else:
                 # Find corresponding active group
                 ag = next(ag for ag in active_groups if ag.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                var_diag = phi * np.diag(XtWX_inv_aug[aug_sl, aug_sl])
+                augmented_indices = np.arange(
+                    1 + ag.start,
+                    1 + ag.end,
+                    dtype=np.intp,
+                )
+                var_diag = phi * covariance_selected_diagonal(
+                    XtWX_inv_aug,
+                    augmented_indices,
+                )
                 values = np.sqrt(np.maximum(var_diag, 0.0))
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
                 result[g.name] = values
@@ -1006,8 +1038,15 @@ class ModelMetrics:
                 result[g.name] = np.zeros(g.size)
             else:
                 ag = next(ag for ag in active_groups if ag.name == g.name)
-                aug_sl = slice(1 + ag.start, 1 + ag.end)
-                var_diag = np.diag(XtWX_inv_aug[aug_sl, aug_sl])
+                augmented_indices = np.arange(
+                    1 + ag.start,
+                    1 + ag.end,
+                    dtype=np.intp,
+                )
+                var_diag = covariance_selected_diagonal(
+                    XtWX_inv_aug,
+                    augmented_indices,
+                )
                 values = np.sqrt(np.maximum(var_diag, 0.0))
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
                 result[g.name] = values
@@ -1080,7 +1119,7 @@ class ModelMetrics:
             phi = self.phi if phi_scale else 1.0
             se = feature_se_from_cov(
                 name,
-                phi * XtWX_inv_aug[1:, 1:],
+                covariance_slope_view(XtWX_inv_aug, scale=phi),
                 active_groups,
                 self._result,
                 self._groups,
@@ -1126,7 +1165,7 @@ class ModelMetrics:
 
         indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
         aug_indices = indices + 1  # offset by 1 for intercept row/col
-        Cov_g = phi * XtWX_inv_aug[np.ix_(aug_indices, aug_indices)]
+        Cov_g = phi * covariance_selected_block(XtWX_inv_aug, aug_indices)
 
         if isinstance(spec, _SplineBase):
             x_grid = np.linspace(spec._lo, spec._hi, n_points)

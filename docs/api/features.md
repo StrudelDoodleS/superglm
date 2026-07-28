@@ -52,6 +52,23 @@ with `model.apply_shape_postfit(...)`.
 
 ::: superglm.Categorical
 
+::: superglm.RandomEffect
+
 ::: superglm.Numeric
 
 ::: superglm.Polynomial
+
+## Interaction Specs
+
+`FactorSmooth(variable, group=..., basis=..., kind=...)` separates two choices:
+
+- `basis="fs"` builds fully penalized random curves with shared wiggle and
+  null-space REML components. A global spline is optional.
+- `basis="sz"` builds pointwise sum-to-zero deviation curves with one shared
+  wiggle component. A matching global `Spline` is required.
+- `kind="ps"` selects the marginal P-spline basis for either construction.
+
+The grouping column must not also be configured as `Categorical` or
+`RandomEffect`; that would duplicate lower-order group geometry.
+
+::: superglm.FactorSmooth
