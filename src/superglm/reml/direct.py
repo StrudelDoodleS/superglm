@@ -182,6 +182,9 @@ def optimize_direct_reml(
     best_obj = np.inf
     best_lambdas = lambdas.copy()
     best_pirls = None
+    # Converged state of the accepted line-search trial, reusable as the next
+    # iteration's candidate when the lambda signature is unchanged.
+    _carry_forward: tuple | None = None
     converged = False
     termination_reason = "max_reml_iter"
     n_iter = 0
@@ -383,32 +386,42 @@ def optimize_direct_reml(
             )
         )
 
-        _t0 = _time.perf_counter()
-        pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
-            X=dm,
-            y=y,
-            weights=sample_weight,
-            family=distribution,
-            link=link,
-            groups=groups,
-            lambda2=cand_lambdas,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-            max_iter=max_pirls_iter,
-            tol=observed_pirls_tol,
-            convergence="coefficients" if use_observed_geometry else "deviance",
-            return_xtwx=True,
-            profile=profile,
-            direct_solve=direct_solve,
-            S_override=S_cand,
-            reml_penalties=penalties,
-            debug_recorder=debug_recorder,
-            debug_context={"phase": "candidate", "reml_iteration": n_iter},
-            trace_run=trace_run,
-            trace_purpose="reml_candidate",
+        _reused = (
+            _carry_forward is not None
+            and set(_carry_forward[0]) == set(cand_lambdas)
+            and all(_carry_forward[0][name] == cand_lambdas[name] for name in cand_lambdas)
         )
-        _t_pirls += _time.perf_counter() - _t0
+        if _reused:
+            _, pirls_result, XtWX_S_inv, XtWX, S_cand = _carry_forward
+            if profile is not None:
+                profile["reml_candidate_reuses"] = profile.get("reml_candidate_reuses", 0) + 1
+        else:
+            _t0 = _time.perf_counter()
+            pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
+                X=dm,
+                y=y,
+                weights=sample_weight,
+                family=distribution,
+                link=link,
+                groups=groups,
+                lambda2=cand_lambdas,
+                offset=offset_arr,
+                beta_init=warm_beta,
+                intercept_init=warm_intercept,
+                max_iter=max_pirls_iter,
+                tol=observed_pirls_tol,
+                convergence="coefficients" if use_observed_geometry else "deviance",
+                return_xtwx=True,
+                profile=profile,
+                direct_solve=direct_solve,
+                S_override=S_cand,
+                reml_penalties=penalties,
+                debug_recorder=debug_recorder,
+                debug_context={"phase": "candidate", "reml_iteration": n_iter},
+                trace_run=trace_run,
+                trace_purpose="reml_candidate",
+            )
+            _t_pirls += _time.perf_counter() - _t0
         S_cand = latch_runtime_backend(pirls_result, cand_lambdas, S_cand)
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
@@ -732,6 +745,7 @@ def optimize_direct_reml(
         # Step-halving line search with Armijo condition
         _t0 = _time.perf_counter()
         max_ls = 8
+        _carry_forward = None
         step = 1.0
         armijo_c = 1e-4
         descent = float(grad @ delta)
@@ -759,7 +773,7 @@ def optimize_direct_reml(
                     reml_penalties=penalties,
                 )
             )
-            trial_result, _trial_inv, trial_xtwx = fit_irls_direct(
+            trial_result, trial_inv, trial_xtwx = fit_irls_direct(
                 X=dm,
                 y=y,
                 weights=sample_weight,
@@ -919,6 +933,17 @@ def optimize_direct_reml(
                     if outer == max_reml_iter - 1:
                         lambda_history.append(trial_lambdas.copy())
                         objective_history.append(float(trial_obj))
+                # The accepted trial's lambdas become the next iteration's
+                # candidate lambdas, and the candidate refit at the top of the
+                # loop solves the identical penalised system. Carry the
+                # converged state forward instead of recomputing it.
+                _carry_forward = (
+                    trial_lambdas.copy(),
+                    trial_result,
+                    trial_inv,
+                    trial_xtwx,
+                    S_trial,
+                )
                 accepted = True
                 break
             if trial_mode_residual is not None:
