@@ -37,7 +37,6 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
-    _cross_gram,
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
@@ -1081,14 +1080,6 @@ def build_design_matrix(
                 constraints=result.constraints,
                 monotone_engine=result.monotone_engine,
             )
-            gm, g_new = _maybe_apply_tensor_side_constraints(
-                gm,
-                g_new,
-                ispec,
-                group_matrices,
-                groups,
-                sample_weight=sample_weight,
-            )
             if hasattr(ispec, "set_reparametrisation") and hasattr(gm, "R_inv"):
                 ispec.set_reparametrisation(gm.R_inv)
             elif r_inv is not None and hasattr(ispec, "set_reparametrisation"):
@@ -1143,79 +1134,16 @@ def _group_has_lambda(gm, g, lambdas):
     return False
 
 
-def _null_space_projection(C: NDArray, tol: float = 1e-10) -> NDArray | None:
-    """Return a column projection that nulls out the row space of ``C``."""
-    if C.size == 0:
-        return None
-    _, s, vt = np.linalg.svd(C, full_matrices=True)
-    if len(s) == 0:
-        return None
-    thresh = s[0] * tol
-    rank = int(np.sum(s > thresh))
-    if rank == 0:
-        return None
-    if rank >= vt.shape[0]:
-        return np.zeros((vt.shape[1], 0), dtype=np.float64)
-    return vt[rank:].T.copy()
-
-
-def _compose_group_projection(gm, Q: NDArray) -> None:
-    """Compose an additional solver-space projection into a group matrix."""
-    if hasattr(gm, "R_inv"):
-        gm.R_inv = gm.R_inv @ Q
-        gm.shape = (gm.shape[0], gm.R_inv.shape[1])
-    elif hasattr(gm, "M"):
-        gm.M = gm.M @ Q
-        gm.shape = gm.M.shape
-
-    if getattr(gm, "projection", None) is not None:
-        gm.projection = gm.projection @ Q
-    else:
-        gm.projection = Q
-
-
-def _maybe_apply_tensor_side_constraints(
-    gm,
-    g: GroupSlice,
-    ispec: Any,
-    prior_group_matrices: list[GroupMatrix],
-    prior_groups: list[GroupSlice],
-    *,
-    sample_weight: NDArray,
-) -> tuple[GroupMatrix, GroupSlice]:
-    """Project a tensor interaction away from parent and overlapping tensor spans."""
-    if not isinstance(gm, DiscretizedTensorGroupMatrix):
-        return gm, g
-
-    parent_set = set(getattr(ispec, "parent_names", ()))
-    if len(parent_set) < 2 or getattr(ispec, "_decompose", False):
-        return gm, g
-
-    cross_blocks: list[NDArray] = []
-    W = np.asarray(sample_weight, dtype=np.float64)
-    for prior_gm, prior_g in zip(prior_group_matrices, prior_groups, strict=False):
-        if ":" not in prior_g.feature_name:
-            continue
-
-        prior_parents = set(prior_g.feature_name.split(":"))
-        if parent_set & prior_parents:
-            cross = _cross_gram(prior_gm, gm, W)
-            cross_blocks.append(np.asarray(cross, dtype=np.float64))
-
-    if not cross_blocks:
-        return gm, g
-
-    C = np.vstack(cross_blocks)
-    Q = _null_space_projection(C)
-    if Q is None:
-        return gm, g
-    if Q.shape[1] == 0:
-        return gm, g
-
-    _compose_group_projection(gm, Q)
-    g.end = g.start + Q.shape[1]
-    g.weight = float(np.sqrt(Q.shape[1]))
-    return gm, g
+# Discrete tensor interactions are deliberately *not* constrained against one
+# another.  ``ti()`` marginals are already centered, so two terms sharing a
+# marginal — ``ti(a, b) + ti(a, c)``, the standard mgcv functional-ANOVA
+# pattern — span distinct, jointly identifiable surfaces.  A cross-Gram null
+# space is also the wrong instrument for cross-term aliasing: it keeps the
+# directions a tensor shares *least* with its neighbours, so on a holey joint
+# support (correlated marginals, common in insurance data) it retains that
+# tensor's numerically null subspace and discards the whole fitted surface.
+# The exact path builds the full span and lets the penalty and shared rank
+# policy handle degenerate directions; the discrete path must match it.
 
 
 def rebuild_design_matrix_with_lambdas(

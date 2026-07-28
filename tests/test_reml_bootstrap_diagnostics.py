@@ -66,7 +66,12 @@ def test_discrete_reml_records_bootstrap_lambda_diagnostics() -> None:
 
 
 def test_projected_tensor_penalty_ranks_use_solver_space() -> None:
-    """Side-constrained tensor penalties should report projected-space ranks."""
+    """Projected tensor penalties should report projected-space ranks.
+
+    ``decompose=True`` splits a tensor into bilinear and wiggly subgroups via
+    an explicit solver-space projection, so the raw penalty rank can exceed the
+    projected block dimension.  The REML rank must follow the projected block.
+    """
     rng = np.random.default_rng(123)
     n = 300
     X = pd.DataFrame(
@@ -89,8 +94,10 @@ def test_projected_tensor_penalty_ranks_use_solver_space() -> None:
             "B": Spline(kind="cr", n_knots=8, penalty="ssp", discrete=True),
             "C": Spline(kind="cr", n_knots=8, penalty="ssp", discrete=True),
         },
-        interactions=[("B", "C"), ("A", "C"), ("A", "B")],
     )
+    model._add_interaction("B", "C", decompose=True)
+    model._add_interaction("A", "C", decompose=True)
+    model._add_interaction("A", "B", decompose=True)
     model._build_design_matrix(X, y, sample_weight, None)
 
     reml_groups = [
@@ -111,6 +118,11 @@ def test_projected_tensor_penalty_ranks_use_solver_space() -> None:
 
     eps_thresh = np.finfo(float).eps ** (2 / 3)
     for component in projected_components:
+        projection = model._dm.group_matrices[component.group_index].projection
+        # Guard against the test silently degrading to unprojected blocks.
+        assert projection.shape[1] < projection.shape[0]
+        assert component.omega_ssp.shape[0] == projection.shape[1]
+
         eigvals = np.linalg.eigvalsh(component.omega_ssp)
         thresh = eps_thresh * max(float(eigvals.max()), 1e-12)
         solver_rank = float(np.sum(eigvals > thresh))
