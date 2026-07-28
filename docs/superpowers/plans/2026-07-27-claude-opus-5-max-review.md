@@ -122,9 +122,11 @@ None.
 
 ## Validation
 
-- Parsed every workflow YAML file.
-- Ran the supply-chain governance tests.
-- Confirmed the final branch scope.
+- `rtk uv run python -c 'from pathlib import Path; import yaml; [yaml.safe_load(path.read_text(encoding="utf-8")) for path in Path(".github/workflows").glob("*.yml")]'`
+- `rtk uv run pytest tests/test_supply_chain_governance.py -q`
+- `rtk git status --short --branch`
+- `rtk git diff --check origin/master...HEAD`
+- `rtk git diff --stat origin/master...HEAD`
 EOF
 ```
 
