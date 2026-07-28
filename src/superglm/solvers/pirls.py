@@ -123,6 +123,23 @@ class _FrozenResultMapping(Mapping[object, object]):
 
 
 @dataclass(frozen=True)
+class REMLGeometrySummary:
+    """Cheap centered-system moments retained for in-loop REML consumers.
+
+    Carries exactly what the exact-REML gradient and objective otherwise read
+    from ``rank_info``: the weighted column means, the working-weight sum, and
+    the data-gram column scales feeding the signed-gram stability policy.
+    Populating it is O(p) from quantities the solve already holds, which lets
+    the optimizer loop skip per-fit rank certification without changing what
+    either consumer sees.
+    """
+
+    mean_x: NDArray
+    sum_w: float
+    column_scale: NDArray
+
+
+@dataclass(frozen=True)
 class IterationDiagnostics:
     """Per-iteration IRLS diagnostics for debugging convergence issues."""
 
@@ -188,6 +205,7 @@ class PIRLSResult:
     # Moore-Penrose pseudo-determinant.
     log_det_H: float | None = None  # noqa: N815
     reml_hessian_rank: int | None = None
+    reml_geometry: REMLGeometrySummary | None = None
     rank_info: RankInfo | None = None
     state_id: int | None = None
     evaluation_id: int | None = None

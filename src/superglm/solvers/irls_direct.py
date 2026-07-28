@@ -68,6 +68,7 @@ from superglm.solvers.irls_state import (
 from superglm.solvers.pirls import (
     IterationDiagnostics,
     PIRLSResult,
+    REMLGeometrySummary,
     _positive_working_weight_stats,
 )
 from superglm.solvers.rank import (
@@ -2304,6 +2305,7 @@ def _fit_irls_direct_once(
     structured_factor: (
         ProfiledScalarSchurFactor | ProfiledBlockSchurFactor | ProfiledSumToZeroBlockFactor | None
     ) = None
+    reml_geometry_summary: REMLGeometrySummary | None = None
     if _use_structured:
         if structured_final is None or _final_penalized_operator is None:
             raise RuntimeError("Structured fit did not produce final coefficient blocks.")
@@ -2373,6 +2375,14 @@ def _fit_irls_direct_once(
             XtWX_S_inv_beta = reml_slope_rank.pseudo_inverse()
             log_det_H = float(np.log(centered_final.sum_w) + reml_slope_rank.log_pdet)
             reml_hessian_rank = 1 + reml_slope_rank.rank
+            # O(p) summary of the centered system for the REML gradient and
+            # objective, so the loop can run without per-fit rank metadata.
+            # column_scale matches decompose_gram's definition bit-for-bit.
+            reml_geometry_summary = REMLGeometrySummary(
+                mean_x=np.asarray(centered_final.mean_x, dtype=np.float64),
+                sum_w=float(centered_final.sum_w),
+                column_scale=np.sqrt(np.maximum(np.diag(centered_final.data_gram), 0.0)),
+            )
         else:
             reml_slope_rank = None
             XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
@@ -2491,6 +2501,7 @@ def _fit_irls_direct_once(
         iteration_log=iteration_log if record_diagnostics else None,
         log_det_H=log_det_H,
         reml_hessian_rank=reml_hessian_rank,
+        reml_geometry=reml_geometry_summary,
         rank_info=rank_info,
         state_id=retained.state_id,
         evaluation_id=retained.evaluation_id,
