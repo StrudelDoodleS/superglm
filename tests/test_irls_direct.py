@@ -279,8 +279,11 @@ class TestDirectSolverBasic:
 
         assert build_calls == 1
         assert result.rank_info is None
-        assert result.effective_df == 0.0
-        assert result.phi == 1.0
+        # Stats-skipping fits poison the unevaluated statistics so accidental
+        # publication fails visibly instead of presenting 0 EDF or unit
+        # dispersion as if either had been computed.
+        assert np.isnan(result.effective_df)
+        assert np.isnan(result.phi)
         assert family.deviance_calls == 1
         assert np.all(np.isfinite(result.beta))
         assert np.all(np.isfinite(inverse))
