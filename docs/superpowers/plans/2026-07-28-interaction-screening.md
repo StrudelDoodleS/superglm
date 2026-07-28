@@ -130,3 +130,32 @@ Investigation of `features/interaction.py` collapses Tasks 3a/3b:
    max review over Tasks 2+3 together after 3c lands, attention on the
    U_nuisance choice, edf-clamp ranking at bracket edges, and coordinate
    consistency with interaction.py.
+
+---
+
+## Naming and positioning (decided 2026-07-28)
+
+**The method is named PSST — Penalized Smooth Score Test** (Max's pick over
+SPECS/TRACE). Formal phrase in docs: "penalized smooth score screening". The
+API stays `screen_interactions()`; PSST appears in docstrings, the result
+object, and any paper. Novelty posture, honestly stated: the primitive
+(score-testing a candidate smooth at a fitted null) is classical — Lin 1997,
+Zhang & Lin 2003, the RLRT line, Wood 2013 — and the claimed contribution is
+the combination: all-pairs screening at one fused histogram per pair via the
+cell algebra, the fixed-EDF lambda_0 calibration that makes raw statistics
+rank across pairs, and the exact-support exposure-weighted GAM setting. A
+targeted prior-art sweep (non-arXiv test literature, glinternet/hierNet/xyz,
+mboost, anything citing Wood 2013 for screening, actuarial venues and
+Emblem/Radar-era proprietary heuristics) is REQUIRED before any public
+novelty claim.
+
+**Linear interaction-search literature — positioning, not machinery:**
+glinternet/hierNet are selection-by-fitting (all pair blocks in one penalized
+fit) — the expensive endgame PSST screening avoids; superglm's own
+selection_penalty path already offers that shape as an alternative
+confirmatory stage and both are paper baselines. xyz (Thanei et al., JMLR
+2018) solves subquadratic pair SEARCH for huge p — irrelevant at rating-factor
+p (45-1200 pairs brute-forces in well under a second) but the backstop idea if
+screening ever faces hundreds of engineered features. Hierarchy stance stated
+for v1: mains-first (screen only pairs whose margins are fitted), i.e. weak
+hierarchy by construction.
