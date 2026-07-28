@@ -9,20 +9,56 @@ from __future__ import annotations
 import numpy as np
 import scipy.sparse as sp
 
-from superglm._group_matrix._group_matrix_support import detect_row_support
+from superglm._group_matrix._group_matrix_support import (
+    detect_row_support,
+    plan_row_support,
+)
 
 
-def test_detect_row_support_compresses_repeated_rows():
-    base = np.array([[1.0, 0.0], [0.0, 2.0], [3.0, 4.0]])
-    rows = base[np.array([0, 1, 2, 0, 1, 0])]
+def _repeated_basis(n=20_000, n_support=60, p_b=9, nnz_row=4, seed=0):
+    """A B-spline-shaped basis: locally supported rows drawn from a small support."""
+    gen = np.random.default_rng(seed)
+    base = np.zeros((n_support, p_b))
+    for row in range(n_support):
+        cols = gen.choice(p_b, size=nnz_row, replace=False)
+        base[row, cols] = gen.normal(size=nnz_row)
+    row_index = gen.integers(0, n_support, n)
+    return sp.csr_matrix(base[row_index]), base, row_index
 
-    result = detect_row_support(sp.csr_matrix(rows))
+
+def test_plan_row_support_compresses_repeated_rows():
+    basis, base, row_index = _repeated_basis()
+
+    result = plan_row_support(basis, row_index)
 
     assert result is not None
-    b_unique, row_index = result
-    assert b_unique.shape == (3, 2)
-    assert row_index.shape == (6,)
-    np.testing.assert_allclose(b_unique[row_index], rows)
+    b_unique, returned_index = result
+    assert b_unique.shape == base.shape
+    np.testing.assert_allclose(b_unique[returned_index], basis.toarray())
+
+
+def test_plan_row_support_declines_when_compression_would_be_slower():
+    """40% distinct rows on a sparse spline basis costs more than it saves."""
+    n = 20_000
+    basis, _, row_index = _repeated_basis(n=n, n_support=n * 4 // 10, seed=1)
+
+    assert plan_row_support(basis, row_index) is None
+
+
+def test_plan_row_support_declines_when_support_buffer_too_large():
+    basis, _, row_index = _repeated_basis(n=20_000, n_support=60)
+
+    assert plan_row_support(basis, row_index, max_support_bytes=1) is None
+
+
+def test_detect_row_support_matches_plan_row_support():
+    basis, _, row_index = _repeated_basis()
+
+    derived = detect_row_support(basis)
+    planned = plan_row_support(basis, row_index)
+
+    assert derived is not None and planned is not None
+    np.testing.assert_allclose(derived[0][derived[1]], planned[0][planned[1]])
 
 
 def test_detect_row_support_declines_when_rows_are_distinct():
@@ -35,12 +71,32 @@ def test_detect_row_support_declines_on_empty_basis():
     assert detect_row_support(sp.csr_matrix((0, 3))) is None
 
 
-def test_detect_row_support_respects_max_ratio():
-    base = np.array([[1.0, 0.0], [0.0, 2.0]])
-    rows = base[np.array([0, 1, 0, 1])]
+def test_nan_rows_decline_rather_than_compress_incorrectly():
+    """The module claims exactness, so NaN must never be merged into a group."""
+    base = np.array([[1.0, 0.0], [np.nan, 2.0]])
+    rows = base[np.array([0, 1] * 500)]
 
-    assert detect_row_support(sp.csr_matrix(rows), max_ratio=0.9) is not None
-    assert detect_row_support(sp.csr_matrix(rows), max_ratio=0.1) is None
+    result = detect_row_support(sp.csr_matrix(rows))
+
+    if result is not None:
+        b_unique, row_index = result
+        reconstructed = b_unique[row_index]
+        finite = np.isfinite(rows)
+        np.testing.assert_allclose(reconstructed[finite], rows[finite])
+        assert np.isnan(reconstructed[~finite]).all()
+
+
+def test_negative_zero_does_not_corrupt_reconstruction():
+    base = np.array([[0.0, 1.0], [-0.0, 1.0], [2.0, 3.0]])
+    rows = base[np.array([0, 1, 2] * 400)]
+
+    result = detect_row_support(sp.csr_matrix(rows))
+
+    if result is not None:
+        b_unique, row_index = result
+        # -0.0 and 0.0 may merge; that is harmless under + and *, but the
+        # reconstruction must still be numerically equal to the input.
+        np.testing.assert_allclose(b_unique[row_index], rows)
 
 
 def test_support_compressed_gram_matches_sparse_ssp():
@@ -236,3 +292,46 @@ def test_support_compressed_class_is_publicly_reachable():
     restored = pickle.loads(pickle.dumps(original))
     assert type(restored) is SupportCompressedSSPGroupMatrix
     np.testing.assert_allclose(restored.toarray(), original.toarray())
+
+
+# (p_b, nnz_row, support_ratio, measured_speedup) at n=200_000, median of 5 after
+# warm-up.  The gate must agree with the sign of these measurements: compress
+# where compression was actually faster, decline where it was actually slower.
+_CALIBRATION = [
+    (9, 4, 0.0005, 20.2),
+    (9, 4, 0.05, 8.3),
+    (9, 4, 0.40, 1.68),
+    (9, 4, 0.95, 0.74),
+    (20, 4, 0.005, 17.4),
+    (20, 4, 0.40, 0.73),
+    (81, 81, 0.05, 407.3),
+    (81, 81, 0.40, 9.96),
+    (81, 81, 0.95, 4.46),
+]
+
+
+def test_gate_agrees_with_measured_crossover():
+    """The cost model is calibrated, not derived; pin it to the measurements."""
+    from superglm._group_matrix._group_matrix_support import _estimated_speedup
+
+    n = 200_000
+    for p_b, nnz_row, ratio, measured in _CALIBRATION:
+        n_support = int(n * ratio)
+        predicted = _estimated_speedup(n, n_support, p_b, nnz=n * nnz_row)
+        should_compress = predicted >= 1.5
+        was_faster = measured >= 1.0
+        assert should_compress == was_faster, (
+            f"p_b={p_b} nnz_row={nnz_row} ratio={ratio}: gate says "
+            f"{'compress' if should_compress else 'decline'} (predicted {predicted:.2f}) "
+            f"but measured speedup was {measured}x"
+        )
+
+
+def test_gate_accepts_the_real_world_blocks():
+    """The two shapes measured on freMTPL2 must both be accepted."""
+    from superglm._group_matrix._group_matrix_support import _estimated_speedup
+
+    # DrivAge k=10 spline: 82 distinct rows in 100k, 4 nonzeros per row.
+    assert _estimated_speedup(100_000, 82, 9, nnz=400_000) >= 1.5
+    # DrivAge:BonusMalus tensor: 2664 distinct rows, fully dense rows.
+    assert _estimated_speedup(100_000, 2_664, 81, nnz=8_100_000) >= 1.5
