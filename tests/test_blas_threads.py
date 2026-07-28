@@ -55,9 +55,14 @@ def test_off_synonyms_disable_capping(monkeypatch):
 def test_unparseable_value_warns_and_caps(monkeypatch):
     import pytest
 
+    from superglm._blas_threads import _auto_policy
+
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "fastest")
     with pytest.warns(UserWarning, match="SUPERGLM_BLAS_THREADS"):
         assert _resolve_limit() == 1
+    # A typo falls back to the automatic cap, so widening must stay active
+    # too -- capped-without-release would be a third, undocumented mode.
+    assert _auto_policy() is True
 
 
 def test_wide_design_releases_auto_cap(monkeypatch):
