@@ -86,6 +86,53 @@ def test_nan_rows_decline_rather_than_compress_incorrectly():
         assert np.isnan(reconstructed[~finite]).all()
 
 
+def _assert_same_partition(labels_a, labels_b):
+    """Two groupings are the same partition iff their joint has no new classes."""
+    joint = labels_a.astype(np.int64) * (int(labels_b.max()) + 1) + labels_b
+    n_joint = len(np.unique(joint))
+    assert n_joint == len(np.unique(labels_a)) == len(np.unique(labels_b))
+
+
+def test_hashed_grouping_matches_byte_keyed_grouping():
+    from superglm._group_matrix._group_matrix_support import (
+        _row_index_chunked,
+        _row_index_hashed,
+    )
+
+    basis, _, _ = _repeated_basis(n=5000, n_support=40, seed=9)
+    _assert_same_partition(
+        _row_index_hashed(basis, chunk_rows=16),
+        _row_index_chunked(basis, chunk_rows=16),
+    )
+
+    special = np.array([[np.nan, 1.0], [np.nan, 1.0], [0.0, 2.0], [-0.0, 2.0]])
+    rows = sp.csr_matrix(special[np.tile(np.arange(4), 300)])
+    _assert_same_partition(
+        _row_index_hashed(rows, chunk_rows=7),
+        _row_index_chunked(rows, chunk_rows=7),
+    )
+
+
+def test_hash_collision_falls_back_to_byte_keyed_grouping(monkeypatch):
+    """With a degenerate hash every row collides; the result must stay exact."""
+    from superglm._group_matrix import _group_matrix_support as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_row_hash_multipliers",
+        lambda p_b: np.zeros(max(p_b, 1), dtype=np.uint64),
+    )
+    basis, base, row_index = _repeated_basis(n=3000, n_support=25, seed=12)
+
+    grouped = mod._row_index_hashed(basis, chunk_rows=64)
+
+    _assert_same_partition(grouped, row_index.astype(np.intp))
+    dense = basis.toarray()
+    first = np.full(int(grouped.max()) + 1, -1, dtype=np.intp)
+    first[grouped[::-1]] = np.arange(len(grouped) - 1, -1, -1)
+    np.testing.assert_array_equal(dense[first][grouped], dense)
+
+
 def test_negative_zero_does_not_corrupt_reconstruction():
     base = np.array([[0.0, 1.0], [-0.0, 1.0], [2.0, 3.0]])
     rows = base[np.array([0, 1, 2] * 400)]
