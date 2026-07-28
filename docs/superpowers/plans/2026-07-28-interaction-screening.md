@@ -208,3 +208,61 @@ freMTPL2 the scan surfaces VehAge:VehPower as the top signal (z=9.2 at
 edf0=16, T=68 nearly unpenalized) ahead of DrivAge:BonusMalus (z=8.9 at 8),
 and the winning-rung column doubles as a shape diagnostic: Density pairs win
 at rung 2 (tilt-level evidence only). Sweep still 2.0 s; suite 4754.
+
+---
+
+## Why the ladder is a grid, not an optimizer (2026-07-29, scratchpad edf0_curve)
+
+Question raised: the ladder {2,4,8,16} is a set — is there a continuous
+function underneath, and is picking edf0 a convex/Brent-able problem?
+
+There IS a function: z(h) = (T(h) - h)/sqrt(2h) over the continuum of
+achievable budgets h; the ladder is a 4-point sample and max-over-rungs
+approximates sup_h z(h). In the penalty eigenbasis (S q = d V~ q after
+profiling), with shrinkage h_i(lambda) = 1/(1 + lambda d_i):
+T = sum u_i^2 h_i, edf = sum h_i, so z = sum (u_i^2 - 1) h_i / sqrt(2 sum
+h_i) — a standardized soft-windowed sum of noisy signal-minus-noise
+increments swept across the eigenvalue axis. That object is generically
+MULTIMODAL: a bump appears wherever a run of eigendirections carries
+signal, so any pair with energy in two spectral regions (tilt + high
+frequency) has two peaks.
+
+Measured (fine geometric grid, 26 rungs, h in [1.3, 36]):
+- 6 of 10 freMTPL2 pairs are multimodal; VehAge:BonusMalus has 3 peaks.
+- VehAge:VehPower is the counterexample to any local optimizer: local max
+  z=3.6 at h=1.3, true peak z=9.8 at h~28. Brent from a low start reports
+  the sweep's #1 pair as mediocre.
+- Even unimodal cases often peak at the BOUNDARY (strong smooth signals:
+  z climbs as h -> h_min; smooth synthetic sup=57 at h=1.3), so "optimize
+  h per pair" mostly returns an edge, not a meaningful bandwidth.
+- Eigen-location confirms the mechanism: smooth synthetic has 96% of
+  excess score energy in the 5 smoothest directions (unimodal); wiggly has
+  27%, energies at ranks {3,4,8,21,24}/25 (two bumps).
+- Ladder vs sup over the grid: top-5 ranking IDENTICAL; max z left on the
+  table 1.29 (all large gaps are left-boundary climbers already ranked
+  high, plus VehAge:VehPower's peak at 28 vs rung 16, gap 0.55).
+
+Where the clean structure lives: the INNER problem — lambda0 from a budget
+via tr((V+lambda S)^-1 V) = edf0 — is smooth and monotone (each h_i is),
+which is exactly why the existing bisection is sound. T(lambda) and
+edf(lambda) are individually convex in lambda; convexity dies in the
+standardized ratio, by construction, because u_i^2 are noisy.
+
+Lineage (adds to the prior-art sweep list): max over a budget ladder of
+standardized score sums is the adaptive-testing family — Fan 1996 adaptive
+Neyman (hard-truncation h_i in {0,1} version of our z), Eubank & Hart 1992
+order selection, Dumbgen & Spokoiny 2001 multiscale testing. Canonical
+practice there: geometric grids (corr(z(h), z(h')) depends on h'/h, so
+dyadic spacing samples at ~equal correlation steps; sup over ALL h needs
+Darling-Erdos loglog corrections). The ladder is the standard
+discretization of this object, not an arbitrary set. Novelty posture
+unchanged: the scan is known machinery; the penalized-smooth-score +
+cell-collapse core is where the new work is.
+
+Recorded refinements, none blocking (ranking measured stable without
+them): (a) extend ladder to {1.5,2,4,8,16,32} — two extra small solves per
+pair, covers both boundary regimes; (b) exact-variance standardization
+z = (T - sum h_i)/sqrt(2 sum h_i^2) — var(T) = 2 tr((AV)^2) <= 2 edf0, so
+current z is conservative where shrinkage is diffuse; (c) rung covariance
+is closed-form, cov(T_r, T_s) = 2 tr(A_r V A_s V), enabling a calibrated
+max-z p-value per pair if screening ever needs more than a ranking.
