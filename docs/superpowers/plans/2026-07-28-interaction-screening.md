@@ -431,3 +431,56 @@ Held items status: extended-ladder-as-default is now REJECTED on
 evidence; the calibrate= layer question stays open (its simulation-
 validated machinery is unaffected by the fix, but its freMTPL2 table
 must be regenerated on the fixed statistic if pursued).
+
+---
+
+## Generalization evidence: synthetic gauntlet + three new real books (2026-07-29)
+
+Question answered: "what happens if I point this at other datasets?"
+All runs through the PUBLIC screen_interactions, default ladder, post-fix
+statistic (scratchpad gauntlet.py, real_books.py; data fetch documented in
+real_books.py — CASdatasets beMTPL97/pg15training via pyreadr, freMTPL2sev
+via OpenML joined to the local freq table on IDpol).
+
+Synthetic gauntlet (10 configs x null/planted x 3 seeds, 9s wall):
+- NULLS HONEST EVERYWHERE: max best-z by config 1.73 (Poisson) to 4.29
+  (heavy lognormal exposure), incl. phi=9 Gaussian (2.07), phi=100
+  Gaussian (2.07 — pre-fix this was z~300), Gamma phi=0.5 (3.11),
+  Bernoulli (2.45), rho=0.85 copula-correlated pair (2.96), 300x220 grid
+  at n=20k (1.99), n=800 (2.05), mu-dependent mixed-Poisson (3.56).
+- phi_hat TRACKS TRUTH in every family: 1.01/1.44/9.0/100.0/0.50/1.00...
+- POWER: planted smooth pair ranks 1/10 in ALL configs (z 11 at n=800 to
+  359 on the 300x220 grid). Two honest weak classes measured:
+  corner-localized hinge interaction ranks 6/10 worst-seed (z~0.4-0.9 —
+  little data in the active corner; a refit would struggle equally), and
+  rho=0.85 correlated pairs demote to rank 4 (ridge support leaves the
+  off-ridge tensor signal thin — same identifiability the ti() refit
+  faces). Neither is a validity failure; both are power limits, and both
+  null cleanly.
+
+Three real books, end to end (mains+screen+top-2 confirmatory refit):
+- beMTPL97 (Belgian MTPL, 163k, 6 splines incl raw long/lat): the screen
+  surfaces long:lat FIRST at z=14.5 (wins at rung 16, lambda0=0.67) —
+  independently rediscovering the published 2-D spatial-smooth modeling
+  choice for this exact book, never having been told the columns are
+  coordinates. bm:agec second at z=10.8. Top-2 refit: deviance gain
+  203.7. Screen 3.5s for 15 pairs at 163k. phi_hat=1.16.
+- freMTPL2sev (French severity, 26.4k claims, Gamma, cap q99.5=34,377,
+  phi_hat=3.55): weak-to-moderate structure, DrivAge:BonusMalus top at
+  z=1.63; top-2 refit gain 93.6 raw (~26 phi-scaled) — modest, matching
+  the modest z.
+- pg15training (Pricing Game TPPD, 100k, phi_hat=1.03): little
+  interaction structure, top z=3.6 (Poldur:Value); top-2 refit gain 13.6
+  — small gain matching small z.
+Across books, z magnitude and refit payoff now COHERE (z 14.5/10.8 ->
+gain 204; z 1.6 -> ~26 scaled; z 3.6 -> 14): the dispersion fix makes z
+meaningful across datasets, which is the property that transfers.
+Zero crashes, zero NaN skips (largest grid 545k cells), screens 1.3-4s.
+
+Pre-flight protocol for a new book (docs material): (1) check the
+printed phi_hat is sane for the family; (2) read z against the measured
+null envelope (best-z < ~4.5 across every config tested; the z<10 gate
+has >2x headroom); (3) winning rung 2 = tilt-level evidence; (4) always
+confirmatory-refit top-3 — the refit, not the screen, is the gate.
+Known gaps unchanged: continuous high-cardinality pairs above the cell
+budget NaN-skip (Task 4 quantile fallback), corner-localized power.
