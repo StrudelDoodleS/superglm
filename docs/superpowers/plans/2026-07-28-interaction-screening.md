@@ -384,3 +384,50 @@ before any landing decision; the multimodality mechanism and the wiggly
 Brent counterexample are unaffected.
 
 Suite: 4759 passed / 152 skipped (5 new regression tests).
+
+---
+
+## Ladder re-measured on the fixed statistic: extension verdict REVERSED (2026-07-29)
+
+Re-ran the full curve/ladder analysis post-5b3d8cf (T/phi_hat scale,
+phi_hat=2.480 on freMTPL2; scratchpad edf0_curve_fixed.py).
+
+Honest z(h) geometry: peaks shift LEFT across the board (DrivAge:BonusMalus
+argmax 4.9, VehAge:VehPower 9.5 — was 6.4 / 27.6); NO pair peaks beyond
+~10, so every pre-fix rung-32 win was dispersion artifact. Real-data
+multimodality drops to 2/10 pairs (was 6/10) but the Brent counterexample
+stands: VehAge:VehPower keeps a false local optimum at h=1.3 (z=0.98) vs
+its true peak z=2.19 at h=9.5, and the wiggly synthetic keeps 2 peaks
+(argmax 11.9). Honest leaders are near-tied: sup_z 2.60 / 2.57 / 2.54 /
+2.19 — the pre-fix separation (9.2 vs 8.9 vs 6.3) was manufactured by
+phi inflation.
+
+The decisive test — confirmatory refit of each ladder's top-2:
+  4-rung top-2 (DaBM + VaVP): deviance gain 116.49
+  6-rung top-2 (DaBM + DaVP): deviance gain  79.55
+  union top-3:                              140.56
+Rung 1.5 promotes tilt-dominant pairs (DrivAge:VehPower, z 1.94 -> 2.35)
+above VehAge:VehPower, but the refit shows VaVP carries ~61 marginal
+deviance vs DaVP's ~24: z at tiny edf measures evidence DENSITY (per df),
+the refit harvests TOTAL evidence. Detection-optimal is not
+payoff-optimal, and the screening product exists to feed refits.
+
+Ladder facts post-fix: oracle rank 1 on 5/5 seeds under both ladders;
+wiggly ladder4 rank 2/2/2 vs ladder6 1/2/2 (marginal); null (5 seeds x 10
+pairs) best-z p95 1.46 (4-rung) vs 1.79 (6-rung), max 1.81 vs 2.30 — both
+far under the z<10 gate and tighter than pre-fix (studentization by
+phi_hat shrinks null tails).
+
+DECISION (reverses the fork-A ADOPT): keep the default ladder (2,4,8,16).
+Rung 32's real-data case was artifact; rung 1.5 buys detection of
+low-payoff tilts at the cost of worse default top-2 refit picks. The tilt
+information is already surfaced honestly by the winning-rung column
+(rung-2 win = tilt-level evidence). Users screening genuinely rough
+domains can pass edf0=(2,4,8,16,32) per call — the API accepts any
+budgets. Doc protocol: with near-tied leaders, refit top-3, not top-2
+(union gain 140.56).
+
+Held items status: extended-ladder-as-default is now REJECTED on
+evidence; the calibrate= layer question stays open (its simulation-
+validated machinery is unaffected by the fix, but its freMTPL2 table
+must be regenerated on the fixed statistic if pursued).
