@@ -676,10 +676,30 @@ reference box; the 5950X numbers above no longer bind). All numbers below are sa
 | **NEW · RFC-12a: in-loop fits skip rank metadata** (commit 096c171) | in-loop candidates/trials never consumed fit statistics; the three O(p) quantities the gradient/objective read (mean_x, sum_w, data-gram column scales) now travel on a `REMLGeometrySummary`; terminal refit unchanged → published stats unchanged; trace/debug runs keep full stats | tensor exact **11.90→5.99 s**, base exact 2.92→2.25 s; streamed-QR certifications 11→2 per fit; trajectory identical (8 iters, 7 reuses) |
 | **NEW · hashed row grouping** (commit bb9ed48) | detection was the last big cost (byte-keyed lexicographic sort, 1.34 s of a 5.7 s fit); now a verified 64-bit mix: 8-byte sort + bitwise verification, collision → byte-keyed fallback; deterministic across machines; NaN/−0.0 semantics preserved | base exact **2.25→1.12 s**, tensor exact **5.99→4.70 s** |
 
-**Cumulative, master f082e9b → branch HEAD, same box:** base exact 8.59→**1.12 s (7.7×)**, tensor exact
-51.77→**4.70 s (11.0×)**; plain-spline exact is now *faster than discrete* at n=100k (0.89×); exact-over-discrete
-on the tensor model 17.6×→**1.35×**. The suite is green throughout (4723 passed incl. mgcv parity, Wood oracles,
-FD gradients, freMTPL2 real-data parity).
+**Cumulative, master f082e9b → branch HEAD, same box:** base exact 8.59→**1.26 s (~6.8×)**, tensor exact
+51.77→**4.46 s (~11.6×)** (branch numbers are medians, see below; the master baselines are single runs).
+The suite is green throughout (4723 passed incl. mgcv parity, Wood oracles, FD gradients, freMTPL2 real-data
+parity).
+
+⚠ **Correction (same day, median re-measurement):** an earlier draft of this section (and commit bb9ed48's
+message) claimed the plain-spline exact fit had overtaken discrete at n=100k (0.89×). That was single-run
+noise — both paths vary ±15% run-to-run on this box. Median-of-reps standings at branch HEAD, plus a
+first full-data measurement:
+
+| n | model | exact | discrete | exact/discrete |
+|---:|---|---:|---:|---:|
+| 100k | base (median of 5) | 1.26 s | 1.08 s | 1.17× |
+| 100k | +tensor (median of 3) | 4.46 s | 3.19 s | 1.40× |
+| 678k (full) | base (single) | 2.75 s | 1.19 s | 2.3× |
+| 678k (full) | +tensor (single) | 14.41 s | 6.96 s | 2.07× |
+
+The honest headline: the exact/discrete gap collapsed from 6.0× (base) and 17.6× (tensor) on master to
+**1.2×/1.4× at 100k and ~2.1–2.3× at full data** — exactness at mid-scale is now nearly free, and
+`discrete=True` keeps its clear value at portfolio scale. Note the discrete path received no optimization on
+this branch and still carries known waste (RFC-9 rebuilds, RFC-11 bootstrap/terminal duplication), so its lead
+at scale is understated. This also re-ranks nothing in §J.4: the remaining exact-path costs at 678k are the
+line-search trial PIRLS passes (RFC-12b) and per-iteration O(n) work the discrete cached-W path avoids by
+design.
 
 ### J.2 Superseding corrections to the backlog
 
