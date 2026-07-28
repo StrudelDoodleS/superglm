@@ -12,10 +12,11 @@ Two entry points, differing only in how the row grouping is obtained:
 
 ``detect_row_support``
     The production path (``dm_builder._build_ssp_group``).  Derives the
-    grouping from the basis itself by keying rows on their raw bytes, a chunk
-    at a time, so only bit-identical rows merge and the transient stays at
-    ``chunk_rows * p_b`` floats.  Needs no assumption that equal covariate
-    values produce bit-identical basis rows.
+    grouping from the basis itself, chunk by chunk, so only bit-identical
+    rows merge; transients are bounded chunks plus one dense
+    ``(n_support, p_b)`` representative block (which approaches the dense
+    basis only when nothing repeats).  Needs no assumption that equal
+    covariate values produce bit-identical basis rows.
 
 ``plan_row_support``
     Core gate + materialisation for callers that already know the grouping --
@@ -207,15 +208,16 @@ def detect_row_support(
     """Derive the row grouping from the basis itself, then plan compression.
 
     Rows are grouped by a vectorized 64-bit mix of their raw float bits and the
-    grouping is verified bitwise, falling back to byte keying on a collision,
-    so transient memory stays bounded at ``chunk_rows * p_b`` floats and the
-    scan is O(n * p_b) either way.  The cost is paid even when compression is
-    declined; callers that already know the grouping can skip it via
-    :func:`plan_row_support`.
+    grouping is verified bitwise, falling back to byte keying on a collision.
+    The scan is O(n * p_b); transients are bounded chunks plus one dense
+    ``(n_support, p_b)`` representative block, and the cost is paid even when
+    compression is declined.  Callers that already know the grouping can skip
+    it via :func:`plan_row_support`.
 
-    Only bit-identical rows merge, which keeps reconstruction exact even for
-    non-finite values: NaN rows merge only when their bit patterns match, and
-    ``-0.0`` stays distinct from ``0.0``.
+    Only bit-identical densified rows merge, so reconstruction is exact even
+    for non-finite values: NaN rows merge only when their bit patterns match.
+    (Explicitly stored ``-0.0`` entries densify to ``+0.0`` before grouping,
+    identically for grouping and reconstruction, so exactness is unaffected.)
     """
     n_rows = B_csr.shape[0]
     if n_rows == 0:
