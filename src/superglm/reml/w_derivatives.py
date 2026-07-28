@@ -292,17 +292,7 @@ def reml_w_correction(
         use_stable_signed_gram = not np.all(
             np.isfinite(centered_scale)
         ) or not _raw_centering_well_scaled(mean_x, centered_scale)
-    elif pirls_result.rank_info is None:
-        factor_mean = getattr(factor, "mean_x", None)
-        factor_sum_w = getattr(factor, "sum_w", None)
-        if factor_mean is None or factor_sum_w is None:
-            mean_x = np.zeros(p)
-            sum_w = None
-        else:
-            mean_x = np.asarray(factor_mean, dtype=np.float64)
-            sum_w = float(factor_sum_w)
-        use_stable_signed_gram = False
-    else:
+    elif pirls_result.rank_info is not None:
         mean_x = np.asarray(pirls_result.rank_info.mean_x, dtype=np.float64)
         if mean_x.shape != (p,):
             raise ValueError("PIRLS rank metadata does not match the REML coefficient space")
@@ -319,6 +309,31 @@ def reml_w_correction(
                     mean_x,
                     centered_scale,
                 )
+    elif pirls_result.reml_geometry is not None:
+        # In-loop fits skip rank metadata; the geometry summary carries the
+        # same centered moments and the same data-gram column scales, so the
+        # signed-gram stability policy sees identical inputs.
+        summary = pirls_result.reml_geometry
+        mean_x = np.asarray(summary.mean_x, dtype=np.float64)
+        if mean_x.shape != (p,):
+            raise ValueError("PIRLS geometry summary does not match the REML coefficient space")
+        sum_w = float(summary.sum_w)
+        if not np.isfinite(sum_w) or sum_w <= 0.0:
+            raise ValueError("PIRLS geometry summary has an invalid working-weight sum")
+        centered_scale = np.asarray(summary.column_scale, dtype=np.float64) / np.sqrt(sum_w)
+        use_stable_signed_gram = centered_scale.shape == mean_x.shape and (
+            not _raw_centering_well_scaled(mean_x, centered_scale)
+        )
+    else:
+        factor_mean = getattr(factor, "mean_x", None)
+        factor_sum_w = getattr(factor, "sum_w", None)
+        if factor_mean is None or factor_sum_w is None:
+            mean_x = np.zeros(p)
+            sum_w = None
+        else:
+            mean_x = np.asarray(factor_mean, dtype=np.float64)
+            sum_w = float(factor_sum_w)
+        use_stable_signed_gram = False
     stable_gram_rhs = np.zeros(dm.n, dtype=np.float64) if use_stable_signed_gram else None
 
     def centered_matvec(values: NDArray) -> NDArray:

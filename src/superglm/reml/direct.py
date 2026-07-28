@@ -182,6 +182,11 @@ def optimize_direct_reml(
     best_obj = np.inf
     best_lambdas = lambdas.copy()
     best_pirls = None
+    # In-loop candidate and trial fits skip per-fit rank metadata: the REML
+    # gradient and objective read the O(p) geometry summary instead, and the
+    # published statistics come from the terminal refit.  Diagnostic runs keep
+    # full statistics so trace rows stay complete.
+    loop_fit_statistics = trace_run is not None or debug_recorder is not None
     # Converged state of the accepted line-search trial, reusable as the next
     # iteration's candidate when the lambda signature is unchanged.
     _carry_forward: tuple | None = None
@@ -410,6 +415,8 @@ def optimize_direct_reml(
                 direct_solve=direct_solve,
                 S_override=S_cand,
                 reml_penalties=penalties,
+                compute_rank_info=loop_fit_statistics,
+                _compute_fit_statistics=loop_fit_statistics,
                 debug_recorder=debug_recorder,
                 debug_context={"phase": "candidate", "reml_iteration": n_iter},
                 trace_run=trace_run,
@@ -786,6 +793,8 @@ def optimize_direct_reml(
                 direct_solve=direct_solve,
                 S_override=S_trial,
                 reml_penalties=penalties,
+                compute_rank_info=loop_fit_statistics,
+                _compute_fit_statistics=loop_fit_statistics,
                 debug_recorder=debug_recorder,
                 debug_context={
                     "phase": "line_search",
