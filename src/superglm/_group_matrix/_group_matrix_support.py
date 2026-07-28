@@ -79,6 +79,35 @@ def _estimated_speedup(n_rows: int, n_support: int, p_b: int, nnz: int) -> float
     return _BLAS_ADVANTAGE * current / compressed
 
 
+def _row_index_chunked(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
+    """Exact row grouping with bounded transient memory.
+
+    Densifying the whole basis and sorting it peaks at several times the dense
+    size.  Working a chunk at a time keeps the transient at
+    ``chunk_rows * p_b`` while remaining exact: rows are keyed by their raw
+    bytes, so only bit-identical rows are merged.
+    """
+    n_rows = B_csr.shape[0]
+    row_index = np.empty(n_rows, dtype=np.intp)
+    seen: dict[bytes, int] = {}
+    for start in range(0, n_rows, chunk_rows):
+        stop = min(start + chunk_rows, n_rows)
+        block = np.ascontiguousarray(B_csr[start:stop].toarray(), dtype=np.float64)
+        # Deduplicate within the chunk first, so the Python-level dictionary
+        # lookups below run once per distinct row rather than once per row.
+        block_unique, block_inverse = np.unique(block, axis=0, return_inverse=True)
+        mapped = np.empty(block_unique.shape[0], dtype=np.intp)
+        for position, row in enumerate(block_unique):
+            key = row.tobytes()
+            group = seen.get(key)
+            if group is None:
+                group = len(seen)
+                seen[key] = group
+            mapped[position] = group
+        row_index[start:stop] = mapped[block_inverse.ravel()]
+    return row_index
+
+
 def plan_row_support(
     B_csr: sp.spmatrix,
     row_index: NDArray,
@@ -139,8 +168,7 @@ def detect_row_support(
     n_rows = B_csr.shape[0]
     if n_rows == 0:
         return None
-    dense = np.asarray(B_csr.toarray(), dtype=np.float64)
-    _, row_index = np.unique(dense, axis=0, return_inverse=True)
+    row_index = _row_index_chunked(B_csr)
     return plan_row_support(
         B_csr,
         row_index,
