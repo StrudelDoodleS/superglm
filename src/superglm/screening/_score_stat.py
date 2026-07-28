@@ -10,7 +10,9 @@ with the efficient-score adjustments ``U_eff = U - C' M^{-1} u_m`` and
 ``V_eff = V - C' M^{-1} C``, and ``lambda0`` chosen so the smooth is compared
 at a fixed screening complexity: ``tr((V_eff + lambda0 S)^{-1} V_eff) = edf0``.
 Fixing the effective degrees of freedom across pairs makes raw ``T`` values
-comparable regardless of each pair's basis size or penalty scaling.
+comparable regardless of each pair's basis size or penalty scaling — at a
+COMMON budget; across different budgets compare the normalized ``z`` the
+ladder scan reports, never raw ``T``.
 
 Ranking-only: calibration is by confirmatory refit, never by this number.
 """
