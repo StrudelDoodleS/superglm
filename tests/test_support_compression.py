@@ -96,3 +96,48 @@ def test_support_compressed_handles_signed_weights():
     np.testing.assert_allclose(
         compressed.gram(signed), reference.gram(signed), rtol=1e-11, atol=1e-11
     )
+
+
+def _make_pair(n, n_support, p_b, p_g, seed):
+    """Build the same block as both a SparseSSP and a support-compressed group."""
+    from superglm._group_matrix._group_matrix_core import SparseSSPGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(seed)
+    base = gen.normal(size=(n_support, p_b))
+    basis = sp.csr_matrix(base[gen.integers(0, n_support, n)])
+    r_inv = gen.normal(size=(p_b, p_g))
+    b_unique, row_index = detect_row_support(basis)
+    return (
+        SparseSSPGroupMatrix(basis, r_inv),
+        SupportCompressedSSPGroupMatrix(b_unique, r_inv, row_index),
+    )
+
+
+def test_cross_gram_uses_fast_path_for_compressed_groups():
+    from superglm._group_matrix._group_matrix_algebra import _cross_gram
+
+    n = 4000
+    reference_i, compressed_i = _make_pair(n, 30, 5, 3, seed=10)
+    reference_j, compressed_j = _make_pair(n, 25, 4, 2, seed=11)
+    weights = np.abs(np.random.default_rng(1).normal(1.0, 0.2, n))
+
+    baseline_profile: dict = {}
+    expected = _cross_gram(reference_i, reference_j, weights, profile=baseline_profile)
+    profile: dict = {}
+    actual = _cross_gram(compressed_i, compressed_j, weights, profile=profile)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+    # Assert the positive branch, not merely the absence of the negative one, so
+    # the test cannot pass vacuously if profiling keys are ever renamed.
+    assert "block_cross_fallback_s" in baseline_profile, (
+        f"expected uncompressed groups to take the fallback; profile={baseline_profile}"
+    )
+    assert "block_cross_disc_disc_s" in profile, (
+        f"compressed groups did not take the 2-D histogram path; profile={profile}"
+    )
+    assert "block_cross_fallback_s" not in profile, (
+        f"compressed groups took the column-at-a-time fallback; profile={profile}"
+    )
