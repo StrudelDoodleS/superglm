@@ -48,6 +48,7 @@ from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction
 from superglm.solvers.centered_system import TabmatCenteringState
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
+from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.structured import resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -198,6 +199,29 @@ def optimize_direct_reml(
     _observed_mode_rejected_trial_count = 0
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
+    structured_runtime_fallback_reason: str | None = None
+
+    def latch_runtime_backend(
+        pirls_result: PIRLSResult,
+        lambda_values: dict[str, float],
+        penalty: NDArray | None,
+    ) -> NDArray | None:
+        """Pin later REML work to Gram after an automatic structured retry."""
+        nonlocal direct_solve, structured_runtime_fallback_reason, use_structured
+        if not use_structured or pirls_result.direct_backend == "structured":
+            return penalty
+        use_structured = False
+        direct_solve = "gram"
+        structured_runtime_fallback_reason = pirls_result.direct_fallback_reason
+        if penalty is not None:
+            return penalty
+        return build_penalty_matrix(
+            list(dm.group_matrices),
+            groups,
+            lambda_values,
+            dm.p,
+            reml_penalties=penalties,
+        )
 
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
@@ -238,11 +262,7 @@ def optimize_direct_reml(
         trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _t0
-    structured_runtime_fallback_reason: str | None = None
-    if use_structured and boot_result.direct_backend != "structured":
-        use_structured = False
-        direct_solve = "gram"
-        structured_runtime_fallback_reason = boot_result.direct_fallback_reason
+    S_boot = latch_runtime_backend(boot_result, boot_lambdas, S_boot)
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
 
@@ -389,6 +409,7 @@ def optimize_direct_reml(
             trace_purpose="reml_candidate",
         )
         _t_pirls += _time.perf_counter() - _t0
+        S_cand = latch_runtime_backend(pirls_result, cand_lambdas, S_cand)
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
 
@@ -767,6 +788,7 @@ def optimize_direct_reml(
                 trace_run=trace_run,
                 trace_purpose="reml_line_search",
             )
+            S_trial = latch_runtime_backend(trial_result, trial_lambdas, S_trial)
 
             trial_logdet = trial_result.log_det_H
             trial_hessian_rank: int | None = None

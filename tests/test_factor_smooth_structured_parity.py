@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
+import superglm.reml.direct as direct_reml
+import superglm.reml.discrete as discrete_reml
 import superglm.solvers._structured.selection as structured_selection
 import superglm.solvers.irls_direct as irls_direct
 from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
@@ -1245,6 +1247,67 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
                 offset=offset,
                 runtime_validation="skip",
             )
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_reml_latches_runtime_sz_fallback_after_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    discrete: bool,
+) -> None:
+    dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
+        _gaussian_response,
+        factor_basis="sz",
+    )
+    reml_groups = [
+        (group_index, group) for group_index, group in enumerate(groups) if group.penalized
+    ]
+    penalty_ranks = {penalty.name: penalty.rank for penalty in penalties}
+    optimizer_module = discrete_reml if discrete else direct_reml
+    original_fit = optimizer_module.fit_irls_direct
+    direct_modes: list[str] = []
+    fallback_reason = "synthetic globally unidentifiable SZ candidate"
+
+    def delayed_runtime_fallback(*args, **kwargs):
+        direct_modes.append(kwargs["direct_solve"])
+        np.testing.assert_allclose(kwargs["offset"], offset)
+        if len(direct_modes) == 2:
+            gram_kwargs = dict(kwargs)
+            gram_kwargs["direct_solve"] = "gram"
+            gram_kwargs["S_override"] = None
+            result = original_fit(*args, **gram_kwargs)
+            result[0].direct_fallback_reason = fallback_reason
+            return result
+        return original_fit(*args, **kwargs)
+
+    monkeypatch.setattr(
+        optimizer_module,
+        "fit_irls_direct",
+        delayed_runtime_fallback,
+    )
+    result = direct_reml.optimize_direct_reml(
+        dm=dm,
+        distribution=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        discrete=discrete,
+        y=y,
+        sample_weight=weights,
+        offset_arr=offset,
+        reml_groups=reml_groups,
+        penalty_ranks=penalty_ranks,
+        lambdas=lambdas,
+        max_reml_iter=1,
+        reml_tol=1.0e-5,
+        verbose=False,
+        direct_solve="auto",
+        reml_penalties=penalties,
+        pirls_tol=1.0e-9,
+    )
+
+    assert direct_modes[:2] == ["auto", "auto"]
+    assert all(mode == "gram" for mode in direct_modes[2:])
+    assert result.pirls_result.direct_backend == "gram"
+    assert result.pirls_result.direct_fallback_reason == fallback_reason
 
 
 def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:

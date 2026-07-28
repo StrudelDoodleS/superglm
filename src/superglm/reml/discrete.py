@@ -292,6 +292,32 @@ def optimize_discrete_reml_cached_w(
     _outer_step_stats: list[dict[str, float | int | bool | None | dict[str, float]]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
+    structured_runtime_fallback_reason: str | None = None
+
+    def latch_runtime_backend(
+        pirls_result: PIRLSResult,
+        lambda_values: dict[str, float],
+        penalty: NDArray | None,
+        *,
+        design: DesignMatrix,
+        penalty_components: list[PenaltyComponent],
+    ) -> NDArray | None:
+        """Pin later REML work to Gram after an automatic structured retry."""
+        nonlocal direct_solve, structured_runtime_fallback_reason, use_structured
+        if not use_structured or pirls_result.direct_backend == "structured":
+            return penalty
+        use_structured = False
+        direct_solve = "gram"
+        structured_runtime_fallback_reason = pirls_result.direct_fallback_reason
+        if penalty is not None:
+            return penalty
+        return build_penalty_matrix(
+            list(design.group_matrices),
+            groups,
+            lambda_values,
+            design.p,
+            reml_penalties=penalty_components,
+        )
 
     # === Bootstrap: one FP step from conservative interaction penalties ===
     # Rich tensor interactions can explode under an almost-unpenalized
@@ -353,11 +379,13 @@ def optimize_discrete_reml_cached_w(
         trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _pirls_start
-    structured_runtime_fallback_reason: str | None = None
-    if use_structured and boot_result.direct_backend != "structured":
-        use_structured = False
-        direct_solve = "gram"
-        structured_runtime_fallback_reason = boot_result.direct_fallback_reason
+    S_boot = latch_runtime_backend(
+        boot_result,
+        boot_lambdas,
+        S_boot,
+        design=dm_boot,
+        penalty_components=penalties_boot,
+    )
     dm = dm_boot
     penalties = penalties_boot
     penalty_caches = penalty_caches_boot
@@ -549,6 +577,13 @@ def optimize_discrete_reml_cached_w(
             trace_purpose="reml_candidate",
         )
         _t_pirls += _time.perf_counter() - _t0
+        S_cand = latch_runtime_backend(
+            pirls_result,
+            cand_lambdas,
+            S_cand,
+            design=dm,
+            penalty_components=penalties,
+        )
         _n_pirls_steps += 1
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
@@ -1227,6 +1262,13 @@ def optimize_discrete_reml_cached_w(
         trace_purpose="reml_optimizer_final",
     )
     _t_pirls += _time.perf_counter() - _t0
+    S_final = latch_runtime_backend(
+        final_result,
+        final_lambdas,
+        S_final,
+        design=dm,
+        penalty_components=penalties,
+    )
     _t0 = _time.perf_counter()
     final_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
         tensor_pair_summaries, final_lambdas
