@@ -36,6 +36,35 @@ _active_scopes = 0
 _registration = None
 
 
+# Break-even measured on the 16-core reference box (audit J.6 follow-up): the
+# single-thread cap wins 7x at p=203 and 1.4x at p=834, breaks even near
+# p=1500 and loses 1.6x by p=2500. Designs at or past break-even release the
+# cap for the remainder of the fit.
+_WIDE_DESIGN_THRESHOLD = 1_500
+
+
+def _auto_policy() -> bool:
+    return os.environ.get(_ENV_VAR, "auto").strip().lower() in ("", "auto")
+
+
+def allow_wide_design(p: int) -> None:
+    """Release the automatic cap for the rest of the fit on a wide design.
+
+    Called once per fit as soon as the design width is known.  Only the
+    automatic policy widens; an explicit integer cap from the environment is
+    respected as given.  Under concurrent fits the widest active design wins
+    for the overlap, trading a transient small-p slowdown for never
+    throttling a genuinely wide factorization.
+    """
+    global _registration
+    if p < _WIDE_DESIGN_THRESHOLD or not _auto_policy():
+        return
+    with _scope_lock:
+        if _registration is not None:
+            _registration.unregister()
+            _registration = None
+
+
 def _resolve_limit() -> int | None:
     """Thread cap for solver BLAS calls, or None to leave BLAS untouched."""
     raw = os.environ.get(_ENV_VAR, "auto").strip().lower()

@@ -952,6 +952,11 @@ def model_build_design_matrix(
     model._groups = result.groups
     validate_penalty_features(configured_penalty(model), result.groups)
     model._dm = result.dm
+    # Every fit path funnels through here, so this is the first point the
+    # design width is known: wide designs release the small-p BLAS cap.
+    from superglm._blas_threads import allow_wide_design
+
+    allow_wide_design(result.dm.p)
     return result.y, result.sample_weight, result.offset
 
 
@@ -966,13 +971,12 @@ def compute_lambda_max(model, y, weights):
     score carries a family factor that is 1 only for canonical links.  The
     solver's objective is unnormalised, so no row-count division belongs here.
     """
-    from superglm.distributions import _VARIANCE_FLOOR, initial_mean
+    from superglm.distributions import initial_mean
+    from superglm.screening import working_score
 
     mu_null = np.atleast_1d(np.asarray(initial_mean(y, weights, model._distribution), float))
     eta_null = model._link.link(mu_null)
-    dmu_deta = model._link.deriv_inverse(eta_null)
-    variance = np.maximum(model._distribution.variance(mu_null), _VARIANCE_FLOOR)
-    score = weights * dmu_deta * (y - mu_null) / variance
+    score = working_score(y, mu_null, eta_null, weights, model._distribution, model._link)
     grad = model._dm.rmatvec(score)
     penalty = configured_penalty(model)
     # GroupLasso thresholds at lambda1 * w_g; the elastic-net family scales that
