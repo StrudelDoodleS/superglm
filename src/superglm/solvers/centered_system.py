@@ -16,6 +16,7 @@ from superglm._group_matrix._group_matrix_centered import (
     centered_rhs,
     packed_centered_gram_rhs,
     stable_centered_gram_rhs,
+    try_raw_moment_centering,
 )
 from superglm.group_matrix import DesignMatrix
 
@@ -56,6 +57,7 @@ class TabmatCenteringState:
 
     eligible: bool | None = None
     raw_spline_eligible: bool | None = None
+    raw_moment_eligible: bool | None = None
 
 
 def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
@@ -190,6 +192,7 @@ def build_centered_system(
     tabmat_split=None,
     tabmat_state: TabmatCenteringState | None = None,
     profile: dict | None = None,
+    _force_chunked: bool = False,
 ) -> CenteredSystem:
     """Build a stably centered data Gram, RHS, and penalized Hessian."""
     n, p = dm.shape
@@ -265,6 +268,36 @@ def build_centered_system(
             # change the centering ratio, but the stable path remains correct
             # and avoids repeating rejected raw work.
             tabmat_state.eligible = packed is not None
+    # General raw-moment rung: the rungs above each require particular group
+    # types, so ordinary spline designs reach the chunked pass below even though
+    # the per-block moment dispatch can produce the same quantities far more
+    # cheaply.  A rejected certificate latches for the fit, as the other
+    # accelerated rungs do, so the moments are not recomputed every iteration.
+    if (
+        packed is None
+        and not _force_chunked
+        and (
+            tabmat_state is None
+            # `eligible is False` means a preflight already certified this
+            # design's raw moments as unsafe.  That verdict is about raw-moment
+            # subtraction itself, not about tabmat, so this rung must honour it
+            # rather than re-attempting the route that was just locked out.
+            or (
+                tabmat_state.eligible is not False and tabmat_state.raw_moment_eligible is not False
+            )
+        )
+    ):
+        packed = try_raw_moment_centering(
+            dm=dm,
+            W=W,
+            weighted_z=W * z_centered,
+            sum_w=sum_w,
+        )
+        if tabmat_state is not None:
+            tabmat_state.raw_moment_eligible = packed is not None
+        if packed is not None and profile is not None:
+            profile["centered_raw_moment_hits"] = profile.get("centered_raw_moment_hits", 0) + 1
+
     if packed is None:
         mean_x = dm.rmatvec(W) / sum_w
         data_gram, rhs = centered_gram_rhs(
