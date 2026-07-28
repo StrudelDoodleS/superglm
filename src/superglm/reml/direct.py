@@ -374,28 +374,22 @@ def optimize_direct_reml(
         # Restore exact fixed values (exp->clip would clamp 0.0 to 1e-6)
         cand_lambdas.update(fixed_lambdas)
 
-        S_cand = (
-            None
-            if use_structured
-            else build_penalty_matrix(
-                dm.group_matrices,
-                groups,
-                cand_lambdas,
-                dm.p,
-                reml_penalties=penalties,
-            )
-        )
-
-        _reused = (
-            _carry_forward is not None
-            and set(_carry_forward[0]) == set(cand_lambdas)
-            and all(_carry_forward[0][name] == cand_lambdas[name] for name in cand_lambdas)
-        )
-        if _reused:
+        if _carry_forward is not None and _carry_forward[0] == cand_lambdas:
             _, pirls_result, XtWX_S_inv, XtWX, S_cand = _carry_forward
             if profile is not None:
                 profile["reml_candidate_reuses"] = profile.get("reml_candidate_reuses", 0) + 1
         else:
+            S_cand = (
+                None
+                if use_structured
+                else build_penalty_matrix(
+                    dm.group_matrices,
+                    groups,
+                    cand_lambdas,
+                    dm.p,
+                    reml_penalties=penalties,
+                )
+            )
             _t0 = _time.perf_counter()
             pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
                 X=dm,
