@@ -266,3 +266,61 @@ z = (T - sum h_i)/sqrt(2 sum h_i^2) — var(T) = 2 tr((AV)^2) <= 2 edf0, so
 current z is conservative where shrinkage is diffuse; (c) rung covariance
 is closed-form, cov(T_r, T_s) = 2 tr(A_r V A_s V), enabling a calibrated
 max-z p-value per pair if screening ever needs more than a ranking.
+
+---
+
+## Fork prototypes: exact-variance z, extended ladder, calibrated max-z (2026-07-29)
+
+Two full-context fork agents prototyped the recorded refinements in the
+session scratchpad (forkA_*, forkB_* files; repo untouched during the
+experiments). Facts both forks agree on:
+
+- Exact-variance standardization z = (T - tr(AV~))/sqrt(2 tr((AV~)^2)) is
+  algebraically verified (0.0 trace mismatch over 1140 rung solves; the
+  shipped sd overstatement is one-sided, multiplier 1.006-1.347, peaking
+  at rungs 4-8). Its ONLY ranking effect anywhere: swaps the near-tied
+  freMTPL2 leaders (DrivAge:BonusMalus over VehAge:VehPower — rung-8
+  shrinkage is more diffuse, sum h_i^2 ~ 5.2 vs edf 8, so conservative z
+  understates it more). Costs one rank on one wiggly seed via a literal
+  tie-flip (T 27.0375 vs 27.0358). Widens null right tail ~14% (correct
+  scaling, not a defect); z<10 gate keeps >=2.1x headroom.
+- Extended ladder (1.5,2,4,8,16,32): closes both boundary regimes from
+  the curve analysis (VehAge:VehPower gap-to-sup 0.55 -> 0.07, wins at
+  rung 32; left-boundary climbers recover ~2/3 of their gaps at rung
+  1.5), promotes wiggly seed 0 to rank 1, degrades nothing, +~1% sweep
+  cost. Under the pure null the winning rung loads on the extremes
+  (~58% at {1.5,32}) — shape diagnostic is only meaningful at material z.
+- Measured adjacent-rung correlations 0.85-0.93 (exact, from
+  cov(T_r,T_s) = 2 tr(A_r V~ A_s V~)): the dyadic grid sits in the sweet
+  band — correlated enough that no peak hides between rungs, distinct
+  enough that rungs aren't duplicates. This is the shipped-form answer to
+  "how do we know the grid is fine enough" — computable per pair/dataset.
+- Calibrated max-z p-value: plain-Gaussian route is materially
+  miscalibrated (null KS p=0.006; overstates far-tail nlp by >20 decades)
+  — never ship it. Moment-matched route (Satterthwaite scaled-chi2
+  marginals + Gaussian copula with exact R) validates against 40k-draw
+  simulation: MAE 0.011, tail MAE 0.0016/max 0.0031, null uniformity KS
+  p=0.276. Bonferroni far-tail bracket <=0.15 decades on leaders.
+  Cost ~10-30 ms/pair beyond rung solves (+~1s on the 2s sweep).
+  IMPLEMENTATION TRAP: scipy Genz MVN-CDF at default tolerance is ~100x
+  slower on the near-singular rung R; must pass abseps~5e-4,
+  maxpts~50k*dim.
+- Null scope limit: calibration validated on n=2500 Poisson synthetics
+  (10 seeds x 10 pairs); re-run the null rig on structurally new data
+  shapes (sparse counts, heavy cells) before trusting p's there.
+
+Fork verdicts diverged on one point: A rejects exact-variance z as the
+DEFAULT ranking (no measured power gain anywhere, breaks the doc-simple
+formula, tie-flip risk); B endorses it as "more correct" and needing
+sign-off. Synthesis: exact variance is calibration machinery, not
+ranking machinery — the headline z stays conservative and doc-simple;
+the exact sd lives inside the opt-in calibration layer where its
+correctness actually matters (it is step 1 of the mm route).
+
+Proposed landing (pending decision): (1) extended ladder as default —
+as the RULE "octaves filling the achievable [null-dim, rank] range",
+not hardcoded constants; (2) opt-in calibrate= flag adding mm-route
+-log10 p columns, Gaussian route excluded; (3) posture guard: screening
+calibration conditional on the working model, not confirmatory
+inference — ranking-only stance and the confirmatory-refit gate stand.
+Whatever lands folds into the pending Tasks 2+3 Opus 5 max review.
