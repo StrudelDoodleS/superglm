@@ -194,3 +194,45 @@ def test_rebuild_with_lambdas_preserves_lossless_type():
 
     rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, {"age": 2.0}, weights)
     assert type(rebuilt.group_matrices[0]) is SupportCompressedSSPGroupMatrix
+
+
+def test_design_summary_does_not_label_lossless_group_as_binned():
+    """design_summary() is public and is the only surface describing storage."""
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm.model.design_summary import _representation_metadata
+
+    rng = np.random.default_rng(6)
+    compressed = SupportCompressedSSPGroupMatrix(
+        rng.normal(size=(10, 4)), rng.normal(size=(4, 3)), rng.integers(0, 10, 100)
+    )
+
+    metadata = _representation_metadata(compressed)
+
+    assert metadata.representation != "discretized-ssp"
+    assert metadata.specialised_discrete_route != "binned-ssp", (
+        "a discrete=False fit must not be reported as taking the binned fREML route"
+    )
+    assert metadata.compressed is True
+
+
+def test_support_compressed_class_is_publicly_reachable():
+    """Pickled models must not carry a private module path."""
+    import pickle
+
+    from superglm import group_matrix as public
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    assert hasattr(public, "SupportCompressedSSPGroupMatrix")
+    assert SupportCompressedSSPGroupMatrix.__module__ == "superglm.group_matrix"
+
+    rng = np.random.default_rng(8)
+    original = SupportCompressedSSPGroupMatrix(
+        rng.normal(size=(6, 3)), rng.normal(size=(3, 2)), rng.integers(0, 6, 50)
+    )
+    restored = pickle.loads(pickle.dumps(original))
+    assert type(restored) is SupportCompressedSSPGroupMatrix
+    np.testing.assert_allclose(restored.toarray(), original.toarray())
