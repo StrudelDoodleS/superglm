@@ -345,6 +345,25 @@ _INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
 }
 
 
+def _build_ssp_group(B_csr, R_inv):
+    """Cheapest exact representation of a factored SSP block.
+
+    Compression is lossless deduplication of repeated rows; it never bins and is
+    independent of ``discrete=True``.  Declines whenever the measured cost model
+    says the current CSR path is cheaper.
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_support import detect_row_support
+
+    detected = detect_row_support(B_csr)
+    if detected is None:
+        return SparseSSPGroupMatrix(B_csr, R_inv)
+    B_unique_rows, row_index = detected
+    return SupportCompressedSSPGroupMatrix(B_unique_rows, R_inv, row_index)
+
+
 def add_interaction(
     feat1: str,
     feat2: str,
@@ -526,7 +545,7 @@ def _process_info(
         elif use_discrete:
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
         elif sp.issparse(info.columns):
-            gm = SparseSSPGroupMatrix(info.columns, R_inv)
+            gm = _build_ssp_group(info.columns, R_inv)
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
         if omega_full is not None and hasattr(gm, "omega"):
@@ -564,7 +583,7 @@ def _process_info(
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
             gm.omega = info.penalty_matrix
         elif sp.issparse(info.columns):
-            gm = SparseSSPGroupMatrix(info.columns, R_inv)
+            gm = _build_ssp_group(info.columns, R_inv)
             gm.omega = info.penalty_matrix
         else:
             gm = DenseGroupMatrix(info.columns @ R_inv)
@@ -625,7 +644,7 @@ def _process_info(
             gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
         elif sp.issparse(info.columns):
             if info.penalty_matrix is not None or info.penalty_components is not None:
-                gm = SparseSSPGroupMatrix(info.columns, np.eye(info.n_cols, dtype=np.float64))
+                gm = _build_ssp_group(info.columns, np.eye(info.n_cols, dtype=np.float64))
                 if info.penalty_matrix is not None:
                     gm.omega = info.penalty_matrix
                 if info.penalty_components is not None:

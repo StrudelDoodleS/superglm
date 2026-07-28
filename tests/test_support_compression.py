@@ -243,12 +243,13 @@ def test_rebuild_with_lambdas_preserves_lossless_type():
     model._build_design_matrix(frame, response, weights, None)
 
     original = model._dm.group_matrices[0]
-    if not isinstance(original, SupportCompressedSSPGroupMatrix):
-        import pytest
+    assert isinstance(original, SupportCompressedSSPGroupMatrix), (
+        f"expected the exact path to compress this block, got {type(original).__name__}"
+    )
 
-        pytest.skip("design build does not yet produce compressed groups (Task 4)")
-
-    rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, {"age": 2.0}, weights)
+    rebuilt = rebuild_design_matrix_with_lambdas(
+        model._dm, model._groups, {"age": 2.0}, weights, 1.0
+    )
     assert type(rebuilt.group_matrices[0]) is SupportCompressedSSPGroupMatrix
 
 
@@ -335,3 +336,47 @@ def test_gate_accepts_the_real_world_blocks():
     assert _estimated_speedup(100_000, 82, 9, nnz=400_000) >= 1.5
     # DrivAge:BonusMalus tensor: 2664 distinct rows, fully dense rows.
     assert _estimated_speedup(100_000, 2_664, 81, nnz=8_100_000) >= 1.5
+
+
+def test_compression_does_not_change_fitted_results(monkeypatch):
+    """The release gate: compression is storage-only and must move no result."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm._group_matrix import _group_matrix_support
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(7)
+    n = 4000
+    frame = pd.DataFrame(
+        {
+            "age": rng.integers(18, 90, n).astype(float),
+            "bm": rng.integers(50, 130, n).astype(float),
+        }
+    )
+    weights = rng.uniform(0.2, 1.0, n)
+    response = rng.poisson(0.2, n) / weights
+
+    def fit():
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=None,
+            discrete=False,
+            features={"age": Spline(kind="ps", k=10), "bm": Spline(kind="ps", k=10)},
+        )
+        model._add_interaction("age", "bm")
+        return model.fit_reml(frame, response, sample_weight=weights)
+
+    compressed = fit()
+    monkeypatch.setattr(_group_matrix_support, "detect_row_support", lambda *a, **k: None)
+    uncompressed = fit()
+
+    np.testing.assert_allclose(
+        compressed.result.beta, uncompressed.result.beta, rtol=1e-8, atol=1e-8
+    )
+    np.testing.assert_allclose(compressed.result.deviance, uncompressed.result.deviance, rtol=1e-9)
+    np.testing.assert_allclose(
+        compressed.metrics(frame, response, sample_weight=weights).effective_df,
+        uncompressed.metrics(frame, response, sample_weight=weights).effective_df,
+        rtol=1e-6,
+    )
