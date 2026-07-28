@@ -618,6 +618,7 @@ class SuperGLM:
         y: NDArray,
         sample_weight: NDArray | None = None,
         *,
+        offset: NDArray | None = None,
         candidates: list[tuple[str, str]] | None = None,
         edf0: float | tuple[float, ...] = (2.0, 4.0, 8.0, 16.0),
         max_cells: int = 5_000_000,
@@ -630,11 +631,16 @@ class SuperGLM:
         fixed screening complexity, after profiling out what the pair's own
         main effects already explain.  ``edf0`` is a probe bandwidth; the
         default ladder evaluates each pair at several budgets and ranks by
-        the best noise-normalized score ``z``, so smooth and high-frequency
-        interactions are both visible.  One O(n) cell pass per pair; no
-        refits.
+        the best noise-normalized score ``z`` (the statistic is scaled by
+        the fit's Pearson dispersion estimate first, so the noise floor
+        stays honest beyond unit-dispersion families), so smooth and
+        high-frequency interactions are both visible.  One O(n) cell pass
+        per pair; no refits.  ``offset`` defaults to the offset the model
+        was fitted with.
 
-        The returned frame is sorted by ``z`` descending.  The
+        The returned frame is sorted by ``z`` descending; rank by ``z`` —
+        ``statistic``/``edf0``/``lambda0`` describe each pair's winning
+        rung, so ``statistic`` is not comparable across rows.  The
         statistic is a ranking device, not a calibrated p-value: confirm the
         top-ranked pairs by refitting them as ``ti()`` terms.
         """
@@ -645,6 +651,7 @@ class SuperGLM:
             X,
             y,
             sample_weight,
+            offset=offset,
             candidates=candidates,
             edf0=edf0,
             max_cells=max_cells,
