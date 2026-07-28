@@ -360,6 +360,33 @@ git commit -m "test: pin fast cross-gram dispatch for support-compressed groups"
 
 ---
 
+### Amendments after Tasks 1-3 (review + measurement)
+
+Tasks 1-3 are complete. Four things changed and are already on the branch; the remaining tasks assume them.
+
+1. **The gate is calibrated, not derived.** `max_ratio` is gone. `_estimated_speedup` compares flop counts and
+   then scales by `_BLAS_ADVANTAGE = 6.0`, because the compressed side is a BLAS dense gram and the current
+   side is a numba scalar loop — measured ratio 5-12x. A review finding predicted a k=10 spline at 40%
+   distinct rows would be ~4x slower; **measured, it is 1.68x faster**. Nine measured crossover points are
+   pinned in `test_gate_agrees_with_measured_crossover`. Guards: decline when `n_support == n_rows` (zero
+   deduplication) and below 1,000 rows (outside the calibration).
+2. **Use `plan_row_support`, not `detect_row_support`.** The former takes a caller-supplied grouping and never
+   densifies the basis; the latter derives one at several times the dense basis in transient memory, paid even
+   when it declines. `dm_builder` knows the covariate, so it can group in an O(n) scan of a 1-D array.
+3. **Subclass identity is preserved** across `row_subset` and the per-lambda rebuild (both previously
+   hardcoded the parent constructor, silently downcasting to the lossy binned type).
+4. **Public surfaces are registered**: `design_summary()` reports `support-compressed-ssp` with no discrete
+   route, and the class is exported from `superglm.group_matrix` with `__module__` normalised.
+
+**Deliberately not done:** four existing fast paths use `type(x) is DiscretizedSSPGroupMatrix` and therefore
+exclude the subclass (`_group_matrix_bin_space.py:176,190,201`, `_group_matrix_centered.py:335,544`). This is a
+missed *gain*, not a regression — those paths already decline for exact-path models, whose splines are
+`SparseSSPGroupMatrix` today. Enabling them needs cell-size analysis first: they were sized when `n_bins <= 256`,
+and lossless supports run to thousands, which interacts with the 5M-cell histogram cap
+(`_group_matrix_algebra.py:31`).
+
+---
+
 ### Task 4: Construct compressed groups during design-matrix build
 
 **Files:**
@@ -367,8 +394,12 @@ git commit -m "test: pin fast cross-gram dispatch for support-compressed groups"
 - Test: `tests/test_support_compression.py`
 
 **Interfaces:**
-- Consumes: `detect_row_support` (Task 1), `SupportCompressedSSPGroupMatrix` (Task 2).
+- Consumes: `plan_row_support` (Task 1, amended), `SupportCompressedSSPGroupMatrix` (Task 2).
 - Produces: no new public symbols. After this task, `SuperGLM(...).​_build_design_matrix(...)` yields `SupportCompressedSSPGroupMatrix` for low-cardinality spline and tensor groups on the exact path.
+
+**Note:** Step 3 below still says `detect_row_support`; use `plan_row_support` with a grouping derived from the
+covariate instead — `np.unique(x_col, return_inverse=True)` for a single-covariate spline, and the joint cell
+index for a tensor. Fall back to `detect_row_support` only where the covariate is genuinely unavailable.
 
 - [ ] **Step 1: Write the failing test**
 
