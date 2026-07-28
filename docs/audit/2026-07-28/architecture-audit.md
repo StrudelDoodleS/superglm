@@ -757,6 +757,26 @@ groups — publishable gap.**
    publishable gap, nothing in the literature); deterministic reduction-tree design for future threading
    (arXiv:2607.18758).
 
+### J.5 Stress battery (benchmarks/benchmark_support_stress.py, n=100k, this box)
+
+Run after a challenge that freMTPL2's default columns are too low-cardinality to trust. Cardinalities used:
+DrivAge 82 · VehAge 55 · BonusMalus 98 · VehPower 12 · **Density 1,568** · joint DrivAge:BonusMalus 2,635 ·
+**joint DrivAge:Density 35,005** · joint VehAge:BonusMalus 1,363.
+
+| case | result |
+|---|---|
+| **A · exactness** — identical tensor fit, detection on vs off | max\|Δβ\| 2.5e-10 (rel 1.2e-10) · deviance agrees to 12 significant digits (Δrel 3e-14) · EDF equal to 8 dp · max rel \|Δμ̂\| 5.3e-9 — the same magnitude as a BLAS/thread-count change. Wall: 4.38 s compressed vs 83.1 s uncompressed. |
+| **B · high-cardinality integer** — s(Density) + ti(DrivAge, Density) | Everything compresses, including the 1,568-support spline and the **35,005-support tensor** (22.7 MB unique-row buffer, under the 64 MB cap; the dense-row flop model accepts ratio 0.35). Exact 7.80 s vs discrete 3.71 s (2.1×). Gate decisions all correct per `design_summary()`. |
+| **C · continuous covariate (jittered Density)** — the honest worst case | Gate correctly declines Density and the tensor (support = n); the four integer splines still compress. Exact fit **53.5 s** vs discrete ~3.7 s — **the uncompressed-tensor regime remains the big exact-path gap** (it is master's old cost structure, minus RFC-12a). Detection is not the problem: with detection fully disabled the fit is 71.6 s, i.e. compressing the remaining groups buys more than detection costs even when the big blocks decline. |
+| **D · two tensors sharing a marginal** | Both compress (2,635 and 1,363 supports); cross-gram cells 3.6 M stay under the 5 M histogram cap; fits in 16.1 s. Multi-tensor fits scale super-linearly in wall (4.4 → 16.1 s for +1 tensor) — geometry-side certification of two holey penalized blocks is the suspected driver; probe alongside RFC-12b. |
+
+**Named limitation (now documented, was implicit):** the branch's exact-path wins are conditional on covariates
+taking repeated values (integer/low-cardinality rating factors — the insurance norm). A truly continuous
+covariate inside a `ti()` keeps the old SparseSSP cost structure. Mitigations, in preference order: RFC-2's
+leverage-diagonal W-correction is **re-promoted for exactly this regime** (it was demoted only for compressible
+designs); the chunked-fallback marshalling fix; the row-tensor G-operator revisit; and `discrete=True`, which
+exists precisely for this trade and is 14× faster here with its usual disclosed binning.
+
 ---
 
 ## Appendix: evidence trail
