@@ -80,7 +80,10 @@ class DiscretizedSSPGroupMatrix:
         return (self.B_unique @ self.R_inv)[self.bin_idx]
 
     def row_subset(self, idx: NDArray) -> DiscretizedSSPGroupMatrix:
-        sub = DiscretizedSSPGroupMatrix(self.B_unique, self.R_inv, self.bin_idx[idx])
+        # type(self) rather than the parent: a subclass carries semantics the
+        # parent does not (lossless support vs binning), and subsetting must not
+        # silently downcast it.
+        sub = type(self)(self.B_unique, self.R_inv, self.bin_idx[idx])
         sub.omega = self.omega
         sub.projection = self.projection
         sub.omega_components = self.omega_components
