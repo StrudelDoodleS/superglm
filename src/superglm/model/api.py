@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._blas_threads import solver_blas_threads
 from superglm._frame import FrameLike, as_eager_frame
 from superglm.distributions import Distribution
 from superglm.links import Link
@@ -471,17 +472,18 @@ class SuperGLM:
                 stacklevel=2,
             )
 
-        return fit_ops.fit(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            tol=resolved_tol,
-            max_iter=resolved_max_iter,
-            convergence=resolved_convergence,
-            record_diagnostics=record_diagnostics,
-        )
+        with solver_blas_threads():
+            return fit_ops.fit(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                tol=resolved_tol,
+                max_iter=resolved_max_iter,
+                convergence=resolved_convergence,
+                record_diagnostics=record_diagnostics,
+            )
 
     def fit_path(
         self,
@@ -498,16 +500,17 @@ class SuperGLM:
 
         Warm-starts each lambda from the previous solution.
         """
-        return fit_ops.fit_path(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            n_lambda=n_lambda,
-            lambda_ratio=lambda_ratio,
-            lambda_seq=lambda_seq,
-        )
+        with solver_blas_threads():
+            return fit_ops.fit_path(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                n_lambda=n_lambda,
+                lambda_ratio=lambda_ratio,
+                lambda_seq=lambda_seq,
+            )
 
     def fit_reml(
         self,
@@ -591,22 +594,23 @@ class SuperGLM:
         resolved_pirls_tol = pirls_tol if pirls_tol is not None else self._tol
         resolved_max_pirls_iter = max_pirls_iter if max_pirls_iter is not None else self._max_iter
 
-        return fit_ops.fit_reml(
-            self,
-            X,
-            y,
-            sample_weight,
-            offset,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            pirls_tol=resolved_pirls_tol,
-            max_pirls_iter=resolved_max_pirls_iter,
-            lambda2_init=lambda2_init,
-            interaction_mode=interaction_mode,
-            runtime_validation=runtime_validation,
-            verbose=verbose,
-            w_correction_order=w_correction_order,
-        )
+        with solver_blas_threads():
+            return fit_ops.fit_reml(
+                self,
+                X,
+                y,
+                sample_weight,
+                offset,
+                max_reml_iter=max_reml_iter,
+                reml_tol=reml_tol,
+                pirls_tol=resolved_pirls_tol,
+                max_pirls_iter=resolved_max_pirls_iter,
+                lambda2_init=lambda2_init,
+                interaction_mode=interaction_mode,
+                runtime_validation=runtime_validation,
+                verbose=verbose,
+                w_correction_order=w_correction_order,
+            )
 
     # ── Properties ────────────────────────────────────────────────
 
