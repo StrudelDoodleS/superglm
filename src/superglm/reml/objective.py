@@ -121,11 +121,19 @@ def reml_laml_objective(
         XtW1 = moments.xtw
         sum_W = float(np.sum(W, dtype=np.float64))
 
-    if XtWX is not None and XtW1 is None and sum_W is None and result.rank_info is not None:
-        rank_mean = np.asarray(result.rank_info.mean_x, dtype=np.float64)
-        if rank_mean.shape == (XtWX.shape[0],):
-            sum_W = float(result.rank_info.sum_w)
-            XtW1 = sum_W * rank_mean
+    if XtWX is not None and XtW1 is None and sum_W is None:
+        if result.rank_info is not None:
+            rank_mean = np.asarray(result.rank_info.mean_x, dtype=np.float64)
+            if rank_mean.shape == (XtWX.shape[0],):
+                sum_W = float(result.rank_info.sum_w)
+                XtW1 = sum_W * rank_mean
+        elif result.reml_geometry is not None:
+            # In-loop fits carry centered moments in the geometry summary
+            # instead of rank metadata; the recovered values are identical.
+            summary_mean = np.asarray(result.reml_geometry.mean_x, dtype=np.float64)
+            if summary_mean.shape == (XtWX.shape[0],):
+                sum_W = float(result.reml_geometry.sum_w)
+                XtW1 = sum_W * summary_mean
 
     if (XtW1 is None) != (sum_W is None):
         raise ValueError("XtW1 and sum_W must be provided together")
