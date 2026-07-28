@@ -95,3 +95,38 @@ ranked across pairs (optionally normalized per edf_0; edf_0 fixed across pairs m
 - Fusing the 45 bincount passes into one blocked pass (matters only at n ≳ 10⁷).
 - Permutation/GCV calibration of a screening threshold (v1 ranks; the refit decides).
 - 3-way sweeps; `by=`-style varying-coefficient candidates; sz/fs factor-smooth pairs (different support geometry, own plan).
+
+---
+
+## Task 3 design amendment (recorded 2026-07-28, pre-implementation)
+
+Investigation of `features/interaction.py` collapses Tasks 3a/3b:
+
+1. **Do not extract bases or codes from fitted group matrices.** Profiling is
+   span-invariant (`V - C'M^-1 C` is the Schur complement onto the span's
+   orthogonal complement), so screen in the RAW centered-marginal coordinates
+   that `_prepare_centered_marginals(x1, x2, parent_specs)` already returns:
+   `(B1, B2, S1, S2)` — exactly the basis/penalty a real `ti()` would be
+   given. `S_ti = kron(S1, I) + kron(I, S2)` (interaction.py:1124-1125),
+   column order = `_row_kron`'s C-order, which pair_score_curvature matches
+   (verified by the Task 1 review). Codes are screening-owned:
+   `np.unique(x, return_inverse=True)` per margin — the Categorical sink-bin
+   trap never arises.
+2. **Every overlap quantity comes from the two cell tables.** With menus
+   `A = B1[support]`, `B = B2[support]` and the Task 1 cells `W_cell`,
+   `S_cell`: `M` blocks are `sum(W_cell)`, `A' diag(rowsum W) A`,
+   `A' W_cell B`, ...; `u_m` is `[sum(S_cell), A' rowsum(S_cell),
+   B' colsum(S_cell)]`; `C` blocks are `vec(A' W_cell B)` and
+   `einsum('ij,ic,ip,jq->cpq', W_cell, A, A, B)` (+ mirror). No extra data
+   passes beyond Task 1's single fused bincount.
+3. **U_nuisance:** pass the overlap block's actual score `u_m` as above. At a
+   freshly fitted mains model it is near zero for the fitted spline spans and
+   exactly `sum(s)`-driven for the intercept; passing the measured value
+   rather than assuming zero keeps the additive-case null exact.
+4. **s and W at the fitted state:** `working_score(y, mu_hat, eta_hat, w, ...)`
+   and `W = w * dmu_deta^2 / max(V(mu_hat), floor)` from the fitted model's
+   predict path — the same quantities the solver's own IRLS forms.
+5. Review cadence agreed with Max: no standalone Task 2 review; one Opus 5
+   max review over Tasks 2+3 together after 3c lands, attention on the
+   U_nuisance choice, edf-clamp ranking at bracket edges, and coordinate
+   consistency with interaction.py.
