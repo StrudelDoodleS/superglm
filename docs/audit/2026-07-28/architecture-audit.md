@@ -777,6 +777,51 @@ leverage-diagonal W-correction is **re-promoted for exactly this regime** (it wa
 designs); the chunked-fallback marshalling fix; the row-tensor G-operator revisit; and `discrete=True`, which
 exists precisely for this trade and is 14× faster here with its usual disclosed binning.
 
+### J.6 RFC-12b retired on measurement; the BLAS-threading pathology it uncovered (commit 3d41fe3)
+
+**RFC-12b is retired.** Its premise — "every Armijo trial runs a full PIRLS to convergence" — is still literally
+true, but instrumentation shows those trials ARE the one converged inner fit per outer iteration: across
+b_L800-class (20 outer iters / 13 trials / 13 accepts — 7 iterations skip the search entirely at bounds),
+a_m15-class (11/10/10) and the two-tensor flagship (8/8, 7 reuses), **every line search accepted its first
+trial; zero step-halvings anywhere.** With the carry-forward already eliminating the duplicate candidate fit,
+the loop runs exactly one full fit per iteration — the structural minimum under the exact contract. A surrogate
+would skip nothing. (The audit's §E row 12 evidence — "8 trials measured" on b_L800 — was ~1 trial/iteration,
+not 8 halvings in one search.)
+
+**What the same instrumentation found instead:** threaded OpenBLAS LAPACK is pathologically slow on this
+library's p³ kernels. Isolated `decompose_gram`: p=203 **56 ms threaded vs 1.6 ms single-threaded (35×)**;
+p=834 152 ms vs 23 ms. In the two-tensor fit, 52 *successful* p=203 Choleskys cost 90–190 ms each. Whole-fit
+A/B (this box):
+
+| case | default threads | 1 thread |
+|---|---:|---:|
+| base exact 100k | 1.10 s | 0.59 s |
+| tensor exact 100k | 4.52 s | 2.13 s |
+| tensor discrete 100k | 3.31 s | 1.01 s |
+| two tensors 100k | 16.12 s | 4.36 s |
+| b_L800-class 20k | 12.00 s | 2.50 s |
+
+Shipped as `solver_blas_threads()` — a scoped `threadpoolctl` cap (`user_api="blas"` only; tabmat OpenMP and
+numba untouched) at `fit`/`fit_path`/`fit_reml`, override via `SUPERGLM_BLAS_THREADS` (int, or `native`).
+The full test suite dropped 5:00 → 2:48 under the cap. **Benchmark canon from here on is the capped default**,
+and any master comparison must use single-thread BLAS or it flatters the branch.
+
+**Corrected cumulative table (like-for-like, single-thread BLAS both sides, n=100k):**
+
+| config | master f082e9b | branch HEAD | |
+|---|---:|---:|---:|
+| base exact | 4.56 s | 0.69 s | 6.6× |
+| tensor exact | 47.96 s | 2.15 s | **22×** |
+| base discrete | 0.63 s | 0.38 s | 1.7× |
+| tensor discrete | 1.61 s | 1.04 s | 1.6× |
+
+Exact-over-discrete lands at 1.8× (base) / 2.1× (tensor) — the remaining gap is the per-iteration O(n)
+exactness tax (working weights, deviance, η re-formed from data each PIRLS iteration), which is the design
+boundary between the two paths, not an optimization shortfall. **The exact-path speed campaign is declared
+done**; J.4's ranking updates to: interaction screening → RFC-15 CI gate (pinning the capped canon) → RFC-1
+anchor → RFC-6 deprecations. RFC-7's urgency drops (its explicit-inverse cost shrank 35× with the cap);
+case D's super-linear scaling largely dissolved with it (16.1 → 4.4 s).
+
 ---
 
 ## Appendix: evidence trail
