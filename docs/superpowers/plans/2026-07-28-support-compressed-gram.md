@@ -688,3 +688,39 @@ shift for Dense columns** — without the anchor the certificate rejects ill-loc
 (mean 9.0, RMS 3.2) and the design latches back to the chunked path.
 
 Addressable: the 4.60 s of `centered_gram_rhs` plus the 2.98 s of per-chunk `toarray`.
+
+---
+
+## AI-REML spike (RFC-6a): measured, REJECTED
+
+One measurement settled it. Phase timings at n=100k, real freMTPL2:
+
+| | plain splines | +tensor |
+|---|---:|---:|
+| total | 5.62 s | 21.43 s |
+| **REML Hessian** | **0.002 s (0.04%)** | **0.106 s (0.49%)** |
+| REML gradient | 0.001 s (0.02%) | 0.154 s (0.72%) |
+| **outer iterations** | **6** | **6** |
+| PIRLS | 2.37 s (42%) | 8.98 s (42%) |
+| line search | 1.82 s (32%) | 7.88 s (37%) |
+
+**AI-REML makes the Hessian cheaper, and the Hessian costs 0.04%.** Making it free saves nothing.
+
+The direction is also wrong. AI-REML approximates the Newton step, trading Hessian accuracy for iteration
+count. superglm already converges in **6 outer iterations** — better than AIREMLF90's own reported 5-15 range.
+The research headline (AIREMLF90 5-15 rounds vs REMLF90's 50-300) compares AI-REML against **EM-REML**, a slow
+fixed point. superglm runs exact Newton with an exact gradient on this path, so the comparison never applied.
+
+The same reasoning retires the rest of that cluster as *performance* work: the Wood-Fasiolo step correction and
+the EFS update fix improve a fixed-point optimiser this path does not use, in code that is production-dead. The
+EFS overlapping-penalty bug (`efs.py:251` hardcodes `tr(S_lambda^- S_j) = r_j / lambda_j`, valid only for
+non-overlapping penalties, so wrong under `select=True` and tensor `ti()`) remains worth fixing as
+**correctness** if EFS is ever resurrected — not for speed.
+
+### Next target: RFC-12, frozen-W line-search trials
+
+PIRLS plus line search is **~75-80%** of both fits. With 6 outer iterations and line search at 32-37%, each
+outer step spends about as much on rejected trials as on the accepted fit, because every Armijo trial runs a
+full PIRLS to convergence (`direct.py:419-470`, `max_ls=8`). The discrete path already demonstrates the
+alternative: evaluate trials against a cached factorisation with no data pass, then re-check exactly at
+acceptance so the exact-path criterion is preserved.
