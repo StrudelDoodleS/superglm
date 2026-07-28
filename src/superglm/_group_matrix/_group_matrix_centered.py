@@ -226,6 +226,60 @@ def _try_raw_spline_tabmat_centering(
     return result
 
 
+def try_raw_moment_centering(
+    *,
+    dm,
+    W: NDArray,
+    weighted_z: NDArray,
+    sum_w: float,
+) -> tuple[NDArray, NDArray, NDArray] | None:
+    """Centre from raw per-block moments, for any design the plan can dispatch.
+
+    The specialised rungs above each require a particular set of group-matrix
+    types; a design outside those sets falls to a chunked pass that rebuilds the
+    ``(n, p)`` design block by block.  The execution plan already computes the
+    same raw moments per block pair far more cheaply, so this rung feeds those
+    through the shared scaling certificate instead.
+
+    Generalises :func:`_try_factored_tensor_centering`, which performs the same
+    subtraction but only for designs containing a factored tensor product.
+    Returns ``None`` whenever the certificate rejects, leaving the caller on its
+    stable chunked path.
+    """
+    # Same measured crossover the mixed rung uses: below this many design cells
+    # the raw-moment accumulation costs more than the stable chunked pass.
+    if dm.n * dm.p < _MIN_MIXED_RAW_MOMENT_CELLS:
+        return None
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        sum_weighted_z = float(np.sum(weighted_z, dtype=np.float64))
+    if not np.isfinite(sum_weighted_z):
+        return None
+
+    # Raw moments can overflow on ill-scaled designs.  The certificate below
+    # rejects non-finite intermediates, but the accumulation itself must not
+    # raise under a caller that has promoted floating-point warnings to errors.
+    try:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            moments = dm.execution_plan._moments_prevalidated(
+                W,
+                rhs=(weighted_z,),
+                include_xtw=True,
+            )
+    except FloatingPointError:
+        return None
+    if moments.xtw is None:  # pragma: no cover - guaranteed by include_xtw
+        return None
+    return _certify_raw_centering(
+        raw_gram=moments.gram,
+        xtw=moments.xtw,
+        raw_rhs=moments.xt_rhs[0],
+        weighted_z=weighted_z,
+        sum_w=sum_w,
+        sum_weighted_z=sum_weighted_z,
+    )
+
+
 def _try_factored_tensor_centering(
     *,
     dm,
