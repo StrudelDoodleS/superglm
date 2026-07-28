@@ -176,3 +176,26 @@ freMTPL2 n=100k, mains = 5 ps-splines (incl. Density, 1,568 distinct) + Area:
   marginal ONCE (5 builds, not 20) and reuse across pairs — expected to
   recover most of the gap. Not blocking: 2 s to rank vs 5 s to confirm one
   candidate is already the right economics.
+
+---
+
+## edf0 sensitivity, measured (2026-07-28, scratchpad edf0_sweep)
+
+freMTPL2 100k, rank stability across edf0: **3-8 is a plateau** — same top
+pair (DrivAge:BonusMalus), z-separation 7.3 -> 8.4 -> 8.9 -> 8.9 with
+diminishing gains; edf0=2 is too blunt (a 2-knob probe cannot represent the
+curved age x BM corner, DrivAge:VehPower overtakes); by edf0=12 the question
+changes (VehAge:VehPower's higher-frequency structure overtakes, T growing
+19 -> 56 across budgets vs 28 -> 54 — itself a finding worth a refit).
+
+Synthetic power confirms the bandwidth theory exactly: a smooth z1*z2 signal
+is best at the SMALLEST budget (z-sep 45.8 at edf0=2, monotone down to 19.2
+at 12); a sin(2.2 z) x sin(2.2 z) signal is invisible at edf0<=4 (rank 9/10)
+and only emerges by 12 (rank 2). edf0 is a probe bandwidth: it must be at
+least the true shape's complexity, and every knob beyond that costs noise.
+
+**Decision:** default stays 4 — the cheap end of the measured real-data
+plateau, matched to the low-complexity prior for pricing interactions.
+Recommended protocol in docs: screen at edf0=4 and once more at 8-12; stable
+ranks are trustworthy, disagreements flag high-frequency candidates for a
+refit rather than a bigger screen.
