@@ -159,3 +159,20 @@ p (45-1200 pairs brute-forces in well under a second) but the backstop idea if
 screening ever faces hundreds of engineered features. Hierarchy stance stated
 for v1: mains-first (screen only pairs whose margins are fitted), i.e. weak
 hierarchy by construction.
+
+---
+
+## Task 5 first measurement (2026-07-28, reference box, benchmarks/benchmark_psst.py)
+
+freMTPL2 n=100k, mains = 5 ps-splines (incl. Density, 1,568 distinct) + Area:
+
+- mains fit_reml 1.24 s (dev 31912.49); **PSST sweep of all 10 pairs 2.0 s**;
+  confirmatory refit of top-2 as ti() 5.1 s, deviance gain 116.5.
+- Ranking: **DrivAge:BonusMalus first (T=27.7)** — the domain-expected pair —
+  then VehAge:VehPower 19.2, VehAge:BonusMalus 18.7, DrivAge:VehPower 18.0;
+  Density pairs (129-154k cells) screen mid-pack without drama.
+- The plan's "< 1 s sweep" target missed at 2.0 s: ~10 pairs x 2 full-length
+  marginal-basis builds each. Obvious v2: build each feature's centered
+  marginal ONCE (5 builds, not 20) and reuse across pairs — expected to
+  recover most of the gap. Not blocking: 2 s to rank vs 5 s to confirm one
+  candidate is already the right economics.
