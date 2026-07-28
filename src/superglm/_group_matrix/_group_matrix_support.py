@@ -10,16 +10,17 @@ unrelated to ``discrete=True``.
 
 Two entry points, differing only in how the row grouping is obtained:
 
-``plan_row_support``
-    The production path.  The caller already knows which rows are identical --
-    a single-covariate spline basis has identical rows exactly where the
-    covariate value repeats -- so it supplies ``row_index`` and this module
-    never touches the full basis.
-
 ``detect_row_support``
-    Convenience for callers without a grouping.  Densifies the basis to derive
-    one, which costs several times the dense basis in transient memory, so it
-    is unsuitable for the hot path.
+    The production path (``dm_builder._build_ssp_group``).  Derives the
+    grouping from the basis itself by keying rows on their raw bytes, a chunk
+    at a time, so only bit-identical rows merge and the transient stays at
+    ``chunk_rows * p_b`` floats.  Needs no assumption that equal covariate
+    values produce bit-identical basis rows.
+
+``plan_row_support``
+    Core gate + materialisation for callers that already know the grouping --
+    a single-covariate spline basis repeats rows exactly where the covariate
+    value repeats -- letting them skip the detection scan entirely.
 """
 
 from __future__ import annotations
@@ -74,8 +75,6 @@ def _estimated_speedup(n_rows: int, n_support: int, p_b: int, nnz: int) -> float
     nnz_per_row = nnz / n_rows
     current = n_rows * nnz_per_row * (nnz_per_row + 1.0) / 2.0
     compressed = n_rows + n_support * float(p_b) ** 2
-    if compressed <= 0.0:
-        return 0.0
     return _BLAS_ADVANTAGE * current / compressed
 
 
@@ -127,7 +126,7 @@ def plan_row_support(
     row_index = np.asarray(row_index, dtype=np.intp).ravel()
     if n_rows == 0 or row_index.shape[0] != n_rows:
         return None
-    n_support = int(row_index.max()) + 1 if n_rows else 0
+    n_support = int(row_index.max()) + 1
     # Strict inequality: equal counts mean no row actually repeats, so there is
     # nothing to deduplicate and the compressed form is pure overhead.
     if n_support <= 0 or n_support >= n_rows:
@@ -158,12 +157,14 @@ def detect_row_support(
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
 
-    Densifies ``B_csr`` and sorts it, so transient memory is several times the
-    dense basis and the cost is paid even when compression is declined.  Prefer
-    :func:`plan_row_support` wherever the caller knows the grouping.
+    Rows are keyed on their raw bytes a chunk at a time, so transient memory is
+    bounded at ``chunk_rows * p_b`` floats, but the scan is O(n * p_b) and is
+    paid even when compression is declined.  Callers that already know the
+    grouping can skip it via :func:`plan_row_support`.
 
-    Rows containing NaN never compare equal, so a basis with NaNs simply fails
-    to compress rather than compressing incorrectly.
+    Byte keying merges only bit-identical rows, which keeps reconstruction
+    exact even for non-finite values: NaN rows merge only when their bit
+    patterns match, and ``-0.0`` stays distinct from ``0.0``.
     """
     n_rows = B_csr.shape[0]
     if n_rows == 0:
