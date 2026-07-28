@@ -956,19 +956,37 @@ def model_build_design_matrix(
 
 
 def compute_lambda_max(model, y, weights):
-    """Smallest lambda1 at which all groups are zeroed (null model)."""
-    from superglm.distributions import initial_mean
+    """Smallest lambda1 at which all groups are zeroed (null model).
 
-    mu_null = initial_mean(y, weights, model._distribution)
-    residual = weights * (y - mu_null)
-    grad = model._dm.rmatvec(residual)
-    n = model._dm.n
+    Must agree with the solver's own zeroing rule.  The block-coordinate step
+    zeroes group ``g`` when ``||grad_g|| <= lambda1 * g.weight``
+    (``pirls.py`` radial threshold, ``GroupLasso.prox_group``), with
+    ``grad_g = -X_g' W r``.  Expanding the IRLS working quantities,
+    ``W r = sample_weight * (dmu/deta) * (y - mu) / V(mu)``, so the null-model
+    score carries a family factor that is 1 only for canonical links.  The
+    solver's objective is unnormalised, so no row-count division belongs here.
+    """
+    from superglm.distributions import _VARIANCE_FLOOR, initial_mean
+
+    mu_null = np.atleast_1d(np.asarray(initial_mean(y, weights, model._distribution), float))
+    eta_null = model._link.link(mu_null)
+    dmu_deta = model._link.deriv_inverse(eta_null)
+    variance = np.maximum(model._distribution.variance(mu_null), _VARIANCE_FLOOR)
+    score = weights * dmu_deta * (y - mu_null) / variance
+    grad = model._dm.rmatvec(score)
+    penalty = configured_penalty(model)
+    # GroupLasso thresholds at lambda1 * w_g; the elastic-net family scales that
+    # by its L1 share alpha (pirls.py radial threshold), so the lambda that
+    # zeroes a group is correspondingly larger.
+    alpha = 1.0 if type(penalty) is GroupLasso else float(getattr(penalty, "alpha", 1.0))
+    if alpha <= 0.0:
+        return 0.0
     lmax = 0.0
     for g in model._groups:
-        if not penalty_targets_group(configured_penalty(model), g):
+        if not penalty_targets_group(penalty, g):
             continue
-        lmax = max(lmax, np.linalg.norm(grad[g.sl]) / g.weight)
-    return lmax / n
+        lmax = max(lmax, np.linalg.norm(grad[g.sl]) / (g.weight * alpha))
+    return lmax
 
 
 def resolve_selection_penalty_for_fit(model, penalty: Penalty, y, weights) -> float:

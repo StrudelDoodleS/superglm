@@ -84,13 +84,17 @@ class TestPathResult:
         m = _make_model()
         result = m.fit_path(df, y, sample_weight=w, n_lambda=20, lambda_ratio=1e-3)
 
-        # Warm-started iterations (all but first) should average fewer iters
-        # than the first cold-start iteration
-        avg_warm = result.n_iter_path[1:].mean()
-        first_cold = result.n_iter_path[0]
-        assert avg_warm <= first_cold, (
-            f"Warm-started avg {avg_warm:.1f} should be <= cold-start {first_cold}"
+        # The path starts at lambda_max, so the first point IS the null model and
+        # is the cheapest fit on the path -- not the most expensive one.  (This
+        # assertion previously read `avg_warm <= first_cold`, which only held
+        # while compute_lambda_max was returning a value n times too small and
+        # the grid therefore started deep in the dense regime.)
+        assert np.all(np.abs(result.coef_path[0]) <= 1e-8), (
+            "path should begin at lambda_max with every coefficient zeroed"
         )
+        # Warm starts keep every subsequent fit cheap in absolute terms.
+        avg_warm = result.n_iter_path[1:].mean()
+        assert avg_warm <= 10, f"warm-started fits should stay cheap, got {avg_warm:.1f}"
 
     def test_deviance_monotone_decreasing(self, poisson_data):
         df, y, w = poisson_data
@@ -157,6 +161,8 @@ class TestPathResult:
         # Norms should increase as lambda decreases
         norms = np.array([np.linalg.norm(c) for c in result.coef_path])
         assert norms[-1] >= norms[0]
-        # Warm-started iterations should average fewer than cold-start
+        # First point is the null model at lambda_max, so it is the cheapest fit;
+        # warm starts keep the rest cheap in absolute terms.
+        assert np.all(np.abs(result.coef_path[0]) <= 1e-8)
         avg_warm = result.n_iter_path[1:].mean()
-        assert avg_warm <= result.n_iter_path[0]
+        assert avg_warm <= 10
