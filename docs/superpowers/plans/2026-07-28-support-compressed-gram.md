@@ -640,3 +640,51 @@ git commit -m "feat: report lossless support compression in design_summary"
 1. **Interaction discovery** — screening candidate pairs by an exact penalised score statistic computed from the same weighted cell aggregates. Independent subsystem, own plan, no dependency on this one.
 2. **Row-tensor (G-operator) factorization** — only if profiling after Task 6 still shows tensor Gram on top. Requires verifying the factorization correctness that this plan's evidence did **not** establish.
 3. **RFC-1 (`docs/audit/2026-07-28/architecture-audit.md`)** — the packed/mixed bin-space centering cliff. Note that Task 4 may partially unlock it for free: the packed path requires every group to be Discretized/Tensor/Categorical, and exact-path splines now present as a `DiscretizedSSPGroupMatrix` subclass. Worth re-checking the ladder dispatch counters after this lands before doing RFC-1 work.
+
+---
+
+## Post-Task-4 profile and the next move (measured)
+
+After Task 4 the tensor fit is 27.28 s (29.51 s under the profiler). The cost moved entirely:
+
+| cost | tottime | was |
+|---|---:|---|
+| `numpy.linalg.qr` via `rank.py:43 streamed_weighted_factor` (258 calls) | 9.97 s | — |
+| `centered_gram_rhs` (51 calls) | 4.60 s (8.80 cum) | chunked-dense centering, still firing |
+| compressed `toarray` (4,575 calls) | 2.98 s | that fallback gathering per chunk |
+| `reml_w_correction` | **0.45 s (1.5%)** | **28.56 s (45%)** |
+
+**The leverage-diagonal W-correction is demoted.** It was the planned next headline item (flat in q, verified
+1.8e-15) and now targets 1.5%. Compression solved q-scaling for compressible designs by making each signed Gram
+cheap rather than by reducing their count. It still matters for continuous covariates that do not compress.
+
+### Two candidates investigated and one rejected on measurement
+
+**Support-aware rank certification — REJECTED.** The QR is not a solve backend and not an alternative to
+pivoted Cholesky (which is already used, `rank.py:659,803`, on the p x p Gram). It is the certification
+escalation that runs when `decompose_gram` is ambiguous, streaming over observation rows. It was always firing
+(19 calls / 9.32 s before compression; 14 calls / 11.67 s after) — compression revealed it, did not cause it.
+
+Streaming it over compressed support rows is exact — `M = diag(sqrt(Wbar)) B_unique` satisfies `M'M = X'WX`,
+verified to 6.66e-16 with identical rank, 20x on a single block. **But certification runs on the full
+concatenated design, and the JOINT distinct-row count is 62,575 of 100,000 — only 1.60x.** Per-group supports
+are small (82, 55, 98, 12, 6) but their joint explodes combinatorially because the covariates are near
+independent. Poor value for complex plumbing.
+
+**Enabling the augmented bin-space plan by relaxing the exact-type checks — REJECTED as brittle.** The
+augmented dimension is `sum(supports)` = 2,917 here, because the tensor group carries a 2,664-row support,
+giving a **68 MB dense augmented Gram**; that path's budgets were sized when `n_bins <= 256`.
+
+### Recommended next task: raw per-pair moments for centering
+
+Measured on the real design: **all diagonal and cross blocks via `_gram_any_sign`/`_cross_gram` take 6.2 ms**,
+against ~90 ms per call for the chunked centered path over 51 calls. Worst per-pair histogram is 261,072 cells
+(2.1 MB) against the 5,000,000-cell cap — 40x of headroom. Nothing scales with `sum(supports)` or with the
+joint support, so the brittleness that rules out the augmented route does not apply.
+
+This is the audit's `large-n:general-raw-moments-rung` (RFC-1) with its verified amendment: raw moments plus a
+rank-1 mean correction, gated by the existing `_certify_raw_centering` certificate, **with a per-fit anchor
+shift for Dense columns** — without the anchor the certificate rejects ill-located numerics such as VehPower
+(mean 9.0, RMS 3.2) and the design latches back to the chunked path.
+
+Addressable: the 4.60 s of `centered_gram_rhs` plus the 2.98 s of per-chunk `toarray`.
