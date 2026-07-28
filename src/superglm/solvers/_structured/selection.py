@@ -317,8 +317,8 @@ def _factor_smooth_singular_local_level(
     )
     local_blocks = np.asarray(information, dtype=np.float64) + local_penalty[None, :, :]
     singular_level = _first_singular_factor_smooth_block(local_blocks)
-    matrix._structured_feasibility_key = cache_key
     matrix._structured_feasibility_level = singular_level
+    matrix._structured_feasibility_key = cache_key
     return singular_level
 
 
@@ -484,11 +484,14 @@ def resolve_structured_backend(
                 mode,
                 selection,
             )
-        if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+        if (
+            isinstance(dominant_matrix, FactorSmoothGroupMatrix)
+            and dominant_matrix.factor_basis != "sz"
+        ):
             override_local_penalties = _factor_smooth_override_local_blocks(
                 override_penalty,
                 structured_indices,
-                sum_to_zero=dominant_matrix.factor_basis == "sz",
+                sum_to_zero=False,
             )
     if isinstance(dominant_matrix, RandomEffectGroupMatrix) and (
         lambda2 is not None or S_override is not None
@@ -546,13 +549,16 @@ def resolve_structured_backend(
                     mode,
                     selection,
                 )
-    if isinstance(dominant_matrix, FactorSmoothGroupMatrix):
+    if (
+        isinstance(dominant_matrix, FactorSmoothGroupMatrix)
+        and dominant_matrix.factor_basis != "sz"
+    ):
         if override_local_penalties is not None:
             structurally_singular_level = _first_singular_factor_smooth_block(
                 override_local_penalties,
                 scale_floor=0.0,
             )
-            if dominant_matrix.factor_basis != "sz" and structurally_singular_level is not None:
+            if structurally_singular_level is not None:
                 level_label = dominant_matrix.levels[structurally_singular_level]
                 return _backend_ineligibility(
                     (
@@ -591,22 +597,21 @@ def resolve_structured_backend(
                 group_name,
                 lambda2,
             )
-            if dominant_matrix.factor_basis != "sz":
-                zero_component = _factor_smooth_zero_penalty_component(
-                    dominant_matrix,
-                    group_name,
-                    lambda2,
+            zero_component = _factor_smooth_zero_penalty_component(
+                dominant_matrix,
+                group_name,
+                lambda2,
+            )
+            if zero_component is not None:
+                return _backend_ineligibility(
+                    (
+                        f"FactorSmooth group {group_name!r} has zero penalty component "
+                        f"{zero_component!r}, which can alias the intercept "
+                        "or population smooth"
+                    ),
+                    mode,
+                    selection,
                 )
-                if zero_component is not None:
-                    return _backend_ineligibility(
-                        (
-                            f"FactorSmooth group {group_name!r} has zero penalty component "
-                            f"{zero_component!r}, which can alias the intercept "
-                            "or population smooth"
-                        ),
-                        mode,
-                        selection,
-                    )
             numerically_singular_penalty = (
                 _first_singular_factor_smooth_block(local_penalty[None, :, :]) is not None
             )

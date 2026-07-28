@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
+import superglm.solvers._structured.selection as structured_selection
 import superglm.solvers.irls_direct as irls_direct
 from superglm import FactorSmooth, LambdaPolicy, Numeric, RandomEffect, Spline, SuperGLM
 from superglm.distributions import Gamma, Gaussian, Poisson
@@ -238,7 +239,7 @@ def _selection_factor_smooth_matrix(
     )
 
 
-def test_auto_sz_cost_fallback_precedes_override_feasibility_scan(monkeypatch) -> None:
+def test_sz_resolution_never_runs_local_feasibility_scans(monkeypatch) -> None:
     n_levels = 4
     x = np.tile(np.linspace(-1.0, 1.0, 6), n_levels)
     matrix, group = _selection_factor_smooth_matrix(
@@ -250,18 +251,20 @@ def test_auto_sz_cost_fallback_precedes_override_feasibility_scan(monkeypatch) -
     weights = np.ones(matrix.shape[0])
     weights[matrix.codes == n_levels - 1] = 0.0
     override = np.zeros((matrix.shape[1], matrix.shape[1]))
-    original = FactorSmoothGroupMatrix.factor_smooth_sufficient_stats
-    calls = 0
-
-    def counted(self, W, rhs):
-        nonlocal calls
-        calls += 1
-        return original(self, W, rhs)
-
     monkeypatch.setattr(
         FactorSmoothGroupMatrix,
         "factor_smooth_sufficient_stats",
-        counted,
+        lambda *_args, **_kwargs: pytest.fail("SZ resolution scanned all training rows"),
+    )
+    monkeypatch.setattr(
+        structured_selection,
+        "_first_singular_factor_smooth_block",
+        lambda *_args, **_kwargs: pytest.fail("SZ resolution eigendecomposed local penalties"),
+    )
+    monkeypatch.setattr(
+        structured_selection,
+        "_factor_smooth_override_local_blocks",
+        lambda *_args, **_kwargs: pytest.fail("SZ resolution expanded local override blocks"),
     )
     automatic = resolve_structured_backend(
         [matrix],
@@ -274,22 +277,47 @@ def test_auto_sz_cost_fallback_precedes_override_feasibility_scan(monkeypatch) -
     )
     assert not automatic.use_structured
     assert "crossover" in automatic.fallback_reason
-    assert calls == 0
 
-    with pytest.raises(ValueError, match="authoritative S_override"):
-        resolve_structured_backend(
-            [matrix],
-            [group],
-            direct_solve="structured",
-            coefficient_width=matrix.shape[1],
-            row_weights=weights,
-            lambda2={f"{group.name}:wiggle": 1.0},
-            S_override=override,
-        )
-    assert calls == 1
+    forced = resolve_structured_backend(
+        [matrix],
+        [group],
+        direct_solve="structured",
+        coefficient_width=matrix.shape[1],
+        row_weights=weights,
+        lambda2={f"{group.name}:wiggle": 1.0},
+        S_override=override,
+    )
+    assert forced.use_structured
 
 
-def test_authoritative_sz_override_preserves_tiny_weight_rank() -> None:
+def test_sz_lambda_resolution_never_runs_local_feasibility_scan(monkeypatch) -> None:
+    n_levels = 20
+    x = np.tile(np.linspace(-1.0, 1.0, 6), n_levels)
+    matrix, group = _selection_factor_smooth_matrix(
+        factor_basis="sz",
+        n_levels=n_levels,
+        local_basis=np.column_stack((np.ones_like(x), x)),
+        repeated_penalty_components=(("wiggle", np.diag([0.0, 1.0])),),
+    )
+
+    monkeypatch.setattr(
+        FactorSmoothGroupMatrix,
+        "factor_smooth_sufficient_stats",
+        lambda *_args, **_kwargs: pytest.fail("SZ resolution scanned all training rows"),
+    )
+    decision = resolve_structured_backend(
+        [matrix],
+        [group],
+        direct_solve="auto",
+        coefficient_width=matrix.shape[1],
+        row_weights=np.ones(matrix.shape[0]),
+        lambda2={f"{group.name}:wiggle": 1.0},
+    )
+
+    assert decision.use_structured
+
+
+def test_authoritative_sz_override_uses_global_tiny_weight_rank() -> None:
     dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
         _gaussian_response,
         factor_basis="sz",
@@ -334,9 +362,9 @@ def test_authoritative_sz_override_preserves_tiny_weight_rank() -> None:
     )
 
     assert automatic.direct_backend == "gram"
-    assert "authoritative S_override" in automatic.direct_fallback_reason
+    assert "globally unidentifiable" in automatic.direct_fallback_reason
     np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
-    with pytest.raises(ValueError, match="authoritative S_override"):
+    with pytest.raises(np.linalg.LinAlgError, match="globally unidentifiable"):
         irls_direct.fit_irls_direct(
             X=dm,
             y=y,
@@ -452,13 +480,10 @@ def test_authoritative_factor_smooth_override_supersedes_stale_zero_lambdas(
     np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
 
 
-@pytest.mark.parametrize("factor_basis", ["fs", "sz"])
-def test_authoritative_singular_factor_smooth_override_falls_back_to_gram(
-    factor_basis: str,
-) -> None:
+def test_authoritative_singular_factor_smooth_override_falls_back_to_gram() -> None:
     dm, groups, penalties, y, weights, offset, lambdas = _factor_smooth_problem(
         _gaussian_response,
-        factor_basis=factor_basis,
+        factor_basis="fs",
     )
     matrix = dm.group_matrices[3]
     assert isinstance(matrix, FactorSmoothGroupMatrix)
@@ -519,6 +544,72 @@ def test_authoritative_singular_factor_smooth_override_falls_back_to_gram(
             S_override=override,
             tol=1.0e-10,
         )
+
+
+def test_sz_locally_singular_but_globally_identifiable_remains_structured() -> None:
+    n_levels = 20
+    support = [np.array([0.0, 0.0])] + [np.array([-1.0, 0.0, 1.0]) for _ in range(n_levels - 1)]
+    x = np.concatenate(support)
+    codes = np.concatenate(
+        [
+            np.full(len(level_support), level, dtype=np.intp)
+            for level, level_support in enumerate(support)
+        ]
+    )
+    basis = np.column_stack((np.ones_like(x), x))
+    matrix = FactorSmoothGroupMatrix(
+        sp.csr_matrix(basis),
+        codes,
+        n_levels,
+        natural_map=np.eye(2),
+        levels=tuple(f"level-{level}" for level in range(n_levels)),
+        repeated_penalty_components=(("wiggle", np.zeros((2, 2))),),
+        factor_basis="sz",
+    )
+    group = GroupSlice(
+        name="x:group:sz",
+        start=0,
+        end=matrix.shape[1],
+        penalized=True,
+    )
+    dm = DesignMatrix([matrix], n=len(x), p=matrix.shape[1])
+    weights = np.ones(len(x))
+    offset = 0.08 * np.cos(np.linspace(0.0, 2.0 * np.pi, len(x)))
+    y = 0.3 + 0.2 * x + np.linspace(-0.1, 0.1, len(x)) + offset
+    override = np.zeros((dm.p, dm.p))
+    lambdas = {f"{group.name}:wiggle": 0.0}
+
+    automatic, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=[group],
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="auto",
+        S_override=override,
+        tol=1.0e-10,
+    )
+    gram, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=weights,
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=[group],
+        lambda2=lambdas,
+        offset=offset,
+        direct_solve="gram",
+        S_override=override,
+        tol=1.0e-10,
+    )
+
+    assert automatic.direct_backend == "structured"
+    assert automatic.direct_fallback_reason is None
+    np.testing.assert_allclose(automatic.beta, gram.beta, atol=3.0e-8)
+    np.testing.assert_allclose(automatic.intercept, gram.intercept, atol=3.0e-8)
 
 
 @pytest.mark.parametrize("factor_basis", ["fs", "sz"])
@@ -1075,7 +1166,7 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
     ("basis", "fallback_reason"),
     [
         ("fs", "zero penalty component"),
-        ("sz", "singular local block"),
+        ("sz", "globally unidentifiable"),
     ],
 )
 @pytest.mark.parametrize("discrete", [False, True])
@@ -1098,6 +1189,8 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
         }
     )
     y = np.sin(4.0 * x) + 0.1 * z + rng.normal(scale=0.05, size=len(x))
+    offset = 0.07 * np.cos(np.linspace(0.0, 3.0 * np.pi, len(x)))
+    y += offset
     sample_weight = np.ones(len(x))
     sample_weight[codes == n_levels - 1] = 0.0
     policies = {"wiggle": LambdaPolicy.off()}
@@ -1109,7 +1202,7 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
         )
     else:
         features["x"] = Spline(k=5, lambda_policy=LambdaPolicy.fixed(1.0))
-    model = SuperGLM(
+    model_kwargs = dict(
         family="gaussian",
         features=features,
         interactions=[
@@ -1122,18 +1215,36 @@ def test_auto_factor_smooth_falls_back_for_unsupported_local_geometry(
             ),
         ],
         selection_penalty=0.0,
-        direct_solve="auto",
         discrete=discrete,
         n_bins=64,
-    ).fit_reml(
+    )
+    model = SuperGLM(**model_kwargs, direct_solve="auto").fit_reml(
         X,
         y,
         sample_weight=sample_weight,
+        offset=offset,
         runtime_validation="skip",
     )
 
     assert model.result.direct_backend == "gram"
     assert fallback_reason in model.result.direct_fallback_reason
+    if basis == "sz":
+        gram = SuperGLM(**model_kwargs, direct_solve="gram").fit_reml(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            runtime_validation="skip",
+        )
+        np.testing.assert_allclose(model.predict(X), gram.predict(X), atol=2.0e-8)
+        with pytest.raises(np.linalg.LinAlgError, match="globally unidentifiable"):
+            SuperGLM(**model_kwargs, direct_solve="structured").fit_reml(
+                X,
+                y,
+                sample_weight=sample_weight,
+                offset=offset,
+                runtime_validation="skip",
+            )
 
 
 def test_zero_penalty_fs_falls_back_or_rejects_but_gram_fits() -> None:

@@ -244,6 +244,11 @@ model.fit_reml(train, y, offset=offset)
 `direct_solve="auto"` retains Gram fitting for small terms and switches to the
 structured backend at the measured crossover. `direct_solve="structured"`
 requires eligible geometry and is useful for reproducible benchmarking.
+Locally rank-deficient SZ levels remain eligible because the exact
+sum-to-zero constraint can make the full system identifiable. If that global
+constrained system is still unidentifiable, `"auto"` retries on Gram and
+records the reason; forced `"structured"` raises the global identifiability
+error.
 `discrete=True` bins the continuous spline support and reuses cached
 sufficient statistics across REML iterations; factor identities and the SZ
 constraint remain exact.

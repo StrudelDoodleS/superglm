@@ -238,6 +238,11 @@ def optimize_direct_reml(
         trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _t0
+    structured_runtime_fallback_reason: str | None = None
+    if use_structured and boot_result.direct_backend != "structured":
+        use_structured = False
+        direct_solve = "gram"
+        structured_runtime_fallback_reason = boot_result.direct_fallback_reason
     warm_beta = boot_result.beta.copy()
     warm_intercept = float(boot_result.intercept)
 
@@ -889,9 +894,9 @@ def optimize_direct_reml(
                     best_obj = float(trial_obj)
                     best_lambdas = trial_lambdas.copy()
                     best_pirls = trial_result
-                if outer == max_reml_iter - 1:
-                    lambda_history.append(trial_lambdas.copy())
-                    objective_history.append(float(trial_obj))
+                    if outer == max_reml_iter - 1:
+                        lambda_history.append(trial_lambdas.copy())
+                        objective_history.append(float(trial_obj))
                 accepted = True
                 break
             if trial_mode_residual is not None:
@@ -918,8 +923,12 @@ def optimize_direct_reml(
 
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
+    if structured_runtime_fallback_reason is not None:
+        best_pirls.direct_fallback_reason = structured_runtime_fallback_reason
 
     if profile is not None:
+        if structured_runtime_fallback_reason is not None:
+            profile["direct_fallback_reason"] = structured_runtime_fallback_reason
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
         profile["reml_pirls_s"] = _t_pirls
         profile["reml_objective_s"] = _t_objective

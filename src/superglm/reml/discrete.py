@@ -353,6 +353,11 @@ def optimize_discrete_reml_cached_w(
         trace_purpose="reml_bootstrap",
     )
     _t_pirls += _time.perf_counter() - _pirls_start
+    structured_runtime_fallback_reason: str | None = None
+    if use_structured and boot_result.direct_backend != "structured":
+        use_structured = False
+        direct_solve = "gram"
+        structured_runtime_fallback_reason = boot_result.direct_fallback_reason
     dm = dm_boot
     penalties = penalties_boot
     penalty_caches = penalty_caches_boot
@@ -1252,9 +1257,13 @@ def optimize_discrete_reml_cached_w(
     best_obj = final_obj
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
+    if structured_runtime_fallback_reason is not None:
+        best_pirls.direct_fallback_reason = structured_runtime_fallback_reason
     lambda_history.append(final_lambdas.copy())
 
     if profile is not None:
+        if structured_runtime_fallback_reason is not None:
+            profile["direct_fallback_reason"] = structured_runtime_fallback_reason
         if _bootstrap_component_stats:
             profile["reml_bootstrap_summary"] = {
                 "boot_phi": float(boot_phi),

@@ -102,6 +102,7 @@ from superglm.solvers.structured import (
 from superglm.solvers.sum_to_zero import (
     ProfiledSumToZeroBlockFactor,
     SumToZeroBlockFactor,
+    SumToZeroIdentifiabilityError,
 )
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
@@ -379,6 +380,97 @@ def _safe_decompose_H(H: NDArray, residual_tol: float = 1e-6) -> tuple[NDArray, 
 
 
 def fit_irls_direct(
+    X: NDArray | DesignMatrix,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    groups: list[GroupSlice],
+    lambda2: float | dict[str, float],
+    offset: NDArray | None = None,
+    beta_init: NDArray | None = None,
+    intercept_init: float | None = None,
+    max_iter: int = 100,
+    tol: float = 1e-8,
+    return_xtwx: bool = False,
+    profile: dict | None = None,
+    cache_out: dict | None = None,
+    record_diagnostics: bool = False,
+    direct_solve: str = "auto",
+    convergence: str = "deviance",
+    S_override: NDArray | None = None,
+    reml_penalties: list[PenaltyComponent] | None = None,
+    return_scop_state: bool = False,
+    _scop_joint: bool = True,
+    scop_state_init: dict[int, dict] | None = None,
+    debug_recorder=None,
+    debug_context: dict[str, object] | None = None,
+    compute_rank_info: bool = True,
+    _return_working_system: bool = False,
+    _compute_fit_statistics: bool = True,
+    _compute_reml_geometry: bool = True,
+    _use_observed_newton: bool = True,
+    _deviance_init: float | None = None,
+    trace_run: TraceRun | None = None,
+    trace_purpose: str = "fit",
+    _compute_scop_postfit_inference: bool = True,
+) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
+    """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
+
+    def run_once(
+        resolved_direct_solve: str,
+    ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
+        return _fit_irls_direct_once(
+            X=X,
+            y=y,
+            weights=weights,
+            family=family,
+            link=link,
+            groups=groups,
+            lambda2=lambda2,
+            offset=offset,
+            beta_init=beta_init,
+            intercept_init=intercept_init,
+            max_iter=max_iter,
+            tol=tol,
+            return_xtwx=return_xtwx,
+            profile=profile,
+            cache_out=cache_out,
+            record_diagnostics=record_diagnostics,
+            direct_solve=resolved_direct_solve,
+            convergence=convergence,
+            S_override=S_override,
+            reml_penalties=reml_penalties,
+            return_scop_state=return_scop_state,
+            _scop_joint=_scop_joint,
+            scop_state_init=scop_state_init,
+            debug_recorder=debug_recorder,
+            debug_context=debug_context,
+            compute_rank_info=compute_rank_info,
+            _return_working_system=_return_working_system,
+            _compute_fit_statistics=_compute_fit_statistics,
+            _compute_reml_geometry=_compute_reml_geometry,
+            _use_observed_newton=_use_observed_newton,
+            _deviance_init=_deviance_init,
+            trace_run=trace_run,
+            trace_purpose=trace_purpose,
+            _compute_scop_postfit_inference=_compute_scop_postfit_inference,
+        )
+
+    try:
+        return run_once(direct_solve)
+    except SumToZeroIdentifiabilityError as error:
+        if direct_solve != "auto":
+            raise
+        fallback_reason = str(error)
+        result = run_once("gram")
+        result[0].direct_fallback_reason = fallback_reason
+        if profile is not None:
+            profile["direct_fallback_reason"] = fallback_reason
+        return result
+
+
+def _fit_irls_direct_once(
     X: NDArray | DesignMatrix,
     y: NDArray,
     weights: NDArray,

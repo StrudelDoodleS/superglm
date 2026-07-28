@@ -135,13 +135,15 @@ class SuperGLM:
             Use active-set cycling in the BCD solver.
         direct_solve : {"auto", "gram", "qr", "structured"}
             Strategy for the direct IRLS solver (lambda1=0).
-            ``"auto"`` uses gram-based Cholesky with residual-checked SVD
-            fallback, warning after repeated fallbacks.  ``"gram"`` forces
-            the gram path without warnings.  ``"qr"`` uses QR on the
+            ``"auto"`` selects compact structured elimination for eligible
+            random-effect and factor-smooth terms above the measured crossover,
+            otherwise using Gram. A globally unidentifiable SZ system also
+            retries on Gram with an explicit recorded reason. ``"gram"`` forces
+            the gram path. ``"qr"`` uses QR on the
             materialised weighted design matrix — backward-stable but
             O(n·p²) per iteration.  Intended for smaller datasets.
             ``"structured"`` forces structured elimination for an eligible
-            random-effect block.
+            random-effect, FS, or SZ block.
         discrete : bool
             Use discretized basis matrices for large-*n* REML (fREML-style).
         n_bins : int or dict[str, int]

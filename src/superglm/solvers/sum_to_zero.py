@@ -25,6 +25,10 @@ from superglm.solvers.hessian_factor import _component_indices, _component_omega
 from superglm.types import PenaltyComponent
 
 
+class SumToZeroIdentifiabilityError(np.linalg.LinAlgError):
+    """Raised when the globally constrained SZ system is not identifiable."""
+
+
 @dataclass(frozen=True)
 class _LocalPSD:
     """Positive-range inverse and null basis for one symmetric local block."""
@@ -421,7 +425,7 @@ class SumToZeroBlockFactor:
             or self._border_factor.negative_count != expected_negative
             or self._border_factor.zero_count
         ):
-            raise np.linalg.LinAlgError(
+            raise SumToZeroIdentifiabilityError(
                 f"Structured SZ term {term_name!r} is globally unidentifiable after "
                 f"enforcing sum-to-zero; deficient fitted levels={self.deficient_levels!r}. "
                 "Use basis='fs', reduce k, or provide more numeric support."
@@ -958,4 +962,5 @@ class ProfiledSumToZeroBlockFactor:
 __all__ = [
     "ProfiledSumToZeroBlockFactor",
     "SumToZeroBlockFactor",
+    "SumToZeroIdentifiabilityError",
 ]
