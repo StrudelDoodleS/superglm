@@ -44,7 +44,22 @@ _WIDE_DESIGN_THRESHOLD = 1_500
 
 
 def _auto_policy() -> bool:
-    return os.environ.get(_ENV_VAR, "auto").strip().lower() in ("", "auto")
+    """True when the automatic policy governs, including unparseable values.
+
+    An unparseable environment value already falls back to the automatic cap
+    in :func:`_resolve_limit`, so widening must stay active for it too —
+    otherwise a typo would yield the cap without its wide-design release.
+    """
+    raw = os.environ.get(_ENV_VAR, "auto").strip().lower()
+    if raw in ("", "auto"):
+        return True
+    if raw in ("native", "off", "none", "false"):
+        return False
+    try:
+        int(raw)
+    except ValueError:
+        return True
+    return False
 
 
 def allow_wide_design(p: int) -> None:

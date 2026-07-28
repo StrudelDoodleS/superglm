@@ -77,6 +77,70 @@ def test_empty_and_singleton_cells_are_exact():
     np.testing.assert_allclose(V, X.T @ (X * weights[:, None]), rtol=1e-14)
 
 
+def test_cell_values_are_pinned_independently():
+    """Hand-computed S_cell and W_cell so a coordinated S/W swap cannot pass."""
+    codes_a = np.array([0, 0, 0, 0])
+    codes_b = np.array([2, 2, 0, 0])
+    score = np.array([1.0, 2.0, 3.0, 4.0])
+    weights = np.array([0.5, 0.25, 1.0, 2.0])
+
+    S_cell, W_cell = pair_cell_moments(codes_a, codes_b, 1, 3, score, weights)
+
+    np.testing.assert_array_equal(S_cell, [[7.0, 0.0, 3.0]])
+    np.testing.assert_array_equal(W_cell, [[3.0, 0.0, 0.75]])
+
+
+def test_out_of_range_codes_raise_instead_of_corrupting():
+    """The kernel indexes without checks; the guard must catch every escape."""
+    import pytest
+
+    ok = np.zeros(4, dtype=int)
+    vals = np.ones(4)
+    for bad_a, bad_b in (([0, 0, 0, 2], ok), (ok, [0, 3, 0, 0]), ([-1, 0, 0, 0], ok)):
+        with pytest.raises(ValueError, match="fall outside"):
+            pair_cell_moments(np.asarray(bad_a), np.asarray(bad_b), 2, 3, vals, vals)
+
+
+def test_short_value_arrays_raise_instead_of_reading_heap():
+    import pytest
+
+    codes = np.zeros(10, dtype=int)
+    with pytest.raises(ValueError, match="row-for-row"):
+        pair_cell_moments(codes, codes, 1, 1, np.zeros(3), np.zeros(10))
+    with pytest.raises(ValueError, match="row-for-row"):
+        pair_cell_moments(codes, codes, 1, 1, np.zeros(10), np.zeros(3))
+
+
+def test_cell_ceiling_rejects_unbinned_wide_pairs():
+    import pytest
+
+    codes = np.zeros(4, dtype=int)
+    vals = np.ones(4)
+    with pytest.raises(ValueError, match="ceiling"):
+        pair_cell_moments(codes, codes, 50_000, 50_000, vals, vals)
+    # The ceiling is caller-adjustable; a modest raise takes effect.
+    S_cell, _ = pair_cell_moments(codes, codes, 2_000, 3_000, vals, vals, max_cells=6_000_000)
+    assert S_cell.shape == (2_000, 3_000)
+
+
+def test_working_score_is_bitwise_the_inline_formula():
+    """Bit-identity pin: the KKT suite tolerates ~10% drift, this does not."""
+    from superglm.distributions import _VARIANCE_FLOOR
+
+    rng = np.random.default_rng(4)
+    n = 500
+    mu = rng.uniform(0.05, 5.0, n)
+    eta = np.log(mu)
+    y = rng.poisson(mu).astype(float)
+    w = rng.uniform(0.1, 2.0, n)
+    family, link = Gamma(), LogLink()
+
+    expected = (
+        w * link.deriv_inverse(eta) * (y - mu) / np.maximum(family.variance(mu), _VARIANCE_FLOOR)
+    )
+    assert np.array_equal(working_score(y, mu, eta, w, family, link), expected)
+
+
 def test_mismatched_code_shapes_raise():
     import pytest
 
