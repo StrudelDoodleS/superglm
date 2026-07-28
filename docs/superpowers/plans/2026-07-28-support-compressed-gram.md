@@ -34,14 +34,46 @@ Measured on the real fitted design (`docs/audit/2026-07-28/measured-tensor-cost.
 
 Two independent wastes on the tensor: it is stored **fully dense inside a CSR container** (density 1.000 — the row-Kronecker of two locally-supported marginals lost their sparsity), and it stores 100,000 rows when only 2,664 are distinct.
 
-Direct measurement of the tensor block's Gram, same `W`:
+Direct measurement of every block's Gram, same `W`, **median of 7 repeats after JIT warm-up** (an earlier
+single-shot run reported 561 ms / 193× for the tensor; warm-up-corrected figures are below and are stronger):
 
-```
-superglm gm.gram(W)                561.1 ms
-support-compressed equivalent        2.9 ms   rel_err 8.28e-15   speedup 193.5x
-```
+| group | p | distinct rows | `gm.gram(W)` median | compressed | speedup | rel_err |
+|---|---:|---:|---:|---:|---:|---|
+| DrivAge | 9 | 82 | 1.84 ms | 0.10 ms | 18.9× | 1.0e-14 |
+| VehAge | 9 | 55 | 1.86 ms | 0.10 ms | 19.0× | 8.8e-15 |
+| BonusMalus | 9 | 98 | 1.89 ms | 0.20 ms | 9.3× | 1.6e-14 |
+| VehPower | 9 | 12 | 1.86 ms | 0.12 ms | 15.3× | 1.5e-15 |
+| Area (`CategoricalGroupMatrix`) | 5 | 6 | 0.13 ms | 0.13 ms | **1.0×** | 0 |
+| **DrivAge:BonusMalus** | 81 | 2,664 | **481.80 ms** (min 478.73) | **0.63 ms** | **759×** | 8.2e-15 |
 
-**193× exact.** No factorization, no approximation — purely exploiting that rows repeat.
+**759× exact on the tensor block.** No factorization, no approximation — purely exploiting that rows repeat.
+`Area` is already optimal because `CategoricalGroupMatrix` stores codes, which is the same idea; this plan
+generalises it to factored SSP bases.
+
+**Measurement hygiene note for the implementer:** these kernels are numba-compiled. A first call can read
+100-400× slower than steady state purely from JIT compilation. Always warm up twice and report a median of
+several repeats; never time a single cold call.
+
+**Factor smooths (`basis="fs"` and `basis="sz"`) are deliberately out of scope** — measured, same protocol:
+
+| basis | factor | levels | p | cells | compressible | gram median | cell-agg |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `fs` | Area | 6 | 36 | 460 | 217× | 2.72 ms | 0.09 ms |
+| `sz` | Area | 6 | 30 | 460 | 217× | 2.67 ms | 0.09 ms |
+| `fs` | VehBrand | 11 | 66 | 789 | 127× | 2.23 ms | 0.09 ms |
+| `sz` | VehBrand | 11 | 60 | 789 | 127× | 2.21 ms | 0.09 ms |
+
+`fs` and `sz` are indistinguishable (one storage path; only the coefficient mapping differs, K vs K−1 blocks).
+The redundancy is real at 127-217×, but the absolute cost is ~2.2-2.7 ms against the tensor's 481.8 ms —
+roughly 200× less on the table. The reason is that `FactorSmoothGroupMatrix` **already** does the optimisation
+the tensor path skips: its docstring notes "the observation-level interaction matrix is never retained", so it
+stores a shared marginal basis plus level codes rather than the n×(K·L) product.
+
+Because this plan wires detection only where `SparseSSPGroupMatrix` is constructed, **factor smooths are
+untouched by it** — no accidental blast radius. Compressing them later needs a *different* shape: keep the
+existing (shared B, codes) factorisation and compress only the marginal's rows, aggregating weights over
+(level, support) cells. Generic row dedup would work but waste the structure, since deduplicated rows are
+sparse block rows (one 6-wide block nonzero out of 36).
 
 **Why the win is available at all:** insurance rating variables are integer-valued. DrivAge has 82 distinct values, BonusMalus 98. Compression here is *lossless*, unlike `discrete=True` binning.
 
