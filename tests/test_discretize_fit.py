@@ -42,6 +42,38 @@ def tensor_interaction_data():
     return X, y
 
 
+@pytest.fixture
+def shared_marginal_tensor_data():
+    """Insurance-shaped data for two ``ti()`` terms sharing one marginal.
+
+    ``bm`` and ``veh`` are both driven by ``age``, so each joint support is
+    holey and each tensor block is numerically rank deficient — the regime
+    where a cross-tensor projection can silently collapse a whole term.
+    """
+    rng = np.random.default_rng(3)
+    n = 1500
+    age = rng.integers(18, 90, n).astype(float)
+    bm = np.clip(150.0 - age - rng.integers(0, 40, n), 50.0, 130.0)
+    veh = np.clip((age - 18) * rng.uniform(0.0, 0.7, n), 0.0, 40.0).round()
+    X = pd.DataFrame({"age": age, "bm": bm, "veh": veh})
+    exposure = rng.uniform(0.05, 1.0, n)
+    mu = np.exp(-2.0 + 0.01 * age - 0.004 * bm + 0.01 * veh)
+    y = (rng.poisson(mu * exposure) / exposure).astype(float)
+    return X, y, exposure
+
+
+def _shared_marginal_tensor_model(discrete):
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=discrete,
+        features={name: Spline(kind="ps", k=8) for name in ("age", "bm", "veh")},
+    )
+    model._add_interaction("age", "bm")
+    model._add_interaction("age", "veh")
+    return model
+
+
 class TestDiscretizedFit:
     def test_close_to_exact(self, poisson_data):
         """Discretized coefficients, deviance, and predictions close to exact."""
@@ -724,6 +756,57 @@ class TestDiscretePredictParity:
 
         assert np.max(np.abs(eta_exact - eta_fast)) < 3e-2
         assert np.max(np.abs(mu_exact - mu_fast)) < 2e-2
+
+
+class TestSharedMarginalTensors:
+    """Two ``ti()`` terms sharing a marginal, as in mgcv functional ANOVA.
+
+    ``s(a)+s(b)+s(c)+ti(a,b)+ti(a,c)`` is a mainstream modelling pattern.  The
+    ``ti()`` marginals are already centered, so the two blocks are identifiable
+    side by side and the discrete path must build the same spans as the exact
+    path rather than constraining one tensor against the other.
+    """
+
+    def test_shared_marginal_tensors_keep_exact_path_widths(self, shared_marginal_tensor_data):
+        """Discrete tensor blocks must not shrink relative to the exact path."""
+        X, y, exposure = shared_marginal_tensor_data
+
+        widths = {}
+        for discrete in (False, True):
+            model = _shared_marginal_tensor_model(discrete)
+            model._build_design_matrix(X, y, exposure, None)
+            widths[discrete] = [gm.shape[1] for gm in model._dm.group_matrices]
+
+        assert widths[True] == widths[False], (
+            "discrete design collapsed a shared-marginal tensor: "
+            f"{widths[True]} vs exact {widths[False]}"
+        )
+
+    def test_shared_marginal_tensors_reml_matches_exact(self, shared_marginal_tensor_data):
+        """fit_reml(discrete=True) must fit, and agree with the exact path."""
+        X, y, exposure = shared_marginal_tensor_data
+
+        model_exact = _shared_marginal_tensor_model(False)
+        model_exact.fit_reml(X, y, sample_weight=exposure)
+
+        model_disc = _shared_marginal_tensor_model(True)
+        model_disc.fit_reml(X, y, sample_weight=exposure)
+
+        dev_exact = model_exact.result.deviance
+        dev_disc = model_disc.result.deviance
+        rel_dev = abs(dev_exact - dev_disc) / abs(dev_exact)
+        assert rel_dev < 0.005, f"Relative deviance difference {rel_dev:.6f} too large"
+
+        edf_exact = model_exact.metrics(X, y, sample_weight=exposure).effective_df
+        edf_disc = model_disc.metrics(X, y, sample_weight=exposure).effective_df
+        assert abs(edf_exact - edf_disc) < 0.5, (
+            f"Effective df {edf_disc:.3f} differs from exact {edf_exact:.3f}"
+        )
+
+        pred_exact = model_exact.predict(X)
+        pred_disc = model_disc.predict(X)
+        mean_rel = np.mean(np.abs(pred_exact - pred_disc) / (pred_exact + 1e-10))
+        assert mean_rel < 0.03, f"Mean relative prediction difference {mean_rel:.4f} too large"
 
 
 class TestDiscretizedTensorInteraction:
