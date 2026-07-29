@@ -579,7 +579,7 @@ def test_screen_bins_continuous_pairs_instead_of_skipping():
     row = table[(table.feature_a == "x1") & (table.feature_b == "x2")].iloc[0]
     assert bool(row["approx"])
     assert np.isfinite(row["z"])
-    # largest-margin-first binning: only x1 needs compression here
+    # largest-margin-first binning: only one margin needs compression here
     assert row["n_cells"] < 2500 * 2500
     assert row["n_cells"] <= 5_000_000
     # the planted continuous interaction ranks first through the fallback
