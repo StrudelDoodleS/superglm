@@ -81,7 +81,6 @@ def test_selection_path_rejects_zero_max_iter() -> None:
 
 
 def test_fit_pirls_rejects_non_positive_inner_and_outer() -> None:
-    from superglm.group_matrix import DesignMatrix  # noqa: F401  (import shape check)
     from superglm.solvers import fit_pirls
 
     # Arguments are never reached: validation runs before any array handling.
@@ -178,9 +177,7 @@ git commit -m "Validate max_iter at the solver entry points (RFC-13, audit S13)
 max_iter=0 reached the post-loop reads of loop-body locals and raised
 UnboundLocalError through fit, fit_reml, and the selection_penalty
 path.  Guard the two public entry points with < 1 (range(-5) fails
-identically); max_iter=1 stays legal for the discrete POI loop.
-
-release:patch"
+identically); max_iter=1 stays legal for the discrete POI loop."
 ```
 
 ---
@@ -373,9 +370,7 @@ irls_direct would invert the dependency direction.  Both penalty
 contributions become optional so either IRLS orchestration can use it.
 
 Pure refactor: irls_direct's call site and numeric results are
-unchanged.
-
-release:none"
+unchanged."
 ```
 
 ---
@@ -552,9 +547,7 @@ the shared stable delta with S as the quadratic and 2 * penalty.eval as
 the non-quadratic term, matching pirls's merit convention exactly.
 
 Answers audit S3's open 'Verify:' note.  May move fitted coefficients
-for pirls fits with ill-conditioned smooth bases.
-
-release:patch"
+for pirls fits with ill-conditioned smooth bases."
 ```
 
 ---
@@ -800,9 +793,7 @@ _project_feasible now reports whether its 100 sweeps reached
 feasibility, so converged means what its name says, and all three call
 sites log a warning instead of discarding the flag.
 
-The indefinite KKT solve keeps its existing lstsq fallback.
-
-release:patch"
+The indefinite KKT solve keeps its existing lstsq fallback."
 ```
 
 ---
@@ -1068,9 +1059,7 @@ Warn from reml_w_correction rather than compute_dW_deta so the
 finite-difference fallback in _compute_d2W_deta2_fd stays quiet, and
 leave the structurally-zero Gamma/log branch silent.  Naming the
 classes lets the stdlib default filter dedup to one warning per class
-pair instead of one per REML iteration.
-
-release:patch"
+pair instead of one per REML iteration."
 ```
 
 ---
@@ -1110,9 +1099,7 @@ Expected: `0.16.2`
 
 ```bash
 git add pyproject.toml src/superglm/__init__.py uv.lock CHANGELOG.md
-git commit -m "Bump to 0.16.2 for the RFC-13 behavioural batch
-
-release:patch"
+git commit -m "Bump to 0.16.2 for the RFC-13 behavioural batch"
 ```
 
 ---
