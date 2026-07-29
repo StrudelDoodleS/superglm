@@ -915,7 +915,7 @@ def test_marginal_width_estimate_never_overestimates():
 
     rng = np.random.default_rng(19)
     x = rng.uniform(0.0, 10.0, 500)
-    for kind, k in (("ps", 6), ("ps", 12), ("cr", 6), ("cr", 12)):
+    for kind, k in (("ps", 5), ("ps", 6), ("ps", 12), ("cr", 3), ("cr", 6), ("cr", 12)):
         spec = Spline(kind=kind, k=k)
         spec.prepare(pd.Series(x)) if hasattr(spec, "prepare") else None
         try:
@@ -944,3 +944,66 @@ def test_screen_cached_sweep_matches_per_pair_screens():
         for col in ("statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
             a, b = getattr(row, col), s[col]
             assert (a == b) or (pd.isna(a) and pd.isna(b)), (row.feature_a, row.feature_b, col)
+
+
+def test_screen_unweighted_fit_screens_any_frame_without_arguments():
+    """Review finding: unit fitted weights were treated as 'inherited', so the
+    fit-data guard fired on every screen and an unweighted model could no
+    longer screen a holdout or subsample. Ones cannot mispair rows."""
+    frame, y, _ = _screening_data(21, interaction=0.5)
+    model = _fit_mains(frame, y, np.ones_like(y))  # unit weights == unweighted
+
+    holdout = frame.iloc[: len(frame) // 2].reset_index(drop=True)
+    table = model.screen_interactions(holdout, y[: len(frame) // 2])
+
+    assert np.isfinite(table["z"]).all()
+
+
+def test_screen_per_spec_discrete_flags_approx():
+    """Review finding: approx read the model-level discrete flag, but
+    discretization is per spec — a discrete=False model with
+    Spline(discrete=True) parents refits through binned supports and must
+    flag approx, and a mixed pair must not."""
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    frame, y, w = _screening_data(22, interaction=0.5)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={
+            "x1": Spline(kind="ps", k=6, discrete=True),
+            "x2": Spline(kind="ps", k=6, discrete=True),
+            "x3": Spline(kind="ps", k=6),
+            "x4": Spline(kind="ps", k=6),
+            "x5": Spline(kind="ps", k=6),
+        },
+    ).fit_reml(frame, y, sample_weight=w)
+
+    table = model.screen_interactions(frame, y, sample_weight=w)
+
+    flags = {frozenset((r.feature_a, r.feature_b)): bool(r.approx) for r in table.itertuples()}
+    assert flags[frozenset(("x1", "x2"))]  # both parents discretize
+    assert not flags[frozenset(("x1", "x3"))]  # mixed pair: refit is exact
+    assert not flags[frozenset(("x3", "x4"))]
+
+
+def test_screen_cache_equivalence_covers_binned_entries():
+    """Reviewer ask: the cache-equivalence pin only exercised exact-path
+    entries; cover the (name, binned=True) cache keys too."""
+    frame, y, w = _continuous_screening_data()
+    model = _fit_continuous(frame, y, w)
+
+    full = model.screen_interactions(frame, y, sample_weight=w)
+    binned_rows = full[full["approx"]]
+    assert len(binned_rows) >= 1  # x1:x2 bins under the default budget
+
+    for row in binned_rows.itertuples():
+        single = model.screen_interactions(
+            frame, y, sample_weight=w, candidates=[(row.feature_a, row.feature_b)]
+        )
+        s = single.iloc[0]
+        for col in ("statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
+            assert getattr(row, col) == s[col], col
