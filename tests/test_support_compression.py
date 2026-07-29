@@ -427,3 +427,53 @@ def test_compression_does_not_change_fitted_results(monkeypatch):
         uncompressed.metrics(frame, response, sample_weight=weights).effective_df,
         rtol=1e-6,
     )
+
+
+def _count_row_densifies(monkeypatch, calls):
+    """Record the row count of every csr densify so tests can pin allocations."""
+    orig_toarray = sp.csr_matrix.toarray
+    orig_todense = sp.csr_matrix.todense
+
+    def toarray(self, *args, **kwargs):
+        out = orig_toarray(self, *args, **kwargs)
+        calls.append(out.shape[0])
+        return out
+
+    def todense(self, *args, **kwargs):
+        out = orig_todense(self, *args, **kwargs)
+        calls.append(out.shape[0])
+        return out
+
+    monkeypatch.setattr(sp.csr_matrix, "toarray", toarray)
+    monkeypatch.setattr(sp.csr_matrix, "todense", todense)
+
+
+def test_declined_scan_never_densifies_the_support_block(monkeypatch):
+    """Review finding: the no-repeats case densified the ENTIRE basis as
+    'representatives' before the byte-budget gate could refuse it. Decline
+    must now cost only the bounded hash chunks."""
+    rng = np.random.default_rng(20)
+    n = 70_000
+    basis = sp.csr_matrix(rng.normal(size=(n, 3)))  # distinct rows a.s.
+    calls = []
+    _count_row_densifies(monkeypatch, calls)
+
+    assert detect_row_support(basis) is None
+    assert calls, "expected the chunked hash scan to densify bounded blocks"
+    assert max(calls) <= 65_536  # pre-fix: one 70_000-row representative block
+
+
+def test_accepted_scan_densifies_the_support_exactly_once(monkeypatch):
+    """Review finding: the accept path densified the representative block
+    twice (verification, then plan_row_support). It must be built once and
+    threaded through."""
+    basis, base, row_index = _repeated_basis()
+    calls = []
+    _count_row_densifies(monkeypatch, calls)
+
+    result = detect_row_support(basis)
+
+    assert result is not None
+    b_unique, derived = result
+    np.testing.assert_array_equal(b_unique[derived], basis.toarray())
+    assert calls.count(60) == 1  # pre-fix: 2 identical 60-row densifies
