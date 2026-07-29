@@ -483,3 +483,18 @@ def test_accepted_scan_densifies_the_support_exactly_once(monkeypatch):
     b_unique, derived = result
     np.testing.assert_array_equal(b_unique[derived], basis.toarray())
     assert calls.count(60) == 1  # pre-fix: 2 identical 60-row densifies
+
+
+def test_hash_scan_chunks_honor_the_byte_ceiling(monkeypatch):
+    """Review finding: fixed 65,536-row chunks densify gigabytes on wide
+    tensor bases before any gate runs. Chunks must be sized in bytes."""
+    rng = np.random.default_rng(21)
+    n, p_b = 5000, 256
+    basis = sp.csr_matrix(rng.normal(size=(n, p_b)))  # distinct rows a.s.
+    calls = []
+    _count_row_densifies(monkeypatch, calls)
+
+    budget = 1 << 20  # 1 MiB => 512 rows per chunk at p_b=256
+    assert detect_row_support(basis, max_support_bytes=budget) is None
+    assert calls
+    assert max(calls) <= budget // (p_b * 8)

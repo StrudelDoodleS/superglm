@@ -244,7 +244,10 @@ def detect_row_support(
     n_rows, p_b = B_csr.shape
     if n_rows == 0:
         return None
-    chunk_rows = 65_536
+    # Chunk by BYTES, not rows: a fixed 65,536-row chunk of a wide tensor
+    # basis (p_b ~ 10k) would densify gigabytes before any gate runs.  The
+    # scan's transients honor the same ceiling as the support block itself.
+    chunk_rows = int(min(65_536, max(1, max_support_bytes // (max(p_b, 1) * 8))))
     hashes = _row_hashes(B_csr, chunk_rows)
     _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
     row_index = np.asarray(row_index, dtype=np.intp).ravel()

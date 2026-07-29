@@ -129,3 +129,38 @@ def test_sparse_group_lasso_alpha_zero_keeps_group_threshold():
 
     assert sgl_lmax > 0.0
     np.testing.assert_allclose(sgl_lmax, gl_lmax, rtol=1e-12)
+
+
+@pytest.mark.parametrize("alpha", [0.35, 1.0])
+def test_sparse_group_lambda_max_is_the_composite_kkt_boundary(alpha):
+    """Review finding: for 0 < alpha <= 1 the elastic-net division is not the
+    sparse-group zero condition ||soft(grad, lam*alpha)|| <= lam*(1-alpha)*w;
+    at alpha=1 it UNDERESTIMATES lambda_max, so fit_path's first model was
+    not all-zero. Pin the solver boundary directly."""
+    from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+
+    frame = _frame(n=2000, seed=11)
+    rng = np.random.default_rng(12)
+    weights = rng.uniform(0.5, 1.0, len(frame))
+    response = rng.poisson(np.exp(-1.0 + 0.6 * frame["a"].to_numpy())) / weights
+
+    probe = SuperGLM(
+        family="poisson",
+        penalty=SparseGroupLasso(lambda1=0.0, alpha=alpha),
+        features={name: Spline(kind="ps", k=6) for name in ("a", "b", "c")},
+    )
+    probe._build_design_matrix(frame, response, weights, None)
+    lambda_max = compute_lambda_max(probe, np.asarray(response, dtype=float), weights)
+    assert lambda_max > 0.0
+
+    def active(lambda1):
+        fitted = SuperGLM(
+            family="poisson",
+            penalty=SparseGroupLasso(lambda1=lambda1, alpha=alpha),
+            features={name: Spline(kind="ps", k=6) for name in ("a", "b", "c")},
+        ).fit(frame, response, sample_weight=weights)
+        beta = fitted.result.beta
+        return sum(1 for g in fitted._groups if float(np.linalg.norm(beta[g.sl])) > 1e-8)
+
+    assert active(lambda_max * 1.05) == 0, f"alpha={alpha}: not all-zero above lambda_max"
+    assert active(lambda_max * 0.90) > 0, f"alpha={alpha}: lambda_max too large"
