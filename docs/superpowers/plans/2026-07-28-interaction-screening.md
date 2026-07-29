@@ -577,3 +577,24 @@ sweep transient, needs ULP-tolerance test updates; is_lossless_support
 wire-or-drop; mu finiteness on the NaN path. Dispersion thread: claude
 re-affirmed n-edf on the exposure-unit-invariance argument; thread
 stays open by design with phi= as the frequency-weight exit.
+
+---
+
+## PR #171 review rounds 6-7 and merge readiness (2026-07-29)
+
+Fixed (8487be5, aae1523): editor-desync of _fit_used_weights (non-unit
+inheritance derived from the stored array at read time); approx flags
+discrete pairs only when binning is lossy (cardinality > resolved
+n_bins; lossless binning returns the exact support); width estimate =
+n_knots (degree-0 closure); support-built menus (no (n,K) transient —
+the recorded top perf follow-up, landed once claude verified the
+support path is the lossless-discretization machinery); offset shape,
+family-domain y, and max_cells validation; zero-weight rows excluded
+from the Pearson residual d.f.; unweighted models screen holdouts
+without arguments again.
+
+Open follow-ups (recorded, not blocking): BLAS cap release before wide
+build-phase reparameterizations (needs pre-build width discovery;
+codex thread left open with rationale); is_lossless_support
+wire-or-drop; mu finiteness on the NaN path. Dispersion thread open by
+agreement. Suite 4788 / 152.
