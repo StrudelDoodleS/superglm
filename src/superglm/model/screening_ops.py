@@ -86,9 +86,15 @@ def _validated_budgets(edf0) -> tuple[float, ...]:
     return tuple(float(b) for b in budgets)
 
 
-def _validated_pairs(candidates, spline_names):
+def _validated_pairs(candidates, spline_names, fitted_pairs):
     if candidates is None:
-        return list(combinations(spline_names, 2))
+        # A pair the model already fits as a tensor term is not a candidate:
+        # the screen profiles only the parent mains, so it would re-surface
+        # the fitted interaction and the confirmation workflow would then
+        # fail with "interaction already added".
+        return [
+            pair for pair in combinations(spline_names, 2) if frozenset(pair) not in fitted_pairs
+        ]
     valid = set(spline_names)
     pairs = []
     for raw in candidates:
@@ -98,8 +104,29 @@ def _validated_pairs(candidates, spline_names):
                 "candidates entries must pair two distinct fitted spline features; "
                 f"got {raw!r} (screenable features: {spline_names})"
             )
+        if frozenset(pair) in fitted_pairs:
+            raise ValueError(
+                f"candidates entry {raw!r} is already fitted as a tensor interaction; "
+                "screening profiles only the parent mains and cannot re-screen it"
+            )
         pairs.append(pair)
     return pairs
+
+
+def _marginal_width_estimate(spec) -> int:
+    """Guard-grade marginal width from the parent spline's geometry.
+
+    Deliberately biased LOW: an under-estimate self-heals (menus get built
+    and the authoritative post-menu recheck re-runs the gates with true
+    dimensions), while an over-estimate would bin or skip a pair that fits
+    the budget with no correction possible.  Built-in kinds have centered
+    marginal widths of ``n_knots + degree`` (ps) and ``n_knots + 1``
+    (cr via the CardinalCR substitution), so ``n_knots + 1`` floors both.
+    """
+    n_knots = getattr(spec, "n_knots", None)
+    if n_knots is not None:
+        return max(int(n_knots) + 1, 3)
+    return 3
 
 
 def screen_interactions(
@@ -164,8 +191,10 @@ def screen_interactions(
     frame = as_eager_frame(X)
     n_rows = len(frame)
     y = np.asarray(y, dtype=np.float64)
+    weights_inherited = False
     if sample_weight is None:
         sample_weight = getattr(model, "_fit_weights", None)
+        weights_inherited = sample_weight is not None
         if sample_weight is None and getattr(model, "_fit_used_weights", False):
             raise ValueError(
                 "the model was fitted with non-unit sample_weight but its fit state was "
@@ -198,7 +227,12 @@ def screen_interactions(
     spline_names = [
         name for name in model._feature_order if isinstance(model._specs.get(name), _SplineBase)
     ]
-    pairs = _validated_pairs(candidates, spline_names)
+    fitted_pairs = {
+        frozenset(spec.parent_names)
+        for spec in getattr(model, "_interaction_specs", {}).values()
+        if hasattr(spec, "parent_names")
+    }
+    pairs = _validated_pairs(candidates, spline_names, fitted_pairs)
     selected = sorted(
         {name for pair in pairs for name in pair if getattr(model._specs[name], "select", False)}
     )
@@ -226,15 +260,31 @@ def screen_interactions(
         _raw(name)
 
     distribution, link = model._distribution, model._link
+    offset_inherited = False
     if offset is None:
         offset = getattr(model, "_fit_offset", None)
+        offset_inherited = offset is not None
         if offset is None and getattr(model, "_fit_used_offset", False):
             raise ValueError(
                 "the model was fitted with an offset but its fit state was released "
                 "(retain_fit_state=False); pass offset explicitly"
             )
-    mu = np.asarray(model.predict(X, offset), dtype=np.float64)
-    eta = np.asarray(link.link(mu), dtype=np.float64)
+    if weights_inherited or offset_inherited:
+        # Inherited arrays are in TRAINING row order; a reordered or edited
+        # frame would silently pair them with the wrong observations.  Verify
+        # against the retained fit-data guard when one is available.
+        guard = getattr(model, "_fit_data_guard", None)
+        if guard is not None and not guard.matches_retained_values(X, y):
+            raise ValueError(
+                "sample_weight/offset were inherited from the fit, but X/y do not "
+                "match the retained training data (reordered or modified rows); "
+                "pass sample_weight and offset explicitly for non-training frames"
+            )
+    # The stabilized predictor directly, NOT link(predict(X)): for a
+    # non-injective link (sqrt) the round trip maps eta to |eta| and flips
+    # the sign of every negative-eta row's score.
+    eta = np.asarray(model._predict_eta_exact(X, offset), dtype=np.float64)
+    mu = np.asarray(link.inverse(eta), dtype=np.float64)
     score = working_score(y, mu, eta, weights, distribution, link)
     dmu_deta = link.deriv_inverse(eta)
     var_mu = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
@@ -286,21 +336,6 @@ def screen_interactions(
             )
         return marginal_cache[key]
 
-    def _marginal_width_estimate(name):
-        """Guard-grade marginal width from the parent spline's geometry.
-
-        The authoritative widths come from the built menus and are re-checked
-        against the budget before any curvature einsum runs; this estimate
-        only decides whether the (cheap, O(n)) basis build is attempted on
-        the unbinned support first.
-        """
-        spec = model._specs[name]
-        n_knots = getattr(spec, "n_knots", None)
-        degree = getattr(spec, "degree", None)
-        if n_knots is not None and degree is not None:
-            return max(int(n_knots) + int(degree), 3)
-        return 9
-
     def _within_budget(n_a, n_b, k_a, k_b):
         cells_ok = n_a * n_b <= max_cells
         inter_ok = n_a * k_b * k_b + n_b * k_a * k_a <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
@@ -309,8 +344,8 @@ def screen_interactions(
     rows = []
     discrete_mains = bool(getattr(model, "_discrete", False))
     for feat_a, feat_b in pairs:
-        k_a = _marginal_width_estimate(feat_a)
-        k_b = _marginal_width_estimate(feat_b)
+        k_a = _marginal_width_estimate(model._specs[feat_a])
+        k_b = _marginal_width_estimate(model._specs[feat_b])
         bin_flag = {feat_a: False, feat_b: False}
         menus = None
         while True:

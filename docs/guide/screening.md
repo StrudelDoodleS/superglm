@@ -11,9 +11,9 @@ minutes.
 model = SuperGLM(family="poisson", features=feats).fit_reml(X, y, sample_weight=exposure)
 table = model.screen_interactions(X, y, sample_weight=exposure)
 print(table.head())
-#  feature_a feature_b  statistic      z  edf0  lambda0  n_cells
-#       long       lat     98.252 14.540  16.0    0.673   339889
-#         bm      agec     23.592 10.796   2.0  110.156     1127
+#  feature_a feature_b  statistic      z  edf0  lambda0  n_cells  approx
+#       long       lat     98.252 14.540  16.0    0.673   339889   False
+#         bm      agec     23.592 10.796   2.0  110.156     1127   False
 ```
 
 The test asks, for each pair: *after profiling out what the pair's own main
@@ -48,8 +48,12 @@ surfaces are both visible.
   out-`z` a curved surface that buys three times the deviance.
 - **NaN rows are skipped pairs**, not failures: the pair's joint support
   exceeded `max_cells` even after the quantile-binning fallback (or the
-  statistic degenerated). They sort last. Rows computed on binned support
-  carry `approx=True`; exact rows carry `approx=False`.
+  statistic degenerated). They sort last. `approx=True` means the row's
+  probe basis differs from what a confirmatory refit would build — either
+  the pair was quantile-binned, or the mains were fitted with
+  `discrete=True` (which marks *every* row, since the discrete refit bins
+  marginal supports). Exact rows on an exact-path fit carry
+  `approx=False`.
 
 ## What it inherits from the fit
 
@@ -72,7 +76,12 @@ Screening always probes the exact-basis tensor, including for mains
 fitted with `discrete=True` (whose confirmatory `ti()` refit uses binned
 marginal supports). That is the same support-discretization gap as the
 quantile fallback — measured at ~3.5% relative z on signal pairs — and
-it never affects which basis the confirmatory refit itself uses.
+it never affects which basis the confirmatory refit itself uses. To make
+the gap visible in the output rather than doc-only, **every row of a
+`discrete=True` screen carries `approx=True`.** Pairs the model already
+fits as tensor terms are excluded from the sweep (and rejected in
+`candidates=`): the screen profiles only the parent mains, so it cannot
+re-screen an interaction that is already in the model.
 
 ## Measured limits
 
