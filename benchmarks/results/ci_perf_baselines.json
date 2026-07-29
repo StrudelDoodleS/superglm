@@ -1,0 +1,45 @@
+{
+  "recorded": "2026-07-29",
+  "commit": "91eef58 (v0.16.0 + RFC-8 bug-half fix)",
+  "box": "16-core reference box (audit 2026-07-28), single-thread BLAS, medians",
+  "notes": "Thresholds are deliberately generous: CI runners are slower and noisier than the reference box, and the gate exists to catch structural regressions (a lost support-compression or cached-W win), not 20% noise. Ratio checks are machine-speed invariant and carry the tighter limits; absolute checks are large multiples of reference-box medians. Recalibrate against real runner numbers once the gate has CI history.",
+  "tensor_cost": {
+    "n": 30000,
+    "reps": 5,
+    "reference_seconds": {
+      "tensor_cost_base_exact": 0.235,
+      "tensor_cost_base_discrete": 0.156,
+      "tensor_cost_ti_exact": 0.886,
+      "tensor_cost_ti_discrete": 0.461
+    },
+    "reference_summary": {
+      "tensor_multiplier_exact": 3.77,
+      "tensor_multiplier_discrete": 2.96
+    },
+    "checks": {
+      "tensor_multiplier_exact": {
+        "max": 6.0,
+        "note": "measured 3.77; the pre-arc tensor-cost reversion is 7.2x, which must trip"
+      },
+      "tensor_multiplier_discrete": {
+        "max": 5.0,
+        "note": "measured 2.96 (pre-arc 3.8 is inside noise); guards catastrophic tensor-path blowups"
+      },
+      "absolute_multiple": {
+        "max": 8.0,
+        "note": "per-case median vs reference-box median; trips on the 6.6x pre-arc base-exact reversion even on a 2-3x slower runner"
+      }
+    }
+  },
+  "flagship": {
+    "n": 678013,
+    "reps": 30,
+    "reference_median_s": 0.846,
+    "checks": {
+      "absolute_multiple": {
+        "max": 5.0,
+        "note": "limit 4.23s: healthy CI ~2x reference leaves 2x margin, pre-arc 2.102s median on a slow runner (~5.3s) trips"
+      }
+    }
+  }
+}
