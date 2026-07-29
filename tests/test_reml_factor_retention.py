@@ -104,8 +104,16 @@ class TestRemlDecompositionRetention:
         )
         decomposition = result.reml_slope_decomposition
         assert decomposition is not None
+        # The certified decompose_factor result (method qr_svd), not the raw
+        # pre-certification decompose_gram one (pivoted_cholesky) — every
+        # other quantity below agrees between the two objects.
+        assert decomposition.method == "qr_svd"
         assert decomposition.rank == 1
         assert decomposition.rank_truncated
+        # A live cholesky_factor coexists with truncation (it factors the
+        # representative submatrix): consumers gate on method/rank_truncated,
+        # never on factor presence.
+        assert decomposition.cholesky_factor is not None
         assert result.reml_hessian_rank == 1 + decomposition.rank
 
         rhs = np.array([0.4, -0.9])
