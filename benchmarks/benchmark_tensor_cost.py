@@ -92,6 +92,22 @@ def build(with_tensor: bool, discrete: bool, k: int = 10) -> SuperGLM:
     return model
 
 
+def _peak_rss_mb() -> float | None:
+    """Whole-run high-water RSS in MB (recorded for CI history, not gated:
+    the value is dominated by the full-frame load and not per-case
+    attributable without subprocess isolation). None where unavailable."""
+    try:
+        import resource
+    except ImportError:  # non-Unix platforms have no resource module
+        return None
+    import sys
+
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # ru_maxrss is kilobytes on Linux but bytes on macOS.
+    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
+    return round(peak / divisor, 1)
+
+
 def run_case(
     tag: str, with_tensor: bool, discrete: bool, n_rows: int | None, profile: bool, reps: int = 1
 ) -> dict:
@@ -200,12 +216,7 @@ def main() -> None:
                 exact["seconds"] / discrete["seconds"], 2
             )
 
-    import resource
-
-    # Whole-run high-water RSS (recorded for CI history, not gated: the value
-    # is dominated by the full-frame load and not per-case attributable
-    # without subprocess isolation).
-    summary["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
+    summary["peak_rss_mb"] = _peak_rss_mb()
 
     out_json = Path(args.json_out)
     out_json.parent.mkdir(parents=True, exist_ok=True)
