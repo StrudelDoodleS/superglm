@@ -73,6 +73,9 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
     cases_by_tag = {case.get("tag"): case for case in tensor.get("cases", [])}
     expected_p = tensor_base.get("expected_p")
     expected_n = tensor_base.get("n")
+    expected_outputs = tensor_base.get("expected_outputs")
+    output_rtol = float(tensor_base.get("output_rtol", 0.0))
+    expected_backend = tensor_base.get("expected_backend")
     for tag in TENSOR_CASE_TAGS:
         case = cases_by_tag.get(tag)
         ok = bool(case and case.get("ok"))
@@ -87,6 +90,18 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
         if expected_n is not None:
             deviation = abs(case.get("n", -1) - expected_n) if ok else None
             checks.append(_check(f"tensor_cost.{tag}.n", deviation, 0.0))
+        if expected_outputs is not None:
+            for field in ("deviance", "effective_df"):
+                measured_value = case.get(field) if ok else None
+                deviation = (
+                    abs(measured_value / expected_outputs[tag][field] - 1.0)
+                    if measured_value is not None
+                    else None
+                )
+                checks.append(_check(f"tensor_cost.{tag}.{field}.rel_dev", deviation, output_rtol))
+        if expected_backend is not None:
+            match = 0.0 if ok and case.get("direct_backend") == expected_backend else None
+            checks.append(_check(f"tensor_cost.{tag}.backend", match, 0.0))
 
     flagship_base = baselines["flagship"]
     flagship_multiple = flagship_base["checks"]["absolute_multiple"]["max"]
@@ -97,17 +112,21 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
             flagship_base["reference_median_s"] * flagship_multiple,
         )
     )
-    expected_outputs = flagship_base.get("expected")
-    if expected_outputs is not None:
-        rtol = float(expected_outputs["rtol"])
+    flagship_expected = flagship_base.get("expected")
+    if flagship_expected is not None:
+        rtol = float(flagship_expected["rtol"])
         for field in ("deviance", "effective_df"):
             measured_value = flagship.get(field)
             deviation = (
-                abs(measured_value / expected_outputs[field] - 1.0)
+                abs(measured_value / flagship_expected[field] - 1.0)
                 if measured_value is not None
                 else None
             )
             checks.append(_check(f"flagship.{field}.rel_dev", deviation, rtol))
+        backend_expected = flagship_expected.get("backend")
+        if backend_expected is not None:
+            match = 0.0 if flagship.get("direct_backend") == backend_expected else None
+            checks.append(_check("flagship.backend", match, 0.0))
     return checks
 
 
