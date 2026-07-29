@@ -143,6 +143,9 @@ def run_case(
     }
     if ok:
         record["p"] = int(model._dm.p)
+        record["deviance"] = float(model.result.deviance)
+        record["effective_df"] = float(model.result.effective_df)
+        record["direct_backend"] = getattr(model.result, "direct_backend", None)
         phases = getattr(model, "_reml_profile", None) or {}
         for key in sorted(phases):
             value = phases.get(key)
@@ -196,6 +199,13 @@ def main() -> None:
             summary[f"exact_over_discrete_{kind}"] = round(
                 exact["seconds"] / discrete["seconds"], 2
             )
+
+    import resource
+
+    # Whole-run high-water RSS (recorded for CI history, not gated: the value
+    # is dominated by the full-frame load and not per-case attributable
+    # without subprocess isolation).
+    summary["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
 
     out_json = Path(args.json_out)
     out_json.parent.mkdir(parents=True, exist_ok=True)

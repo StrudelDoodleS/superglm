@@ -149,9 +149,28 @@ class TestCommittedBaselines:
         assert tensor["checks"]["tensor_multiplier_exact"]["max"] > 0
         assert tensor["checks"]["tensor_multiplier_discrete"]["max"] > 0
         assert tensor["checks"]["absolute_multiple"]["max"] > 0
+        # The output invariants are optional to evaluate_gate, so their
+        # presence in the committed file must be pinned here or the gate
+        # can silently degrade to timing-only.
+        assert tensor["n"] == 30000
+        for tag in (
+            "tensor_cost_base_exact",
+            "tensor_cost_base_discrete",
+            "tensor_cost_ti_exact",
+            "tensor_cost_ti_discrete",
+        ):
+            assert tensor["expected_p"][tag] > 0
+            assert tensor["expected_outputs"][tag]["deviance"] > 0
+            assert tensor["expected_outputs"][tag]["effective_df"] > 0
+        assert tensor["output_rtol"] > 0
+        assert tensor["expected_backend"]
         flagship = baselines["flagship"]
         assert flagship["reference_median_s"] > 0
         assert flagship["checks"]["absolute_multiple"]["max"] > 0
+        assert flagship["expected"]["deviance"] > 0
+        assert flagship["expected"]["effective_df"] > 0
+        assert flagship["expected"]["rtol"] > 0
+        assert flagship["expected"]["backend"]
 
 
 class TestOutputInvariants:
@@ -237,3 +256,74 @@ class TestOutputInvariants:
             baselines, tensor=_tensor_measurement(), flagship={"median_s": 0.9}
         )
         assert all(c.passed for c in checks)
+
+
+class TestFitOutputAndBackendInvariants:
+    @pytest.fixture()
+    def baselines_full(self, baselines):
+        baselines = dict(baselines)
+        tc = dict(baselines["tensor_cost"])
+        tc["output_rtol"] = 5e-3
+        tc["expected_outputs"] = {
+            tag: {"deviance": 9800.0, "effective_df": 22.0}
+            for tag in (
+                "tensor_cost_base_exact",
+                "tensor_cost_base_discrete",
+                "tensor_cost_ti_exact",
+                "tensor_cost_ti_discrete",
+            )
+        }
+        tc["expected_backend"] = "gram"
+        baselines["tensor_cost"] = tc
+        baselines["flagship"] = dict(baselines["flagship"])
+        baselines["flagship"]["expected"] = {
+            "deviance": 212055.4,
+            "effective_df": 43.33,
+            "rtol": 1e-3,
+            "backend": "gram",
+        }
+        return baselines
+
+    def _measurement(self, deviance=9800.0, backend="gram"):
+        measurement = _tensor_measurement()
+        for case in measurement["cases"]:
+            case["deviance"] = deviance
+            case["effective_df"] = 22.0
+            case["direct_backend"] = backend
+        return measurement
+
+    def _flagship(self, backend="gram"):
+        return {
+            "median_s": 0.9,
+            "deviance": 212055.4,
+            "effective_df": 43.33,
+            "direct_backend": backend,
+        }
+
+    def test_matching_outputs_and_backend_pass(self, gate, baselines_full):
+        checks = gate.evaluate_gate(
+            baselines_full, tensor=self._measurement(), flagship=self._flagship()
+        )
+        assert all(c.passed for c in checks)
+
+    def test_tensor_deviance_drift_fails(self, gate, baselines_full):
+        checks = gate.evaluate_gate(
+            baselines_full, tensor=self._measurement(deviance=9900.0), flagship=self._flagship()
+        )
+        assert any(
+            "deviance" in c.name and "tensor_cost" in c.name and not c.passed for c in checks
+        )
+
+    def test_tensor_backend_mismatch_fails(self, gate, baselines_full):
+        checks = gate.evaluate_gate(
+            baselines_full, tensor=self._measurement(backend="qr"), flagship=self._flagship()
+        )
+        assert any("backend" in c.name and "tensor_cost" in c.name and not c.passed for c in checks)
+
+    def test_flagship_backend_mismatch_fails(self, gate, baselines_full):
+        checks = gate.evaluate_gate(
+            baselines_full,
+            tensor=self._measurement(),
+            flagship=self._flagship(backend="structured"),
+        )
+        assert any(c.name == "flagship.backend" and not c.passed for c in checks)
