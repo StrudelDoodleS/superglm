@@ -11,6 +11,10 @@ The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
 without this scaling the ``edf0`` noise floor is only honest for
 unit-dispersion families and a dispersed Gaussian null would swamp the scan.
+The Pearson denominator is ``n - edf`` per the sample_weight=exposure
+contract (Var(y) = phi*V(mu)/w), deliberately NOT the frequency-weight
+``sum(w) - edf`` convention of ``solvers.dispersion`` — measured on
+known-dispersion exposure nulls, only ``n - edf`` is calibrated.
 
 Per-feature work (unique support, codes, marginal basis menus, marginal
 penalties) is cached across the sweep, so an all-pairs screen over P spline
@@ -212,6 +216,13 @@ def screen_interactions(
     var_mu = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
     working_weights = weights * dmu_deta**2 / var_mu
 
+    # Residual d.f. is n - edf, NOT the frequency-weight form sum(w) - edf of
+    # pearson_residual_degrees_of_freedom: the screen follows the library's
+    # protected sample_weight=exposure contract, under which Var(y) =
+    # phi*V(mu)/w and E[Pearson] = n*phi.  Measured on known-phi exposure
+    # nulls, n - edf tracks truth exactly while sum(w) - edf misreads phi 1.0
+    # as ~1.55 and demotes refit-confirmed structure (see the plan log,
+    # dispersion-denominator entry).
     edf_mains = float(getattr(model._result, "effective_df", float("nan")))
     denom = y.size - edf_mains if np.isfinite(edf_mains) else float(y.size)
     phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
