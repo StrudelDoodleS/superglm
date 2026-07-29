@@ -550,3 +550,30 @@ fail-safe given upstream finiteness validation.
 
 Release declaration: release:minor, 0.16.0 (new public feature:
 screen_interactions + screen_bins/approx surface). Suite 4771 / 152.
+
+---
+
+## PR #171 review rounds 3-5 (2026-07-29)
+
+Both reviewers verified every prior fix; iterative narrowing continued.
+Fixed on-branch (18dc392, b976ed0, and this commit): released-fit-state
+models refuse silent unit-weight/no-offset substitution (surviving
+_fit_used_weights flag); SGL lambda_max via the composite KKT boundary
+(solver-pinned at alpha 0/0.35/1); byte-bounded support-scan chunks;
+screening eta taken from _predict_eta_exact (link(predict()) flipped
+score signs for non-injective links - sqrt - on negative-eta rows);
+inherited fit arrays verified against the FitDataGuard so reordered
+frames raise instead of silently mispairing rows; already-fitted tensor
+pairs excluded from the sweep (iterative screen->refit->screen works);
+marginal width estimate biased LOW (over-estimates were terminal:
+binned/skipped pairs inside the true budget, contradicting the approx
+contract); approx semantics documented on every user surface including
+the discrete=True rule; cache equivalence pinned (full sweep == per-pair
+candidates screens).
+
+Recorded follow-ups (claude round 3): support-only marginal evaluation
+via tensor_marginal_info(support=, counts=) - the largest remaining
+sweep transient, needs ULP-tolerance test updates; is_lossless_support
+wire-or-drop; mu finiteness on the NaN path. Dispersion thread: claude
+re-affirmed n-edf on the exposure-unit-invariance argument; thread
+stays open by design with phi= as the frequency-weight exit.
