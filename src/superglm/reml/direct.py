@@ -939,14 +939,21 @@ def optimize_direct_reml(
                 # The accepted trial's lambdas become the next iteration's
                 # candidate lambdas, and the candidate refit at the top of the
                 # loop solves the identical penalised system. Carry the
-                # converged state forward instead of recomputing it.
-                _carry_forward = (
-                    trial_lambdas.copy(),
-                    trial_result,
-                    trial_inv,
-                    trial_xtwx,
-                    S_trial,
-                )
+                # converged state forward instead of recomputing it — but only
+                # a CONVERGED state: an Armijo-accepted trial that exhausted
+                # max_pirls_iter is nonstationary, and reusing it would put
+                # the next gradient/Hessian at the wrong coefficients instead
+                # of warm-start refitting them.
+                if trial_result.converged:
+                    _carry_forward = (
+                        trial_lambdas.copy(),
+                        trial_result,
+                        trial_inv,
+                        trial_xtwx,
+                        S_trial,
+                    )
+                else:
+                    _carry_forward = None
                 accepted = True
                 break
             if trial_mode_residual is not None:

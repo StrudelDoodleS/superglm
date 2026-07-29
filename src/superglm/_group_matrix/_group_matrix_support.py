@@ -161,22 +161,6 @@ def _verified_representatives(
     return representatives
 
 
-def _row_index_hashed(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
-    """Exact row grouping via vectorized 64-bit mixing, verified bitwise.
-
-    Grouping needs a single 8-byte sort instead of a lexicographic sort of
-    ``p_b``-wide records — the cost that dominates :func:`_row_index_chunked`.
-    A verification failure (a true 64-bit collision) falls back to the
-    byte-keyed path, so exactness never rests on the hash.
-    """
-    hashes = _row_hashes(B_csr, chunk_rows)
-    _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
-    row_index = np.asarray(row_index, dtype=np.intp).ravel()
-    if _verified_representatives(B_csr, first_occurrence, row_index, chunk_rows) is None:
-        return _row_index_chunked(B_csr, chunk_rows=chunk_rows)
-    return row_index
-
-
 def _passes_support_gates(
     n_rows: int,
     n_support: int,

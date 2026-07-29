@@ -98,3 +98,34 @@ def test_lambda_max_does_not_scale_with_row_count():
     assert values[1] / values[0] == pytest.approx(4.0, rel=0.25), (
         f"lambda_max did not scale with total score mass: {values}"
     )
+
+
+def test_sparse_group_lasso_alpha_zero_keeps_group_threshold():
+    """Review finding: alpha=0 sparse-group lasso is pure group lasso, but
+    compute_lambda_max returned 0.0 — silently disabling selection_penalty
+    "auto" and collapsing fit_path to an all-zero lambda sequence."""
+    frame = _frame(n=2000, seed=7)
+    rng = np.random.default_rng(8)
+    weights = rng.uniform(0.5, 1.0, len(frame))
+    response = rng.poisson(np.exp(-1.0 + 0.6 * frame["a"].to_numpy())) / weights
+
+    from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+
+    def build(penalty, **kwargs):
+        model = SuperGLM(
+            family="poisson",
+            penalty=penalty,
+            features={name: Spline(kind="ps", k=6) for name in ("a", "b", "c")},
+            **kwargs,
+        )
+        model._build_design_matrix(frame, response, weights, None)
+        return model
+
+    sgl = build(SparseGroupLasso(lambda1=0.0, alpha=0.0))
+    gl = build("group_lasso", selection_penalty=0.0)
+
+    sgl_lmax = compute_lambda_max(sgl, np.asarray(response, dtype=float), weights)
+    gl_lmax = compute_lambda_max(gl, np.asarray(response, dtype=float), weights)
+
+    assert sgl_lmax > 0.0
+    np.testing.assert_allclose(sgl_lmax, gl_lmax, rtol=1e-12)
