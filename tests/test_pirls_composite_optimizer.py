@@ -8,7 +8,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm.distributions import Gaussian
-from superglm.features.spline import Spline
+from superglm.features.spline import PSpline, Spline
 from superglm.links import IdentityLink
 from superglm.penalties.base import penalty_targets_group
 from superglm.penalties.group_elastic_net import GroupElasticNet
@@ -344,3 +344,104 @@ def test_public_ridge_spline_fit_matches_dense_composite_oracle() -> None:
         rtol=2e-8,
         atol=2e-8,
     )
+
+
+def test_pirls_ill_conditioned_smooth_basis_has_no_spurious_step_rejection() -> None:
+    """Audit S3's open 'Verify:' — pirls with a large S must not reject terminal steps.
+
+    ``lambda2`` is 2.0e14 because that is where the defect is observable on this
+    fixture.  At outer iteration 3 the raw penalized-deviance comparison reports
+    ``+3.858892e-04`` for a step whose exact (rational-arithmetic) merit change is
+    ``-1.051594e-04``: the cancellation between two ~1e13 penalty quadratics
+    reverses the sign, all 21 trials are rejected, and the fit stops unconverged
+    at deviance 1023.5299755551212.  The polarized delta reports ``-1.051421e-04``,
+    accepts the full step, and converges at 1023.5298702885818.  Smaller lambdas
+    do not reach the cancellation; much larger ones (>~1e15) make the merit itself
+    too noisy for either comparison to be meaningful.
+    """
+    rng = np.random.default_rng(11)
+    n = 600
+    x = np.sort(rng.uniform(0.0, 1.0, n))
+    mu = np.exp(0.5 + np.sin(4.0 * np.pi * x))
+    y = rng.poisson(mu).astype(float)
+    df = pd.DataFrame({"x": x})
+
+    model = SuperGLM(
+        features={"x": PSpline(n_knots=25)},
+        family="poisson",
+        selection_penalty=0.01,
+    )
+    model.lambda2 = {"x": 2.0e14}
+    model.fit(df, y, record_diagnostics=True)
+
+    iteration_log = model.result.iteration_log
+    assert iteration_log is not None
+    assert not any(row.step_rejected for row in iteration_log), (
+        "pirls rejected a terminal step in an ill-conditioned smooth basis"
+    )
+    assert not any(row.step_halvings for row in iteration_log)
+    # The rejection above is what stops the fit converging, so assert the consequence.
+    assert model.result.converged
+    assert model.result.deviance < 1023.52990
+
+
+def test_pirls_line_search_merit_delta_reproduces_its_penalized_deviance(monkeypatch) -> None:
+    """The wired delta must be the difference of exactly what pirls calls its merit.
+
+    ``_irls_trial_is_unsafe`` scales its roundoff tolerance from ``_state_merit``
+    magnitudes, so a delta on any other scale makes the line search incoherent
+    rather than merely different.  On a well-conditioned basis the raw difference
+    is trustworthy, which makes it a usable oracle for the three term groups:
+    drop the quadratic, or the factor of 2 on ``penalty.eval``, and this fails.
+    """
+    import superglm.solvers.pirls as pirls_module
+    from superglm.solvers.irls_state import _select_irls_trial as real_select
+
+    observed: list[tuple[float, float]] = []
+
+    def spy(*, committed, proposal, evaluate_state, merit_delta=None, **kwargs):
+        assert merit_delta is not None, "pirls must pass a merit delta to the line search"
+
+        def record(state) -> None:
+            assert state.penalized_deviance is not None
+            assert committed.penalized_deviance is not None
+            observed.append(
+                (
+                    float(merit_delta(state, committed)),
+                    state.penalized_deviance - committed.penalized_deviance,
+                )
+            )
+
+        def wrapped(alpha: float):
+            candidate = evaluate_state(alpha)
+            record(candidate)
+            return candidate
+
+        record(proposal)
+        return real_select(
+            committed=committed,
+            proposal=proposal,
+            evaluate_state=wrapped,
+            merit_delta=merit_delta,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(pirls_module, "_select_irls_trial", spy)
+
+    rng = np.random.default_rng(4)
+    n = 300
+    x = np.sort(rng.uniform(0.0, 1.0, n))
+    y = rng.poisson(np.exp(0.3 + np.sin(2.0 * np.pi * x))).astype(float)
+    model = SuperGLM(
+        # A selection penalty is required: without it ``penalty.eval`` is zero and
+        # the factor of 2 on the non-quadratic term would be unobservable.
+        features={"x": PSpline(n_knots=8)},
+        family="poisson",
+        selection_penalty=0.05,
+        spline_penalty=1.5,
+    )
+    model.fit(pd.DataFrame({"x": x}), y)
+
+    assert observed, "the line search never ran"
+    for delta, raw in observed:
+        assert delta == pytest.approx(raw, rel=1e-9, abs=1e-9)

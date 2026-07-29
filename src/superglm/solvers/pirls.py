@@ -36,7 +36,12 @@ from superglm.solvers.centered_system import (
     grouped_weighted_factor,
 )
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
-from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
+from superglm.solvers.irls_state import (
+    _evaluate_irls_state,
+    _IRLSState,
+    _select_irls_trial,
+    _stable_penalized_deviance_delta,
+)
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
@@ -1045,6 +1050,12 @@ def _fit_pirls_inner(
             proposal=proposal,
             evaluate_state=evaluate_trial,
             max_halving=max_halving,
+            merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
+                candidate,
+                base,
+                S,
+                nonsmooth_penalty=lambda values: 2.0 * float(penalty.eval(values, groups)),
+            ),
         )
         retained = committed if decision.step_rejected else trial_cache[decision.alpha]
         beta = retained.beta.copy()
