@@ -152,3 +152,88 @@ class TestCommittedBaselines:
         flagship = baselines["flagship"]
         assert flagship["reference_median_s"] > 0
         assert flagship["checks"]["absolute_multiple"]["max"] > 0
+
+
+class TestOutputInvariants:
+    """Timing alone cannot certify a fit: a regression that gets faster by
+    silently doing less (fewer coefficients, different fit, wrong path) must
+    fail on the recorded numerical outputs."""
+
+    @pytest.fixture()
+    def baselines_with_outputs(self, baselines):
+        baselines = dict(baselines)
+        baselines["tensor_cost"] = dict(baselines["tensor_cost"])
+        baselines["tensor_cost"]["n"] = 30000
+        baselines["tensor_cost"]["expected_p"] = {
+            "tensor_cost_base_exact": 41,
+            "tensor_cost_base_discrete": 41,
+            "tensor_cost_ti_exact": 122,
+            "tensor_cost_ti_discrete": 122,
+        }
+        baselines["flagship"] = dict(baselines["flagship"])
+        baselines["flagship"]["expected"] = {
+            "deviance": 212055.4,
+            "effective_df": 43.33,
+            "rtol": 1e-3,
+        }
+        return baselines
+
+    def _measurement_with_outputs(self):
+        measurement = _tensor_measurement()
+        for case in measurement["cases"]:
+            case["n"] = 30000
+            case["p"] = 122 if "ti" in case["tag"] else 41
+        return measurement
+
+    def _flagship(self, deviance=212055.4, effective_df=43.33):
+        return {"median_s": 0.9, "deviance": deviance, "effective_df": effective_df}
+
+    def test_matching_outputs_pass(self, gate, baselines_with_outputs):
+        checks = gate.evaluate_gate(
+            baselines_with_outputs,
+            tensor=self._measurement_with_outputs(),
+            flagship=self._flagship(),
+        )
+        assert all(c.passed for c in checks)
+
+    def test_deviance_drift_fails(self, gate, baselines_with_outputs):
+        checks = gate.evaluate_gate(
+            baselines_with_outputs,
+            tensor=self._measurement_with_outputs(),
+            flagship=self._flagship(deviance=213000.0),
+        )
+        assert any("deviance" in c.name and not c.passed for c in checks)
+
+    def test_effective_df_drift_fails(self, gate, baselines_with_outputs):
+        checks = gate.evaluate_gate(
+            baselines_with_outputs,
+            tensor=self._measurement_with_outputs(),
+            flagship=self._flagship(effective_df=39.0),
+        )
+        assert any("effective_df" in c.name and not c.passed for c in checks)
+
+    def test_wrong_design_width_fails(self, gate, baselines_with_outputs):
+        measurement = self._measurement_with_outputs()
+        for case in measurement["cases"]:
+            if case["tag"] == "tensor_cost_ti_exact":
+                case["p"] = 41
+        checks = gate.evaluate_gate(
+            baselines_with_outputs, tensor=measurement, flagship=self._flagship()
+        )
+        assert any("ti_exact.p" in c.name and not c.passed for c in checks)
+
+    def test_wrong_row_count_fails(self, gate, baselines_with_outputs):
+        measurement = self._measurement_with_outputs()
+        for case in measurement["cases"]:
+            if case["tag"] == "tensor_cost_base_exact":
+                case["n"] = 5000
+        checks = gate.evaluate_gate(
+            baselines_with_outputs, tensor=measurement, flagship=self._flagship()
+        )
+        assert any("base_exact.n" in c.name and not c.passed for c in checks)
+
+    def test_output_checks_optional_when_unconfigured(self, gate, baselines):
+        checks = gate.evaluate_gate(
+            baselines, tensor=_tensor_measurement(), flagship={"median_s": 0.9}
+        )
+        assert all(c.passed for c in checks)

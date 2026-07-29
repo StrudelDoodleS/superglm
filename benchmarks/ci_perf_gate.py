@@ -71,11 +71,22 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
     multiple = tensor_checks["absolute_multiple"]["max"]
     reference_seconds = tensor_base["reference_seconds"]
     cases_by_tag = {case.get("tag"): case for case in tensor.get("cases", [])}
+    expected_p = tensor_base.get("expected_p")
+    expected_n = tensor_base.get("n")
     for tag in TENSOR_CASE_TAGS:
         case = cases_by_tag.get(tag)
-        measured = case.get("seconds") if case and case.get("ok") else None
+        ok = bool(case and case.get("ok"))
+        measured = case.get("seconds") if ok else None
         limit = reference_seconds[tag] * multiple
         checks.append(_check(f"tensor_cost.{tag}.median_s", measured, limit))
+        # Output invariants: timing alone cannot certify a fit — a run that
+        # got faster by silently doing less must fail on what it computed.
+        if expected_p is not None:
+            deviation = abs(case.get("p", -1) - expected_p[tag]) if ok else None
+            checks.append(_check(f"tensor_cost.{tag}.p", deviation, 0.0))
+        if expected_n is not None:
+            deviation = abs(case.get("n", -1) - expected_n) if ok else None
+            checks.append(_check(f"tensor_cost.{tag}.n", deviation, 0.0))
 
     flagship_base = baselines["flagship"]
     flagship_multiple = flagship_base["checks"]["absolute_multiple"]["max"]
@@ -86,6 +97,17 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
             flagship_base["reference_median_s"] * flagship_multiple,
         )
     )
+    expected_outputs = flagship_base.get("expected")
+    if expected_outputs is not None:
+        rtol = float(expected_outputs["rtol"])
+        for field in ("deviance", "effective_df"):
+            measured_value = flagship.get(field)
+            deviation = (
+                abs(measured_value / expected_outputs[field] - 1.0)
+                if measured_value is not None
+                else None
+            )
+            checks.append(_check(f"flagship.{field}.rel_dev", deviation, rtol))
     return checks
 
 
