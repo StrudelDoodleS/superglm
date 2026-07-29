@@ -579,7 +579,9 @@ def test_screen_bins_continuous_pairs_instead_of_skipping():
     row = table[(table.feature_a == "x1") & (table.feature_b == "x2")].iloc[0]
     assert bool(row["approx"])
     assert np.isfinite(row["z"])
-    assert row["n_cells"] <= 256 * 256
+    # largest-margin-first binning: only x1 needs compression here
+    assert row["n_cells"] < 2500 * 2500
+    assert row["n_cells"] <= 5_000_000
     # the planted continuous interaction ranks first through the fallback
     top = tuple(sorted((table.loc[0, "feature_a"], table.loc[0, "feature_b"])))
     assert top == ("x1", "x2")
@@ -630,3 +632,96 @@ def test_screen_nan_only_when_binning_cannot_fit():
 
     with pytest.raises(ValueError, match="screen_bins"):
         model.screen_interactions(frame, y, sample_weight=w, screen_bins=1)
+
+
+def test_screen_uses_the_fit_weights():
+    """Blocking review finding: sample_weight must inherit from the fit like
+    offset does — screening an exposure-weighted fit at unit weight
+    linearizes against the wrong likelihood."""
+    import pandas as pd
+
+    frame, y, w = _screening_data(8)
+    model = _fit_mains(frame, y, w)
+
+    table_default = model.screen_interactions(frame, y)
+    table_explicit = model.screen_interactions(frame, y, sample_weight=w)
+
+    pd.testing.assert_frame_equal(table_default, table_explicit)
+    # the weights genuinely flow: forcing unit weights must change the screen
+    table_unit = model.screen_interactions(frame, y, sample_weight=np.ones_like(y))
+    assert not np.allclose(table_default["z"], table_unit["z"])
+    assert table_default["z"].max() < 10.0, table_default
+
+
+def test_screen_validates_row_alignment():
+    """Review finding: scalar or misaligned y/sample_weight silently
+    broadcast; both must raise instead."""
+    import pytest
+
+    frame, y, w = _screening_data(9)
+    model = _fit_mains(frame, y, w)
+
+    with pytest.raises(ValueError, match="one entry per row"):
+        model.screen_interactions(frame, np.float64(y[0]), sample_weight=w)
+    with pytest.raises(ValueError, match="one entry per row"):
+        model.screen_interactions(frame, y[:-5], sample_weight=w)
+    with pytest.raises(ValueError, match="one entry per row"):
+        model.screen_interactions(frame, y, sample_weight=w[:-5])
+    with pytest.raises(ValueError, match="one entry per row"):
+        model.screen_interactions(frame, y.reshape(-1, 1), sample_weight=w)
+
+
+def test_screen_requires_finite_covariates():
+    """Review finding: a NaN covariate silently became its own cell; now the
+    skip reason is distinguishable from a cell-budget skip by raising."""
+    import pytest
+
+    frame, y, w = _screening_data(9)
+    model = _fit_mains(frame, y, w)
+    bad = frame.copy()
+    bad.loc[3, "x1"] = np.nan
+
+    with pytest.raises(ValueError, match="finite covariates"):
+        model.screen_interactions(bad, y, sample_weight=w)
+
+
+def test_screen_intermediate_budget_triggers_binning():
+    """Review finding: max_cells bounded the cell grid but not the (n_a, k_b^2)
+    curvature intermediates — a lopsided pair passed the cell budget while the
+    einsum intermediate blew past it. The budget now covers both."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(12)
+    n = 2500
+    frame = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),  # ~2500 uniques
+            "x4": rng.integers(0, 6, n).astype(float),  # 6 levels
+        }
+    )
+    z1 = (frame["x1"] - frame["x1"].mean()) / frame["x1"].std()
+    w = rng.uniform(0.3, 1.0, n)
+    y = rng.poisson(np.exp(-1.2 + 0.3 * z1) * w) / w
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={c: Spline(kind="ps", k=6) for c in frame.columns},
+    ).fit_reml(frame, y, sample_weight=w)
+
+    # cells 2500*6 = 15k fit max_cells exactly; the (n_a * k_b^2) intermediate
+    # (~62.7k) exceeds 4*max_cells, so binning must trigger anyway
+    table = model.screen_interactions(
+        frame, y, sample_weight=w, candidates=[("x1", "x4")], max_cells=15_000
+    )
+    row = table.iloc[0]
+    assert bool(row["approx"])
+    assert np.isfinite(row["z"])
+    assert row["n_cells"] <= 256 * 6
+
+    # with a generous budget the same pair is exact
+    wide = model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x4")])
+    assert not bool(wide.iloc[0]["approx"])

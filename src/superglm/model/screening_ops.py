@@ -11,6 +11,10 @@ The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
 without this scaling the ``edf0`` noise floor is only honest for
 unit-dispersion families and a dispersed Gaussian null would swamp the scan.
+
+Per-feature work (unique support, codes, marginal basis menus, marginal
+penalties) is cached across the sweep, so an all-pairs screen over P spline
+features builds P marginals, not P*(P-1).
 """
 
 from __future__ import annotations
@@ -41,6 +45,13 @@ _RESULT_COLUMNS = [
     "n_cells",
     "approx",
 ]
+
+# The V-assembly einsum carries (n_a, k_b, k_b) and (n_b, k_a, k_a)
+# intermediates that max_cells alone does not bound (a lopsided 1e6 x 5 pair
+# passes the cell budget while the intermediate is 40x larger).  Budget them
+# against a small multiple of max_cells; the marginal dimension is estimated
+# from the parent spec's k, which is a guard-grade bound, not an exact count.
+_INTERMEDIATE_BUDGET_FACTOR = 4
 
 
 def _quantile_binned(x, bins):
@@ -107,10 +118,10 @@ def screen_interactions(
     to probe one bandwidth.  The expensive per-pair work (cells, menus,
     profiling) happens once; the ladder re-solves a small system per rung.
 
-    ``offset`` defaults to the offset the model was fitted with, so the
-    screen linearizes at the fitted mean; pass one explicitly only to
-    override it.  ``T`` is scaled by the fit's Pearson dispersion estimate
-    before normalization (see module docstring).
+    ``offset`` and ``sample_weight`` both default to the values the model
+    was fitted with, so the screen linearizes at the fitted likelihood; pass
+    either explicitly only to override it.  ``T`` is scaled by the fit's
+    Pearson dispersion estimate before normalization (see module docstring).
 
     Returns a frame sorted by ``z`` (descending) with one row per screened
     pair: ``feature_a, feature_b, statistic, z, edf0, lambda0, n_cells,
@@ -120,24 +131,38 @@ def screen_interactions(
     value and ``lambda0`` is a bracket edge, not an interpretable smoothing
     parameter.
 
-    Pairs whose joint unique-value grid exceeds ``max_cells`` fall back to
-    quantile binning: any margin with more than ``screen_bins`` unique
-    values is compressed to ``screen_bins`` empirical-quantile bins (basis
-    evaluated at within-bin means) and the row is flagged ``approx=True``.
-    Pairs that fit the budget are computed exactly and flagged
-    ``approx=False`` — the fallback never touches them.  A pair still over
-    budget after binning is skipped with a NaN row (``n_cells`` reports the
-    grid that was attempted), as is a pair whose statistic degenerates.
+    Pairs whose support exceeds the cell or intermediate budgets fall back
+    to quantile binning, largest margin first: a margin with more than
+    ``screen_bins`` unique values is compressed to ``screen_bins``
+    empirical-quantile bins (basis evaluated at within-bin means) and the
+    row is flagged ``approx=True``.  Pairs within budget are always computed
+    exactly and flagged ``approx=False`` — the fallback never touches them.
+    A pair still over budget after binning is skipped with a NaN row
+    (``n_cells`` reports the grid that was attempted), as is a pair whose
+    statistic degenerates.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
     from superglm.features.interaction import TensorInteraction
 
     frame = as_eager_frame(X)
+    n_rows = len(frame)
     y = np.asarray(y, dtype=np.float64)
+    if sample_weight is None:
+        sample_weight = getattr(model, "_fit_weights", None)
     weights = (
         np.ones_like(y) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
     )
+    if y.shape != (n_rows,):
+        raise ValueError(
+            f"y must be one-dimensional with one entry per row of X; got shape {y.shape} "
+            f"for {n_rows} rows"
+        )
+    if weights.shape != (n_rows,):
+        raise ValueError(
+            f"sample_weight must be one-dimensional with one entry per row of X; got shape "
+            f"{weights.shape} for {n_rows} rows"
+        )
     if not np.all(np.isfinite(y)):
         raise ValueError("screen_interactions requires finite y")
     if not np.all(np.isfinite(weights)) or np.any(weights < 0.0) or not np.any(weights > 0.0):
@@ -161,6 +186,22 @@ def screen_interactions(
             "refit the mains without select"
         )
 
+    raw_x: dict[str, np.ndarray] = {}
+
+    def _raw(name):
+        if name not in raw_x:
+            x = frame.column_array(name, dtype=np.float64)
+            if not np.all(np.isfinite(x)):
+                raise ValueError(
+                    f"screen_interactions requires finite covariates; {name!r} contains "
+                    "non-finite values"
+                )
+            raw_x[name] = x
+        return raw_x[name]
+
+    for name in sorted({name for pair in pairs for name in pair}):
+        _raw(name)
+
     distribution, link = model._distribution, model._link
     if offset is None:
         offset = getattr(model, "_fit_offset", None)
@@ -176,32 +217,81 @@ def screen_interactions(
     phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
     phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))
 
+    support_cache: dict[tuple[str, bool], dict] = {}
+    marginal_cache: dict[tuple[str, bool], tuple[np.ndarray, np.ndarray]] = {}
+
+    def _support(name, binned):
+        key = (name, binned)
+        if key not in support_cache:
+            x = _raw(name)
+            if binned:
+                x = _quantile_binned(x, screen_bins)
+            _, first, codes = np.unique(x, return_index=True, return_inverse=True)
+            support_cache[key] = {"x": x, "first": first, "codes": codes, "n": len(first)}
+        return support_cache[key]
+
+    def _marginals(feat_a, bin_a, feat_b, bin_b):
+        key_a, key_b = (feat_a, bin_a), (feat_b, bin_b)
+        if key_a not in marginal_cache or key_b not in marginal_cache:
+            spec = TensorInteraction(feat_a, feat_b)
+            sa, sb = _support(feat_a, bin_a), _support(feat_b, bin_b)
+            B1, B2, S1, S2 = spec._prepare_centered_marginals(sa["x"], sb["x"], model._specs)
+            if key_a not in marginal_cache:
+                marginal_cache[key_a] = (
+                    np.asarray(B1[sa["first"]].todense(), dtype=np.float64),
+                    S1,
+                )
+            if key_b not in marginal_cache:
+                marginal_cache[key_b] = (
+                    np.asarray(B2[sb["first"]].todense(), dtype=np.float64),
+                    S2,
+                )
+        return marginal_cache[key_a], marginal_cache[key_b]
+
+    def _k_est(name):
+        return max(int(getattr(model._specs[name], "k", 10)) - 1, 1)
+
+    def _within_budget(n_a, n_b, k_a, k_b):
+        cells_ok = n_a * n_b <= max_cells
+        inter_ok = (
+            n_a * k_b * k_b + n_b * k_a * k_a <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
+        )
+        return cells_ok and inter_ok
+
     rows = []
     for feat_a, feat_b in pairs:
-        x_a = frame.column_array(feat_a, dtype=np.float64)
-        x_b = frame.column_array(feat_b, dtype=np.float64)
-        approx = False
-        if np.unique(x_a).size * np.unique(x_b).size > max_cells:
-            if np.unique(x_a).size > screen_bins:
-                x_a = _quantile_binned(x_a, screen_bins)
-                approx = True
-            if np.unique(x_b).size > screen_bins:
-                x_b = _quantile_binned(x_b, screen_bins)
-                approx = True
-        uniq_a, first_a, codes_a = np.unique(x_a, return_index=True, return_inverse=True)
-        uniq_b, first_b, codes_b = np.unique(x_b, return_index=True, return_inverse=True)
-        n_a, n_b = len(uniq_a), len(uniq_b)
-        if n_a * n_b > max_cells:
+        k_a, k_b = _k_est(feat_a), _k_est(feat_b)
+        bin_flag = {feat_a: False, feat_b: False}
+        while True:
+            n_a = _support(feat_a, bin_flag[feat_a])["n"]
+            n_b = _support(feat_b, bin_flag[feat_b])["n"]
+            if _within_budget(n_a, n_b, k_a, k_b):
+                break
+            # bin the largest not-yet-binned margin that binning can shrink
+            binnable = sorted(
+                (
+                    (n, name)
+                    for n, name in ((n_a, feat_a), (n_b, feat_b))
+                    if not bin_flag[name] and n > screen_bins
+                ),
+                reverse=True,
+            )
+            if not binnable:
+                break
+            bin_flag[binnable[0][1]] = True
+        sa = _support(feat_a, bin_flag[feat_a])
+        sb = _support(feat_b, bin_flag[feat_b])
+        n_a, n_b = sa["n"], sb["n"]
+        approx = bin_flag[feat_a] or bin_flag[feat_b]
+        if not _within_budget(n_a, n_b, k_a, k_b):
             rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, False))
             continue
 
-        spec = TensorInteraction(feat_a, feat_b)
-        B1, B2, S1, S2 = spec._prepare_centered_marginals(x_a, x_b, model._specs)
-        menu_a = np.asarray(B1[first_a].todense(), dtype=np.float64)
-        menu_b = np.asarray(B2[first_b].todense(), dtype=np.float64)
-
+        (menu_a, S1), (menu_b, S2) = _marginals(
+            feat_a, bin_flag[feat_a], feat_b, bin_flag[feat_b]
+        )
         S_cell, W_cell = pair_cell_moments(
-            codes_a, codes_b, n_a, n_b, score, working_weights, max_cells=max_cells
+            sa["codes"], sb["codes"], n_a, n_b, score, working_weights, max_cells=max_cells
         )
         U, V = pair_score_curvature(menu_a, menu_b, S_cell, W_cell)
         M, C, u_m = pair_overlap_moments(menu_a, menu_b, S_cell, W_cell)

@@ -101,6 +101,8 @@ def penalized_score_statistic(
         lam = hi
     else:
         for _ in range(_MAX_BISECT):
+            if hi <= lo * (1.0 + 1e-12):
+                break  # bracket exhausted at float resolution; nearest lam wins
             lam = np.sqrt(lo * hi)
             achieved = _edf(V, S, lam)
             if abs(achieved - edf0) <= _EDF_TOL:
