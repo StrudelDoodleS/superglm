@@ -208,8 +208,10 @@ class PIRLSResult:
     reml_hessian_rank: int | None = None
     reml_geometry: REMLGeometrySummary | None = None
     # Centered slope-system decomposition, retained only when the caller
-    # opts in (RFC-12b seam: the cached-factor line search updates this
-    # factor instead of refactorizing per trial). Dense exact path only.
+    # opts in. Factor-L retention seam for RFC-2/RFC-7 consumers (route
+    # solves through the factor instead of a materialized p x p
+    # pseudo-inverse); RFC-12b, its original motivation, is retired per
+    # audit 2026-07-28 §J.6. Dense exact path only.
     reml_slope_decomposition: RankDecomposition | None = None
     rank_info: RankInfo | None = None
     state_id: int | None = None

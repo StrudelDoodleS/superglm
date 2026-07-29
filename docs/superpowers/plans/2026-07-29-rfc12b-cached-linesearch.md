@@ -31,17 +31,38 @@ supersedes the §J.2/§J.4 entries that promoted the RFC — and the
 
 ### Reopening condition
 
-Only reopen if line-search telemetry (`_n_linesearch_fits` vs outer
-iterations in `optimize_direct_reml`) shows a workload class with material
-step-halving counts. If that ever happens, the archived surrogate design —
-including sixteen round-1 and a dozen round-2 review findings on its
-algebra (equilibrated-coordinate updates, Δλ-scaled update vectors,
-Woodbury determinant signs for indefinite capacitance, shared-block
-log|S|₊ joint evaluation, estimated-scale LAML families, rank-truncation
-and stationarity eligibility gates, the two-sided exact-trial fallback) —
-is preserved in the PR #173 review threads and this file's git history
-(`154746e`, `d96230d`). Any revival must re-derive from those findings,
-not from the retired §J.2 sketch.
+Only reopen on telemetry showing material step-halving counts on a real
+workload — and note the published profile can only prove halvings in ONE
+direction: `reml_n_linesearch_fits > reml_n_outer_iter` implies halvings,
+but the converse fails, because iterations that skip the search at bounds
+contribute zero fits (7 of 20 on b_L800 itself), and that slack can absorb
+real halvings undetected. The accepted-trial count the audit's triple
+(20/13/13) relied on is NOT published — `optimize_direct_reml` has no
+accepts counter on the Fisher path
+(`reml_observed_mode_rejected_trial_count` increments only in
+observed-geometry mode). Reviving therefore starts by adding an accepts
+counter next to `accepted = True` in the step-halving loop so
+`halvings = fits − accepts` falls out directly.
+
+If that ever fires, the archived surrogate design — sixteen round-1 and
+eighteen round-2 review findings (6 + 12) on its algebra — is preserved in
+the PR #173 review threads and this file's git history (`154746e`,
+`d96230d`). The durable index of what those findings cover:
+equilibrated-coordinate updates with the `2·Σ log(column_scale[active])`
+logdet term; Δλ-scaled update vectors; per-`penalty_kind` `U_j`
+construction (identity/repeated/sum-to-zero components carry no full
+coefficient-space eigenstructure, and `PenaltyComponent` stores no
+eigenvectors, so `U_j` needs an `eigh` per component even in the dense
+case); the wide-identity whole-fit scope exclusion; Woodbury determinant
+signs for indefinite capacitance; shared-block log|S|₊ joint evaluation;
+estimated-scale LAML families; rank-truncation AND base-fit-stationarity
+eligibility gates; the full `decompose_gram` certificate re-application
+after updates (an rcond band alone is not the policy); the two-sided
+exact-trial fallback plus restart-from-first-feasible-step after a failed
+exact re-check; the `trace_run` state-id contract on every evaluated
+trial; and complete-fit memory/dispatch validation before any default
+flip. Any revival must re-derive from those findings, not from the
+retired §J.2 sketch.
 
 ## What ships instead: the retained-factor seam (Task 1)
 
@@ -52,12 +73,19 @@ kept only its pseudo-inverse. The seam retains the `RankDecomposition`
 itself on `PIRLSResult` behind an opt-in internal kwarg — default off,
 zero behavior and memory change for every existing caller.
 
-**Why it stays despite the retirement:** factor retention is the listed
-prerequisite of two live audit items — RFC-2 (batched whitened
-W-correction, "needs factor-L retention (RFC-7)", 39-85% of exact-fit
-runtime) and RFC-7 (factorization-backed `HessianFactor`, which also
-~halves exact-REML peak memory). This seam is that retention, shipped and
-contract-tested.
+**Why it stays despite the retirement:** the strongest current grounds are
+MEMORY, not the retired speed headlines. §E row 7 is untouched by §J: the
+per-candidate p×p pseudo-inverse materialisation it names is exactly this
+seam's site (the `pseudo_inverse()` call on the retained decomposition),
+and routing consumers through a retained factor ~halves exact-REML peak
+memory ((2q+3)p² → ~q·p² + p²). On speed, cite the audit's own
+supersessions honestly: §J.2 DEMOTES RFC-2 for compressible designs
+(W-correction measured 0.36 s of the 4.7 s tensor fit post-compression),
+§J.5 re-promotes it narrowly for the truly-continuous-covariate regime
+inside `ti()`, and §J.6's close drops RFC-7's urgency (the explicit-inverse
+cost shrank 35× under the BLAS cap). Factor-L retention remains the listed
+prerequisite for that narrowed RFC-2 and for RFC-7's memory win — this
+seam is that retention, shipped and contract-tested.
 
 **Interface** (for the RFC-2/RFC-7 consumers):
 - `PIRLSResult.reml_slope_decomposition: RankDecomposition | None`
