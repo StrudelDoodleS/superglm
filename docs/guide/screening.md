@@ -64,6 +64,12 @@ Parent smooths must be single-penalty: mains fitted with `select=True`
 raise up front, because `ti()` terms cannot be built on such parents
 either.
 
+Screening always probes the exact-basis tensor, including for mains
+fitted with `discrete=True` (whose confirmatory `ti()` refit uses binned
+marginal supports). That is the same support-discretization gap as the
+quantile fallback — measured at ~3.5% relative z on signal pairs — and
+it never affects which basis the confirmatory refit itself uses.
+
 ## Measured limits
 
 - **Corner-localized effects.** An interaction confined to a thin corner

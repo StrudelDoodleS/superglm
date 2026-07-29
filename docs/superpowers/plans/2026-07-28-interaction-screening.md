@@ -506,3 +506,47 @@ tight agreement is promised or wanted: at clamped unpenalized rungs,
 bin-means smooth away (null z 1.59 exact vs 0.60 binned) — the binned
 null is the better-behaved one. Docs updated (guide + docstrings).
 Suite 4762 / 152.
+
+---
+
+## PR #171 review response (2026-07-29)
+
+Two reviewers (claude, codex) produced 12 distinct findings; disposition:
+
+FIXED (commits f857a2f, 3670884, d7322da, 2a319e9 + docs):
+- sample_weight now inherits from the fit like offset (BLOCKING - the
+  offset bug's twin; regression test mirrors the offset pin).
+- y/sample_weight row-alignment and covariate finiteness validated.
+- Per-feature support+marginal caches: P basis builds instead of
+  P*(P-1); verified identical to 1 ULP; freMTPL2 sweep 1.9s -> 1.3s.
+- Cell budget now also bounds the (n_a*k_b^2) curvature intermediates;
+  quantile binning escalates largest-margin-first.
+- Bisection stops when the bracket exhausts float resolution.
+- BLAS wide-design release is now owned by the declaring fit's scope:
+  re-arms for remaining narrow fits, exception-safe entry.
+- Support compression gates run before any densify (no more full-basis
+  allocation on the no-repeats decline) and the accept path densifies
+  the support exactly once.
+
+REASONED PUSHBACK (codex P1, dispersion denominator): using
+pearson_residual_degrees_of_freedom (frequency-weight sum(w)-edf) is
+internally consistent but measurably miscalibrated under the protected
+sample_weight=exposure contract: known-phi exposure nulls read 1.55 at
+truth 1.0, freMTPL2 phi inflates 2.48 -> 4.7, and the top-2 the refit
+gate prefers (116.49 deviance) is demoted for a 79.55 set. n-edf kept;
+divergence documented at the computation site. NOTE the underlying
+semantic tension (CLAUDE.md exposure contract vs dispersion.py
+frequency contract) is real and pre-existing - flagged for a future
+decision at the library level.
+
+DOCUMENTED (codex P1, discrete=True mains): screening probes the
+exact-basis tensor; discrete refits bin marginal supports - same
+support-discretization gap as the quantile fallback (~3.5% on signal
+pairs). Native discrete-support screening recorded as follow-up.
+
+DEFERRED (minor): is_lossless_support has no production consumer
+(wire-or-drop follow-up); _solve_psd check_finite note stands as
+fail-safe given upstream finiteness validation.
+
+Release declaration: release:minor, 0.16.0 (new public feature:
+screen_interactions + screen_bins/approx surface). Suite 4771 / 152.

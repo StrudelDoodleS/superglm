@@ -645,7 +645,11 @@ class SuperGLM:
         unique-value grid exceeds ``max_cells`` are quantile-binned to
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
-        The statistic is a ranking device, not a calibrated p-value: confirm
+        Screening probes the exact-basis tensor for each pair even when the
+        mains were fitted with ``discrete=True`` (whose confirmatory ``ti()``
+        refit bins marginal supports) — the same support-discretization gap
+        as the quantile fallback, measured at ~3.5% on signal pairs.  The
+        statistic is a ranking device, not a calibrated p-value: confirm
         the top-ranked pairs by refitting them as ``ti()`` terms.
         """
         from superglm.model.screening_ops import screen_interactions
