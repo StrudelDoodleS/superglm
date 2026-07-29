@@ -415,6 +415,11 @@ def _store_fit_arrays(model, sample_weight, offset):
     model._fit_weights = np.array(sample_weight)
     model._fit_offset = np.array(offset) if offset is not None else None
     model._fit_used_offset = offset is not None
+    # Survives fit-state release (unlike the arrays), so consumers that
+    # default to the fit's weights can tell "unweighted fit" apart from
+    # "weighted fit whose arrays were released" and refuse to silently
+    # substitute unit weights in the latter case.
+    model._fit_used_weights = bool(np.any(model._fit_weights != 1.0))
     return model._fit_weights, model._fit_offset
 
 
