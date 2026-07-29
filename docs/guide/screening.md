@@ -46,9 +46,11 @@ surfaces are both visible.
   near-tied `z` values are common and the refit, not the screen, is the
   gate. Evidence *density* is not payoff: a strong tilt (rung-2 win) can
   out-`z` a curved surface that buys three times the deviance.
-- **NaN rows are skipped pairs**, not failures: the pair's joint support
-  exceeded `max_cells` even after the quantile-binning fallback (or the
-  statistic degenerated). They sort last. `approx=True` means the row's
+- **NaN rows are skipped pairs**, not failures: the pair exceeded the
+  cell/intermediate budgets even after the quantile-binning fallback, its
+  tensor curvature block alone was too large for the budget (binning
+  cannot shrink basis dimensions, so those skip with no binning
+  attempted), or the statistic degenerated. They sort last. `approx=True` means the row's
   probe basis differs from what a confirmatory refit would build — either
   the pair was quantile-binned, or that pair's `ti()` refit would
   discretize *lossily* (both parents resolve to fit-time discretization,
@@ -69,7 +71,8 @@ explicitly. A badly specified mains model screens against the
 wrong baseline — screening quality is downstream of fit quality. The
 Pearson dispersion that scales the statistic is attached to the result as
 `table.attrs["phi"]` and can be overridden with `phi=` (the estimate uses
-`n − edf` residual degrees of freedom per the exposure weight contract,
+positive-weight-row count − edf residual degrees of freedom per the
+exposure weight contract,
 which keeps rankings invariant to the units exposure is measured in; a
 frequency-weight user can supply their own `phi`).
 
@@ -103,7 +106,8 @@ that is already in the model.
   signal is demoted, not lost. The `ti()` refit faces the same
   identifiability.
 - **Continuous x continuous cardinality.** Pairs whose unique-value grid
-  exceeds `max_cells` fall back to quantile binning (`screen_bins`
+  (or curvature-intermediate allocation, bounded at a small multiple of
+  the same budget) exceeds `max_cells` fall back to quantile binning (`screen_bins`
   empirical-quantile support points per margin, basis evaluated at
   within-bin means) and are flagged `approx=True` in the output. Pairs
   within budget are always computed exactly — the fallback never touches
