@@ -121,19 +121,8 @@ def _row_hash_multipliers(p_b: int) -> NDArray:
     return mults | np.uint64(1)
 
 
-def _row_index_hashed(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
-    """Exact row grouping via vectorized 64-bit mixing, verified bitwise.
-
-    Each dense row's raw float bits are mixed column-wise into one uint64, so
-    grouping needs a single 8-byte sort instead of a lexicographic sort of
-    ``p_b``-wide records — the cost that dominates :func:`_row_index_chunked`.
-    The result is then verified exactly: every row's bits must equal its
-    group representative's bits.  A verification failure (a true 64-bit
-    collision) falls back to the byte-keyed path, so exactness never rests on
-    the hash.  Comparing raw bits keeps NaN rows mergeable only when
-    bit-identical and keeps ``-0.0`` distinct from ``0.0``, matching the
-    byte-keyed semantics.
-    """
+def _row_hashes(B_csr: sp.spmatrix, chunk_rows: int) -> NDArray:
+    """Mix each dense row's raw float bits column-wise into one uint64."""
     n_rows, p_b = B_csr.shape
     mults = _row_hash_multipliers(p_b)
     hashes = np.empty(n_rows, dtype=np.uint64)
@@ -143,18 +132,71 @@ def _row_index_hashed(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
         # Per-column multipliers make the mix position-dependent; uint64
         # arithmetic wraps, which is what a mix wants.
         hashes[start:stop] = (block.view(np.uint64) * mults).sum(axis=1, dtype=np.uint64)
-    _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
-    row_index = np.asarray(row_index, dtype=np.intp).ravel()
+    return hashes
 
+
+def _verified_representatives(
+    B_csr: sp.spmatrix,
+    first_occurrence: NDArray,
+    row_index: NDArray,
+    chunk_rows: int,
+) -> NDArray | None:
+    """Densify the representative rows and verify the grouping bitwise.
+
+    Returns the float64 representative block on success, or None on a true
+    64-bit hash collision (caller falls back to byte keying).  Comparing raw
+    bits keeps NaN rows mergeable only when bit-identical and keeps ``-0.0``
+    distinct from ``0.0``, matching the byte-keyed semantics.
+    """
+    n_rows = B_csr.shape[0]
     representatives = np.ascontiguousarray(
         B_csr[np.asarray(first_occurrence, dtype=np.intp)].toarray(), dtype=np.float64
-    ).view(np.uint64)
+    )
+    rep_bits = representatives.view(np.uint64)
     for start in range(0, n_rows, chunk_rows):
         stop = min(start + chunk_rows, n_rows)
         block = np.ascontiguousarray(B_csr[start:stop].toarray(), dtype=np.float64)
-        if not np.array_equal(representatives[row_index[start:stop]], block.view(np.uint64)):
-            return _row_index_chunked(B_csr, chunk_rows=chunk_rows)
+        if not np.array_equal(rep_bits[row_index[start:stop]], block.view(np.uint64)):
+            return None
+    return representatives
+
+
+def _row_index_hashed(B_csr: sp.spmatrix, chunk_rows: int = 65_536) -> NDArray:
+    """Exact row grouping via vectorized 64-bit mixing, verified bitwise.
+
+    Grouping needs a single 8-byte sort instead of a lexicographic sort of
+    ``p_b``-wide records — the cost that dominates :func:`_row_index_chunked`.
+    A verification failure (a true 64-bit collision) falls back to the
+    byte-keyed path, so exactness never rests on the hash.
+    """
+    hashes = _row_hashes(B_csr, chunk_rows)
+    _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
+    row_index = np.asarray(row_index, dtype=np.intp).ravel()
+    if _verified_representatives(B_csr, first_occurrence, row_index, chunk_rows) is None:
+        return _row_index_chunked(B_csr, chunk_rows=chunk_rows)
     return row_index
+
+
+def _passes_support_gates(
+    n_rows: int,
+    n_support: int,
+    p_b: int,
+    nnz: int,
+    min_speedup: float,
+    max_support_bytes: int,
+) -> bool:
+    """Cheap accept/decline gates, evaluated before anything is densified."""
+    # Strict inequality: equal counts mean no row actually repeats, so there is
+    # nothing to deduplicate and the compressed form is pure overhead.
+    if n_support <= 0 or n_support >= n_rows:
+        return False
+    # The speedup model is calibrated on large blocks; below this the gram is
+    # negligible either way and the calibration does not apply.
+    if n_rows < _MIN_CALIBRATED_ROWS:
+        return False
+    if n_support * p_b * 8 > max_support_bytes:
+        return False
+    return _estimated_speedup(n_rows, n_support, p_b, nnz) >= min_speedup
 
 
 def plan_row_support(
@@ -177,17 +219,9 @@ def plan_row_support(
     if n_rows == 0 or row_index.shape[0] != n_rows:
         return None
     n_support = int(row_index.max()) + 1
-    # Strict inequality: equal counts mean no row actually repeats, so there is
-    # nothing to deduplicate and the compressed form is pure overhead.
-    if n_support <= 0 or n_support >= n_rows:
-        return None
-    # The speedup model is calibrated on large blocks; below this the gram is
-    # negligible either way and the calibration does not apply.
-    if n_rows < _MIN_CALIBRATED_ROWS:
-        return None
-    if n_support * p_b * 8 > max_support_bytes:
-        return None
-    if _estimated_speedup(n_rows, n_support, p_b, int(B_csr.nnz)) < min_speedup:
+    if not _passes_support_gates(
+        n_rows, n_support, p_b, int(B_csr.nnz), min_speedup, max_support_bytes
+    ):
         return None
 
     # First occurrence of each group, taken without densifying the whole basis.
@@ -209,23 +243,39 @@ def detect_row_support(
 
     Rows are grouped by a vectorized 64-bit mix of their raw float bits and the
     grouping is verified bitwise, falling back to byte keying on a collision.
-    The scan is O(n * p_b); transients are bounded chunks plus one dense
-    ``(n_support, p_b)`` representative block, and the cost is paid even when
-    compression is declined.  Callers that already know the grouping can skip
-    it via :func:`plan_row_support`.
+    The scan is O(n * p_b) in bounded chunks; the accept/decline gates run on
+    the hash grouping alone, so a declined block (nothing repeats, support
+    over budget, speedup below threshold) never materialises the dense
+    ``(n_support, p_b)`` representative block — the worst case for that
+    allocation is exactly the no-repeats case where compression is refused.
+    On accept the verified representative block is returned directly, so the
+    support rows are densified exactly once.  Callers that already know the
+    grouping can skip the scan via :func:`plan_row_support`.
 
     Only bit-identical densified rows merge, so reconstruction is exact even
     for non-finite values: NaN rows merge only when their bit patterns match.
     (Explicitly stored ``-0.0`` entries densify to ``+0.0`` before grouping,
     identically for grouping and reconstruction, so exactness is unaffected.)
     """
-    n_rows = B_csr.shape[0]
+    n_rows, p_b = B_csr.shape
     if n_rows == 0:
         return None
-    row_index = _row_index_hashed(B_csr)
-    return plan_row_support(
-        B_csr,
-        row_index,
-        min_speedup=min_speedup,
-        max_support_bytes=max_support_bytes,
-    )
+    chunk_rows = 65_536
+    hashes = _row_hashes(B_csr, chunk_rows)
+    _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
+    row_index = np.asarray(row_index, dtype=np.intp).ravel()
+    if not _passes_support_gates(
+        n_rows, len(first_occurrence), p_b, int(B_csr.nnz), min_speedup, max_support_bytes
+    ):
+        return None
+    representatives = _verified_representatives(B_csr, first_occurrence, row_index, chunk_rows)
+    if representatives is None:
+        # A true 64-bit collision: regroup byte-keyed and re-plan on the
+        # correct grouping (the hash-based gates may have undercounted).
+        return plan_row_support(
+            B_csr,
+            _row_index_chunked(B_csr, chunk_rows=chunk_rows),
+            min_speedup=min_speedup,
+            max_support_bytes=max_support_bytes,
+        )
+    return representatives, row_index
