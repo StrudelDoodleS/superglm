@@ -705,6 +705,7 @@ def init_model(
     model._fit_weights: NDArray | None = None
     model._fit_offset: NDArray | None = None
     model._fit_used_offset = False
+    model._fit_used_weights = False
     model._fit_stats: FitStats | None = None
     model._runtime_canonical_state: dict[str, Any] | None = None
     model._nb_profile_result = None

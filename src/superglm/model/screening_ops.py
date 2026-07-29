@@ -166,6 +166,11 @@ def screen_interactions(
     y = np.asarray(y, dtype=np.float64)
     if sample_weight is None:
         sample_weight = getattr(model, "_fit_weights", None)
+        if sample_weight is None and getattr(model, "_fit_used_weights", False):
+            raise ValueError(
+                "the model was fitted with non-unit sample_weight but its fit state was "
+                "released (retain_fit_state=False); pass sample_weight explicitly"
+            )
     weights = (
         np.ones_like(y) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
     )
@@ -223,6 +228,11 @@ def screen_interactions(
     distribution, link = model._distribution, model._link
     if offset is None:
         offset = getattr(model, "_fit_offset", None)
+        if offset is None and getattr(model, "_fit_used_offset", False):
+            raise ValueError(
+                "the model was fitted with an offset but its fit state was released "
+                "(retain_fit_state=False); pass offset explicitly"
+            )
     mu = np.asarray(model.predict(X, offset), dtype=np.float64)
     eta = np.asarray(link.link(mu), dtype=np.float64)
     score = working_score(y, mu, eta, weights, distribution, link)

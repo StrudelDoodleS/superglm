@@ -37,6 +37,4 @@ def test_iteration_limited_trials_are_refit_not_reused():
     tight = _fit(frame, y, max_pirls_iter=2)
 
     assert np.isfinite(tight._result.deviance)
-    np.testing.assert_allclose(
-        tight._result.deviance, free._result.deviance, rtol=1e-5
-    )
+    np.testing.assert_allclose(tight._result.deviance, free._result.deviance, rtol=1e-5)

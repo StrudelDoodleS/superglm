@@ -776,3 +776,39 @@ def test_screen_discrete_mains_rows_flag_approx():
 
     assert table["approx"].all()
     assert np.isfinite(table["z"]).all()
+
+
+def test_screen_released_fit_state_refuses_silent_fallbacks():
+    """Review finding: retain_fit_state=False releases _fit_weights/_fit_offset,
+    so the fit-inheritance defaults silently degraded to unit weights / no
+    offset. A weighted or offset fit whose arrays are gone must demand
+    explicit values; an unweighted fit stays usable."""
+    import pytest
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    frame, y, w = _screening_data(15)
+
+    def build():
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=None,
+            discrete=False,
+            retain_fit_state=False,
+            features={name: Spline(kind="ps", k=6) for name in frame.columns},
+        )
+
+    weighted = build().fit_reml(frame, y, sample_weight=w)
+    with pytest.raises(ValueError, match="released"):
+        weighted.screen_interactions(frame, y)
+    table = weighted.screen_interactions(frame, y, sample_weight=w)
+    assert np.isfinite(table["z"]).all()
+
+    offset_fit = build().fit_reml(frame, y, offset=np.full(len(y), 0.1))
+    with pytest.raises(ValueError, match="offset explicitly"):
+        offset_fit.screen_interactions(frame, y)
+
+    unweighted = build().fit_reml(frame, y)
+    table2 = unweighted.screen_interactions(frame, y)
+    assert np.isfinite(table2["z"]).all()
