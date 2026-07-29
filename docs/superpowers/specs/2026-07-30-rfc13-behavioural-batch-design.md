@@ -1,0 +1,273 @@
+# RFC-13 Behavioural Batch — Design
+
+**Status: APPROVED (design), implementation pending.**
+**Source:** audit `docs/audit/2026-07-28/architecture-audit.md` §E row 13, §J.4
+item 6, Tranche 1 item 4; subsystem findings S3, S13, S16 in
+`docs/audit/2026-07-28/subsystems/solvers.md`.
+**Base:** `master` at `e8e31f4` (= v0.16.1).
+**Release impact: patch → 0.16.2.**
+
+Four independent correctness-hygiene items, each reproduced through the public
+API by the audit. They share no code except the merit-delta helper's new home,
+so they are implemented as four commits in one PR.
+
+---
+
+## Item 1 — `max_iter=0` raises `ValueError`, not `UnboundLocalError`
+
+### Current behaviour
+
+Both outer loops reference loop-body locals unconditionally after the loop:
+`_fit_pirls_inner` (`pirls.py:843`, reading `retained`/`dev`/`outer`/
+`termination_reason` at 1218 and 1376-1391) and `_fit_irls_direct_once`
+(`irls_direct.py:1285`, reading `it`/`retained`/`dev`/`step_rejected`/
+`termination_reason` at 2118-2131 and 2483-2499). Reproduced on this tree
+through all three public entry paths — `fit`, `fit_reml`, and `fit` with
+`selection_penalty` — each raising
+`UnboundLocalError: cannot access local variable 'it'`.
+
+### Design
+
+Guard the two public solver entry points:
+
+- `fit_irls_direct` (`irls_direct.py:383`): `max_iter < 1` → `ValueError`
+- `fit_pirls` (`pirls.py:1435`): `max_iter_outer < 1` → `ValueError`;
+  `max_iter_inner < 1` → `ValueError`
+
+The private `_fit_pirls_inner` / `_fit_irls_direct_once` helpers stay unguarded;
+they are only ever reached through the validated entry points.
+
+The condition is `< 1`, not `== 0`: `range(-5)` is empty too and fails
+identically. Message form follows the existing `max_halving` precedent at
+`irls_state.py:185`: `"max_iter must be at least 1, got 0"`.
+
+`max_iter=1` remains legal — the discrete POI loop depends on it
+(`reml/discrete.py:551-578`).
+
+### Tests
+
+Public-API assertions that each of `fit`, `fit_reml`, and the
+`selection_penalty` path raises `ValueError` (not `UnboundLocalError`) for
+`max_iter=0`, plus direct solver-level tests for negative values and for
+`max_iter_inner`.
+
+---
+
+## Item 2 — Port the polarization merit delta to pirls
+
+### Current behaviour
+
+`_irls_trial_is_unsafe` (`irls_state.py:141`) already accepts an injectable
+`merit_delta`. `irls_direct` supplies `_stable_penalized_deviance_delta`
+(`irls_direct.py:117`, wired at 1815); pirls (`pirls.py:1043`) supplies
+nothing and falls through to the raw comparison
+`candidate_merit > committed_merit + roundoff` at `irls_state.py:171`.
+
+In an ill-conditioned smooth basis the two penalty quadratics are each
+evaluated accurately while their difference loses enough digits to reverse
+sign. The audit demonstrated a −1.5e-7 improvement read as +1.7e-5, i.e. a
+safe terminal step rejected. This is audit finding S3's named divergence
+risk between the two IRLS orchestrations.
+
+### Design
+
+Move `_stable_penalized_deviance_delta` from `irls_direct.py` to
+`irls_state.py`, next to the `MeritDelta` alias it satisfies
+(`irls_state.py:119`). pirls already imports from `irls_state`; importing from
+`irls_direct` would invert the dependency direction. Two importers to update:
+`irls_direct.py:1815` and `tests/test_irls_state.py:14`. The symbol is private,
+so no compatibility shim.
+
+Generalize it so both penalty contributions are optional:
+
+```python
+def _stable_penalized_deviance_delta(
+    candidate, committed,
+    penalty_matvec=None,      # quadratic S: matrix or matvec; None → term skipped
+    nonsmooth_penalty=None,   # callable beta -> float, pre-scaled by the caller
+) -> float:
+    terms = [float(candidate.deviance), -float(committed.deviance)]
+    if penalty_matvec is not None:
+        terms.append(<polarized Δβ' S (β_c + β_m), unchanged>)
+    if nonsmooth_penalty is not None:
+        terms.append(nonsmooth_penalty(candidate.beta))
+        terms.append(-nonsmooth_penalty(committed.beta))
+    return float(math.fsum(terms))
+```
+
+`irls_direct`'s call is unchanged in behaviour. pirls passes:
+
+- `penalty_matvec = S if (has_smooth_penalty and S is not None) else None`
+- `nonsmooth_penalty = lambda b: 2.0 * penalty.eval(b, groups)`
+
+The `2.0` lives at the call site because it is pirls's merit convention, not
+the helper's.
+
+**Stability scope (decided).** The quadratic gets the polarization identity;
+the group-lasso term is entered as two pre-scaled values inside the same
+`math.fsum`. Per-group differencing of `penalty.eval(beta, [g])` was
+considered and rejected: it costs `2·|groups|` Python calls per trial, relies
+on `eval` being group-separable, and the demonstrated failure mode is the
+quadratic. The residual exposure — `P(β_c) − P(β_m)` differenced at roughly
+`eps·|P|` absolute — is recorded here as a known limit, not a defect.
+
+**Consistency constraint.** The delta must be the difference of exactly what
+`_state_merit` returns, because `_irls_trial_is_unsafe` compares
+`delta > roundoff` where `roundoff` is scaled from `_state_merit` magnitudes.
+pirls's `penalized_deviance` is `deviance + βʹSβ + 2·penalty.eval(β, groups)`
+(`pirls.py:756`); the three term groups reproduce it exactly.
+
+### Behaviour change
+
+This is the user-visible change in the batch. pirls will accept terminal steps
+it previously rejected in ill-conditioned smooth bases, so fitted coefficients
+can move for those fits.
+
+### Tests
+
+- Unit: a state pair where the naive difference reverses sign and the polarized
+  delta does not.
+- Contract: for well-conditioned states the polarized delta agrees with the
+  naive difference to ~1e-12 relative.
+- Contract: `nonsmooth_penalty=None` and `penalty_matvec=None` each reduce to
+  the expected subset of terms.
+- End-to-end: a pirls fit on an ill-conditioned smooth basis emits no spurious
+  `step_rejected`. This answers the open "Verify:" note on audit finding S3.
+
+---
+
+## Item 3 — Pure-H QP solves through the rank policy; `converged` surfaced
+
+### Current behaviour
+
+`solve_constrained_qp` (`constrained_qp.py:57`) issues three raw
+`np.linalg.solve(H, g)` calls (lines 96, 100, 117) — audit S16 records these as
+the only unguarded dense solves in the subsystem, bypassing the shared rank
+policy that every other consumer routes through (`rank.py`, external callers
+listed in `subsystems/solvers.md:54`). Singular `H` therefore raises
+`LinAlgError` rather than being rank-truncated.
+
+`QPResult.converged` (`constrained_qp.py:35`) already exists and is already set
+to `False` on `max_iter` exhaustion (line 199) — but all three call sites
+discard it: `irls_direct.py:1625`, `scop.py:171`, `scop.py:286`.
+
+`_project_feasible` (`constrained_qp.py:38`) caps at 100 sweeps and returns a
+possibly-still-infeasible point with no signal.
+
+### Design
+
+**Rank policy.** Decompose once at entry and reuse for all three pure-H solves:
+
+```python
+decomposition = decompose_gram(H)
+```
+
+`H` is `XtWX + S` at `irls_direct.py:1622` (PSD) and `XʹX + λP + 1e-8·I` at
+`scop.py:162-163` (PD), so `decompose_gram` with its default
+`allow_indefinite=False` is correct; it falls back to the spectral path when
+Cholesky fails. The indefinite KKT solve at line 136 keeps its existing `lstsq`
+fallback — the audit scopes this item to pure-H solves.
+
+Verified: `RankDecomposition.solve` divides by `column_scale` on both the RHS
+and the solution (`rank.py:168,173`), so it returns in original coordinates.
+The `column_scale` trap recorded in the RFC-12b disposition note does not apply.
+
+Line 117 currently re-solves the same unconstrained system on every active-set
+iteration; reusing the decomposition also removes a redundant O(p³) per
+iteration.
+
+**Projection failure.** `_project_feasible` returns `(beta, feasible)`.
+Exhausting its 100 sweeps while still violating a constraint sets
+`QPResult.converged = False`. This is slightly past the audit's literal wording
+but is the other half of S16's "caps at 100 sweeps without reporting failure",
+and it is what makes the flag mean what its name says.
+
+**Surfacing.** Each of the three call sites checks `result.converged` and emits
+`logger.warning` naming its context, matching the existing precedent at
+`irls_direct.py:1648` and `pirls.py:1225`. `scop.py` has no module logger and
+gains one. No public API change; no exception is introduced, so a currently
+degraded-but-working fit keeps working with a diagnostic.
+
+### Behaviour change
+
+Singular `H` moves from raising `LinAlgError` to returning a rank-truncated
+solve, consistent with the rest of the solver stack.
+
+### Tests
+
+- Singular `H` returns a finite solution in the retained subspace instead of
+  raising.
+- Well-conditioned QPs return results identical to the pre-change path.
+- A `max_iter`-starved QP reports `converged=False`.
+- An infeasible-projection case reports `converged=False`.
+- `caplog` assertions at each of the three call sites.
+
+---
+
+## Item 4 — Warn instead of silently dropping the W(ρ) correction
+
+### Current behaviour
+
+`compute_dW_deta` (`w_derivatives.py:50`) returns `None` when the link lacks
+`deriv2_inverse` or the distribution lacks `variance_derivative` (line 72).
+`reml_w_correction` then returns `None` at line 267 with the comment "Custom
+link/distribution w/o 2nd-order" — the REML gradient and Hessian silently lose
+the weight-derivative term.
+
+All eleven built-in links implement `deriv2_inverse`
+(`subsystems/families-profiling.md:20`), so only user-supplied custom links
+reach this. The observed path already fails loudly for the same capability gap
+via `validate_observed_derivative_capability`
+(`observed_geometry.py:452-489`); the Fisher path has no equivalent.
+
+### Design
+
+A private helper in `w_derivatives.py` emits a `UserWarning` naming the missing
+method(s) and the consequence.
+
+**Call site: `reml_w_correction` at the `dW_deta is None` branch (line 267) —
+deliberately not inside `compute_dW_deta`.** `_compute_d2W_deta2_fd` calls
+`compute_dW_deta` three times internally (lines 158, 164, 168); warning there
+would fire inside the finite-difference fallback.
+
+The structural-zero branch at line 270 (`not np.any(dW_deta)` — Gamma/log,
+where the correction is genuinely zero rather than unavailable) must stay
+silent. The two branches are already distinct.
+
+**Per-iteration spam** is handled by the stdlib default warning filter, which
+dedups on `(message, category, module, lineno)`. Including the link and
+distribution class names in the message makes it one warning per unique
+class pair per process. `pytest.warns` still observes it because pytest resets
+filters inside its context. `pyproject.toml:127-129` filters only the `bs`
+`FutureWarning`, so nothing interferes.
+
+Raising, as the observed path does, was considered and rejected: it would
+remove a currently-working if degraded path for custom links.
+
+### Tests
+
+- A custom link without `deriv2_inverse` warns under `pytest.warns(UserWarning)`
+  and the message names `deriv2_inverse`.
+- A custom distribution without `variance_derivative` warns and names *that*
+  method.
+- Gamma/log does **not** warn (structural zero, line 270).
+- A built-in link does not warn.
+
+---
+
+## Packaging
+
+One PR, four commits (one per item) plus a version-bump commit.
+
+**release:patch → 0.16.2**, declared in the PR body per AGENTS.md, with the
+exact next version bumped in the same PR via `scripts/bump_version.py` +
+`uv lock`. Rationale for patch rather than none: item 2 can move fitted
+coefficients, item 3 changes singular-H QP from raising to solving, and item 4
+adds a warning. No API surface changes.
+
+Review follows the dual-bot flow: push, open PR, comment `@claude please review`
+and `@codex please review`, verify comment URLs, expect 3-4 rounds, and verify
+every finding against the code before implementing it.
+
+**Gitignore trap:** `docs/superpowers/` is ignored but tracked by convention.
+This file needs `git add -f` and a `git log --stat` check.
