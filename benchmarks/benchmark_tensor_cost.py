@@ -93,34 +93,42 @@ def build(with_tensor: bool, discrete: bool, k: int = 10) -> SuperGLM:
 
 
 def run_case(
-    tag: str, with_tensor: bool, discrete: bool, n_rows: int | None, profile: bool
+    tag: str, with_tensor: bool, discrete: bool, n_rows: int | None, profile: bool, reps: int = 1
 ) -> dict:
     X, y, weights = load(n_rows)
-    model = build(with_tensor, discrete)
-    profiler = cProfile.Profile() if profile else None
-    start = time.perf_counter()
-    if profiler is not None:
-        profiler.enable()
-    try:
-        model.fit_reml(X, y, sample_weight=weights)
-        ok, error = True, ""
-    except Exception as exc:  # noqa: BLE001 - benchmark records failures
-        ok, error = False, f"{type(exc).__name__}: {exc}"[:300]
-    elapsed = time.perf_counter() - start
-    if profiler is not None:
-        profiler.disable()
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        profiler.dump_stats(str(OUT_DIR / f"{tag}.prof"))
-        stream = io.StringIO()
-        pstats.Stats(profiler, stream=stream).sort_stats("cumulative").print_stats(45)
-        (OUT_DIR / f"{tag}.pstats.txt").write_text(stream.getvalue())
+    rep_seconds: list[float] = []
+    ok, error = True, ""
+    model = None
+    for rep in range(reps):
+        model = build(with_tensor, discrete)
+        profiler = cProfile.Profile() if profile and rep == 0 else None
+        start = time.perf_counter()
+        if profiler is not None:
+            profiler.enable()
+        try:
+            model.fit_reml(X, y, sample_weight=weights)
+        except Exception as exc:  # noqa: BLE001 - benchmark records failures
+            ok, error = False, f"{type(exc).__name__}: {exc}"[:300]
+        elapsed = time.perf_counter() - start
+        if profiler is not None:
+            profiler.disable()
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            profiler.dump_stats(str(OUT_DIR / f"{tag}.prof"))
+            stream = io.StringIO()
+            pstats.Stats(profiler, stream=stream).sort_stats("cumulative").print_stats(45)
+            (OUT_DIR / f"{tag}.pstats.txt").write_text(stream.getvalue())
+        if not ok:
+            break
+        rep_seconds.append(elapsed)
 
     record = {
         "tag": tag,
         "tensor": with_tensor,
         "discrete": discrete,
         "n": int(len(y)),
-        "seconds": round(elapsed, 3),
+        "seconds": round(float(np.median(rep_seconds)), 3) if rep_seconds else None,
+        "reps": reps,
+        "rep_seconds": [round(s, 3) for s in rep_seconds],
         "ok": ok,
         "error": error,
     }
@@ -146,12 +154,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, default=100_000, help="rows (0 = full data)")
     parser.add_argument("--profile", action="store_true", help="dump cProfile artifacts")
+    parser.add_argument("--reps", type=int, default=1, help="fits per case; records the median")
+    parser.add_argument("--json-out", default=str(OUT_JSON), help="result JSON path")
     args = parser.parse_args()
     n_rows = None if args.n == 0 else args.n
 
     rows = []
     for tag, with_tensor, discrete in CASES:
-        record = run_case(tag, with_tensor, discrete, n_rows, args.profile)
+        record = run_case(tag, with_tensor, discrete, n_rows, args.profile, reps=args.reps)
         rows.append(record)
         print(json.dumps(record), flush=True)
 
@@ -170,10 +180,11 @@ def main() -> None:
                 exact["seconds"] / discrete["seconds"], 2
             )
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps({"cases": rows, "summary": summary}, indent=2))
+    out_json = Path(args.json_out)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps({"cases": rows, "summary": summary}, indent=2))
     print(json.dumps({"summary": summary}, indent=2))
-    print(f"wrote {OUT_JSON}")
+    print(f"wrote {out_json}")
 
 
 if __name__ == "__main__":
