@@ -346,16 +346,10 @@ def build_penalized_block_operator(
                     raise ValueError(
                         f"FactorSmooth group {group.name!r} is not the dominant block."
                     )
+                from superglm.reml.penalty_algebra import resolve_component_lambda
+
                 for suffix, omega in matrix.repeated_penalty_components:
-                    if isinstance(lambda2, dict):
-                        lam = float(
-                            lambda2.get(
-                                f"{group.name}:{suffix}",
-                                lambda2.get(group.name, 0.0),
-                            )
-                        )
-                    else:
-                        lam = float(lambda2)
+                    lam = resolve_component_lambda(lambda2, group.name, suffix)
                     D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
                 continue
             lam = (

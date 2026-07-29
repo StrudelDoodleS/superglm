@@ -125,3 +125,30 @@ class TestEvaluateGate:
         checks = gate.evaluate_gate(baselines, tensor=measurement, flagship={"median_s": 0.9})
         failed = [c for c in checks if not c.passed]
         assert any("tensor_multiplier_exact" in c.name for c in failed)
+
+
+class TestCommittedBaselines:
+    """The gate reads this file in CI; a missing or malformed file must fail
+    here, at test time, not as a FileNotFoundError inside the perf-gate job."""
+
+    def test_committed_baselines_file_is_valid(self):
+        import json
+
+        path = _GATE_PATH.parent / "results" / "ci_perf_baselines.json"
+        assert path.exists(), "benchmarks/results/ci_perf_baselines.json must be committed"
+        baselines = json.loads(path.read_text())
+
+        tensor = baselines["tensor_cost"]
+        for tag in (
+            "tensor_cost_base_exact",
+            "tensor_cost_base_discrete",
+            "tensor_cost_ti_exact",
+            "tensor_cost_ti_discrete",
+        ):
+            assert tensor["reference_seconds"][tag] > 0
+        assert tensor["checks"]["tensor_multiplier_exact"]["max"] > 0
+        assert tensor["checks"]["tensor_multiplier_discrete"]["max"] > 0
+        assert tensor["checks"]["absolute_multiple"]["max"] > 0
+        flagship = baselines["flagship"]
+        assert flagship["reference_median_s"] > 0
+        assert flagship["checks"]["absolute_multiple"]["max"] > 0
