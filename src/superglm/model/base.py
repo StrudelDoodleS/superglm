@@ -984,7 +984,15 @@ def compute_lambda_max(model, y, weights):
     # zeroes a group is correspondingly larger.
     alpha = 1.0 if type(penalty) is GroupLasso else float(getattr(penalty, "alpha", 1.0))
     if alpha <= 0.0:
-        return 0.0
+        from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+
+        if isinstance(penalty, SparseGroupLasso):
+            # alpha=0 sparse-group lasso is pure group lasso: groups zero at
+            # ||grad_g|| / w_g, so the group divisor applies, not 0.
+            alpha = 1.0
+        else:
+            # e.g. elastic-net alpha=0 is ridge: nothing ever zeroes.
+            return 0.0
     lmax = 0.0
     for g in model._groups:
         if not penalty_targets_group(penalty, g):

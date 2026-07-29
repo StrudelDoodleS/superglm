@@ -53,12 +53,16 @@ surfaces are both visible.
 
 ## What it inherits from the fit
 
-Screening linearizes at the fitted model: the offset used at fit time is
-applied automatically (pass `offset=` only to override), `sample_weight`
-keeps its exposure meaning, and the mains model's own smoothness choices
-define what "leftover" means. A badly specified mains model screens
-against the wrong baseline — screening quality is downstream of fit
-quality.
+Screening linearizes at the fitted model: **both the offset and the
+`sample_weight` used at fit time are applied automatically** (pass either
+only to override), and the mains model's own smoothness choices define
+what "leftover" means. A badly specified mains model screens against the
+wrong baseline — screening quality is downstream of fit quality. The
+Pearson dispersion that scales the statistic is attached to the result as
+`table.attrs["phi"]` and can be overridden with `phi=` (the estimate uses
+`n − edf` residual degrees of freedom per the exposure weight contract,
+which keeps rankings invariant to the units exposure is measured in; a
+frequency-weight user can supply their own `phi`).
 
 Parent smooths must be single-penalty: mains fitted with `select=True`
 raise up front, because `ti()` terms cannot be built on such parents

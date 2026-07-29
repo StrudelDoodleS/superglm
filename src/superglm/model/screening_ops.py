@@ -18,7 +18,10 @@ known-dispersion exposure nulls, only ``n - edf`` is calibrated.
 
 Per-feature work (unique support, codes, marginal basis menus, marginal
 penalties) is cached across the sweep, so an all-pairs screen over P spline
-features builds P marginals, not P*(P-1).
+features builds each feature's marginal exactly once.  The caches trade
+memory for time and live for the whole sweep: roughly the raw covariates
+plus codes plus menus per screened feature (plus binned variants where the
+fallback fires), instead of per-pair transients.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
 from superglm.distributions import _VARIANCE_FLOOR
@@ -109,6 +113,7 @@ def screen_interactions(
     edf0=(2.0, 4.0, 8.0, 16.0),
     max_cells: int = 5_000_000,
     screen_bins: int = 256,
+    phi: float | None = None,
 ) -> pd.DataFrame:
     """Rank candidate spline-pair interactions of a fitted model by PSST.
 
@@ -125,7 +130,10 @@ def screen_interactions(
     ``offset`` and ``sample_weight`` both default to the values the model
     was fitted with, so the screen linearizes at the fitted likelihood; pass
     either explicitly only to override it.  ``T`` is scaled by the fit's
-    Pearson dispersion estimate before normalization (see module docstring).
+    Pearson dispersion estimate before normalization (see module docstring);
+    the value used is attached as ``table.attrs["phi"]`` and can be
+    overridden with ``phi=`` (e.g. a frequency-weight user supplying
+    ``sum(w) - edf`` semantics).
 
     Returns a frame sorted by ``z`` (descending) with one row per screened
     pair: ``feature_a, feature_b, statistic, z, edf0, lambda0, n_cells,
@@ -142,12 +150,16 @@ def screen_interactions(
     row is flagged ``approx=True``.  Pairs within budget are always computed
     exactly and flagged ``approx=False`` — the fallback never touches them.
     A pair still over budget after binning is skipped with a NaN row
-    (``n_cells`` reports the grid that was attempted), as is a pair whose
-    statistic degenerates.
+    (``n_cells`` reports the grid that was attempted and ``approx`` whether
+    binning was applied), as is a pair whose statistic degenerates.
+    ``approx`` is also True for every row when the mains were fitted with
+    ``discrete=True``: the screen probes the exact-basis tensor while the
+    discrete confirmatory refit bins marginal supports, so no row of such a
+    screen is exact in the refit's basis.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
-    from superglm.features.interaction import TensorInteraction
+    from superglm.features.interaction import TensorInteraction, _normalize_tensor_penalty
 
     frame = as_eager_frame(X)
     n_rows = len(frame)
@@ -175,6 +187,8 @@ def screen_interactions(
     if int(screen_bins) < 2:
         raise ValueError(f"screen_bins must be at least 2, got {screen_bins!r}")
     screen_bins = int(screen_bins)
+    if phi is not None and (not np.isfinite(phi) or phi <= 0.0):
+        raise ValueError(f"phi override must be finite and positive, got {phi!r}")
 
     spline_names = [
         name for name in model._feature_order if isinstance(model._specs.get(name), _SplineBase)
@@ -223,10 +237,13 @@ def screen_interactions(
     # nulls, n - edf tracks truth exactly while sum(w) - edf misreads phi 1.0
     # as ~1.55 and demotes refit-confirmed structure (see the plan log,
     # dispersion-denominator entry).
-    edf_mains = float(getattr(model._result, "effective_df", float("nan")))
-    denom = y.size - edf_mains if np.isfinite(edf_mains) else float(y.size)
-    phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
-    phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))
+    if phi is not None:
+        phi_hat = float(phi)
+    else:
+        edf_mains = float(getattr(model._result, "effective_df", float("nan")))
+        denom = y.size - edf_mains if np.isfinite(edf_mains) else float(y.size)
+        phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
+        phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))
 
     support_cache: dict[tuple[str, bool], dict] = {}
     marginal_cache: dict[tuple[str, bool], tuple[np.ndarray, np.ndarray]] = {}
@@ -241,42 +258,66 @@ def screen_interactions(
             support_cache[key] = {"x": x, "first": first, "codes": codes, "n": len(first)}
         return support_cache[key]
 
-    def _marginals(feat_a, bin_a, feat_b, bin_b):
-        key_a, key_b = (feat_a, bin_a), (feat_b, bin_b)
-        if key_a not in marginal_cache or key_b not in marginal_cache:
-            spec = TensorInteraction(feat_a, feat_b)
-            sa, sb = _support(feat_a, bin_a), _support(feat_b, bin_b)
-            B1, B2, S1, S2 = spec._prepare_centered_marginals(sa["x"], sb["x"], model._specs)
-            if key_a not in marginal_cache:
-                marginal_cache[key_a] = (
-                    np.asarray(B1[sa["first"]].todense(), dtype=np.float64),
-                    S1,
-                )
-            if key_b not in marginal_cache:
-                marginal_cache[key_b] = (
-                    np.asarray(B2[sb["first"]].todense(), dtype=np.float64),
-                    S2,
-                )
-        return marginal_cache[key_a], marginal_cache[key_b]
+    def _one_marginal(name, binned):
+        """Build (menu, penalty) for a single feature; each side independently.
 
-    def _k_est(name):
-        return max(int(getattr(model._specs[name], "k", 10)) - 1, 1)
+        Mirrors one side of TensorInteraction._prepare_centered_marginals so a
+        cache miss on one margin never rebuilds its partner's full-n basis.
+        """
+        key = (name, binned)
+        if key not in marginal_cache:
+            s = _support(name, binned)
+            m = TensorInteraction._marginal_from_spec(model._specs[name], s["x"], None)
+            S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
+            B = sp.csr_matrix(m.basis)
+            marginal_cache[key] = (
+                np.asarray(B[s["first"]].todense(), dtype=np.float64),
+                S,
+            )
+        return marginal_cache[key]
+
+    def _marginal_width_estimate(name):
+        """Guard-grade marginal width from the parent spline's geometry.
+
+        The authoritative widths come from the built menus and are re-checked
+        against the budget before any curvature einsum runs; this estimate
+        only decides whether the (cheap, O(n)) basis build is attempted on
+        the unbinned support first.
+        """
+        spec = model._specs[name]
+        n_knots = getattr(spec, "n_knots", None)
+        degree = getattr(spec, "degree", None)
+        if n_knots is not None and degree is not None:
+            return max(int(n_knots) + int(degree), 3)
+        return 9
 
     def _within_budget(n_a, n_b, k_a, k_b):
         cells_ok = n_a * n_b <= max_cells
-        inter_ok = (
-            n_a * k_b * k_b + n_b * k_a * k_a <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
-        )
+        inter_ok = n_a * k_b * k_b + n_b * k_a * k_a <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
         return cells_ok and inter_ok
 
     rows = []
+    discrete_mains = bool(getattr(model, "_discrete", False))
     for feat_a, feat_b in pairs:
-        k_a, k_b = _k_est(feat_a), _k_est(feat_b)
+        k_a = _marginal_width_estimate(feat_a)
+        k_b = _marginal_width_estimate(feat_b)
         bin_flag = {feat_a: False, feat_b: False}
+        menus = None
         while True:
-            n_a = _support(feat_a, bin_flag[feat_a])["n"]
-            n_b = _support(feat_b, bin_flag[feat_b])["n"]
+            sa = _support(feat_a, bin_flag[feat_a])
+            sb = _support(feat_b, bin_flag[feat_b])
+            n_a, n_b = sa["n"], sb["n"]
+            # V is (k_a*k_b)^2 doubles regardless of support: binning can't help
+            if (k_a * k_b) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
+                break
             if _within_budget(n_a, n_b, k_a, k_b):
+                menu_a, S1 = _one_marginal(feat_a, bin_flag[feat_a])
+                menu_b, S2 = _one_marginal(feat_b, bin_flag[feat_b])
+                if (menu_a.shape[1], menu_b.shape[1]) != (k_a, k_b):
+                    # authoritative dims from the built menus; re-run the gates
+                    k_a, k_b = menu_a.shape[1], menu_b.shape[1]
+                    continue
+                menus = ((menu_a, S1), (menu_b, S2))
                 break
             # bin the largest not-yet-binned margin that binning can shrink
             binnable = sorted(
@@ -290,17 +331,12 @@ def screen_interactions(
             if not binnable:
                 break
             bin_flag[binnable[0][1]] = True
-        sa = _support(feat_a, bin_flag[feat_a])
-        sb = _support(feat_b, bin_flag[feat_b])
-        n_a, n_b = sa["n"], sb["n"]
-        approx = bin_flag[feat_a] or bin_flag[feat_b]
-        if not _within_budget(n_a, n_b, k_a, k_b):
-            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, False))
+        approx = bin_flag[feat_a] or bin_flag[feat_b] or discrete_mains
+        if menus is None:
+            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
             continue
 
-        (menu_a, S1), (menu_b, S2) = _marginals(
-            feat_a, bin_flag[feat_a], feat_b, bin_flag[feat_b]
-        )
+        (menu_a, S1), (menu_b, S2) = menus
         S_cell, W_cell = pair_cell_moments(
             sa["codes"], sb["codes"], n_a, n_b, score, working_weights, max_cells=max_cells
         )
@@ -320,4 +356,6 @@ def screen_interactions(
             rows.append((feat_a, feat_b, best[0], best_z, best[1], best[2], n_a * n_b, approx))
 
     table = pd.DataFrame(rows, columns=_RESULT_COLUMNS)
-    return table.sort_values("z", ascending=False, ignore_index=True)
+    table = table.sort_values("z", ascending=False, ignore_index=True)
+    table.attrs["phi"] = phi_hat
+    return table

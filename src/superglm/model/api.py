@@ -623,6 +623,7 @@ class SuperGLM:
         edf0: float | tuple[float, ...] = (2.0, 4.0, 8.0, 16.0),
         max_cells: int = 5_000_000,
         screen_bins: int = 256,
+        phi: float | None = None,
     ) -> pd.DataFrame:
         """Rank candidate spline-pair interactions by PSST.
 
@@ -636,8 +637,10 @@ class SuperGLM:
         the fit's Pearson dispersion estimate first, so the noise floor
         stays honest beyond unit-dispersion families), so smooth and
         high-frequency interactions are both visible.  One O(n) cell pass
-        per pair; no refits.  ``offset`` defaults to the offset the model
-        was fitted with.
+        per pair; no refits.  ``offset`` and ``sample_weight`` both default
+        to the values the model was fitted with; pass either only to
+        override.  The dispersion used is attached as
+        ``table.attrs["phi"]`` and can be overridden via ``phi=``.
 
         The returned frame is sorted by ``z`` descending; rank by ``z`` —
         ``statistic``/``edf0``/``lambda0`` describe each pair's winning
@@ -664,6 +667,7 @@ class SuperGLM:
             edf0=edf0,
             max_cells=max_cells,
             screen_bins=screen_bins,
+            phi=phi,
         )
 
     # ── Properties ────────────────────────────────────────────────
