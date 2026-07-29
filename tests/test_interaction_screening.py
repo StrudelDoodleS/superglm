@@ -758,24 +758,34 @@ def test_screen_phi_is_visible_and_overridable():
 
 
 def test_screen_discrete_mains_rows_flag_approx():
-    """Reviewer ask: a discrete=True fit screens on the exact basis while its
-    confirmatory refit bins supports — every such row is approx in the sense
-    the column promises (probe basis != refit basis)."""
+    """Reviewer ask, twice refined: a discrete fit flags approx only when its
+    refit basis genuinely differs — discretization of a column whose
+    cardinality fits the bin count is LOSSLESS (the binner returns the exact
+    unique support), so default-bin screens of low-cardinality rating
+    factors stay approx=False, while genuinely lossy bins flag every pair."""
     from superglm import SuperGLM
     from superglm.features.spline import Spline
 
     frame, y, w = _screening_data(14, interaction=0.5)
-    model = SuperGLM(
-        family="poisson",
-        selection_penalty=None,
-        discrete=True,
-        features={name: Spline(kind="ps", k=6) for name in frame.columns},
-    ).fit_reml(frame, y, sample_weight=w)
 
-    table = model.screen_interactions(frame, y, sample_weight=w)
+    def fit(n_bins):
+        return SuperGLM(
+            family="poisson",
+            selection_penalty=None,
+            discrete=True,
+            n_bins=n_bins,
+            features={name: Spline(kind="ps", k=6) for name in frame.columns},
+        ).fit_reml(frame, y, sample_weight=w)
 
-    assert table["approx"].all()
-    assert np.isfinite(table["z"]).all()
+    # 25-37 levels vs 256 bins: every discretization is exact
+    lossless = fit(256).screen_interactions(frame, y, sample_weight=w)
+    assert not lossless["approx"].any()
+    assert np.isfinite(lossless["z"]).all()
+
+    # 8 bins: every parent bins lossily, so every refit differs from the probe
+    lossy = fit(8).screen_interactions(frame, y, sample_weight=w)
+    assert lossy["approx"].all()
+    assert np.isfinite(lossy["z"]).all()
 
 
 def test_screen_released_fit_state_refuses_silent_fallbacks():
@@ -915,15 +925,25 @@ def test_marginal_width_estimate_never_overestimates():
 
     rng = np.random.default_rng(19)
     x = rng.uniform(0.0, 10.0, 500)
-    for kind, k in (("ps", 5), ("ps", 6), ("ps", 12), ("cr", 3), ("cr", 6), ("cr", 12)):
-        spec = Spline(kind=kind, k=k)
+    cases = (
+        ("ps", 3, 0),  # degree-0: centered width n_knots exactly
+        ("ps", 4, 1),
+        ("ps", 5, 3),
+        ("ps", 6, 3),
+        ("ps", 12, 3),
+        ("cr", 3, 3),  # minimum cr: 2-column centered marginal
+        ("cr", 6, 3),
+        ("cr", 12, 3),
+    )
+    for kind, k, degree in cases:
+        spec = Spline(kind=kind, k=k, degree=degree)
         spec.prepare(pd.Series(x)) if hasattr(spec, "prepare") else None
         try:
             m = TensorInteraction._marginal_from_spec(spec, x, None)
         except Exception:
             continue  # spec needs fitting machinery; covered end-to-end elsewhere
         true_width = m.basis.shape[1]
-        assert _marginal_width_estimate(spec) <= true_width, (kind, k, true_width)
+        assert _marginal_width_estimate(spec) <= true_width, (kind, k, degree, true_width)
 
 
 def test_screen_cached_sweep_matches_per_pair_screens():
@@ -960,10 +980,10 @@ def test_screen_unweighted_fit_screens_any_frame_without_arguments():
 
 
 def test_screen_per_spec_discrete_flags_approx():
-    """Review finding: approx read the model-level discrete flag, but
-    discretization is per spec — a discrete=False model with
-    Spline(discrete=True) parents refits through binned supports and must
-    flag approx, and a mixed pair must not."""
+    """Review findings: approx must follow the per-SPEC discretization
+    decision (spec.discrete overrides the model flag; both parents must
+    discretize) AND only flag when at least one discretization is lossy —
+    lossless binning returns the exact unique support."""
 
     from superglm import SuperGLM
     from superglm.features.spline import Spline
@@ -974,18 +994,19 @@ def test_screen_per_spec_discrete_flags_approx():
         selection_penalty=None,
         discrete=False,
         features={
-            "x1": Spline(kind="ps", k=6, discrete=True),
-            "x2": Spline(kind="ps", k=6, discrete=True),
+            "x1": Spline(kind="ps", k=6, discrete=True, n_bins=8),  # lossy bins
+            "x2": Spline(kind="ps", k=6, discrete=True),  # lossless (28 <= 256)
             "x3": Spline(kind="ps", k=6),
             "x4": Spline(kind="ps", k=6),
-            "x5": Spline(kind="ps", k=6),
+            "x5": Spline(kind="ps", k=6, discrete=True),  # lossless (37 <= 256)
         },
     ).fit_reml(frame, y, sample_weight=w)
 
     table = model.screen_interactions(frame, y, sample_weight=w)
 
     flags = {frozenset((r.feature_a, r.feature_b)): bool(r.approx) for r in table.itertuples()}
-    assert flags[frozenset(("x1", "x2"))]  # both parents discretize
+    assert flags[frozenset(("x1", "x2"))]  # both discretize, x1 lossy
+    assert not flags[frozenset(("x2", "x5"))]  # both discretize, both lossless
     assert not flags[frozenset(("x1", "x3"))]  # mixed pair: refit is exact
     assert not flags[frozenset(("x3", "x4"))]
 
@@ -1007,3 +1028,26 @@ def test_screen_cache_equivalence_covers_binned_entries():
         s = single.iloc[0]
         for col in ("statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
             assert getattr(row, col) == s[col], col
+
+
+def test_screen_weight_inheritance_reads_the_stored_array_not_the_stamp():
+    """Review finding: the editor rewrites _fit_weights without touching the
+    _fit_used_weights stamp, so trusting the stamp resurrects the original
+    blocking bug (screen at unit weight against an exposure-fitted model).
+    Non-unitness must be derived from the stored array at read time."""
+    import pandas as pd
+
+    frame, y, w = _screening_data(23, interaction=0.5)
+    model = _fit_mains(frame, y, w)
+
+    # editor's second writer: array becomes ones, stamp stays True
+    explicit_ones = model.screen_interactions(frame, y, sample_weight=np.ones_like(y))
+    model._fit_weights = np.ones_like(y)
+    assert model._fit_used_weights  # the stale stamp
+    pd.testing.assert_frame_equal(model.screen_interactions(frame, y), explicit_ones)
+
+    # mirror: stored non-unit weights inherit despite a stale False stamp
+    model._fit_weights = w
+    model._fit_used_weights = False
+    explicit_w = model.screen_interactions(frame, y, sample_weight=w)
+    pd.testing.assert_frame_equal(model.screen_interactions(frame, y), explicit_w)
