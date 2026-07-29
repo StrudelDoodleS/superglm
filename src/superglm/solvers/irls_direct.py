@@ -418,6 +418,8 @@ def fit_irls_direct(
     _compute_scop_postfit_inference: bool = True,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
+    if max_iter < 1:
+        raise ValueError(f"max_iter must be at least 1, got {max_iter}")
 
     def run_once(
         resolved_direct_solve: str,
