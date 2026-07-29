@@ -1080,3 +1080,62 @@ class TestStructuredPenaltyBuilderComponentLambdas:
         np.testing.assert_allclose(
             np.asarray(penalized.A)[np.ix_(local, local)], expected_block, rtol=1e-12
         )
+
+    def _system_with_fs_dominant(self, factor_basis):
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SparseSSPGroupMatrix
+        from superglm.solvers.structured import build_structured_system
+        from tests.test_factor_smooth_structured_system import _dominant
+
+        rng = np.random.default_rng(12)
+        dominant = _dominant(discrete=False, factor_basis=factor_basis)
+        n = dominant.shape[0]
+        B = rng.normal(size=(n, 3))
+        gm_small = SparseSSPGroupMatrix(sp.csr_matrix(B), np.eye(3))
+        U1 = rng.normal(size=(3, 2))
+        U2 = rng.normal(size=(3, 1))
+        omega_1 = U1 @ U1.T
+        omega_2 = U2 @ U2.T
+        gm_small.omega = omega_1 + omega_2
+        gm_small.omega_components = [("m1", omega_1), ("m2", omega_2)]
+        matrices = [gm_small, dominant]
+        groups = [
+            GroupSlice(name="s", start=0, end=3, penalized=True),
+            GroupSlice(name="f", start=3, end=3 + dominant.shape[1], penalized=True),
+        ]
+        W = rng.uniform(0.5, 1.5, size=n)
+        Wz = rng.normal(size=n)
+        system = build_structured_system(matrices, groups, W, Wz, dominant_group_index=1)
+        return system, matrices, groups, omega_1, omega_2
+
+    def _assert_small_block_penalized(self, system, penalized, omega_1, omega_2):
+        base = np.asarray(system.operator.A, dtype=np.float64)
+        small_position = {
+            int(idx): pos for pos, idx in enumerate(np.asarray(system.operator.small_indices))
+        }
+        local = [small_position[i] for i in range(3)]
+        expected_block = base[np.ix_(local, local)] + 2.0 * omega_1 + 3.0 * omega_2
+        np.testing.assert_allclose(
+            np.asarray(penalized.A)[np.ix_(local, local)], expected_block, rtol=1e-12
+        )
+
+    def test_block_builder_applies_component_named_lambdas(self):
+        from superglm.solvers._structured.moments import BlockStructuredSystem
+        from superglm.solvers.structured import build_penalized_block_operator
+
+        system, matrices, groups, omega_1, omega_2 = self._system_with_fs_dominant("fs")
+        assert isinstance(system, BlockStructuredSystem)
+        lambdas = {"s:m1": 2.0, "s:m2": 3.0, "f": 1.5}
+        penalized = build_penalized_block_operator(system, matrices, groups, lambdas)
+        self._assert_small_block_penalized(system, penalized, omega_1, omega_2)
+
+    def test_sum_to_zero_builder_applies_component_named_lambdas(self):
+        from superglm.solvers._structured.moments import SumToZeroBlockStructuredSystem
+        from superglm.solvers.structured import build_penalized_sum_to_zero_operator
+
+        system, matrices, groups, omega_1, omega_2 = self._system_with_fs_dominant("sz")
+        assert isinstance(system, SumToZeroBlockStructuredSystem)
+        lambdas = {"s:m1": 2.0, "s:m2": 3.0, "f": 1.5}
+        penalized = build_penalized_sum_to_zero_operator(system, matrices, groups, lambdas)
+        self._assert_small_block_penalized(system, penalized, omega_1, omega_2)

@@ -165,6 +165,7 @@ class TestCommittedBaselines:
         assert tensor["output_rtol"] > 0
         assert tensor["expected_backend"]
         flagship = baselines["flagship"]
+        assert flagship["n"] == 678013
         assert flagship["reference_median_s"] > 0
         assert flagship["checks"]["absolute_multiple"]["max"] > 0
         assert flagship["expected"]["deviance"] > 0
@@ -327,3 +328,27 @@ class TestFitOutputAndBackendInvariants:
             flagship=self._flagship(backend="structured"),
         )
         assert any(c.name == "flagship.backend" and not c.passed for c in checks)
+
+
+class TestFlagshipRowCount:
+    def test_row_count_drop_fails(self, gate, baselines):
+        baselines = dict(baselines)
+        baselines["flagship"] = dict(baselines["flagship"])
+        baselines["flagship"]["n"] = 678013
+        checks = gate.evaluate_gate(
+            baselines,
+            tensor=_tensor_measurement(),
+            flagship={"median_s": 0.9, "n": 600000},
+        )
+        assert any(c.name == "flagship.n" and not c.passed for c in checks)
+
+    def test_matching_row_count_passes(self, gate, baselines):
+        baselines = dict(baselines)
+        baselines["flagship"] = dict(baselines["flagship"])
+        baselines["flagship"]["n"] = 678013
+        checks = gate.evaluate_gate(
+            baselines,
+            tensor=_tensor_measurement(),
+            flagship={"median_s": 0.9, "n": 678013},
+        )
+        assert all(c.passed for c in checks)
