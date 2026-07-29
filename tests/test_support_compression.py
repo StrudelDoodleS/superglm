@@ -93,28 +93,35 @@ def _assert_same_partition(labels_a, labels_b):
     assert n_joint == len(np.unique(labels_a)) == len(np.unique(labels_b))
 
 
+def _hash_grouping(basis, chunk_rows):
+    from superglm._group_matrix import _group_matrix_support as mod
+
+    hashes = mod._row_hashes(basis, chunk_rows)
+    _, _, row_index = np.unique(hashes, return_index=True, return_inverse=True)
+    return np.asarray(row_index, dtype=np.intp).ravel()
+
+
 def test_hashed_grouping_matches_byte_keyed_grouping():
-    from superglm._group_matrix._group_matrix_support import (
-        _row_index_chunked,
-        _row_index_hashed,
-    )
+    from superglm._group_matrix._group_matrix_support import _row_index_chunked
 
     basis, _, _ = _repeated_basis(n=5000, n_support=40, seed=9)
     _assert_same_partition(
-        _row_index_hashed(basis, chunk_rows=16),
+        _hash_grouping(basis, chunk_rows=16),
         _row_index_chunked(basis, chunk_rows=16),
     )
 
     special = np.array([[np.nan, 1.0], [np.nan, 1.0], [0.0, 2.0], [-0.0, 2.0]])
     rows = sp.csr_matrix(special[np.tile(np.arange(4), 300)])
     _assert_same_partition(
-        _row_index_hashed(rows, chunk_rows=7),
+        _hash_grouping(rows, chunk_rows=7),
         _row_index_chunked(rows, chunk_rows=7),
     )
 
 
 def test_hash_collision_falls_back_to_byte_keyed_grouping(monkeypatch):
-    """With a degenerate hash every row collides; the result must stay exact."""
+    """With a degenerate hash every row collides; the PRODUCTION path must
+    detect it, regroup byte-keyed, re-run the gates on the true support, and
+    still return an exact compression."""
     from superglm._group_matrix import _group_matrix_support as mod
 
     monkeypatch.setattr(
@@ -122,15 +129,14 @@ def test_hash_collision_falls_back_to_byte_keyed_grouping(monkeypatch):
         "_row_hash_multipliers",
         lambda p_b: np.zeros(max(p_b, 1), dtype=np.uint64),
     )
-    basis, base, row_index = _repeated_basis(n=3000, n_support=25, seed=12)
+    basis, base, row_index = _repeated_basis()  # known accept-shape (60 groups)
 
-    grouped = mod._row_index_hashed(basis, chunk_rows=64)
+    result = detect_row_support(basis)
 
-    _assert_same_partition(grouped, row_index.astype(np.intp))
-    dense = basis.toarray()
-    first = np.full(int(grouped.max()) + 1, -1, dtype=np.intp)
-    first[grouped[::-1]] = np.arange(len(grouped) - 1, -1, -1)
-    np.testing.assert_array_equal(dense[first][grouped], dense)
+    assert result is not None  # gates re-ran on the true 60-group support
+    b_unique, derived = result
+    _assert_same_partition(derived, row_index.astype(np.intp))
+    np.testing.assert_array_equal(b_unique[derived], basis.toarray())
 
 
 def test_negative_zero_does_not_corrupt_reconstruction():

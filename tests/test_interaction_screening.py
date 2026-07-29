@@ -621,14 +621,25 @@ def test_screen_nan_only_when_binning_cannot_fit():
     frame, y, w = _continuous_screening_data()
     model = _fit_continuous(frame, y, w)
 
+    # binning IS applied (x1 -> 50 bins) but the binned grid still exceeds the
+    # budget: NaN row, n_cells reports the attempted binned grid, approx says
+    # binning happened
     table = model.screen_interactions(
-        frame, y, sample_weight=w, candidates=[("x1", "x3")], max_cells=100, screen_bins=50
+        frame, y, sample_weight=w, candidates=[("x1", "x3")], max_cells=800, screen_bins=50
     )
-
     row = table.iloc[0]
     assert np.isnan(row["z"])
-    assert not bool(row["approx"])
+    assert bool(row["approx"])
     assert row["n_cells"] == 50 * 30
+
+    # with a budget so tiny the (k_a*k_b)^2 curvature block itself cannot fit,
+    # the pair is unscreenable at ANY binning — NaN with approx=False, since
+    # nothing was ever approximated
+    tiny = model.screen_interactions(
+        frame, y, sample_weight=w, candidates=[("x1", "x3")], max_cells=100, screen_bins=50
+    )
+    assert np.isnan(tiny.iloc[0]["z"])
+    assert not bool(tiny.iloc[0]["approx"])
 
     with pytest.raises(ValueError, match="screen_bins"):
         model.screen_interactions(frame, y, sample_weight=w, screen_bins=1)
@@ -725,3 +736,43 @@ def test_screen_intermediate_budget_triggers_binning():
     # with a generous budget the same pair is exact
     wide = model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x4")])
     assert not bool(wide.iloc[0]["approx"])
+
+
+def test_screen_phi_is_visible_and_overridable():
+    """Reviewer ask: phi materially selects the winning rung, so it must be
+    auditable (table.attrs) and overridable (frequency-weight escape hatch)."""
+    import pytest
+
+    frame, y, w = _screening_data(13, interaction=0.5)
+    model = _fit_mains(frame, y, w)
+
+    table = model.screen_interactions(frame, y, sample_weight=w)
+    assert np.isfinite(table.attrs["phi"]) and table.attrs["phi"] > 0.0
+
+    forced = model.screen_interactions(frame, y, sample_weight=w, phi=5.0)
+    assert forced.attrs["phi"] == 5.0
+    assert not np.allclose(table["z"], forced["z"])
+
+    with pytest.raises(ValueError, match="phi override"):
+        model.screen_interactions(frame, y, sample_weight=w, phi=-1.0)
+
+
+def test_screen_discrete_mains_rows_flag_approx():
+    """Reviewer ask: a discrete=True fit screens on the exact basis while its
+    confirmatory refit bins supports — every such row is approx in the sense
+    the column promises (probe basis != refit basis)."""
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    frame, y, w = _screening_data(14, interaction=0.5)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=True,
+        features={name: Spline(kind="ps", k=6) for name in frame.columns},
+    ).fit_reml(frame, y, sample_weight=w)
+
+    table = model.screen_interactions(frame, y, sample_weight=w)
+
+    assert table["approx"].all()
+    assert np.isfinite(table["z"]).all()
