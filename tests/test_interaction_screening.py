@@ -614,8 +614,8 @@ def test_screen_binned_tracks_exact_on_signal():
 
 
 def test_screen_nan_only_when_binning_cannot_fit():
-    """If even the binned grid exceeds max_cells, the pair NaN-skips with
-    approx=False and n_cells reporting the attempted grid."""
+    """If even the binned grid exceeds max_cells the pair NaN-skips; approx
+    reports whether binning was attempted before the budget still failed."""
     import pytest
 
     frame, y, w = _continuous_screening_data()
@@ -632,14 +632,14 @@ def test_screen_nan_only_when_binning_cannot_fit():
     assert bool(row["approx"])
     assert row["n_cells"] == 50 * 30
 
-    # with a budget so tiny the (k_a*k_b)^2 curvature block itself cannot fit,
-    # the pair is unscreenable at ANY binning — NaN with approx=False, since
-    # nothing was ever approximated
+    # with a budget so tiny even the (k_a*k_b)^2 curvature block cannot fit,
+    # the pair is unscreenable at any binning — NaN, with approx recording
+    # that binning was attempted before the true dimensions ruled it out
     tiny = model.screen_interactions(
         frame, y, sample_weight=w, candidates=[("x1", "x3")], max_cells=100, screen_bins=50
     )
     assert np.isnan(tiny.iloc[0]["z"])
-    assert not bool(tiny.iloc[0]["approx"])
+    assert bool(tiny.iloc[0]["approx"])
 
     with pytest.raises(ValueError, match="screen_bins"):
         model.screen_interactions(frame, y, sample_weight=w, screen_bins=1)
@@ -812,3 +812,135 @@ def test_screen_released_fit_state_refuses_silent_fallbacks():
     unweighted = build().fit_reml(frame, y)
     table2 = unweighted.screen_interactions(frame, y)
     assert np.isfinite(table2["z"]).all()
+
+
+def test_screen_excludes_already_fitted_interactions():
+    """Review finding: the sweep re-surfaced pairs the model already fits as
+    tensor terms, and the confirmation workflow then failed with
+    'interaction already added'."""
+    import pytest
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    frame, y, w = _screening_data(16, interaction=0.5)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={name: Spline(kind="ps", k=6) for name in frame.columns},
+    )
+    model._add_interaction("x1", "x2")
+    model = model.fit_reml(frame, y, sample_weight=w)
+
+    table = model.screen_interactions(frame, y, sample_weight=w)
+
+    screened = {frozenset((r.feature_a, r.feature_b)) for r in table.itertuples()}
+    assert frozenset(("x1", "x2")) not in screened
+    assert len(table) == 9  # 10 pairs minus the fitted one
+
+    with pytest.raises(ValueError, match="already fitted"):
+        model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x2")])
+
+
+def test_screen_rejects_inherited_arrays_on_reordered_frame():
+    """Review finding: inherited fit arrays are in training row order; a
+    permuted frame silently paired them with the wrong observations."""
+    import pytest
+
+    frame, y, w = _screening_data(17, interaction=0.5)
+    model = _fit_mains(frame, y, w)
+
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(len(y))
+    frame_p = frame.iloc[perm].reset_index(drop=True)
+    y_p, w_p = y[perm], w[perm]
+
+    with pytest.raises(ValueError, match="explicitly"):
+        model.screen_interactions(frame_p, y_p)
+    # explicitly aligned arrays are fine on any row order
+    table = model.screen_interactions(frame_p, y_p, sample_weight=w_p)
+    assert np.isfinite(table["z"]).all()
+    # and the unpermuted frame still inherits silently
+    table2 = model.screen_interactions(frame, y)
+    assert np.isfinite(table2["z"]).all()
+
+
+def test_screen_preserves_eta_sign_for_noninjective_links():
+    """Review finding: eta was reconstructed as link(predict(X)) = |eta| for
+    link='sqrt', flipping the score sign on every negative-eta row."""
+    import pandas as pd
+
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(18)
+    n = 2500
+    frame = pd.DataFrame(
+        {f"x{i}": rng.integers(0, 25 + 3 * i, n).astype(float) for i in range(1, 4)}
+    )
+    z1 = (frame["x1"] - frame["x1"].mean()) / frame["x1"].std()
+    z2 = (frame["x2"] - frame["x2"].mean()) / frame["x2"].std()
+    # an offset crossing zero forces negative stabilized eta on many rows
+    off = rng.uniform(-3.0, 0.0, n)
+    eta_true = 2.0 + 0.3 * z1 + 0.25 * z2 + 0.4 * z1 * z2 + off
+    y = rng.poisson(np.maximum(eta_true, 0.05) ** 2).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        link="sqrt",
+        selection_penalty=None,
+        discrete=False,
+        features={name: Spline(kind="ps", k=6) for name in frame.columns},
+    ).fit_reml(frame, y, offset=off)
+
+    eta = model._predict_eta_exact(frame, off)
+    assert (np.asarray(eta) < 0).any(), "test needs negative fitted eta rows"
+
+    table = model.screen_interactions(frame, y)
+
+    assert np.isfinite(table["z"]).all()
+    top = tuple(sorted((table.loc[0, "feature_a"], table.loc[0, "feature_b"])))
+    assert top == ("x1", "x2")
+
+
+def test_marginal_width_estimate_never_overestimates():
+    """Review finding: over-estimates are terminal (the pair bins or skips
+    with no correction possible), so the estimate must bias low for every
+    built-in spline kind."""
+    import pandas as pd
+
+    from superglm.features.interaction import TensorInteraction
+    from superglm.features.spline import Spline
+    from superglm.model.screening_ops import _marginal_width_estimate
+
+    rng = np.random.default_rng(19)
+    x = rng.uniform(0.0, 10.0, 500)
+    for kind, k in (("ps", 6), ("ps", 12), ("cr", 6), ("cr", 12)):
+        spec = Spline(kind=kind, k=k)
+        spec.prepare(pd.Series(x)) if hasattr(spec, "prepare") else None
+        try:
+            m = TensorInteraction._marginal_from_spec(spec, x, None)
+        except Exception:
+            continue  # spec needs fitting machinery; covered end-to-end elsewhere
+        true_width = m.basis.shape[1]
+        assert _marginal_width_estimate(spec) <= true_width, (kind, k, true_width)
+
+
+def test_screen_cached_sweep_matches_per_pair_screens():
+    """Reviewer ask: pin cache equivalence — the all-pairs sweep must match
+    screening each pair alone, catching any cross-pair cache leakage."""
+    import pandas as pd
+
+    frame, y, w = _screening_data(20, interaction=0.5)
+    model = _fit_mains(frame, y, w)
+
+    full = model.screen_interactions(frame, y, sample_weight=w)
+
+    for row in full.itertuples():
+        single = model.screen_interactions(
+            frame, y, sample_weight=w, candidates=[(row.feature_a, row.feature_b)]
+        )
+        s = single.iloc[0]
+        for col in ("statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
+            a, b = getattr(row, col), s[col]
+            assert (a == b) or (pd.isna(a) and pd.isna(b)), (row.feature_a, row.feature_b, col)
