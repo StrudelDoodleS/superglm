@@ -10,9 +10,10 @@ medians not single runs):
 
 - **Ratio checks** (tensor-fit / base-fit multipliers) are machine-speed
   invariant, so they carry the tight-ish limits.
-- **Absolute checks** are expressed as generous multiples of the reference
-  box's medians — CI runners are slower and noisier, and the gate exists to
-  catch order-of-magnitude regressions (a lost 22x), not 20% noise.
+- **Absolute checks** are multiples of the reference box's medians,
+  calibrated so each named pre-arc reversion (6.6x base-exact, 2.48x
+  flagship) trips on any machine while observed CI medians keep real
+  headroom — the gate catches structural regressions, not 20% noise.
 - A missing or failed benchmark case fails the gate: silence is not success.
 
 Usage::
@@ -45,16 +46,18 @@ class GateCheck:
     measured: float | None
     limit: float
     passed: bool
+    detail: str | None = None
 
     def render(self) -> str:
         status = "PASS" if self.passed else "FAIL"
         measured = "missing" if self.measured is None else f"{self.measured:.3f}"
-        return f"  [{status}] {self.name}: measured {measured}, limit {self.limit:.3f}"
+        suffix = f" ({self.detail})" if self.detail else ""
+        return f"  [{status}] {self.name}: measured {measured}, limit {self.limit:.3f}{suffix}"
 
 
-def _check(name: str, measured: float | None, limit: float) -> GateCheck:
+def _check(name: str, measured: float | None, limit: float, detail: str | None = None) -> GateCheck:
     passed = measured is not None and float(measured) <= float(limit)
-    return GateCheck(name=name, measured=measured, limit=float(limit), passed=passed)
+    return GateCheck(name=name, measured=measured, limit=float(limit), passed=passed, detail=detail)
 
 
 def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateCheck]:
@@ -100,8 +103,16 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
                 )
                 checks.append(_check(f"tensor_cost.{tag}.{field}.rel_dev", deviation, output_rtol))
         if expected_backend is not None:
-            match = 0.0 if ok and case.get("direct_backend") == expected_backend else None
-            checks.append(_check(f"tensor_cost.{tag}.backend", match, 0.0))
+            observed = case.get("direct_backend") if ok else None
+            match = 0.0 if ok and observed == expected_backend else None
+            checks.append(
+                _check(
+                    f"tensor_cost.{tag}.backend",
+                    match,
+                    0.0,
+                    detail=f"expected {expected_backend!r}, got {observed!r}",
+                )
+            )
 
     flagship_base = baselines["flagship"]
     flagship_multiple = flagship_base["checks"]["absolute_multiple"]["max"]
@@ -125,8 +136,21 @@ def evaluate_gate(baselines: dict, tensor: dict, flagship: dict) -> list[GateChe
             checks.append(_check(f"flagship.{field}.rel_dev", deviation, rtol))
         backend_expected = flagship_expected.get("backend")
         if backend_expected is not None:
-            match = 0.0 if flagship.get("direct_backend") == backend_expected else None
-            checks.append(_check("flagship.backend", match, 0.0))
+            observed = flagship.get("direct_backend")
+            match = 0.0 if observed == backend_expected else None
+            checks.append(
+                _check(
+                    "flagship.backend",
+                    match,
+                    0.0,
+                    detail=f"expected {backend_expected!r}, got {observed!r}",
+                )
+            )
+    flagship_n = flagship_base.get("n")
+    if flagship_n is not None:
+        measured_n = flagship.get("n")
+        deviation = abs(measured_n - flagship_n) if measured_n is not None else None
+        checks.append(_check("flagship.n", deviation, 0.0))
     return checks
 
 

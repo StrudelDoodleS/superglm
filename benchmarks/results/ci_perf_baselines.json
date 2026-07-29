@@ -20,11 +20,11 @@
     "checks": {
       "tensor_multiplier_exact": {
         "max": 6.0,
-        "note": "reference 3.57, CI-observed ~4.2; the pre-arc reversion is 7.2x and MUST trip, so this limit cannot be widened past ~7 - the 1.43x CI headroom is accepted and rests on warmup exclusion keeping steady ratio noise under ~10%"
+        "note": "reference 3.57, CI-observed 3.63-3.67 warmup-excluded (1.63-1.65x headroom); the pre-arc reversion is 7.2x and MUST trip, so this limit cannot be widened past ~7"
       },
       "tensor_multiplier_discrete": {
         "max": 5.0,
-        "note": "reference 2.64, CI-observed ~3.1; the 3.8x pre-arc discrete multiplier sits inside runner noise of any non-flapping limit, so this check only guards catastrophic tensor-path blowups"
+        "note": "reference 2.64, CI-observed 2.73-2.76 warmup-excluded (1.81-1.83x headroom); the 3.8x pre-arc discrete multiplier sits inside runner noise of any non-flapping limit, so this check only guards catastrophic tensor-path blowups"
       },
       "absolute_multiple": {
         "max": 5.0,

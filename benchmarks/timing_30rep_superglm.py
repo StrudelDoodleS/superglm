@@ -41,6 +41,21 @@ def load_mtpl2():
     return df, y_freq, exposure
 
 
+def _peak_rss_mb() -> float | None:
+    """Whole-run high-water RSS in MB, or None where unavailable (non-Unix).
+    Recorded for CI history, not gated. ru_maxrss is kilobytes on Linux but
+    bytes on macOS."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    import sys
+
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
+    return round(peak / divisor, 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reps", type=int, default=30, help="fit repetitions (first is warmup)")
@@ -115,10 +130,7 @@ def main():
         "direct_backend": getattr(model.result, "direct_backend", None),
     }
 
-    import resource
-
-    # Whole-run high-water RSS, recorded for CI history (not gated).
-    result["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
+    result["peak_rss_mb"] = _peak_rss_mb()
 
     print(f"\n  === SuperGLM discrete REML — {n_reps} reps (excluding warmup) ===")
     print(f"  warmup:  {warmup_time:.3f}s")
