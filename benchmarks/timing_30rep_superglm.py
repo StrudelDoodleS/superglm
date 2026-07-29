@@ -1,13 +1,17 @@
 """30-rep timing study for SuperGLM discrete REML on MTPL2.
 
-Measures wall time for fit_reml(discrete=True) across 30 repetitions
-with fixed thread count. Reports median, mean, std, min, max.
+Measures wall time for fit_reml(discrete=True) across repeated fits with
+fixed thread count. Reports median, mean, std, min, max (first rep is
+warmup and excluded from the steady-state stats).
 
 Usage:
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
         uv run python benchmarks/timing_30rep_superglm.py
+    # CI reduced run:
+    ... timing_30rep_superglm.py --reps 6 --json-out /tmp/flagship.json
 """
 
+import argparse
 import json
 import os
 import time
@@ -19,8 +23,8 @@ from superglm.features.categorical import Categorical
 from superglm.features.spline import CubicRegressionSpline
 from superglm.model import SuperGLM
 
-N_REPS = 30
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+DEFAULT_OUT = os.path.join(RESULTS_DIR, "superglm_30rep.json")
 
 
 def load_mtpl2():
@@ -38,6 +42,14 @@ def load_mtpl2():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reps", type=int, default=30, help="fit repetitions (first is warmup)")
+    parser.add_argument("--json-out", default=DEFAULT_OUT, help="result JSON path")
+    args = parser.parse_args()
+    n_reps = args.reps
+    if n_reps < 2:
+        raise SystemExit("--reps must be >= 2 (first rep is warmup)")
+
     # Report thread settings
     for var in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"]:
         print(f"  {var}={os.environ.get(var, '(not set)')}")
@@ -57,15 +69,15 @@ def main():
     deviances = []
     edfs = []
 
-    for i in range(N_REPS):
+    for i in range(n_reps):
         model = SuperGLM(
             family="poisson",
-            lambda1=0,
+            selection_penalty=0,
             features=features,
             discrete=True,
         )
         t0 = time.perf_counter()
-        model.fit_reml(df, y_freq, exposure=exposure, max_reml_iter=30)
+        model.fit_reml(df, y_freq, sample_weight=exposure, max_reml_iter=30)
         elapsed = time.perf_counter() - t0
         times.append(elapsed)
         deviances.append(float(model.result.deviance))
@@ -73,7 +85,7 @@ def main():
 
         tag = " (warmup)" if i == 0 else ""
         print(
-            f"  rep {i + 1:2d}/{N_REPS}: {elapsed:.3f}s  "
+            f"  rep {i + 1:2d}/{n_reps}: {elapsed:.3f}s  "
             f"dev={deviances[-1]:.1f}  edf={edfs[-1]:.2f}{tag}"
         )
 
@@ -86,7 +98,7 @@ def main():
         "tool": "superglm",
         "method": "fit_reml_discrete_cached_w",
         "n": n,
-        "n_reps": N_REPS,
+        "n_reps": n_reps,
         "threads": os.environ.get("OMP_NUM_THREADS", "default"),
         "warmup_s": float(warmup_time),
         "all_times_s": [float(t) for t in times],
@@ -102,7 +114,7 @@ def main():
         "effective_df": float(np.median(edfs)),
     }
 
-    print(f"\n  === SuperGLM discrete REML — {N_REPS} reps (excluding warmup) ===")
+    print(f"\n  === SuperGLM discrete REML — {n_reps} reps (excluding warmup) ===")
     print(f"  warmup:  {warmup_time:.3f}s")
     print(f"  median:  {result['median_s']:.3f}s")
     print(f"  mean:    {result['mean_s']:.3f}s")
@@ -114,10 +126,11 @@ def main():
     print(f"  dev:     {result['deviance']:.1f}")
     print(f"  edf:     {result['effective_df']:.2f}")
 
-    out_path = os.path.join(RESULTS_DIR, "superglm_30rep.json")
-    with open(out_path, "w") as f:
+    out_dir = os.path.dirname(os.path.abspath(args.json_out))
+    os.makedirs(out_dir, exist_ok=True)
+    with open(args.json_out, "w") as f:
         json.dump(result, f, indent=2)
-    print(f"\n  Saved to {out_path}")
+    print(f"\n  Saved to {args.json_out}")
 
 
 if __name__ == "__main__":
