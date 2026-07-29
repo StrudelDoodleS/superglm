@@ -143,6 +143,8 @@ def main():
     print(f"  p90:     {result['p90_s']:.3f}s")
     print(f"  dev:     {result['deviance']:.1f}")
     print(f"  edf:     {result['effective_df']:.2f}")
+    print(f"  backend: {result['direct_backend']}")
+    print(f"  rss:     {result['peak_rss_mb']} MB (whole-run high-water, not gated)")
 
     out_dir = os.path.dirname(os.path.abspath(args.json_out))
     os.makedirs(out_dir, exist_ok=True)

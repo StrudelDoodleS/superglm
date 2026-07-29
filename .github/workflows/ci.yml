@@ -111,6 +111,17 @@ jobs:
           --tensor-json /tmp/tensor_cost_ci.json
           --flagship-json /tmp/flagship_ci.json
 
+      - name: Upload benchmark measurements (incl. ungated peak RSS history)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: perf-gate-measurements-${{ github.run_id }}
+          path: |
+            /tmp/tensor_cost_ci.json
+            /tmp/flagship_ci.json
+          if-no-files-found: warn
+          retention-days: 90
+
   test-coverage:
     name: Python 3.13 · coverage shard ${{ matrix.label }}
     if: github.event_name == 'push'
