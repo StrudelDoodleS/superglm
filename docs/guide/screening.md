@@ -50,17 +50,21 @@ surfaces are both visible.
   exceeded `max_cells` even after the quantile-binning fallback (or the
   statistic degenerated). They sort last. `approx=True` means the row's
   probe basis differs from what a confirmatory refit would build — either
-  the pair was quantile-binned, or the mains were fitted with
-  `discrete=True` (which marks *every* row, since the discrete refit bins
-  marginal supports). Exact rows on an exact-path fit carry
-  `approx=False`.
+  the pair was quantile-binned, or that pair's `ti()` refit would
+  discretize (both parents resolve to fit-time discretization, per-spec
+  `discrete` overriding the model flag). Rows whose refit would be exact
+  carry `approx=False`.
 
 ## What it inherits from the fit
 
 Screening linearizes at the fitted model: **both the offset and the
-`sample_weight` used at fit time are applied automatically** (pass either
-only to override), and the mains model's own smoothness choices define
-what "leftover" means. A badly specified mains model screens against the
+`sample_weight` used at fit time are applied automatically** (weights
+only when the fit's were non-unit; pass either only to override), and
+the mains model's own smoothness choices define what "leftover" means.
+Inherited arrays are in training row order, so inheriting requires
+`X`/`y` to be the retained training data — to screen a holdout,
+subsample, or reordered frame, pass `sample_weight` (and `offset`)
+explicitly. A badly specified mains model screens against the
 wrong baseline — screening quality is downstream of fit quality. The
 Pearson dispersion that scales the statistic is attached to the result as
 `table.attrs["phi"]` and can be overridden with `phi=` (the estimate uses
@@ -72,16 +76,17 @@ Parent smooths must be single-penalty: mains fitted with `select=True`
 raise up front, because `ti()` terms cannot be built on such parents
 either.
 
-Screening always probes the exact-basis tensor, including for mains
-fitted with `discrete=True` (whose confirmatory `ti()` refit uses binned
-marginal supports). That is the same support-discretization gap as the
-quantile fallback — measured at ~3.5% relative z on signal pairs — and
-it never affects which basis the confirmatory refit itself uses. To make
-the gap visible in the output rather than doc-only, **every row of a
-`discrete=True` screen carries `approx=True`.** Pairs the model already
-fits as tensor terms are excluded from the sweep (and rejected in
-`candidates=`): the screen profiles only the parent mains, so it cannot
-re-screen an interaction that is already in the model.
+Screening always probes the exact-basis tensor, including for parents
+that discretize (whose confirmatory `ti()` refit uses binned marginal
+supports). That is the same support-discretization gap as the quantile
+fallback — measured at ~3.5% relative z on signal pairs — and it never
+affects which basis the confirmatory refit itself uses. To make the gap
+visible in the output rather than doc-only, **any pair whose refit would
+discretize (both parents resolve to fit-time discretization) carries
+`approx=True`.** Pairs the model already fits as tensor terms are
+excluded from the sweep (and rejected in `candidates=`): the screen
+profiles only the parent mains, so it cannot re-screen an interaction
+that is already in the model.
 
 ## Measured limits
 

@@ -125,8 +125,11 @@ def _marginal_width_estimate(spec) -> int:
     """
     n_knots = getattr(spec, "n_knots", None)
     if n_knots is not None:
-        return max(int(n_knots) + 1, 3)
-    return 3
+        # No higher floor: cr at its minimum k=3 has a 2-column centered
+        # marginal, and any floor above the true width is a terminal
+        # over-estimate.
+        return max(int(n_knots) + 1, 1)
+    return 1
 
 
 def screen_interactions(
@@ -155,8 +158,12 @@ def screen_interactions(
     profiling) happens once; the ladder re-solves a small system per rung.
 
     ``offset`` and ``sample_weight`` both default to the values the model
-    was fitted with, so the screen linearizes at the fitted likelihood; pass
-    either explicitly only to override it.  ``T`` is scaled by the fit's
+    was fitted with (weights only when the fit's were non-unit), so the
+    screen linearizes at the fitted likelihood.  Inherited arrays are in
+    training row order, so inheriting requires ``X``/``y`` to BE the
+    retained training data — screening a holdout, subsample, or reordered
+    frame must pass ``sample_weight`` (and ``offset``) explicitly.  ``T``
+    is scaled by the fit's
     Pearson dispersion estimate before normalization (see module docstring);
     the value used is attached as ``table.attrs["phi"]`` and can be
     overridden with ``phi=`` (e.g. a frequency-weight user supplying
@@ -179,10 +186,11 @@ def screen_interactions(
     A pair still over budget after binning is skipped with a NaN row
     (``n_cells`` reports the grid that was attempted and ``approx`` whether
     binning was applied), as is a pair whose statistic degenerates.
-    ``approx`` is also True for every row when the mains were fitted with
-    ``discrete=True``: the screen probes the exact-basis tensor while the
-    discrete confirmatory refit bins marginal supports, so no row of such a
-    screen is exact in the refit's basis.
+    ``approx`` is also True for any pair whose confirmatory ``ti()`` refit
+    would discretize — both parents resolve to fit-time discretization
+    (per-spec ``discrete`` overriding the model flag): the screen probes
+    the exact-basis tensor while the discrete refit bins marginal supports,
+    so such rows are not exact in the refit's basis.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -192,10 +200,14 @@ def screen_interactions(
     n_rows = len(frame)
     y = np.asarray(y, dtype=np.float64)
     weights_inherited = False
-    if sample_weight is None:
+    if sample_weight is None and getattr(model, "_fit_used_weights", False):
+        # Only a genuinely non-unit fitted weight vector is worth inheriting:
+        # a unit-weight fit screens any frame without arguments (ones cannot
+        # mispair rows), and inheriting them anyway would needlessly pin X/y
+        # to the training data via the fit-data guard below.
         sample_weight = getattr(model, "_fit_weights", None)
         weights_inherited = sample_weight is not None
-        if sample_weight is None and getattr(model, "_fit_used_weights", False):
+        if sample_weight is None:
             raise ValueError(
                 "the model was fitted with non-unit sample_weight but its fit state was "
                 "released (retain_fit_state=False); pass sample_weight explicitly"
@@ -230,7 +242,7 @@ def screen_interactions(
     fitted_pairs = {
         frozenset(spec.parent_names)
         for spec in getattr(model, "_interaction_specs", {}).values()
-        if hasattr(spec, "parent_names")
+        if isinstance(spec, TensorInteraction)
     }
     pairs = _validated_pairs(candidates, spline_names, fitted_pairs)
     selected = sorted(
@@ -342,7 +354,18 @@ def screen_interactions(
         return cells_ok and inter_ok
 
     rows = []
-    discrete_mains = bool(getattr(model, "_discrete", False))
+    from superglm.dm_builder import should_discretize
+
+    # Discretization is decided per SPEC, not per model: spec.discrete
+    # overrides the model flag, and a ti() refit bins marginal supports only
+    # when BOTH parents discretize.  approx must track that per-pair rule.
+    model_discrete = bool(getattr(model, "_discrete", False))
+
+    def _pair_refits_discrete(feat_a, feat_b):
+        return should_discretize(model._specs[feat_a], model_discrete) and should_discretize(
+            model._specs[feat_b], model_discrete
+        )
+
     for feat_a, feat_b in pairs:
         k_a = _marginal_width_estimate(model._specs[feat_a])
         k_b = _marginal_width_estimate(model._specs[feat_b])
@@ -376,7 +399,7 @@ def screen_interactions(
             if not binnable:
                 break
             bin_flag[binnable[0][1]] = True
-        approx = bin_flag[feat_a] or bin_flag[feat_b] or discrete_mains
+        approx = bin_flag[feat_a] or bin_flag[feat_b] or _pair_refits_discrete(feat_a, feat_b)
         if menus is None:
             rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
             continue
