@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -117,6 +118,53 @@ def _evaluate_irls_state(
 
 StateInvalid = Callable[[_IRLSState], bool]
 MeritDelta = Callable[[_IRLSState, _IRLSState], float]
+
+
+def _stable_penalized_deviance_delta(
+    candidate: _IRLSState,
+    committed: _IRLSState,
+    penalty_matvec: Callable[[NDArray], NDArray] | NDArray | None = None,
+    nonsmooth_penalty: Callable[[NDArray], float] | None = None,
+) -> float:
+    """Compare penalized deviances without subtracting two large quadratics.
+
+    In an ill-conditioned smooth basis, the two penalty quadratics can each be
+    accurately evaluated while their tiny difference loses enough digits to
+    reverse the sign of an otherwise safe terminal step.  The polarization
+    identity evaluates that difference directly from the coefficient update.
+
+    ``penalty_matvec`` supplies the quadratic penalty ``S`` (a matrix or a
+    matvec); pass ``None`` when the fit carries no quadratic penalty.
+    ``nonsmooth_penalty`` supplies any non-quadratic penalty term as a
+    function of ``beta``, already scaled to match the caller's merit
+    convention; its two evaluations enter the same ``math.fsum``.
+    """
+    terms = [float(candidate.deviance), -float(committed.deviance)]
+
+    if penalty_matvec is not None:
+        delta_beta = candidate.beta - committed.beta
+        summed_beta = candidate.beta + committed.beta
+        penalty_direction = (
+            penalty_matvec(summed_beta)
+            if callable(penalty_matvec)
+            else np.asarray(penalty_matvec, dtype=np.float64) @ summed_beta
+        )
+        terms.append(
+            math.fsum(
+                float(delta_value * direction_value)
+                for delta_value, direction_value in zip(
+                    delta_beta,
+                    penalty_direction,
+                    strict=True,
+                )
+            )
+        )
+
+    if nonsmooth_penalty is not None:
+        terms.append(float(nonsmooth_penalty(candidate.beta)))
+        terms.append(-float(nonsmooth_penalty(committed.beta)))
+
+    return float(math.fsum(terms))
 
 
 def _state_is_finite(state: _IRLSState) -> bool:

@@ -19,9 +19,7 @@ shared B matrices between select=True subgroups vanishes entirely.
 from __future__ import annotations
 
 import logging
-import math
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -64,6 +62,7 @@ from superglm.solvers.irls_state import (
     _immutable_array,
     _IRLSState,
     _select_irls_trial,
+    _stable_penalized_deviance_delta,
 )
 from superglm.solvers.pirls import (
     IterationDiagnostics,
@@ -112,44 +111,6 @@ from superglm.solvers.working_rows import (
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
-
-
-def _stable_penalized_deviance_delta(
-    candidate: _IRLSState,
-    committed: _IRLSState,
-    penalty_matvec: Callable[[NDArray], NDArray] | NDArray,
-) -> float:
-    """Compare ``D + beta' S beta`` without subtracting two quadratics.
-
-    In an ill-conditioned smooth basis, the two penalty quadratics can each be
-    accurately evaluated while their tiny difference loses enough digits to
-    reverse the sign of an otherwise safe terminal step.  The polarization
-    identity evaluates that difference directly from the coefficient update.
-    """
-    delta_beta = candidate.beta - committed.beta
-    summed_beta = candidate.beta + committed.beta
-    penalty_direction = (
-        penalty_matvec(summed_beta)
-        if callable(penalty_matvec)
-        else np.asarray(penalty_matvec, dtype=np.float64) @ summed_beta
-    )
-    penalty_delta = math.fsum(
-        float(delta_value * direction_value)
-        for delta_value, direction_value in zip(
-            delta_beta,
-            penalty_direction,
-            strict=True,
-        )
-    )
-    return float(
-        math.fsum(
-            (
-                float(candidate.deviance),
-                -float(committed.deviance),
-                penalty_delta,
-            )
-        )
-    )
 
 
 @dataclass(frozen=True)

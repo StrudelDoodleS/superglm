@@ -11,7 +11,7 @@ from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
 from superglm.links import IdentityLink, SqrtLink
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
-from superglm.solvers.irls_direct import _stable_penalized_deviance_delta, fit_irls_direct
+from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
@@ -19,6 +19,7 @@ from superglm.solvers.irls_state import (
     _IRLSState,
     _IRLSStepDecision,
     _select_irls_trial,
+    _stable_penalized_deviance_delta,
 )
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import GroupSlice
@@ -923,3 +924,69 @@ def test_direct_convergence_claim_uses_the_committed_state_identity() -> None:
     assert commit.payload["state_id"] == result.state_id
     assert commit.payload["fit_converged"]
     assert commit.payload["convergence_value"] == pytest.approx(0.0)
+
+
+def test_stable_delta_omits_quadratic_when_penalty_matvec_is_none() -> None:
+    """With no quadratic penalty the delta is a plain deviance difference."""
+    committed = _synthetic_state(0.0, beta=-0.5, penalized_deviance=40.0)
+    proposal = _synthetic_state(0.0, beta=0.25, penalized_deviance=17.0)
+    delta = _stable_penalized_deviance_delta(proposal, committed)
+    assert delta == pytest.approx(proposal.deviance - committed.deviance, abs=1e-15)
+
+
+def test_stable_delta_includes_nonsmooth_penalty_term() -> None:
+    """A non-quadratic penalty enters as two pre-scaled fsum terms."""
+    committed = _synthetic_state(0.0, beta=-0.5, penalized_deviance=40.0)
+    proposal = _synthetic_state(0.0, beta=0.25, penalized_deviance=17.0)
+
+    def nonsmooth(beta: np.ndarray) -> float:
+        return 2.0 * float(np.abs(beta).sum())
+
+    delta = _stable_penalized_deviance_delta(proposal, committed, nonsmooth_penalty=nonsmooth)
+    expected = (
+        proposal.deviance
+        - committed.deviance
+        + nonsmooth(proposal.beta)
+        - nonsmooth(committed.beta)
+    )
+    assert delta == pytest.approx(expected, abs=1e-15)
+    # The two betas differ in L1, so an implementation that ignored
+    # ``nonsmooth_penalty`` would return the bare deviance difference instead.
+    assert expected != pytest.approx(proposal.deviance - committed.deviance, abs=1e-15)
+
+
+def test_stable_delta_combines_quadratic_and_nonsmooth_terms() -> None:
+    """Both penalty terms compose in a single fsum."""
+    penalty = np.array([[2.0, 0.0], [0.0, 3.0]])
+    committed_beta = np.array([0.25, -0.5])
+    proposal_beta = np.array([0.5, -0.125])
+
+    def state(beta: np.ndarray, deviance: float) -> _IRLSState:
+        eta = _immutable_array(np.zeros(1))
+        return _IRLSState(
+            beta=_immutable_array(beta),
+            intercept=0.0,
+            eta_unclipped=eta,
+            eta=eta,
+            mu=eta,
+            deviance=deviance,
+            penalized_deviance=float(deviance + beta @ penalty @ beta),
+        )
+
+    def nonsmooth(beta: np.ndarray) -> float:
+        return 2.0 * float(np.abs(beta).sum())
+
+    committed = state(committed_beta, 10.0)
+    proposal = state(proposal_beta, 9.0)
+    delta = _stable_penalized_deviance_delta(
+        proposal, committed, penalty, nonsmooth_penalty=nonsmooth
+    )
+    expected = (
+        9.0
+        - 10.0
+        + proposal_beta @ penalty @ proposal_beta
+        - committed_beta @ penalty @ committed_beta
+        + nonsmooth(proposal_beta)
+        - nonsmooth(committed_beta)
+    )
+    assert delta == pytest.approx(expected, rel=1e-12)
