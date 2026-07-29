@@ -566,14 +566,6 @@ def _penalised_xtwx_inv(
             if not ag.penalized:
                 continue
 
-            if isinstance(lambda2, dict):
-                lam_g = lambda2.get(gname, 0.0)
-            else:
-                lam_g = lambda2
-
-            if lam_g == 0:
-                continue
-
             if isinstance(
                 gm_orig,
                 SparseSSPGroupMatrix
@@ -582,12 +574,31 @@ def _penalised_xtwx_inv(
                 | DiscretizedSSPGroupMatrix,
             ):
                 R_inv = gm_orig.R_inv
-                omega = gm_orig.omega
-                if omega is None:
-                    p_b = R_inv.shape[0]
-                    omega = _second_diff_penalty(p_b)
-                S_g = lam_g * R_inv.T @ omega @ R_inv
+                omega_components = getattr(gm_orig, "omega_components", None)
+                if omega_components is not None:
+                    from superglm.reml.penalty_algebra import resolve_component_lambda
+
+                    S_g = np.zeros((ag.size, ag.size))
+                    for suffix, omega_j in omega_components:
+                        lam_j = resolve_component_lambda(lambda2, gname, suffix)
+                        if lam_j == 0:
+                            continue
+                        S_g += lam_j * (R_inv.T @ omega_j @ R_inv)
+                    if not np.any(S_g):
+                        continue
+                else:
+                    lam_g = lambda2.get(gname, 0.0) if isinstance(lambda2, dict) else lambda2
+                    if lam_g == 0:
+                        continue
+                    omega = gm_orig.omega
+                    if omega is None:
+                        p_b = R_inv.shape[0]
+                        omega = _second_diff_penalty(p_b)
+                    S_g = lam_g * R_inv.T @ omega @ R_inv
             elif ag.scop_reparameterization is not None:
+                lam_g = lambda2.get(gname, 0.0) if isinstance(lambda2, dict) else lambda2
+                if lam_g == 0:
+                    continue
                 S_g = lam_g * ag.scop_reparameterization.penalty_matrix()
             else:
                 continue

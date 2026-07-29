@@ -65,6 +65,7 @@ jobs:
   perf-gate:
     name: Performance gate · reduced benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # Benchmark canon: single-thread BLAS on both sides, medians not
       # single runs. Thresholds live in benchmarks/results/ci_perf_baselines.json.
@@ -90,13 +91,13 @@ jobs:
           path: data/freMTPL2freq.parquet
           key: freMTPL2freq-openml-41214
 
-      - name: Fetch freMTPL2freq on cache miss
+      - name: Ensure freMTPL2freq present (fetch skips when cached)
         run: uv run --with pyarrow python benchmarks/fetch_mtpl2.py
 
       - name: Tensor-cost benchmark (reduced n, medians)
         run: >-
           uv run --with pyarrow python benchmarks/benchmark_tensor_cost.py
-          --n 30000 --reps 3 --json-out /tmp/tensor_cost_ci.json
+          --n 30000 --reps 4 --json-out /tmp/tensor_cost_ci.json
 
       - name: Flagship benchmark (reduced reps)
         run: >-

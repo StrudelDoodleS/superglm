@@ -156,15 +156,30 @@ def _build_smooth_penalty_terms(model) -> _CompactPenaltyTerms | _LegacyPenaltyT
     for gm, group in zip(group_matrices, groups, strict=True):
         if not group.penalized:
             continue
+        if isinstance(gm, penalty_matrix_types):
+            omega_components = getattr(gm, "omega_components", None)
+            if omega_components is not None:
+                from superglm.reml.penalty_algebra import resolve_component_lambda
+
+                for suffix, omega_j in omega_components:
+                    lam_j = float(resolve_component_lambda(lambda2, group.name, suffix))
+                    if lam_j == 0.0:
+                        continue
+                    terms.append((group.sl, lam_j, omega_j, gm.R_inv))
+                continue
+            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            lam_float = float(lam)
+            if lam_float == 0.0:
+                continue
+            omega = gm.omega
+            if omega is not None:
+                terms.append((group.sl, lam_float, omega, gm.R_inv))
+            continue
         lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
         lam_float = float(lam)
         if lam_float == 0.0:
             continue
-        if isinstance(gm, penalty_matrix_types):
-            omega = gm.omega
-            if omega is not None:
-                terms.append((group.sl, lam_float, omega, gm.R_inv))
-        elif group.scop_reparameterization is not None:
+        if group.scop_reparameterization is not None:
             terms.append(
                 (
                     group.sl,

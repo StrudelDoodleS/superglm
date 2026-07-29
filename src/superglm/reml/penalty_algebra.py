@@ -562,12 +562,15 @@ def resolve_component_lambda(
     """Resolve the smoothing weight for one penalty component of a group.
 
     Dict lambdas are keyed by component name (``"<group>:<suffix>"``, the
-    naming used by ``PenaltyComponent`` and REML-fitted lambdas), falling
-    back to a group-wide key.
+    naming used by ``PenaltyComponent`` and REML-fitted lambdas). A
+    group-wide key acts as the default for every component not listed by
+    its full name, so ``{"a:b": 5.0, "a:b:margin_a": 2.0}`` resolves
+    ``margin_a`` to 2.0 and every other component of ``a:b`` to 5.0.
+    Components matched by neither key resolve to 0.0.
     """
     if not isinstance(lambda2, dict):
-        return lambda2
-    return lambda2.get(f"{group_name}:{suffix}", lambda2.get(group_name, 0.0))
+        return float(lambda2)
+    return float(lambda2.get(f"{group_name}:{suffix}", lambda2.get(group_name, 0.0)))
 
 
 def build_penalty_matrix(
