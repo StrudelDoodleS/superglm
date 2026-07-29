@@ -31,7 +31,31 @@ from superglm.screening import (
 )
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 
-_RESULT_COLUMNS = ["feature_a", "feature_b", "statistic", "z", "edf0", "lambda0", "n_cells"]
+_RESULT_COLUMNS = [
+    "feature_a",
+    "feature_b",
+    "statistic",
+    "z",
+    "edf0",
+    "lambda0",
+    "n_cells",
+    "approx",
+]
+
+
+def _quantile_binned(x, bins):
+    """Replace x by per-bin mean representatives on an empirical quantile grid.
+
+    Screening-only lossy compression for continuous covariates whose joint
+    support would blow the cell budget: the spline basis is evaluated at the
+    within-bin mean, so the probe sees the same marginal geometry at <= bins
+    support points.  Never applied when the pair fits the budget exactly.
+    """
+    edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, bins + 1)[1:-1]))
+    codes = np.searchsorted(edges, x, side="right")
+    _, codes = np.unique(codes, return_inverse=True)
+    reps = np.bincount(codes, weights=x) / np.bincount(codes)
+    return reps[codes]
 
 
 def _validated_budgets(edf0) -> tuple[float, ...]:
@@ -69,6 +93,7 @@ def screen_interactions(
     candidates=None,
     edf0=(2.0, 4.0, 8.0, 16.0),
     max_cells: int = 5_000_000,
+    screen_bins: int = 256,
 ) -> pd.DataFrame:
     """Rank candidate spline-pair interactions of a fitted model by PSST.
 
@@ -88,14 +113,21 @@ def screen_interactions(
     before normalization (see module docstring).
 
     Returns a frame sorted by ``z`` (descending) with one row per screened
-    pair: ``feature_a, feature_b, statistic, z, edf0, lambda0, n_cells``,
-    where ``statistic``/``edf0``/``lambda0`` describe the winning rung.
-    ``statistic`` is therefore NOT comparable across rows (rungs differ) —
-    rank by ``z``.  At a clamped rung ``edf0`` holds the achieved value and
-    ``lambda0`` is a bracket edge, not an interpretable smoothing parameter.
-    Pairs whose joint cell grid exceeds ``max_cells`` are skipped with NaN
-    rather than silently binned; a pair whose statistic degenerates to NaN
-    likewise yields a NaN row instead of failing the sweep.
+    pair: ``feature_a, feature_b, statistic, z, edf0, lambda0, n_cells,
+    approx``, where ``statistic``/``edf0``/``lambda0`` describe the winning
+    rung.  ``statistic`` is therefore NOT comparable across rows (rungs
+    differ) — rank by ``z``.  At a clamped rung ``edf0`` holds the achieved
+    value and ``lambda0`` is a bracket edge, not an interpretable smoothing
+    parameter.
+
+    Pairs whose joint unique-value grid exceeds ``max_cells`` fall back to
+    quantile binning: any margin with more than ``screen_bins`` unique
+    values is compressed to ``screen_bins`` empirical-quantile bins (basis
+    evaluated at within-bin means) and the row is flagged ``approx=True``.
+    Pairs that fit the budget are computed exactly and flagged
+    ``approx=False`` — the fallback never touches them.  A pair still over
+    budget after binning is skipped with a NaN row (``n_cells`` reports the
+    grid that was attempted), as is a pair whose statistic degenerates.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -111,6 +143,9 @@ def screen_interactions(
     if not np.all(np.isfinite(weights)) or np.any(weights < 0.0) or not np.any(weights > 0.0):
         raise ValueError("sample_weight must be finite and non-negative with a positive sum")
     budgets = _validated_budgets(edf0)
+    if int(screen_bins) < 2:
+        raise ValueError(f"screen_bins must be at least 2, got {screen_bins!r}")
+    screen_bins = int(screen_bins)
 
     spline_names = [
         name for name in model._feature_order if isinstance(model._specs.get(name), _SplineBase)
@@ -145,11 +180,19 @@ def screen_interactions(
     for feat_a, feat_b in pairs:
         x_a = frame.column_array(feat_a, dtype=np.float64)
         x_b = frame.column_array(feat_b, dtype=np.float64)
+        approx = False
+        if np.unique(x_a).size * np.unique(x_b).size > max_cells:
+            if np.unique(x_a).size > screen_bins:
+                x_a = _quantile_binned(x_a, screen_bins)
+                approx = True
+            if np.unique(x_b).size > screen_bins:
+                x_b = _quantile_binned(x_b, screen_bins)
+                approx = True
         uniq_a, first_a, codes_a = np.unique(x_a, return_index=True, return_inverse=True)
         uniq_b, first_b, codes_b = np.unique(x_b, return_index=True, return_inverse=True)
         n_a, n_b = len(uniq_a), len(uniq_b)
         if n_a * n_b > max_cells:
-            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b))
+            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, False))
             continue
 
         spec = TensorInteraction(feat_a, feat_b)
@@ -171,9 +214,9 @@ def screen_interactions(
             if z > best_z:
                 best_z, best = z, (statistic, result.edf0, result.lambda0)
         if best is None:
-            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b))
+            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
         else:
-            rows.append((feat_a, feat_b, best[0], best_z, best[1], best[2], n_a * n_b))
+            rows.append((feat_a, feat_b, best[0], best_z, best[1], best[2], n_a * n_b, approx))
 
     table = pd.DataFrame(rows, columns=_RESULT_COLUMNS)
     return table.sort_values("z", ascending=False, ignore_index=True)

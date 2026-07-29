@@ -47,7 +47,9 @@ surfaces are both visible.
   gate. Evidence *density* is not payoff: a strong tilt (rung-2 win) can
   out-`z` a curved surface that buys three times the deviance.
 - **NaN rows are skipped pairs**, not failures: the pair's joint support
-  exceeded `max_cells` (or the statistic degenerated). They sort last.
+  exceeded `max_cells` even after the quantile-binning fallback (or the
+  statistic degenerated). They sort last. Rows computed on binned support
+  carry `approx=True`; exact rows carry `approx=False`.
 
 ## What it inherits from the fit
 
@@ -74,8 +76,12 @@ either.
   signal is demoted, not lost. The `ti()` refit faces the same
   identifiability.
 - **Continuous x continuous cardinality.** Pairs whose unique-value grid
-  exceeds `max_cells` are NaN-skipped rather than silently binned. Bin
-  such covariates yourself before screening if you need those pairs.
+  exceeds `max_cells` fall back to quantile binning (`screen_bins`
+  empirical-quantile support points per margin, basis evaluated at
+  within-bin means) and are flagged `approx=True` in the output. Pairs
+  within budget are always computed exactly — the fallback never touches
+  them. Screening-only: a confirmatory `ti()` refit of a flagged pair
+  uses the full data.
 
 ## Provenance
 
