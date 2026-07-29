@@ -622,6 +622,7 @@ class SuperGLM:
         candidates: list[tuple[str, str]] | None = None,
         edf0: float | tuple[float, ...] = (2.0, 4.0, 8.0, 16.0),
         max_cells: int = 5_000_000,
+        screen_bins: int = 256,
     ) -> pd.DataFrame:
         """Rank candidate spline-pair interactions by PSST.
 
@@ -640,9 +641,12 @@ class SuperGLM:
 
         The returned frame is sorted by ``z`` descending; rank by ``z`` —
         ``statistic``/``edf0``/``lambda0`` describe each pair's winning
-        rung, so ``statistic`` is not comparable across rows.  The
-        statistic is a ranking device, not a calibrated p-value: confirm the
-        top-ranked pairs by refitting them as ``ti()`` terms.
+        rung, so ``statistic`` is not comparable across rows.  Pairs whose
+        unique-value grid exceeds ``max_cells`` are quantile-binned to
+        ``screen_bins`` support points per margin and flagged
+        ``approx=True``; pairs within budget are always computed exactly.
+        The statistic is a ranking device, not a calibrated p-value: confirm
+        the top-ranked pairs by refitting them as ``ti()`` terms.
         """
         from superglm.model.screening_ops import screen_interactions
 
@@ -655,6 +659,7 @@ class SuperGLM:
             candidates=candidates,
             edf0=edf0,
             max_cells=max_cells,
+            screen_bins=screen_bins,
         )
 
     # ── Properties ────────────────────────────────────────────────

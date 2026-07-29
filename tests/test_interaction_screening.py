@@ -534,3 +534,99 @@ def test_screen_select_parents_raise_upfront():
 
     with pytest.raises(ValueError, match="select=True"):
         model.screen_interactions(frame, y, sample_weight=w)
+
+
+def _continuous_screening_data(seed=6, n=2500):
+    """Two continuous covariates (~n uniques each) with a planted smooth
+    interaction, plus one integer covariate; x1:x2 raw grid ~ n^2 cells."""
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    frame = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+            "x3": rng.integers(0, 30, n).astype(float),
+        }
+    )
+    z1 = (frame["x1"] - frame["x1"].mean()) / frame["x1"].std()
+    z2 = (frame["x2"] - frame["x2"].mean()) / frame["x2"].std()
+    w = rng.uniform(0.3, 1.0, n)
+    y = rng.poisson(np.exp(-1.2 + 0.3 * z1 + 0.25 * z2 + 0.5 * z1 * z2) * w) / w
+    return frame, y, w
+
+
+def _fit_continuous(frame, y, w):
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    return SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={c: Spline(kind="ps", k=6) for c in frame.columns},
+    ).fit_reml(frame, y, sample_weight=w)
+
+
+def test_screen_bins_continuous_pairs_instead_of_skipping():
+    """Task 4: a continuous x continuous pair above the cell budget falls
+    back to quantile binning (flagged approx) instead of NaN-skipping."""
+    frame, y, w = _continuous_screening_data()
+    model = _fit_continuous(frame, y, w)
+
+    table = model.screen_interactions(frame, y, sample_weight=w)
+
+    row = table[(table.feature_a == "x1") & (table.feature_b == "x2")].iloc[0]
+    assert bool(row["approx"])
+    assert np.isfinite(row["z"])
+    assert row["n_cells"] <= 256 * 256
+    # the planted continuous interaction ranks first through the fallback
+    top = tuple(sorted((table.loc[0, "feature_a"], table.loc[0, "feature_b"])))
+    assert top == ("x1", "x2")
+    # pairs within the budget stay on the exact path
+    exact = table[~table["approx"]]
+    assert len(exact) == 2
+    assert np.isfinite(exact["z"]).all()
+
+
+def test_screen_binned_tracks_exact_on_signal():
+    """The binned statistic must approximate the exact one where it matters:
+    on a pair carrying real signal (measured gap 3.5%, pinned at 10%).
+    No such promise on null pairs, where binning legitimately smooths away
+    high-frequency noise at unpenalized rungs."""
+    frame, y, w = _continuous_screening_data()
+    model = _fit_continuous(frame, y, w)
+
+    exact = model.screen_interactions(
+        frame, y, sample_weight=w, candidates=[("x1", "x2")], max_cells=7_000_000
+    )
+    binned = model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x2")])
+
+    assert not bool(exact.loc[0, "approx"])
+    assert bool(binned.loc[0, "approx"])
+    z_e, z_b = float(exact.loc[0, "z"]), float(binned.loc[0, "z"])
+    assert z_e > 10.0  # this is a signal pair
+    assert abs(z_e - z_b) / z_e < 0.10
+    # same winning rung (edf0 is the achieved edf, so compare to bisection tol)
+    assert abs(exact.loc[0, "edf0"] - binned.loc[0, "edf0"]) < 1e-2
+
+
+def test_screen_nan_only_when_binning_cannot_fit():
+    """If even the binned grid exceeds max_cells, the pair NaN-skips with
+    approx=False and n_cells reporting the attempted grid."""
+    import pytest
+
+    frame, y, w = _continuous_screening_data()
+    model = _fit_continuous(frame, y, w)
+
+    table = model.screen_interactions(
+        frame, y, sample_weight=w, candidates=[("x1", "x3")], max_cells=100, screen_bins=50
+    )
+
+    row = table.iloc[0]
+    assert np.isnan(row["z"])
+    assert not bool(row["approx"])
+    assert row["n_cells"] == 50 * 30
+
+    with pytest.raises(ValueError, match="screen_bins"):
+        model.screen_interactions(frame, y, sample_weight=w, screen_bins=1)
