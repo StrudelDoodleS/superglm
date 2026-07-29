@@ -1026,3 +1026,57 @@ def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
         reml_penalties=penalties,
     )
     np.testing.assert_allclose(structured_value, dense_value, atol=2e-9)
+
+
+class TestStructuredPenaltyBuilderComponentLambdas:
+    """The legacy (``reml_penalties=None``) branches of the structured penalty
+    builders must resolve component-named lambdas for multi-penalty groups,
+    matching the dense assembly sites fixed on this branch. These branches are
+    defensive today (``fit_irls_direct`` refuses structured dispatch without
+    ``reml_penalties``), but the builders are exported and must agree with the
+    dense semantics."""
+
+    def _system_with_multipenalty_small_block(self):
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import SparseSSPGroupMatrix
+        from superglm.solvers.structured import build_structured_system
+
+        rng = np.random.default_rng(11)
+        n = 200
+        n_levels = 40
+        codes = rng.integers(0, n_levels, size=n, dtype=np.intp)
+        B = rng.normal(size=(n, 3))
+        gm_small = SparseSSPGroupMatrix(sp.csr_matrix(B), np.eye(3))
+        U1 = rng.normal(size=(3, 2))
+        U2 = rng.normal(size=(3, 1))
+        omega_1 = U1 @ U1.T
+        omega_2 = U2 @ U2.T
+        gm_small.omega = omega_1 + omega_2
+        gm_small.omega_components = [("m1", omega_1), ("m2", omega_2)]
+        matrices = [gm_small, RandomEffectGroupMatrix(codes, n_levels)]
+        groups = [
+            GroupSlice(name="s", start=0, end=3, penalized=True),
+            GroupSlice(name="policy", start=3, end=3 + n_levels, penalized=True),
+        ]
+        W = rng.uniform(0.5, 1.5, size=n)
+        Wz = rng.normal(size=n)
+        system = build_structured_system(matrices, groups, W, Wz, dominant_group_index=1)
+        return system, matrices, groups, omega_1, omega_2
+
+    def test_scalar_builder_applies_component_named_lambdas(self):
+        from superglm.solvers.structured import build_penalized_scalar_operator
+
+        system, matrices, groups, omega_1, omega_2 = self._system_with_multipenalty_small_block()
+        lambdas = {"s:m1": 2.0, "s:m2": 3.0, "policy": 1.5}
+        penalized = build_penalized_scalar_operator(system, matrices, groups, lambdas)
+
+        base = np.asarray(system.operator.A, dtype=np.float64)
+        small_position = {
+            int(idx): pos for pos, idx in enumerate(np.asarray(system.operator.small_indices))
+        }
+        local = [small_position[i] for i in range(3)]
+        expected_block = base[np.ix_(local, local)] + 2.0 * omega_1 + 3.0 * omega_2
+        np.testing.assert_allclose(
+            np.asarray(penalized.A)[np.ix_(local, local)], expected_block, rtol=1e-12
+        )

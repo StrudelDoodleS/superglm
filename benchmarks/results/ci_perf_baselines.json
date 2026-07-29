@@ -3,7 +3,7 @@
   "commit": "91eef58 (v0.16.0 + RFC-8 bug-half fix), recalibrated with warmup exclusion after round-1 review",
   "box": "16-core reference box (audit 2026-07-28), single-thread BLAS, median of 5 steady reps (1 warmup excluded)",
   "notes": "Thresholds are deliberately generous: CI runners are slower and noisier than the reference box, and the gate exists to catch structural regressions (a lost support-compression or cached-W win), not 20% noise. Ratio checks are machine-speed invariant to first order and carry the tighter limits; absolute checks are large multiples of reference-box medians. The tensor benchmark excludes one warmup fit per case (import/cache effects measured at 1.5-3x steady state were the dominant rep-to-rep spread in CI).",
-  "ci_observed": "First perf-gate run on ubuntu-latest (2026-07-29, n=30k): steady-state medians ~1.2-1.4x this box; steady ratios tensor_multiplier_exact ~4.2, tensor_multiplier_discrete ~3.1 (both ~15% above the reference box), steady rep spreads 2-5%. Headroom to the ratio limits: 1.43x (exact) and 1.6x (discrete) over observed CI values.",
+  "ci_observed": "perf-gate runs on ubuntu-latest (2026-07-29, n=30k, warmup-excluded): steady medians 1.21-1.36x this box (0.328/0.216/1.192/0.590 vs 0.249/0.165/0.888/0.435); steady ratios tensor_multiplier_exact 3.63 and tensor_multiplier_discrete 2.73 (headroom 1.65x/1.83x to the 6.0/5.0 limits); steady rep spreads 1-5%; flagship median 1.02-1.04s; flagship deviance/effective_df rel_dev measured 0.000 vs reference-box values",
   "tensor_cost": {
     "n": 30000,
     "reps": 5,
@@ -27,8 +27,8 @@
         "note": "reference 2.64, CI-observed ~3.1; the 3.8x pre-arc discrete multiplier sits inside runner noise of any non-flapping limit, so this check only guards catastrophic tensor-path blowups"
       },
       "absolute_multiple": {
-        "max": 8.0,
-        "note": "per-case median vs reference-box median; CI-observed medians are ~1.2-1.4x reference, so the 6.6x pre-arc base-exact reversion trips even on a 2-3x slower runner"
+        "max": 5.0,
+        "note": "per-case median vs reference-box median. 5.0 makes the 6.6x pre-arc base-exact reversion trip on ANY machine (0.249*6.6=1.64s > 1.25s limit), unlike the previous 8.0 which relied on the runner being >=1.21x slower than the reference box; observed CI medians still leave ~3.8x headroom"
       }
     },
     "expected_p": {
@@ -36,7 +36,27 @@
       "tensor_cost_base_discrete": 41,
       "tensor_cost_ti_exact": 122,
       "tensor_cost_ti_discrete": 122
-    }
+    },
+    "output_rtol": 0.005,
+    "expected_outputs": {
+      "tensor_cost_base_exact": {
+        "deviance": 9837.591,
+        "effective_df": 21.115
+      },
+      "tensor_cost_base_discrete": {
+        "deviance": 9838.177,
+        "effective_df": 20.94
+      },
+      "tensor_cost_ti_exact": {
+        "deviance": 9811.753,
+        "effective_df": 24.82
+      },
+      "tensor_cost_ti_discrete": {
+        "deviance": 9812.003,
+        "effective_df": 24.779
+      }
+    },
+    "expected_backend": "gram"
   },
   "flagship": {
     "n": 678013,
@@ -44,15 +64,16 @@
     "reference_median_s": 0.846,
     "checks": {
       "absolute_multiple": {
-        "max": 2.5,
-        "note": "limit 2.12s: CI-observed median is 1.044s (2x headroom; the full-data fit is far more stable than the sub-second tensor cases), and the 2.48x pre-arc flagship reversion lands at ~2.6s on the observed runner, which trips - a 5x limit would have let it through"
+        "max": 2.0,
+        "note": "limit 1.69s: the 2.48x pre-arc flagship reversion is 2.10s on the reference box itself, so 2.0 catches it machine-independently; CI-observed median 1.02-1.04s leaves 1.66x headroom on a benchmark whose steady spread is ~2%"
       }
     },
     "expected": {
       "deviance": 212055.4,
       "effective_df": 43.33,
       "rtol": 0.001,
-      "note": "recorded fit outputs on the reference box; identical data and a deterministic algorithm make these platform-stable, and a gate pass on timing alone must not certify a fit that silently computed something else"
+      "note": "recorded fit outputs on the reference box; identical data and a deterministic algorithm make these platform-stable, and a gate pass on timing alone must not certify a fit that silently computed something else",
+      "backend": "gram"
     }
   }
 }

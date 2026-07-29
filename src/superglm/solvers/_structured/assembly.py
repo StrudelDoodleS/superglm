@@ -83,6 +83,40 @@ def _lambda_for_component(
     return float(lambda2[name]) if isinstance(lambda2, dict) else float(lambda2)
 
 
+def _legacy_small_block_penalty(
+    matrix: GroupMatrix,
+    group: GroupSlice,
+    lambda2: float | dict[str, float],
+) -> NDArray | None:
+    """Solver-space penalty block for one generic small-partition group.
+
+    Legacy (``reml_penalties is None``) assembly: multi-penalty groups
+    resolve per-component lambdas by component name, mirroring
+    ``reml.penalty_algebra.build_penalty_matrix``.
+    """
+    if not hasattr(matrix, "R_inv"):
+        return None
+    omega_components = getattr(matrix, "omega_components", None)
+    if omega_components is not None:
+        from superglm.reml.penalty_algebra import resolve_component_lambda
+
+        block: NDArray | None = None
+        for suffix, omega_j in omega_components:
+            lam_j = resolve_component_lambda(lambda2, group.name, suffix)
+            if lam_j == 0.0:
+                continue
+            term = lam_j * np.asarray(matrix.R_inv.T @ omega_j @ matrix.R_inv, dtype=np.float64)
+            block = term if block is None else block + term
+        return block
+    lam = float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
+    if lam == 0.0:
+        return None
+    omega_raw = getattr(matrix, "omega", None)
+    if omega_raw is None:
+        return None
+    return lam * np.asarray(matrix.R_inv.T @ omega_raw @ matrix.R_inv, dtype=np.float64)
+
+
 def _dense_component_omega(
     component: PenaltyComponent,
     group_matrix: GroupMatrix,
@@ -182,15 +216,17 @@ def build_penalized_scalar_operator(
         for group_index, (matrix, group) in enumerate(zip(group_matrices, groups, strict=True)):
             if not group.penalized:
                 continue
-            lam = (
-                float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
-            )
-            if lam == 0.0:
-                continue
             indices = np.arange(group.start, group.end, dtype=np.intp)
             local_small = small_position[indices]
             local_structured = structured_position[indices]
             if isinstance(matrix, RandomEffectGroupMatrix):
+                lam = (
+                    float(lambda2.get(group.name, 0.0))
+                    if isinstance(lambda2, dict)
+                    else float(lambda2)
+                )
+                if lam == 0.0:
+                    continue
                 if np.all(local_small >= 0):
                     A[local_small, local_small] += lam
                 elif np.all(local_structured >= 0):
@@ -200,18 +236,14 @@ def build_penalized_scalar_operator(
                         f"RandomEffect group {group.name!r} crosses structured partitions."
                     )
                 continue
-            omega_raw = getattr(matrix, "omega", None)
-            if omega_raw is None or not hasattr(matrix, "R_inv"):
+            block = _legacy_small_block_penalty(matrix, group, lambda2)
+            if block is None:
                 continue
-            omega = np.asarray(
-                matrix.R_inv.T @ omega_raw @ matrix.R_inv,
-                dtype=np.float64,
-            )
             if not np.all(local_small >= 0):
                 raise ValueError(
                     f"Penalty geometry for dominant group index {group_index} is unsupported."
                 )
-            A[np.ix_(local_small, local_small)] += lam * omega
+            A[np.ix_(local_small, local_small)] += block
 
     return SymmetricBlockOperator(
         A=A,
@@ -352,30 +384,28 @@ def build_penalized_block_operator(
                     lam = resolve_component_lambda(lambda2, group.name, suffix)
                     D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
                 continue
-            lam = (
-                float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
-            )
-            if lam == 0.0:
-                continue
             if isinstance(matrix, RandomEffectGroupMatrix):
+                lam = (
+                    float(lambda2.get(group.name, 0.0))
+                    if isinstance(lambda2, dict)
+                    else float(lambda2)
+                )
+                if lam == 0.0:
+                    continue
                 if not np.all(local_small >= 0):
                     raise ValueError(
                         f"RandomEffect group {group.name!r} crosses structured partitions."
                     )
                 A[local_small, local_small] += lam
                 continue
-            omega_raw = getattr(matrix, "omega", None)
-            if omega_raw is None or not hasattr(matrix, "R_inv"):
+            block = _legacy_small_block_penalty(matrix, group, lambda2)
+            if block is None:
                 continue
             if not np.all(local_small >= 0):
                 raise ValueError(
                     f"Penalty geometry for dominant group index {group_index} is unsupported."
                 )
-            omega = np.asarray(
-                matrix.R_inv.T @ omega_raw @ matrix.R_inv,
-                dtype=np.float64,
-            )
-            A[np.ix_(local_small, local_small)] += lam * omega
+            A[np.ix_(local_small, local_small)] += block
 
     return BlockSymmetricOperator(
         A=A,
@@ -502,43 +532,34 @@ def build_penalized_sum_to_zero_operator(
                     raise ValueError(
                         f"FactorSmooth group {group.name!r} does not match the dominant SZ block."
                     )
+                from superglm.reml.penalty_algebra import resolve_component_lambda
+
                 suffix, omega = matrix.repeated_penalty_components[0]
+                lam = resolve_component_lambda(lambda2, group.name, suffix)
+                D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
+                continue
+            if isinstance(matrix, RandomEffectGroupMatrix):
                 lam = (
-                    float(
-                        lambda2.get(
-                            f"{group.name}:{suffix}",
-                            lambda2.get(group.name, 0.0),
-                        )
-                    )
+                    float(lambda2.get(group.name, 0.0))
                     if isinstance(lambda2, dict)
                     else float(lambda2)
                 )
-                D += lam * np.asarray(omega, dtype=np.float64)[None, :, :]
-                continue
-            lam = (
-                float(lambda2.get(group.name, 0.0)) if isinstance(lambda2, dict) else float(lambda2)
-            )
-            if lam == 0.0:
-                continue
-            if isinstance(matrix, RandomEffectGroupMatrix):
+                if lam == 0.0:
+                    continue
                 if not np.all(local_small >= 0):
                     raise ValueError(
                         f"RandomEffect group {group.name!r} crosses structured partitions."
                     )
                 A[local_small, local_small] += lam
                 continue
-            omega_raw = getattr(matrix, "omega", None)
-            if omega_raw is None or not hasattr(matrix, "R_inv"):
+            block = _legacy_small_block_penalty(matrix, group, lambda2)
+            if block is None:
                 continue
             if not np.all(local_small >= 0):
                 raise ValueError(
                     f"Penalty geometry for dominant group index {group_index} is unsupported."
                 )
-            omega = np.asarray(
-                matrix.R_inv.T @ omega_raw @ matrix.R_inv,
-                dtype=np.float64,
-            )
-            A[np.ix_(local_small, local_small)] += lam * omega
+            A[np.ix_(local_small, local_small)] += block
 
     return SumToZeroBlockOperator(
         A=A,
