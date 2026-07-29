@@ -1902,3 +1902,115 @@ class TestMultiPenaltyTensorREML:
         # Penalties should be single-component
         for pc in model._reml_penalties:
             assert pc.name == pc.group_name
+
+
+class TestComponentNamedLambda2LegacyAssembly:
+    """RFC-8 bug-half regression: component-named lambda2 dicts must survive
+    the legacy (``reml_penalties=None``) penalty assembly.
+
+    Tensor interactions produce multi-penalty components named
+    ``"x1:x2:margin_x1"`` / ``"x1:x2:margin_x2"``.  The legacy assembly in
+    ``build_penalty_matrix`` looks penalties up by group name only, so a
+    fitted-lambda dict keyed by component names silently drops the entire
+    tensor penalty (audit 2026-07-28 §B1/S7).
+    """
+
+    @pytest.fixture()
+    def tensor_reml_fit(self):
+        rng = np.random.default_rng(1234)
+        n = 400
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        # Additive truth: the tensor penalty binds hard, so dropping it
+        # visibly changes the fit.
+        eta = 0.4 + np.sin(2 * np.pi * x1) + 0.5 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=5),
+                "x2": Spline(kind="cr", n_knots=5),
+            },
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+        assert model._reml_penalties is not None
+        return model, X, y
+
+    def test_legacy_assembly_matches_component_path(self, tensor_reml_fit):
+        from superglm.model.fit_state import fitted_lambda2
+        from superglm.reml.penalty_algebra import build_penalty_matrix
+
+        model, X, y = tensor_reml_fit
+        lambdas = dict(fitted_lambda2(model))
+        group_names = {g.name for g in model._groups}
+        component_keys = [k for k in lambdas if k not in group_names]
+        assert component_keys, "expected component-named keys from the tensor term"
+
+        p = model._dm.shape[1]
+        S_component = build_penalty_matrix(
+            list(model._dm.group_matrices),
+            model._groups,
+            lambdas,
+            p,
+            reml_penalties=model._reml_penalties,
+        )
+        S_legacy = build_penalty_matrix(list(model._dm.group_matrices), model._groups, lambdas, p)
+
+        tensor_group = next(g for g in model._groups if g.name == "x1:x2")
+        assert np.linalg.norm(S_component[tensor_group.sl, tensor_group.sl]) > 0
+        # Tolerance: the component path stores PSD-canonicalized omega_ssp,
+        # which differs from the on-the-fly SSP transform at ~1e-8 relative
+        # (already true for single-penalty groups today); the bug signal is
+        # an entire missing block, orders of magnitude above this.
+        np.testing.assert_allclose(
+            S_legacy,
+            S_component,
+            rtol=1e-6,
+            atol=1e-7 * np.linalg.norm(S_component),
+        )
+
+    def test_structural_smoothing_gate_sees_component_named_keys(self, tensor_reml_fit):
+        from superglm.model.fit_state import fitted_lambda2
+        from superglm.solvers.pirls import _has_structural_smoothing_penalty
+
+        model, X, y = tensor_reml_fit
+        lambdas = dict(fitted_lambda2(model))
+        group_names = {g.name for g in model._groups}
+        tensor_only = {k: v for k, v in lambdas.items() if k not in group_names}
+        assert tensor_only, "expected component-named keys from the tensor term"
+
+        assert _has_structural_smoothing_penalty(
+            list(model._dm.group_matrices), model._groups, tensor_only
+        )
+
+    def test_active_penalty_matrix_legacy_matches_component_path(self, tensor_reml_fit):
+        from superglm.inference.covariance import _active_penalty_matrix
+        from superglm.model.fit_state import fitted_lambda2
+
+        model, X, y = tensor_reml_fit
+        lambdas = dict(fitted_lambda2(model))
+
+        S_component = _active_penalty_matrix(
+            list(model._dm.group_matrices),
+            model._groups,
+            model._groups,
+            lambdas,
+            reml_penalties=model._reml_penalties,
+        )
+        S_legacy = _active_penalty_matrix(
+            list(model._dm.group_matrices),
+            model._groups,
+            model._groups,
+            lambdas,
+        )
+
+        tensor_group = next(g for g in model._groups if g.name == "x1:x2")
+        assert np.linalg.norm(S_component[tensor_group.sl, tensor_group.sl]) > 0
+        np.testing.assert_allclose(
+            S_legacy,
+            S_component,
+            rtol=1e-6,
+            atol=1e-7 * np.linalg.norm(S_component),
+        )

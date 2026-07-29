@@ -438,9 +438,6 @@ def _active_penalty_matrix(
         active_group = active_by_name.get(group.name)
         if active_group is None or not group.penalized:
             continue
-        lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
-        if lam == 0:
-            continue
         if isinstance(
             gm,
             SparseSSPGroupMatrix
@@ -448,12 +445,28 @@ def _active_penalty_matrix(
             | DiscretizedSplineCategoricalGroupMatrix
             | DiscretizedSSPGroupMatrix,
         ):
+            omega_components = getattr(gm, "omega_components", None)
+            if omega_components is not None:
+                from superglm.reml.penalty_algebra import resolve_component_lambda
+
+                for suffix, omega_j in omega_components:
+                    lam_j = resolve_component_lambda(lambda2, group.name, suffix)
+                    if lam_j == 0:
+                        continue
+                    S[active_group.sl, active_group.sl] += lam_j * (gm.R_inv.T @ omega_j @ gm.R_inv)
+                continue
+            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if lam == 0:
+                continue
             omega = gm.omega
             if omega is None:
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
-            S[active_group.sl, active_group.sl] = lam * gm.R_inv.T @ omega @ gm.R_inv
+            S[active_group.sl, active_group.sl] += lam * gm.R_inv.T @ omega @ gm.R_inv
         elif group.scop_reparameterization is not None:
-            S[active_group.sl, active_group.sl] = (
+            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if lam == 0:
+                continue
+            S[active_group.sl, active_group.sl] += (
                 lam * group.scop_reparameterization.penalty_matrix()
             )
     return S

@@ -183,3 +183,57 @@ def test_refit_unpenalised_rejects_variance_component_terms_at_entry(monkeypatch
         match=r"refit_unpenalised\(\).*variance-component.*group",
     ):
         model.refit_unpenalised(X, y)
+
+
+class TestKeepSmoothingWithTensorRemlLambdas:
+    """RFC-8 bug-half regression: REML-fitted component-named lambdas fed back
+    through the public ``lambda2`` setter (directly or via
+    ``refit_unpenalised(keep_smoothing=True)``) must actually penalize the
+    tensor block in the subsequent ``fit()``.
+    """
+
+    @pytest.fixture()
+    def tensor_reml_fit(self):
+        rng = np.random.default_rng(1234)
+        n = 400
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        # Additive truth: REML pushes the tensor lambdas high, so silently
+        # dropping the tensor penalty visibly changes predictions.
+        eta = 0.4 + np.sin(2 * np.pi * x1) + 0.5 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=5),
+                "x2": Spline(kind="cr", n_knots=5),
+            },
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(X, y, max_reml_iter=30)
+        return model, X, y
+
+    def test_component_named_setter_fit_reproduces_reml_fit(self, tensor_reml_fit):
+        from superglm.model.fit_state import fitted_lambda2
+
+        model, X, y = tensor_reml_fit
+        lambdas = dict(fitted_lambda2(model))
+
+        refit = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=5),
+                "x2": Spline(kind="cr", n_knots=5),
+            },
+            interactions=[("x1", "x2")],
+        )
+        refit.lambda2 = lambdas
+        refit.fit(X, y)
+
+        np.testing.assert_allclose(refit.predict(X), model.predict(X), rtol=1e-2)
+
+    def test_refit_unpenalised_keep_smoothing_keeps_tensor_penalty(self, tensor_reml_fit):
+        model, X, y = tensor_reml_fit
+        kept = model.refit_unpenalised(X, y, keep_smoothing=True)
+        np.testing.assert_allclose(kept.predict(X), model.predict(X), rtol=1e-2)
