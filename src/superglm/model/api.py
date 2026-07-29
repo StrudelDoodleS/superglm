@@ -638,8 +638,10 @@ class SuperGLM:
         stays honest beyond unit-dispersion families), so smooth and
         high-frequency interactions are both visible.  One O(n) cell pass
         per pair; no refits.  ``offset`` and ``sample_weight`` both default
-        to the values the model was fitted with; pass either only to
-        override.  The dispersion used is attached as
+        to the values the model was fitted with (weights only when the
+        fit's were non-unit); inheriting requires ``X``/``y`` to be the
+        training data — pass both arrays explicitly to screen a holdout,
+        subsample, or reordered frame.  The dispersion used is attached as
         ``table.attrs["phi"]`` and can be overridden via ``phi=``.
 
         The returned frame is sorted by ``z`` descending; rank by ``z`` —
@@ -648,11 +650,11 @@ class SuperGLM:
         unique-value grid exceeds ``max_cells`` are quantile-binned to
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
-        Screening probes the exact-basis tensor for each pair even when the
-        mains were fitted with ``discrete=True`` (whose confirmatory ``ti()``
-        refit bins marginal supports) — the same support-discretization gap
-        as the quantile fallback, measured at ~3.5% on signal pairs — and
-        such screens flag every row ``approx=True`` to make that visible.
+        Screening always probes the exact-basis tensor; a pair whose
+        confirmatory ``ti()`` refit would discretize (both parents resolve
+        to fit-time discretization) is flagged ``approx=True`` to make that
+        support-discretization gap — measured at ~3.5% on signal pairs, the
+        same class as the quantile fallback — visible in the output.
         Pairs already fitted as tensor terms are excluded from the sweep.  The
         statistic is a ranking device, not a calibrated p-value: confirm
         the top-ranked pairs by refitting them as ``ti()`` terms.
