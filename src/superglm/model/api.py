@@ -651,10 +651,13 @@ class SuperGLM:
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
         Screening always probes the exact-basis tensor; a pair whose
-        confirmatory ``ti()`` refit would discretize (both parents resolve
-        to fit-time discretization) is flagged ``approx=True`` to make that
-        support-discretization gap — measured at ~3.5% on signal pairs, the
-        same class as the quantile fallback — visible in the output.
+        confirmatory ``ti()`` refit would discretize LOSSILY (both parents
+        resolve to fit-time discretization and at least one parent's
+        cardinality exceeds its bin count) is flagged ``approx=True`` to
+        make that support-discretization gap — measured at ~3.5% on signal
+        pairs, the same class as the quantile fallback — visible in the
+        output.  Lossless binning returns the exact support and stays
+        ``approx=False``.
         Pairs already fitted as tensor terms are excluded from the sweep.  The
         statistic is a ranking device, not a calibrated p-value: confirm
         the top-ranked pairs by refitting them as ``ti()`` terms.

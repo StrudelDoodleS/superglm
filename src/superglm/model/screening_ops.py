@@ -33,7 +33,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
-from superglm.distributions import _VARIANCE_FLOOR
+from superglm.distributions import _VARIANCE_FLOOR, validate_response
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
     pair_cell_moments,
@@ -119,16 +119,17 @@ def _marginal_width_estimate(spec) -> int:
     Deliberately biased LOW: an under-estimate self-heals (menus get built
     and the authoritative post-menu recheck re-runs the gates with true
     dimensions), while an over-estimate would bin or skip a pair that fits
-    the budget with no correction possible.  Built-in kinds have centered
-    marginal widths of ``n_knots + degree`` (ps) and ``n_knots + 1``
-    (cr via the CardinalCR substitution), so ``n_knots + 1`` floors both.
+    the budget with no correction possible.  ``n_knots`` floors the centered
+    marginal width of every built-in kind, including degree-0 ps/bs
+    (``n_knots + degree``) and cr via the CardinalCR substitution
+    (``n_knots + 1``).
     """
     n_knots = getattr(spec, "n_knots", None)
     if n_knots is not None:
-        # No higher floor: cr at its minimum k=3 has a 2-column centered
-        # marginal, and any floor above the true width is a terminal
-        # over-estimate.
-        return max(int(n_knots) + 1, 1)
+        # n_knots floors every built-in kind including degree-0 ps/bs
+        # (centered width n_knots + degree) and minimum-k cr (n_knots + 1);
+        # any floor above the true width is a terminal over-estimate.
+        return max(int(n_knots), 1)
     return 1
 
 
@@ -187,10 +188,11 @@ def screen_interactions(
     (``n_cells`` reports the grid that was attempted and ``approx`` whether
     binning was applied), as is a pair whose statistic degenerates.
     ``approx`` is also True for any pair whose confirmatory ``ti()`` refit
-    would discretize — both parents resolve to fit-time discretization
-    (per-spec ``discrete`` overriding the model flag): the screen probes
-    the exact-basis tensor while the discrete refit bins marginal supports,
-    so such rows are not exact in the refit's basis.
+    would discretize LOSSILY — both parents resolve to fit-time
+    discretization (per-spec ``discrete`` overriding the model flag) and at
+    least one parent's cardinality exceeds its resolved bin count.
+    Lossless binning returns the exact unique support, so such refits match
+    the probe basis and stay ``approx=False``.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -200,14 +202,20 @@ def screen_interactions(
     n_rows = len(frame)
     y = np.asarray(y, dtype=np.float64)
     weights_inherited = False
-    if sample_weight is None and getattr(model, "_fit_used_weights", False):
+    if sample_weight is None:
         # Only a genuinely non-unit fitted weight vector is worth inheriting:
         # a unit-weight fit screens any frame without arguments (ones cannot
         # mispair rows), and inheriting them anyway would needlessly pin X/y
-        # to the training data via the fit-data guard below.
-        sample_weight = getattr(model, "_fit_weights", None)
-        weights_inherited = sample_weight is not None
-        if sample_weight is None:
+        # to the training data via the fit-data guard below.  Non-unitness is
+        # derived from the STORED array, not the _fit_used_weights stamp: the
+        # editor may rewrite _fit_weights without touching the stamp, and the
+        # array is the ground truth of the published fit state.
+        stored_weights = getattr(model, "_fit_weights", None)
+        if stored_weights is not None:
+            if np.any(np.asarray(stored_weights) != 1.0):
+                sample_weight = stored_weights
+                weights_inherited = True
+        elif getattr(model, "_fit_used_weights", False):
             raise ValueError(
                 "the model was fitted with non-unit sample_weight but its fit state was "
                 "released (retain_fit_state=False); pass sample_weight explicitly"
@@ -233,8 +241,15 @@ def screen_interactions(
     if int(screen_bins) < 2:
         raise ValueError(f"screen_bins must be at least 2, got {screen_bins!r}")
     screen_bins = int(screen_bins)
+    if not (np.isfinite(max_cells) and int(max_cells) >= 1):
+        raise ValueError(
+            f"max_cells is an allocation ceiling and must be a finite positive "
+            f"integer, got {max_cells!r}"
+        )
+    max_cells = int(max_cells)
     if phi is not None and (not np.isfinite(phi) or phi <= 0.0):
         raise ValueError(f"phi override must be finite and positive, got {phi!r}")
+    validate_response(y, model._distribution)
 
     spline_names = [
         name for name in model._feature_order if isinstance(model._specs.get(name), _SplineBase)
@@ -292,6 +307,15 @@ def screen_interactions(
                 "match the retained training data (reordered or modified rows); "
                 "pass sample_weight and offset explicitly for non-training frames"
             )
+    if offset is not None:
+        offset = np.asarray(offset, dtype=np.float64)
+        if offset.shape != (n_rows,):
+            raise ValueError(
+                f"offset must be one-dimensional with one entry per row of X; got shape "
+                f"{offset.shape} for {n_rows} rows"
+            )
+        if not np.all(np.isfinite(offset)):
+            raise ValueError("offset must contain only finite values")
     # The stabilized predictor directly, NOT link(predict(X)): for a
     # non-injective link (sqrt) the round trip maps eta to |eta| and flips
     # the sign of every negative-eta row's score.
@@ -313,7 +337,10 @@ def screen_interactions(
         phi_hat = float(phi)
     else:
         edf_mains = float(getattr(model._result, "effective_df", float("nan")))
-        denom = y.size - edf_mains if np.isfinite(edf_mains) else float(y.size)
+        # Zero-weight rows contribute exactly zero to the Pearson numerator,
+        # so only positive-weight observations count toward the residual d.f.
+        n_eff = float(np.count_nonzero(weights))
+        denom = n_eff - edf_mains if np.isfinite(edf_mains) else n_eff
         phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
         phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))
 
@@ -326,26 +353,35 @@ def screen_interactions(
             x = _raw(name)
             if binned:
                 x = _quantile_binned(x, screen_bins)
-            _, first, codes = np.unique(x, return_index=True, return_inverse=True)
-            support_cache[key] = {"x": x, "first": first, "codes": codes, "n": len(first)}
+            uniq, codes, counts = np.unique(x, return_inverse=True, return_counts=True)
+            support_cache[key] = {
+                "x": x,
+                "uniq": uniq,
+                "codes": codes,
+                "counts": counts,
+                "n": len(uniq),
+            }
         return support_cache[key]
 
     def _one_marginal(name, binned):
         """Build (menu, penalty) for a single feature; each side independently.
 
-        Mirrors one side of TensorInteraction._prepare_centered_marginals so a
-        cache miss on one margin never rebuilds its partner's full-n basis.
+        Evaluated directly on the compact support via the same
+        ``support=``/``counts=`` path the discrete builder uses (centering
+        direction ``counts @ basis`` equals the full-row column sums), so a
+        million-row feature with a few dozen distinct values never
+        materializes an (n, K) basis.
         """
         key = (name, binned)
         if key not in marginal_cache:
             s = _support(name, binned)
-            m = TensorInteraction._marginal_from_spec(model._specs[name], s["x"], None)
-            S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
-            B = sp.csr_matrix(m.basis)
-            marginal_cache[key] = (
-                np.asarray(B[s["first"]].todense(), dtype=np.float64),
-                S,
+            m = TensorInteraction._marginal_from_spec(
+                model._specs[name], s["x"], None, support=s["uniq"], counts=s["counts"]
             )
+            S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
+            basis = m.basis
+            menu = np.asarray(basis.todense() if sp.issparse(basis) else basis, dtype=np.float64)
+            marginal_cache[key] = (menu, S)
         return marginal_cache[key]
 
     def _within_budget(n_a, n_b, k_a, k_b):
@@ -354,16 +390,27 @@ def screen_interactions(
         return cells_ok and inter_ok
 
     rows = []
-    from superglm.dm_builder import should_discretize
+    from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 
     # Discretization is decided per SPEC, not per model: spec.discrete
     # overrides the model flag, and a ti() refit bins marginal supports only
-    # when BOTH parents discretize.  approx must track that per-pair rule.
+    # when BOTH parents discretize.  Discretization is LOSSLESS when a
+    # parent's cardinality fits its resolved bin count (the binner returns
+    # the exact unique support), so approx flags only pairs whose refit
+    # basis genuinely differs: both parents discretize AND at least one
+    # discretization is lossy.
     model_discrete = bool(getattr(model, "_discrete", False))
+    n_bins_config = getattr(model, "_n_bins", 256)
 
     def _pair_refits_discrete(feat_a, feat_b):
-        return should_discretize(model._specs[feat_a], model_discrete) and should_discretize(
-            model._specs[feat_b], model_discrete
+        if not all(
+            should_discretize(model._specs[name], model_discrete) for name in (feat_a, feat_b)
+        ):
+            return False
+        return any(
+            _support(name, False)["n"]
+            > resolve_discrete_n_bins(name, model._specs[name], n_bins_config)
+            for name in (feat_a, feat_b)
         )
 
     for feat_a, feat_b in pairs:
