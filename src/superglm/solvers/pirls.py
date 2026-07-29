@@ -39,6 +39,7 @@ from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_state import _evaluate_irls_state, _IRLSState, _select_irls_trial
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
+    RankDecomposition,
     RankInfo,
     decompose_factor,
     decompose_gram,
@@ -206,6 +207,10 @@ class PIRLSResult:
     log_det_H: float | None = None  # noqa: N815
     reml_hessian_rank: int | None = None
     reml_geometry: REMLGeometrySummary | None = None
+    # Centered slope-system decomposition, retained only when the caller
+    # opts in (RFC-12b seam: the cached-factor line search updates this
+    # factor instead of refactorizing per trial). Dense exact path only.
+    reml_slope_decomposition: RankDecomposition | None = None
     rank_info: RankInfo | None = None
     state_id: int | None = None
     evaluation_id: int | None = None
