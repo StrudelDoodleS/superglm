@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import Numeric, SuperGLM
 
 
 def _tiny_frame(n: int = 200, seed: int = 0) -> tuple[pd.DataFrame, np.ndarray]:
@@ -85,6 +85,18 @@ def test_fit_irls_direct_rejects_zero_max_iter() -> None:
 def test_max_iter_one_remains_legal() -> None:
     """The discrete POI loop depends on max_iter=1 (reml/discrete.py:551-578)."""
     df, y = _tiny_frame()
-    model = SuperGLM(family="poisson", max_iter=1)
+    # Explicit features are load-bearing: with auto-detection the design is
+    # intercept-only, beta has shape (0,), and asserting finiteness over it is
+    # vacuously true.
+    model = SuperGLM(
+        family="poisson",
+        max_iter=1,
+        features={"x0": Numeric(), "x1": Numeric()},
+    )
     model.fit(df, y)
+    assert model.result.beta.size == 2
     assert np.all(np.isfinite(model.result.beta))
+    # The cap genuinely binds here: one step, stopped short of convergence,
+    # which is how the discrete POI loop runs PIRLS.
+    assert model.result.n_iter == 1
+    assert not model.result.converged
