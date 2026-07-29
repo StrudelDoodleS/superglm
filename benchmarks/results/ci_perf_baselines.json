@@ -65,7 +65,7 @@
     "checks": {
       "absolute_multiple": {
         "max": 2.0,
-        "note": "limit 1.69s: the 2.48x pre-arc flagship reversion is 2.10s on the reference box itself, so 2.0 catches it machine-independently; CI-observed median 1.02-1.04s leaves 1.66x headroom on a benchmark whose steady spread is ~2%"
+        "note": "limit 1.69s: the 2.48x pre-arc flagship reversion is 2.10s on the reference box itself, so 2.0 catches it machine-independently; CI-observed median 1.02-1.04s leaves 1.66x headroom on a benchmark whose steady spread is ~2%; this is the gate's tightest check and is anchored to a different machine -- if it ever flaps, do NOT widen the multiple (that re-disarms the reversion catch): switch to a self-calibrating anchor (measure a cheap fixed workload in the same run and express the limit as a ratio to it)"
       }
     },
     "expected": {
