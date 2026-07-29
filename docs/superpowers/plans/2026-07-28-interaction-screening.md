@@ -484,3 +484,25 @@ has >2x headroom); (3) winning rung 2 = tilt-level evidence; (4) always
 confirmatory-refit top-3 — the refit, not the screen, is the gate.
 Known gaps unchanged: continuous high-cardinality pairs above the cell
 budget NaN-skip (Task 4 quantile fallback), corner-localized power.
+
+---
+
+## Task 4 shipped: quantile-bin fallback for continuous pairs (2026-07-29)
+
+Pairs whose raw unique-value grid exceeds max_cells no longer NaN-skip:
+any margin above screen_bins (default 256) unique values is compressed to
+empirical-quantile bins with the basis evaluated at within-bin means, and
+the row is flagged approx=True (new result column). The exact path is
+untouched — pairs within budget never bin, flagged approx=False. NaN rows
+remain only for pairs still over budget after binning (n_cells reports
+the attempted grid) or degenerate statistics.
+
+Measured contract (pinned in tests at 10%, measured 3.5%): on a SIGNAL
+pair the binned z tracks the exact z (59.1 vs 57.1 on a 2500x2500-unique
+continuous pair, same winning rung; the 6.25M-cell exact run takes 0.1s
+when the budget is raised, so the comparison is direct). On NULL pairs no
+tight agreement is promised or wanted: at clamped unpenalized rungs,
+2500-point support picks up high-frequency noise curvature that 256
+bin-means smooth away (null z 1.59 exact vs 0.60 binned) — the binned
+null is the better-behaved one. Docs updated (guide + docstrings).
+Suite 4762 / 152.
