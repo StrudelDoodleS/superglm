@@ -37,42 +37,43 @@
       "tensor_cost_ti_exact": 122,
       "tensor_cost_ti_discrete": 122
     },
-    "output_rtol": 0.005,
+    "output_rtol": 0.0001,
     "expected_outputs": {
       "tensor_cost_base_exact": {
-        "deviance": 9837.591,
-        "effective_df": 21.115
+        "deviance": 9837.59091523446,
+        "effective_df": 21.115117589110554
       },
       "tensor_cost_base_discrete": {
-        "deviance": 9838.177,
-        "effective_df": 20.94
+        "deviance": 9838.177435384518,
+        "effective_df": 20.940431150557057
       },
       "tensor_cost_ti_exact": {
-        "deviance": 9811.753,
-        "effective_df": 24.82
+        "deviance": 9811.75314918881,
+        "effective_df": 24.820117313400882
       },
       "tensor_cost_ti_discrete": {
-        "deviance": 9812.003,
-        "effective_df": 24.779
+        "deviance": 9812.003387570843,
+        "effective_df": 24.779003843352648
       }
     },
-    "expected_backend": "gram"
+    "expected_backend": "gram",
+    "output_rtol_note": "unified with flagship at 1e-4: three CI runs measured max rel dev 2.1e-5, and that residual was dominated by the baselines rounding effective_df to 2-3 decimals; values are now recorded at full precision from the reference-box calibration run"
   },
   "flagship": {
     "n": 678013,
     "reps": 30,
-    "reference_median_s": 0.846,
+    "reference_median_s": 0.8048,
     "checks": {
       "absolute_multiple": {
         "max": 2.0,
-        "note": "limit 1.69s: the 2.48x pre-arc flagship reversion is 2.10s on the reference box itself, so 2.0 catches it machine-independently; CI-observed median 1.02-1.04s leaves 1.66x headroom on a benchmark whose steady spread is ~2%; this is the gate's tightest check and is anchored to a different machine -- if it ever flaps, do NOT widen the multiple (that re-disarms the reversion catch): switch to a self-calibrating anchor (measure a cheap fixed workload in the same run and express the limit as a ratio to it)"
+        "note": "limit ~1.61s: CI-observed medians 0.99-1.04s (1.54-1.63x headroom, flagship steady std 0.001-0.006s), and the 2.48x pre-arc flagship reversion is ~2.0s on the reference box itself, so it trips machine-independently; this is the gate's tightest check and is anchored to a different machine -- if it ever flaps, do NOT widen the multiple (that re-disarms the reversion catch): switch to a self-calibrating anchor (measure a cheap fixed workload in the same run and express the limit as a ratio to it)"
       }
     },
     "expected": {
-      "deviance": 212055.4,
-      "effective_df": 43.33,
-      "rtol": 0.001,
-      "note": "recorded fit outputs on the reference box; identical data and a deterministic algorithm make these platform-stable, and a gate pass on timing alone must not certify a fit that silently computed something else",
+      "deviance": 212055.38987876667,
+      "effective_df": 43.32930127122941,
+      "rtol": 0.0001,
+      "note": "recorded fit outputs from the committed reference artifact superglm_30rep.json (regenerated 2026-07-29 with the current harness, so direct_backend and peak_rss_mb provenance is in the artifact itself); rtol unified at 1e-4 -- CI measured rel dev <= 1.6e-5 against rounded values, ~0 against full precision",
       "backend": "gram"
     }
   }
