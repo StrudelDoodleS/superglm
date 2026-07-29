@@ -31,9 +31,21 @@ _ENV_VAR = "SUPERGLM_BLAS_THREADS"
 # in the wrong order and leave the process pinned at the cap after all fits
 # returned.  A refcount keeps exactly one registration alive: the first
 # entrant records the true native state and the last exit restores it.
+# Wide designs are tracked per owning scope (thread-local stack) so that a
+# wide fit's release of the cap ends WITH that fit: when the last wide scope
+# exits while capped scopes remain, the cap is re-armed.
 _scope_lock = threading.Lock()
 _active_scopes = 0
+_wide_scopes = 0
 _registration = None
+_tls = threading.local()
+
+
+def _scope_stack() -> list:
+    stack = getattr(_tls, "stack", None)
+    if stack is None:
+        stack = _tls.stack = []
+    return stack
 
 
 # Break-even measured on the 16-core reference box (audit J.6 follow-up): the
@@ -63,18 +75,24 @@ def _auto_policy() -> bool:
 
 
 def allow_wide_design(p: int) -> None:
-    """Release the automatic cap for the rest of the fit on a wide design.
+    """Release the automatic cap while a wide design's fit is active.
 
     Called once per fit as soon as the design width is known.  Only the
     automatic policy widens; an explicit integer cap from the environment is
     respected as given.  Under concurrent fits the widest active design wins
-    for the overlap, trading a transient small-p slowdown for never
-    throttling a genuinely wide factorization.
+    for the overlap — but only for the overlap: the release is owned by the
+    calling fit's scope, and when the last wide scope exits the cap is
+    re-armed for any narrow fits still running.
     """
-    global _registration
+    global _registration, _wide_scopes
     if p < _WIDE_DESIGN_THRESHOLD or not _auto_policy():
         return
+    stack = _scope_stack()
+    scope = stack[-1] if stack else None
     with _scope_lock:
+        if scope is not None and not scope["wide"]:
+            scope["wide"] = True
+            _wide_scopes += 1
         if _registration is not None:
             _registration.unregister()
             _registration = None
@@ -104,25 +122,39 @@ def solver_blas_threads():
     """Cap BLAS pools for the duration of a fit, restoring them on exit.
 
     Safe under concurrent fits: nested or overlapping scopes share one
-    registration, and the native BLAS configuration is restored when the
-    last scope exits.
+    registration, the native BLAS configuration is restored when the last
+    scope exits, and a wide design's cap release (``allow_wide_design``)
+    ends when its owning scope does — remaining narrow fits are re-capped.
     """
-    global _active_scopes, _registration
+    global _active_scopes, _registration, _wide_scopes
     limit = _resolve_limit()
     if limit is None:
         yield
         return
     from threadpoolctl import threadpool_limits
 
-    with _scope_lock:
-        _active_scopes += 1
-        if _active_scopes == 1:
-            _registration = threadpool_limits(limits=limit, user_api="blas")
+    scope = {"wide": False}
+    stack = _scope_stack()
+    entered = False
     try:
+        with _scope_lock:
+            _active_scopes += 1
+            entered = True
+            if _registration is None and _wide_scopes == 0:
+                _registration = threadpool_limits(limits=limit, user_api="blas")
+        stack.append(scope)
         yield
     finally:
-        with _scope_lock:
-            _active_scopes -= 1
-            if _active_scopes == 0 and _registration is not None:
-                _registration.unregister()
-                _registration = None
+        if stack and stack[-1] is scope:
+            stack.pop()
+        if entered:
+            with _scope_lock:
+                _active_scopes -= 1
+                if scope["wide"]:
+                    _wide_scopes -= 1
+                if _active_scopes == 0:
+                    if _registration is not None:
+                        _registration.unregister()
+                        _registration = None
+                elif _wide_scopes == 0 and _registration is None:
+                    _registration = threadpool_limits(limits=limit, user_api="blas")
