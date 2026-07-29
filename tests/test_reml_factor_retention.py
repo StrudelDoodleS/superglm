@@ -1,11 +1,13 @@
-"""RFC-12b Task 1: retained slope-system decomposition on PIRLSResult.
+"""Retained slope-system decomposition on PIRLSResult (factor-L seam).
 
-The cached-factor line search (design note
-docs/superpowers/plans/2026-07-29-rfc12b-cached-linesearch.md) needs the
-centered slope-system ``RankDecomposition`` that ``fit_irls_direct``
-already computes for REML geometry, instead of only its pseudo-inverse.
-Retention is opt-in (internal ``_retain_reml_decomposition`` kwarg) so
-existing callers keep exactly their current behavior and memory profile.
+The seam retains the centered slope-system ``RankDecomposition`` that
+``fit_irls_direct`` already computes for REML geometry, instead of only
+its pseudo-inverse. Its live consumers are RFC-2/RFC-7 (route solves
+through the factor rather than a materialized p x p pseudo-inverse);
+RFC-12b, the retired original motivation, is dispositioned in
+docs/superpowers/plans/2026-07-29-rfc12b-cached-linesearch.md. Retention
+is opt-in (internal ``_retain_reml_decomposition`` kwarg) so existing
+callers keep exactly their current behavior and memory profile.
 """
 
 import numpy as np
@@ -83,8 +85,8 @@ class TestRemlDecompositionRetention:
         # A duplicated column with no penalty forces a rank-deficient slope
         # Hessian, taking the certification branch. The retained object must
         # be the certified decomposition, and the identified-coordinate
-        # log_det_H measure must still hold under truncation — this is the
-        # branch RFC-12b's eligibility gate keys off.
+        # log_det_H measure must still hold under truncation — the branch
+        # any factor-routing consumer must gate on (method/rank_truncated).
         x = np.linspace(-1.0, 1.0, 40)
         y = 1.0 + 0.5 * x
         dm = DesignMatrix([DenseGroupMatrix(np.column_stack((x, x)))], n=len(y), p=2)
@@ -138,9 +140,9 @@ class TestRemlDecompositionRetention:
         assert result.reml_slope_decomposition is None
 
     def test_structured_path_retains_nothing_by_design(self):
-        # RFC-12b scope exclusion: structured Schur factors are not
-        # dense-updatable, so the structured backend must retain None even
-        # with retention requested.
+        # Structured Schur factors have their own retained-factor
+        # protocol, so the structured backend must retain None even with
+        # retention requested.
         rng = np.random.default_rng(701)
         n = 420
         n_levels = 24
