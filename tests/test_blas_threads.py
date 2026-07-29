@@ -113,3 +113,91 @@ def test_overlapping_scopes_restore_native_state(monkeypatch):
         thread.join()
 
     assert _blas_thread_counts() == before
+
+
+def test_nested_wide_scope_rearms_cap_for_outer(monkeypatch):
+    """Review finding: an inner wide fit released the cap for its enclosing
+    narrow fit permanently. The release must end with the wide scope."""
+    from superglm._blas_threads import allow_wide_design
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _blas_thread_counts()
+    with solver_blas_threads():
+        assert all(count == 1 for count in _blas_thread_counts())
+        with solver_blas_threads():
+            allow_wide_design(10_000)
+            assert _blas_thread_counts() == before  # wide overlap: uncapped
+        # inner wide scope exited: the outer narrow fit is capped again
+        assert all(count == 1 for count in _blas_thread_counts())
+    assert _blas_thread_counts() == before
+
+
+def test_entrant_during_wide_overlap_gets_capped_after_wide_exits(monkeypatch):
+    """Review finding: a narrow fit starting mid-wide-overlap stayed uncapped
+    for its whole duration, not just the overlap."""
+    import threading
+
+    from superglm._blas_threads import allow_wide_design
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+    before = _blas_thread_counts()
+    wide_entered = threading.Event()
+    narrow_ready = threading.Event()
+    release_wide = threading.Event()
+    seen = {}
+
+    def wide_fit():
+        with solver_blas_threads():
+            allow_wide_design(10_000)
+            wide_entered.set()
+            release_wide.wait(timeout=10)
+
+    def narrow_fit():
+        wide_entered.wait(timeout=10)
+        with solver_blas_threads():
+            seen["during"] = _blas_thread_counts()
+            narrow_ready.set()
+            release_wide.wait(timeout=10)
+            # wide thread exits its scope below; give it a moment
+            wide_thread.join(timeout=10)
+            seen["after"] = _blas_thread_counts()
+
+    wide_thread = threading.Thread(target=wide_fit)
+    narrow_thread = threading.Thread(target=narrow_fit)
+    wide_thread.start()
+    narrow_thread.start()
+    narrow_ready.wait(timeout=10)
+    release_wide.set()
+    narrow_thread.join(timeout=10)
+
+    assert seen["during"] == before  # uncapped during the wide overlap
+    assert all(count == 1 for count in seen["after"])  # re-armed after it
+    assert _blas_thread_counts() == before
+
+
+def test_enter_failure_does_not_leak_scope_counter(monkeypatch):
+    """Review finding: a threadpool_limits failure on entry left the refcount
+    stuck above zero, disabling capping process-wide forever."""
+    import pytest
+    import threadpoolctl
+
+    import superglm._blas_threads as blas
+
+    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no pools for you")
+
+    monkeypatch.setattr(threadpoolctl, "threadpool_limits", boom)
+    with pytest.raises(RuntimeError, match="no pools"):
+        with solver_blas_threads():
+            pass  # pragma: no cover
+    assert blas._active_scopes == 0
+    assert blas._wide_scopes == 0
+    assert blas._registration is None
+
+    monkeypatch.undo()
+    before = _blas_thread_counts()
+    with solver_blas_threads():
+        assert all(count == 1 for count in _blas_thread_counts())
+    assert _blas_thread_counts() == before
