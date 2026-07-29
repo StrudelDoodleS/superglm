@@ -410,7 +410,7 @@ def fit_irls_direct(
     _return_working_system: bool = False,
     _compute_fit_statistics: bool = True,
     _compute_reml_geometry: bool = True,
-    retain_reml_decomposition: bool = False,
+    _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
@@ -452,7 +452,7 @@ def fit_irls_direct(
             _return_working_system=_return_working_system,
             _compute_fit_statistics=_compute_fit_statistics,
             _compute_reml_geometry=_compute_reml_geometry,
-            retain_reml_decomposition=retain_reml_decomposition,
+            _retain_reml_decomposition=_retain_reml_decomposition,
             _use_observed_newton=_use_observed_newton,
             _deviance_init=_deviance_init,
             trace_run=trace_run,
@@ -503,7 +503,7 @@ def _fit_irls_direct_once(
     _return_working_system: bool = False,
     _compute_fit_statistics: bool = True,
     _compute_reml_geometry: bool = True,
-    retain_reml_decomposition: bool = False,
+    _retain_reml_decomposition: bool = False,
     _use_observed_newton: bool = True,
     _deviance_init: float | None = None,
     trace_run: TraceRun | None = None,
@@ -2393,7 +2393,7 @@ def _fit_irls_direct_once(
             XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
             log_det_H = None
             reml_hessian_rank = None
-        retained_reml_decomposition = reml_slope_rank if retain_reml_decomposition else None
+        retained_reml_decomposition = reml_slope_rank if _retain_reml_decomposition else None
 
         coefficient_rank = None
         if _compute_fit_statistics and compute_rank_info:
