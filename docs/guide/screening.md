@@ -51,9 +51,10 @@ surfaces are both visible.
   statistic degenerated). They sort last. `approx=True` means the row's
   probe basis differs from what a confirmatory refit would build — either
   the pair was quantile-binned, or that pair's `ti()` refit would
-  discretize (both parents resolve to fit-time discretization, per-spec
-  `discrete` overriding the model flag). Rows whose refit would be exact
-  carry `approx=False`.
+  discretize *lossily* (both parents resolve to fit-time discretization,
+  per-spec `discrete` overriding the model flag, and at least one parent's
+  cardinality exceeds its bin count — lossless binning returns the exact
+  unique support). Rows whose refit would be exact carry `approx=False`.
 
 ## What it inherits from the fit
 
@@ -82,8 +83,10 @@ supports). That is the same support-discretization gap as the quantile
 fallback — measured at ~3.5% relative z on signal pairs — and it never
 affects which basis the confirmatory refit itself uses. To make the gap
 visible in the output rather than doc-only, **any pair whose refit would
-discretize (both parents resolve to fit-time discretization) carries
-`approx=True`.** Pairs the model already fits as tensor terms are
+discretize lossily (both parents resolve to fit-time discretization and at
+least one parent's cardinality exceeds its resolved bin count) carries
+`approx=True`** — low-cardinality rating factors bin losslessly and stay
+`approx=False`. Pairs the model already fits as tensor terms are
 excluded from the sweep (and rejected in `candidates=`): the screen
 profiles only the parent mains, so it cannot re-screen an interaction
 that is already in the model.
