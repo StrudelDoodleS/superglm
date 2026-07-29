@@ -15,6 +15,8 @@ import argparse
 import io
 import json
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -29,10 +31,19 @@ NUMERIC_INT_COLUMNS = ("ClaimNb", "VehPower", "VehAge", "DrivAge", "BonusMalus",
 NOMINAL_COLUMNS = ("Area", "VehBrand", "VehGas", "Region")
 
 
-def _download(url: str) -> bytes:
+def _download(url: str, attempts: int = 3) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "superglm-ci-perf-gate"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return response.read()
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return response.read()
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == attempts:
+                raise
+            wait = 10 * attempt
+            print(f"download attempt {attempt} failed ({exc}); retrying in {wait}s")
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
 
 
 def fetch(out_path: Path = OUT_PATH, force: bool = False) -> Path:

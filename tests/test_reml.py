@@ -2014,3 +2014,48 @@ class TestComponentNamedLambda2LegacyAssembly:
             rtol=1e-6,
             atol=1e-7 * np.linalg.norm(S_component),
         )
+
+    def test_shape_ops_penalty_terms_legacy_matches_component_path(self, tensor_reml_fit):
+        from superglm.model.shape_ops import (
+            _build_smooth_penalty_terms,
+            _smooth_penalty_value,
+        )
+
+        model, X, y = tensor_reml_fit
+        beta = model.result.beta
+        value_compact = _smooth_penalty_value(beta, _build_smooth_penalty_terms(model))
+
+        saved = model._reml_penalties
+        model._reml_penalties = None
+        try:
+            value_legacy = _smooth_penalty_value(beta, _build_smooth_penalty_terms(model))
+        finally:
+            model._reml_penalties = saved
+
+        assert value_compact > 0
+        np.testing.assert_allclose(value_legacy, value_compact, rtol=1e-6)
+
+    def test_penalised_xtwx_inv_legacy_matches_component_path(self, tensor_reml_fit):
+        from superglm.model.fit_state import fitted_lambda2
+        from superglm.reml.penalty_algebra import build_penalty_matrix
+
+        model, X, y = tensor_reml_fit
+        lambdas = dict(fitted_lambda2(model))
+        gms = list(model._dm.group_matrices)
+        p = model._dm.shape[1]
+        S = build_penalty_matrix(
+            gms, model._groups, lambdas, p, reml_penalties=model._reml_penalties
+        )
+        W = np.ones(model._dm.shape[0])
+        beta = model.result.beta
+
+        _, inv_ref, aug_ref, _, _ = _penalised_xtwx_inv(
+            beta, W, gms, model._groups, lambdas, S_override=S
+        )
+        _, inv_legacy, aug_legacy, _, _ = _penalised_xtwx_inv(beta, W, gms, model._groups, lambdas)
+
+        scale = np.linalg.norm(inv_ref)
+        np.testing.assert_allclose(inv_legacy, inv_ref, rtol=1e-5, atol=1e-7 * scale)
+        np.testing.assert_allclose(
+            aug_legacy, aug_ref, rtol=1e-5, atol=1e-7 * np.linalg.norm(aug_ref)
+        )

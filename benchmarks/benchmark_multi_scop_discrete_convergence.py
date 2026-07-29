@@ -160,8 +160,10 @@ def _representative_pair_index(
 
     return min(
         range(len(baseline_results)),
-        key=lambda idx: abs(baseline_results[idx].runtime_s - baseline_runtime_median)
-        + abs(optimized_results[idx].runtime_s - optimized_runtime_median),
+        key=lambda idx: (
+            abs(baseline_results[idx].runtime_s - baseline_runtime_median)
+            + abs(optimized_results[idx].runtime_s - optimized_runtime_median)
+        ),
     )
 
 

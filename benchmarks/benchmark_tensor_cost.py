@@ -96,10 +96,15 @@ def run_case(
     tag: str, with_tensor: bool, discrete: bool, n_rows: int | None, profile: bool, reps: int = 1
 ) -> dict:
     X, y, weights = load(n_rows)
+    # With reps >= 2 the first fit is a warmup (import/cache effects measured
+    # at ~1.5-3x steady state) and is excluded from the median, matching the
+    # flagship harness.
+    warmup_reps = 1 if reps >= 2 else 0
     rep_seconds: list[float] = []
+    warmup_seconds: list[float] = []
     ok, error = True, ""
     model = None
-    for rep in range(reps):
+    for rep in range(warmup_reps + reps):
         model = build(with_tensor, discrete)
         profiler = cProfile.Profile() if profile and rep == 0 else None
         start = time.perf_counter()
@@ -119,7 +124,10 @@ def run_case(
             (OUT_DIR / f"{tag}.pstats.txt").write_text(stream.getvalue())
         if not ok:
             break
-        rep_seconds.append(elapsed)
+        if rep < warmup_reps:
+            warmup_seconds.append(elapsed)
+        else:
+            rep_seconds.append(elapsed)
 
     record = {
         "tag": tag,
@@ -129,6 +137,7 @@ def run_case(
         "seconds": round(float(np.median(rep_seconds)), 3) if rep_seconds else None,
         "reps": reps,
         "rep_seconds": [round(s, 3) for s in rep_seconds],
+        "warmup_seconds": [round(s, 3) for s in warmup_seconds],
         "ok": ok,
         "error": error,
     }
@@ -154,9 +163,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, default=100_000, help="rows (0 = full data)")
     parser.add_argument("--profile", action="store_true", help="dump cProfile artifacts")
-    parser.add_argument("--reps", type=int, default=1, help="fits per case; records the median")
+    parser.add_argument(
+        "--reps",
+        type=int,
+        default=1,
+        help="steady-state fits per case; the median is recorded, and with "
+        "reps >= 2 one extra warmup fit runs first and is excluded",
+    )
     parser.add_argument("--json-out", default=str(OUT_JSON), help="result JSON path")
     args = parser.parse_args()
+    if args.reps < 1:
+        parser.error("--reps must be >= 1")
     n_rows = None if args.n == 0 else args.n
 
     rows = []

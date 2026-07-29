@@ -266,14 +266,9 @@ def _factor_smooth_component_lambda(
     lambda2: float | dict[str, float],
 ) -> float:
     """Resolve one repeated factor-smooth component lambda."""
-    if isinstance(lambda2, dict):
-        return float(
-            lambda2.get(
-                f"{group_name}:{suffix}",
-                lambda2.get(group_name, 0.0),
-            )
-        )
-    return float(lambda2)
+    from superglm.reml.penalty_algebra import resolve_component_lambda
+
+    return resolve_component_lambda(lambda2, group_name, suffix)
 
 
 def _factor_smooth_local_penalty(
