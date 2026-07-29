@@ -983,23 +983,52 @@ def compute_lambda_max(model, y, weights):
     # GroupLasso thresholds at lambda1 * w_g; the elastic-net family scales that
     # by its L1 share alpha (pirls.py radial threshold), so the lambda that
     # zeroes a group is correspondingly larger.
-    alpha = 1.0 if type(penalty) is GroupLasso else float(getattr(penalty, "alpha", 1.0))
-    if alpha <= 0.0:
-        from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+    from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 
-        if isinstance(penalty, SparseGroupLasso):
-            # alpha=0 sparse-group lasso is pure group lasso: groups zero at
-            # ||grad_g|| / w_g, so the group divisor applies, not 0.
-            alpha = 1.0
-        else:
-            # e.g. elastic-net alpha=0 is ridge: nothing ever zeroes.
-            return 0.0
+    is_sparse_group = isinstance(penalty, SparseGroupLasso)
+    alpha = 1.0 if type(penalty) is GroupLasso else float(getattr(penalty, "alpha", 1.0))
+    if alpha <= 0.0 and not is_sparse_group:
+        # e.g. elastic-net alpha=0 is ridge: nothing ever zeroes.
+        return 0.0
     lmax = 0.0
     for g in model._groups:
         if not penalty_targets_group(penalty, g):
             continue
-        lmax = max(lmax, np.linalg.norm(grad[g.sl]) / (g.weight * alpha))
+        grad_g = grad[g.sl]
+        if is_sparse_group:
+            lmax = max(lmax, _sparse_group_zero_lambda(grad_g, float(g.weight), alpha))
+        else:
+            lmax = max(lmax, np.linalg.norm(grad_g) / (g.weight * alpha))
     return lmax
+
+
+def _sparse_group_zero_lambda(grad_g: NDArray, weight: float, alpha: float) -> float:
+    """Smallest lambda that zeroes one group under the sparse-group KKT rule.
+
+    The composite zero condition is ``||soft(grad_g, lambda*alpha)||_2 <=
+    lambda*(1-alpha)*weight`` (``pirls.py`` prox: L1 soft-threshold first,
+    then the radial group threshold) — not the elastic-net division.  At
+    alpha=0 this reduces to the pure group-lasso ``||grad_g||/weight``; at
+    alpha=1 to the pure-L1 ``max|grad_g|``.  In between the left side is
+    nonincreasing and the right side increasing in lambda, so the boundary
+    is the unique root, found by bisection to float accuracy.
+    """
+    magnitudes = np.abs(np.asarray(grad_g, dtype=np.float64))
+    if magnitudes.size == 0:
+        return 0.0
+    if alpha <= 0.0:
+        return float(np.linalg.norm(magnitudes)) / weight
+    if alpha >= 1.0:
+        return float(magnitudes.max())
+    lo, hi = 0.0, float(magnitudes.max()) / alpha  # soft() == 0 at hi: zeroed
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        survived = np.maximum(magnitudes - mid * alpha, 0.0)
+        if np.linalg.norm(survived) > mid * (1.0 - alpha) * weight:
+            lo = mid
+        else:
+            hi = mid
+    return hi
 
 
 def resolve_selection_penalty_for_fit(model, penalty: Penalty, y, weights) -> float:
