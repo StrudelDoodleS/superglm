@@ -2345,7 +2345,8 @@ def _fit_irls_direct_once(
             XtWX_S_inv_beta = np.empty((0, 0), dtype=np.float64)
             log_det_H = None
             reml_hessian_rank = None
-        # Structured Schur factors are not dense-updatable (RFC-12b scope).
+        # Structured Schur factors have their own retained-factor protocol;
+        # the dense-decomposition seam does not apply here.
         retained_reml_decomposition: RankDecomposition | None = None
         if _compute_fit_statistics:
             edf_operator = (
