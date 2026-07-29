@@ -1460,6 +1460,10 @@ def fit_pirls(
     2. Flavor adjusts group weights based on beta_init
     3. Refit with adjusted weights (warm started from stage 1)
     """
+    if max_iter_outer < 1:
+        raise ValueError(f"max_iter_outer must be at least 1, got {max_iter_outer}")
+    if max_iter_inner < 1:
+        raise ValueError(f"max_iter_inner must be at least 1, got {max_iter_inner}")
     if isinstance(X, DesignMatrix):
         dm = X
         n = dm.n
