@@ -598,3 +598,24 @@ build-phase reparameterizations (needs pre-build width discovery;
 codex thread left open with rationale); is_lossless_support
 wire-or-drop; mu finiteness on the NaN path. Dispersion thread open by
 agreement. Suite 4788 / 152.
+
+---
+
+## Terminal pre-merge review (Opus 5 max) and merge (2026-07-29)
+
+Verdict: MERGE. Full suite re-run independently (4788/152 exact);
+escalation-loop invariant verified (menus assigned only after gates run
+on authoritative dims; termination <= 6 iterations); budget guard
+matches einsum_path's true intermediates; all cross-file fixes complete
+on every call path; release contract clean (0.16.0 everywhere).
+
+Doc-truth fixes landed pre-merge (approx-vs-budget independence, the
+curvature-block NaN cause, intermediate budget in binning trigger,
+positive-weight-row dispersion denominator). Recorded follow-ups from
+the terminal review: scope-less allow_wide_design release (reachable
+via estimate_nb_theta; perf-only, needs concurrent fits); coverage
+gaps (curvature-block gate line, width-estimate ps cases via a bare
+except, max_cells/offset validation raises, degenerate-statistic row,
+largest-margin ordering with unequal margins); menu allocation
+unbounded by a factor k_a/n_b (design note); no CHANGELOG file for the
+compute_lambda_max /n breaking-change note (added to PR body instead).

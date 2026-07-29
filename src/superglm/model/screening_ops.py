@@ -183,10 +183,14 @@ def screen_interactions(
     ``screen_bins`` unique values is compressed to ``screen_bins``
     empirical-quantile bins (basis evaluated at within-bin means) and the
     row is flagged ``approx=True``.  Pairs within budget are always computed
-    exactly and flagged ``approx=False`` — the fallback never touches them.
+    exactly — the fallback never touches them — though ``approx`` can still
+    be True for such a pair when its refit would discretize lossily.
     A pair still over budget after binning is skipped with a NaN row
     (``n_cells`` reports the grid that was attempted and ``approx`` whether
-    binning was applied), as is a pair whose statistic degenerates.
+    binning was applied), as is a pair whose statistic degenerates.  A pair
+    whose tensor curvature block ``(k_a*k_b)^2`` alone exceeds the budget is
+    skipped immediately — binning cannot shrink basis dimensions, so such
+    rows may report the raw grid with no binning attempted.
     ``approx`` is also True for any pair whose confirmatory ``ti()`` refit
     would discretize LOSSILY — both parents resolve to fit-time
     discretization (per-spec ``discrete`` overriding the model flag) and at
@@ -339,6 +343,7 @@ def screen_interactions(
         edf_mains = float(getattr(model._result, "effective_df", float("nan")))
         # Zero-weight rows contribute exactly zero to the Pearson numerator,
         # so only positive-weight observations count toward the residual d.f.
+        # (the docstring's "n - edf" means exactly this n).
         n_eff = float(np.count_nonzero(weights))
         denom = n_eff - edf_mains if np.isfinite(edf_mains) else n_eff
         phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
