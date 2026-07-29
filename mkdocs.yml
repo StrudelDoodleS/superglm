@@ -92,6 +92,7 @@ nav:
     - Deployment: guide/deployment.md
     - Families & Dispersion: guide/families.md
     - Interactions: guide/interactions.md
+    - Interaction Screening: guide/screening.md
     - REML & Solvers: guide/optimization.md
   - Development:
     - Releases: development/releases.md
