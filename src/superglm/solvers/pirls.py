@@ -66,9 +66,6 @@ def _has_structural_smoothing_penalty(
     for gm, group in zip(gms, groups, strict=True):
         if not group.penalized:
             continue
-        lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
-        if float(lam) == 0.0:
-            continue
         if isinstance(
             gm,
             SparseSSPGroupMatrix
@@ -76,10 +73,22 @@ def _has_structural_smoothing_penalty(
             | DiscretizedSplineCategoricalGroupMatrix
             | DiscretizedSSPGroupMatrix,
         ):
-            if gm.omega is not None:
+            omega_components = getattr(gm, "omega_components", None)
+            if omega_components is not None:
+                from superglm.reml.penalty_algebra import resolve_component_lambda
+
+                for suffix, _omega_j in omega_components:
+                    lam = resolve_component_lambda(lambda2, group.name, suffix)
+                    if float(lam) != 0.0:
+                        return True
+                continue
+            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if float(lam) != 0.0 and gm.omega is not None:
                 return True
         elif group.scop_reparameterization is not None:
-            return True
+            lam = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if float(lam) != 0.0:
+                return True
     return False
 
 

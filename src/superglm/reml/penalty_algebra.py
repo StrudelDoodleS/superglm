@@ -554,6 +554,22 @@ def evaluate_tensor_pair_logdet_summaries(
     return evaluations
 
 
+def resolve_component_lambda(
+    lambda2: float | dict[str, float],
+    group_name: str,
+    suffix: str,
+) -> float:
+    """Resolve the smoothing weight for one penalty component of a group.
+
+    Dict lambdas are keyed by component name (``"<group>:<suffix>"``, the
+    naming used by ``PenaltyComponent`` and REML-fitted lambdas), falling
+    back to a group-wide key.
+    """
+    if not isinstance(lambda2, dict):
+        return lambda2
+    return lambda2.get(f"{group_name}:{suffix}", lambda2.get(group_name, 0.0))
+
+
 def build_penalty_matrix(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -606,14 +622,6 @@ def build_penalty_matrix(
         if not g.penalized:
             continue
 
-        if isinstance(lambda2, dict):
-            lam_g = lambda2.get(g.name, 0.0)
-        else:
-            lam_g = lambda2
-
-        if lam_g == 0:
-            continue
-
         if isinstance(
             gm,
             SparseSSPGroupMatrix
@@ -621,12 +629,26 @@ def build_penalty_matrix(
             | DiscretizedSplineCategoricalGroupMatrix
             | DiscretizedSSPGroupMatrix,
         ):
+            omega_components = getattr(gm, "omega_components", None)
+            if omega_components is not None:
+                for suffix, omega_j in omega_components:
+                    lam_j = resolve_component_lambda(lambda2, g.name, suffix)
+                    if lam_j == 0:
+                        continue
+                    S[g.sl, g.sl] += lam_j * (gm.R_inv.T @ omega_j @ gm.R_inv)
+                continue
+            lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if lam_g == 0:
+                continue
             omega = gm.omega
             if omega is None:
                 continue
-            S[g.sl, g.sl] = lam_g * gm.R_inv.T @ omega @ gm.R_inv
+            S[g.sl, g.sl] += lam_g * gm.R_inv.T @ omega @ gm.R_inv
         elif g.scop_reparameterization is not None:
-            S[g.sl, g.sl] = lam_g * g.scop_reparameterization.penalty_matrix()
+            lam_g = lambda2.get(g.name, 0.0) if isinstance(lambda2, dict) else lambda2
+            if lam_g == 0:
+                continue
+            S[g.sl, g.sl] += lam_g * g.scop_reparameterization.penalty_matrix()
 
     return S
 
