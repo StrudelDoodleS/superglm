@@ -1694,6 +1694,185 @@ class TestRankDeficientKKT:
         assert np.all(A @ result.beta - b >= -1e-10)
 
 
+class TestStationarityIsRealNotATruncationArtifact:
+    """``||step|| < tol`` means stationarity even when ``step`` comes from ``lstsq``.
+
+    The loop terminates on a small step and then reports the KKT certificate.
+    That inference is immediate for ``np.linalg.solve``, which either returns
+    *the* solution or raises; it is not immediate for
+    ``_solve_saddle_least_squares``, whose minimum-norm answer is small exactly
+    when ``lstsq`` discards a direction the right-hand side needed.  Every early
+    return on a rank-deficient ``H`` with a non-empty active set takes that
+    path, so the distinction covers the whole rank-deficient population rather
+    than a corner of it.
+
+    The saddle system is nonetheless always consistent, for a structural reason
+    recorded beside the early return: for PSD ``H = L L^T`` the range of
+    ``P H Q`` sits inside the range of ``P H P``, so a right-hand side whose
+    first block lies in ``range(H)`` and whose second lies in ``range(A_eq)``
+    is always reachable.  These tests pin both halves -- the property, and the
+    hypothesis it needs -- so that the argument beside the code cannot go stale
+    silently.
+    """
+
+    @staticmethod
+    def _kkt_violation(H, g, A, result, tol=1e-12):
+        """Largest KKT violation of ``result``, derived from scratch.
+
+        Returns ``(stationarity, dual, primal)`` as scale-free quantities.
+        Nothing here reuses the solver's own arrays or predicates: the point of
+        the test is to witness the certificate independently, and a check fed
+        the loop's own arithmetic would agree with it by construction.
+        """
+        beta = result.beta
+        gradient = H @ beta - g
+        scale = max(np.linalg.norm(H @ beta), np.linalg.norm(g))
+        if not result.active_set:
+            # No active constraints: stationarity is the bare gradient.
+            outside = np.linalg.norm(gradient)
+            dual = 0.0
+        else:
+            A_eq = A[result.active_set]
+            # Stationarity asks that the gradient lie in range(A_eq^T).  Its
+            # component outside that range is what the projection at the drop
+            # test silently discards, so measure it rather than the projection.
+            multipliers = np.linalg.lstsq(A_eq.T, gradient, rcond=None)[0]
+            outside = np.linalg.norm(A_eq.T @ multipliers - gradient)
+            dual = float(-np.min(multipliers)) / max(np.linalg.norm(multipliers), 1.0)
+        # A gradient that is itself negligible is stationary with zero
+        # multipliers whatever its direction does, so normalise by the scale it
+        # came from and not by the cancelled gradient.
+        stationarity = outside / scale if scale > 0.0 else 0.0
+        primal = float(-np.min(_feasibility_slack(A, beta, np.zeros(A.shape[0]))))
+        return stationarity, dual, primal
+
+    def test_a_converged_result_satisfies_the_kkt_conditions(self):
+        """``converged=True`` is checked from outside, over a population.
+
+        The non-tautological halves are stationarity and dual feasibility: the
+        loop asserts both and this re-derives them from ``H``, ``g`` and the
+        returned active set.  Primal feasibility is *not* asserted here, since
+        ``converged`` is defined through the same predicate and re-testing it
+        would prove nothing -- ``test_an_infeasible_returned_point_is_never_
+        reported_converged`` carries that direction.
+        """
+        rng = np.random.default_rng(20260730)
+        certified = 0
+        rank_deficient = 0
+        for _ in range(700):
+            p = int(rng.integers(3, 10))
+            rank = int(rng.integers(1, p))
+            basis = np.linalg.qr(rng.standard_normal((p, p)))[0]
+            spectrum = np.zeros(p)
+            spectrum[:rank] = 10.0 ** rng.uniform(-2, 2, rank)
+            H = basis @ np.diag(spectrum) @ basis.T
+            H = 0.5 * (H + H.T)
+            g = H @ rng.standard_normal(p)  # in range(H) by construction
+            A = np.diff(np.eye(p), axis=0) if rng.random() < 0.5 else np.eye(p)
+            b = np.zeros(A.shape[0])
+
+            if decompose_gram(H).rank >= p:
+                continue
+            rank_deficient += 1
+            try:
+                result = solve_constrained_qp(H, g, A, b)
+            except ValueError:
+                continue
+            if not result.converged:
+                continue
+            certified += 1
+            stationarity, dual, _ = self._kkt_violation(H, g, A, result)
+            assert stationarity < 1e-8, (
+                f"converged=True on a point whose gradient is {stationarity:.3e} "
+                f"outside range(A_eq^T) -- the small step was a truncation "
+                f"artifact, not stationarity (active set {result.active_set})"
+            )
+            assert dual < 1e-6, f"converged=True with a negative multiplier: {dual:.3e}"
+
+        # Liveness: the sweep must actually reach the path under test, or the
+        # assertions above are vacuous.
+        assert rank_deficient >= 400, f"only {rank_deficient} rank-deficient cases"
+        assert certified >= 200, f"only {certified} converged solves to check"
+
+    def test_the_saddle_system_is_consistent_whenever_g_is_in_range_h(self):
+        """The structural claim, brute-forced away from the loop.
+
+        ``lstsq`` on the assembled saddle leaves a rounding-level residual for
+        every PSD ``H``, whatever its rank, provided the first block lies in
+        ``range(H)``.  That is what licenses reading a small minimum-norm step
+        as stationarity.
+        """
+        rng = np.random.default_rng(4242)
+        worst = 0.0
+        truncated = 0
+        deficient_and_truncated = 0
+        for _ in range(400):
+            p = int(rng.integers(2, 8))
+            rank = int(rng.integers(1, p + 1))
+            factor = rng.standard_normal((p, rank))
+            H = factor @ factor.T  # PSD, rank <= rank
+            n_eq = int(rng.integers(1, p + 2))
+            A_eq = rng.standard_normal((n_eq, p))
+            if rng.random() < 0.5:  # linearly dependent active rows
+                k = int(rng.integers(0, n_eq))
+                A_eq[k] = A_eq[(k + 1) % n_eq] * float(rng.choice([-1.0, 2.0]))
+            beta = rng.standard_normal(p)
+            g = H @ rng.standard_normal(p)
+
+            KKT = np.zeros((p + n_eq, p + n_eq))
+            KKT[:p, :p] = H
+            KKT[:p, p:] = -A_eq.T
+            KKT[p:, :p] = A_eq
+            rhs = np.concatenate([g - H @ beta, -(A_eq @ beta)])  # b_eq = 0
+
+            sol, _, retained, _ = np.linalg.lstsq(KKT, rhs, rcond=None)
+            was_truncated = int(retained < p + n_eq)
+            truncated += was_truncated
+            deficient_and_truncated += was_truncated * int(rank < p)
+            residual = np.linalg.norm(KKT @ sol - rhs)
+            scale = np.linalg.norm(KKT) * np.linalg.norm(sol) + np.linalg.norm(rhs)
+            worst = max(worst, residual / scale if scale > 0 else 0.0)
+
+        # Liveness, twice.  ``lstsq`` must really be truncating, otherwise
+        # consistency is trivial; and the truncation must reach the population
+        # the argument is about -- a rank-deficient ``H``, not merely a
+        # rank-deficient ``A_eq``, which truncates for its own reason and would
+        # keep the first assertion alive on a full-rank sweep.
+        assert truncated >= 100, f"only {truncated} of 400 saddles were truncated"
+        assert deficient_and_truncated >= 50, (
+            f"only {deficient_and_truncated} truncated saddles had a rank-deficient H"
+        )
+        assert worst < 1e-12, f"worst relative saddle residual {worst:.3e}"
+
+    def test_a_g_outside_range_h_would_make_the_saddle_inconsistent(self):
+        """The contrast, so the test above is not passing for a trivial reason.
+
+        This is the case the consistency gate above the loop refuses outright.
+        If that gate ever stopped refusing it, the saddle system would become
+        inconsistent, ``lstsq`` would truncate a needed direction, and a small
+        step would no longer mean stationarity.
+        """
+        H = np.diag([1.0, 0.0])  # range(H) = span(e0)
+        A_eq = np.array([[1.0, 0.0]])
+        beta = np.zeros(2)
+        g = np.array([0.0, 1.0])  # entirely outside range(H)
+
+        KKT = np.zeros((3, 3))
+        KKT[:2, :2] = H
+        KKT[:2, 2:] = -A_eq.T
+        KKT[2:, :2] = A_eq
+        rhs = np.concatenate([g - H @ beta, -(A_eq @ beta)])
+
+        sol = np.linalg.lstsq(KKT, rhs, rcond=None)[0]
+        residual = np.linalg.norm(KKT @ sol - rhs)
+        scale = np.linalg.norm(KKT) * np.linalg.norm(sol) + np.linalg.norm(rhs)
+        assert residual / scale > 0.1, "fixture no longer exercises an inconsistent saddle"
+
+        # And the solver refuses it rather than returning the artifact.
+        with pytest.raises(ValueError, match="component in null"):
+            solve_constrained_qp(H, g, np.array([[1.0, 0.0]]), np.zeros(1))
+
+
 class TestKKTEquilibration:
     """``lstsq``'s cutoff is relative to the matrix it is handed.
 
