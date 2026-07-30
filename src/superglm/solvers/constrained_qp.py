@@ -325,8 +325,20 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     not, and would leave the returned multipliers on a different scale from the
     step.
 
-    Two properties make the scaling safe on a degenerate block, which is the
-    reason this cannot emit ``inf`` or ``nan``:
+    Two properties make the scaling safe on a degenerate block.  Scope them
+    carefully: the scale multiplies **three** quantities -- the matrix, the
+    right-hand side ``rhs * scale``, and the unscaling ``sol * scale`` -- and
+    what is proved below covers only the first.  The equilibrated *matrix
+    entries* cannot exceed 1; the other two products carry no such envelope and
+    can overflow.  Measured on ``K = diag(1, 1e-320, 1)`` with
+    ``rhs = (1, 1e200, 1)``: every equilibrated matrix entry is finite with
+    maximum exactly ``1.0``, ``rhs * scale`` overflows to ``inf``, and the
+    returned solution is all ``nan``.  That input is far outside anything this
+    module assembles -- ``decompose_gram`` refuses a non-finite ``H`` upstream,
+    and the smallest nonzero in-tree row inf-norm is of order the constraint
+    rows -- but the bound below is not what rules it out, and the Ruiz
+    comparison in the second bullet is closer than "provable versus empirical"
+    reads, because the provable side covers one product of three.
 
     * **No zero divide.** A structurally empty row -- an ``H`` row that is zero
       with a matching zero ``A`` column, or an all-zero constraint row -- has
@@ -337,8 +349,9 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
       stay zero and ``lstsq`` discards the direction as it should.  Clamping to
       ``tiny`` instead would manufacture a ``6.7e153`` scale for a row that
       carries no information.
-    * **No overflow.** For a nonzero row, ``|K[i, j]| <= min(m_i, m_j) <=
-      sqrt(m_i * m_j)``, so every equilibrated entry satisfies
+    * **No overflow in the matrix.** For a nonzero row, ``|K[i, j]| <=
+      min(m_i, m_j) <= sqrt(m_i * m_j)``, so every equilibrated matrix entry
+      satisfies
       ``|K[i, j]| / sqrt(m_i * m_j) <= 1`` by construction, whatever the
       dynamic range of the input.  The bound is exact in real arithmetic and
       holds to a couple of ulps once the two multiplies round, which is what
@@ -356,13 +369,16 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
 
     The solution is minimum-norm **in the equilibrated coordinates**, not in
     the original ones, because that is where ``lstsq`` resolves the null
-    directions.  That is the same convention ``RankDecomposition.solve`` uses
-    for the pure-``H`` solve -- it also divides by its column scale, solves,
-    and divides again -- so the two solves inside this module now pick the same
-    representative on a flat optimal face.  Where the face is genuinely flat
-    the point moves but the objective does not: the rank-one regression below
-    returns ``max|beta| = 18.3`` rather than ``15.7`` for the same exact
-    optimum of ``-450``.
+    directions.  ``RankDecomposition.solve`` follows the same *convention* for
+    the pure-``H`` solve -- divide by a scale, solve, divide again -- but not
+    the same *scale*: it divides by ``sqrt(diag(H))`` while this divides by
+    ``sqrt(row inf-norm of K)``.  So the two solves do not structurally pick
+    the same representative on a flat optimal face, and nothing here makes them
+    agree; what is claimed is only that they have not been measured to
+    disagree in a way that matters.  Where the face is genuinely flat the point
+    moves but the objective does not: the rank-one regression below returns
+    ``max|beta| = 18.3`` rather than ``15.7`` for the same exact optimum of
+    ``-450``.
 
     The 2 ensemble cases that regress from feasible to infeasible were read as
     that same benign movement, on the strength of a neutral control: rescaling
@@ -389,8 +405,10 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     pass ``SHARED_RANK_POLICY.gram_rcond`` so that one rule decides what is
     retained, since the policy keeps ``H`` eigenvalues down to
     ``gram_rcond * lambda_max`` while ``lstsq`` drops singular values below
-    ``max(M, N) * eps * sigma_max``.  Equilibration already settles that
-    disagreement, and settles it *better*, for two measured reasons:
+    ``max(M, N) * eps * sigma_max``.  Equilibration is *measured* to settle
+    that disagreement better -- there is no structural argument that it must,
+    and the two bullets below are the whole of the evidence, so weakening
+    either weakens the decline:
 
     * A direction that is near-null for ``H`` but pinned by an active
       constraint keeps a KKT singular value of order that constraint row's
@@ -491,7 +509,17 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     spanning 0.039 to 0.594, so row normalization would reroute 12% of all
     sweeps to repair 0.016% of them.  And an all-zero constraint row divides
     0 by 0 under normalization, which ``argmin`` then selects, where the raw
-    order simply never picks a row that is not violated.
+    order never picks a row whose *raw* violation is not the worst.
+
+    That last clause is about raw violation only, not about the shared
+    predicate: the two come apart for a nonzero ``b``.  With ``b = (0, 1000)``,
+    ``beta = (-0.5, 999)`` and ``tol = 0.01``, row 1 is the worse raw violation
+    (``-1`` against ``-0.5``) yet is already satisfied against its row scale of
+    1000, so the sweep spends budget repairing a row ``_is_feasible`` accepts.
+    Self-limiting -- the stopping test is still the scaled one, so the sweep
+    exits as soon as every row is satisfied -- and unreachable at ``b = 0``,
+    where the two orders coincide.  ``test_the_stopping_test_still_means_every_row``
+    pins that behaviour.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
