@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.solvers.rank import decompose_gram
+from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 
 
 @dataclass
@@ -46,7 +46,33 @@ class QPResult:
     converged: bool = True
 
 
-def _project_feasible(beta: NDArray, A: NDArray, b: NDArray) -> NDArray:
+def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> NDArray:
+    """Return ``A @ beta - b`` measured against a scale-aware tolerance.
+
+    A step that lands *on* a constraint reproduces ``b_i`` only to about
+    ``eps * |A_i @ beta|``, so a fixed absolute tolerance turns a genuine KKT
+    point into a violation as soon as the constraint row is large: at
+    ``|A_i @ beta| ~ 1e4`` an exactly-active constraint already reads ``-2e-12``.
+    Comparing against ``tol * max(1, |b_i|, |A_i @ beta|)`` keeps the test
+    meaningful under rescaling, and is identical to the absolute test for the
+    well-scaled problems where the scale factor is 1.
+
+    Returns the slack already divided by its per-row scale, so callers can
+    compare it against a bare ``-tol``.
+    """
+    products = A @ beta
+    scale = np.maximum(1.0, np.maximum(np.abs(b), np.abs(products)))
+    return (products - b) / scale
+
+
+def _is_feasible(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> bool:
+    """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance."""
+    if A.shape[0] == 0:
+        return True
+    return bool(np.all(_feasibility_slack(A, beta, b, tol) >= -tol))
+
+
+def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
     """Project beta onto the feasible set {x : A @ x >= b}.
 
     Uses iterative constraint-by-constraint projection (Dykstra-like).
@@ -59,12 +85,15 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray) -> NDArray:
     here and the active-set loop often recovers from the second, so the caller
     must test the feasibility of the point it finally returns rather than
     treating the starting point's status as the answer.
+
+    Uses the same scale-aware stopping test as the caller's convergence check,
+    so the two cannot disagree about what "feasible" means.
     """
     beta = beta.copy()
     for _ in range(100):
-        violations = A @ beta - b
-        worst = np.argmin(violations)
-        if violations[worst] >= -1e-12:
+        violations = _feasibility_slack(A, beta, b, tol)
+        worst = int(np.argmin(violations))
+        if violations[worst] >= -tol:
             break
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
@@ -89,11 +118,22 @@ def solve_constrained_qp(
     H : (p, p) NDArray
         Positive semidefinite Hessian. It is decomposed once through the
         shared rank policy, so a rank-deficient H is truncated rather than
-        raising; a materially indefinite H raises ``ValueError``, because
-        the problem is then not the convex QP this solver assumes.
-        The rank policy symmetrizes its input as ``0.5 * (H + H.T)``, so an
-        asymmetric H is solved as its symmetric part. Every in-tree caller
-        builds H symmetric by construction (``XtWX + S``, ``X'X + lambda*P``).
+        raising, provided g lies in ``range(H)``.
+
+        Three inputs raise ``ValueError`` rather than returning a plausible
+        wrong answer: a materially indefinite H (the problem is then not the
+        convex QP this solver assumes); a rank-deficient H whose g has a
+        component outside ``range(H)`` (the objective is unbounded below along
+        a null direction, and no search direction this method forms can follow
+        it); and an H the rank policy cannot equilibrate.
+
+        H is symmetrized once as ``0.5 * (H + H.T)`` and that symmetric part is
+        used throughout -- decomposition, KKT blocks, residual and multiplier
+        test alike -- so an asymmetric H is solved consistently as its
+        symmetric part rather than as two different quadratics on the two
+        paths. For an exactly symmetric H the symmetrization is bitwise
+        identity. Every in-tree caller builds H symmetric by construction
+        (``XtWX + S``, ``X'X + lambda*P``).
     g : (p,) NDArray
         Linear term (gradient at zero, with sign: objective is
         0.5 * beta^T H beta - g^T beta).
@@ -106,7 +146,11 @@ def solve_constrained_qp(
     max_iter : int
         Maximum active-set iterations.
     tol : float
-        Tolerance for constraint satisfaction and multiplier signs.
+        Tolerance for constraint satisfaction and multiplier signs. The
+        constraint test is relative: row ``i`` is satisfied when
+        ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i @ beta|)``, so a
+        badly scaled constraint system does not read as infeasible purely
+        because its rows are large.
 
     Returns
     -------
@@ -116,23 +160,51 @@ def solve_constrained_qp(
     p = H.shape[0]
     m = A.shape[0]
 
+    # The rank policy decomposes 0.5 * (H + H.T).  Materialize that symmetric
+    # part once and use it for the KKT blocks, the residual and the multiplier
+    # test too, so the two solve paths cannot disagree about which quadratic
+    # they are minimizing.  For an exactly symmetric H this is bitwise H.
+    H_sym = 0.5 * (H + H.T)
+
     # Route the pure-H solves through the shared rank policy so a singular or
     # near-singular H is rank-truncated the way it is everywhere else in the
     # solver subsystem, rather than raising LinAlgError.  H does not change
     # during the solve, so one decomposition serves every pure-H solve below.
     try:
-        decomposition = decompose_gram(H)
+        decomposition = decompose_gram(H_sym)
     except ValueError as exc:
         raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
 
-    if m == 0:
-        # No constraints — direct solve
-        beta = decomposition.solve(g)
-        return QPResult(beta=beta, active_set=[], n_iter=0)
-
     # --- Unconstrained solution ---
     beta_unc = decomposition.solve(g)
-    if np.all(A @ beta_unc - b >= -tol):
+
+    # decomposition.solve is a pseudo-inverse, so it answers even when the
+    # normal equations have no solution.  If H is rank-deficient and g has a
+    # component outside range(H), the quadratic decreases without bound along
+    # that null direction and H^+g is merely a projection, not a stationary
+    # point.  Returning it as converged would be a silent wrong answer, so
+    # detect the inconsistency before either early return.  Full rank means
+    # range(H) is everything, so the check is only needed after truncation.
+    if decomposition.rank < decomposition.width:
+        residual_norm = float(np.linalg.norm(H_sym @ beta_unc - g))
+        reference = max(float(np.linalg.norm(g)), np.finfo(float).tiny)
+        if residual_norm > SHARED_RANK_POLICY.factor_rcond * reference:
+            raise ValueError(
+                "solve_constrained_qp: H is rank-deficient (rank "
+                f"{decomposition.rank} of {decomposition.width}) and g has a "
+                "component outside range(H) (relative normal-equation residual "
+                f"{residual_norm / reference:.3e}), so the objective is unbounded "
+                "below along a null direction of H. The active-set method cannot "
+                "reach that optimum -- every search direction it forms lies in "
+                "range(H) -- so no meaningful answer exists here. Regularize H "
+                "(for example add a ridge term) or drop the aliased columns."
+            )
+
+    if m == 0:
+        # No constraints — direct solve
+        return QPResult(beta=beta_unc, active_set=[], n_iter=0)
+
+    if _is_feasible(A, beta_unc, b, tol):
         return QPResult(beta=beta_unc, active_set=[], n_iter=0)
 
     # --- Initialize active set ---
@@ -144,7 +216,7 @@ def solve_constrained_qp(
     # --- Feasible starting point ---
     # This may still be infeasible; see _project_feasible.  Feasibility is
     # therefore re-tested on the point actually returned, below.
-    beta = _project_feasible(beta_unc, A, b)
+    beta = _project_feasible(beta_unc, A, b, tol)
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
@@ -161,12 +233,12 @@ def solve_constrained_qp(
             # [A_eq  0     ] [lambda] = [b_eq - A_eq @ beta]
             n_eq = len(active)
             KKT = np.zeros((p + n_eq, p + n_eq))
-            KKT[:p, :p] = H
+            KKT[:p, :p] = H_sym
             KKT[:p, p:] = -A_eq.T
             KKT[p:, :p] = A_eq
 
             rhs = np.zeros(p + n_eq)
-            rhs[:p] = g - H @ beta
+            rhs[:p] = g - H_sym @ beta
             rhs[p:] = b_eq - A_eq @ beta
 
             try:
@@ -187,14 +259,14 @@ def solve_constrained_qp(
                     beta=beta,
                     active_set=active,
                     n_iter=it + 1,
-                    converged=bool(np.all(A @ beta - b >= -tol)),
+                    converged=_is_feasible(A, beta, b, tol),
                 )
 
             # Recompute multipliers at current point.
             # KKT stationarity: H*beta - g = A_eq' * lambda, lambda >= 0
             # => lambda = (A_eq @ A_eq^T)^{-1} @ A_eq @ (H @ beta - g)
             A_eq = A[active]
-            residual = H @ beta - g
+            residual = H_sym @ beta - g
             try:
                 multipliers = np.linalg.solve(A_eq @ A_eq.T, A_eq @ residual)
             except np.linalg.LinAlgError:
@@ -209,7 +281,7 @@ def solve_constrained_qp(
                     beta=beta,
                     active_set=active,
                     n_iter=it + 1,
-                    converged=bool(np.all(A @ beta - b >= -tol)),
+                    converged=_is_feasible(A, beta, b, tol),
                 )
 
             drop_idx = np.argmin(multipliers)
