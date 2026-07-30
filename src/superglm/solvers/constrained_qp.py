@@ -31,10 +31,13 @@ from superglm.solvers.rank import decompose_gram
 class QPResult:
     """Result of a constrained QP solve.
 
-    ``converged`` is ``False`` when the active-set loop exhausted ``max_iter``
-    or when the feasibility projection never reached the feasible set (which
-    happens for a mutually infeasible constraint system).  In either case
-    ``beta`` is the best available point, not a certified solution.
+    ``converged`` means the full KKT certificate holds for ``beta``: the
+    active-set loop reached its own termination test (a stationary step with
+    no negative multiplier) *and* ``beta`` is feasible.  It is ``False`` when
+    the loop exhausted ``max_iter``, and when the loop terminated but the
+    returned point still violates a constraint -- which is what happens for a
+    mutually infeasible constraint system.  In either case ``beta`` is the
+    best available point, not a certified solution.
     """
 
     beta: NDArray
@@ -43,27 +46,31 @@ class QPResult:
     converged: bool = True
 
 
-def _project_feasible(beta: NDArray, A: NDArray, b: NDArray) -> tuple[NDArray, bool]:
+def _project_feasible(beta: NDArray, A: NDArray, b: NDArray) -> NDArray:
     """Project beta onto the feasible set {x : A @ x >= b}.
 
     Uses iterative constraint-by-constraint projection (Dykstra-like).
     For the small dense problems we handle, this converges quickly.
 
-    Returns the projected point and whether the sweeps reached feasibility;
-    a mutually infeasible constraint set exhausts the sweep budget and
-    reports ``False``.
+    Each sweep repairs only the single worst violation, so the 100-sweep
+    budget can be exhausted with the point still infeasible -- either because
+    the constraints are mutually infeasible, or merely because there are more
+    violated constraints than sweeps.  Those two cases are not distinguishable
+    here and the active-set loop often recovers from the second, so the caller
+    must test the feasibility of the point it finally returns rather than
+    treating the starting point's status as the answer.
     """
     beta = beta.copy()
     for _ in range(100):
         violations = A @ beta - b
         worst = np.argmin(violations)
         if violations[worst] >= -1e-12:
-            return beta, True
+            break
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
         deficit = b[worst] - a @ beta
         beta += deficit / (a @ a) * a
-    return beta, False
+    return beta
 
 
 def solve_constrained_qp(
@@ -84,6 +91,9 @@ def solve_constrained_qp(
         shared rank policy, so a rank-deficient H is truncated rather than
         raising; a materially indefinite H raises ``ValueError``, because
         the problem is then not the convex QP this solver assumes.
+        The rank policy symmetrizes its input as ``0.5 * (H + H.T)``, so an
+        asymmetric H is solved as its symmetric part. Every in-tree caller
+        builds H symmetric by construction (``XtWX + S``, ``X'X + lambda*P``).
     g : (p,) NDArray
         Linear term (gradient at zero, with sign: objective is
         0.5 * beta^T H beta - g^T beta).
@@ -110,7 +120,10 @@ def solve_constrained_qp(
     # near-singular H is rank-truncated the way it is everywhere else in the
     # solver subsystem, rather than raising LinAlgError.  H does not change
     # during the solve, so one decomposition serves every pure-H solve below.
-    decomposition = decompose_gram(H)
+    try:
+        decomposition = decompose_gram(H)
+    except ValueError as exc:
+        raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
 
     if m == 0:
         # No constraints — direct solve
@@ -129,7 +142,9 @@ def solve_constrained_qp(
         active = []
 
     # --- Feasible starting point ---
-    beta, projection_feasible = _project_feasible(beta_unc, A, b)
+    # This may still be infeasible; see _project_feasible.  Feasibility is
+    # therefore re-tested on the point actually returned, below.
+    beta = _project_feasible(beta_unc, A, b)
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
@@ -166,11 +181,13 @@ def solve_constrained_qp(
         if np.linalg.norm(step) < tol:
             # At a stationary point. Check multipliers.
             if len(active) == 0:
+                # Stationary with no active constraint: the KKT certificate is
+                # complete once the point is also feasible.
                 return QPResult(
                     beta=beta,
                     active_set=active,
                     n_iter=it + 1,
-                    converged=projection_feasible,
+                    converged=bool(np.all(A @ beta - b >= -tol)),
                 )
 
             # Recompute multipliers at current point.
@@ -186,12 +203,13 @@ def solve_constrained_qp(
             # Drop most negative multiplier (constraint wants to be inactive)
             min_mult = np.min(multipliers)
             if min_mult >= -tol:
-                # All multipliers nonneg — KKT satisfied
+                # All multipliers nonneg — stationarity and dual feasibility
+                # hold; primal feasibility completes the KKT certificate.
                 return QPResult(
                     beta=beta,
                     active_set=active,
                     n_iter=it + 1,
-                    converged=projection_feasible,
+                    converged=bool(np.all(A @ beta - b >= -tol)),
                 )
 
             drop_idx = np.argmin(multipliers)
@@ -228,4 +246,9 @@ def solve_constrained_qp(
             else:
                 beta = beta_new
 
+    # Exhaustion is unconditional non-convergence, feasible or not: the loop
+    # never reached its stationarity/multiplier test, so there is no KKT
+    # certificate to complete.  A merely feasible point is not a solution --
+    # any interior point is feasible -- so consulting feasibility here would
+    # report success for a search that was cut off mid-flight.
     return QPResult(beta=beta, active_set=active, n_iter=max_iter, converged=False)
