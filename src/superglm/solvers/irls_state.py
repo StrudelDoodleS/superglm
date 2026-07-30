@@ -134,7 +134,15 @@ def _stable_penalized_deviance_delta(
     identity evaluates that difference directly from the coefficient update.
 
     ``penalty_matvec`` supplies the quadratic penalty ``S`` (a matrix or a
-    matvec); pass ``None`` when the fit carries no quadratic penalty.
+    matvec); pass ``None`` when the fit carries no quadratic penalty. **It
+    must apply a symmetric operator.** The polarization identity used here
+    evaluates ``(b1 - b0)' S (b1 + b0)``, which equals the difference of the
+    two merit quadratics ``b' S b`` only when ``S = S'``; for an asymmetric
+    ``S`` the antisymmetric part cancels out of ``b' S b`` but not out of the
+    polarized form, so the merit and its delta would disagree. Every in-tree
+    penalty is symmetric by construction; the constraint is stated because
+    ``S_override`` accepts an arbitrary ``(p, p)`` array on a shape check
+    alone.
     ``nonsmooth_penalty`` supplies any non-quadratic penalty term as a
     function of ``beta``, already scaled to match the caller's merit
     convention; its two evaluations enter the same ``math.fsum``.

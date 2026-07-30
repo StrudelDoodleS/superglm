@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from superglm.solvers.constrained_qp import _project_feasible, solve_constrained_qp
+from superglm.solvers.constrained_qp import (
+    _is_feasible,
+    _project_feasible,
+    solve_constrained_qp,
+)
 
 
 class TestUnconstrainedFallback:
@@ -307,7 +311,7 @@ class TestConvergenceFlag:
 
         # Precondition: the projection really does exhaust its sweep budget.
         beta_unc = np.linalg.solve(H, g)
-        projected = _project_feasible(beta_unc, A, b)
+        projected = _project_feasible(beta_unc, A, b, 1e-12)
         assert np.min(A @ projected - b) < -1e-9, "projection did not overrun its budget"
 
         result = solve_constrained_qp(H, g, A, b)
@@ -456,3 +460,168 @@ class TestCallSiteWarnings:
             if "constrained QP did not converge" in record.getMessage()
         ]
         assert len(warnings) == 1, f"expected exactly 1 warning, got {len(warnings)}"
+
+
+class TestInconsistentNormalEquations:
+    """A rank-deficient H with g outside range(H) must not answer silently.
+
+    ``decomposition.solve`` is a pseudo-inverse, so it returns a projection for
+    a system that has no solution at all.  Routing the pure-H solves through
+    the rank policy turned the pre-branch ``LinAlgError`` into a plausible
+    wrong answer for this case; these tests pin the loud behaviour back.
+    """
+
+    # H = diag(1, 0) has null direction e2, and g = (0, 1) has all of its mass
+    # there, so the objective 0.5*x1^2 - x2 decreases without bound as x2 grows.
+    H_INCONSISTENT = np.diag([1.0, 0.0])
+    G_INCONSISTENT = np.array([0.0, 1.0])
+
+    def test_unconstrained_inconsistent_system_raises(self):
+        with pytest.raises(ValueError, match="component outside range"):
+            solve_constrained_qp(
+                self.H_INCONSISTENT, self.G_INCONSISTENT, np.zeros((0, 2)), np.zeros(0)
+            )
+
+    def test_constrained_inconsistent_system_raises_rather_than_projecting(self):
+        """The bounded-by-constraints case must raise too, not return H+g.
+
+        With ``x2 <= 1`` the true optimum is ``[0, 1]`` with objective -1, but
+        the pseudo-inverse answer ``[0, 0]`` has objective 0 and is feasible,
+        so it would sail through the unconstrained-probe early return.  The
+        active-set loop cannot recover it either: from an empty active set the
+        only direction it forms is ``H+g - beta``, which lies in range(H) and
+        is exactly zero here, so the loop stalls at the wrong point.
+        """
+        A = np.array([[0.0, -1.0]])  # -x2 >= -1, i.e. x2 <= 1
+        b = np.array([-1.0])
+
+        with pytest.raises(ValueError, match="unbounded below along a null direction"):
+            solve_constrained_qp(self.H_INCONSISTENT, self.G_INCONSISTENT, A, b)
+
+    def test_error_names_the_rank_and_the_residual(self):
+        with pytest.raises(ValueError) as excinfo:
+            solve_constrained_qp(
+                self.H_INCONSISTENT, self.G_INCONSISTENT, np.zeros((0, 2)), np.zeros(0)
+            )
+        message = str(excinfo.value)
+        assert "rank 1 of 2" in message
+        assert "Regularize H" in message
+
+    def test_consistent_rank_deficient_system_still_solves(self):
+        """The rank-truncation behaviour this branch added must be preserved.
+
+        Same rank-deficient H, but g in range(H): the pseudo-inverse answer is
+        a genuine solution of the normal equations and must not raise.
+        """
+        H = self.H_INCONSISTENT
+        g = np.array([2.0, 0.0])  # orthogonal to null(H) = span(e2)
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 2)), np.zeros(0))
+
+        np.testing.assert_allclose(H @ result.beta, g, atol=1e-12)
+        assert result.converged
+
+    def test_ridge_regularization_is_a_workable_escape(self):
+        """The remedy the error message recommends must actually work."""
+        H = self.H_INCONSISTENT + 1e-6 * np.eye(2)
+
+        result = solve_constrained_qp(H, self.G_INCONSISTENT, np.zeros((0, 2)), np.zeros(0))
+
+        assert np.all(np.isfinite(result.beta))
+        np.testing.assert_allclose(H @ result.beta, self.G_INCONSISTENT, atol=1e-9)
+
+
+class TestSymmetrization:
+    """H is symmetrized once and used consistently on both solve paths."""
+
+    def test_asymmetric_h_minimizes_its_symmetric_part(self):
+        """Before the fix the decomposition saw 0.5*(H+H') but the KKT blocks
+        saw raw H, so the two paths minimized different quadratics."""
+        H = np.array([[2.0, 2.0], [0.0, 2.0]])  # symmetric part [[2,1],[1,2]]
+        g = np.zeros(2)
+        A = np.array([[1.0, 0.0]])  # x1 >= 1, binding
+        b = np.array([1.0])
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        # Optimum of 0.5 x' sym(H) x subject to x1 >= 1 is [1, -0.5].
+        np.testing.assert_allclose(result.beta, [1.0, -0.5], atol=1e-10)
+        assert result.converged
+
+    def test_symmetric_input_is_untouched(self):
+        """0.5*(H + H.T) must be bitwise identity for an exactly symmetric H."""
+        rng = np.random.default_rng(11)
+        M = rng.standard_normal((5, 5))
+        H = M.T @ M + np.eye(5)
+        H = 0.5 * (H + H.T)  # force exact symmetry
+        g = rng.standard_normal(5)
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 5)), np.zeros(0))
+
+        assert np.array_equal(0.5 * (H + H.T), H)
+        np.testing.assert_allclose(result.beta, np.linalg.solve(H, g), rtol=1e-12)
+
+
+class TestFeasibilityToleranceScaling:
+    """The feasibility test is relative, so large constraint rows do not
+    read as violations at a genuine KKT point."""
+
+    def test_badly_scaled_constraints_do_not_report_spurious_non_convergence(self):
+        """A blocking step lands on a constraint only to ~eps*|A_i @ beta|.
+
+        With rows of order 1e3 that rounding already exceeds an absolute 1e-12
+        tolerance, so the unscaled test called a genuine KKT point infeasible
+        and made all three call sites warn.
+        """
+        rng = np.random.default_rng(0)
+        p = 6
+        M = rng.standard_normal((p, p))
+        H = M.T @ M + 0.5 * np.eye(p)
+        scale = 1e3
+        g = rng.standard_normal(p) * scale
+        A = np.diff(np.eye(p), axis=0)  # monotone increasing
+        b = rng.standard_normal(p - 1) * scale
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        raw_slack = A @ result.beta - b
+        # Precondition: an absolute 1e-12 test really would call this a
+        # violation, so the test exercises the scaling rather than passing
+        # for free.
+        assert np.min(raw_slack) < -1e-12, f"min slack {np.min(raw_slack):.3e} is not tight"
+        # ...but it is a rounding-level violation relative to the row scale.
+        row_scale = np.maximum(1.0, np.maximum(np.abs(b), np.abs(A @ result.beta)))
+        assert np.min(raw_slack / row_scale) >= -1e-12
+        assert result.converged
+
+    def test_scaling_does_not_mask_a_real_violation(self):
+        """A genuinely infeasible point must still report non-convergence."""
+        H = np.eye(1)
+        g = np.array([0.0])
+        A = np.array([[1.0], [-1.0]])
+        b = np.array([1e6, 1e6])  # x >= 1e6 and -x >= 1e6, badly scaled
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert not result.converged
+
+    def test_projection_and_convergence_share_one_feasibility_rule(self):
+        """``_project_feasible`` hardcoded ``-1e-12`` while the caller used
+        ``-tol``; they must now apply one predicate, since disagreement about
+        what "feasible" means is what produced the spurious-warning class.
+
+        The probe point sits a rounding-level distance below its constraint:
+        1e-9 in absolute terms, which an absolute 1e-12 test rejects, but
+        1e-13 relative to the row scale, which the shared rule accepts.
+        """
+        A = np.array([[1.0e4]])
+        b = np.array([1.0e4])
+        beta = np.array([1.0 - 1.0e-13])  # A @ beta - b == -1e-9
+
+        raw_slack = float((A @ beta - b)[0])
+        assert raw_slack < -1e-12, f"probe slack {raw_slack:.3e} is not tight enough"
+
+        # Both the projection's stopping test and the caller's convergence
+        # test must accept it -- so the projection leaves the point alone.
+        assert _is_feasible(A, beta, b, 1e-12)
+        np.testing.assert_array_equal(_project_feasible(beta, A, b, 1e-12), beta)
