@@ -1697,3 +1697,76 @@ class TestIntegerHessian:
         float_result = solve_constrained_qp(H.astype(float), g, np.zeros((0, 2)), np.zeros(0))
 
         np.testing.assert_array_equal(integer_result.beta, float_result.beta)
+
+
+class TestLargeFiniteHessian:
+    """The float cast fixed integer wrap; the sum still overflows in floats."""
+
+    def test_large_finite_hessian_is_solved_rather_than_refused(self):
+        """``[[1e308]] + [[1e308]].T`` is ``inf``, so the PSD guard refused a
+        matrix that ``master``'s ``np.linalg.solve(H, g)`` answered exactly."""
+        H = np.array([[1e308]])
+        with np.errstate(over="ignore"):
+            assert not np.isfinite(H + H.T).all(), "fixture no longer overflows"
+        g = np.array([1.0])
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 1)), np.zeros(0))
+
+        np.testing.assert_array_equal(result.beta, [1e-308])
+        assert result.converged
+
+    def test_large_finite_hessian_solves_the_constrained_problem(self):
+        """The KKT blocks carry ``H_sym`` too, so the active-set path has to
+        survive the same magnitude, not just the early unconstrained return."""
+        H = np.diag([1e308, 1e308])
+        g = np.array([-1e308, 1e308])
+        A = np.eye(2)
+        b = np.zeros(2)
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert np.all(np.isfinite(result.beta))
+        # Unconstrained optimum is ``g / diag(H) = (-1, 1)``; clipping the
+        # violated first row to its bound gives ``(0, 1)``.
+        np.testing.assert_allclose(result.beta, [0.0, 1.0], atol=1e-12, rtol=1e-12)
+        assert _is_feasible(A, result.beta, b, 1e-12)
+        assert result.converged
+
+    def test_a_dense_hessian_past_the_overflow_bound_matches_the_scaled_problem(self):
+        """Scaling ``H`` and ``g`` by a common constant leaves the optimum
+        fixed, so the overflow regime has a reference answer to be checked
+        against -- on a dense ``H`` with a binding active set, not the diagonal
+        one-liner above.  Pre-fix the scaled solve returns all zeros: the
+        symmetrization saturates to ``inf`` and equilibration turns that into
+        ``nan``."""
+        rng = np.random.default_rng(21)
+        factor = rng.standard_normal((4, 4))
+        H = factor.T @ factor + np.eye(4)
+        H *= 1.5 / np.abs(H).max()
+        g = rng.standard_normal(4)
+        A = np.eye(4)
+        b = np.zeros(4)
+
+        reference = solve_constrained_qp(H, g, A, b)
+        assert reference.active_set, "fixture must bind a constraint"
+
+        # ``H`` and ``g`` are scaled by *different* powers of two, so ``H``
+        # crosses the bound while ``H_sym @ beta`` stays representable.  That
+        # matvec overflows for a dense ``H`` at this magnitude with an O(1)
+        # ``beta``, which is a separate exposure this fix does not address.
+        # ``b = 0`` makes the feasible cone scale-invariant, so the optimum
+        # moves by exactly ``g_scale / H_scale``.
+        h_scale, g_scale = 2.0**1023, 2.0**1000
+        scaled_H = H * h_scale
+        assert np.abs(scaled_H).max() > np.finfo(float).max / 2.0, "fixture is inside the bound"
+        with np.errstate(over="ignore"):
+            assert not np.isfinite(scaled_H + scaled_H.T).all(), "fixture no longer overflows"
+
+        scaled = solve_constrained_qp(scaled_H, g * g_scale, A, b)
+
+        assert np.all(np.isfinite(scaled.beta))
+        np.testing.assert_allclose(
+            scaled.beta * (h_scale / g_scale), reference.beta, rtol=1e-9, atol=1e-10
+        )
+        assert scaled.active_set == reference.active_set
+        assert scaled.converged == reference.converged
