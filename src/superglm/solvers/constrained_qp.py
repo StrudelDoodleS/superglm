@@ -417,6 +417,38 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     stopping decision is unchanged there; the ``min`` below keeps the test
     correct for a nonzero ``b``, where it is not.
 
+    **At ``b = 0`` -- every in-tree call site -- this is bitwise ``master``'s
+    projection**, and the claim is an argument rather than a measurement, so it
+    does not decay as fixtures change:
+
+    ==========================  ===================================================
+    step                        at ``b = 0``
+    ==========================  ===================================================
+    ``products - b``            ``x - 0.0`` is bitwise ``x``, signed zeros
+                                included; ``master`` forms the same difference.
+    ``argmin(violations)``      the same array, and ``master`` also selected on
+                                the raw violations (``git show e8e31f4``).
+    ``slack.min() >= -tol``     the clamp ``v / max(1, |v|)`` is exactly ``v``
+                                for ``|v| <= 1`` and exactly ``-1`` for
+                                ``v < -1``, so for ``tol`` in ``(0, 1)`` --
+                                enforced at the public boundary -- ``clamp(v) >=
+                                -tol`` and ``v >= -tol`` are the same predicate
+                                row by row, and the clamp is nondecreasing so
+                                ``min`` commutes with it.  ``master``'s test is
+                                ``violations[argmin] >= -1e-12``, and the default
+                                ``tol`` **is** ``1e-12``.
+    repair body                 unchanged, term for term.
+    ==========================  ===================================================
+
+    The ``tol`` domain is what makes the third row exact rather than
+    approximate: at ``tol >= 1`` the clamped test accepts violations the raw one
+    rejects, which is the vacuity the boundary check exists to refuse.  A
+    nonzero ``b``, or a ``tol`` outside the default, narrows the claim to
+    "same predicate, possibly different arithmetic" -- no in-tree caller does
+    either, and ``test_the_projection_is_bitwise_masters_at_zero_rhs`` pins the
+    equality against a hand-written reference rather than against a recorded
+    number.
+
     Plain raw violation rather than raw over row norm, though the latter is the
     true Euclidean distance to the hyperplane (the sweep moves ``|violation| /
     ||a||``).  Three reasons, in order of weight.  It is what ``master``

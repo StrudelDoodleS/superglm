@@ -1007,6 +1007,71 @@ class TestProjectionSelectsTheWorstViolation:
             f"projection returned {projected}, which its own caller calls infeasible"
         )
 
+    @staticmethod
+    def _master_project_feasible(beta, A, b):
+        """``master``'s projection, transcribed verbatim from ``git show
+        master:src/superglm/solvers/constrained_qp.py``.
+
+        A reference implementation rather than a recorded array: the claim
+        under test is that the shipped body *is* this one at ``b = 0``, and an
+        argument stays true as fixtures move where a stored number does not.
+        """
+        beta = beta.copy()
+        for _ in range(100):
+            violations = A @ beta - b
+            worst = np.argmin(violations)
+            if violations[worst] >= -1e-12:
+                break
+            a = A[worst]
+            deficit = b[worst] - a @ beta
+            beta += deficit / (a @ a) * a
+        return beta
+
+    def test_the_projection_is_bitwise_masters_at_zero_rhs(self):
+        """Every in-tree call site passes ``b = 0`` and the default ``tol``, and
+        on that domain the scale-aware rewrite is the identity.
+
+        ``products - 0.0`` is bitwise ``products``; the selection is the same
+        raw ``argmin``; and the clamp ``v / max(1, |v|)`` is exactly ``v`` for
+        ``|v| <= 1`` and exactly ``-1`` below, so for ``tol`` in ``(0, 1)`` the
+        clamped and raw stopping tests are the same predicate row by row.  The
+        default ``tol`` is ``1e-12``, which is the literal ``master`` hardcoded.
+        """
+        rng = np.random.default_rng(2026)
+        checked = repaired = 0
+        for _ in range(400):
+            p = int(rng.integers(2, 10))
+            shape = rng.integers(0, 4)
+            if shape == 0:
+                A = np.diff(np.eye(p), axis=0)
+            elif shape == 1:
+                A = np.eye(p)
+            elif shape == 2:
+                A = np.diff(np.eye(p), n=2, axis=0)
+            else:
+                # ``D @ P``, the in-tree shape: unequal row norms, so a
+                # selection normalized by the row norm reorders the sweep.
+                A = np.diff(np.eye(p), axis=0) @ np.linalg.qr(rng.standard_normal((p, p)))[0]
+            if A.shape[0] == 0:
+                continue
+            A = A * 10.0 ** rng.uniform(-3, 3)
+            b = np.zeros(A.shape[0])
+            beta = rng.standard_normal(p) * 10.0 ** rng.uniform(-2, 4)
+
+            shipped = _project_feasible(beta, A, b, 1e-12)
+            reference = self._master_project_feasible(beta, A, b)
+            assert shipped.tobytes() == reference.tobytes(), (
+                f"projection diverged from master at b = 0: {shipped} vs {reference}"
+            )
+            checked += 1
+            if not np.all(A @ beta - b >= -1e-12):
+                repaired += 1
+
+        assert checked >= 350, f"only {checked} fixtures were built"
+        assert repaired >= 100, (
+            f"only {repaired} fixtures started infeasible; the comparison is mostly vacuous"
+        )
+
 
 class TestStructuralAliasConsistency:
     """A structurally zero column's null vector is exact at every conditioning.
