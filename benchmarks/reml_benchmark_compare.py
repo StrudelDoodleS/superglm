@@ -1,4 +1,4 @@
-"""Compare SuperGLM and mgcv REML benchmark results.
+"""Compare SuperGLM and the reference implementation REML benchmark results.
 
 Reads JSON outputs from both harnesses and prints a formatted comparison
 table with wall time, deviance, EDF, scale, and iteration counts.
@@ -58,21 +58,25 @@ def format_table(rows: list[dict], title: str):
     print()
 
 
-def match_and_compare(sg_results: list[dict], mgcv_results: list[dict]):
+def match_and_compare(sg_results: list[dict], reference_results: list[dict]):
     """Match comparable runs and print side-by-side comparison."""
     # Group by dataset/family
     comparisons = {
         "Synthetic Poisson (n=800)": {
             "superglm": [r for r in sg_results if "synthetic_poisson" in r["name"]],
-            "mgcv": [r for r in mgcv_results if "synthetic_poisson" in r["name"]],
+            "the reference implementation": [
+                r for r in reference_results if "synthetic_poisson" in r["name"]
+            ],
         },
         "Synthetic Gamma (n=800)": {
             "superglm": [r for r in sg_results if "synthetic_gamma" in r["name"]],
-            "mgcv": [r for r in mgcv_results if "synthetic_gamma" in r["name"]],
+            "the reference implementation": [
+                r for r in reference_results if "synthetic_gamma" in r["name"]
+            ],
         },
         "MTPL2 Poisson (678k)": {
             "superglm": [r for r in sg_results if "mtpl2" in r["name"]],
-            "mgcv": [r for r in mgcv_results if "mtpl2" in r["name"]],
+            "the reference implementation": [r for r in reference_results if "mtpl2" in r["name"]],
         },
     }
 
@@ -86,12 +90,12 @@ def match_and_compare(sg_results: list[dict], mgcv_results: list[dict]):
             format_table(all_rows, title)
 
 
-def print_lambda_comparison(sg_results: list[dict], mgcv_results: list[dict]):
+def print_lambda_comparison(sg_results: list[dict], reference_results: list[dict]):
     """Print smoothing parameter comparison for matched runs.
 
     NOTE: Raw lambda/sp values are NOT directly comparable between SuperGLM
-    and mgcv due to different basis parametrizations (SSP reparametrized
-    B-splines vs mgcv's cr basis with sum-to-zero constraint).  We show
+    and the reference implementation due to different basis parametrizations (SSP reparametrized
+    B-splines vs the reference implementation's cr basis with sum-to-zero constraint).  We show
     them for reference but compare fit outcomes (deviance, EDF, scale)
     as the primary parity metrics.
     """
@@ -100,27 +104,27 @@ def print_lambda_comparison(sg_results: list[dict], mgcv_results: list[dict]):
             (r for r in sg_results if r["name"].startswith(f"synthetic_{family}_exact")),
             None,
         )
-        mgcv_gam = next(
-            (r for r in mgcv_results if f"synthetic_{family}_gam" in r.get("name", "")),
+        reference_gam = next(
+            (r for r in reference_results if f"synthetic_{family}_gam" in r.get("name", "")),
             None,
         )
 
-        if sg_exact and mgcv_gam:
+        if sg_exact and reference_gam:
             print(f"  Smoothing parameters — synthetic {family} (not directly comparable):")
             sg_lam = sg_exact.get("lambdas", {})
-            mgcv_sp = mgcv_gam.get("smoothing_params", {})
+            reference_sp = reference_gam.get("smoothing_params", {})
 
-            print(f"    {'Term':<20s} {'SuperGLM λ':>12s} {'mgcv sp':>12s}")
+            print(f"    {'Term':<20s} {'SuperGLM λ':>12s} {'the reference implementation sp':>12s}")
             print(f"    {'-' * 48}")
 
-            mgcv_keys = list(mgcv_sp.keys())
+            reference_keys = list(reference_sp.keys())
             sg_keys = sorted(sg_lam.keys())
 
             for i, sg_key in enumerate(sg_keys):
                 sg_val = sg_lam[sg_key]
-                if i < len(mgcv_keys):
-                    mgcv_val = mgcv_sp[mgcv_keys[i]]
-                    print(f"    {sg_key:<20s} {sg_val:>12.4f} {mgcv_val:>12.4f}")
+                if i < len(reference_keys):
+                    reference_val = reference_sp[reference_keys[i]]
+                    print(f"    {sg_key:<20s} {sg_val:>12.4f} {reference_val:>12.4f}")
                 else:
                     print(f"    {sg_key:<20s} {sg_val:>12.4f} {'—':>12s}")
             print()
@@ -128,14 +132,14 @@ def print_lambda_comparison(sg_results: list[dict], mgcv_results: list[dict]):
 
 def main():
     print("=" * 90)
-    print("  REML Benchmark Comparison: SuperGLM vs mgcv")
+    print("  REML Benchmark Comparison: SuperGLM vs the reference implementation")
     print("=" * 90)
 
     print("\nLoading results...")
     sg_results = load_results("superglm")
-    mgcv_results = load_results("mgcv")
+    reference_results = load_results("the reference implementation")
 
-    if not sg_results and not mgcv_results:
+    if not sg_results and not reference_results:
         print("\nNo results found. Run the harness scripts first:")
         print("  uv run python benchmarks/reml_benchmark_harness.py")
         print("  Rscript benchmarks/reml_benchmark_harness.R")
@@ -144,24 +148,28 @@ def main():
     # Print individual tables
     if sg_results:
         format_table(sg_results, "SuperGLM Results")
-    if mgcv_results:
-        format_table(mgcv_results, "mgcv Results")
+    if reference_results:
+        format_table(reference_results, "the reference implementation Results")
 
     # Print side-by-side comparison
-    if sg_results and mgcv_results:
+    if sg_results and reference_results:
         # Work on copies so we don't mutate originals for lambda comparison
         sg_copy = [dict(r) for r in sg_results]
-        mgcv_copy = [dict(r) for r in mgcv_results]
-        match_and_compare(sg_copy, mgcv_copy)
+        reference_copy = [dict(r) for r in reference_results]
+        match_and_compare(sg_copy, reference_copy)
 
         print("── Smoothing parameter comparison ──")
-        print_lambda_comparison(sg_results, mgcv_results)
+        print_lambda_comparison(sg_results, reference_results)
 
     # Print notes on comparability
     print("── Notes ──")
-    print("  Synthetic: SuperGLM exact vs mgcv gam(REML) — direct comparison")
+    print(
+        "  Synthetic: SuperGLM exact vs the reference implementation gam(REML) — direct comparison"
+    )
     print("             (same cr basis, same k, same data)")
-    print("  MTPL2:     SuperGLM exact vs mgcv bam(fREML, weights) — closest comparison")
+    print(
+        "  MTPL2:     SuperGLM exact vs the reference implementation bam(fREML, weights) — closest comparison"
+    )
     print("             Both use rate response + exposure weights, matched basis sizes.")
     print("             bam(fREML, offset) uses integer counts + log-offset (different model).")
     print("             gam(REML, 200k) is a subsample — not directly comparable on time/deviance.")
@@ -187,8 +195,8 @@ def main():
                 f"dev={r['deviance']:.1f}, edf={r['effective_df']:.2f}"
             )
 
-    if mgcv_results:
-        for r in mgcv_results:
+    if reference_results:
+        for r in reference_results:
             name = r.get("name", "?")
             print(
                 f"  {name}: {r.get('wall_time_s', 0):.2f}s, "

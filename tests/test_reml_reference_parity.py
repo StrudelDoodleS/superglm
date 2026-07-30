@@ -1,11 +1,11 @@
-"""mgcv parity tests for REML smoothing parameter estimation.
+"""the reference implementation parity tests for REML smoothing parameter estimation.
 
-Compares SuperGLM's fit_reml() against reference values from mgcv::gam()
+Compares SuperGLM's fit_reml() against reference values from the reference implementation
 (method="REML") on shared datasets.  The reference values were generated
-by scratch/r_experiments/reml_parity_reference.R using R 4.5.2 / mgcv 1.9-3.
+by scratch/r_experiments/reml_parity_reference.R using R 4.5.2 / the reference implementation 1.9-3.
 
 Basis differences:
-  - mgcv bs="bs", k=10: 10 B-splines, 9 free columns after sum-to-zero
+  - the reference implementation bs="bs", k=10: 10 B-splines, 9 free columns after sum-to-zero
     identifiability constraint.  Penalty rank = 8.
   - SuperGLM Spline(n_knots=6): 10 B-splines, 10 SSP-reparametrized
     columns (intercept handled separately).  Penalty rank = 8.
@@ -26,17 +26,17 @@ from superglm.model import SuperGLM
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
-# ── mgcv reference values (from reml_parity_reference.R) ────────────
-# R 4.5.2, mgcv 1.9-3, bs="bs" k=10 m=c(3,2), method="REML"
+# ── the reference implementation reference values (from reml_parity_reference.R) ────────────
+# R 4.5.2, the reference implementation 1.9-3, bs="bs" k=10 m=c(3,2), method="REML"
 
-MGCV_POISSON = {
+REFERENCE_POISSON = {
     "sp": [15.00268, 3720.717],
     "sum_edf": 9.213,
     "deviance": 961.555,
     "reml_score": 1410.839,
 }
 
-MGCV_GAMMA = {
+REFERENCE_GAMMA = {
     "sp": [2.32692, 26568557],
     "sum_edf": 9.166,
     "deviance": 157.422,
@@ -54,10 +54,10 @@ def _data_available():
     reason="Run scratch/r_experiments/reml_parity_reference.R first",
 )
 class TestMgcvParity:
-    """Compare SuperGLM REML against mgcv reference on shared data."""
+    """Compare SuperGLM REML against the reference implementation reference on shared data."""
 
     def test_poisson_deviance(self):
-        """Deviance should match mgcv within 1%."""
+        """Deviance should match the reference implementation within 1%."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -68,17 +68,19 @@ class TestMgcvParity:
         m.fit_reml(df, y, max_reml_iter=30)
 
         assert m._reml_result.converged
-        rel_dev = abs(m.result.deviance - MGCV_POISSON["deviance"]) / MGCV_POISSON["deviance"]
+        rel_dev = (
+            abs(m.result.deviance - REFERENCE_POISSON["deviance"]) / REFERENCE_POISSON["deviance"]
+        )
         assert rel_dev < 0.01, (
-            f"Deviance {m.result.deviance:.2f} vs mgcv {MGCV_POISSON['deviance']:.2f} "
+            f"Deviance {m.result.deviance:.2f} vs the reference implementation {REFERENCE_POISSON['deviance']:.2f} "
             f"(rel diff {rel_dev:.4f})"
         )
 
     def test_poisson_edf(self):
-        """Effective df should be within ±2 of mgcv (different basis dimension).
+        """Effective df should be within ±2 of the reference implementation (different basis dimension).
 
         SuperGLM uses 10 SSP columns per smooth (no identifiability constraint)
-        vs mgcv's 9 free columns (sum-to-zero).  This ~1 extra unpenalized
+        vs the reference implementation's 9 free columns (sum-to-zero).  This ~1 extra unpenalized
         dimension per term accounts for most of the EDF difference.
         """
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
@@ -90,14 +92,14 @@ class TestMgcvParity:
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
-        edf_diff = abs(m.result.effective_df - MGCV_POISSON["sum_edf"])
+        edf_diff = abs(m.result.effective_df - REFERENCE_POISSON["sum_edf"])
         assert edf_diff < 2.0, (
-            f"EDF {m.result.effective_df:.2f} vs mgcv {MGCV_POISSON['sum_edf']:.2f} "
+            f"EDF {m.result.effective_df:.2f} vs the reference implementation {REFERENCE_POISSON['sum_edf']:.2f} "
             f"(diff {edf_diff:.2f})"
         )
 
     def test_poisson_lambda_order_of_magnitude(self):
-        """Signal lambda should be same order of magnitude as mgcv."""
+        """Signal lambda should be same order of magnitude as reference."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_poisson.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -109,10 +111,10 @@ class TestMgcvParity:
 
         # x1 has a strong sin signal → moderate lambda
         lam_x1 = m._reml_lambdas["x1"]
-        mgcv_x1 = MGCV_POISSON["sp"][0]
-        ratio = max(lam_x1, mgcv_x1) / min(lam_x1, mgcv_x1)
+        reference_x1 = REFERENCE_POISSON["sp"][0]
+        ratio = max(lam_x1, reference_x1) / min(lam_x1, reference_x1)
         assert ratio < 10, (
-            f"x1 lambda ratio {ratio:.1f}x (SuperGLM={lam_x1:.2f}, mgcv={mgcv_x1:.2f})"
+            f"x1 lambda ratio {ratio:.1f}x (SuperGLM={lam_x1:.2f}, the reference implementation={reference_x1:.2f})"
         )
 
         # x2 has weak signal → large lambda (both > 100)
@@ -134,7 +136,7 @@ class TestMgcvParity:
         assert m._reml_result.n_reml_iter <= 15
 
     def test_gamma_deviance(self):
-        """Gamma deviance should match mgcv within 1%."""
+        """Gamma deviance should match the reference implementation within 1%."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -145,14 +147,14 @@ class TestMgcvParity:
         m.fit_reml(df, y, max_reml_iter=30)
 
         assert m._reml_result.converged
-        rel_dev = abs(m.result.deviance - MGCV_GAMMA["deviance"]) / MGCV_GAMMA["deviance"]
+        rel_dev = abs(m.result.deviance - REFERENCE_GAMMA["deviance"]) / REFERENCE_GAMMA["deviance"]
         assert rel_dev < 0.01, (
-            f"Deviance {m.result.deviance:.2f} vs mgcv {MGCV_GAMMA['deviance']:.2f} "
+            f"Deviance {m.result.deviance:.2f} vs the reference implementation {REFERENCE_GAMMA['deviance']:.2f} "
             f"(rel diff {rel_dev:.4f})"
         )
 
     def test_gamma_edf(self):
-        """Gamma EDF within ±2 of mgcv (different basis dimension)."""
+        """Gamma EDF within ±2 of the reference implementation (different basis dimension)."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -162,14 +164,14 @@ class TestMgcvParity:
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
-        edf_diff = abs(m.result.effective_df - MGCV_GAMMA["sum_edf"])
+        edf_diff = abs(m.result.effective_df - REFERENCE_GAMMA["sum_edf"])
         assert edf_diff < 2.0, (
-            f"EDF {m.result.effective_df:.2f} vs mgcv {MGCV_GAMMA['sum_edf']:.2f} "
+            f"EDF {m.result.effective_df:.2f} vs the reference implementation {REFERENCE_GAMMA['sum_edf']:.2f} "
             f"(diff {edf_diff:.2f})"
         )
 
     def test_gamma_scale(self):
-        """Profiled phi should match mgcv scale within 20%."""
+        """Profiled phi should match the reference implementation scale within 20%."""
         df = pd.read_csv(os.path.join(DATA_DIR, "reml_parity_data_gamma.csv"))
         y = df["y"].values.astype(float)
         m = SuperGLM(
@@ -179,9 +181,9 @@ class TestMgcvParity:
         )
         m.fit_reml(df, y, max_reml_iter=30)
 
-        rel_phi = abs(m.result.phi - MGCV_GAMMA["scale"]) / MGCV_GAMMA["scale"]
+        rel_phi = abs(m.result.phi - REFERENCE_GAMMA["scale"]) / REFERENCE_GAMMA["scale"]
         assert rel_phi < 0.20, (
-            f"phi {m.result.phi:.4f} vs mgcv scale {MGCV_GAMMA['scale']:.4f} "
+            f"phi {m.result.phi:.4f} vs the reference implementation scale {REFERENCE_GAMMA['scale']:.4f} "
             f"(rel diff {rel_phi:.4f})"
         )
 
@@ -198,10 +200,10 @@ class TestMgcvParity:
 
         # x1: signal → moderate lambda
         lam_x1 = m._reml_lambdas["x1"]
-        mgcv_x1 = MGCV_GAMMA["sp"][0]
-        ratio = max(lam_x1, mgcv_x1) / min(lam_x1, mgcv_x1)
+        reference_x1 = REFERENCE_GAMMA["sp"][0]
+        ratio = max(lam_x1, reference_x1) / min(lam_x1, reference_x1)
         assert ratio < 10, (
-            f"x1 lambda ratio {ratio:.1f}x (SuperGLM={lam_x1:.2f}, mgcv={mgcv_x1:.2f})"
+            f"x1 lambda ratio {ratio:.1f}x (SuperGLM={lam_x1:.2f}, the reference implementation={reference_x1:.2f})"
         )
 
         # x2: near-linear → very large lambda

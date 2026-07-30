@@ -2,7 +2,7 @@
 
 ## Headline corrections to the audit's §H.3 subsample-λ hypothesis
 
-1. **λ̂ is NOT scale-free in n.** Measured on penalised cubic spline, Gaussian REML, mgcv parameterisation:
+1. **λ̂ is NOT scale-free in n.** Measured on penalised cubic spline, Gaussian REML, the reference implementation parameterisation:
    d log λ̂ / d log n = **0.43** (λ̂: 16.5 at n=2k → 237.6 at n=1M; EDF 9.5 → 15.9). Transplanting λ̂ from m
    rows to n rows under-penalises by (n/m)^α, α ≈ 0.2–0.57. Systematic bias, not sampling noise — decays like
    (n/m)^0.43, NOT m^(−1/2).
@@ -20,7 +20,7 @@
    IS true (12× λ error → only 20-35% MISE change) — that flatness is what makes any of this viable — but
    insensitive ≠ invariant, and a 1-2 SE shift in a rate relativity is what a validator diffs.
 
-2. **mgcv's `samfrac` does not do what the audit assumed.** Read from CRAN source (`bam.r` ~line 2680):
+2. **the reference implementation's `samfrac` does not do what the audit assumed.** Read from CRAN source (`bam.r` ~line 2680):
    it extracts **only `coefficients`**, never `sp`; runs the subsample fit at deliberately loose tolerance
    (epsilon 1e-2 vs 1e-7); and is **skipped entirely when `discrete=TRUE`**. Wood warm-starts β and re-runs the
    full λ search. He did not freeze λ.

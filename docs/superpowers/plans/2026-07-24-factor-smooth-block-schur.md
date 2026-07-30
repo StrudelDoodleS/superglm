@@ -3,7 +3,7 @@
 > Delivery B of the approved structured-credibility design. Execute with
 > red-green-refactor checkpoints and keep LSS entirely out of scope.
 
-**Goal:** Add an mgcv-style `FactorSmooth` interaction with a fully penalized
+**Goal:** Add an reference-style `FactorSmooth` interaction with a fully penalized
 curve per factor level, exact and `discrete=True` REML, conditional/population
 prediction, compact inference/reporting, and a profiled block-Schur backend.
 
@@ -13,7 +13,7 @@ prediction, compact inference/reporting, and a profiled block-Schur backend.
 **Architecture:** A factor smooth owns one P-spline marginal and one all-level
 factor. Coefficients are level-major `(K, k)`. The compact matrix stores factor
 codes plus a shared raw basis (or discrete support basis/index), and applies an
-mgcv-compatible natural parameterization without constructing
+the reference implementation-compatible natural parameterization without constructing
 `n x (Kk)`. Repeated penalty components store only `k x k` blocks. The existing
 scalar Schur path remains intact; a parallel block-Schur factor eliminates one
 dominant `K x k` term and exposes the same Hessian-factor protocol.
@@ -113,7 +113,7 @@ uv run pytest tests/test_model_config.py tests/test_fit_state.py -q
 - Add compiled row kernels for factor-smooth sufficient statistics and
   factor-smooth-by-small cross-products only where the tests/profile require
   them.
-- Build the raw P-spline marginal once, then reproduce mgcv
+- Build the raw P-spline marginal once, then reproduce the reference implementation
   `nat.param(..., type=1)` so the wiggle block and null coordinates have stable
   scaling.
 
@@ -368,13 +368,13 @@ uv run pytest tests/test_factor_smooth_inference.py \
 
 **Commit:** `Add factor smooth prediction and reporting`
 
-## Task 9: Pinned mgcv `bs="fs"` parity
+## Task 9: Pinned the reference implementation `bs="fs"` parity
 
 **Files**
 
-- Create `tests/fixtures/factor_smooth_mgcv_reference.R`
-- Create `tests/fixtures/factor_smooth_mgcv_reference.json`
-- Create `tests/test_factor_smooth_mgcv_parity.py`
+- Create `tests/fixtures/factor_smooth_the reference implementation_reference.R`
+- Create `tests/fixtures/factor_smooth_the reference implementation_reference.json`
+- Create `tests/test_factor_smooth_the reference implementation_parity.py`
 
 **Cases**
 
@@ -385,18 +385,18 @@ uv run pytest tests/test_factor_smooth_inference.py \
 - population and unseen-level predictions.
 
 Use `s(x, f, bs="fs", k=..., xt=list(bs="ps"), m=2)` and pin R 4.5.3 /
-mgcv 1.9-4. Compare predictions, deviance, EDF, fitted penalty/variance views,
+the reference implementation 1.9-4. Compare predictions, deviance, EDF, fitted penalty/variance views,
 curve shapes, and population behavior. Compare lambdas only after confirming
 the natural-parameter penalty scaling.
 
 **Verify**
 
 ```bash
-Rscript tests/fixtures/factor_smooth_mgcv_reference.R
-uv run pytest tests/test_factor_smooth_mgcv_parity.py -q
+Rscript tests/fixtures/factor_smooth_the reference implementation_reference.R
+uv run pytest tests/test_factor_smooth_the reference implementation_parity.py -q
 ```
 
-**Commit:** `Pin factor smooth parity against mgcv`
+**Commit:** `Pin factor smooth parity against the reference implementation`
 
 ## Task 10: cProfile, crossover, docs, and release verification
 

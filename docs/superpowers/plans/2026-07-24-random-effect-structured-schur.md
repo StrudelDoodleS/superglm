@@ -16,7 +16,7 @@ factor operations instead of requiring a full inverse. `direct_solve="gram"` rem
 `"structured"` forces the new backend, and `"auto"` uses a benchmark-derived crossover.
 
 **Tech Stack:** Python 3.13, NumPy, SciPy, pandas, numba, tabmat, pytest, Ruff, mypy, cProfile,
-`superglm.profiling.harness`, and pinned mgcv reference fixtures.
+`superglm.profiling.harness`, and pinned the reference implementation reference fixtures.
 
 ---
 
@@ -56,13 +56,13 @@ New focused tests:
 - `tests/test_random_effect_reml.py`
 - `tests/test_random_effect_discrete.py`
 - `tests/test_random_effect_inference.py`
-- `tests/test_random_effect_mgcv_parity.py`
+- `tests/test_random_effect_the reference implementation_parity.py`
 - `tests/test_structured_allocations.py`
 
 New reference/profiling files:
 
-- `tests/fixtures/random_effect_mgcv_reference.R`
-- `tests/fixtures/random_effect_mgcv_reference.json`
+- `tests/fixtures/random_effect_the reference implementation_reference.R`
+- `tests/fixtures/random_effect_the reference implementation_reference.json`
 - `benchmarks/profile_structured_credibility.py`
 - `docs/guide/random-effects.md`
 
@@ -1155,14 +1155,14 @@ Existing production files expected to change:
   rtk git commit -m "Harden structured random effect parity"
   ```
 
-## Task 12: Pinned mgcv `bs="re"` parity
+## Task 12: Pinned the reference implementation `bs="re"` parity
 
 ### 12.1 Generate and review reference fixtures
 
 **Files:**
 
-- Create: `tests/fixtures/random_effect_mgcv_reference.R`
-- Create: `tests/fixtures/random_effect_mgcv_reference.json`
+- Create: `tests/fixtures/random_effect_the reference implementation_reference.R`
+- Create: `tests/fixtures/random_effect_the reference implementation_reference.json`
 
 - [ ] In the R script, use fixed seeds and emit references for:
 
@@ -1171,14 +1171,14 @@ Existing production files expected to change:
   - population prediction for an unseen level;
   - `bam(..., method="fREML", discrete=TRUE)` where supported.
 
-- [ ] Record R version, mgcv version, seed, data-generation parameters, deviance, EDF, scale,
+- [ ] Record R version, the reference implementation version, seed, data-generation parameters, deviance, EDF, scale,
   variance component, fitted predictions, and population predictions.
 
 - [ ] Run:
 
   ```bash
-  rtk Rscript tests/fixtures/random_effect_mgcv_reference.R
-  rtk git diff -- tests/fixtures/random_effect_mgcv_reference.json
+  rtk Rscript tests/fixtures/random_effect_the reference implementation_reference.R
+  rtk git diff -- tests/fixtures/random_effect_the reference implementation_reference.json
   ```
 
 - [ ] Manually verify the fixture has no machine-specific paths or timestamps.
@@ -1187,7 +1187,7 @@ Existing production files expected to change:
 
 **Files:**
 
-- Create: `tests/test_random_effect_mgcv_parity.py`
+- Create: `tests/test_random_effect_the reference implementation_parity.py`
 
 - [ ] Recreate the seeded datasets in Python and compare prediction, deviance, EDF, variance
   component, scale, and population behavior. Compare lambda only where penalty scaling is proven
@@ -1198,16 +1198,16 @@ Existing production files expected to change:
 - [ ] Run:
 
   ```bash
-  rtk uv run pytest tests/test_random_effect_mgcv_parity.py -q
+  rtk uv run pytest tests/test_random_effect_the reference implementation_parity.py -q
   ```
 
 - [ ] Commit:
 
   ```bash
-  rtk git add tests/fixtures/random_effect_mgcv_reference.R \
-    tests/fixtures/random_effect_mgcv_reference.json \
-    tests/test_random_effect_mgcv_parity.py
-  rtk git commit -m "Add mgcv random effect parity fixtures"
+  rtk git add tests/fixtures/random_effect_the reference implementation_reference.R \
+    tests/fixtures/random_effect_the reference implementation_reference.json \
+    tests/test_random_effect_the reference implementation_parity.py
+  rtk git commit -m "Add the reference implementation random effect parity fixtures"
   ```
 
 ## Task 13: cProfile evidence, kernel decisions, and auto crossover
@@ -1320,7 +1320,7 @@ Existing production files expected to change:
 - [ ] Document:
 
   - `RandomEffect` versus fixed `Categorical`;
-  - relationship to mgcv `s(f, bs="re")`;
+  - relationship to the reference implementation `s(f, bs="re")`;
   - REML-only fitting;
   - conditional versus population prediction;
   - unseen and missing policies;
@@ -1388,7 +1388,7 @@ Existing production files expected to change:
 Before starting the separate FactorSmooth plan, present:
 
 - exact full-suite result;
-- dense/structured/mgcv parity summary;
+- dense/structured/reference parity summary;
 - cProfile call-stack summary;
 - memory/allocation evidence;
 - measured auto crossover;

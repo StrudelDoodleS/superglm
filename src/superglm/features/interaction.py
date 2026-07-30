@@ -799,8 +799,8 @@ def _row_kron_dense(B1: NDArray, B2: NDArray) -> NDArray:
 def _normalize_tensor_penalty(S: NDArray) -> NDArray:
     """Scale a marginal tensor penalty to unit leading eigenvalue.
 
-    mgcv rescales marginal penalties before constructing tensor penalties in
-    ``smooth.construct.tensor.smooth.spec()``. Matching that keeps different
+    Standard practice rescales marginal penalties before constructing tensor
+    penalties. Matching that convention keeps different
     margins on comparable penalty scales.
     """
     eigvals = np.linalg.eigvalsh(S)
@@ -881,7 +881,7 @@ class TensorInteraction:
     ) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots.
 
-        Enforces the mgcv te()/ti() contract on the original spec before
+        Enforces the tensor-product marginal contract on the original spec before
         any cloning, so unsupported configurations (select, multi-m) can't
         bypass the check via n_knots override reconstruction.
         """
@@ -896,11 +896,11 @@ class TensorInteraction:
             raise NotImplementedError(
                 f"Tensor interactions require single-penalty parent smooths, but "
                 f"{type(spec).__name__} was configured with {detail}. "
-                "This matches the mgcv te()/ti() marginal-smooth contract."
+                "This matches the tensor-product marginal-smooth contract."
             )
 
         # For tensor marginals, route cubic regression splines through the
-        # cardinal CR implementation, which is much closer to mgcv's bs="cr"
+        # cardinal CR implementation, which is much closer to the cardinal
         # geometry than the older projected-B-spline CR path.
         from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
 
@@ -1095,7 +1095,7 @@ class TensorInteraction:
             ]
 
         # Non-decompose: emit one penalty component per marginal,
-        # matching mgcv te()/ti() single-penalty marginal contract.
+        # matching the tensor-product single-penalty marginal contract.
         return GroupInfo(
             columns=None,
             n_cols=n_cols,

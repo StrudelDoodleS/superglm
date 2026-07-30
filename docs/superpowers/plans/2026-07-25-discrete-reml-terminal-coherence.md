@@ -30,7 +30,7 @@ preference against subagent-led development.
 
 ## File Map
 
-- Modify `tests/test_factor_smooth_sz_mgcv_parity.py`
+- Modify `tests/test_factor_smooth_sz_the reference implementation_parity.py`
   - reproduce the terminal lambda jump with algebraically equivalent moments
   - assert terminal/evaluated state coherence
 - Modify `src/superglm/reml/discrete.py`
@@ -52,8 +52,8 @@ No LSS file and no C, C++, Cython, or Rust source is in scope.
 
 **Files:**
 
-- Modify: `tests/test_factor_smooth_sz_mgcv_parity.py`
-- Test: `tests/test_factor_smooth_sz_mgcv_parity.py`
+- Modify: `tests/test_factor_smooth_sz_the reference implementation_parity.py`
+- Test: `tests/test_factor_smooth_sz_the reference implementation_parity.py`
 
 - [ ] **Step 1: Import the compact FactorSmooth matrix**
 
@@ -70,10 +70,10 @@ Append this test after
 
 ```python
 def test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate(
-    mgcv_sz_fixture: dict,
+    the reference implementation_sz_fixture: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    case = mgcv_sz_fixture["poisson_discrete"]
+    case = the reference implementation_sz_fixture["poisson_discrete"]
     data = case["data"]
     X = pd.DataFrame({"x": data["x"], "f": data["f"]})
     y = np.asarray(data["y"], dtype=np.float64)
@@ -158,7 +158,7 @@ floating-point summation order; it does not stub the optimizer.
 
 ```bash
 rtk pytest \
-  tests/test_factor_smooth_sz_mgcv_parity.py::test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate \
+  tests/test_factor_smooth_sz_the reference implementation_parity.py::test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate \
   -q
 ```
 
@@ -168,7 +168,7 @@ Expected: FAIL because the last evaluated wiggle lambda is approximately
 - [ ] **Step 4: Commit the failing regression**
 
 ```bash
-rtk git add tests/test_factor_smooth_sz_mgcv_parity.py
+rtk git add tests/test_factor_smooth_sz_the reference implementation_parity.py
 rtk git commit -m "Test discrete REML terminal lambda coherence"
 ```
 
@@ -177,7 +177,7 @@ rtk git commit -m "Test discrete REML terminal lambda coherence"
 **Files:**
 
 - Modify: `src/superglm/reml/discrete.py`
-- Test: `tests/test_factor_smooth_sz_mgcv_parity.py`
+- Test: `tests/test_factor_smooth_sz_the reference implementation_parity.py`
 - Test: `tests/test_reml_newton_fixes.py`
 
 - [ ] **Step 1: Separate current-candidate gradient work from Hessian work**
@@ -263,7 +263,7 @@ the candidate boundary. Delete the later verbose block and the later
 
 ```bash
 rtk pytest \
-  tests/test_factor_smooth_sz_mgcv_parity.py::test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate \
+  tests/test_factor_smooth_sz_the reference implementation_parity.py::test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate \
   -q
 ```
 
@@ -275,7 +275,7 @@ Expected: PASS with the terminal wiggle lambda near `6.42437`.
 rtk pytest \
   tests/test_reml_newton_fixes.py \
   tests/test_cached_w_validation.py \
-  tests/test_factor_smooth_sz_mgcv_parity.py \
+  tests/test_factor_smooth_sz_the reference implementation_parity.py \
   -q
 ```
 
@@ -433,10 +433,10 @@ rtk pytest \
 Expected: all tests pass for FS, SZ, rectangular natural maps, signed weights,
 empty levels, and no observation-sized FactorSmooth materialization.
 
-- [ ] **Step 7: Run the SZ terminal and mgcv parity tests**
+- [ ] **Step 7: Run the SZ terminal and reference parity tests**
 
 ```bash
-rtk pytest tests/test_factor_smooth_sz_mgcv_parity.py -q
+rtk pytest tests/test_factor_smooth_sz_the reference implementation_parity.py -q
 ```
 
 Expected: all tests pass. The discrete terminal lambda remains near `6.42437`
@@ -558,7 +558,7 @@ Hessian/line-search cycle than the pre-fix control flow.
 rtk pytest \
   tests/test_factor_smooth_discrete.py \
   tests/test_factor_smooth_structured_system.py \
-  tests/test_factor_smooth_sz_mgcv_parity.py \
+  tests/test_factor_smooth_sz_the reference implementation_parity.py \
   tests/test_reml_newton_fixes.py \
   tests/test_cached_w_validation.py \
   tests/test_random_effect_reml.py \
@@ -613,7 +613,7 @@ a separate evidence-gathering design covering:
 - false convergence, boundary lambdas, flat-curvature steps, repeated
   step-halving, and max-iteration exhaustion;
 - objective/PIRLS/gradient/Hessian/line-search timing attribution;
-- mgcv parity where a clean-room fixture exists; and
+- reference parity where a clean-room fixture exists; and
 - only those additional safeguards that improve the representative corpus
   without increasing time to fit materially.
 

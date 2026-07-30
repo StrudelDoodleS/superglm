@@ -69,12 +69,12 @@ proposed : 172 ms hists +   44 ms row-tensor      =  216 ms   → 11.7×
 - **W̄ must stay cache-resident**: histogram cost flat at 1.1-1.7 ms while m₁m₂·8B ≤ 8 MB (L3), then jumps to
   7.6 ms at 32 MB. **Cap tensor-marginal bin counts at ~500-1000**, else fall back to Alg 2/3.
 - **p⁴ intermediate**: core is p₁²×p₂². Fine to k≈20 (1 MB); at k=30 it is 6.5 MB and BLAS starts to bite.
-  mgcv-typical k=5-20 is the sweet spot.
+  the reference implementation-typical k=5-20 is the sweet spot.
 - 3-way with m=200 marginals → 64 MB histogram: falls off the cliff, needs the fallback.
 
 **Novelty caveat (stated honestly):** this is a *combination* of two published results (Currie's G-operator +
 Li & Wood's marginal bin space), not published as such. Li & Wood §3 uses a **different** decomposition —
-blocks A′D(Ã_{·i})WD(B̃_{·j})B, i.e. p₁² separate accumulations each re-scanning n. **mgcv does not appear to
+blocks A′D(Ã_{·i})WD(B̃_{·j})B, i.e. p₁² separate accumulations each re-scanning n. **the reference implementation does not appear to
 do this.** Treat as opportunity, and as a reason to validate carefully. Also: the benchmark baseline was a
 dense NumPy row-Kronecker; superglm's Python-loop sparse version is likely *slower*, so the figures are
 probably conservative — but re-measure against the real code.
@@ -132,7 +132,7 @@ from JIT warmup.
   implication: narrow the dtypes *as part of* writing first-party kernels, not as a standalone PR.
 - **Rügamer (2024), "Scalable Higher-Order Tensor Product Spline Models", AISTATS, arXiv:2402.01090** —
   factorization-machine approximation collapsing O(p^D M^D) → O(pMFD), memory O(npM) regardless of D. Real and
-  elegant, **but it is a rank-F approximation ⇒ breaks mgcv parity by construction.** A different estimator,
+  elegant, **but it is a rank-F approximation ⇒ breaks reference parity by construction.** A different estimator,
   not a faster one. Rule out as a drop-in; note for a future "many weak interactions" mode.
 - **glamlasso (Lund, Vincent & Hansen, arXiv:1510.03298) warning:** they could **not** make coordinate descent
   exploit array structure (*"it is not obvious how to exploit the array structure to reduce the computational

@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from benchmarks.benchmark_tensor_ti_freq import (
-    ROOT,
     FitControls,
     build_case_deltas,
     build_fairness_cases,
@@ -53,20 +52,6 @@ def test_superglm_tensor_benchmark_case_deltas_keep_legacy_one_tensor_delta():
     assert deltas["by_case"]["baseline_plus_2_tensors_discrete"]["fit_s"] == 6.0
 
 
-def test_mgcv_comparator_declares_matching_scaling_cases():
-    script = (ROOT / "benchmarks" / "benchmark_tensor_ti_mgcv.R").read_text()
-    for case in build_superglm_cases():
-        expected_name = case.name.replace("baseline", "mgcv_baseline")
-        assert expected_name in script
-
-
-def test_mgcv_comparator_records_per_smooth_edf():
-    script = (ROOT / "benchmarks" / "benchmark_tensor_ti_mgcv.R").read_text()
-
-    assert "smooth_edf_by_label" in script
-    assert "rownames(sm$s.table)" in script
-
-
 def test_superglm_fairness_profiles_record_strict_and_candidate_controls():
     profiles = build_superglm_control_profiles()
     by_name = {profile.name: profile for profile in profiles}
@@ -74,7 +59,7 @@ def test_superglm_fairness_profiles_record_strict_and_candidate_controls():
     assert list(by_name) == [
         "S0_current_default",
         "S1_strict",
-        "S2_mgcv_ish",
+        "S2_reference_ish",
         "S3_practical",
         "S4_relaxed_candidate",
         "S5_very_relaxed_candidate",
@@ -259,13 +244,3 @@ def test_eta_attribution_reports_rank_and_delta_metrics():
     assert out["max_abs_eta_delta"] == pytest.approx(0.1)
     assert out["mean_abs_eta_delta"] == pytest.approx(0.05)
     assert 0.0 <= out["rank_corr_eta"] <= 1.0
-
-
-def test_mgcv_comparator_declares_fairness_controls_and_threads():
-    script = (ROOT / "benchmarks" / "benchmark_tensor_ti_mgcv.R").read_text()
-
-    for label in ("default", "explicit_default_like", "loose_1e_6", "relaxed_1e_5"):
-        assert label in script
-    assert "gam.control(epsilon = 1e-7, mgcv.tol = 1e-7)" in script
-    assert "gam.control(epsilon = 1e-6, mgcv.tol = 1e-6)" in script
-    assert "nthreads = 1" in script

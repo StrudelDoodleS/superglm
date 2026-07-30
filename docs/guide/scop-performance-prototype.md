@@ -121,7 +121,7 @@ Every prototype should be checked against:
 - `benchmarks/scop_discrete_limit.py`
 - MTPL2 discrete Poisson with `1` monotone term
 - MTPL2 discrete Poisson with `2` monotone terms if available
-- `scasm` / `scam` parity harnesses in `scratch/` or a tracked equivalent
+- `scasm` / `the reference implementation` parity harnesses in `scratch/` or a tracked equivalent
 
 Minimum reporting:
 

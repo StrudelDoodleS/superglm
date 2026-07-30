@@ -1,4 +1,4 @@
-"""Compare 30-rep timing results from SuperGLM and mgcv.
+"""Compare 30-rep timing results from SuperGLM and reference.
 
 Usage:
     uv run python benchmarks/timing_30rep_compare.py
@@ -21,17 +21,20 @@ def load(name):
 
 def main():
     sg = load("superglm")
-    mgcv = load("mgcv")
+    reference = load("reference")
 
-    if not sg and not mgcv:
+    if not sg and not reference:
         print("No results found. Run the timing scripts first.")
         return
 
     print("=" * 70)
-    print("  30-rep Timing Comparison: SuperGLM vs mgcv (MTPL2 678k)")
+    print("  30-rep Timing Comparison: SuperGLM vs reference (MTPL2 678k)")
     print("=" * 70)
 
-    for label, d in [("SuperGLM (discrete cached-W)", sg), ("mgcv bam (fREML discrete)", mgcv)]:
+    for label, d in [
+        ("SuperGLM (discrete cached-W)", sg),
+        ("reference bam (fREML discrete)", reference),
+    ]:
         if d is None:
             continue
         print(f"\n  {label}")
@@ -48,12 +51,12 @@ def main():
         print(f"    deviance: {d['deviance']:.1f}")
         print(f"    edf:      {d['effective_df']:.2f}")
 
-    if sg and mgcv:
-        ratio = sg["median_s"] / mgcv["median_s"]
+    if sg and reference:
+        ratio = sg["median_s"] / reference["median_s"]
         print(f"\n  {'=' * 50}")
-        print(f"  Ratio (median SuperGLM / median mgcv): {ratio:.2f}x")
+        print(f"  Ratio (median SuperGLM / median reference): {ratio:.2f}x")
         print(f"  SuperGLM median: {sg['median_s']:.3f}s")
-        print(f"  mgcv median:     {mgcv['median_s']:.3f}s")
+        print(f"  reference median:     {reference['median_s']:.3f}s")
         print(f"  {'=' * 50}")
 
 

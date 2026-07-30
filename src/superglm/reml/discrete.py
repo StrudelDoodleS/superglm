@@ -1,6 +1,6 @@
 """Cached-W fREML optimizer (discrete path).
 
-Performance Oriented Iteration (mgcv bam-style): interleaves one
+Performance Oriented Iteration: interleaves one
 PIRLS step (W update) with one Newton lambda step on the working
 model's REML criterion.
 
@@ -191,7 +191,7 @@ def optimize_discrete_reml_cached_w(
 ) -> REMLResult:
     """POI fREML optimizer for the discrete path.
 
-    Performance Oriented Iteration (mgcv bam-style): interleaves one
+    Performance Oriented Iteration: interleaves one
     PIRLS step (W update) with one Newton lambda step on the working
     model's REML criterion. Line search re-solves the cached, stably centered
     profiled-intercept system analytically (O(p^3), no data pass) for each

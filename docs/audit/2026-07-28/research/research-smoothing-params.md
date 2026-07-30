@@ -43,7 +43,7 @@ Hessian is parity-safe by construction; only gradient changes move estimates.**
 
 - **Option A (trivial):** pass `dH_extra=None`. `gradient.py:123` then switches to `use_compact_trace`
   (block-local `tr(H⁻¹dSᵢH⁻¹dSⱼ)`, no Grams). Newton direction becomes Gauss-Newton-ish; **fixed point
-  unchanged**. This is what mgcv does with a cheaper outer optimizer.
+  unchanged**. This is what the reference implementation does with a cheaper outer optimizer.
 - **Option B (exact, also q-independent):** cross-terms `tr(H⁻¹λᵢSᵢH⁻¹Cⱼ) = Σₖ aⱼ[k]·gᵢ[k]` with
   `gᵢ[k] = λᵢ‖Vᵢᵀ H⁻¹ xₖ‖²`, `Ωᵢ = VᵢVᵢᵀ` of rank rᵢ. All `gᵢ` cost O(n p Σᵢrᵢ); **because penalty blocks are
   disjoint, Σᵢrᵢ ≈ p ⇒ O(np²) total, not O(q np²)**. Only the pure second-order `tr(H⁻¹CᵢH⁻¹Cⱼ)` resists.
@@ -86,13 +86,13 @@ protected semantics.**
 
 ## RANK 4 — BFGS outer loop for large q
 
-mgcv's own docs: `optimizer = c("outer","bfgs")` — *"For models with large numbers of smoothing parameters,
+the reference implementation's own docs: `optimizer = c("outer","bfgs")` — *"For models with large numbers of smoothing parameters,
 the bfgs method option can be faster than the default newton optimizer."* W&F's own §4 comparison is against
 quasi-Newton, not Newton (motorcycle: EFS 39 steps vs QN 32; Cox colon: 15 vs 16).
 
 **Why it fits superglm:** BFGS needs only the gradient, so with Rank 1 the whole outer iteration is
 `O(pirls(np²+p³) + np² + qn)` — **fully q-independent, and exactly Wood (2011) LAML because the gradient is
-exact. Zero parity risk.** Cleanest large-q path preserving mgcv parity by construction.
+exact. Zero parity risk.** Cleanest large-q path preserving reference parity by construction.
 
 ## RANK 5 — SAP / SOP
 
@@ -109,8 +109,8 @@ matrix already computed for β̂,α̂**. Reduces to `ED_{k_l} = tr((G_k − C*_{
 **Cost:** O(np²+p³) for the one factorisation + q **block-local** traces of O(p_k²) (or O(p_k) diagonal).
 **q-dependent part is lower-order ⇒ effectively constant in q.** Same class as EFS.
 
-**Reported timings:** Doppler, 15 variance params: **SOP 1.0 s vs mgcv 45 s (45×)**, EDs 50.2 vs 50.0.
-X-ray diffraction Poisson, 200 B-splines/80 adaptive: SOP <3 s, *"mgcv around 1000 times slower"*.
+**Reported timings:** Doppler, 15 variance params: **SOP 1.0 s vs the reference implementation 45 s (45×)**, EDs 50.2 vs 50.0.
+X-ray diffraction Poisson, 200 B-splines/80 adaptive: SOP <3 s, *"the reference implementation around 1000 times slower"*.
 2D adaptive, **128 variance parameters**: SOP 22 s, **~30× faster than Wood (2011)**.
 
 **Criterion:** solves REML score equations of the *PQL-linearised* REML log-likelihood ⇒ **same fixed point as
@@ -124,7 +124,7 @@ EFS, not exactly Wood (2011) for non-Gaussian.**
 4. Positivity as checkable rank conditions (their Thm 2) — though conditional on the current iterate, which
    they concede *"may not be an easy task"* to check in advance.
 
-## §6 — Does any of this change estimates? (the mgcv-parity question) — MEASURED
+## §6 — Does any of this change estimates? (the reference-parity question) — MEASURED
 
 W&F are explicit (§3): the general update follows PQL/POI, *"[which] both neglect the dependence of
 ∂²l/∂β∂βᵀ on λ"* — **exactly** superglm's W(ρ) correction. They state *"in practice the λ estimate no longer
@@ -148,7 +148,7 @@ Non-zero for Poisson/log (dW/dη = W), Binomial/logit, Tweedie/log (vanishing on
 **Conclusion: EFS/SOP are safe on fitted values and EDF, NOT safe on reported λ in flat regions.** The Binomial
 n=2000 row: one λ drifted by e^1.55≈4.7 and EFS hit an 800-iteration cap, yet EDF moved 0.05 and μ̂ 0.4% — a
 weakly-identified λ on a flat REML surface. **Newton detects the flatness and terminates; the fixed point
-crawls.** Matters if `summary()` prints λ/`sp` that users diff against mgcv.
+crawls.** Matters if `summary()` prints λ/`sp` that users diff against the reference implementation.
 
 ## RANK 6 — Line search: 8 full PIRLS fits per Newton iteration
 

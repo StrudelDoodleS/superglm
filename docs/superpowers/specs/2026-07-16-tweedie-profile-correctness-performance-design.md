@@ -76,7 +76,7 @@ terms, and weight transformations.
 - CI evaluations are cached but not included in the original search-evaluation
   count; expose a separate total/profile diagnostic so work is not hidden.
 - REML mode is documented as a plug-in likelihood over REML-selected smooths,
-  not as joint mgcv-style REML over `p`, scale, and smoothing parameters.
+  not as joint reference-style REML over `p`, scale, and smoothing parameters.
 
 ## Test strategy
 
@@ -105,5 +105,5 @@ comparison before completion.
 ## Non-goals
 
 - Replace bounded Brent over `p` with a gradient optimizer.
-- Claim that the current REML fit mode is identical to `mgcv::tw` joint REML.
+- Claim that the current REML fit mode is identical to `reference tw` joint REML.
 - Change the EDM prior-weight convention to replication-frequency weights.
