@@ -2638,6 +2638,89 @@ class TestSCOPBoundaryStagnationAcceptance:
             model.fit_reml(frame, response, max_reml_iter=20)
 
 
+class TestIterationDiagnosticsSmallSample:
+    """The diagnostics recorder must survive n <= 5.
+
+    ``k = min(5, n)`` makes ``k == n`` for small samples, and numpy requires
+    ``-n <= kth < n``, so the bottom-k partition needs ``k - 1``. The bug was
+    latent while diagnostics were opt-in; the SCOP stagnation gate turned the
+    recorder on unconditionally, which converted it into a crash on a
+    default-argument REML fit.
+    """
+
+    @staticmethod
+    def _frame(n):
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)}), np.arange(1.0, n + 1.0)
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6])
+    def test_opt_in_diagnostics_survive_small_samples(self, n):
+        frame, response = self._frame(n)
+        fitted = SuperGLM(family="poisson").fit(frame, response, record_diagnostics=True)
+        log = fitted.iteration_diagnostics()
+        assert len(log) >= 1
+        # every recorded index is a real observation
+        for column in ("top_w_indices", "bottom_w_indices"):
+            if column in log.columns:
+                for entry in log[column]:
+                    assert all(0 <= int(i) < n for i in np.atleast_1d(entry))
+
+    @pytest.mark.parametrize("n", [3, 5, 6])
+    def test_scop_reml_fits_small_samples_on_default_arguments(self, n):
+        """No caller opt-in involved: this is the path the gate made unconditional."""
+        frame, response = self._frame(n)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=4, penalty="ssp", constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(frame, response, max_reml_iter=2)
+        assert model.result.beta is not None
+
+    def test_debug_weights_survives_small_samples(self):
+        from superglm.debug_weights import _positive_working_weight_stats
+
+        for n in range(1, 7):
+            weights = np.linspace(1.0, 2.0, n)
+            k = min(5, n)
+            # the shape the recorder uses, exercised directly
+            assert len(np.argpartition(weights, k - 1)[:k]) == k
+            assert len(np.argpartition(weights, -k)[-k:]) == k
+            assert _positive_working_weight_stats(weights)[2] >= 1.0
+
+
+class TestSCOPREMLDoesNotPublishDiagnostics:
+    """A REML fit must not turn on a public accessor its caller never requested.
+
+    ``fit_reml`` exposes no ``record_diagnostics`` parameter and the non-SCOP
+    REML path solves with it off, so a REML caller has never been able to ask
+    for an iteration log. The stagnation gate needs one internally; it must not
+    leak onto the published result, or ``model.iteration_diagnostics()`` would
+    behave differently depending on which solver ran.
+    """
+
+    @staticmethod
+    def _scop_model():
+        x = np.linspace(0.0, 1.0, 60)
+        frame = pd.DataFrame({"x": x})
+        response = np.round(np.exp(1.0 + 0.5 * x)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=6, penalty="ssp", constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(frame, response, max_reml_iter=3)
+        return model
+
+    def test_published_result_carries_no_iteration_log(self):
+        assert self._scop_model().result.iteration_log is None
+
+    def test_accessor_raises_as_documented(self):
+        with pytest.raises(RuntimeError, match="No iteration diagnostics recorded"):
+            self._scop_model().iteration_diagnostics()
+
+
 # ── fit_reml integration tests ──────────────────────────────────────────────────
 
 from superglm.features.spline import BSplineSmooth  # noqa: E402
