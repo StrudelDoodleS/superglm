@@ -606,6 +606,105 @@ class TestInconsistentNormalEquations:
         np.testing.assert_allclose(H @ result.beta, self.G_INCONSISTENT, atol=1e-9)
 
 
+class TestNullMassSurvivesExtremeGradientScale:
+    """The breach test is a ratio of two norms, and both of them can saturate.
+
+    ``np.linalg.norm`` forms ``sqrt(x.dot(x))``, so the squaring leaves the
+    representable range an octave before the value does.  Underflow drives the
+    ratio to ``0.0`` (both norms zero, denominator clamped to ``tiny``);
+    overflow drives it to ``nan`` (``inf / inf``).  Neither is greater than the
+    floor, so the guard this branch added to stop returning ``H+g`` as a
+    stationary point is bypassed by its own arithmetic at both extremes.
+    """
+
+    H_STRUCTURAL = np.diag([1.0, 0.0])
+
+    @staticmethod
+    def _spectral_fixture():
+        """Rank-deficient with the null direction *rotated off* the axes, so
+        the deficiency is spectral rather than structural."""
+        basis = np.linalg.qr(np.random.default_rng(0).standard_normal((3, 3)))[0]
+        H = basis @ np.diag([1.0, 1.0, 0.0]) @ basis.T
+        return 0.5 * (H + H.T), basis[:, 2]
+
+    @pytest.mark.parametrize(
+        "magnitude", [1e-300, 1e-200, 1e-170, 1e-160, 1.0, 1e160, 1e200, 1e300]
+    )
+    def test_a_structural_breach_is_caught_at_every_representable_scale(self, magnitude):
+        """The mass is scale-free in exact arithmetic, so the answer must be
+        the same at every magnitude: all of ``g`` is on the null direction."""
+        g = np.array([0.0, magnitude])
+
+        structural, _ = _null_space_mass(decompose_gram(self.H_STRUCTURAL), g)
+        assert structural == pytest.approx(1.0, rel=1e-12)
+
+        with pytest.raises(ValueError, match="structurally aliased column"):
+            solve_constrained_qp(self.H_STRUCTURAL, g, np.zeros((0, 2)), np.zeros(0))
+
+    @pytest.mark.parametrize("magnitude", [1e-300, 1e-200, 1.0, 1e200, 1e300])
+    def test_a_spectral_breach_is_caught_at_every_representable_scale(self, magnitude):
+        """Pre-fix, ``1e200`` returned ``max|beta| = 2.4e202`` instead."""
+        H, null_direction = self._spectral_fixture()
+        g = null_direction * magnitude
+
+        _, spectral = _null_space_mass(decompose_gram(H), g)
+        assert spectral == pytest.approx(1.0, rel=1e-12)
+
+        with pytest.raises(ValueError, match="truncated spectral direction"):
+            solve_constrained_qp(H, g, np.zeros((0, 3)), np.zeros(0))
+
+    @pytest.mark.parametrize("magnitude", [1e-300, 1e-200, 1.0, 1e200, 1e300])
+    def test_a_consistent_gradient_still_solves_at_every_scale(self, magnitude):
+        """The converse: rescaling must not manufacture a breach either."""
+        g = np.array([magnitude, 0.0])
+
+        structural, spectral = _null_space_mass(decompose_gram(self.H_STRUCTURAL), g)
+        assert (structural, spectral) == (0.0, 0.0)
+
+        result = solve_constrained_qp(self.H_STRUCTURAL, g, np.zeros((0, 2)), np.zeros(0))
+        np.testing.assert_array_equal(result.beta, [magnitude, 0.0])
+
+    def test_a_zero_gradient_reports_zero_mass_without_dividing(self):
+        """``g == 0`` has no exponent to normalize by and no inconsistency to
+        report; it is the one input the old ``max(norm, tiny)`` clamp existed
+        for, and it must keep giving exactly the same answer."""
+        masses = _null_space_mass(decompose_gram(self.H_STRUCTURAL), np.zeros(2))
+        assert masses == (0.0, 0.0)
+
+        result = solve_constrained_qp(self.H_STRUCTURAL, np.zeros(2), np.zeros((0, 2)), np.zeros(0))
+        np.testing.assert_array_equal(result.beta, [0.0, 0.0])
+
+    def test_the_saturating_norm_is_the_mechanism(self):
+        """Pin the mechanism alongside the outcome, so a numpy release that
+        gave ``norm`` a scaled inner product would show up as a changed premise
+        rather than as a silently redundant guard."""
+        decomposition = decompose_gram(self.H_STRUCTURAL)
+        underflowed = np.array([0.0, 1e-200])
+        overflowed = np.array([0.0, 1e200])
+        null_row = np.array([False, True])
+
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            # The squaring saturates; the true magnitude is representable.
+            assert float(underflowed.dot(underflowed)) == 0.0
+            assert float(np.hypot(*underflowed)) == 1e-200
+            assert not np.isfinite(overflowed.dot(overflowed))
+            assert float(np.hypot(*overflowed)) == 1e200
+
+            # So the unscaled ratio reads 0.0 at one end and nan at the other,
+            # and ``mass > floor`` is false for both.
+            def naive_ratio(g):
+                return float(np.linalg.norm(g[null_row])) / max(
+                    float(np.linalg.norm(g)), np.finfo(float).tiny
+                )
+
+            assert naive_ratio(underflowed) == 0.0
+            assert np.isnan(naive_ratio(overflowed))
+
+        # The shipped ratio reports the true mass at both extremes.
+        assert _null_space_mass(decomposition, underflowed)[0] == pytest.approx(1.0)
+        assert _null_space_mass(decomposition, overflowed)[0] == pytest.approx(1.0)
+
+
 class TestLowConditionConsistency:
     """The spectral floor must clear the eigensolver's own null-basis roundoff.
 

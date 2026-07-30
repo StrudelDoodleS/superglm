@@ -107,9 +107,50 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[floa
     half's floor is what let an ill-conditioned retained block desensitize a
     structural alias where detection is exact.
 
+    Both masses are ratios of two norms of the *same* vector, so they are
+    scale-free in exact arithmetic -- but not in floating point, because
+    ``np.linalg.norm`` forms ``sqrt(x.dot(x))`` and the squaring leaves the
+    representable range an octave early.  Measured on ``[0, x]``: ``x.dot(x)``
+    is exactly ``0`` from ``x = 1e-170`` down and exactly ``inf`` from
+    ``x = 1e155`` up, while ``np.hypot`` returns the true magnitude at both --
+    so the squaring is the site, not the ``sqrt``.  **Both** norms in the ratio
+    are affected, not just the denominator, and the two regimes bypass the
+    breach test differently:
+
+    * underflow -- numerator and denominator both ``0``, the denominator
+      clamped up to ``tiny``, so the ratio is ``0.0`` and ``mass > floor`` is
+      simply false;
+    * overflow -- both ``inf``, so the ratio is ``nan`` and ``nan > floor`` is
+      false as well.
+
+    An ``inf`` ratio is not reachable: the numerator is a norm of a subvector
+    of the same ``g``, so it can never exceed the denominator.  Measured
+    end-to-end, ``H = diag(1, 0)`` with ``g = (0, 1e-200)`` and with
+    ``g = (0, 1e200)`` both returned ``beta = [0, 0]`` with ``converged=True``
+    where ``g = (0, 1)`` correctly raises; the spectral half fails the same
+    way, returning ``max|beta| = 2.4e202`` at ``g`` scaled by ``1e200``.
+
+    Rescaling by the inf-norm first puts every norm in ``[0.5, sqrt(width)]``,
+    which no representable ``g`` can push out of range.  The rescaling is by a
+    **power of two** (``frexp``/``ldexp``) rather than by the inf-norm itself,
+    which makes it exact: every partial sum inside both norms is then exactly
+    the unscaled one times ``2**-exponent``, and a quotient of two exactly
+    scaled operands rounds identically to the unscaled quotient.  That is what
+    keeps this bitwise inert on everything that was already in range.
+
+    ``g == 0`` is handled before the rescaling -- there is no exponent to take
+    -- and returns zero mass, which is what the old ``max(norm, tiny)`` clamp
+    produced for it too.  With the exact-zero case split out, that clamp has no
+    remaining job: after rescaling the denominator is at least ``0.5``.
+
     Returns ``(structural_mass, spectral_mass)``, each as a share of ``||g||``.
     """
-    reference = max(float(np.linalg.norm(g)), np.finfo(float).tiny)
+    largest = float(np.max(np.abs(g), initial=0.0))
+    if largest == 0.0:
+        return 0.0, 0.0
+    g = np.ldexp(g, -int(np.frexp(largest)[1]))
+
+    reference = float(np.linalg.norm(g))
     structural = decomposition.column_scale == 0.0
     structural_mass = float(np.linalg.norm(g[structural])) / reference
 
