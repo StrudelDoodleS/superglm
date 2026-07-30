@@ -13,7 +13,7 @@ Biometrics 73(4), 1071-1081.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -688,6 +688,48 @@ def _evaluate_scop_reml_mode(
     )
 
 
+def _scop_discarded_model_directions(
+    scop_states: Mapping[int, dict],
+    width: int,
+) -> NDArray:
+    """Lift the solver's discarded directions into model space, as rows.
+
+    The joint solver truncates one factor spanning every SCOP group and hands
+    each group its own columns of the result, so row ``r`` of every group's
+    block belongs to the same joint direction and the groups reassemble
+    row-wise. Groups solved one at a time instead carry directions confined to
+    themselves, which is the shape this falls back to when the row counts do
+    not agree.
+    """
+    blocks = []
+    for state in scop_states.values():
+        rows = state.get("discarded_directions")
+        if rows is None:
+            continue
+        rows = np.asarray(rows, dtype=np.float64)
+        if rows.ndim != 2 or rows.shape[0] == 0:
+            continue
+        blocks.append((state["group_sl"], rows))
+
+    if not blocks:
+        return np.zeros((0, width), dtype=np.float64)
+
+    row_counts = {rows.shape[0] for _, rows in blocks}
+    if len(row_counts) == 1 and len(blocks) > 1:
+        nullity = row_counts.pop()
+        directions = np.zeros((nullity, width), dtype=np.float64)
+        for group_slice, rows in blocks:
+            directions[:, group_slice] = rows
+        return directions
+
+    directions = np.zeros((sum(rows.shape[0] for _, rows in blocks), width), dtype=np.float64)
+    offset = 0
+    for group_slice, rows in blocks:
+        directions[offset : offset + rows.shape[0], group_slice] = rows
+        offset += rows.shape[0]
+    return directions
+
+
 def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
     """Return the estimable-range Newton correction for mode certification.
 
@@ -718,7 +760,30 @@ def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
     # this mode (observed or Fisher) before applying that same pseudoinverse.
     raw_slope_score = score.slopes + fisher_transformed_mean * score.intercept
     profiled_score = raw_slope_score - geometry_mean * score.intercept
+    # Stationarity is only meaningful where the solver could move. The SCOP
+    # Newton step truncates its augmented factor at ``sqrt(eps)``, and the
+    # discarded directions are ones the data cannot resolve -- no iteration
+    # drives their score to zero, so requiring it here would reject every
+    # boundary mode. This geometry's own estimable range is certified over the
+    # whole centered model at its own scale, so it does not coincide with the
+    # solver's; the solver's is the one the coefficients actually obey.
+    #
+    # The score is projected *before* the pseudoinverse, not the correction
+    # after it: ``hessian_inverse`` is not diagonal in this basis, so a score
+    # component along a discarded direction re-emerges as a correction pointing
+    # somewhere else entirely, which no projection of the result can remove.
+    discarded = _scop_discarded_model_directions(mode.scop_states, len(profiled_score))
+    if discarded.size:
+        retained_basis, _ = np.linalg.qr(discarded.T)
+        profiled_score = profiled_score - retained_basis @ (retained_basis.T @ profiled_score)
+    else:
+        retained_basis = None
+
     slope_correction = geometry.hessian_inverse @ profiled_score
+    if retained_basis is not None:
+        # The correction must also lie where the solver can move.
+        slope_correction = slope_correction - retained_basis @ (retained_basis.T @ slope_correction)
+
     intercept_correction = (
         score.intercept - float(geometry.transformed_intercept_cross @ slope_correction)
     ) / geometry.sum_w
