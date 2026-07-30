@@ -38,6 +38,7 @@ from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
+    _symmetric_part,
     decompose_factor,
     decompose_gram,
     needs_factor_certification,
@@ -1894,3 +1895,63 @@ def test_true_legacy_inference_matches_profiled_rank_state() -> None:
         rtol=1e-9,
         atol=1e-10,
     )
+
+
+def test_equilibration_symmetrizes_a_large_finite_gram_without_overflowing() -> None:
+    """``0.5 * (M + M.T)`` overflows before the halving can bring it back.
+
+    ``_equilibrate_gram`` admits the matrix -- its own finiteness check runs on
+    the *input* -- and then symmetrizes to ``inf``, equilibrates ``inf / inf``
+    to ``nan``, and returns a decomposition that solves to ``0``.  Not a
+    refusal: a silently wrong answer.
+    """
+    matrix = np.diag([1e308, 1e307])
+    with np.errstate(over="ignore"):
+        assert not np.isfinite(matrix + matrix.T).all(), (
+            "fixture no longer overflows the joint form"
+        )
+
+    decomposition = decompose_gram(matrix)
+
+    assert decomposition.rank == 2
+    # Pre-fix this is ``[0.0, 0.0]``: ``inf`` on the diagonal equilibrates to
+    # ``inf / inf``, and the ``nan`` column scale zeroes the solve.
+    np.testing.assert_allclose(
+        decomposition.solve(np.array([1.0, 1.0])), [1e-308, 1e-307], rtol=1e-15
+    )
+
+
+def test_symmetric_part_reproduces_a_symmetric_matrix_bitwise() -> None:
+    """The joint form is exact for a symmetric input at *every* magnitude.
+
+    The unconditional split form ``0.5 * M + 0.5 * M.T`` is not: halving a
+    subnormal rounds, so ``[[3 * 5e-324]]`` comes back as ``4 * 5e-324``.  That
+    is why ``_symmetric_part`` branches on the overflow envelope instead of
+    switching forms outright -- the branch is what keeps this guarantee.
+    """
+    denormal_min = 5e-324
+    subnormal = np.array([[3.0 * denormal_min]])
+    assert (0.5 * subnormal + 0.5 * subnormal.T).tobytes() != subnormal.tobytes(), (
+        "fixture no longer distinguishes the two forms"
+    )
+    assert _symmetric_part(subnormal).tobytes() == subnormal.tobytes()
+
+    rng = np.random.default_rng(1234)
+    factor = rng.standard_normal((7, 7))
+    for scale in (1e-300, 1e-8, 1.0, 1e8, 1e150):
+        gram = (factor.T @ factor) * scale
+        assert _symmetric_part(gram).tobytes() == gram.tobytes()
+
+
+def test_symmetric_part_is_finite_wherever_the_input_is() -> None:
+    """The split branch's envelope: ``|0.5 * M| <= max / 2`` termwise."""
+    largest = np.finfo(float).max
+    for matrix in (
+        np.array([[largest]]),
+        np.array([[largest, largest], [largest, largest]]),
+        np.array([[largest, -largest], [largest, largest]]),
+        np.diag([largest, 1.0, 5e-324]),
+    ):
+        symmetrized = _symmetric_part(matrix)
+        assert np.isfinite(symmetrized).all(), f"{matrix} symmetrized to {symmetrized}"
+        np.testing.assert_allclose(symmetrized, 0.5 * (matrix / 2.0 + matrix.T / 2.0) * 2.0)

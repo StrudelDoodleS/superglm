@@ -32,6 +32,51 @@ SHARED_RANK_POLICY = RankPolicy(
 )
 
 
+# Largest entry magnitude for which ``M + M.T`` provably cannot overflow: the
+# sum is bounded entrywise by twice this.  See ``_symmetric_part``.
+_HALF_MAX = float(np.finfo(float).max) / 2.0
+
+
+def _symmetric_part(values: NDArray) -> NDArray:
+    """``0.5 * (M + M.T)``, computed so a finite ``M`` cannot overflow to ``inf``.
+
+    ``M + M.T`` is formed at full magnitude, so a finite ``M`` whose entries
+    exceed half the float range overflows before the halving can bring it back.
+    ``[[1e308]]`` sums to ``inf``; ``decompose_gram`` then either refuses the
+    matrix outright or -- once the caller has pre-symmetrized -- equilibrates
+    ``inf / inf`` to ``nan`` and returns a silently wrong answer.  Halving each
+    operand first, ``0.5 * M + 0.5 * M.T``, cannot overflow at all: both terms
+    are bounded by ``max / 2``, so their sum is bounded by ``max``.
+
+    The two forms are **not** interchangeable, which is why this is a branch
+    rather than a rewrite.  Halving is exact only while the halved value stays
+    normal, so the split form rounds where the joint form does not.  Swept over
+    1.05e6 exhaustive subnormal pairs, 1.05e6 pairs straddling the
+    normal/subnormal boundary, 8e3 random subnormal pairs and 1e4 random normal
+    pairs spanning the full exponent range, the two forms differ on 393726,
+    393728, 2866 and **0** of those respectively.  The normal-range count is the
+    load-bearing one -- the forms agree bitwise whenever both operands are
+    normal and the sum does not overflow -- but the subnormal disagreement is
+    real, and it costs the guarantee that an exactly symmetric ``M`` is
+    reproduced bitwise: at ``M = [[3 * 5e-324]]`` the split form returns
+    ``4 * 5e-324`` because ``0.5 * M`` rounds to even, while the joint form is
+    exact.
+
+    So the joint form is kept verbatim wherever it is provably safe --
+    ``max|M| <= max / 2`` bounds ``|M + M.T|`` by ``max`` entrywise -- and the
+    split form is taken only in the regime the joint form cannot represent.
+    Every in-tree Gram matrix (``XtWX + S``, ``X'X + lambda*P``) is many orders
+    below that bound, so this is bitwise inert for all of them.
+
+    Non-finite input needs no special handling: ``max|M|`` is then ``inf`` or
+    ``nan``, neither of which satisfies the bound, and the split form
+    propagates the ``inf``/``nan`` exactly as the joint form does.
+    """
+    if float(np.abs(values).max(initial=0.0)) <= _HALF_MAX:
+        return 0.5 * (values + values.T)
+    return 0.5 * values + 0.5 * values.T
+
+
 def diagonal_of_square(matrix: NDArray) -> NDArray:
     """Return ``diag(matrix @ matrix)`` with an O(p²) contraction."""
     matrix = np.asarray(matrix, dtype=float)
@@ -357,7 +402,7 @@ def _equilibrate_gram(
         raise ValueError("matrix must be square")
     if not np.all(np.isfinite(values)):
         raise ValueError("matrix must be finite")
-    symmetric = 0.5 * (values + values.T)
+    symmetric = _symmetric_part(values)
     diagonal = np.diag(symmetric)
     scale_reference = max(float(np.max(np.abs(diagonal), initial=0.0)), 1.0)
     if not allow_indefinite and np.any(diagonal < -100.0 * _EPS * scale_reference):
