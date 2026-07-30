@@ -135,37 +135,31 @@ correct Jacobian is the logistic function.
 
 ---
 
-## Item 6 — Constrained-term coverage against `scam` (future)
+## Item 6 — Constrained-term coverage: reference note, not a backlog
 
-Researched 2026-07-31 from `scam`'s `NAMESPACE`, which registers the bases
-definitively. `scam` ships roughly forty constrained bases, but they are
-combinatorial rather than forty algorithms — near enough
-`{increasing, decreasing} × {convex, concave} × {univariate, tensor-marginal-1,
-tensor-marginal-2, tensor-both} × {± numeric by}` over the same SCOP
-reparameterization applied to marginals. `scam` gives each combination its own
-`smooth.construct` method; superglm factors it as
-`Constraint.fit/postfit × {increasing, decreasing, convex, concave}`, which is
-the better factoring and should stay.
+Researched 2026-07-31 from `scam`'s `NAMESPACE`, which registers its bases
+definitively. `scam` ships roughly forty constrained bases. **We are not
+chasing them, and the count overstates the gap**: they are combinatorial rather
+than forty algorithms — near enough `{increasing, decreasing} × {convex,
+concave} × {univariate, tensor marginals} × {± numeric by}` over one
+reparameterization. `scam` gives each combination its own `smooth.construct`
+method; superglm factors it as `Constraint.fit/postfit × {increasing,
+decreasing, convex, concave}`, which is the better factoring and should stay.
 
-Collapsed to capability, the gap is three axes:
+The four kinds already cover the shapes a pricing model normally asks for. One
+extension is worth keeping in view **only if a real pricing need appears**:
 
-**6a — combined monotonicity and curvature** (`micx`, `micv`, `mdcx`, `mdcv`).
-Cheapest by far: a conjunction of constraints both engines already express, not
-new machinery.
+**Constrained tensor terms.** `TensorInteraction` passes `constraint=None` to
+its marginals, so a monotone marginal inside an interaction is unavailable.
+This is the only gap that would need new machinery rather than a composition,
+and Pya Arnqvist (2024, arXiv:2403.09438) describes the method. Do not start it
+speculatively.
 
-**6b — constrained tensor products and interactions.** Seventeen bases
-(`tedmi`, `tedmd`, `tesmi1`, `tesmi2`, `tesmd1`, `tesmd2`, `temicx`, `temicv`,
-`tedecx`, `tedecv`, `tescx`, `tescv`, `tecvcv`, `tecxcx`, `tecxcv`, plus the
-`ti`-style `tismi`, `tismd`). superglm has none — `TensorInteraction` passes
-`constraint=None` when building its marginals. The substantial item, and the
-one to reach for if monotone marginals inside interactions matter for pricing.
-
-**6c — numeric `by`-variable constraints** (`mpiBy`, `mpdBy`, `cxBy`, `cvBy`,
-`micxBy`, `micvBy`, `mdcxBy`, `mdcvBy`).
-
-Specialty tail, probably irrelevant here: `mifo`/`miso` (finish/start at zero),
-`po`/`ipo`/`dpo`/`cpop` (positivity, cyclic), `lmpi`/`lipl` (locally monotone
-with plateau).
+Deliberately not pursuing: combined monotonicity-and-curvature (`micx`, `micv`,
+`mdcx`, `mdcv` — a conjunction we could compose cheaply if ever asked), numeric
+`by`-variable constraints (`*By`), and the specialty tail (`mifo`/`miso`
+finish/start at zero, `po`/`ipo`/`dpo`/`cpop` positivity and cyclic,
+`lmpi`/`lipl` locally monotone with plateau).
 
 **Neither `scam` nor `mgcv` has a shape-constrained factor-smooth basis**, so
 "a monotone curve per factor level" is not a gap against the reference
@@ -208,8 +202,7 @@ regression spline", `"cr"` basis only, fed to `pcls`).
 3. **Item 4** — write the governance position. One session.
 4. **Item 2** — the SCOP rank-truncation fix. The highest-value engineering item.
 5. **Item 3** — needs a release-scope decision before it can start.
-6. **Item 6** — capability work, only once the correctness items are settled.
-   6a is cheap and independent; 6b is the real project.
+Item 6 is a reference note, not scheduled work.
 
 Items 1b and 4 are cheap and independent; either can go first.
 
