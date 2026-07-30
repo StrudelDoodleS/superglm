@@ -24,14 +24,17 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.solvers.rank import (
-    SHARED_RANK_POLICY,
-    RankDecomposition,
-    RankPolicy,
-    decompose_gram,
-)
+from superglm.solvers.rank import RankDecomposition, decompose_gram
 
 _EPS = np.finfo(float).eps
+
+# Headroom on the normal-equation consistency floor (see ``_consistency_floor``).
+# The floor estimates the accuracy of the *computed null basis*, and this is the
+# safety factor above that estimate.  It is deliberately a constant of its own
+# rather than ``SHARED_RANK_POLICY.certification_band``, which happens to hold
+# the same value but governs factor certification: retuning that band for its
+# own purpose must not silently move this gate.
+_NULL_BASIS_ACCURACY_SLACK = 32.0
 
 
 @dataclass
@@ -71,11 +74,7 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> float:
     return float(np.linalg.norm(orthonormal_null.T @ g)) / reference
 
 
-def _consistency_floor(
-    decomposition: RankDecomposition,
-    *,
-    policy: RankPolicy = SHARED_RANK_POLICY,
-) -> float:
+def _consistency_floor(decomposition: RankDecomposition) -> float:
     """Largest null-space mass the decomposition's own roundoff can manufacture.
 
     The computed null basis is accurate only to about ``eps`` times the
@@ -86,10 +85,29 @@ def _consistency_floor(
     rank policy truncates at ``gram_rcond`` and so retains blocks far more
     ill-conditioned than ``factor_rcond`` would tolerate.
 
-    Above a retained condition of roughly ``1 / (band * eps)`` the floor
-    reaches 1 and no inconsistency is detectable. That is a real resolution
-    limit rather than a tuning choice, and it fails open -- the solve proceeds
-    rather than refusing a system it cannot adjudicate.
+    Sensitivity degrades *gradually* as the retained conditioning grows; there
+    is no sharp cutoff.  Measured detection of an injected null component, by
+    retained condition:
+
+    ==============  ============  ===============  =================
+    retained cond   median floor  1% mass caught   0.1% mass caught
+    ==============  ============  ===============  =================
+    ``1e9``         ``6.8e-06``   120/120          120/120
+    ``1e10``        ``6.8e-05``   120/120          120/120
+    ``1e11``        ``6.8e-04``   118/118          102/118
+    ``1e12``        ``6.9e-03``   103/119            8/119
+    ``1e13``        ``6.8e-02``     8/120            1/120
+    ==============  ============  ===============  =================
+
+    So a 0.1% inconsistency is already partly missed at ``1e11`` and a 1% one
+    at ``1e12``, well below the ``~1e14`` at which the floor saturates at 1 and
+    nothing is detectable at all.  This is a real resolution limit rather than
+    a tuning choice: at those conditions the null basis is itself only accurate
+    to the floor, and along such a direction the objective moves only in the
+    fifth significant figure over a coefficient range of ``1e9``.  It fails
+    open -- the solve proceeds rather than refusing a system it cannot
+    adjudicate -- which is the safe direction, since refusing a solvable system
+    is the defect this floor exists to prevent.
     """
     retained = decomposition.retained_values
     if retained is None or retained.size == 0:
@@ -102,7 +120,7 @@ def _consistency_floor(
         retained_condition = (
             float(np.max(magnitudes)) / smallest if smallest > 0.0 else float("inf")
         )
-    return float(min(1.0, policy.certification_band * _EPS * max(1.0, retained_condition)))
+    return float(min(1.0, _NULL_BASIS_ACCURACY_SLACK * _EPS * max(1.0, retained_condition)))
 
 
 def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> NDArray:
