@@ -306,20 +306,36 @@ Poisson: **0 nonzero `b` entries in 189 constraint rows, max `|Aᵢ @ beta|` =
 was the returned-point change above, not the rescaling. The rescaling is
 retained because it is correct for external callers with nonzero `b`.
 
-*The loop body uses the same measure as the boundaries.* `_is_feasible` governs
-the projection and both `converged` flags, but the loop's own full-step test
-and its blocking-ratio slack were left absolute. Wherever the scaling is
-observable the two then disagree by construction: `_is_feasible` accepts a row
-the loop calls violated, so the loop blocks on it with a negative slack and
-`alpha_min < 0` — a backward step, which *widens* the deferred negative-`alpha`
-bug rather than merely inheriting it. Both now go through `_feasibility_scale`;
-dividing slack and directional derivative by the same row factor leaves the
-step ratio unchanged while making the decisions built on them agree. Measured
-inert in-tree (the scale is exactly 1 there, so the scaled quantities are
-bitwise the raw ones, and fitted values are bitwise identical across four
-constraint shapes); on synthetic nonzero-`b` problems it changes the search
-path in 6/120 cases, never for a worse objective. Clamping `alpha ≥ 0` — the
-pre-existing half — stays deferred.
+*The loop body uses the same measure as the boundaries — for the gate only.*
+`_is_feasible` governs the projection and both `converged` flags, but the
+loop's own full-step test and its blocking gate were left absolute. Wherever
+the scaling is observable the two then disagree by construction: `_is_feasible`
+accepts a row the loop calls violated, so the loop blocks on it with a negative
+slack and `alpha_min < 0` — a backward step. Both gates now go through
+`_feasibility_scale`.
+
+**The deferred negative-`alpha` population therefore *shrank*, not grew.** An
+earlier draft of this note said the reverse. Rows already violated by more than
+1.0 with a tiny negative directional derivative used to pass the absolute gate
+and step backward; they are now skipped, and where every violated row is
+skipped the loop accepts `beta_new` and terminates `converged=False` rather
+than stepping backward. Both behaviours stay inside the
+`_project_feasible`-overrun population the follow-up already scopes, so the
+population *moved* rather than needing new scoping.
+
+*The ratio stays raw.* Scaling numerator and denominator by the same row factor
+is algebraically neutral and **not** neutral in floating point: it rounds twice
+where the raw quotient rounds once, and on a row with slack above 1 the scaled
+numerator collapses to exactly `1.0`. An earlier draft scaled both and claimed
+neutrality. Measured, that shifted `alpha` by an ulp — and in an active-set
+search an ulp flips which row is "blocking" and reroutes the whole path, which
+is how a fixture that took 13 iterations appeared to take 6 and then exhausted
+`max_iter` on CI's BLAS. With the raw ratio restored, routing is **bitwise
+inert on the nonzero-`b` population (0/120)**; the only cases that differ are
+`b = 0` problems with coefficients above 1, all six of which are
+`max_iter`-exhausted solves reaching a *lower* objective. In-tree the scale is
+exactly 1, so the scaled quantities are bitwise the raw ones and fitted values
+are unchanged. Clamping `alpha ≥ 0` — the pre-existing half — stays deferred.
 
 **Surfacing.** Each of the three call sites checks `result.converged` and emits
 `logger.warning` naming its context. `scop.py` has no module logger and gains
@@ -374,6 +390,16 @@ Two refinements the first draft did not have:
   reach that active set from a cold start, i.e. seeding the active set from the
   constraints that bound `null(H)` rather than relying on the ratio test to
   discover them. That is a feature, not a bug fix, and not audit S16.
+- **The stationarity test is absolute.** `np.linalg.norm(step) < tol` uses a
+  fixed `tol` on a quantity whose natural scale is `‖beta‖`. Everything else in
+  the function went scale-aware; this did not. It is the reason a fixture with
+  `‖beta‖ ≈ 8e3` terminated in 13 iterations on one BLAS and exhausted
+  `max_iter` on another with a *stable* active set `[3, 2, 0]` — not cycling,
+  just a step whose norm sits either side of `1e-12` depending on rounding.
+  Pre-existing; not fixed here.
+- **Active-set cycling has no anti-cycling rule.** Not observed (the trace
+  above shows monotone growth to a stable set, 4 distinct sets over the run),
+  but there is nothing preventing it. Filed for completeness.
 - **The negative-`alpha` ratio test.** `alpha` can go negative when the current
   iterate already violates constraint `i` (`slack < 0` with `a_step < -tol`),
   stepping backwards. Reachable only from an infeasible start. Confirmed
