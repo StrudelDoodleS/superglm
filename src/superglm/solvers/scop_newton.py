@@ -363,7 +363,7 @@ def scop_newton_step(
         # rather than claiming a Newton direction.
         used_fisher = True
         step = -1e-4 * grad
-    H_solved = H_gn if used_fisher else H_full
+    H_solved = _restrict_to_resolved_range(H_gn if used_fisher else H_full, discarded)
 
     # --- Damped step (step halving) ---
     # Non-finite trial states (overflow in exp(beta_eff), residual**2, etc.)
@@ -416,6 +416,33 @@ def _solve_step(H: NDArray, grad: NDArray) -> NDArray | None:
         return cho_solve((L, low), grad)
     except np.linalg.LinAlgError:
         return None
+
+
+def _restrict_to_resolved_range(H: NDArray, discarded: NDArray) -> NDArray:
+    """Project ``H`` onto the range the step could actually resolve.
+
+    ``H_penalized`` is consumed as *the* curvature of the accepted step -- the
+    REML joint Hessian substitutes it for the SCOP diagonal block, and the
+    determinant and geometry are taken from that. Reporting the unrestricted
+    full Newton Hessian would contradict the step: at the log-space boundary
+    the discarded direction carries essentially the whole penalized score (the
+    coefficient is running to minus infinity for a vanishing gain, which is
+    precisely why the fit cannot terminate without truncation), and that score
+    enters the Hessian through ``diag(grad_data)`` as a *negative* diagonal.
+    Consumers then see a materially indefinite matrix and refuse it.
+
+    Restricting removes the frozen direction together with its curvature.
+    Because ``P' H_full P == I + curvature`` for the retained basis, the
+    positive-definiteness test already applied to ``I + curvature`` is exactly
+    the statement that the restriction is positive definite, so what is
+    reported here is positive semidefinite by construction rather than by
+    hope. A step that discarded nothing is returned untouched.
+    """
+    if not discarded.size:
+        return H
+    projector = np.eye(H.shape[0]) - discarded.T @ discarded
+    restricted = projector @ H @ projector
+    return 0.5 * (restricted + restricted.T)
 
 
 def _penalty_root(S: NDArray) -> NDArray:
@@ -1172,6 +1199,7 @@ def scop_joint_newton_step(
             H_solved[sl_i, sl_i] = H_block
     else:
         H_solved = H
+    H_solved = _restrict_to_resolved_range(H_solved, discarded)
 
     # --- Step 5: Joint line search ---
     alpha = 1.0

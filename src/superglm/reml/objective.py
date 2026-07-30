@@ -29,6 +29,7 @@ from superglm.reml.scale import (
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
 )
+from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import SymmetricBlockOperator
@@ -233,7 +234,7 @@ def reml_laml_objective(
             XtW1=XtW1,
             sum_W=sum_W,
         )
-        centered_decomposition = decompose_gram(H_joint)
+        centered_decomposition = decompose_on_scop_resolved_range(H_joint, scop_states)
         centered_hessian_rank = centered_decomposition.rank
         logdet_m = float(np.log(sum_W) + centered_decomposition.log_pdet)
     else:

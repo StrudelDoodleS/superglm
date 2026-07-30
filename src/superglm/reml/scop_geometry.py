@@ -312,6 +312,114 @@ def _factor_certifier(
     return certify
 
 
+def _scop_discarded_model_directions(
+    scop_states: Mapping[int, dict],
+    width: int,
+) -> NDArray:
+    """Lift the solver's discarded directions into model space, as rows.
+
+    The joint solver truncates one factor spanning every SCOP group and hands
+    each group its own columns of the result, so row ``r`` of every group's
+    block belongs to the same joint direction and the groups reassemble
+    row-wise. Groups solved one at a time instead carry directions confined to
+    themselves, which is the shape this falls back to when the row counts do
+    not agree.
+    """
+    blocks = []
+    for state in scop_states.values():
+        rows = state.get("discarded_directions")
+        if rows is None:
+            continue
+        rows = np.asarray(rows, dtype=np.float64)
+        if rows.ndim != 2 or rows.shape[0] == 0:
+            continue
+        blocks.append((state["group_sl"], rows))
+
+    if not blocks:
+        return np.zeros((0, width), dtype=np.float64)
+
+    row_counts = {rows.shape[0] for _, rows in blocks}
+    if len(row_counts) == 1 and len(blocks) > 1:
+        nullity = row_counts.pop()
+        directions = np.zeros((nullity, width), dtype=np.float64)
+        for group_slice, rows in blocks:
+            directions[:, group_slice] = rows
+        return directions
+
+    directions = np.zeros((sum(rows.shape[0] for _, rows in blocks), width), dtype=np.float64)
+    offset = 0
+    for group_slice, rows in blocks:
+        directions[offset : offset + rows.shape[0], group_slice] = rows
+        offset += rows.shape[0]
+    return directions
+
+
+def scop_resolved_range_projector(
+    scop_states: Mapping[int, dict],
+    width: int,
+) -> NDArray | None:
+    """Return the projector onto the range the SCOP steps could resolve.
+
+    ``None`` when nothing was discarded, so callers leave their matrix
+    untouched rather than multiplying by an identity.
+    """
+    discarded = _scop_discarded_model_directions(scop_states, width)
+    if not discarded.size:
+        return None
+    frozen_basis, _ = np.linalg.qr(discarded.T)
+    return np.eye(width) - frozen_basis @ frozen_basis.T
+
+
+def restrict_to_scop_resolved_range(
+    matrix: NDArray,
+    scop_states: Mapping[int, dict],
+) -> NDArray:
+    """Project a joint latent matrix onto the resolved range, symmetrically."""
+    projector = scop_resolved_range_projector(scop_states, matrix.shape[0])
+    if projector is None:
+        return matrix
+    restricted = projector @ matrix @ projector
+    return 0.5 * (restricted + restricted.T)
+
+
+def scop_resolved_range_basis(
+    scop_states: Mapping[int, dict],
+    width: int,
+) -> NDArray | None:
+    """Orthonormal basis for the range the SCOP steps could resolve."""
+    discarded = _scop_discarded_model_directions(scop_states, width)
+    if not discarded.size:
+        return None
+    complete, _ = np.linalg.qr(discarded.T, mode="complete")
+    return complete[:, discarded.shape[0] :]
+
+
+def decompose_on_scop_resolved_range(
+    matrix: NDArray,
+    scop_states: Mapping[int, dict],
+) -> RankDecomposition:
+    """Decompose a joint latent matrix in resolved coordinates.
+
+    Zeroing a frozen direction in place is not enough to make a determinant
+    reproducible. ``decompose_gram`` equilibrates before it truncates, and
+    equilibration rescales a direction whose diagonal has been driven to zero,
+    lifting it back above the cutoff by an amount that depends on the rest of
+    the matrix. Two assemblies of the same mode -- one from expected curvature,
+    one from observed -- then disagree about a determinant that should be
+    identical.
+
+    Reducing to an explicit orthonormal basis removes the direction instead of
+    scaling it, so the retained spectrum is the same object either way. The
+    rank returned counts identified coordinates, which is what Wood's ``M_p``
+    requires.
+    """
+    basis = scop_resolved_range_basis(scop_states, matrix.shape[0])
+    if basis is None:
+        return decompose_gram(matrix)
+    reduced = basis.T @ matrix @ basis
+    return decompose_gram(0.5 * (reduced + reduced.T))
+
+
 def _decompose_with_factor_certification(
     matrix: NDArray,
     *,
@@ -582,6 +690,16 @@ def build_cached_scop_joint_geometry(
             np.outer(block_cross, block_cross) / fisher_sum_w
         )
 
+    # This builder assembles the joint curvature directly from the expected
+    # gram rather than through ``assemble_joint_hessian``, so it has to apply
+    # the same restriction: the retained blocks arrive resolved, but the
+    # expected cross-terms around them still reach the directions the SCOP
+    # steps froze. Leaving that leakage here would give this determinant a
+    # different value from the one ``assemble_joint_hessian`` produces for the
+    # same mode, and the two are compared.
+    centered = restrict_to_scop_resolved_range(centered, scop_states)
+    expected_centered = restrict_to_scop_resolved_range(expected_centered, scop_states)
+
     if fallback_flags and all(fallback_flags):
         curvature_source: SCOPCurvatureSource = "fisher"
     elif any(fallback_flags):
@@ -639,6 +757,17 @@ def build_cached_scop_joint_geometry(
         hessian_rank = decomposition.rank
     else:
         centered, hessian_inverse, log_pdet, hessian_rank = restricted_decomposition
+
+    # The determinant and the identified-coordinate count come from the
+    # resolved range, exactly as ``reml_laml_objective`` takes them, so a mode
+    # reproduced from stored state gets the same number this geometry stored.
+    # ``decompose_on_scop_resolved_range`` explains why restricting the matrix
+    # in place is not sufficient for that.
+    if scop_resolved_range_basis(scop_states, centered.shape[0]) is not None:
+        resolved_decomposition = decompose_on_scop_resolved_range(centered, scop_states)
+        log_pdet = resolved_decomposition.log_pdet
+        hessian_rank = resolved_decomposition.rank
+
     return SCOPJointGeometry(
         centered_hessian=_readonly(centered),
         hessian_inverse=_readonly(hessian_inverse),
