@@ -1947,9 +1947,7 @@ def _fit_irls_direct_once(
                 working_eta_min_unclipped < working_eta_min
                 or working_eta_max_unclipped > working_eta_max
             )
-            eta_clipped = bool(
-                eta_min_unclipped < eta_min or eta_max_unclipped > eta_max
-            )
+            eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
 
         # Record per-iteration diagnostics
         if record_diagnostics:

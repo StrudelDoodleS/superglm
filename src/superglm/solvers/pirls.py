@@ -1220,9 +1220,7 @@ def _fit_pirls_inner(
                 working_eta_min_unclipped < working_eta_min
                 or working_eta_max_unclipped > working_eta_max
             )
-            eta_clipped = bool(
-                eta_min_unclipped < eta_min or eta_max_unclipped > eta_max
-            )
+            eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=outer + 1,
