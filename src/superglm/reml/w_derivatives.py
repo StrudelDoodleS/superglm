@@ -177,9 +177,15 @@ def _compute_d2W_deta2_fd(
 def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
     """Report the capability gap that silently drops the W(rho) correction.
 
-    The message names the concrete classes so the stdlib default filter --
-    which dedups on (message, category, module, lineno) -- emits one warning
-    per unique link/distribution pair rather than one per REML iteration.
+    Every message names *both* concrete classes, then says which method is
+    missing.  The stdlib default filter dedups on
+    (message, category, module, lineno), so naming the pair is what makes the
+    granularity one warning per unique link/distribution pair rather than one
+    per REML iteration.  Naming only the absent method would key the dedup on
+    the deficient class alone: one custom link reused across two distributions
+    would warn once and the second degraded fit would go unreported.  The pair
+    is also the more useful thing to report -- the user needs to know which
+    combination was degraded, not just which method is absent.
     """
     missing = []
     if not hasattr(link, "deriv2_inverse"):
@@ -192,13 +198,14 @@ def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
         # Unreachable today: compute_dW_deta returns None only for the two
         # methods above.  Kept so a future None path still says something
         # rather than dropping the correction in silence again.
-        else f"{type(link).__name__}/{type(distribution).__name__} supplied no dW/deta"
+        else "no dW/deta was supplied"
     )
+    pair = f"{type(link).__name__}/{type(distribution).__name__}"
     warnings.warn(
-        f"REML W(rho) correction skipped: {detail}. Smoothing-parameter "
-        "gradients omit the weight-derivative term, so REML may converge "
-        "slowly or select slightly different smoothing parameters. "
-        "Implement the missing method to restore the correction.",
+        f"REML W(rho) correction skipped for {pair}: {detail}. "
+        "Smoothing-parameter gradients omit the weight-derivative term, so "
+        "REML may converge slowly or select slightly different smoothing "
+        "parameters. Implement the missing method to restore the correction.",
         UserWarning,
         stacklevel=3,
     )
