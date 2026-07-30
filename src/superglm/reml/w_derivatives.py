@@ -10,6 +10,7 @@ References
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -173,6 +174,36 @@ def _compute_d2W_deta2_fd(
     return (dW_plus - dW_minus) / (2.0 * eps)
 
 
+def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
+    """Report the capability gap that silently drops the W(rho) correction.
+
+    The message names the concrete classes so the stdlib default filter --
+    which dedups on (message, category, module, lineno) -- emits one warning
+    per unique link/distribution pair rather than one per REML iteration.
+    """
+    missing = []
+    if not hasattr(link, "deriv2_inverse"):
+        missing.append(f"{type(link).__name__}.deriv2_inverse")
+    if not hasattr(distribution, "variance_derivative"):
+        missing.append(f"{type(distribution).__name__}.variance_derivative")
+    detail = (
+        f"{' and '.join(missing)} is not implemented"
+        if missing
+        # Unreachable today: compute_dW_deta returns None only for the two
+        # methods above.  Kept so a future None path still says something
+        # rather than dropping the correction in silence again.
+        else f"{type(link).__name__}/{type(distribution).__name__} supplied no dW/deta"
+    )
+    warnings.warn(
+        f"REML W(rho) correction skipped: {detail}. Smoothing-parameter "
+        "gradients omit the weight-derivative term, so REML may converge "
+        "slowly or select slightly different smoothing parameters. "
+        "Implement the missing method to restore the correction.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
 def reml_w_correction(
     dm: DesignMatrix,
     link: Any,
@@ -265,7 +296,10 @@ def reml_w_correction(
         XtWX_S_inv = geometry.hessian_inverse
 
     if dW_deta is None:
-        return None  # Custom link/distribution w/o 2nd-order
+        # Custom link/distribution w/o 2nd-order.  Distinct from the
+        # structurally-zero branch below, which is silent by design.
+        _warn_w_correction_unavailable(link, distribution)
+        return None
 
     if not np.any(dW_deta):
         return None  # Structurally constant working curvature.
