@@ -2803,14 +2803,26 @@ class TestIterationDiagnosticsSmallSample:
         assert model.result.beta is not None
 
     def test_debug_weights_survives_small_samples(self):
+        """Exercises the helper, not a copy of it.
+
+        This test used to re-spell ``np.argpartition(W, k - 1)[:k]`` inline,
+        which meant it asserted its own arithmetic: reverting the fix in
+        ``_extreme_weight_indices`` left it green, so it read as coverage while
+        pinning nothing.
+        """
         from superglm.debug_weights import _positive_working_weight_stats
+        from superglm.solvers.pirls import _extreme_weight_indices
 
         for n in range(1, 7):
             weights = np.linspace(1.0, 2.0, n)
             k = min(5, n)
-            # the shape the recorder uses, exercised directly
-            assert len(np.argpartition(weights, k - 1)[:k]) == k
-            assert len(np.argpartition(weights, -k)[-k:]) == k
+            top_idx, bot_idx = _extreme_weight_indices(weights)
+            assert len(top_idx) == k
+            assert len(bot_idx) == k
+            assert all(0 <= int(i) < n for i in (*top_idx, *bot_idx))
+            # ...and the documented ordering: largest first, smallest first.
+            np.testing.assert_array_equal(weights[top_idx], np.sort(weights)[::-1][:k])
+            np.testing.assert_array_equal(weights[bot_idx], np.sort(weights)[:k])
             assert _positive_working_weight_stats(weights)[2] >= 1.0
 
 
