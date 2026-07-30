@@ -1244,6 +1244,7 @@ def _fit_irls_direct_once(
 
     max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
+    _warned_qp_nonconvergence = False  # fire-once latch, as for the SVD warning
 
     for it in range(max_iter):
         beta_prev = committed.beta
@@ -1595,11 +1596,16 @@ def _fit_irls_direct_once(
                 beta = qp_result.beta
                 intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
                 prev_active_set = qp_result.active_set
-                if not qp_result.converged:
+                # Non-convergence usually persists for the rest of the fit, so
+                # latch the report to the first occurrence rather than emitting
+                # one identical line per IRLS iteration.
+                if not qp_result.converged and not _warned_qp_nonconvergence:
+                    _warned_qp_nonconvergence = True
                     logger.warning(
                         "fit_irls_direct: constrained QP did not converge at "
                         "iteration %d; monotone constraints may be only "
-                        "approximately satisfied.",
+                        "approximately satisfied. Later iterations of this fit "
+                        "are not reported.",
                         it + 1,
                     )
                 _used_svd = False
