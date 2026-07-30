@@ -1897,6 +1897,46 @@ class TestKKTEquilibration:
         assert worst <= 1.0 + 8.0 * np.finfo(float).eps, f"scaled entry reached {worst}"
 
 
+class TestRankGateSeesCollinearityNotScale:
+    """The gate keys off the *equilibrated* rank, so scale never reaches it.
+
+    ``decompose_gram`` divides by ``sqrt(diag(H))`` before deciding rank, so
+    ``H = diag(1, 1e-20)`` equilibrates to the identity and is reported full
+    rank.  That is a real property of the rank policy, not a bug in it -- but
+    it means a sweep that plants its small eigenvalue diagonally never leaves
+    the ``np.linalg.solve`` side of the gate, whatever it scores.
+    """
+
+    @pytest.mark.parametrize("delta", [1e-20, 1e-18, 1e-16, 2.220446049250313e-16, 1e-12, 1e-8])
+    @pytest.mark.parametrize("width", [2, 6, 12])
+    def test_a_diagonally_planted_eigenvalue_never_drops_the_rank(self, delta, width):
+        H = np.diag([1.0] * (width - 1) + [delta])
+
+        decomposition = decompose_gram(H)
+
+        assert decomposition.rank == decomposition.width, (
+            f"raw condition {1.0 / delta:.1e} dropped the rank; the gate's "
+            "scale-blindness no longer holds and the rationale beside it is stale"
+        )
+
+    def test_the_same_eigenvalue_planted_after_equilibration_does_drop_it(self):
+        """The contrast that makes the point above a property rather than an
+        accident: identical raw conditioning, opposite gate decision."""
+        rng = np.random.default_rng(11)
+        width = 6
+        basis = np.linalg.qr(rng.standard_normal((width, width)))[0]
+        equilibrated = basis @ np.diag([1.0] * (width - 1) + [1e-20]) @ basis.T
+        scale = np.sqrt(np.diag(equilibrated))
+        correlation = equilibrated / np.outer(scale, scale)
+        H = 0.5 * (correlation + correlation.T)
+
+        decomposition = decompose_gram(H)
+
+        assert decomposition.rank < decomposition.width, (
+            "fixture no longer plants inside the retention band"
+        )
+
+
 class TestIntegerHessian:
     """``H + H.T`` evaluates in the input dtype, so an integer H can wrap."""
 
