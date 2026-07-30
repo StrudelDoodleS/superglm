@@ -24,10 +24,18 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.solvers.rank import decompose_gram
+
 
 @dataclass
 class QPResult:
-    """Result of a constrained QP solve."""
+    """Result of a constrained QP solve.
+
+    ``converged`` is ``False`` when the active-set loop exhausted ``max_iter``
+    or when the feasibility projection never reached the feasible set (which
+    happens for a mutually infeasible constraint system).  In either case
+    ``beta`` is the best available point, not a certified solution.
+    """
 
     beta: NDArray
     active_set: list[int] = field(default_factory=list)
@@ -35,23 +43,27 @@ class QPResult:
     converged: bool = True
 
 
-def _project_feasible(beta: NDArray, A: NDArray, b: NDArray) -> NDArray:
+def _project_feasible(beta: NDArray, A: NDArray, b: NDArray) -> tuple[NDArray, bool]:
     """Project beta onto the feasible set {x : A @ x >= b}.
 
     Uses iterative constraint-by-constraint projection (Dykstra-like).
     For the small dense problems we handle, this converges quickly.
+
+    Returns the projected point and whether the sweeps reached feasibility;
+    a mutually infeasible constraint set exhausts the sweep budget and
+    reports ``False``.
     """
     beta = beta.copy()
     for _ in range(100):
         violations = A @ beta - b
         worst = np.argmin(violations)
         if violations[worst] >= -1e-12:
-            break
+            return beta, True
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
         deficit = b[worst] - a @ beta
         beta += deficit / (a @ a) * a
-    return beta
+    return beta, False
 
 
 def solve_constrained_qp(
@@ -68,7 +80,10 @@ def solve_constrained_qp(
     Parameters
     ----------
     H : (p, p) NDArray
-        Positive definite (or PSD + regularized) Hessian.
+        Positive semidefinite Hessian. It is decomposed once through the
+        shared rank policy, so a rank-deficient H is truncated rather than
+        raising; a materially indefinite H raises ``ValueError``, because
+        the problem is then not the convex QP this solver assumes.
     g : (p,) NDArray
         Linear term (gradient at zero, with sign: objective is
         0.5 * beta^T H beta - g^T beta).
@@ -91,13 +106,19 @@ def solve_constrained_qp(
     p = H.shape[0]
     m = A.shape[0]
 
+    # Route the pure-H solves through the shared rank policy so a singular or
+    # near-singular H is rank-truncated the way it is everywhere else in the
+    # solver subsystem, rather than raising LinAlgError.  H does not change
+    # during the solve, so one decomposition serves every pure-H solve below.
+    decomposition = decompose_gram(H)
+
     if m == 0:
         # No constraints — direct solve
-        beta = np.linalg.solve(H, g)
+        beta = decomposition.solve(g)
         return QPResult(beta=beta, active_set=[], n_iter=0)
 
     # --- Unconstrained solution ---
-    beta_unc = np.linalg.solve(H, g)
+    beta_unc = decomposition.solve(g)
     if np.all(A @ beta_unc - b >= -tol):
         return QPResult(beta=beta_unc, active_set=[], n_iter=0)
 
@@ -108,13 +129,14 @@ def solve_constrained_qp(
         active = []
 
     # --- Feasible starting point ---
-    beta = _project_feasible(beta_unc, A, b)
+    beta, projection_feasible = _project_feasible(beta_unc, A, b)
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
         if len(active) == 0:
-            # No active constraints — unconstrained step
-            step = np.linalg.solve(H, g) - beta
+            # No active constraints — unconstrained step.  beta_unc is the same
+            # quantity, already computed above the loop.
+            step = beta_unc - beta
         else:
             A_eq = A[active]  # (|active|, p)
             b_eq = b[active]  # (|active|,)
@@ -144,7 +166,12 @@ def solve_constrained_qp(
         if np.linalg.norm(step) < tol:
             # At a stationary point. Check multipliers.
             if len(active) == 0:
-                return QPResult(beta=beta, active_set=active, n_iter=it + 1)
+                return QPResult(
+                    beta=beta,
+                    active_set=active,
+                    n_iter=it + 1,
+                    converged=projection_feasible,
+                )
 
             # Recompute multipliers at current point.
             # KKT stationarity: H*beta - g = A_eq' * lambda, lambda >= 0
@@ -160,7 +187,12 @@ def solve_constrained_qp(
             min_mult = np.min(multipliers)
             if min_mult >= -tol:
                 # All multipliers nonneg — KKT satisfied
-                return QPResult(beta=beta, active_set=active, n_iter=it + 1)
+                return QPResult(
+                    beta=beta,
+                    active_set=active,
+                    n_iter=it + 1,
+                    converged=projection_feasible,
+                )
 
             drop_idx = np.argmin(multipliers)
             active.pop(drop_idx)
