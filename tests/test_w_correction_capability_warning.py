@@ -189,6 +189,36 @@ def test_warns_once_per_class_pair_not_once_per_iteration(poisson_setup) -> None
     assert sum("variance_derivative" in message for message in messages) == 1
 
 
+def test_one_custom_link_still_warns_for_each_counterpart(poisson_setup, gamma_setup) -> None:
+    """Same missing method, two counterpart distributions => two warnings.
+
+    The complementary axis to the test above: there the two variants differ in
+    *which* method is missing, here they differ only in the *counterpart* that
+    is not missing anything.  Both are raised from the single call site inside
+    ``_call``, so the filter's ``(text, category, lineno)`` key again differs
+    only in message text.  Name only the missing method and the two pairs
+    collapse to one warning, silently hiding the second degraded fit.
+    """
+    link = _LinkWithoutDeriv2(poisson_setup["link"])
+    distributions = [poisson_setup["distribution"], gamma_setup["distribution"]]
+    assert {type(d).__name__ for d in distributions} == {"Poisson", "Gamma"}
+    # Only the link is deficient; both distributions have variance_derivative.
+    for distribution in distributions:
+        assert hasattr(distribution, "variance_derivative")
+        assert _dW_deta(poisson_setup, link=link, distribution=distribution) is None
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        for distribution in distributions:
+            for _ in range(2):
+                _call(poisson_setup, link=link, distribution=distribution)
+
+    messages = [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)]
+    assert len(messages) == 2, messages
+    assert sum("Poisson" in message for message in messages) == 1
+    assert sum("Gamma" in message for message in messages) == 1
+
+
 def test_builtin_link_does_not_warn(poisson_setup) -> None:
     """Poisson/log runs the whole correction, so neither early return may fire."""
     dW_deta = _dW_deta(poisson_setup)

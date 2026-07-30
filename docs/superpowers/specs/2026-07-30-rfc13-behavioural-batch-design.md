@@ -383,8 +383,8 @@ via `validate_observed_derivative_capability`
 
 ### Design
 
-A private helper in `w_derivatives.py` emits a `UserWarning` naming the missing
-method(s) and the consequence.
+A private helper in `w_derivatives.py` emits a `UserWarning` naming the
+concrete link/distribution pair, the missing method(s), and the consequence.
 
 **Call site: `reml_w_correction` at the `dW_deta is None` branch (line 267) —
 deliberately not inside `compute_dW_deta`.** `compute_dW_deta` has a second
@@ -412,6 +412,16 @@ observes it because pytest resets filters inside its context.
 `pyproject.toml:127-129` filters only the `bs` `FutureWarning`, so nothing
 interferes.
 
+The pair must be named **unconditionally**, as a `"{Link}/{Distribution}"`
+prefix, not assembled from whichever class is missing a method. Round-2 review
+caught the earlier version doing the latter: when only the link lacked
+`deriv2_inverse` the message named just that method, so the same custom link
+reused with Poisson and then with Gamma produced byte-identical text and the
+filter suppressed the second — one warning where the design promises two, with
+the second degraded pair going unreported. Naming the pair is also the more
+useful report: the user needs to know which *combination* was degraded, not
+only which method is absent.
+
 Raising, as the observed path does, was considered and rejected: it would
 remove a currently-working if degraded path for custom links.
 
@@ -423,6 +433,15 @@ remove a currently-working if degraded path for custom links.
   method.
 - Gamma/log does **not** warn (structural zero, line 270).
 - A built-in link does not warn.
+- Dedup granularity, on both axes, with every variant raised from a *single*
+  call site so the filter key differs only in message text:
+  - Two different missing methods → two warnings, not one
+    (`test_warns_once_per_class_pair_not_once_per_iteration`), and repeats of
+    each collapse to one, standing in for per-iteration spam.
+  - One custom link, two counterpart distributions → two warnings, not one
+    (`test_one_custom_link_still_warns_for_each_counterpart`). This is the case
+    round-2 review found broken; it fails with `assert 1 == 2` against a
+    message that names only the missing method.
 
 ---
 
