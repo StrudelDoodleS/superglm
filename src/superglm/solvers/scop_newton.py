@@ -21,6 +21,7 @@ the sequential Gauss-Seidel loop that causes slow convergence.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -627,6 +628,40 @@ def _solve_step_minres(
     return None, iters
 
 
+def _gauss_newton_hessian(
+    H: NDArray,
+    joint_slices: list[slice],
+    grad_datas: list[NDArray],
+) -> NDArray:
+    """Strip the second-order Newton term, leaving the PSD Gauss-Newton part."""
+    gauss_newton = H.copy()
+    for idx, sl_i in enumerate(joint_slices):
+        block = gauss_newton[sl_i, sl_i].copy()
+        block[np.diag_indices_from(block)] -= grad_datas[idx]
+        gauss_newton[sl_i, sl_i] = block
+    return gauss_newton
+
+
+def _gauss_newton_conditioning(
+    H: NDArray,
+    joint_slices: list[slice],
+    grad_datas: list[NDArray],
+) -> float:
+    """Smallest-to-largest eigenvalue of the Gauss-Newton Gram.
+
+    Costs one ``q x q`` symmetric eigendecomposition, which is negligible
+    beside the ``n x q`` factor it decides whether to build. Zero when the
+    Gram is not usable at all, which routes to the factor.
+    """
+    eigenvalues = np.linalg.eigvalsh(_gauss_newton_hessian(H, joint_slices, grad_datas))
+    if eigenvalues.size == 0:
+        return 0.0
+    largest = float(eigenvalues[-1])
+    if not np.isfinite(largest) or largest <= 0.0:
+        return 0.0
+    return float(eigenvalues[0]) / largest
+
+
 def _joint_augmented_factor(
     scop_items: list[tuple[int, dict]],
     joint_slices: list[slice],
@@ -670,26 +705,43 @@ def _joint_augmented_factor(
 
 
 def _solve_joint_step(
-    factor: NDArray,
+    make_factor: Callable[[], NDArray],
     second_order: NDArray,
+    conditioning: float,
     H: NDArray,
     grad: NDArray,
     scop_items: list[tuple[int, dict]],
     joint_slices: list[slice],
+    grad_datas: list[NDArray],
     BtWBs: list[NDArray],
     j_diags: list[NDArray],
     lambdas_list: list[float],
 ) -> tuple[NDArray | None, bool, NDArray, str, int]:
     """Solve the joint Newton direction using the active prototype policy.
 
+    ``make_factor`` is a thunk rather than a matrix because a multi-group
+    factor is ``n x q`` and most solves never need one; see the conditioning
+    gate below.
+
     Returns ``(step, used_fisher, discarded, solver_name, iterations)``.
     """
     cfg = _PROTOTYPE_CONFIG
     q_total = H.shape[0]
+    nothing_discarded = np.zeros((0, q_total), dtype=float)
 
     use_iterative = cfg.solve_mode != "direct" and q_total >= cfg.iterative_q_total_min
     if not use_iterative:
-        step, used_fisher, discarded = _truncated_factor_step(factor, second_order, grad)
+        if conditioning > _SQRT_EPS:
+            # Far enough from singular that no direction is near the truncation
+            # cutoff: the Gram carries the step exactly and the factor would
+            # discard nothing. This is the common case and it keeps the
+            # observation-level factor out of the hot path.
+            step = _solve_step(H, grad)
+            if step is not None:
+                return step, False, nothing_discarded, "direct_gram", 0
+            gauss_newton = _gauss_newton_hessian(H, joint_slices, grad_datas)
+            return _solve_step(gauss_newton, grad), True, nothing_discarded, "direct_gram", 0
+        step, used_fisher, discarded = _truncated_factor_step(make_factor(), second_order, grad)
         return step, used_fisher, discarded, "direct", 0
 
     allow_inexact = cfg.solve_mode == "minres_inexact"
@@ -708,9 +760,9 @@ def _solve_joint_step(
     if step is not None:
         solver_name = "minres_inexact" if allow_inexact else "minres"
         # MINRES solves the untruncated system, so nothing was discarded.
-        return step, False, np.zeros((0, q_total), dtype=float), solver_name, iters
+        return step, False, nothing_discarded, solver_name, iters
 
-    step, used_fisher, discarded = _truncated_factor_step(factor, second_order, grad)
+    step, used_fisher, discarded = _truncated_factor_step(make_factor(), second_order, grad)
     return step, used_fisher, discarded, "direct_fallback", iters
 
 
@@ -1165,16 +1217,36 @@ def scop_joint_newton_step(
             )
         return results
 
-    # --- Step 4: Solve from the augmented factor (rank truncated first) ---
-    factor = _joint_augmented_factor(scop_items, joint_slices, j_diags, lambdas_list, W)
+    # --- Step 4: Solve ---
+    # The square-root form exists to resolve directions the Gram cannot, and it
+    # is only worth its cost when there are any. A multi-group factor has to be
+    # built at observation level -- the groups sit on different bin grids, so
+    # there is no shared coarser row space -- which is the O(n q^2) work
+    # discretization exists to avoid, repeated every Newton step.
+    #
+    # When the Gauss-Newton Gram is comfortably far from singular, no direction
+    # is anywhere near the truncation cutoff, the Gram carries the step to full
+    # accuracy, and nothing would have been discarded anyway. Measured on a
+    # three-term fit at n=50000: smallest-to-largest singular value 4.7e-03,
+    # zero directions truncated in every one of its solves, and the factor was
+    # 50000 rows each time.
+    #
+    # The gate is the truncation rule read backwards. Directions are discarded
+    # below ``sigma_max * sqrt(eps)``, which on the Gram is ``lambda_max *
+    # eps``; requiring ``lambda_min / lambda_max`` to clear ``sqrt(eps)`` keeps
+    # a margin of ``1 / sqrt(eps)`` -- eight orders of magnitude -- between the
+    # cheapest system that takes this path and the dearest one that could have
+    # lost a direction to rounding.
     second_order = np.concatenate(grad_datas)
     step, used_fisher, discarded, linear_solver, linear_iterations = _solve_joint_step(
-        factor,
+        lambda: _joint_augmented_factor(scop_items, joint_slices, j_diags, lambdas_list, W),
         second_order,
+        _gauss_newton_conditioning(H, joint_slices, grad_datas),
         H,
         grad,
         scop_items,
         joint_slices,
+        grad_datas,
         BtWBs,
         j_diags,
         lambdas_list,
