@@ -1220,6 +1220,16 @@ def _finalize_scop_reml_mode(
     )
     if not np.isfinite(result.phi) or not np.isfinite(result.effective_df):
         raise RuntimeError("SCOP REML terminal hydration left non-finite fit statistics")
+    # The inner fits set ``record_diagnostics=True`` so the stagnation gate can
+    # read the per-iteration deviance history. That is an internal need:
+    # ``fit_reml`` exposes no ``record_diagnostics`` parameter, and the
+    # non-SCOP REML path solves with it off, so a REML caller has never been
+    # able to ask for a log. Publishing one here would make
+    # ``model.iteration_diagnostics()`` return a frame for SCOP REML fits while
+    # continuing to raise for every other engine -- a contract that varies by
+    # solver. Drop it on the one result that reaches users; every gate decision
+    # was already taken during the fit.
+    result.iteration_log = None
     return result
 
 

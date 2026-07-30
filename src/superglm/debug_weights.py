@@ -143,8 +143,11 @@ def compare_irls_weights(
             _, _, w_ratio = _positive_working_weight_stats(W_it)
             n_sm = len(W_it)
             k = min(5, n_sm)
+            # ``kth`` must satisfy -n <= kth < n. When n_sm <= 5, k == n_sm, so
+            # the bottom-k partition has to use k - 1: it selects the same k
+            # smallest entries and stays in bounds for every k in [1, n_sm].
             top_idx = np.argpartition(W_it, -k)[-k:]
-            bot_idx = np.argpartition(W_it, k)[:k]
+            bot_idx = np.argpartition(W_it, k - 1)[:k]
             rows.append(
                 {
                     "iter": it,

@@ -39,15 +39,6 @@ from superglm.solvers.rank import _EPS, RankDecomposition, decompose_gram
 # this one.
 _NULL_BASIS_ACCURACY_SLACK = 32.0
 
-# Consistency floor for the *structural* half of the null space.  Those basis
-# vectors are exact unit vectors -- a structurally zero column gives ``H`` an
-# identically zero row -- so no conditioning term belongs here.  The two floors
-# model different errors and must move independently: the spectral slack above
-# covers ``eps * kappa`` amplification of a *computed* basis, this one covers
-# only rounding in the two vector norms that form the ratio.  They happen to
-# hold the same numeric value; that coincidence is not a dependency, and
-# deriving one from the other would re-create, one level down, exactly the
-# coupling ``_NULL_BASIS_ACCURACY_SLACK`` exists to avoid.
 # Dimension term for the spectral floor.  The retained-condition term above
 # models error amplification, but ``eigh``'s own backward error grows with the
 # problem's width and does not vanish as the retained block becomes perfectly
@@ -59,6 +50,15 @@ _NULL_BASIS_ACCURACY_SLACK = 32.0
 # term dominates, so this cannot move detection at the high end.
 _SPECTRAL_DIMENSION_SLACK = 512.0
 
+# Consistency floor for the *structural* half of the null space.  Those basis
+# vectors are exact unit vectors -- a structurally zero column gives ``H`` an
+# identically zero row -- so no conditioning term belongs here.  The two floors
+# model different errors and must move independently: the spectral slack above
+# covers ``eps * kappa`` amplification of a *computed* basis, this one covers
+# only rounding in the two vector norms that form the ratio.  They happen to
+# hold the same numeric value; that coincidence is not a dependency, and
+# deriving one from the other would re-create, one level down, exactly the
+# coupling ``_NULL_BASIS_ACCURACY_SLACK`` exists to avoid.
 _STRUCTURAL_NORM_ROUNDING_SLACK = 32.0
 _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 

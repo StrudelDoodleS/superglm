@@ -1234,7 +1234,9 @@ def _fit_irls_direct_once(
     eta_unclipped = committed.eta_unclipped
     eta = committed.eta
     mu = committed.mu
-    iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
+    # Always an empty list; only ``record_diagnostics`` decides whether rows are
+    # appended and whether it is published on the result.
+    iteration_log: list[IterationDiagnostics] = []
     base_debug_context = dict(debug_context or {})
     # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
     record_debug_rows = (
@@ -1938,8 +1940,11 @@ def _fit_irls_direct_once(
         # Record per-iteration diagnostics
         if record_diagnostics:
             k = min(5, n)
+            # ``kth`` must satisfy -n <= kth < n. When n <= 5, k == n, so the
+            # bottom-k partition has to use k - 1: it selects the same k
+            # smallest entries and stays in bounds for every k in [1, n].
             top_idx = np.argpartition(W, -k)[-k:]
-            bot_idx = np.argpartition(W, k)[:k]
+            bot_idx = np.argpartition(W, k - 1)[:k]
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=it + 1,
