@@ -3,7 +3,9 @@
 import numpy as np
 import pytest
 
+from superglm._fit_trace import MemoryTraceSink, NullTraceSink, TraceRun
 from superglm.solvers.constrained_qp import (
+    BLOCKING_TRACE_CHANNEL,
     _consistency_floor,
     _feasibility_scale,
     _feasibility_slack,
@@ -903,3 +905,150 @@ class TestConstraintBoundedInconsistentSystem:
         assert "unconstrained objective is unbounded below" in message
         assert "constraints may still bound the problem" in message
         assert "null-space descent direction" in message
+
+
+class TestBlockingDecisionTrace:
+    """Pin the routing *mechanism* through the house tracing seam.
+
+    Routing the loop's gates through ``_feasibility_scale`` is not observable
+    as a numeric outcome: with the raw ratio it is bitwise inert on every
+    nonzero-``b`` probe, and the only population that differs is ``b = 0``
+    exhausted solves whose paths are chaotic.  Asserting anything there is how
+    a fixture that passed locally exhausted ``max_iter`` on CI's BLAS.
+
+    So these tests assert *properties of each decision*, re-derived by the
+    hook rather than echoed from the loop.  A property must hold whatever path
+    the search takes, so no assertion here can depend on BLAS: only the
+    preconditions count records, and they carry wide margins.
+    """
+
+    @staticmethod
+    def _decisions(scale=100.0, seeds=range(8), p=5, zero_rhs=False, order=1):
+        """Aggregate blocking decisions over several small, fast fixtures.
+
+        Aggregating rather than pinning one fixture is deliberate: a different
+        BLAS may shift an individual search, but the batch still produces
+        decisions, so the preconditions stay satisfied.
+        """
+        records = []
+        for seed in seeds:
+            rng = np.random.default_rng(seed)
+            M = rng.standard_normal((p, p))
+            H = M.T @ M + 0.5 * np.eye(p)
+            g = rng.standard_normal(p) * scale
+            A = np.diff(np.eye(p), n=order, axis=0)
+            b = np.zeros(A.shape[0]) if zero_rhs else rng.standard_normal(A.shape[0]) * scale
+            sink = MemoryTraceSink()
+            solve_constrained_qp(H, g, A, b, _trace_run=TraceRun(f"qp-{seed}", sink=sink))
+            for event in sink.events:
+                assert event.event_kind == "step_decision"
+                assert event.channel == BLOCKING_TRACE_CHANNEL
+                records.append(event.payload)
+        return records
+
+    def test_no_step_the_convergence_test_accepts_reaches_the_blocking_search(self):
+        """The full-step gate must be the convergence test, not an absolute one.
+
+        Where the two disagree, the loop blocks on a row ``_is_feasible``
+        considers satisfied and takes a negative ``alpha`` -- a backward step.
+
+        The two can only disagree when ``tol * |b_i|`` exceeds ``tol``, so this
+        needs a large ``b``; at ``1e2`` the absolute and scaled full-step tests
+        agree on every fixture and the assertion would hold for either
+        implementation.  Measured: every seed here witnesses the disagreement
+        when the gate is reverted.
+        """
+        records = self._decisions(scale=1e6, seeds=range(6))
+
+        assert len(records) >= 10, f"only {len(records)} decisions; no margin"
+        accepted = [r for r in records if r["full_step_is_feasible"]]
+        assert not accepted, (
+            f"{len(accepted)} of {len(records)} blocking searches were entered "
+            "for a step the convergence test accepts"
+        )
+
+    def test_recorded_alpha_is_the_raw_quotient_for_the_blocking_row(self):
+        """The ratio must be the raw quotient, not the doubly-rounded one.
+
+        Recomputed from the inputs the hook recorded, so this asserts the
+        documented relation rather than a stored number.
+        """
+        records = self._decisions()
+
+        checked = 0
+        scaled_rows = 0
+        for record in records:
+            blocking = record["blocking_row"]
+            if blocking < 0:
+                continue
+            index = record["considered_rows"].index(blocking)
+            products = record["row_products"][index]
+            b_i = record["row_b"][index]
+            raw_step = record["row_raw_step"][index]
+            if max(1.0, abs(b_i), abs(products)) > 1.0:
+                scaled_rows += 1
+            assert record["alpha"] == (products - b_i) / -raw_step, (
+                f"alpha {record['alpha']!r} is not the raw quotient "
+                f"{(products - b_i) / -raw_step!r} for row {blocking}"
+            )
+            checked += 1
+
+        assert checked >= 10, f"only {checked} blocking decisions; no margin"
+        # Without a row whose scale exceeds 1 the two forms agree bitwise and
+        # the assertion above is satisfied by any implementation.
+        assert scaled_rows >= 5, (
+            f"only {scaled_rows} blocking rows had scale > 1; the fixtures no "
+            "longer distinguish the raw and scaled quotients"
+        )
+
+    def test_the_blocked_row_always_passes_the_scaled_gate(self):
+        """The blocking gate must be scaled too, not only the full-step gate.
+
+        A directional derivative that is numerically zero *relative to its row*
+        must not make the row a blocking candidate; under the unscaled gate it
+        did, and the row then contributed a negative ``alpha``.  The hook
+        derives the scale itself, so a loop gating on the raw derivative
+        records a ``blocking_row`` outside its own considered set.
+        """
+        # Needs a row whose derivative is numerically still *relative to its
+        # row* while its slack is negative -- only then does the unscaled gate
+        # select it, at a hugely negative alpha.  Measured to occur on the
+        # ``b = 0`` first-difference shape the monotone spline path uses.
+        records = self._decisions(scale=1e6, seeds=range(25), p=6, zero_rhs=True)
+
+        blocked = [r for r in records if r["blocking_row"] >= 0]
+        assert len(blocked) >= 10, f"only {len(blocked)} blocking decisions; no margin"
+        offenders = [r for r in blocked if not r["blocking_is_considered"]]
+        assert not offenders, (
+            f"{len(offenders)} of {len(blocked)} decisions blocked on a row the "
+            "scaled gate excludes"
+        )
+        for record in blocked:
+            assert record["blocking_scaled_step"] < -1e-12, (
+                f"row {record['blocking_row']} was blocked on with scaled "
+                f"derivative {record['blocking_scaled_step']!r}"
+            )
+
+    def test_the_seam_is_off_by_default_and_inert_when_disabled(self):
+        """Default off, and an attached-but-disabled run changes nothing."""
+        rng = np.random.default_rng(2)
+        p = 5
+        M = rng.standard_normal((p, p))
+        H = M.T @ M + 0.5 * np.eye(p)
+        g = rng.standard_normal(p) * 100.0
+        A = np.diff(np.eye(p), axis=0)
+        b = rng.standard_normal(p - 1) * 100.0
+
+        default = solve_constrained_qp(H, g, A, b)
+        disabled_sink = NullTraceSink()
+        disabled = solve_constrained_qp(H, g, A, b, _trace_run=TraceRun("off", sink=disabled_sink))
+        enabled_sink = MemoryTraceSink()
+        enabled = solve_constrained_qp(H, g, A, b, _trace_run=TraceRun("on", sink=enabled_sink))
+
+        assert not disabled_sink.enabled
+        assert enabled_sink.events, "the fixture must actually produce decisions"
+        for other in (disabled, enabled):
+            np.testing.assert_array_equal(default.beta, other.beta)
+            assert default.n_iter == other.n_iter
+            assert default.converged == other.converged
+            assert default.active_set == other.active_set

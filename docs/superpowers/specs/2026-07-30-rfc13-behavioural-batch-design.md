@@ -337,6 +337,34 @@ inert on the nonzero-`b` population (0/120)**; the only cases that differ are
 exactly 1, so the scaled quantities are bitwise the raw ones and fitted values
 are unchanged. Clamping `alpha ≥ 0` — the pre-existing half — stays deferred.
 
+*The routing is pinned by a decision trace, not by a numeric outcome.*
+Routing has no BLAS-robust end-to-end signature: with the raw ratio it is
+bitwise inert on every nonzero-`b` probe, and the only differing population is
+`b = 0` exhausted solves whose paths are chaotic. `solve_constrained_qp`
+therefore takes `_trace_run: TraceRun | None = None` — the house `_fit_trace`
+seam, reusing the existing `step_decision` event kind — and emits one event per
+blocking decision on the `constrained_qp_blocking` channel. Underscore-prefixed
+and keyword-only because the function is re-exported from `superglm.solvers`
+and this is not public API, and no field is added to `QPResult`.
+
+The hook **re-derives** everything it records — the per-row scale, the scaled
+derivative, the considered set, and whether the convergence test accepts the
+full step — instead of reusing the loop's arrays or echoing its booleans. A
+hook fed the loop's own gating arithmetic would agree with it by construction
+and could never witness the gate being wrong. That is what makes the three
+tests bite: each fails under a targeted revert and passes otherwise.
+
+| Mutation | Test that fails |
+|---|---|
+| full-step gate reverted to absolute | `..._no_step_the_convergence_test_accepts_reaches_the_blocking_search` |
+| blocking gate reverted to absolute | `..._the_blocked_row_always_passes_the_scaled_gate` |
+| both (= pre-routing) | both of the above |
+| ratio doubly rounded | `..._recorded_alpha_is_the_raw_quotient_for_the_blocking_row` |
+
+Default off and bitwise inert: `tracing` is resolved once before the loop, the
+payload is built through `emit_lazy` so it is never constructed when disabled,
+and fitted values plus 60 direct solves are byte-identical to the parent.
+
 **Surfacing.** Each of the three call sites checks `result.converged` and emits
 `logger.warning` naming its context. `scop.py` has no module logger and gains
 one. No public API change.
