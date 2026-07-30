@@ -174,8 +174,8 @@ class SCOPReparameterization:
         result = solve_constrained_qp(H, g, A, b)
         if not result.converged:
             logger.warning(
-                "SCOP QP initialization did not converge; falling back to an "
-                "approximate shape-constrained starting point."
+                "SCOP raw-space QP initialization did not converge; falling back "
+                "to an approximate shape-constrained starting point."
             )
         beta_tilde_init = result.beta
 
@@ -292,8 +292,8 @@ class SCOPSolverReparam:
         result = solve_constrained_qp(H, g, A, b)
         if not result.converged:
             logger.warning(
-                "SCOP QP initialization did not converge; falling back to an "
-                "approximate shape-constrained starting point."
+                "SCOP solver-space QP initialization did not converge; falling "
+                "back to an approximate shape-constrained starting point."
             )
         beta_tilde_eff = result.beta
         return np.log(np.maximum(beta_tilde_eff, 1e-8))

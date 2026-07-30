@@ -357,6 +357,9 @@ class TestCallSiteWarnings:
 
         assert calls, "the patched solver was never called"
         assert "did not converge" in caplog.text
+        # The two SCOP initialization paths must be distinguishable in a log.
+        assert "raw-space" in caplog.text
+        assert "solver-space" not in caplog.text
 
     def test_scop_solver_qp_initialize_warns_on_non_convergence(self, caplog, monkeypatch):
         import logging
@@ -376,6 +379,8 @@ class TestCallSiteWarnings:
 
         assert calls, "the patched solver was never called"
         assert "did not converge" in caplog.text
+        assert "solver-space" in caplog.text
+        assert "raw-space" not in caplog.text
 
     def test_irls_direct_warns_when_the_constrained_qp_does_not_converge(self, caplog, monkeypatch):
         import logging
@@ -405,3 +410,49 @@ class TestCallSiteWarnings:
 
         assert calls, "the patched solver was never called"
         assert "constrained QP did not converge" in caplog.text
+
+    def test_irls_direct_qp_warning_is_latched_to_one_per_fit(self, caplog, monkeypatch):
+        """The warning lives inside the IRLS loop; it must not repeat per iteration.
+
+        ``irls_direct`` warns fire-once by convention -- the neighbouring SVD
+        warning uses an ``== 3`` equality latch. Without a latch here, a fit
+        whose QP never converges emits one identical WARNING per IRLS
+        iteration, up to ``max_iter`` (default 200).
+        """
+        import logging
+
+        import pandas as pd
+
+        from superglm import Constraint, SuperGLM
+        from superglm.families import Binomial
+        from superglm.features.spline import BSplineSmooth
+        from superglm.solvers import irls_direct
+
+        calls: list[int] = []
+        monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
+
+        # Binomial needs several IRLS iterations, so the unlatched code would
+        # warn several times; Gaussian converges in ~2 and barely discriminates.
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(0, 1, 200))
+        y = (rng.uniform(size=200) < 1.0 / (1.0 + np.exp(-8.0 * (x - 0.5)))).astype(float)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Binomial(),
+            selection_penalty=0,
+            features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
+        )
+
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+            model.fit(df[["x"]], df["y"])
+
+        # Precondition: enough non-converging QP solves that an unlatched
+        # warning would be clearly visible as a repeat.
+        assert len(calls) >= 5, f"only {len(calls)} QP solves; test cannot discriminate"
+
+        warnings = [
+            record
+            for record in caplog.records
+            if "constrained QP did not converge" in record.getMessage()
+        ]
+        assert len(warnings) == 1, f"expected exactly 1 warning, got {len(warnings)}"
