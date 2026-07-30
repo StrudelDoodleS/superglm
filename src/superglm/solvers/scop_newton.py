@@ -32,6 +32,12 @@ from scipy.sparse.linalg import LinearOperator, minres
 from superglm.group_matrix import _disc_disc_2d_hist
 from superglm.solvers.scop import SCOPSolverReparam
 
+_SQRT_EPS = float(np.finfo(np.float64).eps) ** 0.5
+"""Pya & Wood (2015) §3.2 singular-value cutoff, relative to the largest."""
+
+_NEWTON_CURVATURE_MARGIN = 1e-10
+"""Guard band on the ``I + curvature`` positive-definiteness test."""
+
 
 @dataclass
 class _SCOPPrototypeConfig:
@@ -77,6 +83,15 @@ class SCOPNewtonResult:
 
     dropped_cross_blocks: int = 0
     """Number of cross-group blocks dropped by prototype sparsification."""
+
+    discarded_directions: NDArray | None = None
+    """This group's columns of the directions the step could not resolve.
+
+    Rows are the below-cutoff right singular vectors of the augmented factor,
+    restricted to this group's parameters. For a joint solve every group's
+    result carries the same number of rows in the same order, so the full
+    joint direction is recovered by concatenating groups row-wise.
+    """
 
 
 @dataclass
@@ -270,7 +285,6 @@ def scop_newton_step(
     SCOPNewtonResult
         Updated parameters and diagnostics.
     """
-    q_eff = len(beta_scop)
     beta = beta_scop.copy()
 
     # --- Forward map and residual ---
@@ -315,10 +329,16 @@ def scop_newton_step(
         Wr_agg = np.bincount(bin_idx, weights=W * residual, minlength=n_bins)
         BtWB = B_scop.T @ (B_scop * W_agg[:, None])  # (q_eff, q_eff)
         r_eff = B_scop.T @ Wr_agg  # (q_eff,)
+        # A single group's own bin grid is the row space of its factor, so the
+        # square-root form costs nothing in discretization here. Only the
+        # multi-group joint factor has to scatter, because the groups sit on
+        # different grids.
+        factor_weights = W_agg
     else:
         BtW = B_scop.T * W[np.newaxis, :]
         BtWB = BtW @ B_scop
         r_eff = BtW @ residual
+        factor_weights = W
 
     # --- Gradient (exploit diagonal J: J^T @ r = j * r) ---
     grad_data = -(j_diag * r_eff)  # elementwise, not matrix multiply
@@ -332,20 +352,18 @@ def scop_newton_step(
     # H_second[i,i] = grad_data[i] (diagonal correction)
     H_full = H_gn + np.diag(grad_data)
 
-    # --- Attempt full Newton step ---
-    used_fisher = False
-    H_solved = H_full
-    step = _solve_step(H_full, grad)
+    # --- Newton step from the augmented factor (rank truncated first) ---
+    factor = _augmented_factor(
+        np.sqrt(np.maximum(factor_weights, 0.0))[:, None] * (B_scop * j_diag[None, :]),
+        np.sqrt(max(lambda2, 0.0)) * _penalty_root(S_scop),
+    )
+    step, used_fisher, discarded = _truncated_factor_step(factor, grad_data, grad)
     if step is None:
+        # No identifiable direction at all: fall back to a short gradient step
+        # rather than claiming a Newton direction.
         used_fisher = True
-        H_fisher = H_gn + 1e-8 * np.eye(q_eff)
-        step = _solve_step(H_fisher, grad)
-        if step is None:
-            H_fisher += 1e-4 * np.eye(q_eff)
-            step = _solve_step(H_fisher, grad)
-            if step is None:
-                step = -1e-4 * grad
-        H_solved = H_fisher
+        step = -1e-4 * grad
+    H_solved = H_gn if used_fisher else H_full
 
     # --- Damped step (step halving) ---
     # Non-finite trial states (overflow in exp(beta_eff), residual**2, etc.)
@@ -380,6 +398,7 @@ def scop_newton_step(
         step_norm=step_norm,
         used_fisher_fallback=used_fisher,
         H_penalized=H_solved,
+        discarded_directions=discarded,
     )
     _append_scop_trace(
         debug_recorder,
@@ -397,6 +416,99 @@ def _solve_step(H: NDArray, grad: NDArray) -> NDArray | None:
         return cho_solve((L, low), grad)
     except np.linalg.LinAlgError:
         return None
+
+
+def _penalty_root(S: NDArray) -> NDArray:
+    """Return ``rS`` with ``rS.T @ rS == S``, for symmetric PSD ``S``."""
+    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (S + S.T))
+    return np.sqrt(np.maximum(eigenvalues, 0.0))[:, None] * eigenvectors.T
+
+
+def _augmented_factor(
+    weighted_design: NDArray,
+    penalty_root: NDArray,
+) -> NDArray:
+    """Stack a weighted design on a penalty root, as ``scam`` builds ``wX11``."""
+    return np.vstack([weighted_design, penalty_root])
+
+
+def _truncated_factor_step(
+    factor: NDArray,
+    second_order: NDArray,
+    grad: NDArray,
+) -> tuple[NDArray | None, bool, NDArray]:
+    """Newton step computed from the augmented factor, rank handled first.
+
+    Returns ``(step, used_fisher, discarded)``; ``step`` is None only for a
+    degenerate factor with no usable direction at all. ``discarded`` holds the
+    right singular vectors below the cutoff as rows, and is the record of which
+    directions this step deliberately did not move in -- downstream mode
+    certification has to measure stationarity on the retained subspace, or it
+    demands a correction along a direction the data cannot resolve.
+
+    This follows ``scam.fit()`` rather than solving with the Gram. ``factor``
+    is the augmented weighted design ``[sqrt(W) B J ; sqrt(lambda) rS]``, whose
+    cross-product is the Gauss-Newton Hessian, and the order of operations is
+    the point:
+
+    1. ``R`` from a QR of the factor, then an SVD of ``R``, discarding
+       directions below ``sigma_max * sqrt(eps)`` -- Pya & Wood (2015) §3.2,
+       "the largest singular value multiplied by some power (in the range .5
+       to 1) of the machine precision", and the threshold ``scam`` uses at
+       every one of its five decomposition sites.
+    2. Only then is the second-order Newton term introduced, expressed in the
+       basis where the Gauss-Newton Hessian is the identity.
+
+    Truncating the Gram instead cannot work, and not merely for want of a
+    better threshold: forming ``B' W B`` squares the condition number, so the
+    unidentifiable directions this is meant to discard have already been
+    ground into the same rounding noise as small-but-real ones. On a measured
+    boundary fit the Gram's spectrum leaves no threshold that separates them.
+
+    Handling rank first is also what keeps the second-order term safe. That
+    term is what makes the full Newton Hessian indefinite, and applied to an
+    unidentifiable direction it amplifies rather than corrects it -- the
+    mechanism behind a SCOP coefficient drifting toward its log-space boundary
+    while the deviance stands still.
+    """
+    width = factor.shape[1]
+    empty_discarded = np.zeros((0, width), dtype=float)
+
+    upper_triangular = np.linalg.qr(factor, mode="r")
+    _, singular_values, right_vectors = np.linalg.svd(upper_triangular)
+    if singular_values.size == 0:
+        return None, False, empty_discarded
+
+    largest = float(singular_values[0])
+    if not np.isfinite(largest) or largest <= 0.0:
+        return None, False, empty_discarded
+
+    retained = singular_values >= largest * _SQRT_EPS
+    if not np.any(retained):
+        return None, False, empty_discarded
+
+    discarded = right_vectors[~retained]
+
+    # ``identifiable`` maps the retained subspace back to parameter space and
+    # rescales it, so that ``identifiable @ identifiable.T`` is the
+    # pseudo-inverse of the Gauss-Newton Hessian and the Gauss-Newton
+    # curvature becomes the identity in these coordinates.
+    identifiable = right_vectors[retained].T / singular_values[retained][None, :]
+
+    curvature = identifiable.T @ (second_order[:, None] * identifiable)
+    curvature = 0.5 * (curvature + curvature.T)
+
+    if float(np.linalg.eigvalsh(curvature)[0]) <= -1.0 + _NEWTON_CURVATURE_MARGIN:
+        # ``I + curvature`` is not positive definite, so neither is the full
+        # Newton Hessian. Fisher scoring for this iteration, which in this
+        # basis is exactly the rank-truncated Gauss-Newton solve. ``scam``
+        # makes the same decision from an eigendecomposition of the same
+        # quantity.
+        return identifiable @ (identifiable.T @ grad), True, discarded
+
+    identity = np.eye(identifiable.shape[1])
+    step = identifiable @ np.linalg.solve(identity + curvature, identifiable.T @ grad)
+    return step, False, discarded
 
 
 def _build_minres_preconditioner(
@@ -488,7 +600,51 @@ def _solve_step_minres(
     return None, iters
 
 
+def _joint_augmented_factor(
+    scop_items: list[tuple[int, dict]],
+    joint_slices: list[slice],
+    j_diags: list[NDArray],
+    lambdas_list: list[float],
+    W: NDArray,
+) -> NDArray:
+    """Augmented weighted design whose cross-product is the joint GN Hessian.
+
+    Groups sit on independent bin grids -- their cross-grams go through a 2D
+    weight histogram -- so a multi-group factor has no common bin-level row
+    space and its data block is built at observation level. A lone group keeps
+    its own grid, where the factor is exactly as cheap as the Gram.
+    """
+    q_total = joint_slices[-1].stop if joint_slices else 0
+
+    if len(scop_items) == 1:
+        state = scop_items[0][1]
+        design, bin_idx = state["B_scop"], state["bin_idx"]
+        if bin_idx is not None:
+            weights = np.bincount(bin_idx, weights=W, minlength=design.shape[0])
+        else:
+            weights = W
+        data_block = np.sqrt(np.maximum(weights, 0.0))[:, None] * (design * j_diags[0][None, :])
+    else:
+        data_block = np.empty((W.shape[0], q_total), dtype=float)
+        for idx, (_, state) in enumerate(scop_items):
+            design, bin_idx = state["B_scop"], state["bin_idx"]
+            scattered = design[bin_idx] if bin_idx is not None else design
+            data_block[:, joint_slices[idx]] = scattered * j_diags[idx][None, :]
+        data_block *= np.sqrt(np.maximum(W, 0.0))[:, None]
+
+    penalty_block = np.zeros((q_total, q_total), dtype=float)
+    for idx, (_, state) in enumerate(scop_items):
+        sl_i = joint_slices[idx]
+        penalty_block[sl_i, sl_i] = np.sqrt(max(lambdas_list[idx], 0.0)) * _penalty_root(
+            state["S_scop"]
+        )
+
+    return _augmented_factor(data_block, penalty_block)
+
+
 def _solve_joint_step(
+    factor: NDArray,
+    second_order: NDArray,
     H: NDArray,
     grad: NDArray,
     scop_items: list[tuple[int, dict]],
@@ -496,14 +652,18 @@ def _solve_joint_step(
     BtWBs: list[NDArray],
     j_diags: list[NDArray],
     lambdas_list: list[float],
-) -> tuple[NDArray | None, str, int]:
-    """Solve the joint Newton direction using the active prototype policy."""
+) -> tuple[NDArray | None, bool, NDArray, str, int]:
+    """Solve the joint Newton direction using the active prototype policy.
+
+    Returns ``(step, used_fisher, discarded, solver_name, iterations)``.
+    """
     cfg = _PROTOTYPE_CONFIG
     q_total = H.shape[0]
 
     use_iterative = cfg.solve_mode != "direct" and q_total >= cfg.iterative_q_total_min
     if not use_iterative:
-        return _solve_step(H, grad), "direct", 0
+        step, used_fisher, discarded = _truncated_factor_step(factor, second_order, grad)
+        return step, used_fisher, discarded, "direct", 0
 
     allow_inexact = cfg.solve_mode == "minres_inexact"
     step, iters = _solve_step_minres(
@@ -520,9 +680,11 @@ def _solve_joint_step(
     )
     if step is not None:
         solver_name = "minres_inexact" if allow_inexact else "minres"
-        return step, solver_name, iters
+        # MINRES solves the untruncated system, so nothing was discarded.
+        return step, False, np.zeros((0, q_total), dtype=float), solver_name, iters
 
-    return _solve_step(H, grad), "direct_fallback", iters
+    step, used_fisher, discarded = _truncated_factor_step(factor, second_order, grad)
+    return step, used_fisher, discarded, "direct_fallback", iters
 
 
 # ---------------------------------------------------------------------------
@@ -976,10 +1138,12 @@ def scop_joint_newton_step(
             )
         return results
 
-    # --- Step 4: Solve ---
-    used_fisher = False
-    H_solved = H
-    step, linear_solver, linear_iterations = _solve_joint_step(
+    # --- Step 4: Solve from the augmented factor (rank truncated first) ---
+    factor = _joint_augmented_factor(scop_items, joint_slices, j_diags, lambdas_list, W)
+    second_order = np.concatenate(grad_datas)
+    step, used_fisher, discarded, linear_solver, linear_iterations = _solve_joint_step(
+        factor,
+        second_order,
         H,
         grad,
         scop_items,
@@ -990,40 +1154,24 @@ def scop_joint_newton_step(
     )
 
     if step is None:
-        # Fisher fallback: drop second-order diag(grad_data) terms
+        # No identifiable direction at all: a short gradient step rather than
+        # a claimed Newton direction.
         used_fisher = True
-        H_gn = H.copy()
+        step = -1e-4 * grad
+        discarded = np.zeros((0, q_total), dtype=float)
+        linear_solver = "gradient_fallback"
+        linear_iterations = 0
+
+    if used_fisher:
+        # Report the Gauss-Newton curvature, which is what the step used.
+        H_solved = H.copy()
         for idx in range(n_groups):
             sl_i = joint_slices[idx]
-            H_block = H_gn[sl_i, sl_i].copy()
+            H_block = H_solved[sl_i, sl_i].copy()
             H_block[np.diag_indices_from(H_block)] -= grad_datas[idx]
-            H_gn[sl_i, sl_i] = H_block
-        H_fisher = H_gn + 1e-8 * np.eye(q_total)
-        step, linear_solver, linear_iterations = _solve_joint_step(
-            H_fisher,
-            grad,
-            scop_items,
-            joint_slices,
-            BtWBs,
-            j_diags,
-            lambdas_list,
-        )
-        if step is None:
-            H_fisher += 1e-4 * np.eye(q_total)
-            step, linear_solver, linear_iterations = _solve_joint_step(
-                H_fisher,
-                grad,
-                scop_items,
-                joint_slices,
-                BtWBs,
-                j_diags,
-                lambdas_list,
-            )
-            if step is None:
-                step = -1e-4 * grad
-                linear_solver = "gradient_fallback"
-                linear_iterations = 0
-        H_solved = H_fisher
+            H_solved[sl_i, sl_i] = H_block
+    else:
+        H_solved = H
 
     # --- Step 5: Joint line search ---
     alpha = 1.0
@@ -1077,6 +1225,7 @@ def scop_joint_newton_step(
             linear_solver=linear_solver,
             linear_iterations=linear_iterations,
             dropped_cross_blocks=dropped_cross_blocks,
+            discarded_directions=discarded[:, sl_i],
         )
 
     for gi, result in results.items():

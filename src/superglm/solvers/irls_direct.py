@@ -127,6 +127,11 @@ class _SCOPGroupSpec:
     bin_idx: NDArray | None
 
 
+def _immutable_or_none(values: NDArray | None) -> NDArray | None:
+    """Freeze an optional array, preserving ``None``."""
+    return None if values is None else _immutable_array(values)
+
+
 @dataclass(frozen=True)
 class _SCOPGroupState:
     """Dynamic SCOP state committed atomically with an IRLS snapshot."""
@@ -137,6 +142,9 @@ class _SCOPGroupState:
     H_scop_penalized: NDArray | None
     last_step_norm: float
     last_fisher_fallback: bool
+    discarded_directions: NDArray | None = None
+    """This group's columns of the directions the last Newton step could not
+    resolve. Mode certification measures stationarity on the complement."""
 
 
 @dataclass(frozen=True)
@@ -197,6 +205,7 @@ def _evaluate_scop_trial(
                 H_scop_penalized=None,
                 last_step_norm=float(np.linalg.norm(beta_eff - committed_group.beta_eff)),
                 last_fisher_fallback=proposed_group.last_fisher_fallback,
+                discarded_directions=proposed_group.discarded_directions,
             )
         )
 
@@ -913,6 +922,7 @@ def _fit_irls_direct_once(
                         "H_scop_penalized",
                         "last_step_norm",
                         "last_fisher_fallback",
+                        "discarded_directions",
                         "penalty_rank",
                         "penalty_log_det_omega_plus",
                         "penalty_eigvals_omega",
@@ -1196,6 +1206,7 @@ def _fit_irls_direct_once(
                     ),
                     last_step_norm=float(st.get("last_step_norm", 0.0)),
                     last_fisher_fallback=bool(st.get("last_fisher_fallback", False)),
+                    discarded_directions=_immutable_or_none(st.get("discarded_directions")),
                 )
                 for gi, st in sorted(_scop_state.items())
             ),
@@ -1673,6 +1684,9 @@ def _fit_irls_direct_once(
                         ),
                         last_step_norm=float(scop_results[gi].step_norm),
                         last_fisher_fallback=bool(scop_results[gi].used_fisher_fallback),
+                        discarded_directions=_immutable_or_none(
+                            scop_results[gi].discarded_directions
+                        ),
                     )
                     for gi in sorted(_scop_specs)
                 ),
@@ -1756,6 +1770,11 @@ def _fit_irls_direct_once(
                 )
                 st["last_step_norm"] = group_state.last_step_norm
                 st["last_fisher_fallback"] = group_state.last_fisher_fallback
+                st["discarded_directions"] = (
+                    None
+                    if group_state.discarded_directions is None
+                    else group_state.discarded_directions.copy()
+                )
             if n_halvings:
                 logger.info(
                     "  irls_direct SCOP iter=%d: accepted latent step fraction %.5g after "
@@ -2174,6 +2193,11 @@ def _fit_irls_direct_once(
                         None if refresh.H_penalized is None else refresh.H_penalized.copy()
                     )
                     _scop_state[gi]["last_fisher_fallback"] = bool(refresh.used_fisher_fallback)
+                    _scop_state[gi]["discarded_directions"] = (
+                        None
+                        if refresh.discarded_directions is None
+                        else refresh.discarded_directions.copy()
+                    )
             else:
                 for gi, st in _scop_state.items():
                     z_scop_group = z_scop_final.copy()
@@ -2200,6 +2224,11 @@ def _fit_irls_direct_once(
                         None if refresh.H_penalized is None else refresh.H_penalized.copy()
                     )
                     st["last_fisher_fallback"] = bool(refresh.used_fisher_fallback)
+                    st["discarded_directions"] = (
+                        None
+                        if refresh.discarded_directions is None
+                        else refresh.discarded_directions.copy()
+                    )
 
     # Every public/exported matrix and rank claim is evaluated at the retained
     # model. Private fREML performance iterations deliberately reuse the
@@ -2556,6 +2585,7 @@ def _fit_irls_direct_once(
                 "group_name": groups[gi].name,
                 "last_step_norm": st.get("last_step_norm", 0.0),
                 "last_fisher_fallback": st.get("last_fisher_fallback", False),
+                "discarded_directions": st.get("discarded_directions"),
                 "penalty_rank": st.get("penalty_rank"),
                 "penalty_log_det_omega_plus": st.get("penalty_log_det_omega_plus"),
                 "penalty_eigvals_omega": st.get("penalty_eigvals_omega"),
