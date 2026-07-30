@@ -3878,20 +3878,23 @@ class TestMultiSCOPIntegration:
     def test_stored_objective_reproduction_multi_scop(self):
         """Reconstruct REML objective from stored model state (no solver rerun).
 
-        Must match model._reml_result.objective to rel=1e-5.
+        Must match model._reml_result.objective to rel=1e-8.
 
-        Tighter than that is not attainable for this fixture and the reason is
-        structural rather than sloppy. Rank truncation in the SCOP Newton step
-        makes this a boundary mode: the frozen direction is removed from the
-        determinant, and the identified Hessian that remains is near-singular
-        (measured second-smallest eigenvalue 8.1e-06 against a largest of
-        1.9e+02). A log-determinant over coordinates that ill-conditioned
-        amplifies the difference between the weights the solver converged on
-        and the weights this test recomputes from the published coefficients,
-        which differ by the IRLS convergence tolerance.
+        The signal is deliberately curved. A linear signal has zero second
+        differences, which drives the SCOP curvature coefficients to their
+        log-space boundary and leaves the identified Hessian near-singular;
+        a log-determinant over coordinates that ill-conditioned amplifies the
+        difference between the weights the solver converged on and the weights
+        this test recomputes from published coefficients, which differ by the
+        IRLS convergence tolerance. The earlier linear fixture truncated a
+        direction on all 108 of its solves and reproduced to only ~1e-6,
+        varying with the BLAS -- it was measuring conditioning, not the
+        bookkeeping fidelity this test is for.
 
-        The reproduction is still exact in structure -- same reduced
-        coordinates, same rank 21 -- and the residual is ~1e-6 relative.
+        Curved, the mode is interior: zero truncating solves and reproduction
+        to ~7e-15, so 1e-8 holds with seven orders of margin rather than
+        resting on a platform's rounding. Boundary modes are covered by
+        ``test_two_scop_terms_auto_lambda`` and the stagnation-channel test.
         """
         from superglm.distributions import _VARIANCE_FLOOR, clip_mu
         from superglm.group_matrix import _block_xtwx
@@ -3902,7 +3905,10 @@ class TestMultiSCOPIntegration:
         n = 500
         x1 = np.sort(rng.uniform(0, 1, n))
         x2 = np.sort(rng.uniform(0, 1, n))
-        y = 2 * x1 - 1.5 * x2 + rng.normal(0, 0.2, n)
+        # Curved, not linear: see the docstring. A linear signal has no second
+        # differences for the SCOP curvature coefficients to explain, so they run
+        # to the log-space boundary and the determinant becomes conditioning-limited.
+        y = 2 * np.sqrt(x1) - 1.5 * x2**2 + rng.normal(0, 0.2, n)
         df = pd.DataFrame({"x1": x1, "x2": x2})
 
         model = SuperGLM(
@@ -3947,7 +3953,7 @@ class TestMultiSCOPIntegration:
             reml_penalties=model._reml_penalties,
             scop_states=model._reml_result.scop_states,
         )
-        assert obj_recomputed == pytest.approx(model._reml_result.objective, rel=1e-5)
+        assert obj_recomputed == pytest.approx(model._reml_result.objective, rel=1e-8)
 
     @pytest.mark.slow
     def test_lambda_responds_to_noise_multi_scop(self):
