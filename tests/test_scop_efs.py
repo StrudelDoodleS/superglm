@@ -2381,9 +2381,15 @@ class TestSCOPBoundaryStagnationAcceptance:
     LONG_RUN = 256
     SHORT_RUN = 4
 
+    # The default ``max_pirls_iter``. The window is 50 at this cap.
+    CAP = 100
+
+    def _stagnated(self, result, cap=None):
+        return scop_efs_module._scop_deviance_stagnated(result, self.CAP if cap is None else cap)
+
     @property
     def WINDOW(self):  # noqa: N802 - resolved lazily so collection never depends on it
-        return scop_efs_module._STAGNANT_DEVIANCE_WINDOW
+        return scop_efs_module._scop_stagnation_window(self.CAP)
 
     @property
     def TOLERANCE(self):  # noqa: N802
@@ -2411,7 +2417,7 @@ class TestSCOPBoundaryStagnationAcceptance:
 
     def test_flat_deviance_across_the_window_is_accepted(self):
         result = self._result(self._flat(self.WINDOW + 1))
-        assert scop_efs_module._scop_deviance_stagnated(result) is True
+        assert self._stagnated(result) is True
 
     def test_single_ulp_drift_is_accepted(self):
         """The measured fit moved one ULP on its final iteration.
@@ -2423,56 +2429,56 @@ class TestSCOPBoundaryStagnationAcceptance:
         for _ in range(self.WINDOW):
             deviances.append(np.nextafter(deviances[-1], np.inf))
         assert deviances[-1] != deviances[0]
-        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is True
+        assert self._stagnated(self._result(deviances)) is True
 
     def test_window_one_iteration_short_is_rejected(self):
         result = self._result(self._flat(self.WINDOW))
-        assert scop_efs_module._scop_deviance_stagnated(result) is False
+        assert self._stagnated(result) is False
 
     def test_change_just_below_the_tolerance_is_accepted(self):
         deviances = self._flat(self.WINDOW + 1)
         step = 0.5 * self.TOLERANCE * (abs(self.STALLED_DEVIANCE) + 1.0)
         deviances[-1] = self.STALLED_DEVIANCE + step
         assert deviances[-1] != deviances[-2]
-        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is True
+        assert self._stagnated(self._result(deviances)) is True
 
     def test_change_just_above_the_tolerance_is_rejected(self):
         deviances = self._flat(self.WINDOW + 1)
         step = 2.0 * self.TOLERANCE * (abs(self.STALLED_DEVIANCE) + 1.0)
         deviances[-1] = self.STALLED_DEVIANCE + step
-        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+        assert self._stagnated(self._result(deviances)) is False
 
     def test_a_still_descending_fit_is_rejected(self):
         """A fit crawling downhill is genuine non-convergence, not stagnation."""
         deviances = [self.STALLED_DEVIANCE * (1.0 - 1e-6) ** i for i in range(self.WINDOW + 1)]
-        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+        assert self._stagnated(self._result(deviances)) is False
 
     def test_an_oscillating_fit_is_rejected(self):
         deviances = [
             self.STALLED_DEVIANCE + (1e-6 if i % 2 else -1e-6) for i in range(self.WINDOW + 1)
         ]
-        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+        assert self._stagnated(self._result(deviances)) is False
 
     def test_a_rejected_step_inside_the_window_is_rejected(self):
         result = self._result(self._flat(self.WINDOW + 1))
         result.iteration_log[-1].step_rejected = True
-        assert scop_efs_module._scop_deviance_stagnated(result) is False
+        assert self._stagnated(result) is False
 
     def test_a_halved_step_inside_the_window_is_rejected(self):
         result = self._result(self._flat(self.WINDOW + 1))
         result.iteration_log[-1].step_halvings = 1
-        assert scop_efs_module._scop_deviance_stagnated(result) is False
+        assert self._stagnated(result) is False
 
     def test_a_non_max_iter_termination_is_rejected(self):
         for reason in ("step_rejected", "nonfinite_deviance", "curvature_fallback", None):
             result = self._result(self._flat(self.WINDOW + 1), reason=reason)
-            assert scop_efs_module._scop_deviance_stagnated(result) is False
+            assert self._stagnated(result) is False
 
     def test_a_nonfinite_deviance_is_rejected(self):
         for bad in (np.nan, np.inf):
             deviances = self._flat(self.WINDOW + 1)
             deviances[-1] = bad
-            assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+            assert self._stagnated(self._result(deviances)) is False
 
     def test_an_absent_iteration_log_is_rejected(self):
         """An injected solver that publishes no log keeps the strict gate."""
@@ -2480,8 +2486,54 @@ class TestSCOPBoundaryStagnationAcceptance:
             result = SimpleNamespace(
                 converged=False, termination_reason="max_iter", iteration_log=log
             )
-            assert scop_efs_module._scop_deviance_stagnated(result) is False
-        assert scop_efs_module._scop_deviance_stagnated(SimpleNamespace(converged=False)) is False
+            assert self._stagnated(result) is False
+        assert self._stagnated(SimpleNamespace(converged=False)) is False
+
+    # ── the window scales with the iteration budget ─────────────────────────
+
+    def test_window_scales_with_the_iteration_budget(self):
+        """A fixed window would leave low-cap callers with the original bug.
+
+        The shape is ``max(30, min(50, cap // 2))``: half the budget, floored
+        at the shortest window the corpus can justify and capped at the
+        calibrated 50.
+        """
+        window = scop_efs_module._scop_stagnation_window
+        assert window(100) == 50  # default cap, unchanged
+        assert window(200) == 50  # capped
+        assert window(80) == 40
+        assert window(63) == 31  # tightest measured margin
+        assert window(60) == 30
+        assert window(49) == 30  # floored
+        assert window(31) == 30  # floored, still reachable
+
+    def test_the_window_never_drops_below_the_separating_floor(self):
+        """30 clears the longest run (29) ever seen on a converging fit."""
+        window = scop_efs_module._scop_stagnation_window
+        for cap in range(31, 400):
+            assert window(cap) >= 30
+            assert window(cap) <= 50
+            # always measurable within the budget
+            assert cap >= window(cap) + 1
+
+    def test_a_budget_too_short_to_classify_refuses(self):
+        """Below cap 31 a 30-transition window does not fit; refuse, do not guess."""
+        window = scop_efs_module._scop_stagnation_window
+        for cap in (0, 1, 5, 10, 25, 29, 30):
+            assert window(cap) is None
+        # ... and the predicate declines regardless of how flat the fit looks.
+        for cap in (1, 10, 30):
+            assert self._stagnated(self._result(self._flat(200)), cap=cap) is False
+
+    def test_a_low_cap_still_accepts_a_long_enough_run(self):
+        """At cap 60 the required run is 30, and a 46-run boundary fit qualifies.
+
+        46 is what the measured boundary fit presents at that cap: it begins
+        stagnating at iteration 14 regardless of where the budget ends.
+        """
+        assert self._stagnated(self._result(self._flat(47)), cap=60) is True
+        # one transition short of the required 30 is still refused
+        assert self._stagnated(self._result(self._flat(30)), cap=60) is False
 
     # ── the gate itself, through _fit_scop_reml_mode ────────────────────────
 
@@ -2528,6 +2580,7 @@ class TestSCOPBoundaryStagnationAcceptance:
         result.beta = np.array([0.0])
         result.intercept = 0.0
         result.rank_info = None
+        result.n_iter = n_entries
         return result
 
     def test_gate_admits_a_stagnant_candidate(self, monkeypatch):
