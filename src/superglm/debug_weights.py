@@ -23,7 +23,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
-from superglm.solvers.pirls import _positive_working_weight_stats
+from superglm.solvers.pirls import _extreme_weight_indices, _positive_working_weight_stats
 
 logger = logging.getLogger(__name__)
 
@@ -141,13 +141,7 @@ def compare_irls_weights(
             w_family = sm_family.weights(mu_it)
             W_it = freq_weights * w_family
             _, _, w_ratio = _positive_working_weight_stats(W_it)
-            n_sm = len(W_it)
-            k = min(5, n_sm)
-            # ``kth`` must satisfy -n <= kth < n. When n_sm <= 5, k == n_sm, so
-            # the bottom-k partition has to use k - 1: it selects the same k
-            # smallest entries and stays in bounds for every k in [1, n_sm].
-            top_idx = np.argpartition(W_it, -k)[-k:]
-            bot_idx = np.argpartition(W_it, k - 1)[:k]
+            top_idx, bot_idx = _extreme_weight_indices(W_it)
             rows.append(
                 {
                     "iter": it,
@@ -159,8 +153,8 @@ def compare_irls_weights(
                     "mu_max": float(mu_it.max()),
                     "deviance": float(sm_result.deviance),
                     "converged": sm_result.converged,
-                    "top_W_obs": list(top_idx[np.argsort(W_it[top_idx])[::-1]]),
-                    "bottom_W_obs": list(bot_idx[np.argsort(W_it[bot_idx])]),
+                    "top_W_obs": list(top_idx),
+                    "bottom_W_obs": list(bot_idx),
                 }
             )
     except Exception as e:

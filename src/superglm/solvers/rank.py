@@ -397,13 +397,9 @@ def _null_basis(
     * so the two blocks have **disjoint row supports** and split ``null(H)``
       orthogonally.
 
-    ``constrained_qp._null_space_mass`` depends on exactly that.  It recovers
-    the spectral half by restricting to the scaled (active) rows -- which works
-    only because the unit-vector columns are annihilated there -- and then
-    thresholds the two halves separately, because the unit vectors are exact
-    while the spectral directions are accurate only to ``eps * retained
-    condition``.  Changing the row supports, or mixing the two kinds of column
-    into shared rows, silently breaks that consumer's split.
+    ``constrained_qp._null_space_mass`` depends on exactly that.  Changing the
+    row supports, or mixing the two kinds of column into shared rows, silently
+    breaks that consumer's split.
     """
     pieces: list[NDArray] = []
     if discarded_vectors.shape[1]:
