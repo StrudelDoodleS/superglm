@@ -12,6 +12,7 @@ Biometrics 73(4), 1071-1081.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -54,6 +55,8 @@ from superglm.solvers.rank import (
     needs_factor_certification,
 )
 from superglm.types import GroupSlice, PenaltyComponent
+
+logger = logging.getLogger(__name__)
 
 # These private thresholds intentionally mix units: absolute lambda scale for the
 # floor guard, log-lambda-step scale for stability/plateau checks, and relative
@@ -770,21 +773,52 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode, pirls_tol: float) -> float:
 #   and no fit in the corpus falls in between. 50 is the geometric midpoint of
 #   [29, 86], leaving a 1.7x margin against both populations.
 #
-# The window is an absolute iteration count, so the acceptance can only fire
-# when ``max_pirls_iter`` exceeds it. That is deliberate: on a short budget,
-# hitting ``max_iter`` is far weaker evidence of a boundary solution, and
-# raising the non-convergence remains the safe answer.
+# The window scales with the iteration budget, because a fixed 50 would leave
+# any caller who lowers ``max_pirls_iter`` with exactly the failure this exists
+# to prevent -- and a lower cap makes stagnation-at-cap *more* likely, not
+# less. A fit's trajectory does not depend on its cap, so a recorded fit
+# truncated at cap ``C`` reproduces what it would have presented at that cap:
+# a converging fit that begins stagnating at iteration ``s`` and finishes at
+# ``n_iter`` presents a run of ``C - s`` when ``C < n_iter``, and never reaches
+# this gate at all when ``C >= n_iter``. Replaying all 1015 converging fits
+# that way against ``max(30, min(50, C // 2))`` keeps the two populations
+# separated at *every* cap -- the margin is positive throughout, tightest at
+# ``C = 63`` (window 31 against a worst converging run of 24, margin 7) -- and
+# the floor of 30 also clears, cap-independently, the largest run ever observed
+# on a converging fit (29). At ``C >= 100`` the window is 50 and no converging
+# fit in the corpus even reaches the cap.
+#
+# Below ``C = 31`` a 30-transition window does not fit in the budget, so the
+# evidence cannot support a classification and the non-convergence is raised
+# rather than guessed at.
 _STAGNANT_DEVIANCE_TOLERANCE = 8.0 * float(np.finfo(np.float64).eps)
-_STAGNANT_DEVIANCE_WINDOW = 50
+_STAGNANT_DEVIANCE_WINDOW_MAX = 50
+_STAGNANT_DEVIANCE_WINDOW_MIN = 30
 
 
-def _scop_deviance_stagnated(result: Any) -> bool:
+def _scop_stagnation_window(max_iter: int) -> int | None:
+    """Return the stagnant run required at ``max_iter``, or None if unsupported.
+
+    ``None`` means the budget is too short for the shortest window the corpus
+    can justify, so no fit at that cap may be accepted on stagnation.
+    """
+    window = max(
+        _STAGNANT_DEVIANCE_WINDOW_MIN,
+        min(_STAGNANT_DEVIANCE_WINDOW_MAX, int(max_iter) // 2),
+    )
+    # One more iteration than transitions is needed to measure the window.
+    if int(max_iter) < window + 1:
+        return None
+    return window
+
+
+def _scop_deviance_stagnated(result: Any, max_iter: int) -> bool:
     """Return True when a non-converged inner fit sits on a boundary solution.
 
     Accepts only deviance stagnation, and only the benign kind. A fit that
     exhausted its budget while diverging, oscillating or rejecting steps does
-    not hold its deviance constant to roundoff across a 50-iteration window,
-    so it still reports non-convergence. The caller's downstream latent
+    not hold its deviance constant to roundoff across the whole window, so it
+    still reports non-convergence. The caller's downstream latent
     penalized-score certification is unaffected and still has to accept the
     mode, so this never admits a point that is not a stationary mode.
     """
@@ -792,11 +826,14 @@ def _scop_deviance_stagnated(result: Any) -> bool:
     # breakdowns; only an exhausted iteration budget is a stagnation candidate.
     if getattr(result, "termination_reason", None) != "max_iter":
         return False
+    required = _scop_stagnation_window(max_iter)
+    if required is None:
+        return False
     iteration_log = getattr(result, "iteration_log", None)
-    if not iteration_log or len(iteration_log) <= _STAGNANT_DEVIANCE_WINDOW:
+    if not iteration_log or len(iteration_log) <= required:
         return False
 
-    window = iteration_log[-(_STAGNANT_DEVIANCE_WINDOW + 1) :]
+    window = iteration_log[-(required + 1) :]
     previous = float(window[0].deviance)
     if not np.isfinite(previous):
         return False
@@ -898,8 +935,17 @@ def _fit_scop_reml_mode(
         scop_states = {}
 
     if require_converged and not result.converged:
-        if not _scop_deviance_stagnated(result):
+        if not _scop_deviance_stagnated(result, context.max_pirls_iter):
             return None
+        logger.info(
+            "SCOP %s fit accepted as a boundary solution: deviance stagnant to "
+            "%.3g relative across the last %d of %d iterations "
+            "(coefficient criterion cannot terminate at a log-space boundary)",
+            phase,
+            _STAGNANT_DEVIANCE_TOLERANCE,
+            _scop_stagnation_window(context.max_pirls_iter) or 0,
+            result.n_iter,
+        )
         # A boundary solution is a converged mode: the deviance has stopped
         # moving and the coefficient criterion is tracking a coordinate that no
         # longer measures progress. Record that decision on the result so every
