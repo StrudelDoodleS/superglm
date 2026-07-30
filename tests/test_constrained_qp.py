@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from superglm.solvers.constrained_qp import (
+    _consistency_floor,
+    _feasibility_scale,
+    _feasibility_slack,
     _is_feasible,
+    _null_space_mass,
     _project_feasible,
     solve_constrained_qp,
 )
@@ -499,7 +503,7 @@ class TestInconsistentNormalEquations:
         with pytest.raises(ValueError, match="unbounded below along that direction"):
             solve_constrained_qp(self.H_INCONSISTENT, self.G_INCONSISTENT, A, b)
 
-    def test_error_names_the_rank_and_the_residual(self):
+    def test_error_names_the_rank_and_the_null_mass(self):
         with pytest.raises(ValueError) as excinfo:
             solve_constrained_qp(
                 self.H_INCONSISTENT, self.G_INCONSISTENT, np.zeros((0, 2)), np.zeros(0)
@@ -688,3 +692,136 @@ class TestFeasibilityToleranceScaling:
         # test must accept it -- so the projection leaves the point alone.
         assert _is_feasible(A, beta, b, 1e-12)
         np.testing.assert_array_equal(_project_feasible(beta, A, b, 1e-12), beta)
+
+
+class TestStructuralAliasConsistency:
+    """A structurally zero column's null vector is exact at every conditioning.
+
+    ``rank._null_basis`` stacks exact unit vectors (for structurally zero
+    columns) together with computed spectral directions whose accuracy decays
+    as ``eps * retained condition``.  Measuring both against the spectral floor
+    let an ill-conditioned retained block desensitize the exact half, so a
+    genuinely unbounded objective was accepted as converged.
+    """
+
+    @staticmethod
+    def _structural_alias_with_ill_conditioned_block(retained_condition, structural_mass, seed=0):
+        """``blkdiag(K, 0)``: ``K`` carries a spectral truncation at the given
+        retained condition, and the last column is structurally zero -- an
+        exact unit null vector.  ``g`` is consistent on the ``K`` block and
+        carries ``structural_mass`` on the exact null direction.
+        """
+        rng = np.random.default_rng(seed)
+        basis, _ = np.linalg.qr(rng.standard_normal((3, 3)))
+        block = basis @ np.diag([1.0, 1.0 / retained_condition, 0.0]) @ basis.T
+        block = 0.5 * (block + block.T)
+        H = np.zeros((4, 4))
+        H[:3, :3] = block
+        g = np.zeros(4)
+        g[:3] = basis[:, :2] @ rng.standard_normal(2)
+        g[3] = structural_mass * np.linalg.norm(g[:3])
+        return H, g
+
+    @pytest.mark.parametrize(
+        ("retained_condition", "structural_mass"),
+        [(1e10, 1e-6), (1e11, 1e-5), (1e13, 1e-3)],
+    )
+    def test_structural_alias_caught_despite_ill_conditioned_retained_block(
+        self, retained_condition, structural_mass
+    ):
+        H, g = self._structural_alias_with_ill_conditioned_block(
+            retained_condition, structural_mass
+        )
+        decomposition = decompose_gram(H)
+
+        # Preconditions. Without these the test could pass under a single
+        # shared floor and prove nothing.
+        assert decomposition.rank < decomposition.width, "gate not reached"
+        assert _consistency_floor(decomposition) > structural_mass, (
+            "the spectral floor is tighter than the injected mass here, so a "
+            "shared floor would have caught this anyway"
+        )
+        structural, spectral = _null_space_mass(decomposition, g)
+        assert spectral < structural, "the injected mass must be structural, not spectral"
+
+        with pytest.raises(ValueError, match="structurally aliased column"):
+            solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
+
+    @pytest.mark.parametrize("retained_condition", [1e10, 1e11, 1e13])
+    def test_consistent_system_with_a_structural_alias_still_solves(self, retained_condition):
+        """The tight structural floor must not over-fire on a consistent g.
+
+        A real caller's structural entry is *exactly* zero -- an identically
+        zero design column gives an identically zero inner product -- so the
+        floor's slack is defensive rather than load-bearing.  The probe uses a
+        roundoff-scale ``1e-17`` instead of exact zero so that the assertion
+        actually exercises the slack: at a floor of 0 this would be refused.
+        """
+        H, g = self._structural_alias_with_ill_conditioned_block(
+            retained_condition, structural_mass=1e-17
+        )
+        decomposition = decompose_gram(H)
+        assert decomposition.rank < decomposition.width, "gate not reached"
+        structural, _ = _null_space_mass(decomposition, g)
+        assert 0.0 < structural < 1e-15, f"probe mass {structural:.2e} is not roundoff-scale"
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
+
+        assert np.all(np.isfinite(result.beta))
+        assert result.converged
+
+
+class TestLoopFeasibilityRouting:
+    """The active-set loop uses the same feasibility measure as its boundaries.
+
+    While the boundaries were relative and the loop body absolute, the loop
+    treated rows as violated that ``_is_feasible`` considered satisfied, then
+    blocked on them with a negative slack -- a backward step, which widens the
+    deferred negative-``alpha`` bug rather than merely inheriting it.
+    """
+
+    def test_loop_does_not_block_on_rows_convergence_considers_satisfied(self):
+        """Same optimum, far fewer iterations, once the two tests agree.
+
+        This fixture took 13 active-set iterations while the loop body was
+        absolute; it takes 6 once the loop routes through the shared helper.
+        The wasted iterations were blocking steps on rows already satisfied.
+        """
+        rng = np.random.default_rng(8)
+        p = 5
+        M = rng.standard_normal((p, p))
+        H = M.T @ M + 0.5 * np.eye(p)
+        scale = 1e4
+        g = rng.standard_normal(p) * scale
+        A = np.diff(np.eye(p), axis=0)
+        b = rng.standard_normal(p - 1) * scale  # nonzero b: scaling is observable
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert result.converged
+        assert result.n_iter <= 8, f"{result.n_iter} iterations; was 13 before routing"
+        # Same answer, not a different one reached faster.
+        objective = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+        np.testing.assert_allclose(objective, 1.370796e07, rtol=1e-6)
+
+    def test_zero_rhs_makes_the_scaling_exactly_inert(self):
+        """Every in-tree caller passes b = 0; pin that this is the inert case.
+
+        With ``b_i == 0`` the per-row scale is ``max(1, |A_i @ beta|)``, which
+        is 1 for the coefficient magnitudes the monotone spline path produces,
+        so the scaled slack and scaled step are bitwise the raw ones.
+        """
+        rng = np.random.default_rng(3)
+        p = 5
+        M = rng.standard_normal((p, p))
+        H = M.T @ M + 0.5 * np.eye(p)
+        g = rng.standard_normal(p)
+        A = np.diff(np.eye(p), axis=0)
+        b = np.zeros(p - 1)
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        products = A @ result.beta
+        assert np.max(np.abs(products)) <= 1.0, "fixture no longer exercises scale == 1"
+        np.testing.assert_array_equal(_feasibility_scale(products, b), np.ones(p - 1))
+        np.testing.assert_array_equal(_feasibility_slack(A, result.beta, b), products - b)
