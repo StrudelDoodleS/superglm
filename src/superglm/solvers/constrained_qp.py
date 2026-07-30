@@ -33,14 +33,22 @@ from superglm.solvers.rank import _EPS, RankDecomposition, decompose_gram
 # safety factor above that estimate.  It is deliberately a constant of its own
 # rather than ``SHARED_RANK_POLICY.certification_band``, which happens to hold
 # the same value but governs factor certification: retuning that band for its
-# own purpose must not silently move this gate.
+# own purpose must not silently move this gate.  For the same reason the
+# structural floor below carries its own literal rather than deriving from
+# this one.
 _NULL_BASIS_ACCURACY_SLACK = 32.0
 
 # Consistency floor for the *structural* half of the null space.  Those basis
 # vectors are exact unit vectors -- a structurally zero column gives ``H`` an
-# identically zero row -- so no conditioning term belongs here; the only slack
-# needed covers rounding in the norms themselves.
-_STRUCTURAL_CONSISTENCY_FLOOR = _NULL_BASIS_ACCURACY_SLACK * _EPS
+# identically zero row -- so no conditioning term belongs here.  The two floors
+# model different errors and must move independently: the spectral slack above
+# covers ``eps * kappa`` amplification of a *computed* basis, this one covers
+# only rounding in the two vector norms that form the ratio.  They happen to
+# hold the same numeric value; that coincidence is not a dependency, and
+# deriving one from the other would re-create, one level down, exactly the
+# coupling ``_NULL_BASIS_ACCURACY_SLACK`` exists to avoid.
+_STRUCTURAL_NORM_ROUNDING_SLACK = 32.0
+_STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 
 
 @dataclass
@@ -350,12 +358,16 @@ def solve_constrained_qp(
                 "solve_constrained_qp: H is rank-deficient (rank "
                 f"{decomposition.rank} of {decomposition.width}) and g has a "
                 f"component in null(H) along {kind} ({mass:.3e} of ||g||, "
-                f"against a resolution floor of {floor:.3e}), so the objective "
-                "is unbounded below along that direction. The unconstrained "
-                "solve and the active-set loop's empty-active-set step both "
-                "form directions inside range(H), so neither entry path can "
-                "follow it. Regularize H (for example add a ridge term) or "
-                "drop the aliased columns."
+                f"against a resolution floor of {floor:.3e}), so the "
+                "unconstrained objective is unbounded below along that "
+                "direction. The unconstrained solve and the active-set loop's "
+                "empty-active-set step both form directions inside range(H), "
+                "so neither entry path can follow it. Note the constraints may "
+                "still bound the problem, in which case a finite optimum "
+                "exists that this solver cannot reach: doing so needs a "
+                "null-space descent direction, which is a filed follow-up "
+                "rather than a capability it has today. Regularize H (for "
+                "example add a ridge term) or drop the aliased columns."
             )
 
     if m == 0:
@@ -458,9 +470,8 @@ def solve_constrained_qp(
             blocking = -1
 
             products = A @ beta
-            row_scale = _feasibility_scale(products, b)
-            scaled_slack = (products - b) / row_scale
-            scaled_step = (A @ step) / row_scale
+            raw_step = A @ step
+            scaled_step = raw_step / _feasibility_scale(products, b)
             # Set membership, not ``i in active``: the list scan is O(|active|)
             # per row and dominated the rest of this now-vectorized block.
             # ``active`` is only mutated after this loop finishes.
@@ -469,11 +480,17 @@ def solve_constrained_qp(
             for i in range(m):
                 if i in active_lookup:
                     continue
-                a_step = scaled_step[i]
-                if a_step < -tol:
-                    # This constraint could be violated.  Dividing slack and
-                    # a_step by the same row scale leaves the ratio unchanged.
-                    alpha = scaled_slack[i] / (-a_step)
+                if scaled_step[i] < -tol:
+                    # Gate on the *scaled* derivative, so "does this step move
+                    # the row at all" agrees with _is_feasible.  Take the ratio
+                    # from the *raw* pair: dividing both by the row scale is
+                    # algebraically neutral but not neutral in floating point,
+                    # since it rounds twice where this rounds once.  On a row
+                    # with slack > 1 the scaled numerator is exactly 1.0 and
+                    # the two answers differ by up to an ulp, which would put
+                    # an ulp of drift into `beta += alpha_min * step` for no
+                    # gain -- the gate is what needed to change, not the ratio.
+                    alpha = (products[i] - b[i]) / -raw_step[i]
                     if alpha < alpha_min:
                         alpha_min = alpha
                         blocking = i
