@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._fit_trace import TraceRun
 from superglm.solvers.rank import _EPS, RankDecomposition, decompose_gram
 
 # Headroom on the normal-equation consistency floor (see ``_consistency_floor``).
@@ -258,6 +259,71 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     return beta
 
 
+BLOCKING_TRACE_CHANNEL = "constrained_qp_blocking"
+
+
+def _emit_blocking_decision(
+    trace_run: TraceRun,
+    *,
+    iteration: int,
+    A: NDArray,
+    b: NDArray,
+    beta: NDArray,
+    beta_new: NDArray,
+    tol: float,
+    products: NDArray,
+    raw_step: NDArray,
+    active_lookup: set[int],
+    blocking: int,
+    alpha_min: float,
+) -> None:
+    """Record one blocking-constraint decision as a ``step_decision`` event.
+
+    Deliberately **re-derives** everything it records from the raw inputs
+    rather than echoing the loop's own booleans or reusing its scaled arrays.
+    A hook fed the loop's gating arithmetic would agree with that arithmetic by
+    construction and so could never witness the gate being wrong, which is the
+    whole reason the decision trace exists.  In particular ``considered_rows``
+    is computed from a scale this function derives itself, so a loop that
+    gated on the unscaled derivative records a ``blocking_row`` that is *not*
+    in its own considered set.
+    """
+    derived_scale = _feasibility_scale(products, b)
+    derived_scaled_step = raw_step / derived_scale
+    considered = [
+        index
+        for index in range(A.shape[0])
+        if index not in active_lookup and derived_scaled_step[index] < -tol
+    ]
+    scaled_slack = _feasibility_slack(A, beta, b)
+    trace_run.emit_lazy(
+        "step_decision",
+        lambda: {
+            "iteration": iteration,
+            # Independently evaluated: the loop must reach this block only for
+            # a step the convergence test rejects.
+            "full_step_is_feasible": _is_feasible(A, beta_new, b, tol),
+            "considered_rows": tuple(considered),
+            # The raw inputs the ratio is defined on, so a reader can recompute
+            # alpha exactly rather than trust the recorded value.
+            "row_products": tuple(float(products[i]) for i in considered),
+            "row_b": tuple(float(b[i]) for i in considered),
+            "row_raw_step": tuple(float(raw_step[i]) for i in considered),
+            "row_scaled_slack": tuple(float(scaled_slack[i]) for i in considered),
+            "blocking_row": int(blocking),
+            # Independently derived: a row the scaled gate excludes must never
+            # be the one blocked on.
+            "blocking_is_considered": blocking < 0 or blocking in considered,
+            "blocking_scaled_step": (
+                float(derived_scaled_step[blocking]) if blocking >= 0 else 0.0
+            ),
+            "alpha": float(alpha_min),
+        },
+        channel=BLOCKING_TRACE_CHANNEL,
+        purpose="constrained_qp",
+    )
+
+
 def solve_constrained_qp(
     H: NDArray,
     g: NDArray,
@@ -266,6 +332,8 @@ def solve_constrained_qp(
     active_set_init: list[int] | None = None,
     max_iter: int = 200,
     tol: float = 1e-12,
+    *,
+    _trace_run: TraceRun | None = None,
 ) -> QPResult:
     """Solve a convex QP with linear inequality constraints.
 
@@ -301,6 +369,17 @@ def solve_constrained_qp(
         Warm-start active set from previous solve.
     max_iter : int
         Maximum active-set iterations.
+    _trace_run : TraceRun | None
+        Internal seam, default off. When given an *enabled* ``TraceRun`` the
+        active-set loop emits one ``step_decision`` event per blocking
+        decision on the ``constrained_qp_blocking`` channel, so a test can
+        assert the mechanism -- which rows were considered, whether the
+        convergence test accepts them, which was blocked on, and the alpha
+        taken -- instead of a numeric outcome whose value depends on BLAS.
+        Underscore-prefixed and keyword-only because ``solve_constrained_qp``
+        is re-exported from ``superglm.solvers`` and this is not public API.
+        The default path is bitwise unchanged: the flag is resolved once
+        before the loop and the payload is never constructed.
     tol : float
         Tolerance for constraint satisfaction and multiplier signs. The
         constraint test is relative: row ``i`` is satisfied when
@@ -387,6 +466,10 @@ def solve_constrained_qp(
     # This may still be infeasible; see _project_feasible.  Feasibility is
     # therefore re-tested on the point actually returned, below.
     beta = _project_feasible(beta_unc, A, b, tol)
+
+    # Resolved once: the hot loop must not pay a per-row or per-iteration
+    # attribute lookup for a seam that is off in every production call.
+    tracing = _trace_run is not None and _trace_run.enabled
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
@@ -494,6 +577,25 @@ def solve_constrained_qp(
                     if alpha < alpha_min:
                         alpha_min = alpha
                         blocking = i
+
+            if tracing:
+                # After selection, before `active` is mutated, so the recorded
+                # `active_lookup` is the set the decision was actually made
+                # against.  Off by default, so this costs one bool test.
+                _emit_blocking_decision(
+                    _trace_run,
+                    iteration=it,
+                    A=A,
+                    b=b,
+                    beta=beta,
+                    beta_new=beta_new,
+                    tol=tol,
+                    products=products,
+                    raw_step=raw_step,
+                    active_lookup=active_lookup,
+                    blocking=blocking,
+                    alpha_min=alpha_min,
+                )
 
             if blocking >= 0:
                 beta = beta + alpha_min * step
