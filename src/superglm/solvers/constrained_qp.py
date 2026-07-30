@@ -749,9 +749,50 @@ def solve_constrained_qp(
     # attribute lookup for a seam that is off in every production call.
     tracing = _trace_run is not None and _trace_run.enabled
 
-    # Only a rank-truncated H can put a null direction into the KKT system.
-    # Resolved once so the full-rank path -- which is nearly every in-tree
-    # solve -- keeps taking np.linalg.solve on bitwise the same inputs.
+    # Route rank-truncated systems to the least-squares solve.  This gate is
+    # deliberately narrow, and it is *not* the claim that the direct solve is
+    # safe on the other side of it.  That claim was made once and does not
+    # survive measurement:
+    #
+    # ``decompose_gram`` equilibrates by ``sqrt(diag(H))`` *before* deciding
+    # rank (``rank._equilibrate_gram``), so the rank decision reports
+    # **collinearity**, not scale.  ``H = diag(1, 1e-20)`` equilibrates to the
+    # identity and is reported full rank; across diagonal plantings from
+    # ``1e-20`` to ``1e-8`` at widths 2, 6 and 12, 0 of 21 dropped rank at all.
+    # Such an H takes ``np.linalg.solve`` on a saddle of raw condition ``1e20``
+    # without ever approaching the retention threshold -- and a sweep that
+    # plants its small eigenvalue diagonally therefore never leaves this side
+    # of the gate, whatever it scores.
+    #
+    # Measured on this side, with the small eigenvalue planted in the
+    # *equilibrated* spectrum and the direction it carries made tangent to the
+    # active set (``A_eq v = 0``, so no constraint row pins it), over 192 KKT
+    # systems the policy calls full rank:
+    #
+    # ==========================  ==============  ==============
+    # quantity                    np.linalg.solve  equilibrated lstsq
+    # ==========================  ==============  ==============
+    # ``max|step|`` median        ``5.2e2``       ``3.6``
+    # ``max|step|`` worst         ``6.6e6``       ``2.5e2``
+    # relative residual median    ``1.2e-21``     ``5.0e-21``
+    # relative residual worst     ``7.4e-16``     ``1.0e-15``
+    # ``|A_eq (beta + step)|``    ``8.4e-10``     ``3.6e-12``
+    # ==========================  ==============  ==============
+    #
+    # Both residuals are at rounding, so the direct solve is not wrong about
+    # the linear system: it *numerically succeeds* and picks a far larger
+    # representative on a near-flat line.  That is the round-6 drift mechanism
+    # -- the one that reached ``4.1e43`` -- and it is the opposite of a
+    # truncation artifact, so an objective gap, which is flat along exactly
+    # that direction, cannot see it.  Scored on ``max|beta|`` and worst slack
+    # instead: end to end with the eigenvalue at ``4 * eps``, 1 of 40 solves on
+    # this side of the gate returned a fully saturated ``-1.0`` slack, and
+    # ``max|beta|`` reached ``1.9e6`` where the optimum is ``O(1)``.
+    #
+    # Widening the gate is behaviour-changing for every near-singular fit, so
+    # it is filed rather than done here.  What this line claims is only what is
+    # measured: the *in-tree* full-rank population -- nearly every in-tree
+    # solve -- keeps taking ``np.linalg.solve`` on bitwise the same inputs.
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
     for it in range(max_iter):
