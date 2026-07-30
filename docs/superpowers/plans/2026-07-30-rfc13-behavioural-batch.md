@@ -1,5 +1,15 @@
 # RFC-13 Behavioural Batch Implementation Plan
 
+> **SUPERSEDED WHERE IT CONFLICTS WITH THE CODE.** This plan was written before
+> implementation and is kept as the record of intent, not as guidance. Task 4
+> Step 4 below specifies `_project_feasible -> (beta, feasible)` with
+> `QPResult.converged` latched from the projected *starting* point. That was
+> implemented, measured at 27/100 spurious `converged=False`, and replaced by
+> deriving `converged` from the *returned* point; the feasibility test also
+> became relative. Other steps were refined across review rounds. The spec
+> (`docs/superpowers/specs/2026-07-30-rfc13-behavioural-batch-design.md`) and
+> the shipped code are the authority — do not re-apply the code blocks here.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Land the four RFC-13 correctness-hygiene fixes — `max_iter=0` validation, the polarization merit delta in pirls, rank-policy-routed QP solves with a meaningful `converged` flag, and a warning when the REML W(ρ) correction is silently dropped.
