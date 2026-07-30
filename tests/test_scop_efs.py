@@ -2397,8 +2397,9 @@ class TestSCOPBoundaryStagnationAcceptance:
         return scop_efs_module._STAGNANT_DEVIANCE_TOLERANCE
 
     @staticmethod
-    def _entry(deviance, *, rejected=False, halvings=0):
+    def _entry(deviance, iteration, *, rejected=False, halvings=0):
         return SimpleNamespace(
+            iteration=iteration,
             deviance=deviance,
             step_rejected=rejected,
             step_halvings=halvings,
@@ -2406,10 +2407,13 @@ class TestSCOPBoundaryStagnationAcceptance:
 
     @classmethod
     def _result(cls, deviances, *, reason="max_iter"):
+        # Numbered from 1 with no gaps, the way the solver appends them.
         return SimpleNamespace(
             converged=False,
             termination_reason=reason,
-            stagnation_log=[cls._entry(d) for d in deviances],
+            stagnation_log=[
+                cls._entry(deviance, index + 1) for index, deviance in enumerate(deviances)
+            ],
         )
 
     @classmethod
@@ -2480,6 +2484,38 @@ class TestSCOPBoundaryStagnationAcceptance:
             deviances = self._flat(self.WINDOW + 1)
             deviances[-1] = bad
             assert self._stagnated(self._result(deviances)) is False
+
+    def test_a_window_spanning_a_gap_is_refused_loudly(self):
+        """The window is taken by position and read as consecutive iterations.
+
+        Nothing in the solver can produce a gap today -- the append is
+        unconditional, once per iteration -- so this is a guard against a
+        future edit that conditionalizes or relocates it. Without the check the
+        gate would compare non-adjacent iterations and could accept a fit that
+        moved in between, silently: every visible symptom of the bug would be
+        an *acceptance*, which is the one outcome the gate is supposed to
+        withhold.
+        """
+        result = self._result(self._flat(self.WINDOW + 1))
+        # Control: the same fit, numbered contiguously, is accepted.
+        assert self._stagnated(result) is True
+
+        # Drop one iteration out of the middle of the sliced window.
+        result.stagnation_log[-3].iteration += 1
+        with pytest.raises(RuntimeError, match="not contiguous"):
+            self._stagnated(result)
+
+    def test_a_gap_outside_the_sliced_window_is_not_the_gate_s_business(self):
+        """Only the window the gate reads has to be contiguous.
+
+        The check is scoped to the slice rather than the whole log, so a fit
+        whose early history is irregular for some other reason is still
+        classifiable on its tail.
+        """
+        deviances = self._flat(self.WINDOW + 6)
+        result = self._result(deviances)
+        result.stagnation_log[0].iteration -= 4
+        assert self._stagnated(result) is True
 
     def test_an_absent_stagnation_log_is_rejected(self):
         """An injected solver that publishes no log keeps the strict gate.
@@ -2710,9 +2746,15 @@ class TestStagnationChannelMatchesTheDiagnosticsRecorder:
             assert full is not None
             assert len(narrow) == len(full)
             for record, row in zip(narrow, full, strict=True):
+                assert record.iteration == row.iteration
                 assert self._bits(record.deviance) == self._bits(row.deviance)
                 assert record.step_rejected == row.step_rejected
                 assert record.step_halvings == row.step_halvings
+            # The gate slices this log by position and reads it as a
+            # contiguous run, so the numbering has to be one per iteration
+            # with no gaps -- checked here rather than only inside the gate,
+            # which sees a tail rather than the whole history.
+            assert [r.iteration for r in narrow] == list(range(1, len(narrow) + 1))
             entries += len(narrow)
         # Enough iterations that agreement is evidence, not a coincidence.
         assert entries >= 30

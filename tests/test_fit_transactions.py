@@ -381,12 +381,15 @@ def test_published_stagnation_records_keep_their_fields():
         converged=True,
         phi=1.0,
         effective_df=1.0,
-        stagnation_log=[StagnationRecord(deviance=1.5, step_rejected=False, step_halvings=2)],
+        stagnation_log=[
+            StagnationRecord(iteration=7, deviance=1.5, step_rejected=False, step_halvings=2)
+        ],
     )
     result._publish()
 
     entry = result.stagnation_log[0]
     assert isinstance(entry, StagnationRecord)
+    assert entry.iteration == 7
     assert entry.deviance == 1.5
     assert entry.step_rejected is False
     assert entry.step_halvings == 2
