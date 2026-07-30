@@ -38,9 +38,7 @@ def _warn_qp_initialization_fallback(space: str) -> None:
     """Warn that a ``qp_initialize`` QP did not converge.
 
     ``space`` is ``"raw-space"`` or ``"solver-space"``: the two initialization
-    paths must stay distinguishable in a log, which is the only thing that
-    differs between them.  Interpolated lazily so the rendered text is
-    byte-identical to the two hand-written messages this replaced.
+    paths must stay distinguishable in a log.
     """
     logger.warning(
         "SCOP %s QP initialization did not converge; falling back "

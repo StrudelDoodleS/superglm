@@ -68,6 +68,7 @@ from superglm.solvers.pirls import (
     IterationDiagnostics,
     PIRLSResult,
     REMLGeometrySummary,
+    _extreme_weight_indices,
     _positive_working_weight_stats,
 )
 from superglm.solvers.rank import (
@@ -1242,6 +1243,8 @@ def _fit_irls_direct_once(
     record_debug_rows = (
         debug_recorder is not None and getattr(debug_recorder, "enabled_level", 0) >= 2
     )
+    # Strictly wider than ``record_diagnostics``, so the per-iteration extrema
+    # this gates are always bound by the time a diagnostics row is built.
     capture_extrema = record_diagnostics or record_debug_rows
 
     max_halving = 20  # max step-halving attempts per iteration
@@ -1928,52 +1931,60 @@ def _fit_irls_direct_once(
         working_eta_clipped = False
         eta_clipped = False
         if capture_extrema:
+            # Each of these is read again by the diagnostics row below, which
+            # only runs when ``capture_extrema`` is true (see its definition).
+            # Bind once: they are O(n) passes over arrays nothing mutates
+            # between here and the append.
+            working_eta_min = float(np.min(working_eta))
+            working_eta_max = float(np.max(working_eta))
+            working_eta_min_unclipped = float(np.min(working_eta_unclipped))
+            working_eta_max_unclipped = float(np.max(working_eta_unclipped))
+            eta_min = float(np.min(eta))
+            eta_max = float(np.max(eta))
+            eta_min_unclipped = float(np.min(eta_unclipped))
+            eta_max_unclipped = float(np.max(eta_unclipped))
             working_eta_clipped = bool(
-                float(np.min(working_eta_unclipped)) < float(np.min(working_eta))
-                or float(np.max(working_eta_unclipped)) > float(np.max(working_eta))
+                working_eta_min_unclipped < working_eta_min
+                or working_eta_max_unclipped > working_eta_max
             )
             eta_clipped = bool(
-                float(np.min(eta_unclipped)) < float(np.min(eta))
-                or float(np.max(eta_unclipped)) > float(np.max(eta))
+                eta_min_unclipped < eta_min or eta_max_unclipped > eta_max
             )
 
         # Record per-iteration diagnostics
         if record_diagnostics:
-            k = min(5, n)
-            # ``kth`` must satisfy -n <= kth < n. When n <= 5, k == n, so the
-            # bottom-k partition has to use k - 1: it selects the same k
-            # smallest entries and stays in bounds for every k in [1, n].
-            top_idx = np.argpartition(W, -k)[-k:]
-            bot_idx = np.argpartition(W, k - 1)[:k]
+            top_idx, bot_idx = _extreme_weight_indices(W)
+            w_min = float(W.min())
+            w_max = float(W.max())
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=it + 1,
                     deviance=dev,
-                    w_min=float(W.min()),
-                    w_max=float(W.max()),
+                    w_min=w_min,
+                    w_max=w_max,
                     w_ratio=w_ratio,
                     mu_min=float(mu.min()),
                     mu_max=float(mu.max()),
-                    eta_min=float(eta.min()),
-                    eta_max=float(eta.max()),
+                    eta_min=eta_min,
+                    eta_max=eta_max,
                     intercept=intercept,
                     step_halvings=n_halvings,
-                    top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
-                    bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
+                    top_w_indices=top_idx,
+                    bottom_w_indices=bot_idx,
                     cond_estimate=_cond_est,
                     used_svd_fallback=_used_svd,
-                    raw_w_min=float(W.min()),
-                    raw_w_max=float(W.max()),
+                    raw_w_min=w_min,
+                    raw_w_max=w_max,
                     raw_w_ratio=w_ratio,
-                    eta_min_unclipped=float(np.min(eta_unclipped)),
-                    eta_max_unclipped=float(np.max(eta_unclipped)),
+                    eta_min_unclipped=eta_min_unclipped,
+                    eta_max_unclipped=eta_max_unclipped,
                     eta_clipped=eta_clipped,
                     working_mu_min=float(working_mu.min()),
                     working_mu_max=float(working_mu.max()),
-                    working_eta_min=float(working_eta.min()),
-                    working_eta_max=float(working_eta.max()),
-                    working_eta_min_unclipped=float(np.min(working_eta_unclipped)),
-                    working_eta_max_unclipped=float(np.max(working_eta_unclipped)),
+                    working_eta_min=working_eta_min,
+                    working_eta_max=working_eta_max,
+                    working_eta_min_unclipped=working_eta_min_unclipped,
+                    working_eta_max_unclipped=working_eta_max_unclipped,
                     working_eta_clipped=working_eta_clipped,
                     step_rejected=step_rejected,
                     rank_truncated=rank_truncated,

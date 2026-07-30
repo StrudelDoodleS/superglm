@@ -114,6 +114,25 @@ def _positive_working_weight_stats(W: NDArray) -> tuple[float, float, float]:
     return positive_min, positive_max, ratio
 
 
+def _extreme_weight_indices(
+    W: NDArray[np.float64], k: int = 5
+) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
+    """Indices of the k largest and k smallest working weights, each ordered by W.
+
+    ``np.argpartition`` requires ``-n <= kth < n``.  When ``W.size <= k`` the
+    bottom partition must use ``k - 1``: it selects the same k smallest entries
+    and stays in bounds for every k in [1, W.size].  The top partition is
+    already safe because ``-k >= -W.size``.
+    """
+    k = min(k, W.size)
+    top_idx = np.argpartition(W, -k)[-k:]
+    bot_idx = np.argpartition(W, k - 1)[:k]
+    return (
+        top_idx[np.argsort(W[top_idx])[::-1]],
+        bot_idx[np.argsort(W[bot_idx])],
+    )
+
+
 class _FrozenResultMapping(Mapping[object, object]):
     """Pickle-safe mapping used for recursively published result metadata."""
 
@@ -1183,47 +1202,54 @@ def _fit_pirls_inner(
 
         # Record per-iteration diagnostics
         if record_diagnostics:
-            k = min(5, n)
-            # ``kth`` must satisfy -n <= kth < n. When n <= 5, k == n, so the
-            # bottom-k partition has to use k - 1: it selects the same k
-            # smallest entries and stays in bounds for every k in [1, n].
-            top_idx = np.argpartition(W, -k)[-k:]
-            bot_idx = np.argpartition(W, k - 1)[:k]
+            top_idx, bot_idx = _extreme_weight_indices(W)
+            # Each extremum below is reported under two field names and, for
+            # the eta pairs, also decides the clipping flag.  Bind once: these
+            # are O(n) passes over arrays nothing here mutates.
+            w_min = float(W.min())
+            w_max = float(W.max())
+            eta_min = float(np.min(eta_new))
+            eta_max = float(np.max(eta_new))
+            eta_min_unclipped = float(np.min(eta_new_unclipped))
+            eta_max_unclipped = float(np.max(eta_new_unclipped))
+            working_eta_min = float(np.min(eta))
+            working_eta_max = float(np.max(eta))
+            working_eta_min_unclipped = float(np.min(eta_unclipped))
+            working_eta_max_unclipped = float(np.max(eta_unclipped))
             working_eta_clipped = bool(
-                float(np.min(eta_unclipped)) < float(np.min(eta))
-                or float(np.max(eta_unclipped)) > float(np.max(eta))
+                working_eta_min_unclipped < working_eta_min
+                or working_eta_max_unclipped > working_eta_max
             )
             eta_clipped = bool(
-                float(np.min(eta_new_unclipped)) < float(np.min(eta_new))
-                or float(np.max(eta_new_unclipped)) > float(np.max(eta_new))
+                eta_min_unclipped < eta_min or eta_max_unclipped > eta_max
             )
             iteration_log.append(
                 IterationDiagnostics(
                     iteration=outer + 1,
                     deviance=dev,
-                    w_min=float(W.min()),
-                    w_max=float(W.max()),
+                    w_min=w_min,
+                    w_max=w_max,
                     w_ratio=w_ratio,
                     mu_min=float(mu_new.min()),
                     mu_max=float(mu_new.max()),
-                    eta_min=float(eta_new.min()),
-                    eta_max=float(eta_new.max()),
+                    eta_min=eta_min,
+                    eta_max=eta_max,
                     intercept=intercept,
                     step_halvings=n_halvings,
-                    top_w_indices=top_idx[np.argsort(W[top_idx])[::-1]],
-                    bottom_w_indices=bot_idx[np.argsort(W[bot_idx])],
-                    raw_w_min=float(W.min()),
-                    raw_w_max=float(W.max()),
+                    top_w_indices=top_idx,
+                    bottom_w_indices=bot_idx,
+                    raw_w_min=w_min,
+                    raw_w_max=w_max,
                     raw_w_ratio=w_ratio,
-                    eta_min_unclipped=float(np.min(eta_new_unclipped)),
-                    eta_max_unclipped=float(np.max(eta_new_unclipped)),
+                    eta_min_unclipped=eta_min_unclipped,
+                    eta_max_unclipped=eta_max_unclipped,
                     eta_clipped=eta_clipped,
                     working_mu_min=float(mu.min()),
                     working_mu_max=float(mu.max()),
-                    working_eta_min=float(eta.min()),
-                    working_eta_max=float(eta.max()),
-                    working_eta_min_unclipped=float(np.min(eta_unclipped)),
-                    working_eta_max_unclipped=float(np.max(eta_unclipped)),
+                    working_eta_min=working_eta_min,
+                    working_eta_max=working_eta_max,
+                    working_eta_min_unclipped=working_eta_min_unclipped,
+                    working_eta_max_unclipped=working_eta_max_unclipped,
                     working_eta_clipped=working_eta_clipped,
                     step_rejected=step_rejected,
                     trials_attempted=decision.trials_attempted,
