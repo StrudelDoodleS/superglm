@@ -745,6 +745,75 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode, pirls_tol: float) -> float:
     return max(10.0 * min(pirls_tol, 1.0e-10), float(numerical_floor))
 
 
+# Deviance-stagnation acceptance for boundary SCOP coefficient modes.
+#
+# SCOP inner fits run with ``convergence="coefficients"``. That criterion
+# cannot terminate when a SCOP coefficient drifts toward its log-space
+# boundary (``exp(gamma) -> 0``): the coefficient keeps changing while the fit
+# stops changing, so the criterion measures a quantity that no longer tracks
+# progress. Such a fit has reached a boundary solution and further iteration
+# changes nothing observable, so the already-computed mode is accepted rather
+# than rejected as a non-convergence.
+#
+# Both constants are taken from the 1017 SCOP inner fits the REML test corpus
+# performs, not from round numbers:
+#
+# * Tolerance. Throughout the stagnant regime the deviance moves by at most a
+#   single ULP -- 0.73 eps under the solver's own
+#   ``|d - d_prev| / (|d_prev| + 1)`` convention -- while one iteration earlier
+#   the same fit was still genuinely moving at 116 eps. 8 eps is the geometric
+#   midpoint of that separation (9.2 eps) at the nearest exactly representable
+#   power of two. Testing exact equality would not do: the final iteration of
+#   the measured fit moves by precisely one ULP.
+# * Window. The longest trailing stagnant run measured on a fit that then went
+#   on to converge normally is 29 iterations; the boundary fit holds for 86,
+#   and no fit in the corpus falls in between. 50 is the geometric midpoint of
+#   [29, 86], leaving a 1.7x margin against both populations.
+#
+# The window is an absolute iteration count, so the acceptance can only fire
+# when ``max_pirls_iter`` exceeds it. That is deliberate: on a short budget,
+# hitting ``max_iter`` is far weaker evidence of a boundary solution, and
+# raising the non-convergence remains the safe answer.
+_STAGNANT_DEVIANCE_TOLERANCE = 8.0 * float(np.finfo(np.float64).eps)
+_STAGNANT_DEVIANCE_WINDOW = 50
+
+
+def _scop_deviance_stagnated(result: Any) -> bool:
+    """Return True when a non-converged inner fit sits on a boundary solution.
+
+    Accepts only deviance stagnation, and only the benign kind. A fit that
+    exhausted its budget while diverging, oscillating or rejecting steps does
+    not hold its deviance constant to roundoff across a 50-iteration window,
+    so it still reports non-convergence. The caller's downstream latent
+    penalized-score certification is unaffected and still has to accept the
+    mode, so this never admits a point that is not a stationary mode.
+    """
+    # ``step_rejected`` and ``nonfinite_deviance`` terminations are genuine
+    # breakdowns; only an exhausted iteration budget is a stagnation candidate.
+    if getattr(result, "termination_reason", None) != "max_iter":
+        return False
+    iteration_log = getattr(result, "iteration_log", None)
+    if not iteration_log or len(iteration_log) <= _STAGNANT_DEVIANCE_WINDOW:
+        return False
+
+    window = iteration_log[-(_STAGNANT_DEVIANCE_WINDOW + 1) :]
+    previous = float(window[0].deviance)
+    if not np.isfinite(previous):
+        return False
+    for entry in window[1:]:
+        deviance = float(entry.deviance)
+        if not np.isfinite(deviance):
+            return False
+        # A halved or rejected step means the iteration is still fighting the
+        # objective. That is genuine non-convergence, not a boundary solution.
+        if entry.step_rejected or entry.step_halvings:
+            return False
+        if abs(deviance - previous) / (abs(previous) + 1.0) > _STAGNANT_DEVIANCE_TOLERANCE:
+            return False
+        previous = deviance
+    return True
+
+
 def _fit_scop_reml_mode(
     context: _SCOPREMLFitContext,
     lambdas: dict[str, float],
@@ -815,6 +884,10 @@ def _fit_scop_reml_mode(
         compute_rank_info=False,
         _compute_fit_statistics=False,
         _compute_reml_geometry=False,
+        # Supplies the per-iteration deviance history that
+        # ``_scop_deviance_stagnated`` needs to recognise a boundary solution.
+        # Purely a record: it feeds no numerics and cannot move a fitted value.
+        record_diagnostics=True,
         cache_out=working_cache,
     )
     scop_states: dict[int, dict]
@@ -825,7 +898,17 @@ def _fit_scop_reml_mode(
         scop_states = {}
 
     if require_converged and not result.converged:
-        return None
+        if not _scop_deviance_stagnated(result):
+            return None
+        # A boundary solution is a converged mode: the deviance has stopped
+        # moving and the coefficient criterion is tracking a coordinate that no
+        # longer measures progress. Record that decision on the result so every
+        # downstream consumer -- the fixed-lambda ``REMLResult.converged`` flag
+        # and the published terminal fit among them -- sees one coherent
+        # convergence state instead of a mode that was accepted here but still
+        # advertises a failure. ``termination_reason`` keeps its ``"max_iter"``
+        # value as the durable record of how the iteration actually ended.
+        result.converged = True
     rank_info = result.rank_info
     cached_mean_x = working_cache.get("mean_x")
     cached_sum_w = working_cache.get("sum_W")

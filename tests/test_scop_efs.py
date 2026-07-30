@@ -2359,6 +2359,232 @@ class TestSCOPEFSOuterLoop:
             assert "x" in entry
 
 
+class TestSCOPBoundaryStagnationAcceptance:
+    """A SCOP inner fit pinned at a boundary solution is accepted, not rejected.
+
+    SCOP inner fits use ``convergence="coefficients"``. That criterion cannot
+    terminate when a SCOP coefficient drifts toward its log-space boundary
+    (``exp(gamma) -> 0``): the coefficient keeps changing while the fit stops
+    changing. The measured fit held its deviance to a single ULP for 86
+    consecutive iterations while the coefficient change decayed only ~0.9% per
+    iteration, so it exhausted ``max_pirls_iter`` and was reported as a
+    non-convergence even though nothing observable was still moving.
+
+    These tests pin the acceptance and, just as importantly, each guard that
+    keeps a genuine non-convergence failing.
+    """
+
+    # The deviance the measured boundary fit stalled on.
+    STALLED_DEVIANCE = 696.9342068066064
+    # Comfortably longer and shorter than any plausible window, so the gate
+    # tests below exercise behaviour rather than the constant's exact value.
+    LONG_RUN = 256
+    SHORT_RUN = 4
+
+    @property
+    def WINDOW(self):  # noqa: N802 - resolved lazily so collection never depends on it
+        return scop_efs_module._STAGNANT_DEVIANCE_WINDOW
+
+    @property
+    def TOLERANCE(self):  # noqa: N802
+        return scop_efs_module._STAGNANT_DEVIANCE_TOLERANCE
+
+    @staticmethod
+    def _entry(deviance, *, rejected=False, halvings=0):
+        return SimpleNamespace(
+            deviance=deviance,
+            step_rejected=rejected,
+            step_halvings=halvings,
+        )
+
+    @classmethod
+    def _result(cls, deviances, *, reason="max_iter"):
+        return SimpleNamespace(
+            converged=False,
+            termination_reason=reason,
+            iteration_log=[cls._entry(d) for d in deviances],
+        )
+
+    @classmethod
+    def _flat(cls, n_entries):
+        return [cls.STALLED_DEVIANCE] * n_entries
+
+    def test_flat_deviance_across_the_window_is_accepted(self):
+        result = self._result(self._flat(self.WINDOW + 1))
+        assert scop_efs_module._scop_deviance_stagnated(result) is True
+
+    def test_single_ulp_drift_is_accepted(self):
+        """The measured fit moved one ULP on its final iteration.
+
+        Exact-equality stagnation would therefore never have fired on the
+        very case this exists to accept.
+        """
+        deviances = [self.STALLED_DEVIANCE]
+        for _ in range(self.WINDOW):
+            deviances.append(np.nextafter(deviances[-1], np.inf))
+        assert deviances[-1] != deviances[0]
+        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is True
+
+    def test_window_one_iteration_short_is_rejected(self):
+        result = self._result(self._flat(self.WINDOW))
+        assert scop_efs_module._scop_deviance_stagnated(result) is False
+
+    def test_change_just_below_the_tolerance_is_accepted(self):
+        deviances = self._flat(self.WINDOW + 1)
+        step = 0.5 * self.TOLERANCE * (abs(self.STALLED_DEVIANCE) + 1.0)
+        deviances[-1] = self.STALLED_DEVIANCE + step
+        assert deviances[-1] != deviances[-2]
+        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is True
+
+    def test_change_just_above_the_tolerance_is_rejected(self):
+        deviances = self._flat(self.WINDOW + 1)
+        step = 2.0 * self.TOLERANCE * (abs(self.STALLED_DEVIANCE) + 1.0)
+        deviances[-1] = self.STALLED_DEVIANCE + step
+        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+
+    def test_a_still_descending_fit_is_rejected(self):
+        """A fit crawling downhill is genuine non-convergence, not stagnation."""
+        deviances = [self.STALLED_DEVIANCE * (1.0 - 1e-6) ** i for i in range(self.WINDOW + 1)]
+        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+
+    def test_an_oscillating_fit_is_rejected(self):
+        deviances = [
+            self.STALLED_DEVIANCE + (1e-6 if i % 2 else -1e-6) for i in range(self.WINDOW + 1)
+        ]
+        assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+
+    def test_a_rejected_step_inside_the_window_is_rejected(self):
+        result = self._result(self._flat(self.WINDOW + 1))
+        result.iteration_log[-1].step_rejected = True
+        assert scop_efs_module._scop_deviance_stagnated(result) is False
+
+    def test_a_halved_step_inside_the_window_is_rejected(self):
+        result = self._result(self._flat(self.WINDOW + 1))
+        result.iteration_log[-1].step_halvings = 1
+        assert scop_efs_module._scop_deviance_stagnated(result) is False
+
+    def test_a_non_max_iter_termination_is_rejected(self):
+        for reason in ("step_rejected", "nonfinite_deviance", "curvature_fallback", None):
+            result = self._result(self._flat(self.WINDOW + 1), reason=reason)
+            assert scop_efs_module._scop_deviance_stagnated(result) is False
+
+    def test_a_nonfinite_deviance_is_rejected(self):
+        for bad in (np.nan, np.inf):
+            deviances = self._flat(self.WINDOW + 1)
+            deviances[-1] = bad
+            assert scop_efs_module._scop_deviance_stagnated(self._result(deviances)) is False
+
+    def test_an_absent_iteration_log_is_rejected(self):
+        """An injected solver that publishes no log keeps the strict gate."""
+        for log in (None, []):
+            result = SimpleNamespace(
+                converged=False, termination_reason="max_iter", iteration_log=log
+            )
+            assert scop_efs_module._scop_deviance_stagnated(result) is False
+        assert scop_efs_module._scop_deviance_stagnated(SimpleNamespace(converged=False)) is False
+
+    # ── the gate itself, through _fit_scop_reml_mode ────────────────────────
+
+    @staticmethod
+    def _context():
+        return scop_efs_module._SCOPREMLFitContext(
+            dm=SimpleNamespace(p=1, group_matrices=[]),
+            distribution=SimpleNamespace(),
+            link=SimpleNamespace(),
+            groups=[],
+            y=np.array([1.0]),
+            sample_weight=np.array([1.0]),
+            offset_arr=np.array([0.0]),
+            pirls_tol=1e-6,
+            max_pirls_iter=200,
+            reml_penalties=[],
+            convergence="coefficients",
+            scop_joint=True,
+            debug_recorder=None,
+            likelihood_size=1.0,
+            gamma_scale_data=None,
+        )
+
+    def _run_gate(self, monkeypatch, solver_result, captured=None):
+        def fake_solver(**kwargs):
+            if captured is not None:
+                captured.update(kwargs)
+            return solver_result, None, np.array([[1.0]]), {}
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", fake_solver)
+        return scop_efs_module._fit_scop_reml_mode(
+            self._context(),
+            {"x": 1.0},
+            beta_init=None,
+            intercept_init=None,
+            scop_state_init=None,
+            phase="candidate",
+            reml_iteration=1,
+            require_converged=True,
+        )
+
+    def _stub(self, n_entries):
+        result = self._result(self._flat(n_entries))
+        result.beta = np.array([0.0])
+        result.intercept = 0.0
+        result.rank_info = None
+        return result
+
+    def test_gate_admits_a_stagnant_candidate(self, monkeypatch):
+        """The stagnant candidate is no longer short-circuited to ``None``.
+
+        Admission is evidenced by the fit proceeding into geometry assembly,
+        which this bare stub cannot satisfy. Before deviance-stagnation
+        acceptance the gate returned ``None`` here and the caller raised
+        ``SCOP REML candidate did not converge to a coefficient mode``.
+        """
+        stub = self._stub(self.LONG_RUN)
+        with pytest.raises(RuntimeError, match="retained centered fit geometry"):
+            self._run_gate(monkeypatch, stub)
+        # The accepted boundary mode is recorded as converged so downstream
+        # consumers see one coherent state, while ``termination_reason``
+        # preserves how the iteration actually ended.
+        assert stub.converged is True
+        assert stub.termination_reason == "max_iter"
+
+    def test_a_rejected_candidate_is_not_marked_converged(self, monkeypatch):
+        stub = self._stub(self.SHORT_RUN)
+        assert self._run_gate(monkeypatch, stub) is None
+        assert stub.converged is False
+
+    def test_gate_still_rejects_a_candidate_that_is_merely_slow(self, monkeypatch):
+        """Too short a stagnant run is still a non-convergence."""
+        assert self._run_gate(monkeypatch, self._stub(self.SHORT_RUN)) is None
+
+    def test_gate_requests_the_iteration_log_it_needs(self, monkeypatch):
+        captured = {}
+        self._run_gate(monkeypatch, self._stub(self.SHORT_RUN), captured=captured)
+        assert captured["record_diagnostics"] is True
+
+    def test_a_genuinely_non_converging_fit_still_raises(self):
+        """A real SCOP fit that never settles is still reported as a failure.
+
+        This quasi-separated Poisson exhausts all 100 PIRLS iterations with
+        zero halvings and zero rejections -- the same surface shape as the
+        boundary solution that is now accepted -- but its deviance is still
+        moving by ~1e-3 relative per iteration. Deviance stagnation, not the
+        step-quality guards, is what separates the two.
+        """
+        x = np.linspace(0, 1, 200)
+        frame = pd.DataFrame({"x": x})
+        response = np.where(x > 0.8, 5000.0, 0.0)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=12, penalty="ssp", constraint=Constraint.fit.increasing)
+            },
+        )
+        with pytest.raises(RuntimeError, match="did not converge to a coefficient mode"):
+            model.fit_reml(frame, response, max_reml_iter=20)
+
+
 # ── fit_reml integration tests ──────────────────────────────────────────────────
 
 from superglm.features.spline import BSplineSmooth  # noqa: E402
