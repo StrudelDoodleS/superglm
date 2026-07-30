@@ -973,8 +973,8 @@ class TestProjectionSelectsTheWorstViolation:
         worst residual violation of ``-2.84e-01``; selecting on the clamped
         slack leaves ``-4.70e+00``, 16.6x worse, because it cycles between rows
         0 and 1 -- both stuck at ``-1.0`` -- while rows 3 and 5, violated by 14,
-        wait.  The 1.0 threshold below sits between the two with an order of
-        magnitude of margin either side.
+        wait.  The 1.0 threshold below sits between the two, with ``3.5x``
+        margin to the passing value and ``4.7x`` to the failing one.
         """
         projected = _project_feasible(self.BETA, self.A, self.B, 1e-12)
         residual = float(np.min(self.A @ projected - self.B))

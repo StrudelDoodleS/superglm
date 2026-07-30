@@ -246,11 +246,19 @@ class StagnationRecord:
     there so the gate can *check* the window it slices.  The gate takes its
     window by position (``log[-(required + 1):]``) and reads it as a run of
     consecutive iterations.  Nothing enforces that today -- the append is
-    unconditional -- but an edit that conditionalized or relocated it would make
-    the window span a gap and the gate would measure stagnation across it with
+    unconditional -- but an edit that **conditionalized** it would make the
+    window span a gap and the gate would measure stagnation across it with
     nothing to notice.  One int per iteration converts that silent wrong answer
     into a loud one, which is cheaper than testing for every way the two could
     drift apart.  Numbered ``it + 1``, matching ``IterationDiagnostics``.
+
+    Relocation is a different case and this guard does not cover it: moving the
+    append *below* the non-finite-deviance break shortens the log by one entry
+    on that iteration but leaves it contiguous, so the contiguity check passes.
+    That is harmless in fact, but for an unrelated reason -- the break sets
+    ``termination_reason = "nonfinite_deviance"``, and ``_scop_boundary_stagnation``
+    rejects anything but ``"max_iter"`` before it slices at all.  Two guards,
+    not one; do not read this one as covering both.
     """
 
     iteration: int
