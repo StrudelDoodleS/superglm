@@ -6,7 +6,7 @@
 > checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement, document, profile, and verify a unified
-`FactorSmooth(basis="fs"|"sz", kind=...)` API with clean-room the reference implementation-compatible
+`FactorSmooth(basis="fs"|"sz", kind=...)` API with clean-room mgcv-compatible
 SZ deviations, compact exact/discrete execution, and no LSS changes.
 
 **Architecture:** Keep the existing FS natural parameterization and compiled
@@ -18,7 +18,7 @@ protocols so dense oracles, REML derivatives, retained covariance, and
 reporting all consume the same public geometry.
 
 **Tech Stack:** Python 3.10+, NumPy, SciPy, pandas, Numba, tabmat, pytest,
-R 4.5.3 with the reference implementation 1.9-4, cProfile, tracemalloc, MkDocs, Ruff, mypy.
+R 4.5.3 with mgcv 1.9-4, cProfile, tracemalloc, MkDocs, Ruff, mypy.
 
 ---
 
@@ -43,11 +43,11 @@ R 4.5.3 with the reference implementation 1.9-4, cProfile, tracemalloc, MkDocs, 
   Gaussian/Poisson, finite-difference, and retained-state integration.
 - `tests/test_factor_smooth_sz_inference.py` — SZ-specific reporting and curve
   covariance tests.
-- `tests/test_factor_smooth_sz_the reference implementation_parity.py` — pinned the reference implementation fit and
+- `tests/test_factor_smooth_sz_mgcv_parity.py` — pinned mgcv fit and
   construction parity.
-- `tests/fixtures/factor_smooth_sz_the reference implementation_reference.R` — clean-room fixture
-  generator that executes the reference implementation without embedding its source.
-- `tests/fixtures/factor_smooth_sz_the reference implementation_reference.json` — generated,
+- `tests/fixtures/factor_smooth_sz_mgcv_reference.R` — clean-room fixture
+  generator that executes mgcv without embedding its source.
+- `tests/fixtures/factor_smooth_sz_mgcv_reference.json` — generated,
   version-pinned reference values.
 
 ### Modified files
@@ -1530,7 +1530,7 @@ Do not emit a collapse warning or label this as credibility.
 - [ ] **Step 6: Run reporting/inference suites and commit**
 
 ```bash
-rtk uv run pytest tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_the reference implementation_parity.py -q
+rtk uv run pytest tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_mgcv_parity.py -q
 rtk uv run ruff check src/superglm/inference/covariance.py src/superglm/inference/factor_smooths.py src/superglm/model/api.py tests/test_factor_smooth_sz_inference.py
 rtk git add src/superglm/inference/covariance.py src/superglm/inference/factor_smooths.py src/superglm/model/api.py tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_inference.py
 rtk git commit -m "Add SZ prediction and reporting"
@@ -1541,13 +1541,13 @@ credibility shrinkage.
 
 ---
 
-### Task 9: Pin clean-room the reference implementation 1.9-4 parity
+### Task 9: Pin clean-room mgcv 1.9-4 parity
 
 **Files:**
 
-- Create: `tests/fixtures/factor_smooth_sz_the reference implementation_reference.R`
-- Create: `tests/fixtures/factor_smooth_sz_the reference implementation_reference.json`
-- Create: `tests/test_factor_smooth_sz_the reference implementation_parity.py`
+- Create: `tests/fixtures/factor_smooth_sz_mgcv_reference.R`
+- Create: `tests/fixtures/factor_smooth_sz_mgcv_reference.json`
+- Create: `tests/test_factor_smooth_sz_mgcv_parity.py`
 
 - [ ] **Step 1: Write the fixture generator**
 
@@ -1562,7 +1562,7 @@ y ~ s(x, bs = "ps", k = 7, m = 2) +
 
 Record:
 
-- `R.version.string`, `packageVersion("the reference implementation")`, seed, and exact formula;
+- `R.version.string`, `packageVersion("mgcv")`, seed, and exact formula;
 - data and prediction frames;
 - response predictions, global-only predictions, deviation term, deviance,
   scale, total/SZ/global EDF;
@@ -1572,23 +1572,23 @@ Record:
   one-row `PredictMat`;
 - the corresponding no-`id` smoothing-parameter count.
 
-No the reference implementation source text or implementation code enters the fixture.
+No mgcv source text or implementation code enters the fixture.
 
 - [ ] **Step 2: Generate and inspect the pinned JSON**
 
 ```bash
-rtk Rscript tests/fixtures/factor_smooth_sz_the reference implementation_reference.R tests/fixtures/factor_smooth_sz_the reference implementation_reference.json
-rtk json tests/fixtures/factor_smooth_sz_the reference implementation_reference.json
+rtk Rscript tests/fixtures/factor_smooth_sz_mgcv_reference.R tests/fixtures/factor_smooth_sz_mgcv_reference.json
+rtk json tests/fixtures/factor_smooth_sz_mgcv_reference.json
 ```
 
-Expected metadata: R 4.5.3, the reference implementation 1.9.4, construction width 18, one shared
+Expected metadata: R 4.5.3, mgcv 1.9.4, construction width 18, one shared
 penalty, rank 12, nullity 6, and finite `1 x 18` prediction design.
 
 - [ ] **Step 3: Write parity tests**
 
 Fit matching SuperGLM models with explicit `Spline` plus `basis="sz"`.
 Define the column mapping explicitly as the sorted-level contrast
-`C = [I; -1]` Kronecker the shared marginal P-spline coordinates; if the reference implementation's
+`C = [I; -1]` Kronecker the shared marginal P-spline coordinates; if mgcv's
 marginal coordinates differ, estimate one deterministic square change of
 basis from the construction fixture and apply its congruence to the penalty.
 Reject the fixture if that mapping is rank deficient or fails on the separate
@@ -1601,7 +1601,7 @@ one-row `PredictMat` fixture. Compare:
 - deviance and EDF;
 - exact/discrete SuperGLM parity;
 - one-row prediction;
-- unseen SuperGLM population prediction against the reference implementation prediction with the SZ
+- unseen SuperGLM population prediction against mgcv prediction with the SZ
   term excluded.
 
 Start with construction `atol=2e-10`; Gaussian prediction/deviance/EDF
@@ -1615,9 +1615,9 @@ the test.
 - [ ] **Step 4: Run parity tests and commit**
 
 ```bash
-rtk uv run pytest tests/test_factor_smooth_sz_the reference implementation_parity.py tests/test_factor_smooth_the reference implementation_parity.py -q
-rtk git add tests/fixtures/factor_smooth_sz_the reference implementation_reference.R tests/fixtures/factor_smooth_sz_the reference implementation_reference.json tests/test_factor_smooth_sz_the reference implementation_parity.py
-rtk git commit -m "Pin SZ parity against the reference implementation"
+rtk uv run pytest tests/test_factor_smooth_sz_mgcv_parity.py tests/test_factor_smooth_mgcv_parity.py -q
+rtk git add tests/fixtures/factor_smooth_sz_mgcv_reference.R tests/fixtures/factor_smooth_sz_mgcv_reference.json tests/test_factor_smooth_sz_mgcv_parity.py
+rtk git commit -m "Pin SZ parity against mgcv"
 ```
 
 Expected: pinned construction and fit parity pass without calling R during
@@ -1703,7 +1703,7 @@ Document:
 | Fully penalized random curves | `FactorSmooth(..., basis="fs")` | optional | full wiggle/null shrinkage |
 | Centered deviation curves | `FactorSmooth(..., basis="sz")` | required | wiggle shrinks, polynomial null space remains |
 
-Explain that `group=` corresponds to the reference implementation's factor argument, not generic
+Explain that `group=` corresponds to mgcv's factor argument, not generic
 `by=`; tuple spline-spline interactions remain `ti()`-style; `te`/`tp` are
 not added. Spell out that SZ means “sum-to-zero” and that the result is a
 continuous rating curve per level, not a finite two-way lookup table.
@@ -1880,7 +1880,7 @@ rtk git commit -m "Profile structured SZ smooths"
 - [ ] **Step 1: Run all focused factor-smooth and structured suites**
 
 ```bash
-rtk uv run pytest tests/test_factor_smooth_feature.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py tests/test_factor_smooth_penalties.py tests/test_factor_smooth_reml.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_the reference implementation_parity.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_sz_penalties.py tests/test_sum_to_zero_structured_factor.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_sz_the reference implementation_parity.py tests/test_random_effect_reml.py tests/test_structured_factor.py tests/test_structured_irls.py tests/test_structured_allocations.py -q
+rtk uv run pytest tests/test_factor_smooth_feature.py tests/test_factor_smooth_matrix.py tests/test_factor_smooth_discrete.py tests/test_factor_smooth_penalties.py tests/test_factor_smooth_reml.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_structured_system.py tests/test_factor_smooth_structured_parity.py tests/test_factor_smooth_sz_feature.py tests/test_factor_smooth_sz_matrix.py tests/test_factor_smooth_sz_penalties.py tests/test_sum_to_zero_structured_factor.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_sz_inference.py tests/test_factor_smooth_sz_mgcv_parity.py tests/test_random_effect_reml.py tests/test_structured_factor.py tests/test_structured_irls.py tests/test_structured_allocations.py -q
 ```
 
 Expected: all pass.
@@ -1920,7 +1920,7 @@ or documentation section. Confirm:
 - exact pointwise sum-to-zero;
 - one shared wiggle lambda;
 - exact/discrete compact structured solving;
-- dense/structured and reference parity;
+- dense/structured and mgcv parity;
 - prediction/reporting semantics;
 - shorthand warning and canonical explicit docs;
 - profile/crossover evidence.

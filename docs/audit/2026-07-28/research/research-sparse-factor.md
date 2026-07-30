@@ -1,10 +1,10 @@
 # Research track 3: sparse factorization & selected inverse — findings
 
-## ⭐ AI-REML is strictly better than EFS for the reference-parity constraint
+## ⭐ AI-REML is strictly better than EFS for the mgcv-parity constraint
 
 **AI-REML approximates only the HESSIAN; the gradient stays exact, so the fixed point is the exact REML
 optimum. It is an approximate Newton *step*, not an approximate *estimator*.** EFS/SOP by contrast make the PQL
-simplification — the reference implementation's own `?gam` concedes EFS is *"eventually **approximately** maximizing the marginal
+simplification — mgcv's own `?gam` concedes EFS is *"eventually **approximately** maximizing the marginal
 likelihood."*
 
 **This re-ranks the EFS discussion: AI-REML should be primary, EFS/SOP secondary.**
@@ -37,14 +37,14 @@ factorizations**. Better constant than selected inversion (which costs ~2× per 
 also hands you `diag(H⁻¹)`, which superglm needs for EDF/SEs.
 
 **LMMsolver (Boer 2023, Statistical Modelling 23(5-6):465-479)** uses exactly this for sparse P-spline mixed
-models and reports **the reference implementation 600 s → 1 s** and **the reference implementation 38 min → 30 s**. **Closest published prior art to what
+models and reports **mgcv 600 s → 1 s** and **mgcv 38 min → 30 s**. **Closest published prior art to what
 superglm wants — read before committing to Takahashi.**
 
 Recommended split: **Smith-1995 Cholesky AD for the gradient traces, Takahashi for `diag(H⁻¹)`.**
 
 ## Correction to the track's own earlier cost model
 
-`O(qp² + p³)` for the reference implementation's Newton is only right **when W is frozen**. Wood (2011) states `O(M·n·q²)` for the
+`O(qp² + p³)` for mgcv's Newton is only right **when W is frozen**. Wood (2011) states `O(M·n·q²)` for the
 log-determinant second derivatives, noting *"this step dominates the method's computational cost."* The extra
 `T_k` terms exist because **W depends on λ through β̂** — they vanish for Gaussian-identity and for any
 fREML/bam working model (confirmed: `fast-REML.r` contains no `T_k` terms) but dominate otherwise.
@@ -57,7 +57,7 @@ gradient function."* It profiles β and σ out, leaving <10 parameters for BOBYQ
 `log|L_θ|`.
 
 **But lme4 never reports a penalised EDF or per-coefficient posterior SE — that is WHY it never needs H⁻¹.**
-superglm, targeting reference parity, does need `diag(H⁻¹)`. So profiling-plus-derivative-free is **not available**.
+superglm, targeting mgcv parity, does need `diag(H⁻¹)`. So profiling-plus-derivative-free is **not available**.
 
 Symbolic reuse confirmed: *"The symbolic phase… **does not depend on the value of θ**."* ⇒ symbolic analysis
 once per fit, numeric refactorization per iteration.
@@ -108,6 +108,6 @@ need it.
 ## Net recommendation
 
 Adopt **sparse Cholesky + Takahashi selected inversion + AI-REML** — the verified animal-breeding architecture
-— **rather than EFS**, because AI keeps the REML gradient exact and therefore preserves the reference-parity claim.
+— **rather than EFS**, because AI keeps the REML gradient exact and therefore preserves the mgcv-parity claim.
 Evaluate **Smith-1995 Cholesky AD** as a possibly-cheaper substitute for selected inversion in the gradient,
 keeping Takahashi for `diag(H⁻¹)`. Gate the whole sparse investment on a measured `nnz(L_H)` fill-in test.

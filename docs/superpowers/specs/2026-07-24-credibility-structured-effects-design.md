@@ -3,7 +3,7 @@
 ## Goal
 
 Add actuarial credibility to SuperGLM through genuine REML-estimated random
-effects, then extend the same machinery to reference-style factor smooths. Both
+effects, then extend the same machinery to mgcv-style factor smooths. Both
 features must preserve SuperGLM's compact categorical and discretized
 representations and must remain practical when the structured term has far
 more coefficients than the rest of the model.
@@ -33,7 +33,7 @@ LSS is explicitly outside this design and must not be modified.
 - Exact largest-block Schur backend for ordinary and `discrete=True` REML.
 - Conditional and population prediction.
 - Variance-component and level credibility reporting.
-- Dense-versus-structured, the reference implementation, and performance evidence.
+- Dense-versus-structured, mgcv, and performance evidence.
 
 ### Delivery B: random smooth curves
 
@@ -44,7 +44,7 @@ LSS is explicitly outside this design and must not be modified.
 - Block-diagonal extension of the Schur backend.
 - Conditional and population prediction.
 - Per-level curve, uncertainty, support, and effective-credibility reporting.
-- Dense-versus-structured, the reference implementation `bs="fs"`, and performance evidence.
+- Dense-versus-structured, mgcv `bs="fs"`, and performance evidence.
 
 Delivery B starts only after Delivery A has a correct dense oracle, structured
 parity, and stable profiling results. The structured backend is designed for
@@ -56,7 +56,7 @@ checkpoints. Delivery A must be complete and verified before the Delivery B
 plan is executed. This keeps the solver foundation and scalar statistical
 contract independently reviewable while retaining one coherent architecture.
 
-## Relationship to the reference implementation
+## Relationship to mgcv
 
 ### Random effects
 
@@ -70,7 +70,7 @@ The first `RandomEffect` contract matches the factor random-intercept case
 - REML estimates the penalty/variance component;
 - an unseen prediction level contributes zero.
 
-General the reference implementation `bs="re"` terms may also contain numeric predictors and their
+General mgcv `bs="re"` terms may also contain numeric predictors and their
 parametric interactions. Random slopes and general random-coefficient terms
 are later extensions, not part of Delivery A.
 
@@ -639,7 +639,7 @@ credibility, and convergence state.
 Finite-difference tests cover REML derivatives for identity and repeated
 factor-smooth penalty components.
 
-### reference parity
+### mgcv parity
 
 Pinned R scripts and committed reference summaries cover:
 

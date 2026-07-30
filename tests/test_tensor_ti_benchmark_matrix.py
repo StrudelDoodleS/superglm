@@ -59,7 +59,7 @@ def test_superglm_fairness_profiles_record_strict_and_candidate_controls():
     assert list(by_name) == [
         "S0_current_default",
         "S1_strict",
-        "S2_reference_ish",
+        "S2_mgcv_ish",
         "S3_practical",
         "S4_relaxed_candidate",
         "S5_very_relaxed_candidate",

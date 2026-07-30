@@ -6,7 +6,7 @@ pricing model.
 ## Splines
 
 `Spline(kind, k)` is the main public spline API. `k` is the public basis size
-in the the reference implementation sense; the fitted smooth then absorbs the identifiability
+in the mgcv sense; the fitted smooth then absorbs the identifiability
 constraint.
 
 ```python
@@ -23,8 +23,8 @@ Spline(kind="cr", k=12, m=(1, 2))         # multi-order penalty
 | Kind | Use when | Notes |
 |------|----------|-------|
 | `"ps"` | default pricing spline | P-spline with difference penalty |
-| `"bs"` | you want a proper B-spline smooth / reference-style `bs` basis | integrated-derivative penalty on the same raw B-spline geometry |
-| `"cr"` | you want a cubic regression spline / reference-style `cr` basis | natural boundary constraints plus identifiability |
+| `"bs"` | you want a proper B-spline smooth / mgcv-style `bs` basis | integrated-derivative penalty on the same raw B-spline geometry |
+| `"cr"` | you want a cubic regression spline / mgcv-style `cr` basis | natural boundary constraints plus identifiability |
 | `"ns"` | you want a natural spline with fixed natural boundaries | does not support monotone fitting |
 
 ### Knot strategies
@@ -40,7 +40,7 @@ for skewed variables like Bonus-Malus.
 
 ### `select=True`
 
-`select=True` adds reference-style double-penalty shrinkage to the spline term. This
+`select=True` adds mgcv-style double-penalty shrinkage to the spline term. This
 is the REML-native way to let a smooth shrink toward linear or zero while
 staying in the `fit_reml()` workflow.
 
@@ -123,7 +123,7 @@ RandomEffect()                    # unseen levels use the population prediction
 RandomEffect(unseen="error")      # fail on an unseen level
 ```
 
-It is the SuperGLM analogue of the reference implementation's `s(group, bs="re")`. Unlike
+It is the SuperGLM analogue of mgcv's `s(group, bs="re")`. Unlike
 `Categorical`, it retains every level rather than choosing a reference level,
 and it requires `fit_reml()`. See [Credibility terms](credibility.md) for
 reporting, prediction, and a real insurance example.

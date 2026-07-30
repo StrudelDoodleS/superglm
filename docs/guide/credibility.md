@@ -10,7 +10,7 @@ it estimates centered level deviations around a required global curve. Its
 wiggle is smoothed, but its polynomial null space is not fully shrunk, so its
 level table is not labelled as credibility or collapse.
 
-| SuperGLM | reference analogue | What varies by level |
+| SuperGLM | mgcv analogue | What varies by level |
 |---|---|---|
 | `RandomEffect()` | `s(group, bs="re")` | one intercept |
 | `FactorSmooth(x, group=..., basis="fs")` | `s(x, group, bs="fs")` | a fully penalized smooth curve |
@@ -115,7 +115,7 @@ model.fit_reml(
 One shared P-spline basis is repeated implicitly for every factor level. The
 term has shared `wiggle` and null-space smoothing parameters, but each level
 gets its own coefficient block. The null-space penalties make the deviations
-fully penalized, matching the role of the reference implementation's `bs="fs"` basis.
+fully penalized, matching the role of mgcv's `bs="fs"` basis.
 
 For level \(j\), the scalar summary generalizes ordinary credibility to the
 whole coefficient block:
@@ -326,5 +326,5 @@ credibility and curve tables, and `credibility_demo.png`.
 - `fit()` and `fit_path()` reject factor smooths.
 - Factor-smooth `k` must be at least 5.
 - Missing numeric or grouping values are rejected.
-- The the reference implementation 1.9-4 FS and SZ Gaussian, Poisson, construction, unseen-level, and
+- The mgcv 1.9-4 FS and SZ Gaussian, Poisson, construction, unseen-level, and
   discrete reference cases are pinned in the test suite.

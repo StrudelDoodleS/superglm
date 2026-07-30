@@ -21,7 +21,7 @@ Nearly every method is a one-line delegate into a `_spline_*` helper module; the
 | `BSplineSmooth` | 522–623 | Integrated-derivative penalty (609–613); QP shape constraints (615–620). `_penalty_semantics="integrated_derivative"`. |
 | `NaturalSpline` | 626–696 | Difference penalty + natural f''=0 constraints via Z projection (`_apply_constraints` 690–696); `_select_supported=False` (644). Only class using the base default clamped knot assembly (197–203). |
 | `CubicRegressionSpline` | 699–811 | Integrated-f'' penalty + mandatory natural constraints (806–811); exact clamped knots (771–778); `_max_penalty_order=3`. |
-| `CardinalCRSpline` | 814–951 | the reference implementation `bs="cr"` cardinal basis; own `_place_knots` (895–897) and matrices `_cr_knots/_cr_M/_cr_S` (891–893); "experimental… not yet the default for kind='cr'" (827–828). |
+| `CardinalCRSpline` | 814–951 | mgcv `bs="cr"` cardinal basis; own `_place_knots` (895–897) and matrices `_cr_knots/_cr_M/_cr_S` (891–893); "experimental… not yet the default for kind='cr'" (827–828). |
 | `n_knots_from_k` / `Spline` factory | 959–1004 | Delegate to `_spline_factory`. |
 
 **Callers of the classes** (grep): `dm_builder.py` (build path, lines 730–735, 857), `model/*`, `inference/*`, `editor/*`, `export/*`, `plotting/*`, `sklearn.py`, `diagnostics/*`, `features/ordered_categorical.py`, `features/interaction.py`, `features/factor_smooth.py`.
@@ -57,7 +57,7 @@ Nearly every method is a one-line delegate into a `_spline_*` helper module; the
 - `build_identifiability_projection_for_spec` (55–72): `np.unique(x)` (O(n log n)), evaluates basis **dense at all u support points** (`.toarray()`, line 63), then `build_identifiability_projection` (11–30): counts@basis column-sum, complete QR of a (K,1) vector, drop first column → (K, K−1) projection.
 - `apply_identifiability` (33–52): ω ← zᵀωz. Skipped when `absorbs_intercept` is False (select=True; spline.py:241–252).
 
-### 1.8 `_spline_select.py` (164) — select=True (the reference implementation double penalty)
+### 1.8 `_spline_select.py` (164) — select=True (mgcv double penalty)
 - `eigendecompose_select` (14–45): `eigh(ω_c)`, requires exactly 2 null eigenvalues (24–30), rotates constant out of null space → 1-D linear null block + range block.
 - `build_select_group_info` (74–125): assembles combined `[U_null|U_range]` projection, `("null", ω_null)` + `("wiggle", ω_wiggle)` (or per-order `d{m}`) components; `lstsq(Z, U)` back-projections (92–93).
 - `build_select` (128–156): entry from `build_group_info`; also sets `_interaction_projection` (137).
@@ -100,8 +100,8 @@ Nearly every method is a one-line delegate into a `_spline_*` helper module; the
 | `CategoricalInteraction` | 491–611 | (L1−1)(L2−1) sparse indicator columns via coo assembly (537–559). |
 | `NumericInteraction` | 617–669 | single product column. |
 | `PolynomialInteraction` | 675–768 | d1·d2 Legendre cross products; third copy of `_scale/_basis` (697–706). |
-| `TensorInteraction` | 821–1290 | ti()-style tensor: `_marginal_from_spec` (873–976, incl. the reference implementation-contract check 887–900, CR→CardinalCR reroute 938–960, n_knots-override cloning 962–975, `inspect.signature` legacy-subclass shim 920–936); `build` (1111–1132): row-Kronecker `T = _row_kron(B1,B2)` + `kron(S1,I)+kron(I,S2)`; `build_discrete` (1134–1180): integer pair-encoding on observed support, `_row_kron_dense`; `_build_group_infos` (1049–1109): optional decompose into bilinear-null + wiggly subgroups via eigh; chunked/support-aware `score` (1196–1260). |
-| helpers | `_row_kron` 774–791 (Python loop over k1·k2 sparse column multiplies), `_row_kron_dense` 794–796 (einsum), `_normalize_tensor_penalty` 799–810 (unit leading eigenvalue, "matching the reference implementation"). |
+| `TensorInteraction` | 821–1290 | ti()-style tensor: `_marginal_from_spec` (873–976, incl. mgcv-contract check 887–900, CR→CardinalCR reroute 938–960, n_knots-override cloning 962–975, `inspect.signature` legacy-subclass shim 920–936); `build` (1111–1132): row-Kronecker `T = _row_kron(B1,B2)` + `kron(S1,I)+kron(I,S2)`; `build_discrete` (1134–1180): integer pair-encoding on observed support, `_row_kron_dense`; `_build_group_infos` (1049–1109): optional decompose into bilinear-null + wiggly subgroups via eigh; chunked/support-aware `score` (1196–1260). |
+| helpers | `_row_kron` 774–791 (Python loop over k1·k2 sparse column multiplies), `_row_kron_dense` 794–796 (einsum), `_normalize_tensor_penalty` 799–810 (unit leading eigenvalue, "matching mgcv"). |
 
 ### 1.16 `factor_smooth.py` (512) — added with random effects in #165
 - `_combine_qr_r` (24–35): streamed tall-skinny QR merge, chunk = 65 536 rows (20).
@@ -241,7 +241,7 @@ Same algebra line for line: n_null=1, `lstsq(Z, U_null/U_range)` back-projection
 `TensorInteraction._centered_marginal_basis` (978–982) computes `B @ info.projection` — dense (projection mixes all K columns) — then wraps in csr. `_row_kron` (774–791) then loops over p1·p2 column pairs of these dense-as-sparse matrices, producing T (n, p1·p2) CSR with ≈ full density: 12 bytes/entry vs 8 for dense, plus a Python loop of p1·p2 sparse multiplies and an hstack. Same pattern in `eval_cardinal_basis` (`_spline_cardinal.py:82`) and `linear_tail_basis_matrix` (`_spline_extrapolation.py:72`). Verify: nnz/size ratio of T on a real fit; time `_row_kron` vs a dense einsum at n=1e6, p1=p2=9.
 
 **S5 — Tensor marginal penalty normalisation is asymmetric across kinds.**
-`_normalize_tensor_penalty` docstring (interaction.py:799–806) says the reference implementation rescales marginal penalties for tensors. Here `normalize_penalty=True` is set only on the CR→CardinalCR reroute (959); `TensorMarginalInfo.normalize_penalty` defaults to False (`_spline_build.py:244`, types.py:337). A `ps ⊗ cr` tensor therefore normalises one margin and not the other, putting margins on incomparable penalty scales — the exact problem the helper cites the reference implementation for. Verify: compare REML lambdas / EDF against the reference implementation `ti(x1, x2, bs=c("ps","cr"))`.
+`_normalize_tensor_penalty` docstring (interaction.py:799–806) says mgcv rescales marginal penalties for tensors. Here `normalize_penalty=True` is set only on the CR→CardinalCR reroute (959); `TensorMarginalInfo.normalize_penalty` defaults to False (`_spline_build.py:244`, types.py:337). A `ps ⊗ cr` tensor therefore normalises one margin and not the other, putting margins on incomparable penalty scales — the exact problem the helper cites mgcv for. Verify: compare REML lambdas / EDF against mgcv `ti(x1, x2, bs=c("ps","cr"))`.
 
 **S6 — CR parents are silently rerouted (with changed knot strategy) for tensor marginals.**
 `_marginal_from_spec` (interaction.py:938–960): a `CubicRegressionSpline` parent becomes a `CardinalCRSpline` marginal, and if the parent used `knot_strategy="uniform"` without explicit knots it is switched to `"quantile"` (939–941). So the tensor marginal does not inherit the parent smooth's geometry, contradicting both `tensor_marginal_ingredients`' docstring ("Reuses the parent's knot vector… so that tensor marginals inherit the parent spline geometry", spline.py:370–387) and the CardinalCRSpline docstring's "not yet the default for kind='cr'" (827–828). Verify: fit `s(x1, kind="cr") + ti(x1,x2)` and compare marginal knots to the parent's.
@@ -250,7 +250,7 @@ Same algebra line for line: n_null=1, `lstsq(Z, U_null/U_range)` back-projection
 (a) `spline.py:36–38` `_weighted_quantile_knots` — zero callers in src and tests; dead.
 (b) `spec.monotone/monotone_mode` mirrors written in `_spline_config.py:98–100`, read as fallback in `_spline_build.py:13–20` and dm_builder.py:717–720 — dual representation of `constraint_kind/mode`.
 (c) `_marginal_from_spec`'s `inspect.signature`-based dispatch for "custom spline subclasses overriding the old one-argument method" (interaction.py:920–936) — runtime reflection in the build hot path to support an undocumented extension contract.
-(d) The the reference implementation-contract rejection is triplicated: `tensor_marginal_info` (`_spline_build.py:184–195`), `_marginal_from_spec` (interaction.py:887–900), and implicitly `validate_select`. Verify each shim's reachability with tests.
+(d) The mgcv-contract rejection is triplicated: `tensor_marginal_info` (`_spline_build.py:184–195`), `_marginal_from_spec` (interaction.py:887–900), and implicitly `validate_select`. Verify each shim's reachability with tests.
 
 **S8 — CardinalCRSpline docstring documents parameters that don't exist.**
 spline.py:844–848 documents `monotone : str or None` and `monotone_mode : str` ("'fit' (not yet implemented)"); the actual `__init__` (859–890) takes `constraint=` and no monotone params. Doc-code mismatch on an experimental-but-shipping class.
@@ -280,7 +280,7 @@ types.py:116–176: four mutually exclusive field families (columns / cat_codes 
 
 ## 6. Contract verification notes (protected semantics)
 
-- **k / k−1 contract:** verified consistent across ps/bs (open vector, `_spline_factory.py:24–25`), cr (clamped +2, −2 natural, `:31`), cr_cardinal (K=k, `:27–29`); identifiability removes exactly 1 column in all kinds (`_spline_identifiability.py:28–30`). FactorSmooth intentionally keeps k columns per level (no identifiability; fully penalised), matching the reference implementation `bs="fs"`.
+- **k / k−1 contract:** verified consistent across ps/bs (open vector, `_spline_factory.py:24–25`), cr (clamped +2, −2 natural, `:31`), cr_cardinal (K=k, `:27–29`); identifiability removes exactly 1 column in all kinds (`_spline_identifiability.py:28–30`). FactorSmooth intentionally keeps k columns per level (no identifiability; fully penalised), matching mgcv `bs="fs"`.
 - **select=True vs selection_penalty:** select handled entirely here via null/range decomposition with a `component_types={"null": "selection"}` marker; no group-lasso coupling found inside features/ — separation respected.
 - **discrete=True no-drift:** geometry (ω, projection, n_cols) is shared between exact and discrete paths by construction (`build_knots_and_penalty` reuses the same helpers), **except** the select assembly which is duplicated code (S2) — that duplication is the main drift risk.
 - **sample_weight:** feature builds accept it; splines explicitly discard it (`del sample_weight`, `_spline_build.py:60, 141`) so the identifiability constraint is unweighted row-mean-zero (documented at spline.py:241–247). Categorical base selection does use it (exposure, categorical.py:117–122). Consistent with docs.

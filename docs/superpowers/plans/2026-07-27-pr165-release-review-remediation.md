@@ -689,8 +689,8 @@ rtk git commit -m "Expose structured inference contract failures"
 - Modify: `src/superglm/reml/w_derivatives.py`
 - Modify: `examples/fremtpl2_credibility.py`
 - Modify: `tests/test_fremtpl2_credibility_demo.py`
-- Modify: `tests/test_factor_smooth_the reference implementation_parity.py`
-- Modify: `tests/test_factor_smooth_sz_the reference implementation_parity.py`
+- Modify: `tests/test_factor_smooth_mgcv_parity.py`
+- Modify: `tests/test_factor_smooth_sz_mgcv_parity.py`
 - Modify: `docs/guide/credibility.md`
 
 - [ ] **Step 1: Remove dead and incorrect internal declarations**
@@ -744,7 +744,7 @@ In the credibility guide:
 - label the OpenML held-out table as a dated seeded snapshot that must be
   regenerated when dataset/preprocessing versions change.
 
-Add comments beside the broad null-lambda the reference implementation tolerances explaining that
+Add comments beside the broad null-lambda mgcv tolerances explaining that
 predictions/deviance are tightly pinned while the optimum is flat in those
 penalty coordinates.
 
@@ -753,7 +753,7 @@ penalty coordinates.
 Run:
 
 ```bash
-rtk pytest tests/test_fremtpl2_credibility_demo.py tests/test_factor_smooth_the reference implementation_parity.py tests/test_factor_smooth_sz_the reference implementation_parity.py
+rtk pytest tests/test_fremtpl2_credibility_demo.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_sz_mgcv_parity.py
 rtk ruff check src/superglm/reml/gradient.py src/superglm/reml/w_derivatives.py examples/fremtpl2_credibility.py tests/test_fremtpl2_credibility_demo.py
 ```
 
@@ -762,7 +762,7 @@ Expected: all tests and lint checks pass.
 - [ ] **Step 6: Commit Task 7**
 
 ```bash
-rtk git add src/superglm/reml/gradient.py src/superglm/reml/w_derivatives.py examples/fremtpl2_credibility.py tests/test_fremtpl2_credibility_demo.py tests/test_factor_smooth_the reference implementation_parity.py tests/test_factor_smooth_sz_the reference implementation_parity.py docs/guide/credibility.md
+rtk git add src/superglm/reml/gradient.py src/superglm/reml/w_derivatives.py examples/fremtpl2_credibility.py tests/test_fremtpl2_credibility_demo.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_sz_mgcv_parity.py docs/guide/credibility.md
 rtk git commit -m "Clarify credibility compatibility contracts"
 ```
 

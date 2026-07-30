@@ -140,7 +140,7 @@ conditional mean. Use an explicit offset when exposure should also enter the mea
 
 With `fit_mode="reml"`, REML selects spline smoothing penalties within each
 candidate fit. The *p*/φ profile is then evaluated conditionally; it does not jointly estimate *p* and φ
-using an reference-style REML objective.
+using an mgcv-style REML objective.
 
 ### Profile confidence interval
 

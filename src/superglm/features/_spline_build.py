@@ -191,7 +191,7 @@ def tensor_marginal_info(
         raise NotImplementedError(
             f"Tensor interactions require single-penalty parent smooths, but "
             f"{type(spec).__name__} was configured with {detail}. "
-            "This matches the tensor-product marginal-smooth contract."
+            "This matches the mgcv te()/ti() marginal-smooth contract."
         )
 
     x = np.asarray(x, dtype=np.float64).ravel()

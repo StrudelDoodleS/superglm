@@ -8,7 +8,7 @@ model or a fixed-penalty sparse model.
 | Standard spline pricing model | `fit_reml()` with `selection_penalty=0` | Automatic smoothness selection and clean GAM-style inference |
 | Large-`n` spline pricing model | `fit_reml(discrete=True)` | Same modeling story, cheaper outer iterations |
 | High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | Compact scalar/block/constrained fitting with automatic small-model fallback |
-| Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | reference-style double-penalty shrinkage |
+| Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | mgcv-style double-penalty shrinkage |
 | Sparse screening / compression | `fit()` with `selection_penalty > 0` | Fixed-penalty sparse model rather than REML smoothness selection |
 | Regularisation path analysis | `fit_path()` | Warm-started lambda path for fixed-penalty models |
 
@@ -192,7 +192,7 @@ fallback.
 
 These are different tools and should not be documented as interchangeable.
 
-- `select=True` keeps you in the REML story and adds reference-style double-penalty
+- `select=True` keeps you in the REML story and adds mgcv-style double-penalty
   shrinkage to the spline term.
 - `selection_penalty > 0` activates sparse/group penalties and moves you toward
   a sparse additive model workflow.

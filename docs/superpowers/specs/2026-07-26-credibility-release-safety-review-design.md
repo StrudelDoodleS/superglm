@@ -234,7 +234,7 @@ setup in about 0.18 s, and matched fitted predictions within
 
 The existing QR-whitened eigenparameterization is retained. A replacement
 constant/slope null basis was explicitly rejected after it materially degraded
-the pinned Poisson the reference implementation cases.
+the pinned Poisson mgcv cases.
 
 The zero-eigenvalue MRRR coordinates can change by signed permutation under
 tall-skinny QR. That is model-equivalent only when the null-component policy
@@ -306,7 +306,7 @@ For RE, FS, and SZ:
 - streaming default FS agrees up to allowed signed null permutation and gives
   prediction/objective parity;
 - asymmetric null policies and `m > 2` select compatibility construction;
-- pinned the reference implementation FS/SZ cases remain within their existing tolerances;
+- pinned mgcv FS/SZ cases remain within their existing tolerances;
 - an isolated one-million-row benchmark records wall time and peak RSS;
 - cProfile/call-stack output confirms basis construction rather than solver
   work owns the measured improvement;
@@ -320,7 +320,7 @@ Before any final claim:
 2. formatting, Ruff, and mypy pass for touched surfaces;
 3. the full local suite passes;
 4. package and release verifiers pass;
-5. exact/discrete, Gram/structured, FS/SZ, and reference parity gates pass;
+5. exact/discrete, Gram/structured, FS/SZ, and mgcv parity gates pass;
 6. the isolated one-million-row memory/time benchmark is repeated;
 7. an independent code review examines the exact committed head;
 8. all actionable findings are fixed and reviewed;

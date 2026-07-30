@@ -438,7 +438,7 @@ In `docs/guide/families.md`:
 - describe MLE/Brent as defaults and Pearson as an opt-in speed/approximation tradeoff;
 - show `result.ci()` as a separate expensive explicit call available only for MLE;
 - state `Var(Y_i) = phi * mu_i**p / w_i`, weights are EDM prior weights rather than replication counts, and zero-weight rows must be removed;
-- qualify REML as a plug-in likelihood over REML-selected smooths, not joint reference-style REML;
+- qualify REML as a plug-in likelihood over REML-selected smooths, not joint mgcv-style REML;
 - describe exact Wright-Bessel evaluation with diagnosed saddlepoint fallback.
 
 Update API docstrings consistently. Do not rewrite committed notebook outputs in this task; explicitly pin/label approximate examples later if a notebook test requires it.

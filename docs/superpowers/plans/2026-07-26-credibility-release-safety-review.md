@@ -1538,7 +1538,7 @@ For the compatibility path, materialize `raw_dense` once, call
 
 Set `_marginal_build_backend` to `"streamed_tsqr"` or `"dense_qr_compat"`.
 
-- [ ] **Step 5: Add fit-level fixed-policy and reference parity gates**
+- [ ] **Step 5: Add fit-level fixed-policy and mgcv parity gates**
 
 Add this exact/discrete fit regression to
 `tests/test_factor_smooth_discrete.py`; it exercises both the streamed,
@@ -1624,10 +1624,10 @@ fit-level prediction/deviance assertion is the invariant.
 Then run:
 
 ```bash
-rtk pytest tests/test_factor_smooth_feature.py tests/test_factor_smooth_discrete.py tests/test_factor_smooth_the reference implementation_parity.py tests/test_factor_smooth_sz_the reference implementation_parity.py -q
+rtk pytest tests/test_factor_smooth_feature.py tests/test_factor_smooth_discrete.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_sz_mgcv_parity.py -q
 ```
 
-Expected: PASS without loosening existing pinned the reference implementation tolerances.
+Expected: PASS without loosening existing pinned mgcv tolerances.
 
 - [ ] **Step 6: Create the isolated construction profiler**
 
@@ -1776,7 +1776,7 @@ Expected: all commands pass.
 - [ ] **Step 3: Run focused numerical and deployment gates**
 
 ```bash
-rtk pytest tests/test_structured_allocations.py tests/test_factor_smooth_structured_parity.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_the reference implementation_parity.py tests/test_factor_smooth_sz_the reference implementation_parity.py tests/test_random_effect_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_sz_inference.py tests/test_rating_table_export.py tests/test_plot_api.py tests/test_drop1.py tests/test_fit_state_retention.py -q
+rtk pytest tests/test_structured_allocations.py tests/test_factor_smooth_structured_parity.py tests/test_factor_smooth_sz_reml.py tests/test_factor_smooth_mgcv_parity.py tests/test_factor_smooth_sz_mgcv_parity.py tests/test_random_effect_inference.py tests/test_factor_smooth_inference.py tests/test_factor_smooth_sz_inference.py tests/test_rating_table_export.py tests/test_plot_api.py tests/test_drop1.py tests/test_fit_state_retention.py -q
 ```
 
 Expected: PASS.

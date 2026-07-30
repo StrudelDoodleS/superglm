@@ -37,8 +37,8 @@ benchmarks/results/*
 !benchmarks/results/ci_perf_baselines.json
 
 # Generated parity/reference CSVs (keep local, do not track)
-tests/fixtures/reference_gamma_mtpl2sev_fitted.csv
-tests/fixtures/reference_nb2_mtpl2_fitted.csv
+tests/fixtures/mgcv_gamma_mtpl2sev_fitted.csv
+tests/fixtures/mgcv_nb2_mtpl2_fitted.csv
 tests/fixtures/mtpl2_freq_50k.csv
 tests/fixtures/mtpl2_sev_merged.csv
 

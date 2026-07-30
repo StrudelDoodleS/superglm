@@ -484,7 +484,7 @@ def _cross_gram_tensor_own_margin(
 ) -> NDArray | None:
     """Cross-Gram for tensor × one of its own discretized marginal smooths.
 
-    Discretized fitting stores tensor marginals as compact matrices plus
+    mgcv bam(discrete=TRUE) stores tensor marginals as compact matrices plus
     row index arrays and forms X'WX from that packed representation via XWXd.
     For tensor × own-margin main-effect cross-blocks, reuse the tensor 2D
     W-grid instead of rescanning observations through the generic tensor-main

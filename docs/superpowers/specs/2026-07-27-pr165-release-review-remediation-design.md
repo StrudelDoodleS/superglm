@@ -167,7 +167,7 @@ The pass will:
 - validate boolean covariance-selector length like NumPy;
 - replace private model navigation in the flagship example with public
   `diagnostics()`, `features`, and known variant contracts;
-- document broad the reference implementation lambda tolerances as flat-optimum allowances.
+- document broad mgcv lambda tolerances as flat-optimum allowances.
 
 It will not change intentional lambda-history retention semantics.
 
