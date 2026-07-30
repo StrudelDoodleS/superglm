@@ -1361,6 +1361,97 @@ class TestRankDeficientKKT:
         np.testing.assert_allclose(objective, -450.0, rtol=1e-9)
         assert result.converged
 
+    def test_the_rank_deficient_branch_is_reachable_from_a_production_fit(self):
+        """A retraction, pinned: this branch was described as synthetic-only.
+
+        It is not.  A monotone ``BSplineSmooth`` on a covariate with a wide gap
+        leaves whole B-spline basis functions with empty support, so ``XtWX``
+        has exactly zero rows and columns -- and with the spline penalty at
+        zero, ``S`` adds nothing back.  Every ingredient then lines up:
+        ``g_vec`` is exactly ``0.0`` on those coordinates because ``XtWz`` and
+        ``XtW1`` both are, the structural null mass is exactly ``0.0`` so the
+        consistency gate passes rather than raising, and the constraint rows
+        are binding, so the fit routes into ``kkt_may_be_singular = True`` with
+        a non-empty active set.  Measured on the fixture below: 4 QP calls, all
+        at rank 13 of 19, 6 exactly zero rows, active set 6, ``max|beta| <
+        0.42``, worst slack ``-0.0``.
+
+        What this does *not* claim: that the branch is load-bearing here.
+        Pinning ``kkt_may_be_singular = False`` returns bitwise identical
+        coefficients on this fixture -- ``np.linalg.solve`` has no rank cutoff
+        and handles this particular singular saddle.  The branch's necessity is
+        pinned by the rank-one fixture above; this one pins only that
+        production reaches it, which is what the earlier claim got wrong.
+        """
+        import pandas as pd
+
+        from superglm import Constraint, SuperGLM
+        from superglm.features.spline import BSplineSmooth
+        from superglm.solvers import irls_direct
+
+        real_solve = irls_direct.solve_constrained_qp
+        observed: list[dict] = []
+
+        def recording_solve(H, g, A, b, **kwargs):
+            H_sym = 0.5 * (np.asarray(H, dtype=float) + np.asarray(H, dtype=float).T)
+            decomposition = decompose_gram(H_sym)
+            zero_rows = np.flatnonzero(np.all(H_sym == 0.0, axis=1))
+            result = real_solve(H, g, A, b, **kwargs)
+            observed.append(
+                {
+                    "rank": decomposition.rank,
+                    "width": decomposition.width,
+                    "zero_rows": zero_rows,
+                    "g_on_zero_rows": np.asarray(g, dtype=float)[zero_rows],
+                    "structural_mass": _null_space_mass(decomposition, np.asarray(g, float))[0],
+                    "n_active": len(result.active_set),
+                    "beta": result.beta,
+                    "slack": float(np.min(A @ result.beta - b)),
+                }
+            )
+            return result
+
+        # A 0.6-wide gap in x with 16 knots empties the support of six basis
+        # functions.  Poisson so the fit takes several IRLS iterations.
+        x = np.concatenate([np.linspace(0.0, 0.2, 60), np.linspace(0.8, 1.0, 60)])
+        y = np.round(np.exp(0.5 + 2.0 * x)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            spline_penalty=0.0,
+            features={"x": BSplineSmooth(n_knots=16, constraint=Constraint.fit.increasing)},
+        )
+        try:
+            irls_direct.solve_constrained_qp = recording_solve
+            model.fit(pd.DataFrame({"x": x}), y)
+        finally:
+            irls_direct.solve_constrained_qp = real_solve
+
+        assert observed, "the constrained QP never ran"
+        singular = [row for row in observed if row["rank"] < row["width"]]
+        assert singular, (
+            f"no QP solve was rank deficient; ranks {[(r['rank'], r['width']) for r in observed]}"
+        )
+
+        for row in singular:
+            # The mechanism, not just the outcome: a structurally empty column.
+            assert row["zero_rows"].size > 0, "rank deficiency is not structural"
+            np.testing.assert_array_equal(row["g_on_zero_rows"], np.zeros(row["zero_rows"].size))
+            # ...so the consistency gate sees exactly no structural mass and
+            # admits the system instead of raising.
+            assert row["structural_mass"] == 0.0
+            # ...and the constraints are binding, which is what puts a
+            # constraint-tangent direction into the KKT system at all.
+            assert row["n_active"] > 0, "no constraint was active"
+            # The answer stays usable.
+            assert np.all(np.isfinite(row["beta"]))
+            assert np.max(np.abs(row["beta"])) < 1e3, (
+                f"max|beta| = {np.max(np.abs(row['beta'])):.3e} has drifted"
+            )
+            assert row["slack"] >= -1e-8, f"constraint violated by {row['slack']:.3e}"
+
+        assert np.all(np.isfinite(model._result.beta))
+
     def test_full_rank_path_still_uses_the_direct_kkt_solve(self):
         """The rank-aware branch must not touch the full-rank majority."""
         rng = np.random.default_rng(4)
