@@ -197,8 +197,14 @@ def _qualified_class_name(obj: Any) -> str:
 def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
     """Report the capability gap that silently drops the W(rho) correction.
 
-    Called only where ``compute_dW_deta`` returned ``None``, which it does
-    only for a missing method, so the list is never empty here.
+    Called only where ``dW_deta is None``, which is reachable only from
+    ``compute_dW_deta``'s missing-method return, so the list is never empty
+    here.  The other branch that binds ``dW_deta`` -- the observed-geometry one
+    -- cannot reach this line at all: ``reml_w_correction`` raises
+    ``"observed REML geometry omitted first weight derivatives"`` before the
+    assignment when ``geometry.weight_derivative is None``.  Drop that raise
+    and this docstring becomes false, with ``detail`` reading
+    ``" is not implemented"`` on an empty join.
 
     Every message opens with the *module-qualified* link/distribution pair,
     then says which method is missing.  The stdlib default filter dedups on

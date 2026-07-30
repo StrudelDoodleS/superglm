@@ -273,6 +273,18 @@ class PIRLSResult:
     # only for the internal callers that classify terminal behaviour (the SCOP
     # deviance-stagnation gate), and scrubbed before publication so it never
     # becomes a solver-dependent public surface.
+    #
+    # Written by ``fit_irls_direct`` alone, under its ``_record_stagnation``
+    # flag. ``fit_pirls`` builds its ``PIRLSResult`` without this field and has
+    # no flag to ask for it, so a result from that solver always reports
+    # ``None`` -- which ``_scop_deviance_stagnated`` reads as "no evidence" and
+    # declines on, reverting to pre-gate behaviour and raising the
+    # non-convergence a boundary solution was meant to be accepted through.
+    # That is a silent downgrade rather than an error, and it is not reachable
+    # today only because ``_fit_scop_reml_mode`` calls ``fit_irls_direct``
+    # directly. The field lives here rather than beside its writer because
+    # ``PIRLSResult`` is the shared result type; route a new caller through
+    # ``fit_pirls`` and it must populate this or accept that downgrade.
     stagnation_log: list[StagnationRecord] | tuple[StagnationRecord, ...] | None = None
     # REML geometry after profiling the intercept. At full rank ``log_det_H``
     # is log|H_aug|. Under rank truncation it is the identified-coordinate
