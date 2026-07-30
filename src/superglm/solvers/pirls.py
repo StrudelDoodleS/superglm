@@ -669,7 +669,9 @@ def _fit_pirls_inner(
     """Single-pass PIRLS fit with a composite block-coordinate inner solver."""
     n, p = dm.shape
     beta = beta_init.copy() if beta_init is not None else np.zeros(p)
-    iteration_log: list[IterationDiagnostics] = [] if record_diagnostics else []
+    # Always an empty list; only ``record_diagnostics`` decides whether rows are
+    # appended and whether it is published on the result.
+    iteration_log: list[IterationDiagnostics] = []
 
     # Initialize intercept
     if intercept_init is not None:
@@ -1182,8 +1184,11 @@ def _fit_pirls_inner(
         # Record per-iteration diagnostics
         if record_diagnostics:
             k = min(5, n)
+            # ``kth`` must satisfy -n <= kth < n. When n <= 5, k == n, so the
+            # bottom-k partition has to use k - 1: it selects the same k
+            # smallest entries and stays in bounds for every k in [1, n].
             top_idx = np.argpartition(W, -k)[-k:]
-            bot_idx = np.argpartition(W, k)[:k]
+            bot_idx = np.argpartition(W, k - 1)[:k]
             working_eta_clipped = bool(
                 float(np.min(eta_unclipped)) < float(np.min(eta))
                 or float(np.max(eta_unclipped)) > float(np.max(eta))
