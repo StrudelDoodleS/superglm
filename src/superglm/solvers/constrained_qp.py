@@ -27,7 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.solvers.rank import _EPS, RankDecomposition, decompose_gram
+from superglm.solvers.rank import _EPS, RankDecomposition, _symmetric_part, decompose_gram
 
 # Headroom on the normal-equation consistency floor (see ``_consistency_floor``).
 # The floor estimates the accuracy of the *computed null basis*, and this is the
@@ -508,9 +508,11 @@ def solve_constrained_qp(
         used throughout -- decomposition, KKT blocks, residual and multiplier
         test alike -- so an asymmetric H is solved consistently as its
         symmetric part rather than as two different quadratics on the two
-        paths. For an exactly symmetric H the symmetrization is bitwise
-        identity. Every in-tree caller builds H symmetric by construction
-        (``XtWX + S``, ``X'X + lambda*P``).
+        paths. For an exactly symmetric H whose entries are normal the
+        symmetrization is bitwise identity; see ``_symmetric_part`` for the
+        overflow branch and for the subnormal case where it is not. Every
+        in-tree caller builds H symmetric by construction (``XtWX + S``,
+        ``X'X + lambda*P``).
     g : (p,) NDArray
         Linear term (gradient at zero, with sign: objective is
         0.5 * beta^T H beta - g^T beta).
@@ -557,9 +559,14 @@ def solve_constrained_qp(
     # H silently wraps -- ``[[2**62]]`` as int64 sums to a negative number and
     # a valid PSD problem is then rejected for a "materially negative
     # diagonal".  The raw ``np.linalg.solve`` this replaced upcast internally,
-    # so the exposure arrived with the symmetrization.
+    # so the exposure arrived with the symmetrization.  Casting fixes only the
+    # integer half of that exposure; ``rank._symmetric_part`` covers the
+    # floating-point half, where a finite ``H`` above half the float range sums
+    # to ``inf`` instead of wrapping.  ``decompose_gram`` symmetrizes again on
+    # the way in and goes through the same helper, so both symmetrizations on
+    # this path carry the same envelope.
     H_asarray = np.asarray(H, dtype=float)
-    H_sym = 0.5 * (H_asarray + H_asarray.T)
+    H_sym = _symmetric_part(H_asarray)
 
     # Route the pure-H solves through the shared rank policy so a singular or
     # near-singular H is rank-truncated the way it is everywhere else in the
