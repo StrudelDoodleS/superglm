@@ -849,9 +849,49 @@ def solve_constrained_qp(
     # ``max|beta|`` reached ``1.9e6`` where the optimum is ``O(1)``.
     #
     # Widening the gate is behaviour-changing for every near-singular fit, so
-    # it is filed rather than done here.  What this line claims is only what is
-    # measured: the *in-tree* full-rank population -- nearly every in-tree
-    # solve -- keeps taking ``np.linalg.solve`` on bitwise the same inputs.
+    # it is filed rather than done here.  **The decline does not rest on
+    # byte-identity with master, and an earlier form of this note said it did.**
+    # That form cited 9657 of 10924 KKT direct solves as byte-identical; that
+    # corpus was measured for the equilibration commit against its *parent*,
+    # answering "did equilibration touch the full-rank path", and re-labelling
+    # it as a master comparison attaches the wrong baseline.  It is also
+    # self-refuting: admitting rank-deficient ``H`` moved fitted values
+    # ``2.9e-13`` relative to master on a monotone ``BSplineSmooth`` fit, and if
+    # those moved then ``beta_unc = decomposition.solve(g)`` moved, so the
+    # projected start moved, so ``rhs[:p] = g - H_sym @ beta`` moved -- the KKT
+    # systems on that fit cannot be master's byte for byte.  Measured directly
+    # against ``master`` over the 720-solve full-rank corpus, **49** betas are
+    # byte-identical and 671 are not.
+    #
+    # The decline survives on the **routing**, which is a stronger argument and
+    # does not decay as fixtures change:
+    #
+    # ==========================  ========================  ==================
+    # ``H`` after equilibration   master                    this branch
+    # ==========================  ========================  ==================
+    # full rank                   ``np.linalg.solve``       identical routing
+    # rank-deficient, LU-solvable ``np.linalg.solve``       equilibrated lstsq
+    #                             -- **the drift regime**
+    # exactly singular            ``LinAlgError`` before    equilibrated lstsq
+    #                             the loop
+    # ==========================  ========================  ==================
+    #
+    # Row 2 carries it.  ``np.linalg.solve`` does not raise on a merely
+    # *near*-singular matrix -- that is the whole mechanism of round 6's P1 --
+    # so on master an ``H`` whose smallest equilibrated eigenvalue sat just
+    # under the retention threshold went into the loop and took the direct KKT
+    # solve on a near-singular saddle.  This branch routes exactly that
+    # population away from it.  **The branch strictly shrinks the set of inputs
+    # reaching the drifting solve and adds none**, and for the set that remains
+    # the routing is master's by construction, since the gate keys on
+    # ``decomposition.rank < decomposition.width``, a property of ``H`` alone.
+    #
+    # What is *not* guaranteed is that the specific systems are unchanged, and
+    # it is measurably false rather than merely unproven: admitting the
+    # rank-deficient case perturbs the QP initialisation, so a fit can move onto
+    # or off the drift.  Over that same full-rank corpus 577 of 720 solves take
+    # master's iteration count *and* master's active set while only 49 land on
+    # master's bytes -- the route is preserved, the arithmetic along it is not.
     kkt_may_be_singular = decomposition.rank < decomposition.width
 
     for it in range(max_iter):
