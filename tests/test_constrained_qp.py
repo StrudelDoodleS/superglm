@@ -640,9 +640,17 @@ class TestLowConditionConsistency:
         np.testing.assert_allclose(H @ result.beta, g, atol=1e-12)
         assert result.converged
 
-    @pytest.mark.parametrize("width", [3, 5, 8, 16])
+    @pytest.mark.parametrize("width", [3, 5, 8, 16, 32, 64, 120, 180])
     def test_consistent_systems_at_unit_condition_are_not_refused(self, width):
-        """The floor's dimension term: eigensolver noise grows with width."""
+        """The floor's dimension term, checked across the production range.
+
+        ``decomposition.width`` is the full parameter count, and the monotone
+        ``irls_direct`` caller builds ``A`` over the whole coefficient vector,
+        so in-tree widths reach 105-180.  Measured: the null-basis roundoff is
+        *flat* in absolute terms across 16-180 (0.2-2.5 eps) rather than linear
+        in width, so a linear floor over-provisions at the top of the range --
+        the binding case is small widths, where it reaches 86.5 eps at width 5.
+        """
         refused = 0
         checked = 0
         for seed in range(20):
@@ -1181,3 +1189,136 @@ class TestBlockingDecisionTrace:
             assert default.n_iter == other.n_iter
             assert default.converged == other.converged
             assert default.active_set == other.active_set
+
+
+class TestProductionShapedConsistency:
+    """The floor must clear a *cancelling* ``g``, not just a single matvec.
+
+    Both the original calibration and the unit-condition sweep build
+    ``g = H @ x`` -- one matvec of roundoff.  In production
+    ``g_vec = XtWz - rhs0 * XtW1 / sum_W`` is a cancelling combination whose
+    relative error can sit orders above eps, and ``_null_space_mass`` projects
+    the *computed* ``g``, so the measured mass carries ``g``'s own error on top
+    of the basis error that ``_consistency_floor`` models.
+    """
+
+    @staticmethod
+    def _profiled_fit(width, seed):
+        """``H = X'WX`` with an exactly collinear column; ``g`` profiled.
+
+        Consistent by construction: ``H v = 0`` implies ``X v = 0``, and the
+        profiled ``g`` then satisfies ``g . v = 0`` identically.
+        """
+        rng = np.random.default_rng(seed)
+        n = 4 * width
+        X = rng.standard_normal((n, width))
+        X[:, -1] = X[:, 0]  # exact null direction e_last - e_0
+        W = rng.gamma(2.0, 1.0, n)
+        z = X @ rng.standard_normal(width) + 0.1 * rng.standard_normal(n)
+        H = X.T @ (W[:, None] * X)
+        g = X.T @ (W * z) - ((W * z).sum() / W.sum()) * (X.T @ W)
+        return H, g
+
+    @pytest.mark.parametrize("width", [16, 64, 180])
+    def test_profiled_rhs_at_production_width_is_not_refused(self, width):
+        refused = 0
+        checked = 0
+        for seed in range(10):
+            H, g = self._profiled_fit(width, seed)
+            decomposition = decompose_gram(H)
+            if decomposition.rank >= decomposition.width:
+                continue
+            checked += 1
+            _, spectral = _null_space_mass(decomposition, g)
+            assert _consistency_floor(decomposition) > 100 * spectral, (
+                f"floor leaves under 100x over a measured roundoff of {spectral:.3e}"
+            )
+            try:
+                solve_constrained_qp(H, g, np.zeros((0, width)), np.zeros(0))
+            except ValueError:
+                refused += 1
+
+        assert checked >= 5, f"only {checked} systems reached the gate"
+        assert refused == 0, f"{refused}/{checked} consistent profiled fits refused"
+
+
+class TestRankDeficientKKT:
+    """A truncated H can leave a null direction in the KKT system.
+
+    ``np.linalg.solve`` *numerically succeeds* on such a system rather than
+    raising, so the ``LinAlgError`` fallback never fires and the step drifts
+    along the flat direction.  Admitting rank-deficient H is what routed
+    singular systems into that solve: before this branch the pure-H solve
+    raised first and the KKT system never saw one.
+    """
+
+    def test_binding_constraint_with_rank_one_h_stays_bounded_and_feasible(self):
+        """Measured pre-fix: 200 iterations, ``|beta| ~ 4.1e43``, constraint
+        violated by 1.0. ``converged`` was already ``False``, so a test that
+        only checked the flag would have passed on that answer."""
+        H = np.outer([2.0, 3.0, 5.0], [2.0, 3.0, 5.0])  # rank 1
+        g = H @ np.array([-3.0, -3.0, -3.0])
+        A = np.array([[1.0, 3.0, 2.0]])
+        b = np.array([1.0])
+
+        assert decompose_gram(H).rank == 1, "fixture must be rank deficient"
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        # Property 1: the returned point satisfies the constraints.
+        assert np.all(A @ result.beta - b >= -1e-9), (
+            f"constraint violated by {np.min(A @ result.beta - b):.3e}"
+        )
+        # Property 2: the magnitude is bounded -- this is what a `converged`
+        # check alone would miss.
+        assert np.max(np.abs(result.beta)) < 1e3, (
+            f"max|beta| = {np.max(np.abs(result.beta)):.3e} has drifted"
+        )
+        # And it is the optimum: 0.5 s^2 + 30 s at s = v @ beta is minimal at
+        # s = -30, giving -450.
+        objective = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+        np.testing.assert_allclose(objective, -450.0, rtol=1e-9)
+        assert result.converged
+
+    def test_full_rank_path_still_uses_the_direct_kkt_solve(self):
+        """The rank-aware branch must not touch the full-rank majority."""
+        rng = np.random.default_rng(4)
+        p = 5
+        M = rng.standard_normal((p, p))
+        H = M.T @ M + np.eye(p)
+        g = rng.standard_normal(p)
+        A = np.eye(p)
+        b = np.full(p, 0.5)  # binding, so the KKT branch is exercised
+
+        decomposition = decompose_gram(H)
+        assert decomposition.rank == decomposition.width, "fixture must be full rank"
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert result.converged
+        assert np.all(A @ result.beta - b >= -1e-10)
+
+
+class TestIntegerHessian:
+    """``H + H.T`` evaluates in the input dtype, so an integer H can wrap."""
+
+    def test_large_integer_hessian_does_not_overflow(self):
+        """``[[2**62]]`` as int64 sums to a negative number, and the PSD guard
+        then rejects a valid one-dimensional problem."""
+        H = np.array([[2**62]])
+        assert (H + H.T)[0, 0] < 0, "fixture no longer demonstrates the wrap"
+        g = np.array([1.0])
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 1)), np.zeros(0))
+
+        np.testing.assert_allclose(result.beta, [1.0 / 2**62], rtol=1e-12)
+        assert result.converged
+
+    def test_integer_hessian_matches_its_float_cast(self):
+        H = np.array([[4, 1], [1, 3]])
+        g = np.array([1.0, 2.0])
+
+        integer_result = solve_constrained_qp(H, g, np.zeros((0, 2)), np.zeros(0))
+        float_result = solve_constrained_qp(H.astype(float), g, np.zeros((0, 2)), np.zeros(0))
+
+        np.testing.assert_array_equal(integer_result.beta, float_result.beta)
