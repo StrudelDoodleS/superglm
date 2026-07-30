@@ -605,6 +605,66 @@ class TestInconsistentNormalEquations:
         np.testing.assert_allclose(H @ result.beta, self.G_INCONSISTENT, atol=1e-9)
 
 
+class TestLowConditionConsistency:
+    """The spectral floor must clear the eigensolver's own null-basis roundoff.
+
+    The retained-condition term models error *amplification*, which vanishes as
+    the retained block becomes well conditioned -- but ``eigh``'s backward
+    error does not, so at low condition the floor bottomed out below the noise
+    it was meant to sit above and refused consistent systems.
+    """
+
+    def test_well_conditioned_rank_one_system_is_not_refused(self):
+        """Reported by review; reproduces platform-dependently.
+
+        On this box the spectral mass measures ~5e-16 against the old 7.1e-15
+        floor and passes; on the reporter's it measured 8.819e-15 and raised.
+        That the same input lands either side of the floor depending on the
+        eigensolver is itself the argument that the floor was inside the noise.
+        """
+        R = np.array([[-1.3181547011385448, 0.00814244848194327, 0.47345700571580956]])
+        H = R.T @ R  # rank 1 of 3
+        g = H @ np.array([0.3183325456193874, 0.4026397715796121, 0.9365457438408186])
+
+        decomposition = decompose_gram(H)
+        assert decomposition.rank < decomposition.width, "gate not reached"
+        _, spectral = _null_space_mass(decomposition, g)
+        floor = _consistency_floor(decomposition)
+        assert floor > 20 * spectral, (
+            f"floor {floor:.3e} leaves only {floor / max(spectral, 1e-300):.1f}x "
+            f"over a measured roundoff of {spectral:.3e}"
+        )
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 3)), np.zeros(0))
+
+        np.testing.assert_allclose(H @ result.beta, g, atol=1e-12)
+        assert result.converged
+
+    @pytest.mark.parametrize("width", [3, 5, 8, 16])
+    def test_consistent_systems_at_unit_condition_are_not_refused(self, width):
+        """The floor's dimension term: eigensolver noise grows with width."""
+        refused = 0
+        checked = 0
+        for seed in range(20):
+            rng = np.random.default_rng(seed)
+            basis, _ = np.linalg.qr(rng.standard_normal((width, width)))
+            eigenvalues = np.zeros(width)
+            eigenvalues[0] = 1.0  # rank 1, perfectly conditioned retained block
+            H = basis @ np.diag(eigenvalues) @ basis.T
+            H = 0.5 * (H + H.T)
+            g = H @ rng.standard_normal(width)  # in range(H) by construction
+            if decompose_gram(H).rank >= width:
+                continue
+            checked += 1
+            try:
+                solve_constrained_qp(H, g, np.zeros((0, width)), np.zeros(0))
+            except ValueError:
+                refused += 1
+
+        assert checked >= 15, f"only {checked} systems reached the gate"
+        assert refused == 0, f"{refused}/{checked} consistent systems refused"
+
+
 class TestSymmetrization:
     """H is symmetrized once and used consistently on both solve paths."""
 
@@ -827,37 +887,60 @@ class TestLoopFeasibilityRouting:
         assert raw_quotient == 22.825435914728093
         assert scaled_quotient == 22.82543591472809
 
-    def test_badly_scaled_solve_stays_self_consistent(self):
-        """End-to-end sanity that does not depend on reaching a KKT point.
+    def test_an_infeasible_returned_point_is_never_reported_converged(self):
+        """The converse implication, which is not a tautology.
 
-        Deliberately asserts no iteration count and no convergence outcome:
-        whether this problem reaches stationarity inside ``max_iter`` depends
-        on the ``norm(step) < tol`` test, which is absolute on a quantity whose
-        natural scale is ``||beta||`` (filed follow-up) and therefore moves
-        with BLAS.  What must hold on every platform is that ``converged``
-        agrees with the feasibility of the point actually returned.
+        Asserting ``converged -> feasible`` would be: ``converged`` *is* that
+        same ``_is_feasible`` call on the same arrays, so it can only agree
+        with itself.  ``infeasible -> not converged`` is different, because the
+        exhaustion return reaches ``False`` without consulting feasibility at
+        all, and because a regression that hardcoded ``converged=True`` at
+        either in-loop return would violate it.  No iteration count and no
+        convergence outcome is asserted, so nothing here moves with BLAS.
         """
+        fixtures = []
+
+        # Mutually infeasible: returns an infeasible point, must report False.
+        fixtures.append(
+            (np.eye(1), np.array([0.0]), np.array([[1.0], [-1.0]]), np.array([1.0, 1.0]))
+        )
+        # Badly scaled, nonzero b: the scaling is observable here.
         rng = np.random.default_rng(8)
         p = 5
         M = rng.standard_normal((p, p))
-        H = M.T @ M + 0.5 * np.eye(p)
-        scale = 1e4
-        g = rng.standard_normal(p) * scale
-        A = np.diff(np.eye(p), axis=0)
-        b = rng.standard_normal(p - 1) * scale  # nonzero b: scaling is observable
+        for scale in (1e2, 1e4):
+            H = M.T @ M + 0.5 * np.eye(p)
+            fixtures.append(
+                (
+                    H,
+                    rng.standard_normal(p) * scale,
+                    np.diff(np.eye(p), axis=0),
+                    rng.standard_normal(p - 1) * scale,
+                )
+            )
 
-        result = solve_constrained_qp(H, g, A, b)
+        saw_infeasible = False
+        for H, g, A, b in fixtures:
+            result = solve_constrained_qp(H, g, A, b)
+            assert np.all(np.isfinite(result.beta))
+            if not _is_feasible(A, result.beta, b, 1e-12):
+                saw_infeasible = True
+                assert not result.converged, "an infeasible point was reported as a converged solve"
 
-        assert np.all(np.isfinite(result.beta))
-        if result.converged:
-            assert _is_feasible(A, result.beta, b, 1e-12)
+        assert saw_infeasible, "no fixture returned an infeasible point; the implication is vacuous"
 
     def test_zero_rhs_makes_the_scaling_exactly_inert(self):
         """Every in-tree caller passes b = 0; pin that this is the inert case.
 
-        With ``b_i == 0`` the per-row scale is ``max(1, |A_i @ beta|)``, which
-        is 1 for the coefficient magnitudes the monotone spline path produces,
-        so the scaled slack and scaled step are bitwise the raw ones.
+        With ``b_i == 0`` the per-row scale is ``max(1, |A_i @ beta|)``.
+        Measured across 7 monotone/convex/SCOP fits spanning Gaussian,
+        Binomial and Poisson -- 15 QP calls, 189 constraint rows -- the max
+        ``|A_i @ beta|`` inside the ratio block is 0.72, so the scale is
+        exactly 1.0 there and the scaled quantities are bitwise the raw ones.
+        That bound covers ``A @ beta`` inside the ratio block only; the
+        feasibility test keys off ``A @ beta_new`` and ``_project_feasible``
+        off its own iterates, which are different products and are covered by
+        the byte-for-byte fitted-value check rather than by this bound.
         """
         rng = np.random.default_rng(3)
         p = 5
@@ -977,6 +1060,7 @@ class TestBlockingDecisionTrace:
 
         checked = 0
         scaled_rows = 0
+        distinguishing = 0
         for record in records:
             blocking = record["blocking_row"]
             if blocking < 0:
@@ -985,8 +1069,13 @@ class TestBlockingDecisionTrace:
             products = record["row_products"][index]
             b_i = record["row_b"][index]
             raw_step = record["row_raw_step"][index]
-            if max(1.0, abs(b_i), abs(products)) > 1.0:
+            row_scale = max(1.0, abs(b_i), abs(products))
+            if row_scale > 1.0:
                 scaled_rows += 1
+                if (products - b_i) / -raw_step != ((products - b_i) / row_scale) / -(
+                    raw_step / row_scale
+                ):
+                    distinguishing += 1
             assert record["alpha"] == (products - b_i) / -raw_step, (
                 f"alpha {record['alpha']!r} is not the raw quotient "
                 f"{(products - b_i) / -raw_step!r} for row {blocking}"
@@ -996,10 +1085,50 @@ class TestBlockingDecisionTrace:
         assert checked >= 10, f"only {checked} blocking decisions; no margin"
         # Without a row whose scale exceeds 1 the two forms agree bitwise and
         # the assertion above is satisfied by any implementation.
-        assert scaled_rows >= 5, (
-            f"only {scaled_rows} blocking rows had scale > 1; the fixtures no "
-            "longer distinguish the raw and scaled quotients"
+        # Sharper than counting rows with scale > 1: require that the two
+        # quotient forms actually disagree in floating point on some recorded
+        # row, which is the thing the assertion above distinguishes.
+        assert distinguishing >= 1, (
+            f"scale > 1 on {scaled_rows} blocking rows but the raw and scaled "
+            "quotients agree bitwise on all of them; the fixtures no longer "
+            "distinguish the two forms"
         )
+
+    def test_recorded_operands_agree_with_an_independent_slack(self):
+        """Cross-check the ratio's *operands*, not just the ratio.
+
+        ``products`` and ``raw_step`` are handed to the hook by the loop, so
+        the alpha test -- which recomputes its expectation from those same
+        recorded operands -- is self-consistent under any mutation of them.
+        A slip such as ``products = A @ beta_new`` would give the loop a wrong
+        slack, a wrong alpha and a wrong step, and that test would still pass.
+
+        ``row_scaled_slack`` comes from an independent ``_feasibility_slack``
+        call on the loop's *current* iterate, so reconstructing the raw slack
+        from it and comparing against the recorded operands catches exactly
+        that class of slip.
+        """
+        records = self._decisions(scale=1e6, seeds=range(6))
+
+        checked = 0
+        for record in records:
+            for products, b_i, scaled_slack in zip(
+                record["row_products"], record["row_b"], record["row_scaled_slack"]
+            ):
+                row_scale = max(1.0, abs(b_i), abs(products))
+                reconstructed = scaled_slack * row_scale
+                raw_slack = products - b_i
+                # (x / s) * s is within an ulp of x; anything larger means the
+                # two came from different iterates.
+                assert abs(reconstructed - raw_slack) <= 8 * np.finfo(float).eps * max(
+                    abs(raw_slack), row_scale
+                ), (
+                    f"recorded slack {raw_slack!r} disagrees with the "
+                    f"independent measurement {reconstructed!r}"
+                )
+                checked += 1
+
+        assert checked >= 10, f"only {checked} considered rows; no margin"
 
     def test_the_blocked_row_always_passes_the_scaled_gate(self):
         """The blocking gate must be scaled too, not only the full-step gate.
