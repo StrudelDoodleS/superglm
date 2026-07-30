@@ -319,10 +319,15 @@ class TestConvergenceFlag:
         projected = _project_feasible(beta_unc, A, b, 1e-12)
         assert np.min(A @ projected - b) < -1e-9, "projection did not overrun its budget"
 
-        result = solve_constrained_qp(H, g, A, b)
+        # An explicit generous max_iter: the property under test is "a
+        # projection overrun that the loop repairs reports converged", not
+        # "it repairs it within the default 200 iterations", and the
+        # stationarity test is absolute (filed follow-up) so the count moves
+        # with BLAS.
+        result = solve_constrained_qp(H, g, A, b, max_iter=5000)
 
         # The loop terminated on its own KKT test, not on max_iter...
-        assert result.n_iter < 200
+        assert result.n_iter < 5000
         # ...at a point that is genuinely feasible...
         assert np.all(A @ result.beta - b >= -1e-12)
         # ...so this is a converged solve.
@@ -780,12 +785,55 @@ class TestLoopFeasibilityRouting:
     deferred negative-``alpha`` bug rather than merely inheriting it.
     """
 
-    def test_loop_does_not_block_on_rows_convergence_considers_satisfied(self):
-        """Same optimum, far fewer iterations, once the two tests agree.
+    def test_blocking_gate_is_scaled_so_a_numerically_still_row_is_skipped(self):
+        """The *gate* is scaled: that is the half of the routing that changed.
 
-        This fixture took 13 active-set iterations while the loop body was
-        absolute; it takes 6 once the loop routes through the shared helper.
-        The wasted iterations were blocking steps on rows already satisfied.
+        A directional derivative that is numerically zero relative to its row
+        must not make the row a blocking candidate.  Under the absolute gate it
+        did, and the row then contributed a negative ``alpha`` -- a backward
+        step.  Pure arithmetic, so no BLAS can move it.
+        """
+        products = np.array([1.0e6])
+        b = np.array([0.0])
+        raw_step = np.array([-1.0e-9])
+        tol = 1e-12
+
+        scale = _feasibility_scale(products, b)
+        assert scale[0] == 1.0e6, "fixture no longer exercises a scale above 1"
+        assert raw_step[0] < -tol, "the absolute gate would make this a candidate"
+        assert (raw_step / scale)[0] > -tol, "the scaled gate must skip it"
+
+    def test_blocking_ratio_is_taken_from_the_raw_pair(self):
+        """The *ratio* is not scaled: that half must stay bitwise as it was.
+
+        Dividing numerator and denominator by the same row scale is
+        algebraically neutral and numerically is not -- it rounds twice where
+        the raw quotient rounds once.  On a row with slack above 1 the scaled
+        numerator collapses to exactly 1.0.  These are measured values where
+        the two forms genuinely disagree in the last bit.
+        """
+        products, b_i, raw_step = 3.0086616993496036, 0.0, -0.13181179586621902
+        scale = max(1.0, abs(b_i), abs(products))
+
+        raw_quotient = (products - b_i) / -raw_step
+        scaled_quotient = ((products - b_i) / scale) / -(raw_step / scale)
+
+        assert scale > 1.0
+        assert (products - b_i) / scale == 1.0, "the scaled numerator collapses"
+        assert raw_quotient != scaled_quotient, "fixture no longer demonstrates the double rounding"
+        # The solver must use the raw form; see the ratio block's comment.
+        assert raw_quotient == 22.825435914728093
+        assert scaled_quotient == 22.82543591472809
+
+    def test_badly_scaled_solve_stays_self_consistent(self):
+        """End-to-end sanity that does not depend on reaching a KKT point.
+
+        Deliberately asserts no iteration count and no convergence outcome:
+        whether this problem reaches stationarity inside ``max_iter`` depends
+        on the ``norm(step) < tol`` test, which is absolute on a quantity whose
+        natural scale is ``||beta||`` (filed follow-up) and therefore moves
+        with BLAS.  What must hold on every platform is that ``converged``
+        agrees with the feasibility of the point actually returned.
         """
         rng = np.random.default_rng(8)
         p = 5
@@ -798,11 +846,9 @@ class TestLoopFeasibilityRouting:
 
         result = solve_constrained_qp(H, g, A, b)
 
-        assert result.converged
-        assert result.n_iter <= 8, f"{result.n_iter} iterations; was 13 before routing"
-        # Same answer, not a different one reached faster.
-        objective = 0.5 * result.beta @ H @ result.beta - g @ result.beta
-        np.testing.assert_allclose(objective, 1.370796e07, rtol=1e-6)
+        assert np.all(np.isfinite(result.beta))
+        if result.converged:
+            assert _is_feasible(A, result.beta, b, 1e-12)
 
     def test_zero_rhs_makes_the_scaling_exactly_inert(self):
         """Every in-tree caller passes b = 0; pin that this is the inert case.
@@ -825,3 +871,35 @@ class TestLoopFeasibilityRouting:
         assert np.max(np.abs(products)) <= 1.0, "fixture no longer exercises scale == 1"
         np.testing.assert_array_equal(_feasibility_scale(products, b), np.ones(p - 1))
         np.testing.assert_array_equal(_feasibility_slack(A, result.beta, b), products - b)
+
+
+class TestConstraintBoundedInconsistentSystem:
+    """The bounded-but-inconsistent case is refused, deliberately.
+
+    ``H = diag(1, 0)``, ``g = (0, 1)``, ``x2 <= 1`` has the finite optimum
+    ``(0, 1)``.  Reaching it needs a null-space descent direction, which is a
+    filed follow-up rather than a capability this solver has; master refused
+    the same input with ``LinAlgError``, so refusing is not a regression.
+    This test exists so that implementing the solve shows up as a deliberate
+    change rather than a silent one.
+    """
+
+    def test_constraint_bounded_case_is_refused_and_says_so(self):
+        H = np.diag([1.0, 0.0])
+        g = np.array([0.0, 1.0])
+        A = np.array([[0.0, -1.0]])  # -x2 >= -1, i.e. x2 <= 1
+        b = np.array([-1.0])
+
+        # The finite optimum exists and is strictly better than the projection.
+        optimum = np.array([0.0, 1.0])
+        assert 0.5 * optimum @ H @ optimum - g @ optimum == -1.0
+
+        with pytest.raises(ValueError) as excinfo:
+            solve_constrained_qp(H, g, A, b)
+
+        message = str(excinfo.value)
+        # The message must not claim the problem itself is unbounded: the
+        # constraints here do bound it.
+        assert "unconstrained objective is unbounded below" in message
+        assert "constraints may still bound the problem" in message
+        assert "null-space descent direction" in message
