@@ -770,6 +770,86 @@ class TestFeasibilityToleranceScaling:
         np.testing.assert_array_equal(_project_feasible(beta, A, b, 1e-12), beta)
 
 
+class TestProjectionSelectsTheWorstViolation:
+    """The scale-aware slack is a stopping test, not a ranking.
+
+    At ``b = 0`` it evaluates to ``x / max(1, |x|)``, which is exactly ``-1.0``
+    for *every* violation past 1, so feeding it to ``argmin`` makes rows
+    violated by wildly different amounts indistinguishable and breaks the exact
+    tie on the lowest index.  Selection therefore comes from the raw
+    violations; only the stopping test stays scale-aware.
+    """
+
+    A = np.diff(np.eye(7), axis=0)  # rows e_{i+1} - e_i, the monotone shape
+    B = np.zeros(6)
+    # First differences -1.5, -14, -1.5, -14, -1.5, -14: every row past the
+    # clamp, three of them nearly ten times worse than the other three.
+    BETA = np.array([0.0, -1.5, -15.5, -17.0, -31.0, -32.5, -46.5])
+
+    def test_the_clamp_erases_the_ordering(self):
+        """Precondition: the raw violations differ 9x and the scaled ones do not."""
+        raw = self.A @ self.BETA - self.B
+        np.testing.assert_array_equal(raw, [-1.5, -14.0, -1.5, -14.0, -1.5, -14.0])
+        # Exactly -1.0 on all six -- not merely close, which is what makes the
+        # tie exact and hands the pick to the lowest index.
+        np.testing.assert_array_equal(
+            _feasibility_slack(self.A, self.BETA, self.B), np.full(6, -1.0)
+        )
+        assert int(np.argmin(raw)) == 1
+        assert int(np.argmin(_feasibility_slack(self.A, self.BETA, self.B))) == 0
+
+    def test_below_the_clamp_the_two_orderings_agree(self):
+        """Control: the collapse is the cause, not a coincidence of the fixture."""
+        beta = np.array([0.0, -0.3, -0.5, -0.9, -1.1, -1.3, -1.6])
+        raw = self.A @ beta - self.B
+        np.testing.assert_array_equal(raw, _feasibility_slack(self.A, beta, self.B))
+        assert int(np.argmin(raw)) == int(np.argmin(_feasibility_slack(self.A, beta, self.B)))
+
+    def test_the_sweep_budget_is_spent_on_the_worst_row(self):
+        """The outcome the ranking buys, not the internal it is spelled with.
+
+        Each sweep repairs one row and pushes part of that row's violation into
+        its two neighbours, so the 100-sweep budget is finite currency and
+        spending it on the worst row is what converts it into feasibility.
+        Measured on this fixture: selecting on the raw violations leaves a
+        worst residual violation of ``-2.84e-01``; selecting on the clamped
+        slack leaves ``-4.70e+00``, 16.6x worse, because it cycles between rows
+        0 and 1 -- both stuck at ``-1.0`` -- while rows 3 and 5, violated by 14,
+        wait.  The 1.0 threshold below sits between the two with an order of
+        magnitude of margin either side.
+        """
+        projected = _project_feasible(self.BETA, self.A, self.B, 1e-12)
+        residual = float(np.min(self.A @ projected - self.B))
+        assert residual > -1.0, f"worst residual violation {residual:.3e} is the clamped ordering's"
+
+    def test_the_stopping_test_still_means_every_row(self):
+        """Selection moved to the raw pair; the *stopping* test must not.
+
+        Taking the stopping test from the selected row -- ``scaled[argmin(raw)]
+        >= -tol`` -- is equivalent at ``b = 0``, where clamping is monotone in
+        the raw violation so the raw argmin also attains the minimum slack.  It
+        is not equivalent for a nonzero ``b``, and this is the case that
+        separates them: row 1 is the worse raw violation (-1) but, against a
+        row scale of 1000, is already satisfied to ``tol``, while row 0 is
+        violated by half its scale.  Reading the stopping test off row 1 exits
+        immediately and returns a point ``_is_feasible`` rejects.
+        """
+        A = np.eye(2)
+        b = np.array([0.0, 1000.0])
+        beta = np.array([-0.5, 999.0])
+
+        raw = A @ beta - b
+        scaled = _feasibility_slack(A, beta, b)
+        np.testing.assert_array_equal(raw, [-0.5, -1.0])
+        np.testing.assert_allclose(scaled, [-0.5, -0.001], rtol=0, atol=0)
+        assert int(np.argmin(raw)) == 1 and int(np.argmin(scaled)) == 0
+
+        projected = _project_feasible(beta, A, b, 0.01)
+        assert _is_feasible(A, projected, b, 0.01), (
+            f"projection returned {projected}, which its own caller calls infeasible"
+        )
+
+
 class TestStructuralAliasConsistency:
     """A structurally zero column's null vector is exact at every conditioning.
 

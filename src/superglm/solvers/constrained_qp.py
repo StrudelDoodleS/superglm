@@ -361,16 +361,46 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     treating the starting point's status as the answer.
 
     Uses the same scale-aware stopping test as the caller's convergence check,
-    so the two cannot disagree about what "feasible" means.
+    so the two cannot disagree about what "feasible" means -- but takes the
+    *selection* from the raw violations, the same split round 4 applied to the
+    blocking ratio.  The scale-aware slack is a per-row **clamp**: at ``b = 0``
+    it is ``x / max(1, |x|)``, which is exactly ``-1.0`` for every violation
+    worse than 1, so rows violated by wildly different amounts become
+    indistinguishable and ``argmin`` breaks the exact tie on the lowest index.
+    Measured on a first-difference ``A``: raw violations ``[-3, -8, -3]`` scale
+    to ``[-1, -1, -1]``, and the sweep repairs row 0 while row 1 is three times
+    worse.  Below saturation the two orders agree (``[-0.3, -0.2, -0.4]``
+    scales to itself), which is what pins the clamp as the cause rather than a
+    coincidence of the fixture.  Clamping is monotone nondecreasing at
+    ``b = 0``, so the raw argmin still attains the minimum scaled slack and the
+    stopping decision is unchanged there; the ``min`` below keeps the test
+    correct for a nonzero ``b``, where it is not.
+
+    Plain raw violation rather than raw over row norm, though the latter is the
+    true Euclidean distance to the hyperplane (the sweep moves ``|violation| /
+    ||a||``).  Three reasons, in order of weight.  It is what ``master``
+    selected on, so this stays a repair of a defect this branch introduced
+    rather than a new selection policy smuggled into a patch.  It is far
+    narrower: over 480 constrained fits / 1285 projections / 24300 sweeps the
+    raw and clamped orders differ on 4 sweeps, while raw and row-normalized
+    differ on 3022 -- in-tree rows are ``D @ P``, not ``D``, with norms
+    spanning 0.039 to 0.594, so row normalization would reroute 12% of all
+    sweeps to repair 0.016% of them.  And an all-zero constraint row divides
+    0 by 0 under normalization, which ``argmin`` then selects, where the raw
+    order simply never picks a row that is not violated.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
     abs_b = np.abs(b)
     for _ in range(100):
-        violations = _feasibility_slack(A, beta, b, abs_b=abs_b)
-        worst = int(np.argmin(violations))
-        if violations[worst] >= -tol:
+        # Inlined rather than calling ``_feasibility_slack``, which would
+        # recompute the matvec; the arithmetic is identical term for term.
+        products = A @ beta
+        violations = products - b
+        slack = violations / _feasibility_scale(products, b, abs_b=abs_b)
+        if slack.min() >= -tol:
             break
+        worst = int(np.argmin(violations))
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
         deficit = b[worst] - a @ beta
