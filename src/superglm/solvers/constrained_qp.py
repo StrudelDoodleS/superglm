@@ -992,22 +992,32 @@ def solve_constrained_qp(
             # property of the caller's constraint system, and belongs at the
             # boundary rather than inside the iteration if it ever matters.
             #
-            # **Known gap, filed rather than fixed here.**  The loop can reach
-            # this return on a subset active set while another row is
-            # materially violated, and it then returns that point.  Over a
-            # 3950-case rank-deficient ensemble this fires on 265 cases
-            # (production-shaped: ``b = 0``, structured ``A``, so ``x = 0`` is
-            # feasible and the problem is not the constraints) and 155
-            # adversarial ones, with slacks saturating at ``-1.0``.
+            # **Known gap, repaired at the return below rather than in the
+            # loop.**  The loop can reach this return on a subset active set
+            # while another row is materially violated, and it then returns
+            # that point.  Over a 3950-case rank-deficient ensemble this fires
+            # on 265 cases (production-shaped: ``b = 0``, structured ``A``, so
+            # ``x = 0`` is feasible and the problem is not the constraints) and
+            # 155 adversarial ones, with slacks saturating at ``-1.0``.
             #
-            # ``converged=False`` is weaker protection than it looks.
-            # ``irls_direct.py:1614`` does ``beta = qp_result.beta``
-            # unconditionally, six lines *before* it reads ``converged``, which
-            # drives nothing but a latched log line -- so the infeasible point
-            # flows into the fit either way.  And this is not a pre-existing
-            # exposure merely inherited: the code is pre-existing, but the
-            # rank-deficient population that reaches it is new to this branch.
-            # On ``master`` ``np.linalg.solve(H, g)`` ran before the loop, so a
+            # It is **not** confined to the rank-deficient population, and that
+            # correction matters for who owns the defect.  Over the 600
+            # full-rank cold solves of the byte-identity corpus -- ``H`` built
+            # as ``M^T M + c I``, so ``np.linalg.solve`` runs on both arms and
+            # nothing about this branch's routing applies -- ``master`` returns
+            # an infeasible early return on **92** and this branch on **93**.
+            # The phenomenon and its rate are master's; only which specific
+            # cases land on it moved (67 overlap, 4 byte-identically), because
+            # the QP initialisation moved.  So the rank-deficient half below is
+            # new to this branch and the full-rank half is inherited.
+            #
+            # ``converged=False`` is weaker protection than it looks, which is
+            # why it is not the whole answer.  ``irls_direct.py:1614`` does
+            # ``beta = qp_result.beta`` unconditionally, six lines *before* it
+            # reads ``converged``, which drives nothing but a latched log line
+            # -- so the infeasible point flows into the fit either way.  For the
+            # rank-deficient half the population is this branch's own: on
+            # ``master`` ``np.linalg.solve(H, g)`` ran before the loop, so a
             # singular ``H`` raised ``LinAlgError`` and the loop never ran at
             # all -- measured, ``master`` refuses 2181 of those same 3950 cases
             # outright, and 165 of them are cases where this branch instead
@@ -1032,11 +1042,62 @@ def solve_constrained_qp(
             # also moves the full-rank path: 37 corpus records over 8 of 120
             # full-rank seeds, including one that goes from ``n_iter=41`` to
             # exhaustion.
+            #
+            # So the point is repaired here instead, where the repair cannot
+            # cycle.  Feasibility is what the constraint is *for*: at
+            # ``irls_direct.py:1614`` an infeasible ``beta`` means the fitted
+            # model is not monotone, while a projected one is monotone and
+            # merely worse in objective -- and that call site takes ``beta``
+            # unconditionally, so the real choice is between shipping a
+            # violated constraint and shipping a suboptimal coefficient.
+            #
+            # **Inert on the currently-feasible population by construction, not
+            # by measurement.**  The guard is *precisely* the condition under
+            # which ``converged`` is already ``False`` today, so no solve that
+            # currently returns a feasible point takes either the projection or
+            # a changed flag.  Measured to confirm the construction rather than
+            # to establish it: over the 1440 solves of the byte-identity corpus
+            # 1295 are byte-identical, all 145 that move were returning an
+            # infeasible point, **0** that were returning a feasible one move,
+            # and 0 move from an exhaustion return.  All eight end-to-end
+            # constrained fits are byte-identical.  It terminates by
+            # construction too -- ``_project_feasible`` is 100 bounded sweeps
+            # and cannot cycle -- which the loop-side repair could not promise.
+            #
+            # Reach and cost.  It repairs 146 of the 265 production-shaped and
+            # 77 of the 155 adversarial cases, and 51 of the full-rank corpus's
+            # cold solves.  The rest exhaust the 100-sweep budget still
+            # infeasible, so this is a partial repair by design: what is left
+            # needs the equality block enforced, which is the redesign.  The
+            # objective is paid for it -- median relative change ``2.4e-13``,
+            # but ``1.1`` at the 99th percentile and ``1.9`` at worst -- which
+            # is the trade being made and not a defect: those points were
+            # outside the feasible set, so their objective was never admissible.
+            #
+            # ``converged`` deliberately reports the feasibility of the point
+            # the loop *found*, taken before the projection runs, and this is
+            # not a concession to the sweep budget.  It is the stronger reading:
+            # projecting moves ``beta`` off the stationary point, so the KKT
+            # certificate does not hold for the projected point even when the
+            # projection fully succeeds.  Reporting post-projection feasibility
+            # would flip exactly the 223 repaired cases to ``converged=True`` --
+            # feasible, but demonstrably not a KKT point -- which is the
+            # over-claim the flag exists to prevent.  The budget does also run
+            # out, on 119 and 78 of those two populations, so on those the two
+            # readings agree; they agree for a reason that does not survive the
+            # repair succeeding, which is why the pre-projection one is taken.
+            #
+            # ``active_set`` is returned unchanged and still describes the
+            # pre-projection point.  It is a warm start, not a claim about
+            # ``beta``, and narrowing it is the loop work rather than this.
+            feasible = _is_feasible(A, beta, b, tol)
+            if not feasible:
+                beta = _project_feasible(beta, A, b, tol)
             return QPResult(
                 beta=beta,
                 active_set=active,
                 n_iter=it + 1,
-                converged=_is_feasible(A, beta, b, tol),
+                converged=feasible,
             )
 
         # --- Step ratio: find blocking constraint ---
