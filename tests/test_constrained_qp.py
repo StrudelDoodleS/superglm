@@ -1,8 +1,9 @@
 """Tests for the active-set constrained penalized least-squares solver."""
 
 import numpy as np
+import pytest
 
-from superglm.solvers.constrained_qp import solve_constrained_qp
+from superglm.solvers.constrained_qp import _project_feasible, solve_constrained_qp
 
 
 class TestUnconstrainedFallback:
@@ -220,6 +221,14 @@ class TestRankDeficientHessian:
         np.testing.assert_allclose(float(np.sum(result.beta)), 1.0, atol=1e-10)
         assert result.converged
 
+    def test_indefinite_h_error_names_this_function(self):
+        """The rank policy's ValueError must be re-labelled for the caller."""
+        H = np.array([[1.0, 0.0], [0.0, -1.0]])  # materially indefinite
+        g = np.array([1.0, 1.0])
+
+        with pytest.raises(ValueError, match="solve_constrained_qp requires a usable PSD H"):
+            solve_constrained_qp(H, g, np.zeros((0, 2)), np.zeros(0))
+
     def test_well_conditioned_solution_is_unchanged_by_the_rank_policy(self):
         """The rank policy must not perturb a well-conditioned unconstrained solve."""
         H = np.array([[4.0, 1.0], [1.0, 3.0]])
@@ -246,6 +255,10 @@ class TestConvergenceFlag:
 
         assert not result.converged
         assert result.n_iter == 1
+        # Exhaustion outranks feasibility.  This truncated point happens to be
+        # feasible, and must still report non-convergence: the loop never
+        # reached its stationarity/multiplier test, so nothing is certified.
+        assert np.all(A @ result.beta - b >= -1e-12)
 
     def test_infeasible_projection_reports_non_convergence(self):
         """Mutually contradictory constraints cannot be projected onto."""
@@ -273,6 +286,38 @@ class TestConvergenceFlag:
 
         assert result.converged
         assert np.all(np.diff(result.beta) >= -1e-10)
+
+    def test_projection_budget_overrun_that_the_loop_repairs_reports_convergence(self):
+        """``converged`` describes the point returned, not the starting point.
+
+        With more non-negativity constraints than the 100 projection sweeps
+        can repair -- the ``A = np.eye(q)`` shape used by SCOP's solver-space
+        ``qp_initialize`` -- the projection hands the active-set loop an
+        infeasible start, and the loop then reaches a genuine feasible KKT
+        point.  Latching the projection's own verdict reports a spurious
+        non-convergence here and makes both call sites warn misleadingly.
+        """
+        p = 130
+        rng = np.random.default_rng(32)
+        M = rng.standard_normal((p, p))
+        H = M.T @ M / p + np.eye(p)
+        g = rng.standard_normal(p) - 0.6  # bias so >100 constraints are violated
+        A = np.eye(p)
+        b = np.zeros(p)
+
+        # Precondition: the projection really does exhaust its sweep budget.
+        beta_unc = np.linalg.solve(H, g)
+        projected = _project_feasible(beta_unc, A, b)
+        assert np.min(A @ projected - b) < -1e-9, "projection did not overrun its budget"
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        # The loop terminated on its own KKT test, not on max_iter...
+        assert result.n_iter < 200
+        # ...at a point that is genuinely feasible...
+        assert np.all(A @ result.beta - b >= -1e-12)
+        # ...so this is a converged solve.
+        assert result.converged
 
 
 class TestCallSiteWarnings:
