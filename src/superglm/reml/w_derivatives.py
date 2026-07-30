@@ -174,18 +174,36 @@ def _compute_d2W_deta2_fd(
     return (dW_plus - dW_minus) / (2.0 * eps)
 
 
+def _qualified_class_name(obj: Any) -> str:
+    """Module-qualified class identity, e.g. ``superglm.links.LogLink``.
+
+    ``__qualname__`` rather than ``__name__`` so nested and locally defined
+    classes stay distinguishable from a module-level class of the same name.
+    """
+    cls = type(obj)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
 def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
     """Report the capability gap that silently drops the W(rho) correction.
 
-    Every message names *both* concrete classes, then says which method is
-    missing.  The stdlib default filter dedups on
-    (message, category, module, lineno), so naming the pair is what makes the
-    granularity one warning per unique link/distribution pair rather than one
-    per REML iteration.  Naming only the absent method would key the dedup on
-    the deficient class alone: one custom link reused across two distributions
-    would warn once and the second degraded fit would go unreported.  The pair
-    is also the more useful thing to report -- the user needs to know which
-    combination was degraded, not just which method is absent.
+    Every message opens with the *module-qualified* link/distribution pair,
+    then says which method is missing.  The stdlib default filter dedups on
+    (message, category, module, lineno), so that prefix is what sets the
+    granularity: one warning per unique pair rather than one per REML
+    iteration.  Both halves of the prefix are load-bearing, and each was a
+    real bug before it was there.  Naming only the absent method keys the
+    dedup on the deficient class alone, so one custom link reused across two
+    distributions warns once.  Naming classes by bare ``__name__`` keys it on
+    a string two different classes can share, so two ``MyLink`` classes in
+    different modules warn once.  Either way the second pair's degraded fit
+    goes unreported.
+
+    The qualified pair is also the most useful thing to report: for a custom
+    class the module is exactly what the user needs in order to find it.  The
+    missing-method clause deliberately stays unqualified -- it would repeat
+    the same long path a few words later, buying no distinctness and no
+    information.
     """
     missing = []
     if not hasattr(link, "deriv2_inverse"):
@@ -200,7 +218,7 @@ def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
         # rather than dropping the correction in silence again.
         else "no dW/deta was supplied"
     )
-    pair = f"{type(link).__name__}/{type(distribution).__name__}"
+    pair = f"{_qualified_class_name(link)}/{_qualified_class_name(distribution)}"
     warnings.warn(
         f"REML W(rho) correction skipped for {pair}: {detail}. "
         "Smoothing-parameter gradients omit the weight-derivative term, so "

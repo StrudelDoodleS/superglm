@@ -441,7 +441,8 @@ via `validate_observed_derivative_capability`
 ### Design
 
 A private helper in `w_derivatives.py` emits a `UserWarning` naming the
-concrete link/distribution pair, the missing method(s), and the consequence.
+module-qualified link/distribution pair, the missing method(s), and the
+consequence.
 
 **Call site: `reml_w_correction` at the `dW_deta is None` branch (line 267) —
 deliberately not inside `compute_dW_deta`.** `compute_dW_deta` has a second
@@ -469,15 +470,27 @@ observes it because pytest resets filters inside its context.
 `pyproject.toml:127-129` filters only the `bs` `FutureWarning`, so nothing
 interferes.
 
-The pair must be named **unconditionally**, as a `"{Link}/{Distribution}"`
-prefix, not assembled from whichever class is missing a method. Round-2 review
-caught the earlier version doing the latter: when only the link lacked
-`deriv2_inverse` the message named just that method, so the same custom link
-reused with Poisson and then with Gamma produced byte-identical text and the
-filter suppressed the second — one warning where the design promises two, with
-the second degraded pair going unreported. Naming the pair is also the more
-useful report: the user needs to know which *combination* was degraded, not
-only which method is absent.
+The prefix that carries this must be **an unconditional pair** of
+**module-qualified** names — `f"{cls.__module__}.{cls.__qualname__}"` for each
+side, via the `_qualified_class_name` helper. Both properties are load-bearing
+and each was a real defect before review caught it:
+
+- **Unconditional pair** (round 2). The message was assembled only from
+  whichever class was missing a method, so when just the link lacked
+  `deriv2_inverse` the distribution was never named. The same custom link used
+  with Poisson and then with Gamma produced byte-identical text and the filter
+  suppressed the second.
+- **Module-qualified, not bare `__name__`** (round 3). Two distinct classes both
+  called `MyLink`, in different modules, rendered identically and collided the
+  same way. `__qualname__` rather than `__name__` additionally keeps nested and
+  locally defined classes distinct from a module-level class of the same name.
+
+In both cases the result was one warning where the design promises two, with
+the second degraded pair going unreported. The qualified pair is also the more
+useful report: the user needs to know which *combination* was degraded, and for
+a custom class the module is exactly what they need to locate it. The
+missing-method clause stays unqualified — repeating the full path a few words
+later buys no distinctness and no information.
 
 Raising, as the observed path does, was considered and rejected: it would
 remove a currently-working if degraded path for custom links.
@@ -490,15 +503,23 @@ remove a currently-working if degraded path for custom links.
   method.
 - Gamma/log does **not** warn (structural zero, line 270).
 - A built-in link does not warn.
-- Dedup granularity, on both axes, with every variant raised from a *single*
-  call site so the filter key differs only in message text:
+- Dedup granularity, on all three axes, with every variant raised from a
+  *single* call site so the filter key differs only in message text:
   - Two different missing methods → two warnings, not one
     (`test_warns_once_per_class_pair_not_once_per_iteration`), and repeats of
     each collapse to one, standing in for per-iteration spam.
   - One custom link, two counterpart distributions → two warnings, not one
-    (`test_one_custom_link_still_warns_for_each_counterpart`). This is the case
-    round-2 review found broken; it fails with `assert 1 == 2` against a
-    message that names only the missing method.
+    (`test_one_custom_link_still_warns_for_each_counterpart`). The case round-2
+    review found broken; it fails with `assert 1 == 2` against a message that
+    names only the missing method.
+  - Two same-named classes from different modules → two warnings, not one
+    (`test_same_class_name_in_different_modules_warns_twice`). The case round-3
+    review found broken; it fails with `assert 1 == 2` against a message that
+    names classes by bare `__name__`. The two types are built by a helper that
+    sets `__module__` and `__qualname__` explicitly — two `class` statements in
+    one test file share `__module__` and so could not express the collision —
+    and the test asserts the collision holds (same `__name__`, same
+    `__qualname__`, different classes) before relying on it.
 
 ---
 

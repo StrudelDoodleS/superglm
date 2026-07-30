@@ -219,6 +219,58 @@ def test_one_custom_link_still_warns_for_each_counterpart(poisson_setup, gamma_s
     assert sum("Gamma" in message for message in messages) == 1
 
 
+def _deficient_link_class(module_name: str) -> type:
+    """A link-wrapper class called ``MyLink`` that claims to live in ``module_name``.
+
+    Two of these differ *only* in ``__module__``.  Two ``class`` statements in
+    this file could not express that -- they would share ``__module__`` -- so
+    the type is built here and its identity attributes set explicitly.
+    ``__qualname__`` is overridden too: defined in a function it would
+    otherwise be ``_deficient_link_class.<locals>.MyLink``, which already
+    differs from nothing and would let a ``__name__``-keyed message pass.
+    """
+
+    class MyLink(_LinkWithoutDeriv2):
+        pass
+
+    MyLink.__module__ = module_name
+    MyLink.__qualname__ = "MyLink"
+    return MyLink
+
+
+def test_same_class_name_in_different_modules_warns_twice(poisson_setup) -> None:
+    """Two distinct ``MyLink`` classes from different modules => two warnings.
+
+    The third dedup axis.  A bare ``type(x).__name__`` key collides here: both
+    pairs render identically, the filter drops the second, and one degraded
+    fit goes unreported.  Keying on ``__module__`` + ``__qualname__`` separates
+    them.
+    """
+    alpha = _deficient_link_class("acme.alpha_links")(poisson_setup["link"])
+    beta = _deficient_link_class("acme.beta_links")(poisson_setup["link"])
+
+    # The collision is real: same bare name, same qualname, different classes.
+    assert type(alpha) is not type(beta)
+    assert type(alpha).__name__ == type(beta).__name__ == "MyLink"
+    assert type(alpha).__qualname__ == type(beta).__qualname__ == "MyLink"
+    assert type(alpha).__module__ != type(beta).__module__
+
+    links = [alpha, beta]
+    for link in links:
+        assert _dW_deta(poisson_setup, link=link) is None
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        for link in links:
+            for _ in range(2):
+                _call(poisson_setup, link=link)
+
+    messages = [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)]
+    assert len(messages) == 2, messages
+    assert sum("acme.alpha_links" in message for message in messages) == 1
+    assert sum("acme.beta_links" in message for message in messages) == 1
+
+
 def test_builtin_link_does_not_warn(poisson_setup) -> None:
     """Poisson/log runs the whole correction, so neither early return may fire."""
     dW_deta = _dW_deta(poisson_setup)
