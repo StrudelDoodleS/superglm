@@ -135,6 +135,72 @@ correct Jacobian is the logistic function.
 
 ---
 
+## Item 6 — Constrained-term coverage against `scam` (future)
+
+Researched 2026-07-31 from `scam`'s `NAMESPACE`, which registers the bases
+definitively. `scam` ships roughly forty constrained bases, but they are
+combinatorial rather than forty algorithms — near enough
+`{increasing, decreasing} × {convex, concave} × {univariate, tensor-marginal-1,
+tensor-marginal-2, tensor-both} × {± numeric by}` over the same SCOP
+reparameterization applied to marginals. `scam` gives each combination its own
+`smooth.construct` method; superglm factors it as
+`Constraint.fit/postfit × {increasing, decreasing, convex, concave}`, which is
+the better factoring and should stay.
+
+Collapsed to capability, the gap is three axes:
+
+**6a — combined monotonicity and curvature** (`micx`, `micv`, `mdcx`, `mdcv`).
+Cheapest by far: a conjunction of constraints both engines already express, not
+new machinery.
+
+**6b — constrained tensor products and interactions.** Seventeen bases
+(`tedmi`, `tedmd`, `tesmi1`, `tesmi2`, `tesmd1`, `tesmd2`, `temicx`, `temicv`,
+`tedecx`, `tedecv`, `tescx`, `tescv`, `tecvcv`, `tecxcx`, `tecxcv`, plus the
+`ti`-style `tismi`, `tismd`). superglm has none — `TensorInteraction` passes
+`constraint=None` when building its marginals. The substantial item, and the
+one to reach for if monotone marginals inside interactions matter for pricing.
+
+**6c — numeric `by`-variable constraints** (`mpiBy`, `mpdBy`, `cxBy`, `cvBy`,
+`micxBy`, `micvBy`, `mdcxBy`, `mdcvBy`).
+
+Specialty tail, probably irrelevant here: `mifo`/`miso` (finish/start at zero),
+`po`/`ipo`/`dpo`/`cpop` (positivity, cyclic), `lmpi`/`lipl` (locally monotone
+with plateau).
+
+**Neither `scam` nor `mgcv` has a shape-constrained factor-smooth basis**, so
+"a monotone curve per factor level" is not a gap against the reference
+implementation — nobody offers it.
+
+### The RE/FS/SZ guard is not part of this gap
+
+`fit_ops.py`'s `_reject_structured_fit_constraints` refuses a *fit-time* shape
+constraint alongside `RandomEffect` or `FactorSmooth`. It arrived with those
+features in `f082e9bd` (#165, 0.15.0) as a deliberate scope boundary, and
+`2026-07-27-pr165-release-review-remediation-design.md` §4 states the reason:
+
+> "Fit-time constrained REML is not currently defined for identity, repeated,
+> or sum-to-zero penalty components."
+
+RE/FS/SZ carry compact structured penalties; defining constrained REML over
+them would mean expanding to dense `Kk × Kk` penalties and losing exactly the
+compactness that makes those terms affordable. **Post-fit constraints are
+supported** with RE/FS/SZ via `penalty_component_quadratic()`, which is what
+the error message points at, so this is narrower than "cannot be combined".
+
+`scam` is more permissive — "Unconstrained terms of the `mgcv` package,
+specified using `s`, `te`, `ti`, `t2`, can be added as well" — so the
+restriction is superglm's own, not inherited. Lifting it is a separate piece of
+work from Item 6 and would need constrained REML defined over compact penalty
+components first. Note also that relaxing it makes the `O(p³)` projection in
+`restrict_to_scop_resolved_range` live on wide models; it is currently unreachable
+because a constrained model cannot carry a wide factor-smooth term.
+
+Sources: `scam` `NAMESPACE` and `shape.constrained.smooth.terms`; `mgcv`
+`mono.con` ("linear constraints sufficient for monotonicity … of a cubic
+regression spline", `"cr"` basis only, fed to `pcls`).
+
+---
+
 ## Suggested sequence
 
 1. Merge #174.
@@ -142,5 +208,14 @@ correct Jacobian is the logistic function.
 3. **Item 4** — write the governance position. One session.
 4. **Item 2** — the SCOP rank-truncation fix. The highest-value engineering item.
 5. **Item 3** — needs a release-scope decision before it can start.
+6. **Item 6** — capability work, only once the correctness items are settled.
+   6a is cheap and independent; 6b is the real project.
 
 Items 1b and 4 are cheap and independent; either can go first.
+
+**Status 2026-07-31:** Item 2 is implemented on `fix/scop-rank-truncation`
+(rank truncation moved to the factor, resolved range carried through the
+determinant and curvature, factor built only when the Gram cannot resolve the
+step). Item 2c is now answerable with evidence — the boundary fit converges in
+single figures rather than exhausting its budget — but the stagnation gate has
+deliberately not been removed; that is a separate change.
