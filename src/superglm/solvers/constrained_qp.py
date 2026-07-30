@@ -71,9 +71,15 @@ class QPResult:
     active-set loop reached its own termination test (a stationary step with
     no negative multiplier) *and* ``beta`` is feasible.  It is ``False`` when
     the loop exhausted ``max_iter``, and when the loop terminated but the
-    returned point still violates a constraint -- which is what happens for a
-    mutually infeasible constraint system.  In either case ``beta`` is the
+    returned point still violates a constraint.  In either case ``beta`` is the
     best available point, not a certified solution.
+
+    A mutually infeasible constraint system is one way to reach the second
+    case, but not the only one and not the common one: the loop can also stop
+    at a stationary point on a *subset* active set with another row materially
+    violated, on a system that has a feasible point.  See the early return
+    below for the measurement and for why ``converged=False`` is weaker
+    protection than it looks.
     """
 
     beta: NDArray
@@ -342,7 +348,11 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
       trading a provable envelope for an empirical one.  Measured over a
       3950-case rank-deficient ensemble the extra passes repair 14 infeasible
       answers against this pass's 7, for the same 2 regressions -- real, but
-      not worth the weaker guarantee on this path.
+      not worth the weaker guarantee on this path.  Those 2 are 2 *new
+      silently-infeasible answers* against 5 net repairs, inside a population
+      this branch created: on ``master`` a singular ``H`` raised
+      ``LinAlgError`` before the loop ever ran, so the baseline they regress
+      against is a loud refusal, not a feasible answer.
 
     The solution is minimum-norm **in the equilibrated coordinates**, not in
     the original ones, because that is where ``lstsq`` resolves the null
@@ -353,6 +363,27 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     the point moves but the objective does not: the rank-one regression below
     returns ``max|beta| = 18.3`` rather than ``15.7`` for the same exact
     optimum of ``-450``.
+
+    The 2 ensemble cases that regress from feasible to infeasible were read as
+    that same benign movement, on the strength of a neutral control: rescaling
+    ``K`` and ``rhs`` by a common constant rerouted 2607 answers without
+    flipping any feasibility outcome.  **The control cannot carry that
+    conclusion.**  ``sigma(cK) = c sigma(K)`` and ``rcond`` is relative, so the
+    control leaves the retained set identical *by construction* -- measured, it
+    changes ``lstsq``'s retained rank in **0 of 110725** rank-deficient KKT
+    solves.  It isolates bit noise and nothing else, and cannot tell a
+    different minimum-norm representative (benign) from a different retained
+    rank (not).  Equilibration changes exactly the latter: across the same
+    solves it moves the retained rank on **9.3%** of them.
+
+    Measured directly instead, on the arm-versus-arm rank rather than the
+    control: over a production-shaped reconstruction (``b = 0``, structured
+    ``A``) the feasibility regressions carry **0 of 2319** KKT solves with a
+    changed retained rank, which does support the benign reading there.  Over
+    an adversarial reconstruction **196 of 2455 (8.0%)** do.  So the benign
+    reading is a property of the in-tree-shaped population, not a structural
+    fact about equilibration, and it is the arm-versus-arm rank -- not the
+    control -- that establishes it.
 
     ``rcond`` is deliberately left at ``None``.  The competing proposal is to
     pass ``SHARED_RANK_POLICY.gram_rcond`` so that one rule decides what is
@@ -870,6 +901,47 @@ def solve_constrained_qp(
 
             # Stationarity and dual feasibility hold; primal feasibility
             # completes the KKT certificate.
+            #
+            # **Known gap, filed rather than fixed here.**  The loop can reach
+            # this return on a subset active set while another row is
+            # materially violated, and it then returns that point.  Over a
+            # 3950-case rank-deficient ensemble this fires on 265 cases
+            # (production-shaped: ``b = 0``, structured ``A``, so ``x = 0`` is
+            # feasible and the problem is not the constraints) and 155
+            # adversarial ones, with slacks saturating at ``-1.0``.
+            #
+            # ``converged=False`` is weaker protection than it looks.
+            # ``irls_direct.py:1614`` does ``beta = qp_result.beta``
+            # unconditionally, six lines *before* it reads ``converged``, which
+            # drives nothing but a latched log line -- so the infeasible point
+            # flows into the fit either way.  And this is not a pre-existing
+            # exposure merely inherited: the code is pre-existing, but the
+            # rank-deficient population that reaches it is new to this branch.
+            # On ``master`` ``np.linalg.solve(H, g)`` ran before the loop, so a
+            # singular ``H`` raised ``LinAlgError`` and the loop never ran at
+            # all -- measured, ``master`` refuses 2181 of those same 3950 cases
+            # outright, and 165 of them are cases where this branch instead
+            # returns an infeasible ``beta``.  Loud refusal to silent
+            # infeasibility, which is the same correction round 6 already
+            # accepted for its own P1.
+            #
+            # The obvious repair -- add the worst violated inactive row and
+            # continue -- was implemented and measured, and is **not** shipped.
+            # It repairs 123 of the 265 and regresses no feasibility outcome,
+            # but the loop has no anti-cycling rule and this is precisely the
+            # manoeuvre that cycles: 9 cases that terminated in 3 to 16
+            # iterations then run to ``max_iter``, and 5 of those still do at
+            # ``max_iter=4000``, in traced two-state cycles (``drop 3`` /
+            # ``block-add 3``, forever).  Bounding re-activations does not
+            # close it -- the cycle it steers into never revisits this branch,
+            # because the multiplier test drops first every time -- so the
+            # bounded variant leaves the same 5 non-terminating.  The residual
+            # 142 are not reachable by it at all: in **all** of them the worst
+            # violated row is already *active*, so what is left needs the
+            # equality block enforced, which is the active-set redesign.  It
+            # also moves the full-rank path: 37 corpus records over 8 of 120
+            # full-rank seeds, including one that goes from ``n_iter=41`` to
+            # exhaustion.
             return QPResult(
                 beta=beta,
                 active_set=active,
