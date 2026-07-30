@@ -1,8 +1,8 @@
 {
-  "tool": "mgcv",
+  "tool": "reference",
   "method": "bam_fREML_discrete_weights",
   "r_version": "R version 4.5.2 (2025-10-31)",
-  "mgcv_version": "1.9.3",
+  "reference_version": "1.9.3",
   "n": 678013,
   "n_reps": 30,
   "threads": "1",

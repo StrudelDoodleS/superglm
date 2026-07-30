@@ -379,7 +379,7 @@ class TestMgcvStyleSmoothTestInput:
     def test_summary_smooth_pvalue_uses_weighted_qr_factor(self):
         """Regression test for the false-significant noise-spline bug.
 
-        mgcv's stored ``R`` factor is the QR factor of the weighted active
+        the reference implementation's stored ``R`` factor is the QR factor of the weighted active
         design, so ``R.T @ R`` matches ``X'WX``. The summary path should use
         that QR factor rather than the raw active design block.
         """
@@ -765,7 +765,7 @@ class TestREMLFallbacks:
         assert not hasattr(model, "_reml_lambdas")
 
 
-# ── REML + select=True (mgcv double penalty) ─────────────────────
+# ── REML + select=True (the reference implementation double penalty) ─────────────────────
 
 
 class TestREMLSelectTrue:

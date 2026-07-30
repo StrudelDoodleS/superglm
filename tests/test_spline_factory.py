@@ -107,7 +107,7 @@ class TestKMapping:
         assert n_knots_from_k("ns", 20, degree=3) == 18  # 20 - 3 + 1 = 18
 
     def test_n_knots_from_k_cr(self):
-        # cr: same as ns (n_knots = k - degree + 1), mgcv-aligned
+        # cr: same as ns (n_knots = k - degree + 1), the reference implementation-aligned
         assert n_knots_from_k("cr", 10, degree=3) == 8  # 10 - 3 + 1 = 8
         assert n_knots_from_k("cr", 20, degree=3) == 18  # 20 - 3 + 1 = 18
 

@@ -226,7 +226,7 @@ Implementation follows red-green-refactor cycles.
    compatibility allocation.
 7. A call-count regression test proves the profiled common case no longer
    performs one dominant row scan per small-side column.
-8. Existing exact/discrete FS, SZ, REML, inference, allocation, and mgcv parity
+8. Existing exact/discrete FS, SZ, REML, inference, allocation, and reference parity
    tests remain green.
 
 ## Benchmark and Keep/Revert Gates

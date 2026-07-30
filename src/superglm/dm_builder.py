@@ -1136,7 +1136,7 @@ def _group_has_lambda(gm, g, lambdas):
 
 # Discrete tensor interactions are deliberately *not* constrained against one
 # another.  ``ti()`` marginals are already centered, so two terms sharing a
-# marginal — ``ti(a, b) + ti(a, c)``, the standard mgcv functional-ANOVA
+# marginal — ``ti(a, b) + ti(a, c)``, the standard functional-ANOVA
 # pattern — span distinct, jointly identifiable surfaces.  A cross-Gram null
 # space is also the wrong instrument for cross-term aliasing: it keeps the
 # directions a tensor shares *least* with its neighbours, so on a holey joint
@@ -1250,7 +1250,7 @@ def rebuild_design_matrix_with_lambdas(
                 # Discrete tensor interactions are emitted in fixed centered
                 # tensor coordinates with explicit marginal penalty components.
                 # Lambda updates should change S(lambda), not rebuild the
-                # packed design/R_inv. This mirrors mgcv bam(discrete=TRUE),
+                # packed design/R_inv. This mirrors discretized fitting,
                 # where the packed marginal/index representation is fixed
                 # while smoothing parameters move.
                 new_gms.append(gm)

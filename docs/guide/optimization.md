@@ -247,7 +247,7 @@ until λ stabilizes
     by reusing weighted summaries when the IRLS geometry has not changed much.
 
 !!! tip "Recommended workflow for spline-based GAM models"
-    Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `selection_penalty > 0`.
+    Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — reference-style automatic term selection without needing `selection_penalty > 0`.
 
 !!! note "Current multi-penalty guard rails"
     The exact and discrete REML paths support shared-block multi-penalty terms
@@ -503,7 +503,7 @@ For this repo's problem shape, proximal Newton BCD is a defensible choice.
 
 ### 8.1 Why not plain coordinate descent?
 
-Plain coordinate descent is strongest when the penalty is coordinate-separable and the updates are scalar, like glmnet-style lasso.
+Plain coordinate descent is strongest when the penalty is coordinate-separable and the updates are scalar, like the reference lasso implementation-style lasso.
 
 Your problem is group-structured, so block updates are a more natural fit than scalar updates.
 
@@ -870,7 +870,7 @@ In this repo: `src/superglm/reml_optimizer.py::optimize_efs_reml`.
 
 There is no single universal "meta" that every library follows, because libraries are solving slightly different problems.
 
-But for spline-based GAM smoothness selection, `REML` and `fREML` are absolutely mainstream choices, especially in the `mgcv` tradition.
+But for spline-based GAM smoothness selection, `REML` and `fREML` are absolutely mainstream choices, especially in the `the reference implementation` tradition.
 
 At the same time:
 

@@ -629,8 +629,8 @@ rtk uv run pytest \
   tests/test_factor_smooth_structured_system.py \
   tests/test_factor_smooth_reml.py \
   tests/test_factor_smooth_sz_reml.py \
-  tests/test_factor_smooth_mgcv_parity.py \
-  tests/test_factor_smooth_sz_mgcv_parity.py \
+  tests/test_factor_smooth_the reference implementation_parity.py \
+  tests/test_factor_smooth_sz_the reference implementation_parity.py \
   -q
 rtk uv run ruff check src/superglm/ tests/test_factor_smooth_* tests/test_structured_allocations.py
 ```
@@ -1052,7 +1052,7 @@ rtk uv run pytest \
   tests/test_factor_smooth_feature.py \
   tests/test_factor_smooth_inference.py \
   tests/test_factor_smooth_matrix.py \
-  tests/test_factor_smooth_mgcv_parity.py \
+  tests/test_factor_smooth_the reference implementation_parity.py \
   tests/test_factor_smooth_penalties.py \
   tests/test_factor_smooth_reml.py \
   tests/test_factor_smooth_structured_parity.py \
@@ -1060,7 +1060,7 @@ rtk uv run pytest \
   tests/test_factor_smooth_sz_feature.py \
   tests/test_factor_smooth_sz_inference.py \
   tests/test_factor_smooth_sz_matrix.py \
-  tests/test_factor_smooth_sz_mgcv_parity.py \
+  tests/test_factor_smooth_sz_the reference implementation_parity.py \
   tests/test_factor_smooth_sz_penalties.py \
   tests/test_factor_smooth_sz_reml.py \
   tests/test_structured_allocations.py \

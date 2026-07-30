@@ -78,7 +78,7 @@ when requested with `"auto"`. REML accepts only `None` or `0.0`; use spline
 
 This is the recommended path for spline-heavy GAM-style pricing models. Use it
 when you want automatic smoothness selection, interpretable smooth terms, and
-mgcv-style modeling rather than sparse screening.
+penalised smooth modelling rather than sparse screening.
 
 ```python
 model = SuperGLM(
@@ -125,7 +125,7 @@ model.fit(df, y, sample_weight=exposure)
 
 ### `select=True`
 
-`select=True` on spline terms adds mgcv-style double-penalty shrinkage. This is
+`select=True` on spline terms adds double-penalty shrinkage. This is
 the REML-native way to let smooth terms shrink toward linear or zero while
 staying in the `fit_reml()` workflow.
 

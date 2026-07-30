@@ -1,4 +1,4 @@
-"""Pinned clean-room parity against mgcv 1.9-4 ``bs="sz"``."""
+"""Pinned clean-room parity against a pinned external reference, sum-to-zero factor smooth."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from superglm import FactorSmooth, Spline, SuperGLM
 from superglm.factor_smooth_geometry import sum_to_zero_penalty
 from superglm.group_matrix import FactorSmoothGroupMatrix
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "factor_smooth_sz_mgcv_reference.json"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "factor_smooth_sz_reference.json"
 _CASE_NAMES = ("gaussian", "poisson", "poisson_discrete")
 
 
 @pytest.fixture(scope="module")
-def mgcv_sz_fixture() -> dict:
+def reference_sz_fixture() -> dict:
     return json.loads(_FIXTURE_PATH.read_text())
 
 
@@ -27,15 +27,15 @@ def _fortran_matrix(flat: list[float], dimensions: list[int]) -> np.ndarray:
 
 
 def test_sz_reference_fixture_is_versioned_and_has_shared_geometry(
-    mgcv_sz_fixture: dict,
+    reference_sz_fixture: dict,
 ) -> None:
-    metadata = mgcv_sz_fixture["metadata"]
-    construction = mgcv_sz_fixture["construction"]
-
-    assert metadata["r_version"] == "R version 4.5.3 (2026-03-11)"
-    assert metadata["mgcv_version"] == "1.9.4"
+    metadata = reference_sz_fixture["metadata"]
+    construction = reference_sz_fixture["construction"]
+    assert metadata["reference_version"] == "1.9.4"
     assert metadata["seed"] == 20260725
-    assert metadata["sz_term"] == ('s(x, f, bs="sz", k=6, xt=list(bs="ps"), m=2, id=1)')
+    assert metadata["sz_term"] == (
+        "sum-to-zero factor-smooth interaction, P-spline marginal, k=6, m=2"
+    )
     assert construction["design_dim"] == [48, 18]
     assert construction["penalty_count"] == 1
     assert construction["penalty_rank"] == 12
@@ -44,10 +44,10 @@ def test_sz_reference_fixture_is_versioned_and_has_shared_geometry(
     assert construction["prediction_dim"] == [1, 18]
 
 
-def test_sz_construction_matches_mgcv_sorted_contrast_coordinates(
-    mgcv_sz_fixture: dict,
+def test_sz_construction_matches_reference_sorted_contrast_coordinates(
+    reference_sz_fixture: dict,
 ) -> None:
-    construction = mgcv_sz_fixture["construction"]
+    construction = reference_sz_fixture["construction"]
     x = np.asarray(construction["data"]["x"], dtype=np.float64)
     group = np.asarray(construction["data"]["f"], dtype=object)
     spec = FactorSmooth(
@@ -119,10 +119,10 @@ def test_sz_construction_matches_mgcv_sorted_contrast_coordinates(
 
 
 @pytest.fixture(scope="module")
-def fitted_sz_cases(mgcv_sz_fixture: dict) -> dict[str, SuperGLM]:
+def fitted_sz_cases(reference_sz_fixture: dict) -> dict[str, SuperGLM]:
     fitted: dict[str, SuperGLM] = {}
     for name in _CASE_NAMES:
-        case = mgcv_sz_fixture[name]
+        case = reference_sz_fixture[name]
         data = case["data"]
         X = pd.DataFrame({"x": data["x"], "f": data["f"]})
         y = np.asarray(data["y"], dtype=np.float64)
@@ -203,8 +203,8 @@ def _unseen_frame(case: dict) -> tuple[pd.DataFrame, np.ndarray | None]:
         ("poisson_discrete", 1.2e-2, 8.0e-4, 3.0e-7, 1.2e-1),
     ],
 )
-def test_sz_fit_matches_mgcv_reml_and_freml(
-    mgcv_sz_fixture: dict,
+def test_sz_fit_matches_reference_reml_and_freml(
+    reference_sz_fixture: dict,
     fitted_sz_cases: dict[str, SuperGLM],
     name: str,
     prediction_rtol: float,
@@ -212,7 +212,7 @@ def test_sz_fit_matches_mgcv_reml_and_freml(
     deviance_atol: float,
     edf_atol: float,
 ) -> None:
-    case = mgcv_sz_fixture[name]
+    case = reference_sz_fixture[name]
     reference = case["reference"]
     model = fitted_sz_cases[name]
     prediction_frame, offset = _prediction_frame(case)
@@ -281,12 +281,12 @@ def test_sz_fit_matches_mgcv_reml_and_freml(
 
 
 @pytest.mark.parametrize("name", _CASE_NAMES)
-def test_sz_unseen_population_matches_mgcv_term_exclusion(
-    mgcv_sz_fixture: dict,
+def test_sz_unseen_population_matches_reference_term_exclusion(
+    reference_sz_fixture: dict,
     fitted_sz_cases: dict[str, SuperGLM],
     name: str,
 ) -> None:
-    case = mgcv_sz_fixture[name]
+    case = reference_sz_fixture[name]
     model = fitted_sz_cases[name]
     frame, offset = _unseen_frame(case)
     conditional = model.predict(frame, offset=offset, random_effects="conditional")
@@ -302,14 +302,14 @@ def test_sz_unseen_population_matches_mgcv_term_exclusion(
 
 
 def test_sz_superglm_exact_and_discrete_predictions_match(
-    mgcv_sz_fixture: dict,
+    reference_sz_fixture: dict,
     fitted_sz_cases: dict[str, SuperGLM],
 ) -> None:
-    frame, offset = _prediction_frame(mgcv_sz_fixture["poisson"])
+    frame, offset = _prediction_frame(reference_sz_fixture["poisson"])
     exact = fitted_sz_cases["poisson"]
     discrete = fitted_sz_cases["poisson_discrete"]
 
-    # mgcv's own exact-versus-discrete fixture differs by up to 0.351%
+    # the reference implementation's own exact-versus-discrete fixture differs by up to 0.351%
     # here, so this bound captures measured binning/fREML geometry rather than
     # demanding identity between the two algorithms.
     np.testing.assert_allclose(
@@ -322,10 +322,10 @@ def test_sz_superglm_exact_and_discrete_predictions_match(
 
 
 def test_discrete_sz_terminal_lambdas_are_the_evaluated_candidate(
-    mgcv_sz_fixture: dict,
+    reference_sz_fixture: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    case = mgcv_sz_fixture["poisson_discrete"]
+    case = reference_sz_fixture["poisson_discrete"]
     data = case["data"]
     X = pd.DataFrame({"x": data["x"], "f": data["f"]})
     y = np.asarray(data["y"], dtype=np.float64)

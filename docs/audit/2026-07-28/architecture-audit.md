@@ -130,10 +130,10 @@ p≈2–5k; peak RSS 726 MB at p=834 incl. ~300 MB interpreter baseline.
 
 ### B.4 Benchmark-evidence correction (verified twice, independently)
 
-The repo's tracked flagship comparison (`benchmarks/results/superglm_30rep.json`: median 2.102 s vs mgcv 1.567 s,
+The repo's tracked flagship comparison (`benchmarks/results/superglm_30rep.json`: median 2.102 s vs the reference implementation 1.567 s,
 "1.34× slower") is **stale and unrunnable**: `timing_30rep_superglm.py` uses two removed ctor/fit kwargs
 (`lambda1=`, `exposure=`) and TypeErrors at HEAD. Re-measured at f082e9b on the same freMTPL2 n=678k task
-(deviance parity 212055.39 reproduced): **master now beats mgcv, ~1.36 s vs 1.57 s** (independent verifier
+(deviance parity 212055.39 reproduced): **master now beats the reference implementation, ~1.36 s vs 1.57 s** (independent verifier
 certifies ≥1.25× improvement over the tracked superglm numbers even under heavy box load). The public speed
 narrative is currently backed by broken, dirty-tree-provenance artifacts — see RFC-15.
 
@@ -298,7 +298,7 @@ Ranking = verified impact ÷ risk. Sev/conf are post-verification. "Validation" 
 | 12 | **Exact-path cached line-search trials** | med/adjusted | trials are 17% of b_L800 optimizer wall (92% claim corrected — candidate fits dominate and stay); 8 trials measured | b_L800-class −~15% | exact Armijo re-check at acceptance mandatory; fall back to exact trials before declaring line_search failure | b_L800 re-profile + convergence suite |
 | 13 | **Behavioral small-fix batch**: max_iter=0 UnboundLocalError → ValueError; port polarization merit_delta to pirls (extended with group-lasso delta term); QP pure-H solves through rank policy + surface QPResult.converged; observed-fallback silent-drop → warning | med/confirmed | all reproduced through public API; merit divergence shown to misread a −1.5e-7 improvement as +1.7e-5 | correctness hygiene | none material | targeted unit tests per item |
 | 14 | **Sparse-factor + selected-inverse (Takahashi) backend** — generalises the one-block structured Schur | high/adjusted | single-dominant-block gate verified; realistic credibility models are multi-block; the shipped #165 factor protocol (`selected_inverse_diagonal`, `trace_inverse_penalty`, `logdet`) is already the right seam, hand-rolled for one block | wide-categorical/credibility fits escape dense p³ **and** exact REML survives at large p (§H.4); subsumes RFC-7's dense-inverse removal | fill-reducing ordering quality determines everything; must bound DLR trace-machinery rank growth; keep the dense path as reference oracle | dense-vs-sparse agreement on models small enough for both (the #165 design already mandates this); b_L800-class + credibility benchmark |
-| 15 | **Benchmark repair + CI perf gate** | med/confirmed | flagship harness TypeErrors at HEAD; dirty-tree baseline; no wall-time gate anywhere; master actually beats mgcv now (B.4) | speed narrative becomes enforceable; regressions visible | keep R/mgcv side version-pinned | fixed 30-rep harness in CI (reduced reps) with threshold vs tracked baseline |
+| 15 | **Benchmark repair + CI perf gate** | med/confirmed | flagship harness TypeErrors at HEAD; dirty-tree baseline; no wall-time gate anywhere; master actually beats the reference implementation now (B.4) | speed narrative becomes enforceable; regressions visible | keep R/the reference implementation side version-pinned | fixed 30-rep harness in CI (reduced reps) with threshold vs tracked baseline |
 | 16 | **CurvatureProvider + typed solver contract** | med/confirmed | four geometry homes, two divergent mode-score normalisation policies; stringly cache_out consumed via bare string keys | one geometry seam; enables backend evolution | mode-score reconciliation may flip accept/reject near boundaries — needs tolerance study | observed-geometry + SCOP suites |
 | 17 | **Sequential strong rules on fit_path** (after RFC-3) | low/confirmed | per-group Hessians+eigensystems rebuilt for ALL groups every outer iteration; KKT verifier exists (`_composite_kkt_violation`) | path fits on wide models | screening economics modest at insurance p; sequenced last | path-KKT exactness test |
 
@@ -335,7 +335,7 @@ fallback preserved.
 
 1. ⚠ **RFC-15 first, not fourth.** Repair the flagship harness (two removed kwargs), regenerate baselines from
    a clean tree, record commit hashes, wire a reduced-rep wall-time gate into CI. Half a day, and it is the
-   instrument every later gate reads. It also publishes the fact that master already beats mgcv (~1.36 s vs
+   instrument every later gate reads. It also publishes the fact that master already beats the reference implementation (~1.36 s vs
    1.57 s), which today is claimed nowhere and contradicted by the tracked artifacts.
 2. RFC-3 λmax/auto calibration (+ non-canonical-link family factor) with KKT boundary tests. Minor-version
    bugfix with a prominent changelog entry: `selection_penalty="auto"` currently resolves ~n× too weak, so
@@ -377,7 +377,7 @@ fallback preserved.
 10. RFC-5 fit() validation gate; RFC-11 terminal/bootstrap dedup; RFC-9 discrete build/support reuse.
     **Gate:** n-scaling re-profile — discrete 1M ≤ ~8 s (from 17.6), exact 1M ≤ ~30 s (from 53.7), fit() 1M
     overhead ≤ 5%; discrete-vs-exact parity suite unchanged; bit-identical results across thread counts;
-    flagship CI margin over mgcv widens.
+    flagship CI margin over the reference implementation widens.
 
 ### Tranche 3 — Exact-REML performance
 
@@ -428,10 +428,10 @@ first-party kernels.
 1. **Fused single-pass all-pairs discrete Gram kernel** ("one sweep over an (n,G) code matrix"). Measured
    3-8.5× **slower** than the existing per-pair histogram passes (105 scattered updates/row across a 55 MB
    working set vs one L2-resident 512 KB histogram per pass). Per-pair bin-space accumulation is the correct
-   target; mgcv's XWXd is itself per-term-pair, not one all-pairs sweep.
+   target; the reference implementation's XWXd is itself per-term-pair, not one all-pairs sweep.
 2. **Stochastic trace/log-det (Hutchinson/SLQ)**. Wrong for the niche: exact insurance-scale p (10²-10⁴) is
    served by dense/structured exact factorizations; SLQ's error×iteration budget only pays at p≳10⁵ and
-   would put a Monte-Carlo tolerance inside a criterion the project promises matches mgcv.
+   would put a Monte-Carlo tolerance inside a criterion the project promises matches the reference implementation.
 3. **Iterative solvers + block/low-rank preconditioners as a solve backend**. Same niche argument; the
    structured Schur backend already covers the genuinely-large-p credibility case exactly. Quarantine the
    default-off MINRES prototype hooks out of the production SCOP module instead (C-8).
@@ -516,7 +516,7 @@ before any statistical shortcut. Three currently-unclaimed levers make up that l
 Of the ~14 full-data passes a discrete fit performs, most serve the **smoothing-parameter search**, not the
 final coefficient fit. λ is a low-dimensional nuisance parameter whose selection error at n=10⁷ is already
 negligible for prediction. Selecting λ on a subsample and running only the terminal PIRLS on all rows
-(mgcv gestures at this with `bam(samfrac=)`) collapses 14 full passes to ~3-5, a further **~3×** that composes
+(the reference implementation gestures at this with `bam(samfrac=)`) collapses 14 full passes to ~3-5, a further **~3×** that composes
 with everything in H.2. Combined ceiling: **a billion-row, 20-term GAM in ~15-20 s on one machine.**
 This deserves its own design note — the contract question is what to promise about λ̂ reproducibility.
 
@@ -528,7 +528,7 @@ Bin-space accumulation reduces the *n* factor only. For large p the ladder is:
 - **p ~10³-10⁵ dominated by high-cardinality factors** (the realistic insurance case: many rating levels,
   credibility/random effects). A single categorical's own `XᵀWX` block is **diagonal** — each row touches one
   level — so eliminating it by Schur complement is O(L), not O(L³). Nested Schur elimination plus a
-  fill-reducing sparse Cholesky (CHOLMOD/AMD, as `lme4` and `mgcv::gamm` use) keeps `log|XᵀWX+S|` exact.
+  fill-reducing sparse Cholesky (CHOLMOD/AMD, as `lme4` and `the reference GAM implementationm` use) keeps `log|XᵀWX+S|` exact.
 
   **The piece that completes it: Takahashi's equations (selected inverse).** A sparse factor alone is not
   enough for REML, which also needs `tr(H⁻¹S_j)` per penalty, `diag(H⁻¹)` for EDF and standard errors, and
@@ -558,7 +558,7 @@ Bin-space accumulation reduces the *n* factor only. For large p the ladder is:
 - **p ≳ 10⁵ with dense coupling** (e.g. many continuous×continuous tensor interactions) — no structural escape;
   iterative solves plus stochastic log-det/trace become necessary, **and exact REML is lost**. Note this is
   precisely the machinery rejected in §G for the current niche: the rejection is niche-specific, not permanent.
-  The honest statement is that **exact REML and dense-coupled p ≳ 10⁵ are in tension**, and mgcv does not go
+  The honest statement is that **exact REML and dense-coupled p ≳ 10⁵ are in tension**, and the reference implementation does not go
   there either.
 
 ### H.5 If distribution is genuinely required
@@ -618,7 +618,7 @@ iteration, and `inference/covariance.py` builds a second one by another route. T
 **RFC-14 gains a verified architecture and a gate.** sparse Cholesky → Takahashi selected inversion (first-order
 traces + `diag(H⁻¹)`) → AI (curvature) is the ASReml/BLUPF90/WOMBAT standard; Takahashi and AI are
 **complements** (the first-order trace does not cancel under AI). Evaluate **Smith (1995) reverse-mode Cholesky
-AD** as a cheaper gradient route — **LMMsolver (Boer 2023) reports mgcv 600 s → 1 s and 38 min → 30 s**.
+AD** as a cheaper gradient route — **LMMsolver (Boer 2023) reports the reference implementation 600 s → 1 s and 38 min → 30 s**.
 scikit-sparse has no selected inversion (PR unmerged) — **port Davis's `sparseinv`, ~200 lines, BSD-3**, which
 also resolves the GPL concern. **Gate on a measured `nnz(L_H)`**: MSSM found sparse Cholesky *slower* than
 dense when H wasn't genuinely sparse.
@@ -642,7 +642,7 @@ EDF < ~0.01/term instead (2-5 passes). Li & Wood's loop order is column-major-tu
 for row-major (**NumPy is C-order**); and **BLAS quality alone was 10×** in their timings — audit which BLAS
 this path hits.
 
-**Subsample-λ, corrected.** λ̂ is **not** scale-free in n (measured `d log λ̂/d log n = 0.43`), and mgcv's
+**Subsample-λ, corrected.** λ̂ is **not** scale-free in n (measured `d log λ̂/d log n = 0.43`), and the reference implementation's
 `samfrac` carries only coefficients, never `sp`, and is skipped under `discrete=TRUE`. The defensible version is
 **warm-starting λ from a rescaled subsample fit and converging on full data** — start-independent fixed point,
 zero contract change, ~2-2.5×. Frozen-λ, if ever shipped, must be refused under `select=True`.
@@ -671,14 +671,14 @@ reference box; the 5950X numbers above no longer bind). All numbers below are sa
 | **RFC-1 raw-moment centering rung** | sound; certificate bounds cancellation ratio ≤2; rejection latches per fit, success re-certifies per W. ⚠ **anchor shift NOT implemented** — ill-located Dense numerics (VehPower-shape) still latch to chunked | part of the 51.8→11.9 s composite |
 | **RFC-3 λ_max calibration** | correct; score `w·(dμ/dη)(y−μ)/V` matches solver KKT threshold exactly; α division for elastic net; behaviorally pinned 24/24 @1.01×, 23/24 @0.99× | `selection_penalty="auto"`/`fit_path` now meaningful (bugfix release + changelog) |
 | **Line-search trial carry-forward** | sound; not bit-identical (different warm start, same fixed point), honestly documented; call-site parameter parity verified | 7 of 8 candidate fits eliminated on the flagship |
-| **Discrete tensor cross-constraint removal** | correct root-cause fix: null(C) ⊇ the block's own null space, so the projection either no-ops or retains garbage; ti() marginal centering keeps shared-marginal tensors jointly identifiable; matches exact path & mgcv | discrete shared-marginal models fit instead of raising; deviance parity 2.6e-5 |
+| **Discrete tensor cross-constraint removal** | correct root-cause fix: null(C) ⊇ the block's own null space, so the projection either no-ops or retains garbage; ti() marginal centering keeps shared-marginal tensors jointly identifiable; matches exact path & the reference implementation | discrete shared-marginal models fit instead of raising; deviance parity 2.6e-5 |
 | **RFC-6a spike: AI-REML** | **rejection CONFIRMED** — REML Hessian is 0.04–0.49% of wall; 6 outer Newton iters ≤ AIREMLF90's own 5–15; the research headline compared AI vs EM-REML, and AI-REML keeps the exact gradient so it never touched the W-correction cost either | RFC-6 deletion path unblocked (deprecation cycle for `run_reml_once`/`optimize_efs_reml` re-exports, then delete ~950+290 LOC) |
 | **NEW · RFC-12a: in-loop fits skip rank metadata** (commit 096c171) | in-loop candidates/trials never consumed fit statistics; the three O(p) quantities the gradient/objective read (mean_x, sum_w, data-gram column scales) now travel on a `REMLGeometrySummary`; terminal refit unchanged → published stats unchanged; trace/debug runs keep full stats | tensor exact **11.90→5.99 s**, base exact 2.92→2.25 s; streamed-QR certifications 11→2 per fit; trajectory identical (8 iters, 7 reuses) |
 | **NEW · hashed row grouping** (commit bb9ed48) | detection was the last big cost (byte-keyed lexicographic sort, 1.34 s of a 5.7 s fit); now a verified 64-bit mix: 8-byte sort + bitwise verification, collision → byte-keyed fallback; deterministic across machines; NaN/−0.0 semantics preserved | base exact **2.25→1.12 s**, tensor exact **5.99→4.70 s** |
 
 **Cumulative, master f082e9b → branch HEAD, same box:** base exact 8.59→**1.26 s (~6.8×)**, tensor exact
 51.77→**4.46 s (~11.6×)** (branch numbers are medians, see below; the master baselines are single runs).
-The suite is green throughout (4723 passed incl. mgcv parity, Wood oracles, FD gradients, freMTPL2 real-data
+The suite is green throughout (4723 passed incl. reference parity, Wood oracles, FD gradients, freMTPL2 real-data
 parity).
 
 ⚠ **Correction (same day, median re-measurement):** an earlier draft of this section (and commit bb9ed48's
@@ -709,7 +709,7 @@ design.
 - **RFC-12 splits:** 12a landed (above). **12b — cached-factorization trial evaluation with exact Armijo
   re-check at acceptance — is the next big exact-path item** (line search still 1.5 s of the 4.7 s tensor fit;
   trials still run full PIRLS). Template: Wood's NCV machinery (arXiv:2404.16490) — rank-1 Givens/hyperbolic
-  up/downdates of the retained Cholesky, Woodbury fallback; mgcv-grade production precedent. Prerequisite is a
+  up/downdates of the retained Cholesky, Woodbury fallback; the reference implementation-grade production precedent. Prerequisite is a
   retained factor on the result (RFC-7's factor protocol seam).
 - **RFC-18 (detection cost) resolved** by the hashed grouping — the `plan_row_support` covariate-plumbing
   variant is no longer worth its GroupInfo surface change; keep `plan_row_support` as the seam for callers that

@@ -193,7 +193,7 @@ def build_superglm_control_profiles() -> tuple[FitControls, ...]:
             max_reml_iter=20,
             runtime_validation="full",
         ),
-        FitControls("S2_mgcv_ish", pirls_tol=1e-7, reml_tol=1e-6, max_reml_iter=20),
+        FitControls("S2_reference_ish", pirls_tol=1e-7, reml_tol=1e-6, max_reml_iter=20),
         FitControls("S3_practical", pirls_tol=1e-6, reml_tol=1e-6, max_reml_iter=20),
         FitControls(
             "S4_relaxed_candidate",

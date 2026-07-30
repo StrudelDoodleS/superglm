@@ -61,7 +61,7 @@ find, not finding it.
 ## Caveats carried forward
 
 - The row-tensor identity is a **combination** of two published results (Currie–Durbán–Eilers' G-operator and
-  Li & Wood's marginal bin space) not published as such; mgcv does not appear to do it. Validate carefully.
+  Li & Wood's marginal bin space) not published as such; the reference implementation does not appear to do it. Validate carefully.
 - The score-statistic derivation for discovery is **inferred, not verified** — check before building on it.
 - Screening candidates invalidates naive p-values; discovery needs held-out validation or selective inference
   before anything ships to a pricing context.

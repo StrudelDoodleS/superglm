@@ -1,4 +1,4 @@
-"""Tests for mgcv-style spline decomposition (select=True, double penalty)."""
+"""Tests for the reference implementation-style spline decomposition (select=True, double penalty)."""
 
 import numpy as np
 import pandas as pd
