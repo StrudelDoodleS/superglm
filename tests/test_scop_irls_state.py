@@ -334,6 +334,60 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
     np.testing.assert_allclose(state["H_scop_penalized"], expected)
 
 
+@pytest.mark.parametrize(
+    ("alpha", "halvings", "rejected"),
+    [(0.5, 1, False), (0.25, 2, False), (1.0, 0, True)],
+)
+def test_stagnation_channel_matches_the_recorder_on_step_quality(
+    monkeypatch, alpha, halvings, rejected
+) -> None:
+    """The two per-iteration channels must agree on the step-quality fields too.
+
+    ``test_both_channels_agree_entry_for_entry`` compares the narrow channel
+    against the full recorder over a real SCOP REML fit, but every record that
+    corpus produces carries ``step_rejected=False`` and ``step_halvings=0`` --
+    measured: 69 records, 2 inner fits, zero of each.  So it pins the deviance
+    and nothing else, and mutating the narrow append to skip rejected steps
+    passes it.  This drives both fields directly instead of hoping a fixture
+    reaches them.
+    """
+    import superglm.solvers.irls_direct as irls_direct
+
+    model, y, weights, offset = _scop_fit_inputs()
+
+    def forced_decision(**kwargs):
+        kwargs["evaluate_state"](alpha)
+        return _IRLSStepDecision(alpha, halvings, rejected, trials_attempted=halvings + 1)
+
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", forced_decision)
+    result, _ = irls_direct.fit_irls_direct(
+        model._dm,
+        y,
+        weights,
+        model._distribution,
+        model._link,
+        model._groups,
+        lambda2={"x": 1.0},
+        offset=offset,
+        max_iter=1,
+        record_diagnostics=True,
+        _record_stagnation=True,
+    )
+
+    assert result.iteration_log is not None
+    assert result.stagnation_log is not None
+    assert len(result.stagnation_log) == len(result.iteration_log)
+    for record, row in zip(result.stagnation_log, result.iteration_log, strict=True):
+        assert np.float64(record.deviance).tobytes() == np.float64(row.deviance).tobytes()
+        assert record.step_rejected == row.step_rejected
+        assert record.step_halvings == row.step_halvings
+
+    # Without this the parametrization could be inert and the comparison above
+    # would be pinning the same all-zero case three times.
+    assert result.stagnation_log[0].step_halvings == halvings
+    assert result.stagnation_log[0].step_rejected is rejected
+
+
 def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) -> None:
     """The fallback flag must describe the refreshed terminal Hessian block."""
     from dataclasses import replace
