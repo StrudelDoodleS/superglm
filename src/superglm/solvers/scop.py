@@ -34,6 +34,21 @@ SCOPKind = str
 _VALID_KINDS = {"increasing", "decreasing", "convex", "concave"}
 
 
+def _warn_qp_initialization_fallback(space: str) -> None:
+    """Warn that a ``qp_initialize`` QP did not converge.
+
+    ``space`` is ``"raw-space"`` or ``"solver-space"``: the two initialization
+    paths must stay distinguishable in a log, which is the only thing that
+    differs between them.  Interpolated lazily so the rendered text is
+    byte-identical to the two hand-written messages this replaced.
+    """
+    logger.warning(
+        "SCOP %s QP initialization did not converge; falling back "
+        "to an approximate shape-constrained starting point.",
+        space,
+    )
+
+
 def _resolve_kind(kind: SCOPKind | None, direction: str | None) -> SCOPKind:
     resolved = kind or direction or "increasing"
     if kind is not None and direction is not None and kind != direction:
@@ -173,10 +188,7 @@ class SCOPReparameterization:
 
         result = solve_constrained_qp(H, g, A, b)
         if not result.converged:
-            logger.warning(
-                "SCOP raw-space QP initialization did not converge; falling back "
-                "to an approximate shape-constrained starting point."
-            )
+            _warn_qp_initialization_fallback("raw-space")
         beta_tilde_init = result.beta
 
         beta = np.array(beta_tilde_init, copy=True)
@@ -291,10 +303,7 @@ class SCOPSolverReparam:
 
         result = solve_constrained_qp(H, g, A, b)
         if not result.converged:
-            logger.warning(
-                "SCOP solver-space QP initialization did not converge; falling "
-                "back to an approximate shape-constrained starting point."
-            )
+            _warn_qp_initialization_fallback("solver-space")
         beta_tilde_eff = result.beta
         return np.log(np.maximum(beta_tilde_eff, 1e-8))
 

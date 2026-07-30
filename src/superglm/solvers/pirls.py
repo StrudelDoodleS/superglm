@@ -725,6 +725,18 @@ def _fit_pirls_inner(
             ("smooth", float(lambda2)),
         )
 
+    def nonsmooth_merit(values: NDArray) -> float:
+        """The selection penalty on the *merit* convention.
+
+        The composite objective is ``0.5 * D + 0.5 * b' S b + penalty.eval(b)``
+        and the merit tracked here is twice it, on the deviance scale, so the
+        nonsmooth term enters at ``2 *``.  The recorded ``penalized_deviance``
+        and the line search's merit delta must agree on that factor or the
+        search would optimize a different objective than the one it records --
+        the exact incoherence this shared closure exists to prevent.
+        """
+        return 2.0 * float(penalty.eval(values, groups))
+
     def evaluate_state(
         beta_values: NDArray,
         intercept_value: float,
@@ -765,7 +777,7 @@ def _fit_pirls_inner(
                     if has_smooth_penalty and S is not None
                     else 0.0
                 )
-                + 2.0 * float(penalty.eval(state.beta, groups))
+                + nonsmooth_merit(state.beta)
             ),
         )
         if trace_enabled:
@@ -1054,7 +1066,7 @@ def _fit_pirls_inner(
                 candidate,
                 base,
                 S,
-                nonsmooth_penalty=lambda values: 2.0 * float(penalty.eval(values, groups)),
+                nonsmooth_penalty=nonsmooth_merit,
             ),
         )
         retained = committed if decision.step_rejected else trial_cache[decision.alpha]
