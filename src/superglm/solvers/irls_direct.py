@@ -68,6 +68,7 @@ from superglm.solvers.pirls import (
     IterationDiagnostics,
     PIRLSResult,
     REMLGeometrySummary,
+    StagnationRecord,
     _extreme_weight_indices,
     _positive_working_weight_stats,
 )
@@ -378,6 +379,7 @@ def fit_irls_direct(
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
     _compute_scop_postfit_inference: bool = True,
+    _record_stagnation: bool = False,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
     if max_iter < 1:
@@ -422,6 +424,7 @@ def fit_irls_direct(
             trace_run=trace_run,
             trace_purpose=trace_purpose,
             _compute_scop_postfit_inference=_compute_scop_postfit_inference,
+            _record_stagnation=_record_stagnation,
         )
 
     try:
@@ -473,6 +476,7 @@ def _fit_irls_direct_once(
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
     _compute_scop_postfit_inference: bool = True,
+    _record_stagnation: bool = False,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -548,6 +552,11 @@ def _fit_irls_direct_once(
         terminal/public mode installs covariance and EDF exactly once.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
+    _record_stagnation : bool
+        Internal narrow channel, independent of ``record_diagnostics``. Records
+        only ``(deviance, step_rejected, step_halvings)`` per iteration, on
+        ``result.stagnation_log``, for callers that classify how a fit ended
+        without needing the full diagnostics row or its O(n) extrema passes.
     S_override : (p, p) ndarray, optional
         Pre-built penalty matrix.  When provided, skips internal
         ``_build_penalty_matrix`` call entirely.
@@ -1238,6 +1247,10 @@ def _fit_irls_direct_once(
     # Always an empty list; only ``record_diagnostics`` decides whether rows are
     # appended and whether it is published on the result.
     iteration_log: list[IterationDiagnostics] = []
+    # Same convention for the narrow channel. It is deliberately not derived
+    # from ``record_diagnostics``: the whole point is that a caller can have
+    # these three scalars without the forty-field row or ``capture_extrema``.
+    stagnation_log: list[StagnationRecord] = []
     base_debug_context = dict(debug_context or {})
     # Level 2 fixes the row schema for the whole fit, so snapshot it at fit entry.
     record_debug_rows = (
@@ -1949,6 +1962,19 @@ def _fit_irls_direct_once(
             )
             eta_clipped = bool(eta_min_unclipped < eta_min or eta_max_unclipped > eta_max)
 
+        # Narrow per-iteration record. Written from the same loop variables as
+        # the diagnostics row below and at the same point in the iteration --
+        # before the non-finite-deviance break -- so the two channels always
+        # carry identical values over identical iteration ranges.
+        if _record_stagnation:
+            stagnation_log.append(
+                StagnationRecord(
+                    deviance=dev,
+                    step_rejected=step_rejected,
+                    step_halvings=n_halvings,
+                )
+            )
+
         # Record per-iteration diagnostics
         if record_diagnostics:
             top_idx, bot_idx = _extreme_weight_indices(W)
@@ -2498,6 +2524,7 @@ def _fit_irls_direct_once(
         phi=phi,
         effective_df=p_eff,
         iteration_log=iteration_log if record_diagnostics else None,
+        stagnation_log=stagnation_log if _record_stagnation else None,
         log_det_H=log_det_H,
         reml_hessian_rank=reml_hessian_rank,
         reml_geometry=reml_geometry_summary,
