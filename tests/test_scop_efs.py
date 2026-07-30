@@ -2408,7 +2408,7 @@ class TestSCOPBoundaryStagnationAcceptance:
         return SimpleNamespace(
             converged=False,
             termination_reason=reason,
-            iteration_log=[cls._entry(d) for d in deviances],
+            stagnation_log=[cls._entry(d) for d in deviances],
         )
 
     @classmethod
@@ -2461,12 +2461,12 @@ class TestSCOPBoundaryStagnationAcceptance:
 
     def test_a_rejected_step_inside_the_window_is_rejected(self):
         result = self._result(self._flat(self.WINDOW + 1))
-        result.iteration_log[-1].step_rejected = True
+        result.stagnation_log[-1].step_rejected = True
         assert self._stagnated(result) is False
 
     def test_a_halved_step_inside_the_window_is_rejected(self):
         result = self._result(self._flat(self.WINDOW + 1))
-        result.iteration_log[-1].step_halvings = 1
+        result.stagnation_log[-1].step_halvings = 1
         assert self._stagnated(result) is False
 
     def test_a_non_max_iter_termination_is_rejected(self):
@@ -2480,11 +2480,16 @@ class TestSCOPBoundaryStagnationAcceptance:
             deviances[-1] = bad
             assert self._stagnated(self._result(deviances)) is False
 
-    def test_an_absent_iteration_log_is_rejected(self):
-        """An injected solver that publishes no log keeps the strict gate."""
+    def test_an_absent_stagnation_log_is_rejected(self):
+        """An injected solver that publishes no log keeps the strict gate.
+
+        The last case has no ``termination_reason`` and no per-iteration channel
+        of any kind. The gate must decline it, not raise: a result that does not
+        carry these attributes is a legitimate thing to hand the predicate.
+        """
         for log in (None, []):
             result = SimpleNamespace(
-                converged=False, termination_reason="max_iter", iteration_log=log
+                converged=False, termination_reason="max_iter", stagnation_log=log
             )
             assert self._stagnated(result) is False
         assert self._stagnated(SimpleNamespace(converged=False)) is False
@@ -2609,10 +2614,19 @@ class TestSCOPBoundaryStagnationAcceptance:
         """Too short a stagnant run is still a non-convergence."""
         assert self._run_gate(monkeypatch, self._stub(self.SHORT_RUN)) is None
 
-    def test_gate_requests_the_iteration_log_it_needs(self, monkeypatch):
+    def test_gate_requests_only_the_narrow_channel_it_needs(self, monkeypatch):
+        """The inner fits ask for the three scalars, not the full recorder.
+
+        ``record_diagnostics`` would supply the same three, but it builds a
+        forty-field row per iteration and switches on the solver's extrema
+        capture with it -- measured at 7-16% of SCOP REML wall time. Asking for
+        it here is a performance regression, so the negative half of this
+        assertion is the part that matters.
+        """
         captured = {}
         self._run_gate(monkeypatch, self._stub(self.SHORT_RUN), captured=captured)
-        assert captured["record_diagnostics"] is True
+        assert captured["_record_stagnation"] is True
+        assert captured.get("record_diagnostics", False) is False
 
     def test_a_genuinely_non_converging_fit_still_raises(self):
         """A real SCOP fit that never settles is still reported as a failure.
@@ -2638,14 +2652,74 @@ class TestSCOPBoundaryStagnationAcceptance:
             model.fit_reml(frame, response, max_reml_iter=20)
 
 
+class TestStagnationChannelMatchesTheDiagnosticsRecorder:
+    """The narrow channel must carry exactly what the full recorder would.
+
+    The gate originally read ``IterationDiagnostics`` rows, which meant every
+    SCOP inner fit paid for a forty-field row and the solver's per-iteration
+    extrema capture to hand over three scalars. It now reads
+    ``StagnationRecord``s from a narrow flag instead. Both are appended from the
+    same loop variables at the same point in the iteration; this pins that, by
+    running a real SCOP REML fit with *both* channels on and requiring exact
+    equality field by field. Byte equality is deliberate: ``allclose`` would not
+    catch a channel that had drifted onto a different quantity.
+    """
+
+    @staticmethod
+    def _bits(value):
+        return np.float64(value).tobytes()
+
+    def test_both_channels_agree_entry_for_entry(self, monkeypatch):
+        real = scop_efs_module.fit_irls_direct
+        compared = []
+
+        def both_channels(**kwargs):
+            out = real(**dict(kwargs, record_diagnostics=True))
+            result = out[0]
+            compared.append((result.stagnation_log, result.iteration_log))
+            return out
+
+        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", both_channels)
+
+        # A monotone-increasing constraint on decreasing data: SCOP coefficients
+        # run to their log-space boundary, so the fit exhausts its budget and
+        # the whole iteration history -- not just a converged tail -- is compared.
+        x = np.linspace(0.0, 1.0, 300)
+        y = 5.0 - 4.0 * x + 0.05 * np.random.default_rng(1).standard_normal(300)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(pd.DataFrame({"x": x}), y, max_reml_iter=2, max_pirls_iter=35)
+
+        assert compared, "no SCOP inner fit ran"
+        entries = 0
+        for narrow, full in compared:
+            assert narrow is not None
+            assert full is not None
+            assert len(narrow) == len(full)
+            for record, row in zip(narrow, full, strict=True):
+                assert self._bits(record.deviance) == self._bits(row.deviance)
+                assert record.step_rejected == row.step_rejected
+                assert record.step_halvings == row.step_halvings
+            entries += len(narrow)
+        # Enough iterations that agreement is evidence, not a coincidence.
+        assert entries >= 30
+
+
 class TestIterationDiagnosticsSmallSample:
     """The diagnostics recorder must survive n <= 5.
 
     ``k = min(5, n)`` makes ``k == n`` for small samples, and numpy requires
     ``-n <= kth < n``, so the bottom-k partition needs ``k - 1``. The bug was
-    latent while diagnostics were opt-in; the SCOP stagnation gate turned the
-    recorder on unconditionally, which converted it into a crash on a
-    default-argument REML fit.
+    latent while diagnostics were opt-in; the SCOP stagnation gate briefly
+    turned the recorder on unconditionally, which converted it into a crash on
+    a default-argument REML fit. The gate now reads a narrow channel and the
+    recorder is opt-in again, so the crash is no longer reachable from
+    ``fit_reml`` -- the opt-in test below is what keeps the fix pinned, and the
+    REML test below keeps small-n SCOP fits themselves covered.
     """
 
     @staticmethod
@@ -2666,7 +2740,7 @@ class TestIterationDiagnosticsSmallSample:
 
     @pytest.mark.parametrize("n", [3, 5, 6])
     def test_scop_reml_fits_small_samples_on_default_arguments(self, n):
-        """No caller opt-in involved: this is the path the gate made unconditional."""
+        """No caller opt-in involved: the default-argument SCOP REML path."""
         frame, response = self._frame(n)
         model = SuperGLM(
             family="poisson",
@@ -2692,11 +2766,12 @@ class TestIterationDiagnosticsSmallSample:
 class TestSCOPREMLDoesNotPublishDiagnostics:
     """A REML fit must not turn on a public accessor its caller never requested.
 
-    ``fit_reml`` exposes no ``record_diagnostics`` parameter and the non-SCOP
-    REML path solves with it off, so a REML caller has never been able to ask
-    for an iteration log. The stagnation gate needs one internally; it must not
-    leak onto the published result, or ``model.iteration_diagnostics()`` would
-    behave differently depending on which solver ran.
+    ``fit_reml`` exposes no diagnostics parameter and the non-SCOP REML path
+    records nothing, so a REML caller has never been able to ask for a
+    per-iteration log. The stagnation gate needs one internally -- now the
+    narrow ``stagnation_log`` rather than the full ``iteration_log`` -- and
+    neither may leak onto the published result, or a SCOP REML fit would carry
+    fields no other engine populates.
     """
 
     @staticmethod
@@ -2715,6 +2790,14 @@ class TestSCOPREMLDoesNotPublishDiagnostics:
 
     def test_published_result_carries_no_iteration_log(self):
         assert self._scop_model().result.iteration_log is None
+
+    def test_published_result_carries_no_stagnation_log(self):
+        """The gate's own channel is scrubbed too, not just the recorder's."""
+        result = self._scop_model().result
+        # The field still exists -- this passes because it was cleared, not
+        # because the attribute went missing.
+        assert hasattr(result, "stagnation_log")
+        assert result.stagnation_log is None
 
     def test_accessor_raises_as_documented(self):
         with pytest.raises(RuntimeError, match="No iteration diagnostics recorded"):

@@ -223,6 +223,31 @@ class IterationDiagnostics:
     termination_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class StagnationRecord:
+    """The three per-iteration scalars a stagnation gate reads, and nothing else.
+
+    ``IterationDiagnostics`` carries the same three among its forty fields, but
+    populating one costs roughly fourteen O(n) reductions, two ``argpartition``
+    calls and two ``argsort`` calls per iteration -- and switching it on also
+    switches on the solver's per-iteration extrema capture. A caller that only
+    needs to classify a fit's terminal behaviour should not pay for a debugging
+    record it never reads, so this is the narrow channel it asks for instead.
+    Both are written from the same loop variables in the same iteration, so a
+    deviance seen here is bitwise the one a diagnostics row would have carried.
+
+    A dataclass rather than a ``NamedTuple``: ``_freeze_result_arrays`` rebuilds
+    any tuple it meets as a plain ``tuple``, which would strip a NamedTuple of
+    its field names at the publication boundary and turn every later
+    ``entry.deviance`` into an ``AttributeError``. Dataclasses are reconstructed
+    by type, which is why ``IterationDiagnostics`` survives publication intact.
+    """
+
+    deviance: float
+    step_rejected: bool
+    step_halvings: int
+
+
 @dataclass
 class PIRLSResult:
     beta: NDArray
@@ -233,6 +258,11 @@ class PIRLSResult:
     phi: float
     effective_df: float
     iteration_log: list[IterationDiagnostics] | tuple[IterationDiagnostics, ...] | None = None
+    # Narrow per-iteration channel, independent of ``iteration_log``: populated
+    # only for the internal callers that classify terminal behaviour (the SCOP
+    # deviance-stagnation gate), and scrubbed before publication so it never
+    # becomes a solver-dependent public surface.
+    stagnation_log: list[StagnationRecord] | tuple[StagnationRecord, ...] | None = None
     # REML geometry after profiling the intercept. At full rank ``log_det_H``
     # is log|H_aug|. Under rank truncation it is the identified-coordinate
     # measure log(sum(W)) + log|H_c|_+, not the raw augmented matrix's

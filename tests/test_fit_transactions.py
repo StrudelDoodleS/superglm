@@ -21,6 +21,7 @@ from superglm.model.fit_state import (
 )
 from superglm.model.fit_workspace import FitWorkspace
 from superglm.profiling.nb import NBProfileResult
+from superglm.solvers.pirls import PIRLSResult, StagnationRecord
 
 from ._fit_state_oracles import (
     InjectedFitFailure,
@@ -362,6 +363,35 @@ def test_published_result_deeply_freezes_diagnostics_and_rank_metadata(two_fit_d
         result.iteration_log[0].deviance = -1.0
     with pytest.raises(TypeError):
         result.rank_info.group_edf[model._groups[0].name] = -1.0
+
+
+def test_published_stagnation_records_keep_their_fields():
+    """Freezing must not strip the narrow channel's records to bare tuples.
+
+    ``_freeze_result_arrays`` rebuilds any tuple it meets as a plain ``tuple``,
+    so a record type that is one would lose its field names here and every
+    later ``entry.deviance`` would raise. ``StagnationRecord`` is a dataclass
+    for exactly this reason; this pins that it stays one.
+    """
+    result = PIRLSResult(
+        beta=np.zeros(2),
+        intercept=0.0,
+        n_iter=1,
+        deviance=1.0,
+        converged=True,
+        phi=1.0,
+        effective_df=1.0,
+        stagnation_log=[StagnationRecord(deviance=1.5, step_rejected=False, step_halvings=2)],
+    )
+    result._publish()
+
+    entry = result.stagnation_log[0]
+    assert isinstance(entry, StagnationRecord)
+    assert entry.deviance == 1.5
+    assert entry.step_rejected is False
+    assert entry.step_halvings == 2
+    with pytest.raises(AttributeError):
+        entry.deviance = -1.0
 
 
 @pytest.mark.parametrize(
