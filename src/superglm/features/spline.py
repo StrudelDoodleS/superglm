@@ -65,7 +65,7 @@ class _SplineBase:
         numerical issues increase with no practical benefit.
     knot_strategy : str
         "uniform" (default) spaces knots evenly across the data range.
-        "quantile" places knots at quantiles of ``unique(x)`` (the
+        "quantile" places knots at quantiles of ``unique(x)`` (mgcv
         convention — resistant to ties). "quantile_rows" places knots
         at quantiles of all rows (``pd.qcut``-style — more knots in
         dense regions). "quantile_tempered" places knots via weighted
@@ -524,8 +524,7 @@ class BSplineSmooth(_BSplineBase):
 
     Same raw B-spline basis as ``PSpline``, but penalised via the
     *integrated squared m-th derivative* rather than the discrete
-    difference penalty.  This is the B-spline smooth with an
-    integrated-derivative penalty.
+    difference penalty.  This is the analogue of mgcv's ``"bs"`` smooth.
 
     The penalty matrix is::
 
@@ -710,7 +709,7 @@ class CubicRegressionSpline(_SplineBase):
     computed via Gauss-Legendre quadrature over each knot interval.
 
     Multi-order penalties (m tuple) are a SuperGLM extension, not strict
-    cardinal cubic regression spline parity.
+    mgcv ``bs="cr"`` parity.
 
     Parameters
     ----------
@@ -813,7 +812,7 @@ class CubicRegressionSpline(_SplineBase):
 
 
 class CardinalCRSpline(_SplineBase):
-    """Cardinal cubic regression spline (value-at-knot parameterisation).
+    """Cardinal cubic regression spline (mgcv ``bs="cr"`` parameterisation).
 
     The basis functions are the natural cubic spline cardinal functions:
     basis function *j* is the unique natural cubic spline that equals 1

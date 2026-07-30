@@ -70,7 +70,7 @@ model = SuperGLM(
 model.fit_reml(df, y, offset=log_exposure)
 ```
 
-FS is analogous to the reference implementation's `bs="fs"`: every level has a complete curve and
+FS is analogous to mgcv's `bs="fs"`: every level has a complete curve and
 shared wiggle/null-space smoothing components. It can be fitted without the
 global `Spline`; when both are present, identifiability is supplied by the
 full FS penalty, but the construction does not force the global curve to do as
@@ -98,14 +98,14 @@ model = SuperGLM(
 ).fit_reml(X, y)
 ```
 
-SZ is analogous to the reference implementation's `bs="sz"` with one shared smoothing parameter. At
+SZ is analogous to mgcv's `bs="sz"` with one shared smoothing parameter. At
 every value of `age`, the fitted regional deviations sum exactly to zero, so
 the required global `Spline` is the portfolio curve and the SZ term describes
 departures from it. Adding the global spline is therefore intended, not a
 source of duplicate main-effect geometry.
 
 `group=` names the factor whose levels receive curves. It corresponds to the
-factor argument in the reference implementation's `s(x, factor, bs=...)`; it is not a generic `by=`
+factor argument in mgcv's `s(x, factor, bs=...)`; it is not a generic `by=`
 multiplier. SuperGLM rejects a `Categorical` or `RandomEffect` main effect on
 that same grouping column because FS already contains its constant direction
 and SZ's uncentered level curves contain lower-order factor geometry. A random

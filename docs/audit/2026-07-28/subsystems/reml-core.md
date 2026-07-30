@@ -37,7 +37,7 @@ everything anyway; `superglm/__init__.py:95` imports `REMLResult` through it.
     structured backend decision `direct.py:150-158` (`resolve_structured_backend`).
   - Bootstrap: one `fit_irls_direct` at conservative lambdas (`direct.py:243-263`), then a hand-rolled FP step to
     initialise `rho` (`direct.py:322-354`) with a `select_snap` special case for `component_type == "selection"`
-    (`direct.py:338-344`) — i.e. reference-style `select=True` double-penalty null-space components.
+    (`direct.py:338-344`) — i.e. mgcv-style `select=True` double-penalty null-space components.
   - Newton loop `direct.py:364-944`: per outer iter — full PIRLS (`direct.py:387-410`), optional
     `build_observed_reml_geometry` + `observed_penalized_mode_score` (`direct.py:424-469`), objective
     (`direct.py:472-491`), gradient (`direct.py:571-579`), `reml_w_correction` (`direct.py:584-599`, skipped when
@@ -52,7 +52,7 @@ everything anyway; `superglm/__init__.py:95` imports `REMLResult` through it.
   `reml.observed_geometry`, `reml.penalty_algebra`, `reml.scale`, `reml.convergence`, `solvers.structured`,
   `solvers.hessian_factor.as_hessian_factor`.
 
-### 1.4 `reml/discrete.py` (1369 lines) — POI fREML (the reference implementation bam-style), the `discrete=True` path
+### 1.4 `reml/discrete.py` (1369 lines) — POI fREML (mgcv bam-style), the `discrete=True` path
 - `_solve_cached_profiled_system` (`discrete.py:61-129`): one lambda trial in the intercept-profiled centered geometry.
   Equilibrated Cholesky first (`discrete.py:86-119`) with rcond certification against `SHARED_RANK_POLICY`, fallback
   `decompose_gram` (`discrete.py:122-126`). Returns beta, intercept, `log_det_H = log(sum W) + log|H_c|_+`, rank.

@@ -35,8 +35,8 @@ cycle, in particular:
 - Wood and Fasiolo (2017), “A generalized Fellner-Schall method for smoothing parameter
   optimization with application to Tweedie location, scale and shape models,” Biometrics.
 
-No the reference implementation source code, implementation detail, or copied algorithm text may be used as a design or
-implementation source. No the reference implementation code may be vendored. Existing black-box parity fixtures may be
+No mgcv source code, implementation detail, or copied algorithm text may be used as a design or
+implementation source. No mgcv code may be vendored. Existing black-box parity fixtures may be
 retained as secondary regression evidence, but formulas, invariants, and implementation decisions
 must be independently derived from the published papers and documented dense oracles.
 

@@ -34,18 +34,18 @@ mismatch.
 
 ## External Reference
 
-This design follows the control-flow invariant visible in the reference implementation without copying
+This design follows the control-flow invariant visible in mgcv without copying
 its implementation. The documented discrete `bam` path uses performance
 oriented iteration and warns that POI is less stable than nested iteration:
 
-- <https://search.r-project.org/CRAN/refmans/the reference implementation/html/bam.html>
+- <https://search.r-project.org/CRAN/refmans/mgcv/html/bam.html>
 
-In the reference implementation 1.9-4's `bgam.fitd`, convergence is checked after preparing the current
+In mgcv 1.9-4's `bgam.fitd`, convergence is checked after preparing the current
 working model and before requesting the next smoothing-parameter Newton step:
 
-- <https://github.com/cran/the reference implementation/blob/master/R/bam.r#L3383-L3436>
+- <https://github.com/cran/mgcv/blob/master/R/bam.r#L3383-L3436>
 
-The relevant lesson is state coherence, not a reference-specific formula: a
+The relevant lesson is state coherence, not an mgcv-specific formula: a
 convergence decision must apply to the same smoothing parameters and
 coefficient state that will be retained.
 
@@ -135,7 +135,7 @@ Implementation follows red-green-refactor.
    exact/discrete SZ parity.
 3. Retain direct moment-oracle tests for FS and SZ across rectangular natural
    maps, signed weights, and weighted right-hand sides.
-4. Run focused discrete REML, structured solver, FactorSmooth, and reference-parity
+4. Run focused discrete REML, structured solver, FactorSmooth, and mgcv-parity
    tests.
 5. Run the complete test suite and Ruff.
 
@@ -148,7 +148,7 @@ code changes, rather than merely asserting one preferred numerical checksum.
   `(0.54884, 6.42437)` instead of the unevaluated `(0.52457, 2.36339)` step.
 - Batched and retained moment arrays must remain within floating-point
   summation error of the explicit row oracle.
-- Existing the reference implementation SZ parity and exact-versus-discrete prediction tests must pass.
+- Existing mgcv SZ parity and exact-versus-discrete prediction tests must pass.
 - Existing FS and RE behavior must remain unchanged.
 - The million-row benchmark must show no time-to-fit regression relative to
   the current retained implementation; report median timings from repeated

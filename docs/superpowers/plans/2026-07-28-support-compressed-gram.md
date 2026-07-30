@@ -11,8 +11,8 @@
 ## Global Constraints
 
 - `discrete=True` is the **lossy binned** fREML path and must not silently drift from exact. This plan's compression is **lossless deduplication**, never binning. The two must remain distinguishable in code, telemetry and `design_summary()`.
-- `select=True` (the reference implementation double penalty) and `selection_penalty > 0` (sparse group penalty) are different tools; this plan touches neither.
-- Spline `k` matches the reference implementation's basis dimension; built columns = k−1. Storage changes must not alter column counts.
+- `select=True` (mgcv double penalty) and `selection_penalty > 0` (sparse group penalty) are different tools; this plan touches neither.
+- Spline `k` matches mgcv's basis dimension; built columns = k−1. Storage changes must not alter column counts.
 - `sample_weight=` is exposure weight. `exposure=` must never be reintroduced.
 - Public API surface is unchanged by this plan. No new user-facing keyword arguments.
 - All performance claims verified with cProfile (project convention).

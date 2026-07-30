@@ -1,4 +1,4 @@
-"""Pinned predictive parity against the reference implementation's ``bs="fs"`` factor smooth."""
+"""Pinned predictive parity against mgcv's ``bs="fs"`` factor smooth."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 import superglm.features.factor_smooth as factor_smooth_module
 from superglm import FactorSmooth, Spline, SuperGLM
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "factor_smooth_reference.json"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "factor_smooth_mgcv_reference.json"
 _CASE_NAMES = (
     "gaussian",
     "poisson",
@@ -22,15 +22,15 @@ _CASE_NAMES = (
 
 
 @pytest.fixture(scope="module")
-def reference_fixture() -> dict:
+def mgcv_fixture() -> dict:
     return json.loads(_FIXTURE_PATH.read_text())
 
 
 @pytest.fixture(scope="module")
-def fitted_cases(reference_fixture: dict) -> dict[str, SuperGLM]:
+def fitted_cases(mgcv_fixture: dict) -> dict[str, SuperGLM]:
     fitted: dict[str, SuperGLM] = {}
     for name in _CASE_NAMES:
-        case = reference_fixture[name]
+        case = mgcv_fixture[name]
         data = case["data"]
         X = pd.DataFrame({"x": data["x"], "f": data["f"]})
         y = np.asarray(data["y"], dtype=np.float64)
@@ -92,18 +92,17 @@ def _unseen_frame(case: dict) -> tuple[pd.DataFrame, np.ndarray | None]:
     return frame, offset
 
 
-def test_reference_fixture_is_pinned_to_documented_reference_release(
-    reference_fixture: dict,
-) -> None:
-    assert reference_fixture["metadata"]["reference_version"] == "1.9.4"
-    assert reference_fixture["metadata"]["factor_smooth"] == (
-        "factor-smooth interaction, P-spline marginal, k=6, m=2"
+def test_reference_fixture_is_pinned_to_documented_mgcv_release(mgcv_fixture: dict) -> None:
+    assert mgcv_fixture["metadata"]["r_version"] == "R version 4.5.3 (2026-03-11)"
+    assert mgcv_fixture["metadata"]["mgcv_version"] == "1.9.4"
+    assert mgcv_fixture["metadata"]["factor_smooth"] == (
+        's(x, f, bs="fs", k=6, xt=list(bs="ps"), m=2)'
     )
 
 
-def test_superglm_source_does_not_name_private_reference_symbols() -> None:
+def test_superglm_source_does_not_name_private_mgcv_symbols() -> None:
     source_root = Path(factor_smooth_module.__file__).parents[1]
-    private_namespace = "the reference implementation" + ":" * 3
+    private_namespace = "mgcv" + ":" * 3
     offenders = [
         str(path.relative_to(source_root))
         for path in source_root.rglob("*.py")
@@ -122,15 +121,15 @@ def test_superglm_source_does_not_name_private_reference_symbols() -> None:
         ("poisson_global_discrete", 9.0e-3, 5.0e-4, 9.0e-2),
     ],
 )
-def test_factor_smooth_fit_matches_reference_reml_and_freml(
-    reference_fixture: dict,
+def test_factor_smooth_fit_matches_mgcv_reml_and_freml(
+    mgcv_fixture: dict,
     fitted_cases: dict[str, SuperGLM],
     name: str,
     prediction_rtol: float,
     deviance_rtol: float,
     edf_atol: float,
 ) -> None:
-    case = reference_fixture[name]
+    case = mgcv_fixture[name]
     reference = case["reference"]
     model = fitted_cases[name]
     report = model.factor_smooth("x:f:fs", grid=np.asarray(case["curve_grid"]))
@@ -145,7 +144,7 @@ def test_factor_smooth_fit_matches_reference_reml_and_freml(
     assert report.effective_df == pytest.approx(reference["factor_smooth_edf"], abs=edf_atol)
     assert model.result.phi == pytest.approx(reference["scale"], rel=3.0e-4, abs=2.0e-8)
 
-    # the reference implementation rescales every smooth penalty before optimization.  The fixture
+    # mgcv rescales every smooth penalty before optimization.  The fixture
     # divides its reported sp by S.scale so these values multiply the same
     # unscaled natural penalties that SuperGLM retains.
     actual_wiggle = report.lambdas["wiggle"]
@@ -225,12 +224,12 @@ def test_factor_smooth_fit_matches_reference_reml_and_freml(
 
 
 @pytest.mark.parametrize("name", _CASE_NAMES)
-def test_unseen_factor_levels_use_reference_population_prediction(
-    reference_fixture: dict,
+def test_unseen_factor_levels_use_mgcv_population_prediction(
+    mgcv_fixture: dict,
     fitted_cases: dict[str, SuperGLM],
     name: str,
 ) -> None:
-    case = reference_fixture[name]
+    case = mgcv_fixture[name]
     model = fitted_cases[name]
     frame, offset = _unseen_frame(case)
     conditional = model.predict(frame, offset=offset, random_effects="conditional")

@@ -20,14 +20,14 @@ fit time must remain close to PR #156.
   cases, but a neutral `p=1.05` reference demonstrates that it can be materially
   biased where exact series evaluation remains necessary.
 
-## Clean-room the reference implementation audit
+## Clean-room mgcv audit
 
-The comparison used the installed R 4.5.3/the reference implementation 1.9-4 package and the official
-CRAN `the reference implementation_1.9-4.tar.gz` source archive (SHA-256
+The comparison used the installed R 4.5.3/mgcv 1.9-4 package and the official
+CRAN `mgcv_1.9-4.tar.gz` source archive (SHA-256
 `a98159698afb269e06a46cac1f945bf2b3427a2dd587c6f2efd67ede90089372`). The audit
-records algorithms, black-box outputs, and timings only; no the reference implementation code is copied.
+records algorithms, black-box outputs, and timings only; no mgcv code is copied.
 
-the reference implementation does not use Wright-Bessel evaluation. Its `tweedious` implementation
+mgcv does not use Wright-Bessel evaluation. Its `tweedious` implementation
 follows Dunn-Smyth directly: predict
 `j_max = y**(2-p) / (phi * (2-p))`, start at the neighboring integer mode, and
 sweep upward and downward until terms fall below a scaled tolerance. It buffers
@@ -36,7 +36,7 @@ gamma-family terms shared by observations with common `p` and `phi`, and its
 coordinates to the REML optimizer. These observations support mode-centered
 fallback, shared vector work, and bounded transformed parameters in this design.
 
-the reference implementation is not a safe model for the pathological boundary. Its C implementation
+mgcv is not a safe model for the pathological boundary. Its C implementation
 uses an integer series index and a 50,000,000-element buffer ceiling. At
 `y=mu=1`, sufficiently tiny `phi` overflows the index path; `ldTweedie` can then
 return a finite but plainly invalid log density dominated by the canonical term.
@@ -48,13 +48,13 @@ Warm medians on this machine for 1,000 rows were 0.003 seconds for fixed-power
 `glm`, 0.019 seconds for fixed-power linear `gam(method="REML")`, 0.043 seconds
 for fixed-power spline REML, 0.024 seconds for estimated-power linear REML, and
 0.050 seconds for estimated-power spline REML. On the shared 800-row neutral
-profile fixture, the reference implementation took 0.023 seconds and returned `p=1.1973744,
+profile fixture, mgcv took 0.023 seconds and returned `p=1.1973744,
 phi=0.8083430`; current PR #158 took 1.423 seconds and returned `p=1.1969129,
 phi=0.8068296`. After bounded mode-centered summation, shared gamma-base work,
 and vectorized budget selection, SuperGLM takes about 0.21 seconds and returns
 `p=1.1969129, phi=0.8068298`. The parameter agreement is strong; the remaining
 roughly 9x timing gap is explained by SuperGLM's nested scalar profile (about
-277 density passes) versus the reference implementation's joint derivative-based REML optimization.
+277 density passes) versus mgcv's joint derivative-based REML optimization.
 
 Saddlepoint is not a generally acceptable replacement for exact profiling. In
 known-mean simulations, saddlepoint-only likelihood moved `p` by `-0.20` and
@@ -85,7 +85,7 @@ Replace the left-to-right sum with the Dunn-Smyth strategy for `1 < p < 2`:
 
 Rows in one vector pass reuse the gamma-only base
 `log Gamma(j + 1) + log Gamma(a*j)` over overlapping index ranges, mirroring the
-useful buffering principle found in the reference implementation without copying its implementation.
+useful buffering principle found in mgcv without copying its implementation.
 Budget selection operates on deterministic tie groups with vector reductions,
 not one Python reduction per row.
 

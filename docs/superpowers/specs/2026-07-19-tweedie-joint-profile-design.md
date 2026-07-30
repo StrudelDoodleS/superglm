@@ -2,12 +2,12 @@
 
 ## Goal
 
-Make exact Tweedie `p`/`phi` profiling competitive with or faster tha reference on
+Make exact Tweedie `p`/`phi` profiling competitive with or faster than mgcv on
 ordinary data without changing ordinary `fit()` behavior, weakening the
 likelihood, or allowing pathological series work to crash or hang a fit.
 
 The primary warm target is at least a tenfold reduction from the current
-roughly 0.215-second 800-row exact profile. The corresponding the reference implementation 1.9-4 run on
+roughly 0.215-second 800-row exact profile. The corresponding mgcv 1.9-4 run on
 this machine takes about 0.023--0.025 seconds. SuperGLM should reach 0.022
 seconds or less for the internal profile when feasible, and should pursue
 public end-to-end parity without sacrificing correctness.
@@ -16,7 +16,7 @@ public end-to-end parity without sacrificing correctness.
 
 On the shared 800-row neutral fixture, the current exact implementation performs
 14 fixed-power fits and 278 complete density-series passes. Approximately 94%
-of profile time is in the inner exact likelihood. the reference implementation performs seven exact
+of profile time is in the inner exact likelihood. mgcv performs seven exact
 series passes and six joint Newton updates. Its advantage is primarily avoided
 work, not the language of its series loop.
 
@@ -132,7 +132,7 @@ Performance optimizations that preserve the exact sum are required:
   benefit;
 - reuse `j`-dependent gamma/digamma/trigamma terms within one candidate
   evaluation when a bounded contiguous table is cheaper than recomputation;
-- use scalar recurrences in sparse or wide-index cases to avoid the reference implementation's large
+- use scalar recurrences in sparse or wide-index cases to avoid mgcv's large
   contiguous-buffer failure mode;
 - avoid object construction for rejected trial steps;
 - retain deterministic summation order and full binary64 convergence checks.
@@ -244,16 +244,16 @@ kernel calls, coefficient fits, and total terms. On the shared 800-row fixture:
 - hard target: no more than 12 exact kernel passes and at least 8x faster than
   the current 0.215-second implementation;
 - parity target: no more than 8 exact kernel passes and no slower than the
-  measured 0.023--0.025-second the reference implementation run;
+  measured 0.023--0.025-second mgcv run;
 - stretch target: internal profile at or below 0.015 seconds and public
-  `model.estimate_p()` at or below the reference implementation when final-refit cost permits.
+  `model.estimate_p()` at or below mgcv when final-refit cost permits.
 
 Wall-time thresholds are reported rather than placed in ordinary CI. Stable
 call-count and exact-work assertions prevent algorithmic regressions in CI.
 
 ## Excluded scope
 
-- Porting or copying the reference implementation C/R implementation details.
+- Porting or copying mgcv C/R implementation details.
 - Fourier inversion or revival of the orphaned certified-density engine.
 - Replacing the exact ordinary profile with saddlepoint or Pearson estimates.
 - Full implicit differentiation through REML smoothing parameters in this

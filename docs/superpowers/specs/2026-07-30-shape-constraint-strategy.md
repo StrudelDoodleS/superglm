@@ -179,7 +179,7 @@ If any of those are on the roadmap, the QP stays regardless.
    and enforcement for `bs`/`cr`.
 2. **Do not migrate `bs`/`cr` to SCOP.** It destroys what those classes are —
    measured, not argued.
-3. **Adopt the reference implementation's discipline at the QP boundary**: require full column rank and
+3. **Adopt mgcv's discipline at the QP boundary**: require full column rank and
    refuse otherwise, as established constrained-least-squares practice does.
    This reverts
    the premise of audit item 3, which read a load-bearing guard as a robustness gap.

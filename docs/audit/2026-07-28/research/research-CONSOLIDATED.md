@@ -12,7 +12,7 @@ All measured claims below were benchmarked or numerically verified by the report
 |---|---|
 | **int32 bin indices**: track 5 measured **1.41×**; track 1 measured **slower** | Track 5 benchmarked a **hand-written numba kernel**; track 1 benchmarked **`np.bincount`, which upcasts internally**. Both correct. **Narrow dtypes pay ONLY inside first-party kernels — worthless as a NumPy-level dtype change.** Sequencing: fold dtype narrowing into kernel work, never ship it standalone. |
 | **Threading multiplier**: audit §H.2 assumed 4-8× on accumulation; track 5 measured **1.3× and flat** | Accumulation is **memory-bandwidth bound** (one core already saturates ~27 GB/s). But the **compute-bound block/group axis gives 6-10×** (track 5: 6-9× on per-group Hessians; track 1: 9.9× on Gram blocks). **Thread the block axis, not the observation axis.** Audit §H.2's billion-row estimate corrects from ~39 s to **~55 s**. |
-| **EFS vs AI-REML**: track 2 championed EFS/SOP; track 3 says AI-REML is strictly better | **AI-REML primary.** AI approximates only the *Hessian* — the gradient stays exact, so the fixed point is the **exact REML optimum**. EFS/SOP make the PQL simplification and change the estimator. AI preserves the reference-parity claim by construction; EFS does not. |
+| **EFS vs AI-REML**: track 2 championed EFS/SOP; track 3 says AI-REML is strictly better | **AI-REML primary.** AI approximates only the *Hessian* — the gradient stays exact, so the fixed point is the **exact REML optimum**. EFS/SOP make the PQL simplification and change the estimator. AI preserves the mgcv-parity claim by construction; EFS does not. |
 | **Does anything fix the G² pass problem?** | **No — confirmed by both tracks 1 and 5, and by Li & Wood themselves.** The literature keeps one accumulation per term-pair. The win is in **not needing most pairs** (row-tensor identity), not in fusing them. |
 
 ---
@@ -37,7 +37,7 @@ Crossover: wins iff **m₁m₂ ≲ n**; cap tensor-marginal bins at ~500-1000 so
 **Grid-vs-scattered SETTLED:** GLAM *proper* needs a lattice — do not pursue; joint gridding is explicitly
 rejected by Li & Wood (discretisation error exceeds statistical error). **But the row-tensor identity is
 grid-free** — marginal binning makes W small a different way.
-*Novelty caveat:* a combination of Currie et al. + Li & Wood not published as such; the reference implementation does not appear to do
+*Novelty caveat:* a combination of Currie et al. + Li & Wood not published as such; mgcv does not appear to do
 it. Opportunity, and a reason to validate carefully.
 
 ### ⭐⭐ C. AI-REML — exact gradient, approximate Hessian (track 3)
@@ -72,7 +72,7 @@ work.**
 Also: EFS is already shipped and merely unwired (reachable only on λ₁>0 and SCOP paths) — **wiring is a far
 smaller change than the audit assumed.**
 
-### ⭐ G. λ̂ is not scale-free in n; and the reference implementation's `samfrac` doesn't do what the audit claimed (track 4)
+### ⭐ G. λ̂ is not scale-free in n; and mgcv's `samfrac` doesn't do what the audit claimed (track 4)
 Measured **d log λ̂ / d log n = 0.43**. Raw transplant of λ̂ from a 20% subsample is still **1.03 SE** off;
 with the `(n/m)^α̂` rescale, 5% gets inside **0.28 SE**. **`samfrac` carries only `coefficients`, never `sp`,
 runs at loose tolerance, and is skipped entirely when `discrete=TRUE`.**
@@ -95,7 +95,7 @@ Meyer verbatim: the AI-REML gradient *"require[s] selected elements of C⁻¹…
 inversion method of Takahashi et al. (1973)."* ASReml/BLUPF90/WOMBAT/DMU all do this. **Takahashi and AI are
 complements — the first-order trace does not cancel under AI.**
 **Smith (1995) reverse-mode Cholesky AD** may be cheaper for the gradient: all q traces at O(1) factorizations,
-~2× one likelihood evaluation. **LMMsolver (Boer 2023) uses it: the reference implementation 600 s → 1 s, 38 min → 30 s** — the
+~2× one likelihood evaluation. **LMMsolver (Boer 2023) uses it: mgcv 600 s → 1 s, 38 min → 30 s** — the
 closest published prior art. Recommended split: **Smith AD for gradient traces, Takahashi for `diag(H⁻¹)`**.
 **Practicalities:** scikit-sparse has **no** selected inversion (PR open, unmerged) — **port Davis's
 `sparseinv`, ~200 lines, BSD-3**, which also resolves the GPL concern. **Gate the whole sparse investment on a
@@ -123,7 +123,7 @@ cost. **Would replace `benchmarks/superbooster_interaction_challenger.py`**, whi
 proxy on a 30k subsample outside the library.
 **Caveats:** post-selection inference (screening invalidates naive p-values — needs held-out validation);
 score test is *local*; must penalise-adjust or high-k tensors win spuriously; bin resolution caps detectability.
-**Strategic: the reference implementation has no automated pairwise interaction search — this is superglm exceeding the reference implementation on
+**Strategic: mgcv has no automated pairwise interaction search — this is superglm exceeding mgcv on
 capability, enabled by the speed work.**
 
 ---
@@ -141,7 +141,7 @@ capability, enabled by the speed work.**
 | **Sketching / RandNLA** | The win is avoiding O(mn²) dense QR, which superglm already avoids. **Forming the sketch costs a full data pass — the scarce resource.** |
 | **Leverage-score sampling** | Ma, Mahoney & Yu: neither leverage nor uniform dominates; superseded by OSMAC's shrinkage. Loses to mV/mVc for Poisson in Ai et al.'s own benchmarks. |
 | **HDFE alternating projections for REML traces** | **Near-proof**: Kline, Saggio & Sølvsten needed **8 hours on 32 cores** doing n separate PCG solves for what selected inversion gives directly. `lfe` gives FE SEs only by bootstrapping; `reghdfe` not at all; Somaini–Wolak cannot pass two dimensions. Complements, never replaces, the selected-inverse route. |
-| **Rügamer (2024) factorization-machine tensors** | Rank-F approximation ⇒ **breaks reference parity by construction**. A different estimator, not a faster one. |
+| **Rügamer (2024) factorization-machine tensors** | Rank-F approximation ⇒ **breaks mgcv parity by construction**. A different estimator, not a faster one. |
 | **Histogram privatization/replication for speed** | Measured best case 1.13×, mostly 0.07-0.67×. (Still adopt fixed-chunk privatization for *determinism*, not speed.) |
 | **`w_correction_order=2` at large q** | O(q²np²) — 325 Grams/iteration at q=25. Hard-gate it. |
 | **Array structure to speed up BCD** | glamlasso authors: *"it is not obvious how to exploit the array structure to reduce the computational complexity."* Array tricks help Gram formation only. |

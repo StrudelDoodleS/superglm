@@ -1038,7 +1038,7 @@ class TestQuantileTemperedStrategy:
 
 
 class TestPSplineOpenKnotVector:
-    """Tests for the the reference implementation-style open knot vector on PSpline."""
+    """Tests for the mgcv-style open knot vector on PSpline."""
 
     def test_knot_vector_extends_beyond_boundary(self):
         """PSpline internal knot vector extends beyond the public boundary."""

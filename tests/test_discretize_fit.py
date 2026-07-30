@@ -759,7 +759,7 @@ class TestDiscretePredictParity:
 
 
 class TestSharedMarginalTensors:
-    """Two ``ti()`` terms sharing a marginal, as in the reference implementation functional ANOVA.
+    """Two ``ti()`` terms sharing a marginal, as in mgcv functional ANOVA.
 
     ``s(a)+s(b)+s(c)+ti(a,b)+ti(a,c)`` is a mainstream modelling pattern.  The
     ``ti()`` marginals are already centered, so the two blocks are identifiable

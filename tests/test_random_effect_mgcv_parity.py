@@ -1,4 +1,4 @@
-"""Pinned parity against the reference implementation's ``bs="re"`` random-effect smooth."""
+"""Pinned parity against mgcv's ``bs="re"`` random-effect smooth."""
 
 from __future__ import annotations
 
@@ -11,19 +11,19 @@ import pytest
 
 from superglm import Numeric, RandomEffect, SuperGLM
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "random_effect_reference.json"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "random_effect_mgcv_reference.json"
 
 
 @pytest.fixture(scope="module")
-def reference_fixture() -> dict:
+def mgcv_fixture() -> dict:
     return json.loads(_FIXTURE_PATH.read_text())
 
 
 @pytest.fixture(scope="module")
-def fitted_cases(reference_fixture: dict) -> dict[str, tuple[SuperGLM, pd.DataFrame, np.ndarray]]:
+def fitted_cases(mgcv_fixture: dict) -> dict[str, tuple[SuperGLM, pd.DataFrame, np.ndarray]]:
     fitted = {}
     for name in ("gaussian", "poisson", "poisson_discrete"):
-        case = reference_fixture[name]
+        case = mgcv_fixture[name]
         data = case["data"]
         X = pd.DataFrame({"x": data["x"], "level": data["level"]})
         y = np.asarray(data["y"], dtype=np.float64)
@@ -55,8 +55,9 @@ def fitted_cases(reference_fixture: dict) -> dict[str, tuple[SuperGLM, pd.DataFr
     return fitted
 
 
-def test_reference_fixture_is_pinned_to_documented_reference_release(reference_fixture: dict):
-    assert reference_fixture["metadata"]["reference_version"] == "1.9.4"
+def test_reference_fixture_is_pinned_to_documented_mgcv_release(mgcv_fixture: dict):
+    assert mgcv_fixture["metadata"]["r_version"] == "R version 4.5.3 (2026-03-11)"
+    assert mgcv_fixture["metadata"]["mgcv_version"] == "1.9.4"
 
 
 @pytest.mark.parametrize(
@@ -67,15 +68,15 @@ def test_reference_fixture_is_pinned_to_documented_reference_release(reference_f
         ("poisson_discrete", 3e-6, 3e-7),
     ],
 )
-def test_random_effect_fit_matches_reference_reml_and_freml(
-    reference_fixture: dict,
+def test_random_effect_fit_matches_mgcv_reml_and_freml(
+    mgcv_fixture: dict,
     fitted_cases: dict[str, tuple[SuperGLM, pd.DataFrame, np.ndarray]],
     name: str,
     relative_tolerance: float,
     prediction_tolerance: float,
 ):
     model, X, offset = fitted_cases[name]
-    reference = reference_fixture[name]["reference"]
+    reference = mgcv_fixture[name]["reference"]
     report = model.random_effects("level")
 
     actual_scalars = {
@@ -116,13 +117,13 @@ def test_random_effect_fit_matches_reference_reml_and_freml(
 
 
 @pytest.mark.parametrize("name", ["gaussian", "poisson", "poisson_discrete"])
-def test_unseen_random_effect_levels_score_at_reference_population_prediction(
-    reference_fixture: dict,
+def test_unseen_random_effect_levels_score_at_mgcv_population_prediction(
+    mgcv_fixture: dict,
     fitted_cases: dict[str, tuple[SuperGLM, pd.DataFrame, np.ndarray]],
     name: str,
 ):
     model, _, _ = fitted_cases[name]
-    reference = reference_fixture[name]["reference"]
+    reference = mgcv_fixture[name]["reference"]
     x = np.array([-0.7, 0.15, 1.1])
     X = pd.DataFrame({"x": x, "level": ["unseen-a", "unseen-b", "unseen-c"]})
     if name == "gaussian":

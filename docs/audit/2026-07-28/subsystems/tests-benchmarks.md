@@ -10,27 +10,27 @@ suite freezes, and (d) where coverage of solver/REML internals is thin.
 
 ## 0. HEADLINE BENCHMARK EVIDENCE (tracked results)
 
-### 0.1 The flagship 30-rep MTPL2 comparison — superglm currently LOSES to the reference implementation
+### 0.1 The flagship 30-rep MTPL2 comparison — superglm currently LOSES to mgcv
 
 Tracked results (`git ls-files` confirms only these four files under `benchmarks/results/` are
 committed; the rest of `benchmarks/results/` is gitignored via `.gitignore:34`):
 
 | file | tool / method | n | median | mean | std | min–max | deviance | edf |
 |---|---|---|---|---|---|---|---|---|
-| `benchmarks/results/the reference implementation_30rep.json` | the reference implementation `bam(fREML, discrete=TRUE, weights)` (the reference implementation 1.9.3, R 4.5.2) | 678,013 | **1.567 s** | 1.561 s | 0.054 | 1.454–1.651 | 212023.256 | 44.198 |
+| `benchmarks/results/mgcv_30rep.json` | mgcv `bam(fREML, discrete=TRUE, weights)` (mgcv 1.9.3, R 4.5.2) | 678,013 | **1.567 s** | 1.561 s | 0.054 | 1.454–1.651 | 212023.256 | 44.198 |
 | `benchmarks/results/superglm_30rep.json` | superglm `fit_reml(discrete=True)` "cached-W" | 678,013 | **2.102 s** | 2.103 s | 0.038 | 2.034–2.172 | 212055.369 | 43.342 |
 
-- **Ratio superglm/the reference implementation = 1.34x** (computed exactly as `timing_30rep_compare.py:52` does:
-  `sg["median_s"]/the reference implementation["median_s"]`). The project's stated goal ("match the reference implementation accuracy, beat it on
+- **Ratio superglm/mgcv = 1.34x** (computed exactly as `timing_30rep_compare.py:52` does:
+  `sg["median_s"]/mgcv["median_s"]`). The project's stated goal ("match mgcv accuracy, beat it on
   speed") is *not currently met* on its own flagship scenario; superglm is ~34% slower, single-threaded,
   same machine.
 - Accuracy parity at this scale: deviance differs by 32.1 (rel 1.5e-4), EDF differs by 0.86. Both are
   inside the loose test tolerances (see §4.3) but the EDF gap is a real fREML-vs-fREML discrepancy.
 - Both harnesses measure a *fresh model fit per rep* with data prep outside the timer
-  (`benchmarks/timing_30rep_superglm.py:60-69`, `benchmarks/timing_30rep_the reference implementation.R:42-56`), 1 BLAS thread,
+  (`benchmarks/timing_30rep_superglm.py:60-69`, `benchmarks/timing_30rep_mgcv.R:42-56`), 1 BLAS thread,
   first rep discarded as warmup (`timing_30rep_superglm.py:82-83`). Methodologically clean and
   genuinely comparable: rate response + exposure weights on both sides, matched basis sizes
-  (superglm `CubicRegressionSpline(n_knots=18/13/13)` ↔ the reference implementation `k=20/15/15 bs="cr"`; the mapping is
+  (superglm `CubicRegressionSpline(n_knots=18/13/13)` ↔ mgcv `k=20/15/15 bs="cr"`; the mapping is
   documented at `benchmarks/reml_benchmark_harness.py:207-211`).
 
 ### 0.2 `benchmarks/results/multi_scop_discrete_convergence.csv`
@@ -65,18 +65,18 @@ retroactively certify this baseline's code state). File size is dominated by ful
 
 ## 1. MODULE MAP
 
-### 1.1 Benchmarks — cross-tool comparison harnesses (the the reference implementation evidence chain)
+### 1.1 Benchmarks — cross-tool comparison harnesses (the mgcv evidence chain)
 
 | file | responsibility | key functions | callers / calls |
 |---|---|---|---|
 | `benchmarks/reml_benchmark_harness.py` (317) | superglm side of REML benchmark: synthetic Poisson/Gamma n=800 (exact+discrete, 3 reps) + MTPL2 678k (exact+discrete, 1 rep). Exports CSVs for R. | `run_one` :85-138 (times `fit_reml`, harvests `model._reml_result/_reml_lambdas/_reml_profile`), `run_synthetic_benchmarks` :144, `run_mtpl2_benchmarks` :187, phase-profile printer :263-298 | writes `results/superglm_results.json`, `bench_synthetic_*.csv`, `bench_mtpl2.csv`; consumed by `reml_benchmark_compare.py` and `reml_benchmark_harness.R` |
-| `benchmarks/reml_benchmark_harness.R` (210) | the reference implementation side: `gam(REML)` on synthetics, `gam(REML)` on 200k MTPL2 subsample, `bam(fREML,discrete)` count+offset, `bam(fREML,discrete,weights)` (:173-191, the apples-to-apples config). | `extract_results` :33-57 | reads CSVs from Python harness; writes `results/the reference implementation_results.json` |
-| `benchmarks/reml_benchmark_compare.py` (202) | joins the two JSONs, prints tables, λ comparison with explicit "not directly comparable" caveat :89-97, comparability notes :161-167 | `match_and_compare` :61, `print_lambda_comparison` :89 | reads `{superglm,the reference implementation}_results.json` (both gitignored → compare inputs are ephemeral) |
+| `benchmarks/reml_benchmark_harness.R` (210) | mgcv side: `gam(REML)` on synthetics, `gam(REML)` on 200k MTPL2 subsample, `bam(fREML,discrete)` count+offset, `bam(fREML,discrete,weights)` (:173-191, the apples-to-apples config). | `extract_results` :33-57 | reads CSVs from Python harness; writes `results/mgcv_results.json` |
+| `benchmarks/reml_benchmark_compare.py` (202) | joins the two JSONs, prints tables, λ comparison with explicit "not directly comparable" caveat :89-97, comparability notes :161-167 | `match_and_compare` :61, `print_lambda_comparison` :89 | reads `{superglm,mgcv}_results.json` (both gitignored → compare inputs are ephemeral) |
 | `benchmarks/timing_30rep_superglm.py` (124) | 30-rep MTPL2 discrete REML timing (§0.1). Model spec :49-54, timing loop :60-78 | writes `results/superglm_30rep.json` (tracked) |
-| `benchmarks/timing_30rep_the reference implementation.R` (106) | the reference implementation 30-rep counterpart, `bam` formula :44-55 | reads `results/bench_mtpl2.csv` (must run Python harness first :30-32); writes `results/the reference implementation_30rep.json` (tracked) |
+| `benchmarks/timing_30rep_mgcv.R` (106) | mgcv 30-rep counterpart, `bam` formula :44-55 | reads `results/bench_mtpl2.csv` (must run Python harness first :30-32); writes `results/mgcv_30rep.json` (tracked) |
 | `benchmarks/timing_30rep_compare.py` (61) | prints both + ratio :51-57 | reads the two tracked 30rep JSONs |
 | `benchmarks/benchmark_tensor_ti_freq.py` (1063) | discrete MTPL2 tensor-interaction stress matrix: baseline, +1/2/3 tensors, +spline-by-cat, mixed; docstring says its purpose is "a tracked reproduction of the current discrete=True fit_reml tensor-interaction failure mode" (:11-15). Exports train/test CSVs for R comparator. | `build_superglm_cases`, `build_fairness_cases`, `build_case_deltas`, `FitControls`, `thread_control_metadata` (imported by `tests/test_tensor_ti_benchmark_matrix.py:7-17`) | uses `multiprocessing` to isolate fits |
-| `benchmarks/benchmark_tensor_ti_the reference implementation.R` (316) | the reference implementation oracle for the same 7-case matrix, `bam(discrete=TRUE, fREML)`, "behavior oracle without copying the reference implementation source" :12-15 | reads the exported split; writes `tensor_ti_the reference implementation.json` |
+| `benchmarks/benchmark_tensor_ti_mgcv.R` (316) | mgcv oracle for the same 7-case matrix, `bam(discrete=TRUE, fREML)`, "behavior oracle without copying mgcv source" :12-15 | reads the exported split; writes `tensor_ti_mgcv.json` |
 
 ### 1.2 Benchmarks — regression-gate harnesses (subprocess-isolated, schema-validated)
 
@@ -150,11 +150,11 @@ certification governs equal-rank truncation (:565); log-pdet stability under ext
 
 ### 1.6 Tests — other perf/parity clusters (skimmed)
 
-- `tests/test_reml_the reference implementation_parity.py` (227): hardcoded the reference implementation references (R 4.5.2 / the reference implementation 1.9-3) at :32-45;
+- `tests/test_reml_mgcv_parity.py` (227): hardcoded mgcv references (R 4.5.2 / mgcv 1.9-3) at :32-45;
   deviance rel < 1% (:72, :149), EDF ±2.0 (:94), λ within 10x order-of-magnitude only (:114, :203),
   Gamma scale rel < 20% (:183), REML iter ≤ 15 (:134). Skips unless fixture CSVs generated by
   `scratch/r_experiments/reml_parity_reference.R` exist (:52-55).
-- `tests/test_realdata_parity.py` (503): freMTPL2 parity — exact REML deviance rel < 0.1% vs the reference implementation
+- `tests/test_realdata_parity.py` (503): freMTPL2 parity — exact REML deviance rel < 0.1% vs mgcv
   (:350), EDF ±2.0 (:359), Pearson scale rel < 10% (:376); **discrete-vs-exact on real data**:
   deviance rel < 0.5% (:419), EDF ±2.0 (:428); NB2 theta near-Poisson check (:241). Skips without data.
 - `tests/test_cached_w_validation.py`: docstring (:1-11) — the trust gate for the cached-W discrete
@@ -173,8 +173,8 @@ certification governs equal-rank truncation (:565); log-pdet stability under ext
 - `tests/test_structured_credibility_benchmark.py` (131) and `tests/test_dataframe_boundary_benchmark.py`
   (100), `tests/test_profiling_harness.py` (100): smoke/contract tests for the remaining harnesses.
 - Oracle families: `test_wood_reml_oracles.py` (independent Wood-paper oracles),
-  `test_statsmodels_coef_consistency.py`, `test_factor_smooth*_the reference implementation_parity.py`,
-  `test_random_effect_the reference implementation_parity.py` — four independent external reference systems (the reference implementation-R numbers,
+  `test_statsmodels_coef_consistency.py`, `test_factor_smooth*_mgcv_parity.py`,
+  `test_random_effect_mgcv_parity.py` — four independent external reference systems (mgcv-R numbers,
   Wood formulas, statsmodels, dense NumPy oracles).
 
 Total: 3,758 test functions across ~180 files (108,794 lines in `tests/`).
@@ -183,7 +183,7 @@ Total: 3,758 test functions across ~180 files (108,794 lines in `tests/`).
 
 ## 2. DATA FLOW
 
-### 2.1 Cross-tool the reference implementation comparison chain
+### 2.1 Cross-tool mgcv comparison chain
 1. `reml_benchmark_harness.py` generates synthetic frames (n=800, 2 numeric cols) and/or loads MTPL2
    parquet (n=678,013), applies the canonical prep (clip ClaimNb≤4, Exposure≥0.01, DrivAge 18–90,
    VehAge 0–20, BonusMalus 50–150, log1p Density; :66-79) and materialises `y_freq = ClaimNb/Exposure`
@@ -257,11 +257,11 @@ slightly divergent metadata schemas.
 
 ## 5. SUSPECTS
 
-### S1. The flagship benchmark contradicts the project goal — superglm 1.34x slower tha reference
-- `benchmarks/results/superglm_30rep.json:71` (median 2.102 s) vs `benchmarks/results/the reference implementation_30rep.json:13`
+### S1. The flagship benchmark contradicts the project goal — superglm 1.34x slower than mgcv
+- `benchmarks/results/superglm_30rep.json:71` (median 2.102 s) vs `benchmarks/results/mgcv_30rep.json:13`
   (median 1.567 s), same n=678,013, single thread, same machine, matched model.
 - Why suspicious: this is the repo's own tracked apples-to-apples evidence, and the current dev branch
-  in the main worktree is literally named `perf-the reference implementation-fit-performance`. Any architecture decision should
+  in the main worktree is literally named `perf-mgcv-fit-performance`. Any architecture decision should
   treat this 0.54 s gap as the primary optimisation target; the harness's phase profile
   (`reml_benchmark_harness.py:274-298`: dm_build / irls working / gram / eigh solve / W-correction /
   Hessian+Newton / line search) already tells you where to look.
@@ -269,13 +269,13 @@ slightly divergent metadata schemas.
   discrete case and rank phases.
 
 ### S2. Real-scale discrete parity gap in EDF is untested
-- Tracked evidence: EDF 43.342 vs the reference implementation 44.198 (Δ0.86) and deviance Δ32.1 at n=678k. The only
+- Tracked evidence: EDF 43.342 vs mgcv 44.198 (Δ0.86) and deviance Δ32.1 at n=678k. The only
   discrete-vs-exact EDF tolerances are |Δ| < 0.5 at n=800 (`tests/test_reml.py:1180`), < 1.0 for Gamma
-  (:1227), and ±2.0 on real data (`tests/test_realdata_parity.py:428`). Nothing pins the *the reference implementation-vs-
+  (:1227), and ±2.0 on real data (`tests/test_realdata_parity.py:428`). Nothing pins the *mgcv-vs-
   superglm-discrete* EDF at scale; the 30rep JSONs record it but no test reads them.
 - Why suspicious: "discrete=True must not silently drift from exact REML" is protected; a 0.86 EDF gap
-  vs the reference implementation's fREML could be legitimate basis-difference or could be drift — currently unfalsifiable.
-- Verify: run exact REML on an MTPL2 subsample and triangulate exact-vs-discrete-vs-the reference implementation EDF.
+  vs mgcv's fREML could be legitimate basis-difference or could be drift — currently unfalsifiable.
+- Verify: run exact REML on an MTPL2 subsample and triangulate exact-vs-discrete-vs-mgcv EDF.
 
 ### S3. Parity tolerances are scattered and mutually inconsistent
 - Discrete-vs-exact deviance: 1e-3 (`test_reml.py:1175`), 5e-3 Gamma (:1222), 5e-3 fit-level
@@ -285,7 +285,7 @@ slightly divergent metadata schemas.
   (`benchmarks/results/multi_scop_discrete_convergence.csv`, synthetic row).
 - Why suspicious: there is no single documented parity contract; a refactor could pass one file's gate
   while violating another's, and the λ-based assertions are fragile by the project's own evidence.
-- Verify: enumerate all discrete/exact/the reference implementation tolerance assertions (grep done above) and check which have
+- Verify: enumerate all discrete/exact/mgcv tolerance assertions (grep done above) and check which have
   ever been near-threshold in CI history.
 
 ### S4. Two near-identical ~1000-line measurement harnesses
@@ -357,7 +357,7 @@ slightly divergent metadata schemas.
   `benchmark_fit_state_trace.py:931` `phase_timings_are_regression_gates: False`). Wall-time
   enforcement exists only in manually-run comparators (`benchmark_dataframe_boundary.py:649` 3%/5%;
   `benchmark_fit_state_trace.py` exit-2 on *numerical* drift only).
-- Why suspicious: the 1.34x the reference implementation gap (S1) could regress further without any automated signal; the
+- Why suspicious: the 1.34x mgcv gap (S1) could regress further without any automated signal; the
   performance story relies on humans re-running harnesses.
 - Verify: CI config / skills for any benchmark invocation (none found under `tests/`).
 
@@ -376,10 +376,10 @@ slightly divergent metadata schemas.
   indirect (integration) coverage from none.
 
 ### S12. `reml_benchmark_compare.py` operates on untracked inputs
-- It reads `results/{superglm,the reference implementation}_results.json` (:17-25), which are gitignored; only the 30rep JSONs
+- It reads `results/{superglm,mgcv}_results.json` (:17-25), which are gitignored; only the 30rep JSONs
   and the multi-SCOP CSV are tracked. The richer multi-configuration comparison (synthetic exact vs
   discrete, MTPL2 exact) therefore has no committed evidence — the tracked story is discrete-only.
-- Verify: regenerate `superglm_results.json` to capture the exact-path MTPL2 timing (the reference implementation's
+- Verify: regenerate `superglm_results.json` to capture the exact-path MTPL2 timing (mgcv's
   `gam(REML)` full-data fit is documented as infeasible — the R harness subsamples to 200k, :124-131).
 
 ---
@@ -395,5 +395,5 @@ slightly divergent metadata schemas.
    fit/fit_reml separation + stale-REML clearing (`test_reml.py:1719-1784`), select=True vs
    selection_penalty (`test_reml.py:638-682, 771-840`), k↔built-columns mapping documented in parity
    headers (`test_realdata_parity.py:33-38`, `benchmarks/reml_benchmark_harness.py:207-211`).
-4. Independent oracles exist at three levels (the reference implementation numbers, Wood-formula dense oracles, dense NumPy
+4. Independent oracles exist at three levels (mgcv numbers, Wood-formula dense oracles, dense NumPy
    gram oracles), so solver algebra can be rewritten with strong external anchors.

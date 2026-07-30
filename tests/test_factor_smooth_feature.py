@@ -1,4 +1,4 @@
-"""Public contract tests for the reference implementation-style factor smooth interactions."""
+"""Public contract tests for mgcv-style factor smooth interactions."""
 
 from __future__ import annotations
 

@@ -984,7 +984,7 @@ class ModelMetrics:
 
         Note: These are conditional-on-the-selected-model SEs from the
         penalized estimate. They do not account for model selection
-        uncertainty (the standard convention).
+        uncertainty (same convention as glmnet / mgcv).
         """
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
         phi = self.phi
