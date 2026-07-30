@@ -200,13 +200,43 @@ exactly symmetric `H` — which every in-tree caller builds by construction —
 `decomposition.solve` is a pseudo-inverse, so it returns `H⁺g` even when the
 normal equations are inconsistent. When `rank < width` and `g` has a component
 outside `range(H)`, the objective is unbounded below along a null direction of
-`H`, `H⁺g` is a projection rather than a stationary point, and no search
-direction the active-set method forms can follow the descent (they all lie in
-`range(H)`). Returning that as `converged` would be a silent wrong answer, so
-the relative normal-equation residual is checked against
-`SHARED_RANK_POLICY.factor_rcond` before either early return and a `ValueError`
-naming the rank and the residual is raised instead. The check is skipped at
-full rank, where `range(H)` is everything.
+`H` and `H⁺g` is a projection rather than a stationary point. Neither entry
+path can follow that descent: the unconstrained solve returns `H⁺g` directly,
+and the active-set loop's empty-active-set step is `beta_unc - beta`, which
+also lies in `range(H)` — measured to be exactly zero in the reproducer, so the
+loop stalls on its own stationarity test and returns the same wrong point.
+Returning that as `converged` would be a silent wrong answer, so a `ValueError`
+is raised before either early return. The check is skipped at full rank, where
+`range(H)` is everything.
+
+*The claim is about the entry paths, not about every direction the method can
+ever form.* Once the active set is **non-empty** the KKT block `[[H, -A_eqᵀ],
+[A_eq, 0]]` can be nonsingular even with singular `H`, and it then does produce
+a null direction. Measured: on `H = diag(1,0)`, `g = (1,1)`, `x2 <= 1`,
+`x1 >= 3` (true optimum `[3,1]`, objective 0.5), an empty initial active set
+returns `[3,0]` at objective 1.5, while `active_set_init=[0]` — the constraint
+whose row covers the null direction — reaches `[3,1]` exactly. A warm-started
+solve can therefore reach the finite optimum that a cold one cannot; see the
+follow-up item below.
+
+*Detection: project `g` onto `null(H)`, do not test the solve residual.* The
+first implementation compared the relative normal-equation residual against
+`SHARED_RANK_POLICY.factor_rcond` (`√eps ≈ 1.5e-8`). That threshold does not
+match the decomposition's: `decompose_gram` truncates at `gram_rcond = eps`, so
+it legitimately retains blocks conditioned up to ~`4.5e15`, while a residual is
+amplified by exactly that retained condition number. Measured false-positive
+rate on **genuinely consistent** systems (`g` built inside the retained span):
+**109/120** refused at retained condition `1e9`, **119/120** at `1e10`,
+**119/119** at `1e12`. No residual threshold fixes this, because at those
+conditions a correct solution's own residual (`5.8e-8`, `5.8e-7`, `5.5e-5`
+respectively) already exceeds any bound that would still catch inconsistency.
+Consistency is instead `g ⊥ null(H)`, which the decomposition's existing
+`null_basis()` measures directly and without amplification. The threshold is
+the roundoff floor of that basis, `certification_band * eps * retained
+condition`, which drives the false-positive rate to **0/120 at all three
+conditions** while still catching **120/120** inconsistent systems. Above a
+retained condition of ~`1/(band·eps)` the floor saturates at 1 and the check
+fails open — a real resolution limit, and the safe direction to fail.
 
 **Projection failure — `converged` describes the returned point.** This is the
 other half of S16's "caps at 100 sweeps without reporting failure", and it is
@@ -283,6 +313,26 @@ Two refinements the first draft did not have:
 - `QPResult.converged` becomes meaningful, so the three call sites can emit
   diagnostics that a currently degraded-but-working fit did not previously get.
 
+### Follow-ups (not this PR)
+
+- **Support the constrained-but-bounded inconsistent case.** When `H` is
+  rank-deficient, `g ∉ range(H)`, but the constraints block every null
+  direction, the problem has a genuine finite optimum that this item now
+  refuses rather than computes. The measurement above shows the machinery is
+  closer than it looks: a **non-empty** active set whose rows cover the null
+  direction already produces the right answer through the existing KKT block
+  (`active_set_init=[0]` reaches `[3,1]` exactly). What is missing is a way to
+  reach that active set from a cold start, i.e. seeding the active set from the
+  constraints that bound `null(H)` rather than relying on the ratio test to
+  discover them. That is a feature, not a bug fix, and not audit S16.
+- **The negative-`alpha` ratio test.** `alpha` can go negative when the current
+  iterate already violates constraint `i` (`slack < 0` with `a_step < -tol`),
+  stepping backwards. Reachable only from an infeasible start. Confirmed
+  pre-existing and byte-identical to `e8e31f4`, originating in `234adee`.
+- **The outer convergence rule** at `pirls.py:1086` / `irls_direct.py:1857`
+  still differences raw penalized deviances. Pre-existing, shared with
+  `irls_direct`, not a regression.
+
 ### Tests
 
 `tests/test_constrained_qp.py`:
@@ -300,9 +350,13 @@ Two refinements the first draft did not have:
 - `TestCallSiteWarnings` — `caplog` assertions at each of the three call sites,
   plus one that the `irls_direct` warning is latched to one per fit.
 - `TestInconsistentNormalEquations` — unconstrained and constrained
-  inconsistent systems raise; the error names the rank and the residual; a
+  inconsistent systems raise; the error names the rank and the null mass; a
   *consistent* rank-deficient system still solves; ridge regularization is a
-  workable escape.
+  workable escape. Two parametrized tests pin the threshold boundary at
+  retained conditions `1e9 / 1e10 / 1e12`: consistent systems must all solve
+  (this fails under either a residual gate or a fixed `factor_rcond`
+  threshold), and inconsistent ones must all still raise (this fails if the
+  floor is loosened to 1).
 - `TestSymmetrization` — an asymmetric `H` minimizes its symmetric part; a
   symmetric input is untouched.
 - `TestFeasibilityToleranceScaling` — badly scaled constraints do not report

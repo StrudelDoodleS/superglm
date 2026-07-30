@@ -8,6 +8,7 @@ from superglm.solvers.constrained_qp import (
     _project_feasible,
     solve_constrained_qp,
 )
+from superglm.solvers.rank import decompose_gram
 
 
 class TestUnconstrainedFallback:
@@ -477,7 +478,7 @@ class TestInconsistentNormalEquations:
     G_INCONSISTENT = np.array([0.0, 1.0])
 
     def test_unconstrained_inconsistent_system_raises(self):
-        with pytest.raises(ValueError, match="component outside range"):
+        with pytest.raises(ValueError, match="component in null\\(H\\)"):
             solve_constrained_qp(
                 self.H_INCONSISTENT, self.G_INCONSISTENT, np.zeros((0, 2)), np.zeros(0)
             )
@@ -495,7 +496,7 @@ class TestInconsistentNormalEquations:
         A = np.array([[0.0, -1.0]])  # -x2 >= -1, i.e. x2 <= 1
         b = np.array([-1.0])
 
-        with pytest.raises(ValueError, match="unbounded below along a null direction"):
+        with pytest.raises(ValueError, match="unbounded below along that direction"):
             solve_constrained_qp(self.H_INCONSISTENT, self.G_INCONSISTENT, A, b)
 
     def test_error_names_the_rank_and_the_residual(self):
@@ -520,6 +521,68 @@ class TestInconsistentNormalEquations:
 
         np.testing.assert_allclose(H @ result.beta, g, atol=1e-12)
         assert result.converged
+
+    @staticmethod
+    def _ill_conditioned_rank_deficient(retained_condition, seed, *, null_mass=0.0):
+        """H with an exact null direction and a controlled retained condition.
+
+        ``g`` is built inside the retained span with O(1) coefficients, so it
+        is consistent yet drives a large ``beta`` -- which is exactly what
+        inflates a solve residual without making the system inconsistent.
+        """
+        p = 4
+        rng = np.random.default_rng(seed)
+        basis, _ = np.linalg.qr(rng.standard_normal((p, p)))
+        eigenvalues = np.concatenate([[1.0], np.full(p - 2, 1.0 / retained_condition), [0.0]])
+        H = basis @ np.diag(eigenvalues) @ basis.T
+        H = 0.5 * (H + H.T)
+        g = basis[:, : p - 1] @ rng.standard_normal(p - 1)
+        if null_mass:
+            g = g + null_mass * np.linalg.norm(g) * basis[:, p - 1]
+        return H, g
+
+    @pytest.mark.parametrize("retained_condition", [1e9, 1e10, 1e12])
+    def test_consistent_but_ill_conditioned_systems_still_solve(self, retained_condition):
+        """The gate must not refuse systems the rank policy can solve.
+
+        ``decompose_gram`` truncates at ``gram_rcond = eps``, so it retains
+        blocks conditioned far beyond ``factor_rcond``.  A residual-based gate
+        refused almost all of these, because a residual is amplified by exactly
+        that retained condition number.
+        """
+        refused = 0
+        checked = 0
+        for seed in range(20):
+            H, g = self._ill_conditioned_rank_deficient(retained_condition, seed)
+            if decompose_gram(H).rank >= H.shape[0]:
+                continue  # gate not reached; nothing to assert
+            checked += 1
+            try:
+                result = solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
+            except ValueError:
+                refused += 1
+                continue
+            assert np.all(np.isfinite(result.beta))
+
+        assert checked >= 15, f"only {checked} systems reached the gate"
+        assert refused == 0, f"{refused}/{checked} consistent systems refused"
+
+    @pytest.mark.parametrize("retained_condition", [1e9, 1e10, 1e12])
+    def test_inconsistent_systems_are_still_caught_at_the_same_conditions(self, retained_condition):
+        """Loosening the threshold must not blind the gate."""
+        caught = 0
+        checked = 0
+        for seed in range(20):
+            H, g = self._ill_conditioned_rank_deficient(retained_condition, seed, null_mass=0.25)
+            if decompose_gram(H).rank >= H.shape[0]:
+                continue
+            checked += 1
+            with pytest.raises(ValueError, match="component in null"):
+                solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
+            caught += 1
+
+        assert checked >= 15, f"only {checked} systems reached the gate"
+        assert caught == checked
 
     def test_ridge_regularization_is_a_workable_escape(self):
         """The remedy the error message recommends must actually work."""
