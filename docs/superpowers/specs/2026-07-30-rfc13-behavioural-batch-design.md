@@ -1,10 +1,14 @@
 # RFC-13 Behavioural Batch — Design
 
-**Status: APPROVED (design), implementation pending.**
+**Status: IMPLEMENTED** on `fix/rfc13-behavioural-batch` (PR #174). Approved as
+a design first; the sections below have since been reconciled against the code
+that actually shipped, and record the superseded decisions they replaced so the
+reasoning is not lost. Read the code as the authority; read this for the *why*.
 **Source:** audit `docs/audit/2026-07-28/architecture-audit.md` §E row 13, §J.4
 item 6, Tranche 1 item 4; subsystem findings S3, S13, S16 in
 `docs/audit/2026-07-28/subsystems/solvers.md`.
-**Base:** `master` at `e8e31f4` (= v0.16.1).
+**Base:** `master` at `e8e31f4` (= v0.16.1). Every `file.py:NNN` reference below
+is a line number *at that base commit*, not on the branch tip.
 **Release impact: patch → 0.16.2.**
 
 Four independent correctness-hygiene items, each reproduced through the public
@@ -156,10 +160,15 @@ possibly-still-infeasible point with no signal.
 
 ### Design
 
-**Rank policy.** Decompose once at entry and reuse for all three pure-H solves:
+**Rank policy.** Symmetrize once at entry, decompose that, and solve once:
 
 ```python
-decomposition = decompose_gram(H)
+H_sym = 0.5 * (H + H.T)
+try:
+    decomposition = decompose_gram(H_sym)
+except ValueError as exc:
+    raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
+beta_unc = decomposition.solve(g)
 ```
 
 `H` is `XtWX + S` at `irls_direct.py:1622` (PSD) and `XʹX + λP + 1e-8·I` at
@@ -172,35 +181,133 @@ Verified: `RankDecomposition.solve` divides by `column_scale` on both the RHS
 and the solution (`rank.py:168,173`), so it returns in original coordinates.
 The `column_scale` trap recorded in the RFC-12b disposition note does not apply.
 
-Line 117 currently re-solves the same unconstrained system on every active-set
-iteration; reusing the decomposition also removes a redundant O(p³) per
-iteration.
+**One decomposition, one solve.** The three raw solves at base (lines 96, 100,
+117) are all `H⁻¹g`, so they collapse to a single `decomposition.solve(g)`
+above the loop; the in-loop empty-active-set branch becomes
+`step = beta_unc - beta`, reusing the *solution vector*, not merely the
+factorization. That removes a redundant O(p³) per active-set iteration.
 
-**Projection failure.** `_project_feasible` returns `(beta, feasible)`.
-Exhausting its 100 sweeps while still violating a constraint sets
-`QPResult.converged = False`. This is slightly past the audit's literal wording
-but is the other half of S16's "caps at 100 sweeps without reporting failure",
-and it is what makes the flag mean what its name says.
+**Symmetrization is consistent, not local to the decomposition.**
+`decompose_gram` internally works on the symmetric part, so passing a raw
+asymmetric `H` would have left the decomposition minimizing `0.5(H + Hʹ)` while
+the KKT block, the stationarity residual `H @ beta - g` and the multiplier test
+still used the asymmetric `H` — two different quadratics on the two paths.
+`H_sym` is therefore materialized once and used for *all* of them. For an
+exactly symmetric `H` — which every in-tree caller builds by construction —
+`0.5 * (H + H.T)` is bitwise identity, so this costs nothing in behaviour.
+
+**Rank truncation is not licence to answer an unanswerable question.**
+`decomposition.solve` is a pseudo-inverse, so it returns `H⁺g` even when the
+normal equations are inconsistent. When `rank < width` and `g` has a component
+outside `range(H)`, the objective is unbounded below along a null direction of
+`H`, `H⁺g` is a projection rather than a stationary point, and no search
+direction the active-set method forms can follow the descent (they all lie in
+`range(H)`). Returning that as `converged` would be a silent wrong answer, so
+the relative normal-equation residual is checked against
+`SHARED_RANK_POLICY.factor_rcond` before either early return and a `ValueError`
+naming the rank and the residual is raised instead. The check is skipped at
+full rank, where `range(H)` is everything.
+
+**Projection failure — `converged` describes the returned point.** This is the
+other half of S16's "caps at 100 sweeps without reporting failure", and it is
+what makes the flag mean what its name says. `_project_feasible` still returns
+only `beta`; the flag is computed at the two in-loop returns from
+`_is_feasible(A, beta, b, tol)` on the point being returned.
+
+*Rejected first implementation.* `_project_feasible` returned
+`(beta, feasible)` and the QP latched that starting-point verdict into
+`QPResult.converged`. Measured **27/100** spurious `converged = False` at
+`p ∈ {105, 120, 150, 180}` with `A = np.eye(q)` — exactly the shape SCOP's
+solver-space `qp_initialize` builds — where the active-set loop had in fact
+reached a feasible KKT point with `n_iter < max_iter`. Each sweep of the
+projection repairs only the single worst violation, so more than 100 violated
+non-negativity constraints exhausts the budget for a perfectly feasible
+problem; "mutually infeasible" and "merely more constraints than sweeps" are
+indistinguishable there, and the loop routinely recovers from the second. Both
+SCOP call sites then warned misleadingly. Pinned by
+`TestConvergenceFlag::test_projection_budget_overrun_that_the_loop_repairs_reports_convergence`
+in `tests/test_constrained_qp.py`, which asserts the precondition (the
+projection really does overrun) before asserting the flag.
+
+*Why the projection's history carries no information about the answer.* The
+two in-loop returns fire only once stationarity and dual feasibility already
+hold (zero step, all multipliers ≥ `-tol`), which leaves primal feasibility of
+the *returned* point as the sole outstanding KKT condition. Testing it there is
+therefore both necessary and sufficient, and nothing about the starting point
+is relevant.
+
+*Iteration exhaustion stays unconditionally `converged = False`.* The loop
+never reached its own stationarity/multiplier test, so no certificate exists to
+complete, and consulting feasibility there would report success for a search cut
+off mid-flight — every interior point is feasible.
+
+*Feasibility is tested with a relative tolerance.* A step that lands *on* a
+constraint reproduces `b_i` only to about `eps · |Aᵢ @ beta|`, so an unscaled
+absolute bound made a genuine KKT point with `|Aᵢ @ beta| ≳ 1.5e3` report
+`converged = False` and made all three call sites warn. `_feasibility_slack`
+divides the raw slack by `max(1, |b_i|, |Aᵢ @ beta|)` and both the projection's
+stopping test and the caller's convergence test use it, so the two cannot
+disagree about what "feasible" means. For a well-scaled problem the scale
+factor is 1 and the test is identical to the absolute one.
 
 **Surfacing.** Each of the three call sites checks `result.converged` and emits
 `logger.warning` naming its context, matching the existing precedent at
 `irls_direct.py:1648` and `pirls.py:1225`. `scop.py` has no module logger and
-gains one. No public API change; no exception is introduced, so a currently
-degraded-but-working fit keeps working with a diagnostic.
+gains one. No public API change.
+
+Two refinements the first draft did not have:
+
+- **The `irls_direct` warning is latched to one per fit** (`_warned_qp_nonconvergence`,
+  set alongside the existing SVD-fallback latch). QP non-convergence normally
+  persists for the remainder of the fit, so the unlatched version emitted one
+  identical line per IRLS iteration. The message names the iteration at which
+  the condition was first seen and states that later iterations are not
+  reported.
+- **The two SCOP sites name which of them fired** — "SCOP raw-space QP
+  initialization" (`SCOPReparameterization.qp_initialize`) versus "SCOP
+  solver-space QP initialization" (`SCOPSolverReparam.qp_initialize`). They
+  previously shared one message, so a warning could not be traced back to a
+  call site.
 
 ### Behaviour change
 
-Singular `H` moves from raising `LinAlgError` to returning a rank-truncated
-solve, consistent with the rest of the solver stack.
+- A *consistent* singular `H` moves from raising `LinAlgError` to returning a
+  rank-truncated solve, consistent with the rest of the solver stack.
+- Three inputs now raise `ValueError` rather than `LinAlgError` or a plausible
+  wrong answer: a materially indefinite `H`; a rank-deficient `H` whose `g` has
+  a component outside `range(H)`; and an `H` the rank policy cannot
+  equilibrate. The middle case is the one that changed during review — it
+  previously returned `H⁺g` with `converged=True`.
+- An asymmetric `H` is now solved consistently as its symmetric part on every
+  path, instead of as two different quadratics.
+- `QPResult.converged` becomes meaningful, so the three call sites can emit
+  diagnostics that a currently degraded-but-working fit did not previously get.
 
 ### Tests
 
-- Singular `H` returns a finite solution in the retained subspace instead of
-  raising.
-- Well-conditioned QPs return results identical to the pre-change path.
-- A `max_iter`-starved QP reports `converged=False`.
-- An infeasible-projection case reports `converged=False`.
-- `caplog` assertions at each of the three call sites.
+`tests/test_constrained_qp.py`:
+
+- `TestRankDeficientHessian` — singular `H` returns a finite solution in the
+  retained subspace instead of raising; a binding constraint still reaches the
+  optimum; the indefinite-`H` error names this function; a well-conditioned
+  solution is unchanged by the rank policy.
+- `TestConvergenceFlag` — a `max_iter`-starved QP reports `converged=False`
+  *even though its truncated point happens to be feasible*; a mutually
+  infeasible constraint system reports `converged=False` with
+  `n_iter < max_iter`; a feasible solve still reports `converged=True`; and a
+  projection-budget overrun that the loop repairs reports `converged=True`
+  (the regression that the rejected starting-point design produced).
+- `TestCallSiteWarnings` — `caplog` assertions at each of the three call sites,
+  plus one that the `irls_direct` warning is latched to one per fit.
+- `TestInconsistentNormalEquations` — unconstrained and constrained
+  inconsistent systems raise; the error names the rank and the residual; a
+  *consistent* rank-deficient system still solves; ridge regularization is a
+  workable escape.
+- `TestSymmetrization` — an asymmetric `H` minimizes its symmetric part; a
+  symmetric input is untouched.
+- `TestFeasibilityToleranceScaling` — badly scaled constraints do not report
+  spurious non-convergence, the scaling does not mask a real violation, and the
+  projection and the convergence test share one feasibility rule.
 
 ---
 

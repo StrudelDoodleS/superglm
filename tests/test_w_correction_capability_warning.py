@@ -86,6 +86,7 @@ def _build_setup(family: str, seed: int):
     )
 
     return {
+        "model": model,
         "dm": model._dm,
         "link": model._link,
         "distribution": model._distribution,
@@ -128,16 +129,21 @@ def _call(setup, *, link=None, distribution=None):
     )
 
 
-def _dW_deta(setup, *, link=None, distribution=None):
-    """Recompute dW/deta exactly as ``reml_w_correction``'s Fisher path does."""
-    link = link if link is not None else setup["link"]
-    distribution = distribution if distribution is not None else setup["distribution"]
+def _eta_mu(setup, link, distribution):
+    """The linear predictor and mean at which ``reml_w_correction`` evaluates W."""
     pirls_result = setup["pirls_result"]
     eta = stabilize_eta(
         setup["dm"].matvec(pirls_result.beta) + pirls_result.intercept + setup["offset_arr"],
         link,
     )
-    mu = clip_mu(link.inverse(eta), distribution)
+    return eta, clip_mu(link.inverse(eta), distribution)
+
+
+def _dW_deta(setup, *, link=None, distribution=None):
+    """Recompute dW/deta exactly as ``reml_w_correction``'s Fisher path does."""
+    link = link if link is not None else setup["link"]
+    distribution = distribution if distribution is not None else setup["distribution"]
+    eta, mu = _eta_mu(setup, link, distribution)
     return compute_dW_deta(link, distribution, mu, eta, setup["sample_weight"])
 
 
@@ -194,6 +200,51 @@ def test_builtin_link_does_not_warn(poisson_setup) -> None:
         result = _call(poisson_setup)
 
     assert result is not None, "the correction must actually be computed here"
+    assert [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)] == []
+
+
+def test_compute_dW_deta_itself_is_silent(poisson_setup) -> None:
+    """The warning lives in ``reml_w_correction``, never in ``compute_dW_deta``.
+
+    ``compute_dW_deta`` has a second public entry point --
+    ``model_compute_dW_deta`` (``model/reml_ops.py:13``), surfaced as
+    ``Model._compute_dW_deta`` and re-exported from ``reml/__init__.py``.  That
+    is a bare derivative query making no REML claim, so a warning about skipped
+    smoothing-parameter gradients does not belong on it.
+
+    Without this test the placement is unpinned: moving the ``warnings.warn``
+    call from ``reml_w_correction`` into ``compute_dW_deta`` leaves every other
+    test in this file green.
+    """
+    variants = [
+        {"link": _LinkWithoutDeriv2(poisson_setup["link"])},
+        {"distribution": _DistributionWithoutVarianceDerivative(poisson_setup["distribution"])},
+    ]
+
+    for kwargs in variants:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert _dW_deta(poisson_setup, **kwargs) is None
+
+        assert [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)] == [], kwargs
+
+
+def test_model_compute_dW_deta_is_silent(poisson_setup, monkeypatch) -> None:
+    """The same guard through the public ``Model._compute_dW_deta`` wrapper.
+
+    This is the path the placement decision exists to protect, so assert it
+    directly rather than only on the underlying function.
+    """
+    model = poisson_setup["model"]
+    link = _LinkWithoutDeriv2(poisson_setup["link"])
+    monkeypatch.setattr(model, "_link", link)
+    eta, mu = _eta_mu(poisson_setup, link, poisson_setup["distribution"])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = model._compute_dW_deta(mu, eta, poisson_setup["sample_weight"])
+
+    assert result is None, "the capability gate is what must be exercised here"
     assert [str(w.message) for w in caught if _SKIP_MESSAGE in str(w.message)] == []
 
 
