@@ -48,6 +48,16 @@ from superglm.solvers.structured import (
 from superglm.types import GroupSlice, PenaltyComponent
 
 
+def _missing_w_derivative_methods(link: Any, distribution: Any) -> list[str]:
+    """Second-order methods the W(rho) correction needs and this pair lacks."""
+    missing: list[str] = []
+    if not hasattr(link, "deriv2_inverse"):
+        missing.append(f"{type(link).__name__}.deriv2_inverse")
+    if not hasattr(distribution, "variance_derivative"):
+        missing.append(f"{type(distribution).__name__}.variance_derivative")
+    return missing
+
+
 def compute_dW_deta(
     link: Any,
     distribution: Any,
@@ -70,7 +80,7 @@ def compute_dW_deta(
     """
     if isinstance(distribution, Gamma) and isinstance(link, LogLink):
         return np.zeros_like(mu, dtype=np.float64)
-    if not hasattr(link, "deriv2_inverse") or not hasattr(distribution, "variance_derivative"):
+    if _missing_w_derivative_methods(link, distribution):
         return None
     g1 = link.deriv_inverse(eta)  # dmu/deta
     g2 = link.deriv2_inverse(eta)  # d2mu/deta2
@@ -187,37 +197,21 @@ def _qualified_class_name(obj: Any) -> str:
 def _warn_w_correction_unavailable(link: Any, distribution: Any) -> None:
     """Report the capability gap that silently drops the W(rho) correction.
 
+    Called only where ``compute_dW_deta`` returned ``None``, which it does
+    only for a missing method, so the list is never empty here.
+
     Every message opens with the *module-qualified* link/distribution pair,
     then says which method is missing.  The stdlib default filter dedups on
     (message, category, module, lineno), so that prefix is what sets the
     granularity: one warning per unique pair rather than one per REML
-    iteration.  Both halves of the prefix are load-bearing, and each was a
-    real bug before it was there.  Naming only the absent method keys the
-    dedup on the deficient class alone, so one custom link reused across two
-    distributions warns once.  Naming classes by bare ``__name__`` keys it on
-    a string two different classes can share, so two ``MyLink`` classes in
-    different modules warn once.  Either way the second pair's degraded fit
-    goes unreported.
+    iteration.  Both halves of the prefix are load-bearing.
 
-    The qualified pair is also the most useful thing to report: for a custom
-    class the module is exactly what the user needs in order to find it.  The
-    missing-method clause deliberately stays unqualified -- it would repeat
-    the same long path a few words later, buying no distinctness and no
-    information.
+    The missing-method clause deliberately stays unqualified -- it would
+    repeat the same long path a few words later, buying no distinctness and
+    no information.
     """
-    missing = []
-    if not hasattr(link, "deriv2_inverse"):
-        missing.append(f"{type(link).__name__}.deriv2_inverse")
-    if not hasattr(distribution, "variance_derivative"):
-        missing.append(f"{type(distribution).__name__}.variance_derivative")
-    detail = (
-        f"{' and '.join(missing)} is not implemented"
-        if missing
-        # Unreachable today: compute_dW_deta returns None only for the two
-        # methods above.  Kept so a future None path still says something
-        # rather than dropping the correction in silence again.
-        else "no dW/deta was supplied"
-    )
+    missing = _missing_w_derivative_methods(link, distribution)
+    detail = f"{' and '.join(missing)} is not implemented"
     pair = f"{_qualified_class_name(link)}/{_qualified_class_name(distribution)}"
     warnings.warn(
         f"REML W(rho) correction skipped for {pair}: {detail}. "

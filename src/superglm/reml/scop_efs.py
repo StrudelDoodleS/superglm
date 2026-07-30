@@ -758,7 +758,7 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode, pirls_tol: float) -> float:
 # changes nothing observable, so the already-computed mode is accepted rather
 # than rejected as a non-convergence.
 #
-# Both constants are taken from the 1017 SCOP inner fits the REML test corpus
+# Both thresholds are taken from the 1017 SCOP inner fits the REML test corpus
 # performs, not from round numbers:
 #
 # * Tolerance. Throughout the stagnant regime the deviance moves by at most a
@@ -770,23 +770,22 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode, pirls_tol: float) -> float:
 #   the measured fit moves by precisely one ULP.
 # * Window. The longest trailing stagnant run measured on a fit that then went
 #   on to converge normally is 29 iterations; the boundary fit holds for 86,
-#   and no fit in the corpus falls in between. 50 is the geometric midpoint of
-#   [29, 86], leaving a 1.7x margin against both populations.
-#
-# The window scales with the iteration budget, because a fixed 50 would leave
-# any caller who lowers ``max_pirls_iter`` with exactly the failure this exists
-# to prevent -- and a lower cap makes stagnation-at-cap *more* likely, not
-# less. A fit's trajectory does not depend on its cap, so a recorded fit
-# truncated at cap ``C`` reproduces what it would have presented at that cap:
-# a converging fit that begins stagnating at iteration ``s`` and finishes at
-# ``n_iter`` presents a run of ``C - s`` when ``C < n_iter``, and never reaches
-# this gate at all when ``C >= n_iter``. Replaying all 1015 converging fits
-# that way against ``max(30, min(50, C // 2))`` keeps the two populations
-# separated at *every* cap -- the margin is positive throughout, tightest at
-# ``C = 63`` (window 31 against a worst converging run of 24, margin 7) -- and
-# the floor of 30 also clears, cap-independently, the largest run ever observed
-# on a converging fit (29). At ``C >= 100`` the window is 50 and no converging
-# fit in the corpus even reaches the cap.
+#   and no fit in the corpus falls in between. The window scales with the
+#   iteration budget rather than sitting at a constant inside that gap,
+#   because a fixed one would leave any caller who lowers ``max_pirls_iter``
+#   with exactly the failure this exists to prevent -- and a lower cap makes
+#   stagnation-at-cap *more* likely, not less. A fit's trajectory does not
+#   depend on its cap, so a recorded fit truncated at cap ``C`` reproduces
+#   what it would have presented at that cap: a converging fit that begins
+#   stagnating at iteration ``s`` and finishes at ``n_iter`` presents a run of
+#   ``C - s`` when ``C < n_iter``, and never reaches this gate at all when
+#   ``C >= n_iter``. Replaying all 1015 converging fits that way against
+#   ``max(30, min(50, C // 2))`` keeps the two populations separated at
+#   *every* cap -- the margin is positive throughout, tightest at ``C = 63``
+#   (window 31 against a worst converging run of 24, margin 7) -- and the
+#   floor of 30 also clears, cap-independently, the largest run ever observed
+#   on a converging fit (29). At ``C >= 100`` the window is 50 and no
+#   converging fit in the corpus even reaches the cap.
 #
 # Below ``C = 31`` a 30-transition window does not fit in the budget, so the
 # evidence cannot support a classification and the non-convergence is raised
@@ -804,10 +803,10 @@ def _scop_stagnation_window(max_iter: int) -> int | None:
     """
     window = max(
         _STAGNANT_DEVIANCE_WINDOW_MIN,
-        min(_STAGNANT_DEVIANCE_WINDOW_MAX, int(max_iter) // 2),
+        min(_STAGNANT_DEVIANCE_WINDOW_MAX, max_iter // 2),
     )
     # One more iteration than transitions is needed to measure the window.
-    if int(max_iter) < window + 1:
+    if max_iter < window + 1:
         return None
     return window
 
@@ -937,13 +936,16 @@ def _fit_scop_reml_mode(
     if require_converged and not result.converged:
         if not _scop_deviance_stagnated(result, context.max_pirls_iter):
             return None
+        # The predicate accepted, so the window it resolved from this same cap
+        # was not None. Report that window; there is no fallback to guard.
+        required = _scop_stagnation_window(context.max_pirls_iter)
         logger.info(
             "SCOP %s fit accepted as a boundary solution: deviance stagnant to "
             "%.3g relative across the last %d of %d iterations "
             "(coefficient criterion cannot terminate at a log-space boundary)",
             phase,
             _STAGNANT_DEVIANCE_TOLERANCE,
-            _scop_stagnation_window(context.max_pirls_iter) or 0,
+            required,
             result.n_iter,
         )
         # A boundary solution is a converged mode: the deviance has stopped

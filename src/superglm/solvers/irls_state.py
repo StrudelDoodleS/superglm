@@ -172,7 +172,7 @@ def _stable_penalized_deviance_delta(
         terms.append(float(nonsmooth_penalty(candidate.beta)))
         terms.append(-float(nonsmooth_penalty(committed.beta)))
 
-    return float(math.fsum(terms))
+    return math.fsum(terms)
 
 
 def _state_is_finite(state: _IRLSState) -> bool:
