@@ -225,9 +225,9 @@ class IterationDiagnostics:
 
 @dataclass(frozen=True)
 class StagnationRecord:
-    """The three per-iteration scalars a stagnation gate reads, and nothing else.
+    """The per-iteration scalars a stagnation gate reads, and nothing else.
 
-    ``IterationDiagnostics`` carries the same three among its forty fields, but
+    ``IterationDiagnostics`` carries the same ones among its forty fields, but
     populating one costs roughly fourteen O(n) reductions, two ``argpartition``
     calls and two ``argsort`` calls per iteration -- and switching it on also
     switches on the solver's per-iteration extrema capture. A caller that only
@@ -241,8 +241,19 @@ class StagnationRecord:
     its field names at the publication boundary and turn every later
     ``entry.deviance`` into an ``AttributeError``. Dataclasses are reconstructed
     by type, which is why ``IterationDiagnostics`` survives publication intact.
+
+    ``iteration`` carries no information the gate computes anything from; it is
+    there so the gate can *check* the window it slices.  The gate takes its
+    window by position (``log[-(required + 1):]``) and reads it as a run of
+    consecutive iterations.  Nothing enforces that today -- the append is
+    unconditional -- but an edit that conditionalized or relocated it would make
+    the window span a gap and the gate would measure stagnation across it with
+    nothing to notice.  One int per iteration converts that silent wrong answer
+    into a loud one, which is cheaper than testing for every way the two could
+    drift apart.  Numbered ``it + 1``, matching ``IterationDiagnostics``.
     """
 
+    iteration: int
     deviance: float
     step_rejected: bool
     step_halvings: int
