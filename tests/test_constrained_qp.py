@@ -1873,6 +1873,152 @@ class TestStationarityIsRealNotATruncationArtifact:
             solve_constrained_qp(H, g, np.array([[1.0, 0.0]]), np.zeros(1))
 
 
+class TestInfeasibleEarlyReturnIsProjected:
+    """The stationary-point early return repairs the point it is about to return.
+
+    The loop can stop at a stationary point on a *subset* active set with
+    another row materially violated.  ``converged=False`` disclosed that but did
+    not fix it, and the ``irls_direct`` call site takes ``beta`` unconditionally
+    -- so an infeasible answer meant a fitted model that was not monotone.
+    Projecting at the return converts those into feasible, possibly suboptimal
+    answers.
+
+    The guard is precisely today's ``converged=False`` condition, so every solve
+    that currently returns a feasible point is untouched by construction rather
+    than by measurement.
+    """
+
+    @staticmethod
+    def _rank_deficient_population(n=900, seed=20260730):
+        """Rank-deficient QPs shaped like the in-tree callers: ``b = 0``, structured ``A``.
+
+        ``x = 0`` is feasible for every one of them, so an infeasible answer is
+        a solver defect rather than an infeasible problem.
+        """
+        rng = np.random.default_rng(seed)
+        cases = []
+        while len(cases) < n:
+            p = int(rng.integers(3, 13))
+            rank = int(rng.integers(1, p))
+            basis = np.linalg.qr(rng.standard_normal((p, p)))[0]
+            spectrum = np.zeros(p)
+            spectrum[:rank] = 10.0 ** rng.uniform(-2, 2, rank)
+            H = basis @ np.diag(spectrum) @ basis.T
+            H = 0.5 * (H + H.T)
+            if rng.random() < 0.45:
+                zero = int(rng.integers(0, p))
+                H[zero, :] = 0.0
+                H[:, zero] = 0.0
+            H = H * 10.0 ** rng.uniform(-6, 6)
+            g = H @ rng.standard_normal(p)  # in range(H) by construction
+            shape = rng.random()
+            if shape < 0.4:
+                A = np.diff(np.eye(p), axis=0)
+            elif shape < 0.7:
+                A = np.eye(p)
+            else:
+                A = np.diff(np.eye(p), n=2, axis=0)
+            A = A * 10.0 ** rng.uniform(-3, 3)
+            if A.shape[0] == 0:
+                continue
+            b = np.zeros(A.shape[0])
+            try:
+                if decompose_gram(H).rank >= p:
+                    continue
+                solve_constrained_qp(H, g, A, b, max_iter=1)
+            except ValueError:
+                continue  # inconsistent normal equations: refused by design
+            cases.append((H, g, A, b))
+        return cases
+
+    def test_an_infeasible_early_return_is_repaired_where_the_projection_reaches(self):
+        """Counted, not snapshotted: without the projection this count is 0.
+
+        Every case here reaches the early return with a row still violated, so
+        before the repair *none* of them was feasible on return.  The bound is
+        deliberately far below the measured rate -- 223 of 420 across the two
+        full 3950-case ensembles -- because the point being pinned is that the
+        repair happens at all, not the exact share the sweep budget reaches.
+        """
+        fired = repaired = 0
+        for H, g, A, b in self._rank_deficient_population():
+            result = solve_constrained_qp(H, g, A, b)
+            if result.converged or result.n_iter >= 200:
+                continue  # not the early-return-infeasible population
+            fired += 1
+            if _is_feasible(A, result.beta, b, 1e-12):
+                repaired += 1
+
+        assert fired >= 30, f"only {fired} solves reached the early return infeasibly"
+        assert repaired >= 10, (
+            f"{repaired} of {fired} infeasible early returns came back feasible; "
+            "without the projection at the return this is 0 by construction"
+        )
+
+    def test_a_repaired_point_is_still_not_reported_converged(self):
+        """Feasible is not certified, and the flag must not start saying it is.
+
+        ``converged`` reports the feasibility of the point the *loop* found,
+        taken before the projection runs.  Reporting post-projection feasibility
+        instead would flip exactly the repaired population to ``True`` -- a
+        point that satisfies the constraints but is not a KKT point, which is
+        the over-claim the flag exists to prevent.
+        """
+        checked = 0
+        for H, g, A, b in self._rank_deficient_population():
+            result = solve_constrained_qp(H, g, A, b)
+            if result.converged or result.n_iter >= 200:
+                continue
+            if not _is_feasible(A, result.beta, b, 1e-12):
+                continue  # the projection ran out of budget; nothing to over-claim
+            checked += 1
+            assert not result.converged, (
+                "a projected point was reported converged: the flag has been "
+                "moved to post-projection feasibility"
+            )
+        assert checked >= 10, f"only {checked} repaired points to check"
+
+    def test_the_projection_does_not_run_again_on_a_feasible_solve(self, monkeypatch):
+        """The inertness mechanism, witnessed rather than inferred.
+
+        Every constrained solve runs ``_project_feasible`` once before the loop.
+        A solve that returns a feasible point must not run it a second time --
+        that is what makes this change bitwise inert on the currently-good
+        population, and counting the calls witnesses it directly instead of
+        re-deriving the guard's condition, which would agree by construction.
+        """
+        calls = {"n": 0}
+        original = _project_feasible
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", counting)
+
+        rng = np.random.default_rng(11)
+        converged_solves = 0
+        for _ in range(120):
+            p = int(rng.integers(2, 9))
+            M = rng.standard_normal((p, p))
+            H = M.T @ M + (0.1 + rng.random()) * np.eye(p)  # full rank
+            g = rng.standard_normal(p) * float(rng.choice([1.0, 1e2, 1e4]))
+            A = np.diff(np.eye(p), axis=0) if rng.random() < 0.5 else np.eye(p)
+            b = np.zeros(A.shape[0])
+
+            calls["n"] = 0
+            result = solve_constrained_qp(H, g, A, b)
+            if not result.converged:
+                continue
+            converged_solves += 1
+            assert calls["n"] <= 1, (
+                f"a converged solve ran _project_feasible {calls['n']} times; "
+                "the return-side projection fired on a feasible point"
+            )
+
+        assert converged_solves >= 60, f"only {converged_solves} converged solves swept"
+
+
 class TestKKTEquilibration:
     """``lstsq``'s cutoff is relative to the matrix it is handed.
 
