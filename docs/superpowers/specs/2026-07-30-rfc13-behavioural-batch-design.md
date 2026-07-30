@@ -226,20 +226,30 @@ A private helper in `w_derivatives.py` emits a `UserWarning` naming the missing
 method(s) and the consequence.
 
 **Call site: `reml_w_correction` at the `dW_deta is None` branch (line 267) —
-deliberately not inside `compute_dW_deta`.** `_compute_d2W_deta2_fd` calls
-`compute_dW_deta` three times internally (lines 158, 164, 168); warning there
-would fire inside the finite-difference fallback.
+deliberately not inside `compute_dW_deta`.** `compute_dW_deta` has a second
+public entry point, `model_compute_dW_deta` (`model/reml_ops.py:15`, surfaced
+as `Model._compute_dW_deta` and re-exported from `reml/__init__.py`). That is a
+bare derivative query making no REML claim, so a warning about skipped
+smoothing-parameter gradients does not belong on it. (The finite-difference
+fallback is *not* an exposure: `_compute_d2W_deta2_fd` is reached only from the
+`w_correction_order >= 2` branch of `reml_w_correction`, which sits after the
+`dW_deta is None` gate, so its three internal `compute_dW_deta` calls can never
+hit the capability gate.)
 
 The structural-zero branch at line 270 (`not np.any(dW_deta)` — Gamma/log,
 where the correction is genuinely zero rather than unavailable) must stay
 silent. The two branches are already distinct.
 
 **Per-iteration spam** is handled by the stdlib default warning filter, which
-dedups on `(message, category, module, lineno)`. Including the link and
-distribution class names in the message makes it one warning per unique
-class pair per process. `pytest.warns` still observes it because pytest resets
-filters inside its context. `pyproject.toml:127-129` filters only the `bs`
-`FutureWarning`, so nothing interferes.
+dedups on `(message, category, module, lineno)`. Because `stacklevel=3` keys
+the registry on the *caller's* frame, and `reml_w_correction` has two call
+sites (`reml/direct.py:599` and `model/reml_ops.py:30`), including the link and
+distribution class names in the message bounds this at **at most two** warnings
+per unique class pair per process — one per call site. Measured: five REML
+iterations from a single call site emit one warning. `pytest.warns` still
+observes it because pytest resets filters inside its context.
+`pyproject.toml:127-129` filters only the `bs` `FutureWarning`, so nothing
+interferes.
 
 Raising, as the observed path does, was considered and rejected: it would
 remove a currently-working if degraded path for custom links.
