@@ -33,8 +33,24 @@ each material change and its release metadata in one review.
 
 The pull-request base version must agree with the latest PyPI release before
 preparation. `release:none` work may merge without competing for a version, but
-a release tag still points to the reviewed release-bearing PR's merge commit,
-not an arbitrary later master tip.
+a release tag still points to the commit on master produced by the reviewed
+release-bearing PR, not an arbitrary later master tip. The repository
+rebase-merges under a linear-history rule, so that commit is the rebased head;
+there is no merge commit to bind to.
+
+## Version history notes
+
+`0.16.2` was never released. It was prepared on the branch that became PR #174
+and merged to master, but no tag was pushed, so it existed only as an
+unpublished candidate. PR #176 then declared `release:minor` and bumped master
+to `0.17.0`, which subsumes it: a minor release carries everything the skipped
+patch would have. The gap between `0.16.1` on PyPI and `0.17.0` on master is
+therefore expected, and `0.16.2` should never be published.
+
+This is the ordinary consequence of merging without tagging. A merged
+release-bearing pull request leaves master carrying a version that is not on
+PyPI, and the next release-bearing pull request either waits for it to publish
+or, as here, supersedes it.
 
 ## Invoke the specialist
 
@@ -64,7 +80,7 @@ new exact instruction:
 Use the release_manager agent to publish v0.x.y and monitor PyPI deployment.
 ```
 
-The specialist pushes the approved annotated tag at the reviewed merge commit.
+The specialist pushes the approved annotated tag at the reviewed commit on master.
 The existing release workflow builds and verifies the wheel and sdist,
 publishes them through PyPI Trusted Publishing, then creates the GitHub Release.
 Direct uploads, reused versions, moved tags, and inferred publication authority
