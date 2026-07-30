@@ -423,8 +423,14 @@ def solve_constrained_qp(
     m = A.shape[0]
 
     # Materialize the symmetric part once and use it everywhere below; see the
-    # ``H`` parameter above for why.
-    H_sym = 0.5 * (H + H.T)
+    # ``H`` parameter above for why.  The float cast is load-bearing rather
+    # than defensive: ``H + H.T`` evaluates in the input dtype, so an integer
+    # H silently wraps -- ``[[2**62]]`` as int64 sums to a negative number and
+    # a valid PSD problem is then rejected for a "materially negative
+    # diagonal".  The raw ``np.linalg.solve`` this replaced upcast internally,
+    # so the exposure arrived with the symmetrization.
+    H_asarray = np.asarray(H, dtype=float)
+    H_sym = 0.5 * (H_asarray + H_asarray.T)
 
     # Route the pure-H solves through the shared rank policy so a singular or
     # near-singular H is rank-truncated the way it is everywhere else in the
@@ -495,6 +501,11 @@ def solve_constrained_qp(
     # attribute lookup for a seam that is off in every production call.
     tracing = _trace_run is not None and _trace_run.enabled
 
+    # Only a rank-truncated H can put a null direction into the KKT system.
+    # Resolved once so the full-rank path -- which is nearly every in-tree
+    # solve -- keeps taking np.linalg.solve on bitwise the same inputs.
+    kkt_may_be_singular = decomposition.rank < decomposition.width
+
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
         if len(active) == 0:
@@ -518,11 +529,22 @@ def solve_constrained_qp(
             rhs[:p] = g - H_sym @ beta
             rhs[p:] = b_eq - A_eq @ beta
 
-            try:
-                sol = np.linalg.solve(KKT, rhs)
-            except np.linalg.LinAlgError:
-                # Singular KKT — use least-squares
+            if kkt_may_be_singular:
+                # A truncated H can leave the KKT system with a
+                # constraint-tangent null direction.  np.linalg.solve
+                # *numerically succeeds* on such a system rather than raising,
+                # so the LinAlgError fallback below never fires and the step
+                # drifts along the flat direction -- measured reaching
+                # |beta| ~ 4e43 while violating the constraint it was meant to
+                # respect.  Take the minimum-norm solution directly instead of
+                # waiting for an exception that does not come.
                 sol = np.linalg.lstsq(KKT, rhs, rcond=None)[0]
+            else:
+                try:
+                    sol = np.linalg.solve(KKT, rhs)
+                except np.linalg.LinAlgError:
+                    # Singular KKT — use least-squares
+                    sol = np.linalg.lstsq(KKT, rhs, rcond=None)[0]
 
             step = sol[:p]
 
