@@ -358,6 +358,14 @@ def test_pirls_ill_conditioned_smooth_basis_has_no_spurious_step_rejection() -> 
     accepts the full step, and converges at 1023.5298702885818.  Smaller lambdas
     do not reach the cancellation; much larger ones (>~1e15) make the merit itself
     too noisy for either comparison to be meaningful.
+
+    Deliberately no threshold on the converged deviance.  Perturbing ``x`` by one
+    ulp moves it by up to 2.5e-04 -- an order of magnitude more than the gap
+    between the two arms -- and one such perturbation lands *worse* than the
+    pre-change value, so no threshold separates them.  A different BLAS reduction
+    order does the same thing, deterministically, which is why fixing the thread
+    count does not make such a bound safe.  The structural assertions below are
+    the property; they survived every one of those perturbations.
     """
     rng = np.random.default_rng(11)
     n = 600
@@ -375,14 +383,18 @@ def test_pirls_ill_conditioned_smooth_basis_has_no_spurious_step_rejection() -> 
     model.fit(df, y, record_diagnostics=True)
 
     iteration_log = model.result.iteration_log
-    assert iteration_log is not None
+    assert iteration_log
     assert not any(row.step_rejected for row in iteration_log), (
         "pirls rejected a terminal step in an ill-conditioned smooth basis"
     )
+    # Stricter than the property under test -- a halving is ordinarily a benign
+    # safeguard -- but on this fixture exact rational arithmetic says alpha=1 is
+    # the safe step at every outer iteration (merit changes -5.72e+01, -6.86e-01,
+    # -1.0516e-04), so any halving here is the same mis-signed comparison caught
+    # one severity short of a rejection.  Kept as an early-warning tripwire.
     assert not any(row.step_halvings for row in iteration_log)
     # The rejection above is what stops the fit converging, so assert the consequence.
     assert model.result.converged
-    assert model.result.deviance < 1023.52990
 
 
 def test_pirls_line_search_merit_delta_reproduces_its_penalized_deviance(monkeypatch) -> None:
