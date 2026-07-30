@@ -36,6 +36,12 @@ _EPS = np.finfo(float).eps
 # own purpose must not silently move this gate.
 _NULL_BASIS_ACCURACY_SLACK = 32.0
 
+# Consistency floor for the *structural* half of the null space.  Those basis
+# vectors are exact unit vectors -- a structurally zero column gives ``H`` an
+# identically zero row -- so no conditioning term belongs here; the only slack
+# needed covers rounding in the norms themselves.
+_STRUCTURAL_CONSISTENCY_FLOOR = _NULL_BASIS_ACCURACY_SLACK * _EPS
+
 
 @dataclass
 class QPResult:
@@ -56,8 +62,8 @@ class QPResult:
     converged: bool = True
 
 
-def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> float:
-    """Fraction of ``g`` lying in ``null(H)``, as a share of ``||g||``.
+def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[float, float]:
+    """Split ``g``'s share of ``null(H)`` into its structural and spectral parts.
 
     ``g`` is in ``range(H)`` -- the normal equations are consistent -- exactly
     when it is orthogonal to ``null(H)``, so project it onto the null basis the
@@ -65,29 +71,61 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> float:
     instead of inferring it from a solve residual: a residual is amplified by
     the retained condition number, which at the conditions the rank policy
     happily retains swamps the signal entirely.
+
+    The two halves must not share a threshold, because they are not known to
+    the same accuracy.  ``rank._null_basis`` stacks
+
+    * one **exact unit vector** per structurally zero column (``column_scale``
+      is 0 there, so ``H`` has an identically zero row and column), and
+    * the **discarded spectral directions** ``D^-1 @ V_discarded``, whose
+      computed accuracy degrades as ``eps * retained condition``.
+
+    They have disjoint row supports -- the unit vectors live on the unscaled
+    columns, the spectral directions on the scaled ones -- so the split is an
+    orthogonal decomposition of ``null(H)`` and the two masses can be measured
+    and thresholded independently. Judging the exact half against the spectral
+    half's floor is what let an ill-conditioned retained block desensitize a
+    structural alias where detection is exact.
+
+    Returns ``(structural_mass, spectral_mass)``, each as a share of ``||g||``.
     """
-    null_basis = decomposition.null_basis()
-    if null_basis.shape[1] == 0:
-        return 0.0
-    orthonormal_null, _ = np.linalg.qr(null_basis)
     reference = max(float(np.linalg.norm(g)), np.finfo(float).tiny)
-    return float(np.linalg.norm(orthonormal_null.T @ g)) / reference
+    structural = decomposition.column_scale == 0.0
+    structural_mass = float(np.linalg.norm(g[structural])) / reference
+
+    null_basis = decomposition.null_basis()
+    scaled = ~structural
+    spectral_mass = 0.0
+    if null_basis.shape[1] and np.any(scaled):
+        # Restricting to the scaled rows annihilates the unit-vector columns
+        # and leaves exactly the spectral ones.
+        spectral_basis = null_basis[scaled, :]
+        retained_columns = np.linalg.norm(spectral_basis, axis=0) > 0.0
+        if np.any(retained_columns):
+            orthonormal, _ = np.linalg.qr(spectral_basis[:, retained_columns])
+            spectral_mass = float(np.linalg.norm(orthonormal.T @ g[scaled])) / reference
+    return structural_mass, spectral_mass
 
 
 def _consistency_floor(decomposition: RankDecomposition) -> float:
-    """Largest null-space mass the decomposition's own roundoff can manufacture.
+    """Largest *spectral* null mass the decomposition's own roundoff can manufacture.
 
-    The computed null basis is accurate only to about ``eps`` times the
-    retained condition number, so a genuinely consistent ``g`` still projects
-    onto it by roughly that much.  Scaling the threshold with the retained
-    conditioning -- rather than fixing it at ``factor_rcond`` -- is what keeps
-    a well-posed but ill-conditioned rank-deficient system solvable, since the
-    rank policy truncates at ``gram_rcond`` and so retains blocks far more
-    ill-conditioned than ``factor_rcond`` would tolerate.
+    This governs only the spectral half of the split in ``_null_space_mass``.
+    The structural half is measured against ``_STRUCTURAL_CONSISTENCY_FLOOR``,
+    because a structurally zero column's null vector is an exact unit vector
+    and carries none of the error this floor models.
+
+    The computed spectral null basis is accurate only to about ``eps`` times
+    the retained condition number, so a genuinely consistent ``g`` still
+    projects onto it by roughly that much.  Scaling the threshold with the
+    retained conditioning -- rather than fixing it at ``factor_rcond`` -- is
+    what keeps a well-posed but ill-conditioned rank-deficient system solvable,
+    since the rank policy truncates at ``gram_rcond`` and so retains blocks far
+    more ill-conditioned than ``factor_rcond`` would tolerate.
 
     Sensitivity degrades *gradually* as the retained conditioning grows; there
-    is no sharp cutoff.  Measured detection of an injected null component, by
-    retained condition:
+    is no sharp cutoff.  Measured detection of an injected **spectral** null
+    component, by retained condition:
 
     ==============  ============  ===============  =================
     retained cond   median floor  1% mass caught   0.1% mass caught
@@ -99,20 +137,22 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     ``1e13``        ``6.8e-02``     8/120            1/120
     ==============  ============  ===============  =================
 
-    So a 0.1% inconsistency is already partly missed at ``1e11`` and a 1% one
-    at ``1e12``, well below the ``~1e14`` at which the floor saturates at 1 and
-    nothing is detectable at all.  This is a real resolution limit rather than
-    a tuning choice: at those conditions the null basis is itself only accurate
-    to the floor, and along such a direction the objective moves only in the
-    fifth significant figure over a coefficient range of ``1e9``.  It fails
-    open -- the solve proceeds rather than refusing a system it cannot
-    adjudicate -- which is the safe direction, since refusing a solvable system
-    is the defect this floor exists to prevent.
+    So a 0.1% spectral inconsistency is already partly missed at ``1e11`` and a
+    1% one at ``1e12``, well below the ``~1e14`` at which the floor saturates
+    at 1 and nothing spectral is detectable at all.  This is a real resolution
+    limit rather than a tuning choice: at those conditions the spectral null
+    basis is itself only accurate to the floor, and along such a direction the
+    objective moves only in the fifth significant figure over a coefficient
+    range of ``1e9``.  It fails open -- the solve proceeds rather than refusing
+    a system it cannot adjudicate -- which is the safe direction, since
+    refusing a solvable system is the defect this floor exists to prevent.
+
+    None of that degradation applies to a structural alias: those are exact at
+    every conditioning, which is why they are thresholded separately.
     """
     retained = decomposition.retained_values
     if retained is None or retained.size == 0:
-        # Cholesky without truncated spectrum: only structural zero columns
-        # were dropped, and their null basis is exact unit vectors.
+        # Cholesky without truncated spectrum: nothing spectral was dropped.
         retained_condition = 1.0
     else:
         magnitudes = np.abs(retained)
@@ -123,7 +163,7 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     return float(min(1.0, _NULL_BASIS_ACCURACY_SLACK * _EPS * max(1.0, retained_condition)))
 
 
-def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> NDArray:
+def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray) -> NDArray:
     """Return ``A @ beta - b`` measured against a scale-aware tolerance.
 
     A step that lands *on* a constraint reproduces ``b_i`` only to about
@@ -138,15 +178,26 @@ def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> NDA
     compare it against a bare ``-tol``.
     """
     products = A @ beta
-    scale = np.maximum(1.0, np.maximum(np.abs(b), np.abs(products)))
-    return (products - b) / scale
+    return (products - b) / _feasibility_scale(products, b)
+
+
+def _feasibility_scale(products: NDArray, b: NDArray) -> NDArray:
+    """Per-row scale for the relative feasibility test: ``max(1, |b|, |A @ beta|)``.
+
+    Exposed separately so the active-set loop can divide *both* its slack and
+    its directional derivative by the same factor.  Scaling both leaves the
+    step ratio ``slack / -a_step`` numerically unchanged while making the
+    decisions built on them -- "is this row already satisfied", "does this step
+    move the row at all" -- agree with ``_is_feasible``.
+    """
+    return np.maximum(1.0, np.maximum(np.abs(b), np.abs(products)))
 
 
 def _is_feasible(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> bool:
     """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance."""
     if A.shape[0] == 0:
         return True
-    return bool(np.all(_feasibility_slack(A, beta, b, tol) >= -tol))
+    return bool(np.all(_feasibility_slack(A, beta, b) >= -tol))
 
 
 def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
@@ -168,7 +219,7 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     """
     beta = beta.copy()
     for _ in range(100):
-        violations = _feasibility_slack(A, beta, b, tol)
+        violations = _feasibility_slack(A, beta, b)
         worst = int(np.argmin(violations))
         if violations[worst] >= -tol:
             break
@@ -227,7 +278,10 @@ def solve_constrained_qp(
         constraint test is relative: row ``i`` is satisfied when
         ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i @ beta|)``, so a
         badly scaled constraint system does not read as infeasible purely
-        because its rows are large.
+        because its rows are large. This matters only for callers with a
+        nonzero ``b``: at ``b_i == 0`` the relative test is algebraically
+        identical to the absolute one for any ``tol`` in ``(0, 1)``, and every
+        in-tree caller passes ``b = 0``.
 
     Returns
     -------
@@ -263,19 +317,29 @@ def solve_constrained_qp(
     # detect the inconsistency before either early return.  Full rank means
     # range(H) is everything, so the check is only needed after truncation.
     if decomposition.rank < decomposition.width:
-        null_mass = _null_space_mass(decomposition, g)
-        floor = _consistency_floor(decomposition)
-        if null_mass > floor:
+        # The two halves of null(H) are known to different accuracies, so they
+        # get their own floors; see _null_space_mass.  Sharing one floor let an
+        # ill-conditioned retained block desensitize a structural alias, where
+        # detection is in fact exact.
+        structural_mass, spectral_mass = _null_space_mass(decomposition, g)
+        spectral_floor = _consistency_floor(decomposition)
+        structural_breach = structural_mass > _STRUCTURAL_CONSISTENCY_FLOOR
+        if structural_breach or spectral_mass > spectral_floor:
+            kind, mass, floor = (
+                ("a structurally aliased column", structural_mass, _STRUCTURAL_CONSISTENCY_FLOOR)
+                if structural_breach
+                else ("a truncated spectral direction", spectral_mass, spectral_floor)
+            )
             raise ValueError(
                 "solve_constrained_qp: H is rank-deficient (rank "
                 f"{decomposition.rank} of {decomposition.width}) and g has a "
-                f"component in null(H) ({null_mass:.3e} of ||g||, against a "
-                f"resolution floor of {floor:.3e}), so the objective is unbounded "
-                "below along that direction. The unconstrained solve and the "
-                "active-set loop's empty-active-set step both form directions "
-                "inside range(H), so neither entry path can follow it. "
-                "Regularize H (for example add a ridge term) or drop the "
-                "aliased columns."
+                f"component in null(H) along {kind} ({mass:.3e} of ||g||, "
+                f"against a resolution floor of {floor:.3e}), so the objective "
+                "is unbounded below along that direction. The unconstrained "
+                "solve and the active-set loop's empty-active-set step both "
+                "form directions inside range(H), so neither entry path can "
+                "follow it. Regularize H (for example add a ridge term) or "
+                "drop the aliased columns."
             )
 
     if m == 0:
@@ -367,10 +431,14 @@ def solve_constrained_qp(
             continue
 
         # --- Step ratio: find blocking constraint ---
+        # Both tests below go through the same per-row scale the convergence
+        # test uses.  Leaving them absolute while the boundaries went relative
+        # made the loop treat a row as violated that _is_feasible considers
+        # satisfied, so it would block on that row with a negative slack and
+        # take a backward step.
         beta_new = beta + step
-        violations = A @ beta_new - b
 
-        if np.all(violations >= -tol):
+        if _is_feasible(A, beta_new, b, tol):
             # Full step is feasible
             beta = beta_new
         else:
@@ -378,14 +446,19 @@ def solve_constrained_qp(
             alpha_min = 1.0
             blocking = -1
 
+            products = A @ beta
+            row_scale = _feasibility_scale(products, b)
+            scaled_slack = (products - b) / row_scale
+            scaled_step = (A @ step) / row_scale
+
             for i in range(m):
                 if i in active:
                     continue
-                a_step = A[i] @ step
+                a_step = scaled_step[i]
                 if a_step < -tol:
-                    # This constraint could be violated
-                    slack = A[i] @ beta - b[i]
-                    alpha = slack / (-a_step)
+                    # This constraint could be violated.  Dividing slack and
+                    # a_step by the same row scale leaves the ratio unchanged.
+                    alpha = scaled_slack[i] / (-a_step)
                     if alpha < alpha_min:
                         alpha_min = alpha
                         blocking = i
