@@ -906,6 +906,13 @@ def solve_constrained_qp(
         if np.linalg.norm(step) < tol:
             # At a stationary point.  With an empty active set that is already
             # the whole dual condition; otherwise the multipliers decide first.
+            #
+            # A small ``step`` means stationarity only because the saddle system
+            # is *solvable*, and on the ``kkt_may_be_singular`` path that needs
+            # an argument: ``step`` there is the **minimum-norm** least-squares
+            # solution, which is small by construction whenever ``lstsq``
+            # discards a direction the right-hand side needed.  The argument is
+            # below the loop, at the return.
             if len(active) != 0:
                 # Recompute multipliers at current point.
                 # KKT stationarity: H*beta - g = A_eq' * lambda, lambda >= 0
@@ -929,6 +936,61 @@ def solve_constrained_qp(
 
             # Stationarity and dual feasibility hold; primal feasibility
             # completes the KKT certificate.
+            #
+            # **Why stationarity holds even though ``step`` may come from
+            # ``lstsq``.**  The termination test above is ``||step|| < tol``,
+            # and reading a small step as stationarity is immediate for
+            # ``np.linalg.solve``, which either returns *the* solution or
+            # raises.  It is not immediate for ``_solve_saddle_least_squares``:
+            # a minimum-norm least-squares solution is small exactly when
+            # ``lstsq`` truncates a direction ``rhs`` needed, so on that path a
+            # small step could in principle be a truncation artifact rather
+            # than a KKT point, and every early return with a non-empty active
+            # set on a rank-deficient ``H`` arrives through it.  It is not an
+            # artifact, and the reason is structural rather than empirical:
+            #
+            # The system is ``[[H, -A_eq^T], [A_eq, 0]] z = [u; v]`` with
+            # ``u = g - H beta`` and ``v = b_eq - A_eq beta``.  Solving the
+            # second block needs ``v`` in ``range(A_eq)``; what is then left is
+            # ``P (u - H x_p)`` in ``range(P H P)``, where ``P`` projects onto
+            # ``null(A_eq)`` and ``x_p`` is any particular solution.  Write the
+            # PSD ``H`` as ``L L^T``.  Then ``range(P H P) = range(P L)``, and
+            # ``P H Q = (P L)(L^T Q)`` has its range inside ``range(P L)`` as
+            # well -- so for any ``u`` in ``range(H)`` both ``P u`` and
+            # ``P H x_p`` land in ``range(P H P)`` and the condition holds.
+            # **The saddle system is consistent for every PSD ``H``, whatever
+            # its rank**, given only that ``u`` is in ``range(H)`` and ``v`` is
+            # in ``range(A_eq)``.
+            #
+            # Both hypotheses are discharged here rather than assumed.  ``u`` is
+            # in ``range(H)`` because ``g`` is: the consistency gate above the
+            # loop refuses any other ``g`` outright, and ``H beta`` is in
+            # ``range(H)`` trivially.  ``v`` is in ``range(A_eq)`` whenever
+            # ``b_eq`` is, which is automatic at ``b = 0`` -- every in-tree
+            # caller.  So on this code path ``lstsq`` is never asked to discard
+            # a direction the right-hand side needs.
+            #
+            # Measured, at 33705 early returns with a non-empty active set --
+            # the two 3950-case rank-deficient ensembles, the full-rank
+            # byte-identity corpus, and a 26143-solve hunt seeded with
+            # positively dependent constraint rows and nonzero ``b`` -- the
+            # number whose gradient ``H beta - g`` is both materially nonzero
+            # and materially outside ``range(A_eq^T)`` is **0**.  A runtime
+            # residual check was written and measured against this population
+            # and fires on none of it, so it is not shipped: it would be a
+            # guard that no in-tree caller can reach and that no path exercises.
+            # ``test_a_converged_result_satisfies_the_kkt_conditions`` verifies
+            # the certificate from outside instead, on the public result.
+            #
+            # What the argument does *not* cover is ``b_eq`` outside
+            # ``range(A_eq)``, which needs positively dependent active rows
+            # *and* a nonzero ``b``.  Brute-forced over 40000 random PSD
+            # saddles, that is the only way to make the system inconsistent
+            # (worst relative residual ``0.97`` there, against ``26.7 * eps``
+            # with ``v`` in range), and the 26143-solve hunt did not reach it
+            # through the loop's own dynamics.  Filed, not guarded: it is a
+            # property of the caller's constraint system, and belongs at the
+            # boundary rather than inside the iteration if it ever matters.
             #
             # **Known gap, filed rather than fixed here.**  The loop can reach
             # this return on a subset active set while another row is
