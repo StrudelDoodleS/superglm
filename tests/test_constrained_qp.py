@@ -12,6 +12,7 @@ from superglm.solvers.constrained_qp import (
     _is_feasible,
     _null_space_mass,
     _project_feasible,
+    _solve_saddle_least_squares,
     solve_constrained_qp,
 )
 from superglm.solvers.rank import decompose_gram
@@ -1297,6 +1298,209 @@ class TestRankDeficientKKT:
 
         assert result.converged
         assert np.all(A @ result.beta - b >= -1e-10)
+
+
+class TestKKTEquilibration:
+    """``lstsq``'s cutoff is relative to the matrix it is handed.
+
+    Routing rank-deficient systems to ``lstsq`` fixed the drift above, but on
+    the *unscaled* saddle matrix the cutoff measures the constraint block
+    against the norm of ``H``.  When ``H`` dwarfs the constraint rows every
+    constraint direction reads as noise and is discarded, and the answer
+    ignores the constraints.  The matrix is nonsingular in these cases; only
+    the tolerance was wrong.
+    """
+
+    def test_dominant_hessian_does_not_discard_the_constraint_block(self):
+        """Measured pre-fix: ``beta = (-1, 0.5)``, violating ``A @ beta >= 0``
+        by ``0.5``, from KKT singular values ``[1e16, 1, 1]`` against an
+        ``rcond=None`` cutoff of ``3 * eps * 1e16 = 6.66`` -- both unit values
+        truncated, rank 1 of 3 retained.  The feasible optimum attains the same
+        objective, so the wrong answer was not even cheaper."""
+        H = np.diag([1e16, 0.0])
+        g = np.array([-1e16, 0.0])
+        A = np.array([[1.0, 1.0]])
+        b = np.array([0.0])
+
+        assert decompose_gram(H).rank == 1, "fixture must take the lstsq branch"
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert np.all(A @ result.beta - b >= -1e-9), (
+            f"constraint violated by {np.min(A @ result.beta - b):.3e}"
+        )
+        objective = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+        np.testing.assert_allclose(objective, -5e15, rtol=1e-12)
+        np.testing.assert_allclose(result.beta, [-1.0, 1.0], rtol=1e-9)
+        # ``converged`` is unchanged in meaning and now reports True on its own
+        # terms: the loop reached its termination test and the point it
+        # returned is feasible, which is the whole certificate.  Pre-fix it was
+        # False *because* the point was infeasible.
+        assert result.converged
+
+    @pytest.mark.parametrize("exponent", [-20, -12, -8, -4, 0, 4, 8, 12, 16, 20])
+    def test_feasibility_survives_hessian_constraint_scale_mismatch(self, exponent):
+        """One passing example is not evidence that a scaling is right.
+
+        Pre-fix this is feasible up to ``1e12`` and infeasible by ``0.5`` at
+        ``1e16`` and ``1e20``; the cutoff crosses the constraint rows somewhere
+        in between.  Post-fix every scale returns the exact optimum
+        ``(-1, 1) * 1`` with the objective ``-0.5 * scale``.
+        """
+        scale = 10.0**exponent
+        H = np.diag([scale, 0.0])
+        g = np.array([-scale, 0.0])
+        A = np.array([[1.0, 1.0]])
+        b = np.array([0.0])
+
+        assert decompose_gram(H).rank == 1, "fixture must take the lstsq branch"
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        slack = float((A @ result.beta - b)[0])
+        assert slack >= -1e-9, f"infeasible by {slack:.3e} at scale {scale:.0e}"
+        if exponent >= -12:
+            # Below about ``eps`` the H block is lost in the roundoff of the
+            # constraint block when the saddle matrix is *assembled*, so the
+            # tangential step is not recoverable by any later rescaling. That
+            # floor is unchanged by this fix and is asserted separately below.
+            objective = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+            np.testing.assert_allclose(objective, -0.5 * scale, rtol=1e-12)
+
+    def test_hessian_below_constraint_roundoff_is_a_known_precision_floor(self):
+        """Not a regression, and not fixable by scaling: at ``||H|| <= eps *
+        ||A||`` the ``H`` block rounds away as the saddle matrix is formed, so
+        the constraint-tangent step is gone before any solve sees it.  Pinned
+        so that the sweep above cannot quietly be weakened to hide it."""
+        scale = 1e-16
+        H = np.diag([scale, 0.0])
+        g = np.array([-scale, 0.0])
+        A = np.array([[1.0, 1.0]])
+        b = np.array([0.0])
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert float((A @ result.beta - b)[0]) >= -1e-9
+        objective = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+        # The optimum is -0.5 * scale; the reachable answer is 0.75 of it.
+        np.testing.assert_allclose(objective, -0.75 * 0.5 * scale, rtol=1e-9)
+
+    def test_retained_in_band_direction_is_not_truncated_by_the_kkt_solve(self):
+        """The rank policy retains eigenvalues down to ``gram_rcond * lambda_max
+        = eps * lambda_max``; ``lstsq(rcond=None)`` drops singular values below
+        ``max(M, N) * eps * sigma_max``.  A direction in between is retained by
+        the policy -- ``decomposition.solve`` uses it -- but discarded by the
+        KKT solve, so the two solves inside one function disagree about what
+        the retained subspace is.
+
+        This is only reachable when the active rows leave the direction free:
+        an in-band direction that an active constraint *pins* keeps a KKT
+        singular value of order that constraint row's norm, not of order its
+        ``H`` eigenvalue, so it never approaches either cutoff.  Here
+        ``A_eq = [[1, 0, 0]]`` leaves ``e2`` free and ``H[1, 1] = eps`` puts it
+        squarely in the band.
+
+        Asserted on the saddle solve rather than end to end because
+        ``decomposition.solve`` plus the feasibility projection happen to
+        resolve ``e2`` before the loop's first KKT step in every end-to-end
+        fixture tried, which would make an outer assertion pass against the
+        unequilibrated solve too.
+
+        Measured: unequilibrated, the KKT singular ratios are
+        ``[1, 0.38, 1.4e-16, 0]`` against a cutoff of ``4 * eps = 8.9e-16``, so
+        the direction is dropped and the step along ``e2`` is exactly ``0``.
+        An explicit ``rcond=gram_rcond`` does *not* rescue it -- ``1.4e-16`` is
+        below ``eps`` too -- but equilibration lifts the ratio to ``0.38``.
+        """
+        eps = np.finfo(float).eps
+        target = -1.0e3
+        H = np.diag([1.0, eps, 0.0])
+        g = np.array([-1.0, eps * target, 0.0])
+        A_eq = np.array([[1.0, 0.0, 0.0]])
+
+        decomposition = decompose_gram(H)
+        assert decomposition.rank == 2, "fixture must take the lstsq branch"
+        # The policy itself uses the in-band direction, so the KKT solve must.
+        np.testing.assert_allclose(decomposition.solve(g), [-1.0, target, 0.0], rtol=1e-9)
+
+        KKT = np.zeros((4, 4))
+        KKT[:3, :3] = H
+        KKT[:3, 3:] = -A_eq.T
+        KKT[3:, :3] = A_eq
+        rhs = np.concatenate([g, [0.0]])
+
+        solution = _solve_saddle_least_squares(KKT, rhs)
+
+        np.testing.assert_allclose(solution[1], target, rtol=1e-9)
+
+    def test_equilibration_is_bitwise_inert_on_an_already_balanced_saddle(self):
+        """The scaling must not perturb systems that did not need it: every row
+        inf-norm is 1 here, so the scale is exactly 1.0 and each multiply is
+        exact.  This is what keeps the change confined to badly scaled saddles
+        rather than spreading last-bit drift across the rank-deficient path."""
+        KKT = np.array(
+            [[1.0, 1.0, -1.0], [1.0, 1.0, -0.0], [1.0, 0.0, 0.0]],
+        )
+        rhs = np.array([0.25, -0.5, 0.125])
+        assert np.all(np.abs(KKT).max(axis=1) == 1.0), "fixture must be balanced"
+
+        equilibrated = _solve_saddle_least_squares(KKT, rhs)
+        plain = np.linalg.lstsq(KKT, rhs, rcond=None)[0]
+
+        assert equilibrated.tobytes() == plain.tobytes()
+
+    def test_degenerate_blocks_do_not_produce_non_finite_scales(self):
+        """A structurally empty row has inf-norm 0 and must not be divided by.
+
+        It keeps scale ``1.0`` rather than being clamped to ``tiny``, which
+        would manufacture a ``6.7e153`` scale for a row carrying no
+        information.  A denormal row is a real row and *is* normalized.
+        """
+        empty = np.zeros((3, 3))
+        empty[0, 0] = 1.0
+        assert _solve_saddle_least_squares(empty, np.array([1.0, 0.0, 0.0])).tolist() == [
+            1.0,
+            0.0,
+            0.0,
+        ]
+
+        for H, g, A, b in [
+            (np.zeros((2, 2)), np.zeros(2), np.array([[1.0, 1.0]]), np.array([1.0])),
+            (
+                np.diag([1e-300, 0.0]),
+                np.array([-1e-300, 0.0]),
+                np.array([[1.0, 1.0]]),
+                np.array([0.0]),
+            ),
+            (np.diag([1.0, 0.0]), np.array([-1.0, 0.0]), np.array([[1e18, 1e18]]), np.array([0.0])),
+        ]:
+            result = solve_constrained_qp(H, g, A, b)
+            assert np.all(np.isfinite(result.beta)), f"non-finite beta for {np.diag(H)}"
+
+    def test_equilibrated_entries_are_bounded_by_one(self):
+        """The no-overflow argument, exercised rather than asserted in prose:
+        ``|K[i, j]| <= min(m_i, m_j) <= sqrt(m_i * m_j)``, so every scaled entry
+        is at most 1 whatever the dynamic range of the input.
+
+        The bound is exact in real arithmetic; the two multiplies that apply it
+        round, so the test allows a few ulps.  What matters for overflow is the
+        magnitude, not the last bit -- the measured worst case is 1 + 2 ulp.
+        """
+        rng = np.random.default_rng(3)
+        worst = 0.0
+        for _ in range(200):
+            n = int(rng.integers(2, 9))
+            raw = rng.standard_normal((n, n)) * 10.0 ** rng.uniform(-200, 200, (n, 1))
+            raw = np.where(rng.random((n, n)) < 0.3, 0.0, raw)
+            # |K| symmetric, as the saddle assembly guarantees.
+            saddle = np.triu(np.abs(raw)) - np.triu(np.abs(raw), 1).T
+            row_norm = np.abs(saddle).max(axis=1)
+            nonzero = row_norm > 0.0
+            scale = np.where(nonzero, 1.0 / np.sqrt(np.where(nonzero, row_norm, 1.0)), 1.0)
+            scaled = saddle * scale[:, None] * scale[None, :]
+            assert np.all(np.isfinite(scaled))
+            worst = max(worst, float(np.abs(scaled).max()))
+        assert worst <= 1.0 + 8.0 * np.finfo(float).eps, f"scaled entry reached {worst}"
 
 
 class TestIntegerHessian:
