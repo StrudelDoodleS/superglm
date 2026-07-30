@@ -232,11 +232,30 @@ conditions a correct solution's own residual (`5.8e-8`, `5.8e-7`, `5.5e-5`
 respectively) already exceeds any bound that would still catch inconsistency.
 Consistency is instead `g ⊥ null(H)`, which the decomposition's existing
 `null_basis()` measures directly and without amplification. The threshold is
-the roundoff floor of that basis, `certification_band * eps * retained
+the roundoff floor of that basis, `_NULL_BASIS_ACCURACY_SLACK * eps * retained
 condition`, which drives the false-positive rate to **0/120 at all three
 conditions** while still catching **120/120** inconsistent systems. Above a
-retained condition of ~`1/(band·eps)` the floor saturates at 1 and the check
+retained condition of ~`1/(slack·eps)` the floor saturates at 1 and the check
 fails open — a real resolution limit, and the safe direction to fail.
+(The slack factor is a constant of this module, deliberately *not*
+`SHARED_RANK_POLICY.certification_band`: that band governs factor
+certification and merely holds the same value, so retuning it for its own
+purpose must not move this gate.)
+
+*The floor applies to the spectral half of `null(H)` only.* `rank._null_basis`
+stacks two things with disjoint row supports: **exact unit vectors** for
+structurally zero columns, and **computed spectral directions** `D⁻¹·V_discarded`
+whose accuracy decays as `eps · κ_retained`. Keying one floor off the retained
+condition and applying it to both let an ill-conditioned retained block
+desensitize the exact half. Measured on `blkdiag(K, 0)` where `K` carries a
+spectral truncation: at retained conditions `1e10 / 1e11 / 1e13` a structural
+inconsistency of `1e-6 / 1e-5 / 1e-3` of `‖g‖` was **accepted as converged**
+while the objective fell without bound along that exact unit direction — travel
+back toward the silent wrong answer the gate exists to prevent, on input master
+raised `LinAlgError` for. `_null_space_mass` therefore returns the two masses
+separately; the structural one is tested against a flat `slack · eps` and only
+the spectral one against `_consistency_floor`. The split is orthogonal, so the
+two are independent.
 
 **Projection failure — `converged` describes the returned point.** This is the
 other half of S16's "caps at 100 sweeps without reporting failure", and it is
@@ -274,16 +293,45 @@ off mid-flight — every interior point is feasible.
 *Feasibility is tested with a relative tolerance.* A step that lands *on* a
 constraint reproduces `b_i` only to about `eps · |Aᵢ @ beta|`, so an unscaled
 absolute bound made a genuine KKT point with `|Aᵢ @ beta| ≳ 1.5e3` report
-`converged = False` and made all three call sites warn. `_feasibility_slack`
-divides the raw slack by `max(1, |b_i|, |Aᵢ @ beta|)` and both the projection's
-stopping test and the caller's convergence test use it, so the two cannot
-disagree about what "feasible" means. For a well-scaled problem the scale
-factor is 1 and the test is identical to the absolute one.
+`converged = False`. `_feasibility_slack` divides the raw slack by
+`max(1, |b_i|, |Aᵢ @ beta|)`.
+
+**This is inert for every in-tree caller, and did not fix the in-tree
+symptom.** All three pass `b = 0` (`scop.py:172`, `scop.py:290`, and
+`irls_direct.py` via `_spline_constraints.py`), and at `b_i = 0` the relative
+test is algebraically identical to the absolute one for any `tol ∈ (0,1)`.
+Measured across 7 monotone/convex/SCOP fits spanning Gaussian, Binomial and
+Poisson: **0 nonzero `b` entries in 189 constraint rows, max `|Aᵢ @ beta|` =
+0.72, max per-row scale exactly 1.0.** What removed the SCOP spurious warnings
+was the returned-point change above, not the rescaling. The rescaling is
+retained because it is correct for external callers with nonzero `b`.
+
+*The loop body uses the same measure as the boundaries.* `_is_feasible` governs
+the projection and both `converged` flags, but the loop's own full-step test
+and its blocking-ratio slack were left absolute. Wherever the scaling is
+observable the two then disagree by construction: `_is_feasible` accepts a row
+the loop calls violated, so the loop blocks on it with a negative slack and
+`alpha_min < 0` — a backward step, which *widens* the deferred negative-`alpha`
+bug rather than merely inheriting it. Both now go through `_feasibility_scale`;
+dividing slack and directional derivative by the same row factor leaves the
+step ratio unchanged while making the decisions built on them agree. Measured
+inert in-tree (the scale is exactly 1 there, so the scaled quantities are
+bitwise the raw ones, and fitted values are bitwise identical across four
+constraint shapes); on synthetic nonzero-`b` problems it changes the search
+path in 6/120 cases, never for a worse objective. Clamping `alpha ≥ 0` — the
+pre-existing half — stays deferred.
 
 **Surfacing.** Each of the three call sites checks `result.converged` and emits
-`logger.warning` naming its context, matching the existing precedent at
-`irls_direct.py:1648` and `pirls.py:1225`. `scop.py` has no module logger and
-gains one. No public API change.
+`logger.warning` naming its context. `scop.py` has no module logger and gains
+one. No public API change.
+
+*Correction.* This paragraph originally justified the warning as "matching the
+existing precedent at `irls_direct.py:1648` and `pirls.py:1225`". **Both halves
+of that were false against the tree**, and the error propagated into the
+implementation: the first is now `irls_direct.py:1617` and is an `== 3`
+*equality latch* that fires exactly once, not on every qualifying iteration;
+the second is `logger.info`, not `logger.warning`. The convention the file
+actually follows is fire-once, which is what the latch below implements.
 
 Two refinements the first draft did not have:
 
@@ -362,6 +410,15 @@ Two refinements the first draft did not have:
 - `TestFeasibilityToleranceScaling` — badly scaled constraints do not report
   spurious non-convergence, the scaling does not mask a real violation, and the
   projection and the convergence test share one feasibility rule.
+- `TestStructuralAliasConsistency` — at retained conditions `1e10 / 1e11 /
+  1e13`, a structural inconsistency below the spectral floor still raises (each
+  case asserts the spectral floor *would* have missed it, so a shared floor
+  cannot pass the test), and a consistent system with a roundoff-scale
+  structural component still solves.
+- `TestLoopFeasibilityRouting` — the loop no longer blocks on rows the
+  convergence test considers satisfied (same optimum in 6 iterations where the
+  absolute test took 13), and the `b = 0` shape every in-tree caller uses is
+  pinned as the exactly-inert case.
 
 ---
 
