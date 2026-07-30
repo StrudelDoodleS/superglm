@@ -170,3 +170,193 @@ class TestEdgeCases:
         result = solve_constrained_qp(H, g, A, b)
         np.testing.assert_allclose(result.beta, [0.0, 0.0], atol=1e-10)
         assert set(result.active_set) == {0, 1}
+
+
+class TestRankDeficientHessian:
+    """Singular H is rank-truncated by the shared policy, not raised on."""
+
+    def test_unconstrained_singular_h_solves_the_normal_equations(self):
+        """m == 0 with rank-deficient H must not raise."""
+        H = np.array([[1.0, 1.0], [1.0, 1.0]])  # rank 1
+        g = np.array([1.0, 1.0])  # in range(H), so a solution exists
+
+        result = solve_constrained_qp(H, g, np.zeros((0, 2)), np.zeros(0))
+
+        assert np.all(np.isfinite(result.beta))
+        # A rank-truncated solve of a consistent singular system is still an
+        # exact solution of the normal equations, just not the minimum-norm one.
+        np.testing.assert_allclose(H @ result.beta, g, atol=1e-12)
+        assert result.converged
+
+    def test_singular_h_returns_finite_solution_instead_of_raising(self):
+        """Rank-deficient H must go through the rank policy, not raise LinAlgError."""
+        H = np.array([[1.0, 1.0], [1.0, 1.0]])  # rank 1
+        g = np.array([1.0, 1.0])
+        A = np.array([[1.0, 0.0]])
+        b = np.array([-10.0])  # inactive at the unconstrained solution
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert np.all(np.isfinite(result.beta))
+        np.testing.assert_allclose(H @ result.beta, g, atol=1e-12)
+        assert np.all(A @ result.beta - b >= -1e-10)
+        assert result.converged
+
+    def test_singular_h_with_a_binding_constraint_reaches_the_optimum(self):
+        """The active-set loop must also survive a rank-deficient H.
+
+        Objective 0.5*(x1 + x2)^2 - (x1 + x2) subject to x1 >= 5 is minimized
+        by any point with x1 == 5 and x1 + x2 == 1.
+        """
+        H = np.array([[1.0, 1.0], [1.0, 1.0]])  # rank 1
+        g = np.array([1.0, 1.0])
+        A = np.array([[1.0, 0.0]])
+        b = np.array([5.0])  # binding
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert np.all(np.isfinite(result.beta))
+        assert result.beta[0] >= 5.0 - 1e-10
+        np.testing.assert_allclose(float(np.sum(result.beta)), 1.0, atol=1e-10)
+        assert result.converged
+
+    def test_well_conditioned_solution_is_unchanged_by_the_rank_policy(self):
+        """The rank policy must not perturb a well-conditioned unconstrained solve."""
+        H = np.array([[4.0, 1.0], [1.0, 3.0]])
+        g = np.array([1.0, 2.0])
+        A = np.array([[1.0, 0.0]])
+        b = np.array([-10.0])  # inactive
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        np.testing.assert_allclose(result.beta, np.linalg.solve(H, g), rtol=1e-12)
+        assert result.converged
+
+
+class TestConvergenceFlag:
+    """``QPResult.converged`` reports what its name says."""
+
+    def test_iteration_starved_qp_reports_non_convergence(self):
+        H = np.eye(3)
+        g = np.array([5.0, 5.0, 5.0])
+        A = -np.eye(3)
+        b = np.array([-0.1, -0.1, -0.1])
+
+        result = solve_constrained_qp(H, g, A, b, max_iter=1)
+
+        assert not result.converged
+        assert result.n_iter == 1
+
+    def test_infeasible_projection_reports_non_convergence(self):
+        """Mutually contradictory constraints cannot be projected onto."""
+        H = np.eye(1)
+        g = np.array([0.0])
+        A = np.array([[1.0], [-1.0]])
+        b = np.array([1.0, 1.0])  # x >= 1 and -x >= 1
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert not result.converged
+        # The flag is not merely "ran out of iterations": the active-set loop
+        # terminated on its own KKT test, at a point that is still infeasible.
+        assert result.n_iter < 200
+        assert np.min(A @ result.beta - b) < -1e-6
+
+    def test_feasible_solve_still_reports_convergence(self):
+        """The projection path must not report spurious non-convergence."""
+        H = np.eye(3)
+        g = np.array([3.0, 2.0, 1.0])
+        A = np.diff(np.eye(3), axis=0)  # monotone increasing; g is decreasing
+        b = np.zeros(2)
+
+        result = solve_constrained_qp(H, g, A, b)
+
+        assert result.converged
+        assert np.all(np.diff(result.beta) >= -1e-10)
+
+
+class TestCallSiteWarnings:
+    """The three call sites surface ``converged`` instead of discarding it."""
+
+    @staticmethod
+    def _non_converging(calls):
+        """Wrap the real solver, forcing ``converged=False`` on every call."""
+        from superglm.solvers.constrained_qp import solve_constrained_qp as real_solve
+
+        def fake_solve(*args, **kwargs):
+            calls.append(1)
+            result = real_solve(*args, **kwargs)
+            result.converged = False
+            return result
+
+        return fake_solve
+
+    def test_scop_raw_qp_initialize_warns_on_non_convergence(self, caplog, monkeypatch):
+        import logging
+
+        from superglm.solvers import scop
+
+        calls: list[int] = []
+        # raising=True (the default): if the symbol is ever moved back inside
+        # the function body, this patch fails loudly instead of silently
+        # leaving the real solver in place and vacuously passing.
+        monkeypatch.setattr(scop, "solve_constrained_qp", self._non_converging(calls))
+
+        reparam = scop.build_scop_reparam(6, kind="increasing")
+        rng = np.random.default_rng(3)
+        B = rng.normal(size=(40, 6))
+        y = rng.normal(size=40)
+
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.scop"):
+            reparam.qp_initialize(B, y)
+
+        assert calls, "the patched solver was never called"
+        assert "did not converge" in caplog.text
+
+    def test_scop_solver_qp_initialize_warns_on_non_convergence(self, caplog, monkeypatch):
+        import logging
+
+        from superglm.solvers import scop
+
+        calls: list[int] = []
+        monkeypatch.setattr(scop, "solve_constrained_qp", self._non_converging(calls))
+
+        reparam = scop.build_scop_solver_reparam(6, kind="increasing")
+        rng = np.random.default_rng(4)
+        B = rng.normal(size=(40, reparam.q))
+        y = rng.normal(size=40)
+
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.scop"):
+            reparam.qp_initialize(B, y)
+
+        assert calls, "the patched solver was never called"
+        assert "did not converge" in caplog.text
+
+    def test_irls_direct_warns_when_the_constrained_qp_does_not_converge(self, caplog, monkeypatch):
+        import logging
+
+        import pandas as pd
+
+        from superglm import Constraint, SuperGLM
+        from superglm.families import Gaussian
+        from superglm.features.spline import BSplineSmooth
+        from superglm.solvers import irls_direct
+
+        calls: list[int] = []
+        monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
+
+        rng = np.random.default_rng(0)
+        x = np.sort(rng.uniform(0, 1, 80))
+        y = 2.0 * x + rng.normal(0, 0.1, 80)
+        df = pd.DataFrame({"x": x, "y": y})
+        model = SuperGLM(
+            family=Gaussian(),
+            selection_penalty=0,
+            features={"x": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing)},
+        )
+
+        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+            model.fit(df[["x"]], df["y"])
+
+        assert calls, "the patched solver was never called"
+        assert "constrained QP did not converge" in caplog.text

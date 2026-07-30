@@ -1595,6 +1595,13 @@ def _fit_irls_direct_once(
                 beta = qp_result.beta
                 intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
                 prev_active_set = qp_result.active_set
+                if not qp_result.converged:
+                    logger.warning(
+                        "fit_irls_direct: constrained QP did not converge at "
+                        "iteration %d; monotone constraints may be only "
+                        "approximately satisfied.",
+                        it + 1,
+                    )
                 _used_svd = False
                 _cond_est = 0.0
                 _t_solve += time.perf_counter() - _t0

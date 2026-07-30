@@ -20,10 +20,15 @@ Computing, 25, 543-559.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+
+from superglm.solvers.constrained_qp import solve_constrained_qp
+
+logger = logging.getLogger(__name__)
 
 SCOPKind = str
 _VALID_KINDS = {"increasing", "decreasing", "convex", "concave"}
@@ -148,8 +153,6 @@ class SCOPReparameterization:
         weights: NDArray | None = None,
     ) -> NDArray:
         """SCAM-style QP initialization in beta_tilde space."""
-        from superglm.solvers.constrained_qp import solve_constrained_qp
-
         X = B @ self.Sigma
         if weights is not None:
             W = np.sqrt(weights)
@@ -169,6 +172,11 @@ class SCOPReparameterization:
         b = np.zeros(self.shape_dim, dtype=np.float64)
 
         result = solve_constrained_qp(H, g, A, b)
+        if not result.converged:
+            logger.warning(
+                "SCOP QP initialization did not converge; falling back to an "
+                "approximate shape-constrained starting point."
+            )
         beta_tilde_init = result.beta
 
         beta = np.array(beta_tilde_init, copy=True)
@@ -263,8 +271,6 @@ class SCOPSolverReparam:
 
     def qp_initialize(self, B_centered: NDArray, y: NDArray, **kwargs) -> NDArray:
         """QP initialization in solver space."""
-        from superglm.solvers.constrained_qp import solve_constrained_qp
-
         weights = kwargs.get("weights", None)
         lambda_penalty = kwargs.get("lambda_penalty", 0.01)
 
@@ -284,6 +290,11 @@ class SCOPSolverReparam:
         b = np.zeros(self.q, dtype=np.float64)
 
         result = solve_constrained_qp(H, g, A, b)
+        if not result.converged:
+            logger.warning(
+                "SCOP QP initialization did not converge; falling back to an "
+                "approximate shape-constrained starting point."
+            )
         beta_tilde_eff = result.beta
         return np.log(np.maximum(beta_tilde_eff, 1e-8))
 
