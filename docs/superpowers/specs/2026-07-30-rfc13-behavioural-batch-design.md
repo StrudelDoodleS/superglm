@@ -328,9 +328,10 @@ one. No public API change.
 *Correction.* This paragraph originally justified the warning as "matching the
 existing precedent at `irls_direct.py:1648` and `pirls.py:1225`". **Both halves
 of that were false against the tree**, and the error propagated into the
-implementation: the first is now `irls_direct.py:1617` and is an `== 3`
+implementation: the first is now `irls_direct.py:1623` and is an `== 3`
 *equality latch* that fires exactly once, not on every qualifying iteration;
-the second is `logger.info`, not `logger.warning`. The convention the file
+the second is now `pirls.py:1240` and is `logger.info`, not
+`logger.warning`. The convention the file
 actually follows is fire-once, which is what the latch below implements.
 
 Two refinements the first draft did not have:

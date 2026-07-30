@@ -4,7 +4,9 @@ Solves:
     minimize   0.5 * beta^T H beta - g^T beta
     subject to A @ beta >= b
 
-where H is positive definite (or positive semidefinite with regularization).
+where H is positive semidefinite.  A rank-deficient H is rank-truncated through
+the shared rank policy rather than regularized; a materially indefinite one is
+rejected (see ``solve_constrained_qp``).
 
 Uses a primal active-set method:
 1. Start with a feasible point (project if needed).
@@ -24,9 +26,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.solvers.rank import RankDecomposition, decompose_gram
-
-_EPS = np.finfo(float).eps
+from superglm.solvers.rank import _EPS, RankDecomposition, decompose_gram
 
 # Headroom on the normal-equation consistency floor (see ``_consistency_floor``).
 # The floor estimates the accuracy of the *computed null basis*, and this is the
@@ -96,14 +96,16 @@ def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[floa
     null_basis = decomposition.null_basis()
     scaled = ~structural
     spectral_mass = 0.0
-    if null_basis.shape[1] and np.any(scaled):
-        # Restricting to the scaled rows annihilates the unit-vector columns
-        # and leaves exactly the spectral ones.
-        spectral_basis = null_basis[scaled, :]
-        retained_columns = np.linalg.norm(spectral_basis, axis=0) > 0.0
-        if np.any(retained_columns):
-            orthonormal, _ = np.linalg.qr(spectral_basis[:, retained_columns])
-            spectral_mass = float(np.linalg.norm(orthonormal.T @ g[scaled])) / reference
+    # Restricting to the scaled rows annihilates the unit-vector columns and
+    # leaves exactly the spectral ones.  This also covers both empty cases on
+    # its own: with no null columns the column norms are an empty array, and
+    # with no scaled columns they are all zero, so ``retained_columns`` is
+    # all-False either way.
+    spectral_basis = null_basis[scaled, :]
+    retained_columns = np.linalg.norm(spectral_basis, axis=0) > 0.0
+    if np.any(retained_columns):
+        orthonormal, _ = np.linalg.qr(spectral_basis[:, retained_columns])
+        spectral_mass = float(np.linalg.norm(orthonormal.T @ g[scaled])) / reference
     return structural_mass, spectral_mass
 
 
@@ -147,8 +149,22 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     a system it cannot adjudicate -- which is the safe direction, since
     refusing a solvable system is the defect this floor exists to prevent.
 
-    None of that degradation applies to a structural alias: those are exact at
-    every conditioning, which is why they are thresholded separately.
+    Two conventions from ``rank.py`` are load-bearing here and are easy to
+    confuse:
+
+    * The condition number computed below is on the **Gram** scale, a ratio of
+      eigenvalues of the equilibrated Gram matrix.  ``RankDecomposition``'s own
+      ``pre_truncation_condition`` is on the **factor** scale -- the square root
+      of that ratio.  Do not substitute one for the other; they differ by a
+      squaring, which at these magnitudes is the whole gate.
+    * ``retained_values is None`` is read as "nothing spectral was dropped".
+      That inference holds because only the eigen paths populate the field, but
+      it is *not* uniform across ``rank.py``'s two ``method="cholesky"``
+      branches: the fast pre-eigendecomposition branch leaves it ``None``,
+      while the post-eigendecomposition one sets it to the full spectrum.  Both
+      are full rank on the active columns, so both mean the same thing here --
+      but a future branch that leaves the field unset after truncating would
+      silently collapse this floor to ``32 * eps``.
     """
     retained = decomposition.retained_values
     if retained is None or retained.size == 0:
@@ -163,7 +179,9 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     return float(min(1.0, _NULL_BASIS_ACCURACY_SLACK * _EPS * max(1.0, retained_condition)))
 
 
-def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray) -> NDArray:
+def _feasibility_slack(
+    A: NDArray, beta: NDArray, b: NDArray, *, abs_b: NDArray | None = None
+) -> NDArray:
     """Return ``A @ beta - b`` measured against a scale-aware tolerance.
 
     A step that lands *on* a constraint reproduces ``b_i`` only to about
@@ -176,12 +194,15 @@ def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray) -> NDArray:
 
     Returns the slack already divided by its per-row scale, so callers can
     compare it against a bare ``-tol``.
+
+    ``abs_b`` lets a caller in a loop pass ``np.abs(b)`` once instead of paying
+    for it every sweep; it must equal ``np.abs(b)``.
     """
     products = A @ beta
-    return (products - b) / _feasibility_scale(products, b)
+    return (products - b) / _feasibility_scale(products, b, abs_b=abs_b)
 
 
-def _feasibility_scale(products: NDArray, b: NDArray) -> NDArray:
+def _feasibility_scale(products: NDArray, b: NDArray, *, abs_b: NDArray | None = None) -> NDArray:
     """Per-row scale for the relative feasibility test: ``max(1, |b|, |A @ beta|)``.
 
     Exposed separately so the active-set loop can divide *both* its slack and
@@ -190,13 +211,11 @@ def _feasibility_scale(products: NDArray, b: NDArray) -> NDArray:
     decisions built on them -- "is this row already satisfied", "does this step
     move the row at all" -- agree with ``_is_feasible``.
     """
-    return np.maximum(1.0, np.maximum(np.abs(b), np.abs(products)))
+    return np.maximum(1.0, np.maximum(np.abs(b) if abs_b is None else abs_b, np.abs(products)))
 
 
 def _is_feasible(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> bool:
     """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance."""
-    if A.shape[0] == 0:
-        return True
     return bool(np.all(_feasibility_slack(A, beta, b) >= -tol))
 
 
@@ -204,7 +223,6 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     """Project beta onto the feasible set {x : A @ x >= b}.
 
     Uses iterative constraint-by-constraint projection (Dykstra-like).
-    For the small dense problems we handle, this converges quickly.
 
     Each sweep repairs only the single worst violation, so the 100-sweep
     budget can be exhausted with the point still infeasible -- either because
@@ -218,8 +236,10 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     so the two cannot disagree about what "feasible" means.
     """
     beta = beta.copy()
+    # Loop-invariant: only ``A @ beta`` changes between sweeps.
+    abs_b = np.abs(b)
     for _ in range(100):
-        violations = _feasibility_slack(A, beta, b)
+        violations = _feasibility_slack(A, beta, b, abs_b=abs_b)
         worst = int(np.argmin(violations))
         if violations[worst] >= -tol:
             break
@@ -291,10 +311,8 @@ def solve_constrained_qp(
     p = H.shape[0]
     m = A.shape[0]
 
-    # The rank policy decomposes 0.5 * (H + H.T).  Materialize that symmetric
-    # part once and use it for the KKT blocks, the residual and the multiplier
-    # test too, so the two solve paths cannot disagree about which quadratic
-    # they are minimizing.  For an exactly symmetric H this is bitwise H.
+    # Materialize the symmetric part once and use it everywhere below; see the
+    # ``H`` parameter above for why.
     H_sym = 0.5 * (H + H.T)
 
     # Route the pure-H solves through the shared rank policy so a singular or
@@ -318,9 +336,7 @@ def solve_constrained_qp(
     # range(H) is everything, so the check is only needed after truncation.
     if decomposition.rank < decomposition.width:
         # The two halves of null(H) are known to different accuracies, so they
-        # get their own floors; see _null_space_mass.  Sharing one floor let an
-        # ill-conditioned retained block desensitize a structural alias, where
-        # detection is in fact exact.
+        # get their own floors; see _null_space_mass.
         structural_mass, spectral_mass = _null_space_mass(decomposition, g)
         spectral_floor = _consistency_floor(decomposition)
         structural_breach = structural_mass > _STRUCTURAL_CONSISTENCY_FLOOR
@@ -343,7 +359,7 @@ def solve_constrained_qp(
             )
 
     if m == 0:
-        # No constraints — direct solve
+        # No constraints: the unconstrained solve above is already the answer.
         return QPResult(beta=beta_unc, active_set=[], n_iter=0)
 
     if _is_feasible(A, beta_unc, b, tol):
@@ -393,42 +409,37 @@ def solve_constrained_qp(
 
         # --- Check step feasibility ---
         if np.linalg.norm(step) < tol:
-            # At a stationary point. Check multipliers.
-            if len(active) == 0:
-                # Stationary with no active constraint: the KKT certificate is
-                # complete once the point is also feasible.
-                return QPResult(
-                    beta=beta,
-                    active_set=active,
-                    n_iter=it + 1,
-                    converged=_is_feasible(A, beta, b, tol),
-                )
+            # At a stationary point.  With an empty active set that is already
+            # the whole dual condition; otherwise the multipliers decide first.
+            if len(active) != 0:
+                # Recompute multipliers at current point.
+                # KKT stationarity: H*beta - g = A_eq' * lambda, lambda >= 0
+                # => lambda = (A_eq @ A_eq^T)^{-1} @ A_eq @ (H @ beta - g)
+                A_eq = A[active]
+                residual = H_sym @ beta - g
+                try:
+                    multipliers = np.linalg.solve(A_eq @ A_eq.T, A_eq @ residual)
+                except np.linalg.LinAlgError:
+                    multipliers = np.linalg.lstsq(A_eq @ A_eq.T, A_eq @ residual, rcond=None)[0]
 
-            # Recompute multipliers at current point.
-            # KKT stationarity: H*beta - g = A_eq' * lambda, lambda >= 0
-            # => lambda = (A_eq @ A_eq^T)^{-1} @ A_eq @ (H @ beta - g)
-            A_eq = A[active]
-            residual = H_sym @ beta - g
-            try:
-                multipliers = np.linalg.solve(A_eq @ A_eq.T, A_eq @ residual)
-            except np.linalg.LinAlgError:
-                multipliers = np.linalg.lstsq(A_eq @ A_eq.T, A_eq @ residual, rcond=None)[0]
+                # Drop most negative multiplier (constraint wants to be
+                # inactive).  Spelled as ``not (min_mult >= -tol)`` rather than
+                # ``min_mult < -tol`` so a NaN multiplier still takes the drop
+                # branch, exactly as it did when this was a single comparison.
+                min_mult = np.min(multipliers)
+                if not min_mult >= -tol:
+                    drop_idx = np.argmin(multipliers)
+                    active.pop(drop_idx)
+                    continue
 
-            # Drop most negative multiplier (constraint wants to be inactive)
-            min_mult = np.min(multipliers)
-            if min_mult >= -tol:
-                # All multipliers nonneg — stationarity and dual feasibility
-                # hold; primal feasibility completes the KKT certificate.
-                return QPResult(
-                    beta=beta,
-                    active_set=active,
-                    n_iter=it + 1,
-                    converged=_is_feasible(A, beta, b, tol),
-                )
-
-            drop_idx = np.argmin(multipliers)
-            active.pop(drop_idx)
-            continue
+            # Stationarity and dual feasibility hold; primal feasibility
+            # completes the KKT certificate.
+            return QPResult(
+                beta=beta,
+                active_set=active,
+                n_iter=it + 1,
+                converged=_is_feasible(A, beta, b, tol),
+            )
 
         # --- Step ratio: find blocking constraint ---
         # Both tests below go through the same per-row scale the convergence
@@ -450,9 +461,13 @@ def solve_constrained_qp(
             row_scale = _feasibility_scale(products, b)
             scaled_slack = (products - b) / row_scale
             scaled_step = (A @ step) / row_scale
+            # Set membership, not ``i in active``: the list scan is O(|active|)
+            # per row and dominated the rest of this now-vectorized block.
+            # ``active`` is only mutated after this loop finishes.
+            active_lookup = set(active)
 
             for i in range(m):
-                if i in active:
+                if i in active_lookup:
                     continue
                 a_step = scaled_step[i]
                 if a_step < -tol:
