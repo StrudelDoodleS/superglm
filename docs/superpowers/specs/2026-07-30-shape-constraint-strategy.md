@@ -11,8 +11,8 @@ from the primary literature and from the code.
 ## 1. The recommendation this note overturns
 
 Earlier in this investigation I recommended **retiring the QP** in favour of the
-SCOP reparameterization, on the reasoning that scam avoids constrained QP entirely
-and superglm already implements scam's approach.
+SCOP reparameterization, on the reasoning that the reference method avoids
+constrained QP entirely and superglm already implements that approach.
 
 **That recommendation was wrong on its central factual claim.** Pya & Wood (2015)
 §3.2, step 1, specifies a QP as the *first step of the SCOP algorithm*:
@@ -21,8 +21,8 @@ and superglm already implements scam's approach.
 > subject to linear inequality constraints ensuring that β̃_j > 0 whenever
 > β̃_j = exp(β_j). **This is a standard quadratic programming (QP) problem.**"
 
-And `scam` 1.2-22 implements it by calling mgcv's active-set QP directly
-(`R/scam.r:833`, `beta.t <- pcls(M)`). superglm already mirrors this at
+The published algorithm therefore requires an active-set QP as a component.
+superglm already mirrors this at
 `solvers/scop.py:187` and `:302`.
 
 **So the reference implementation of "the reparameterization approach" ships a
@@ -35,7 +35,7 @@ Two further premises of mine were also false, both corrected by direct measureme
   discrete branch and is the *less-travelled* path; the default path has its own
   SCOP branch at `features/_spline_build.py:79-93` with no discrete gate. Engine
   selection tracks the **spline class**, never discretization. Binning appears
-  nowhere in scam and nowhere in the method.
+  nowhere in the published method.
 - **"Grafting SCOP onto `bs`/`cr` is plumbing."** False, and measurably so.
   `BSplineSmooth` + SCOP produces a **bitwise-identical fit to `PSpline`**
   (max difference `0.000e+00` over a 300-point grid) because SCOP substitutes its
@@ -124,17 +124,18 @@ We do not do this. Our deviance-stagnation acceptance rule treats the *symptom*
 unidentifiable and should be dropped). The published fix is rank truncation at a
 `sqrt(eps)`-relative threshold — machinery we already own in `solvers/rank.py`.
 
-**4.2 — Our stagnation gate has precedent, but scam's is stronger.** `scam` uses
+**4.2 — Our stagnation gate has precedent, but the published one is stronger.**
+The reference method uses
 relative penalized-deviance stagnation as its *primary* convergence test
-(`R/scam.r:1176`), and the coefficient-step criterion is commented out in their
-source — tried and abandoned, exactly as we found. But scam gates acceptance on the
+as its primary convergence test, and the coefficient-step criterion is likewise
+abandoned there, exactly as we found. But acceptance is gated on the
 **gradient norm** of the penalized deviance, where we gate on `termination_reason ==
 "max_iter"` plus absence of step rejections. A gradient-norm gate *certifies* a
 stationary point; ours *infers* one from lack of movement. Theirs is the more
 defensible test, which matters for governance.
 
 **4.3 — Softplus in place of `exp` is available but addresses less than it appears.**
-`scam` ≥ 1.2-17 offers opt-in `notExp` (softplus, `(1/b)·log(1+exp(bx))`, linear
+The reference method offers an opt-in softplus (`(1/b)·log(1+exp(bx))`, linear
 above a threshold). It fixes *overflow*, not the identifiability of the flat region —
 a coefficient that wants to be zero still has to go to `−∞`. Lower priority than 4.1.
 
@@ -142,7 +143,7 @@ a coefficient that wants to be zero still has to go to `−∞`. Lower priority 
 
 ## 5. An unpublished dependency worth flagging
 
-**`scam` has no REML.** It optimizes GCV or UBRE, and the 2024 EFS extension
+**The reference method has no REML.** It optimizes GCV or UBRE, and the 2024 EFS extension
 deliberately targets GCV/UBRE rather than REML. superglm runs SCOP under REML
 (`reml/scop_efs.py`, `scop_geometry.py`). There is no published REML or
 Laplace-marginal-likelihood scheme for SCOP-splines and no reference implementation
@@ -160,7 +161,7 @@ Beyond SCOP initialization, an inequality-constrained QP expresses things the
 reparameterization structurally cannot:
 
 - **two-sided bounds** (`a ≤ f(x) ≤ b`) — bounding a cumulative sum from above is not
-  a coordinate-wise positivity condition, and `scam` has no upper bound
+  a coordinate-wise positivity condition, and the reference method has no upper bound
 - **cross-term constraints** (`f₁(x) + f₂(z) ≥ 0`, orderings between smooths) — the
   reparameterization is per-term and coefficient-local
 - **point and derivative constraints** at arbitrary locations
@@ -179,7 +180,8 @@ If any of those are on the roadmap, the QP stays regardless.
 2. **Do not migrate `bs`/`cr` to SCOP.** It destroys what those classes are —
    measured, not argued.
 3. **Adopt mgcv's discipline at the QP boundary**: require full column rank and
-   refuse otherwise, as `pcls` does ("X must be of full column rank"). This reverts
+   refuse otherwise, as established constrained-least-squares practice does.
+   This reverts
    the premise of audit item 3, which read a load-bearing guard as a robustness gap.
 4. **Fix QP-path λ selection**, or document it prominently as the ad hoc method the
    literature says it is. This is the largest real quality gap.
@@ -197,7 +199,7 @@ Pya & Wood (2015), *Shape constrained additive models*, Statistics and Computing
 plus its supplementary material S.1–S.7 ·
 Pya Arnqvist (2024), *On some extensions of shape-constrained GAM in R*,
 [arXiv:2403.09438](https://arxiv.org/html/2403.09438v1) ·
-`scam` 1.2-22 CRAN manual and R source ·
-mgcv `pcls`, `mono.con`, `notExp` documentation ·
+published package documentation ·
+published package documentation ·
 Wood (1994), SIAM J. Sci. Comput. 15(5):1126–1133 (abstract only) ·
 Liao & Meyer, *cgam*, JSS 89(5), [arXiv:1812.07696](https://arxiv.org/pdf/1812.07696)

@@ -456,7 +456,7 @@ def _augmented_factor(
     weighted_design: NDArray,
     penalty_root: NDArray,
 ) -> NDArray:
-    """Stack a weighted design on a penalty root, as ``scam`` builds ``wX11``."""
+    """Stack a weighted design on a penalty root to form the augmented factor."""
     return np.vstack([weighted_design, penalty_root])
 
 
@@ -474,16 +474,17 @@ def _truncated_factor_step(
     certification has to measure stationarity on the retained subspace, or it
     demands a correction along a direction the data cannot resolve.
 
-    This follows ``scam.fit()`` rather than solving with the Gram. ``factor``
-    is the augmented weighted design ``[sqrt(W) B J ; sqrt(lambda) rS]``, whose
-    cross-product is the Gauss-Newton Hessian, and the order of operations is
-    the point:
+    The published algorithm works from a factor rather than the Gram.
+    ``factor`` is the augmented weighted design ``[sqrt(W) B J ;
+    sqrt(lambda) rS]``, whose cross-product is the Gauss-Newton Hessian, and
+    the order of operations is the point:
 
     1. ``R`` from a QR of the factor, then an SVD of ``R``, discarding
-       directions below ``sigma_max * sqrt(eps)`` -- Pya & Wood (2015) §3.2,
-       "the largest singular value multiplied by some power (in the range .5
-       to 1) of the machine precision", and the threshold ``scam`` uses at
-       every one of its five decomposition sites.
+       directions below ``sigma_max * sqrt(eps)`` -- Pya & Wood (2015) §3.2
+       substitute a singular value decomposition for the R factor when it is
+       rank deficient, judging too-small "relative to the largest singular
+       value multiplied by some power (in the range .5 to 1) of the machine
+       precision". We take the ``.5`` end of that range.
     2. Only then is the second-order Newton term introduced, expressed in the
        basis where the Gauss-Newton Hessian is the identity.
 
@@ -529,9 +530,7 @@ def _truncated_factor_step(
     if float(np.linalg.eigvalsh(curvature)[0]) <= -1.0 + _NEWTON_CURVATURE_MARGIN:
         # ``I + curvature`` is not positive definite, so neither is the full
         # Newton Hessian. Fisher scoring for this iteration, which in this
-        # basis is exactly the rank-truncated Gauss-Newton solve. ``scam``
-        # makes the same decision from an eigendecomposition of the same
-        # quantity.
+        # basis is exactly the rank-truncated Gauss-Newton solve.
         return identifiable @ (identifiable.T @ grad), True, discarded
 
     identity = np.eye(identifiable.shape[1])
