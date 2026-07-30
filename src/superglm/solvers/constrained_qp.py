@@ -24,7 +24,14 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    RankDecomposition,
+    RankPolicy,
+    decompose_gram,
+)
+
+_EPS = np.finfo(float).eps
 
 
 @dataclass
@@ -44,6 +51,58 @@ class QPResult:
     active_set: list[int] = field(default_factory=list)
     n_iter: int = 0
     converged: bool = True
+
+
+def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> float:
+    """Fraction of ``g`` lying in ``null(H)``, as a share of ``||g||``.
+
+    ``g`` is in ``range(H)`` -- the normal equations are consistent -- exactly
+    when it is orthogonal to ``null(H)``, so project it onto the null basis the
+    decomposition already computed.  This measures the inconsistency directly
+    instead of inferring it from a solve residual: a residual is amplified by
+    the retained condition number, which at the conditions the rank policy
+    happily retains swamps the signal entirely.
+    """
+    null_basis = decomposition.null_basis()
+    if null_basis.shape[1] == 0:
+        return 0.0
+    orthonormal_null, _ = np.linalg.qr(null_basis)
+    reference = max(float(np.linalg.norm(g)), np.finfo(float).tiny)
+    return float(np.linalg.norm(orthonormal_null.T @ g)) / reference
+
+
+def _consistency_floor(
+    decomposition: RankDecomposition,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+) -> float:
+    """Largest null-space mass the decomposition's own roundoff can manufacture.
+
+    The computed null basis is accurate only to about ``eps`` times the
+    retained condition number, so a genuinely consistent ``g`` still projects
+    onto it by roughly that much.  Scaling the threshold with the retained
+    conditioning -- rather than fixing it at ``factor_rcond`` -- is what keeps
+    a well-posed but ill-conditioned rank-deficient system solvable, since the
+    rank policy truncates at ``gram_rcond`` and so retains blocks far more
+    ill-conditioned than ``factor_rcond`` would tolerate.
+
+    Above a retained condition of roughly ``1 / (band * eps)`` the floor
+    reaches 1 and no inconsistency is detectable. That is a real resolution
+    limit rather than a tuning choice, and it fails open -- the solve proceeds
+    rather than refusing a system it cannot adjudicate.
+    """
+    retained = decomposition.retained_values
+    if retained is None or retained.size == 0:
+        # Cholesky without truncated spectrum: only structural zero columns
+        # were dropped, and their null basis is exact unit vectors.
+        retained_condition = 1.0
+    else:
+        magnitudes = np.abs(retained)
+        smallest = float(np.min(magnitudes))
+        retained_condition = (
+            float(np.max(magnitudes)) / smallest if smallest > 0.0 else float("inf")
+        )
+    return float(min(1.0, policy.certification_band * _EPS * max(1.0, retained_condition)))
 
 
 def _feasibility_slack(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> NDArray:
@@ -186,18 +245,19 @@ def solve_constrained_qp(
     # detect the inconsistency before either early return.  Full rank means
     # range(H) is everything, so the check is only needed after truncation.
     if decomposition.rank < decomposition.width:
-        residual_norm = float(np.linalg.norm(H_sym @ beta_unc - g))
-        reference = max(float(np.linalg.norm(g)), np.finfo(float).tiny)
-        if residual_norm > SHARED_RANK_POLICY.factor_rcond * reference:
+        null_mass = _null_space_mass(decomposition, g)
+        floor = _consistency_floor(decomposition)
+        if null_mass > floor:
             raise ValueError(
                 "solve_constrained_qp: H is rank-deficient (rank "
                 f"{decomposition.rank} of {decomposition.width}) and g has a "
-                "component outside range(H) (relative normal-equation residual "
-                f"{residual_norm / reference:.3e}), so the objective is unbounded "
-                "below along a null direction of H. The active-set method cannot "
-                "reach that optimum -- every search direction it forms lies in "
-                "range(H) -- so no meaningful answer exists here. Regularize H "
-                "(for example add a ridge term) or drop the aliased columns."
+                f"component in null(H) ({null_mass:.3e} of ||g||, against a "
+                f"resolution floor of {floor:.3e}), so the objective is unbounded "
+                "below along that direction. The unconstrained solve and the "
+                "active-set loop's empty-active-set step both form directions "
+                "inside range(H), so neither entry path can follow it. "
+                "Regularize H (for example add a ridge term) or drop the "
+                "aliased columns."
             )
 
     if m == 0:
