@@ -60,9 +60,9 @@ pseudo-inverse with a threshold relative to the largest singular value times
 **2a** — Implement rank truncation in the SCOP Newton step, reusing
 `solvers/rank.py` (which already has exactly this policy, at exactly this threshold).
 **2b** — Strengthen the acceptance gate from "hit `max_iter` with no rejections" to
-`scam`'s gradient-norm test on the penalized deviance — certifying a stationary point
-rather than inferring one. Keep deviance stagnation as the primary criterion; `scam`
-does, and abandoned the coefficient-step test exactly as we did.
+the published gradient-norm test on the penalized deviance — certifying a stationary
+point rather than inferring one. Keep deviance stagnation as the primary criterion;
+the reference method does, and abandons the coefficient-step test exactly as we did.
 **2c** — Then reassess whether the stagnation acceptance rule is still needed at all.
 
 Expect this to *simplify* `reml/scop_efs.py`. It also removes the Python-3.10-only
@@ -76,10 +76,11 @@ PR body.
 **Why:** it reverts the premise that generated review rounds 6–9, and it converts
 silent infeasibility into a loud refusal.
 
-mgcv's `pcls` states "X must be of full column rank, at least when projected into
-the null space of any equality constraints" — it refuses rank-deficient input by
-design. Audit item 3 read our equivalent `LinAlgError` as a robustness gap and
-removed it; four downstream components then met inputs they were never written for.
+Established constrained-least-squares practice requires the design to be of full
+column rank, at least when projected into the null space of any equality
+constraints, and refuses rank-deficient input by design. Audit item 3 read our
+equivalent `LinAlgError` as a robustness gap and removed it; four downstream
+components then met inputs they were never written for.
 
 **3a** — Validate rank at `solve_constrained_qp`'s entry and raise with a message
 naming the likely cause (collinear columns, a near-empty categorical level).
@@ -98,7 +99,7 @@ constraint violation — but it is a minor release, not a patch.
 
 **Why:** cheap, and it is a governance exposure rather than a technical one.
 
-`scam` has no REML; it optimizes GCV/UBRE, and the 2024 EFS extension deliberately
+The reference method has no REML; it optimizes GCV/UBRE, and the 2024 EFS extension deliberately
 targets GCV/UBRE too. Our SCOP-under-REML has no published basis and no reference
 implementation to check against. Record that in
 `docs/governance/model_risk_pack.md` as an explicit position — that the method is an
@@ -110,19 +111,18 @@ Not a defect. But "we follow Pya & Wood" is currently doing work it cannot suppo
 
 ## Item 5 — Softplus for the SCOP transform (optional)
 
-`scam` ≥ 1.2-17 offers opt-in softplus in place of `exp`. It addresses overflow, not
+The reference method offers an opt-in softplus in place of `exp`. It addresses overflow, not
 identifiability — a coefficient wanting to be zero still runs to `−∞`. Worth doing
 only after Item 2, and only if overflow shows up in practice.
 
-**If adopted, do not copy scam's covariance bug:** their delta-method Jacobian uses
-`exp(β)` unconditionally (`R/scam.r:1519`) even when softplus is active, where the
-correct Jacobian is the logistic function.
+**If adopted, mind the delta-method Jacobian:** with softplus active the correct
+Jacobian is the logistic function, not `exp(β)`.
 
 ---
 
 ## Explicitly not doing
 
-- **Retiring the QP.** scam ships one; Pya & Wood specify one. Our two SCOP
+- **Retiring the QP.** Pya & Wood specify one. Our two SCOP
   initialization sites mirror the reference implementation exactly.
 - **Migrating `bs`/`cr` to SCOP.** Measured: `bs` collapses bitwise onto `ps`
   because SCOP discards the integrated-derivative penalty that defines it, and `cr`
@@ -137,14 +137,14 @@ correct Jacobian is the logistic function.
 
 ## Item 6 — Constrained-term coverage: reference note, not a backlog
 
-Researched 2026-07-31 from `scam`'s `NAMESPACE`, which registers its bases
-definitively. `scam` ships roughly forty constrained bases. **We are not
-chasing them, and the count overstates the gap**: they are combinatorial rather
-than forty algorithms — near enough `{increasing, decreasing} × {convex,
-concave} × {univariate, tensor marginals} × {± numeric by}` over one
-reparameterization. `scam` gives each combination its own `smooth.construct`
-method; superglm factors it as `Constraint.fit/postfit × {increasing,
-decreasing, convex, concave}`, which is the better factoring and should stay.
+Surveyed 2026-07-31 from published package documentation. The reference
+implementation exposes roughly forty constrained bases. **We are not chasing
+them, and the count overstates the gap**: they are combinatorial rather than
+forty algorithms — near enough `{increasing, decreasing} × {convex, concave} ×
+{univariate, tensor marginals} × {± numeric by}` over one reparameterization.
+Each combination is exposed there as a separate named basis; superglm factors
+it as `Constraint.fit/postfit × {increasing, decreasing, convex, concave}`,
+which is the better factoring and should stay.
 
 The four kinds already cover the shapes a pricing model normally asks for. One
 extension is worth keeping in view **only if a real pricing need appears**:
@@ -161,7 +161,7 @@ Deliberately not pursuing: combined monotonicity-and-curvature (`micx`, `micv`,
 finish/start at zero, `po`/`ipo`/`dpo`/`cpop` positivity and cyclic,
 `lmpi`/`lipl` locally monotone with plateau).
 
-**Neither `scam` nor `mgcv` has a shape-constrained factor-smooth basis**, so
+**No published implementation offers a shape-constrained factor-smooth basis**, so
 "a monotone curve per factor level" is not a gap against the reference
 implementation — nobody offers it.
 
@@ -181,17 +181,16 @@ compactness that makes those terms affordable. **Post-fit constraints are
 supported** with RE/FS/SZ via `penalty_component_quadratic()`, which is what
 the error message points at, so this is narrower than "cannot be combined".
 
-`scam` is more permissive — "Unconstrained terms of the `mgcv` package,
-specified using `s`, `te`, `ti`, `t2`, can be added as well" — so the
+The published reference is more permissive — its documentation states that
+unconstrained smooth terms may be added alongside constrained ones — so the
 restriction is superglm's own, not inherited. Lifting it is a separate piece of
 work from Item 6 and would need constrained REML defined over compact penalty
 components first. Note also that relaxing it makes the `O(p³)` projection in
 `restrict_to_scop_resolved_range` live on wide models; it is currently unreachable
 because a constrained model cannot carry a wide factor-smooth term.
 
-Sources: `scam` `NAMESPACE` and `shape.constrained.smooth.terms`; `mgcv`
-`mono.con` ("linear constraints sufficient for monotonicity … of a cubic
-regression spline", `"cr"` basis only, fed to `pcls`).
+Sources: published package documentation for the reference implementations;
+Pya & Wood (2015); Pya Arnqvist (2024), arXiv:2403.09438.
 
 ---
 
