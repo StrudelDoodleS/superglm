@@ -13,7 +13,7 @@ Biometrics 73(4), 1071-1081.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -38,7 +38,9 @@ from superglm.reml.scop_geometry import (
     build_cached_scop_joint_geometry,
     build_observed_scop_joint_geometry,
     install_scop_postfit_inference,
+    restrict_to_scop_resolved_range,
     scop_penalized_mode_score,
+    scop_resolved_range_projector,
 )
 from superglm.solvers.centered_system import (
     grouped_augmented_factor,
@@ -484,6 +486,14 @@ def assemble_joint_hessian(
             intercept_cross[sl] *= _scop_jacobian_diag(st)
         H_joint -= np.outer(intercept_cross, intercept_cross) / sum_W
 
+    # Restrict to the range the SCOP steps could resolve. The diagonal blocks
+    # arrive already restricted, but the cross-blocks assembled above still
+    # couple other coefficients to a direction the solver froze, and that
+    # leakage is enough to leave the joint matrix indefinite where consumers
+    # decompose it. Projecting the assembled matrix covers both. A fit whose
+    # steps discarded nothing is returned untouched.
+    H_joint = restrict_to_scop_resolved_range(H_joint, scop_states)
+
     return H_joint, mapping
 
 
@@ -688,48 +698,6 @@ def _evaluate_scop_reml_mode(
     )
 
 
-def _scop_discarded_model_directions(
-    scop_states: Mapping[int, dict],
-    width: int,
-) -> NDArray:
-    """Lift the solver's discarded directions into model space, as rows.
-
-    The joint solver truncates one factor spanning every SCOP group and hands
-    each group its own columns of the result, so row ``r`` of every group's
-    block belongs to the same joint direction and the groups reassemble
-    row-wise. Groups solved one at a time instead carry directions confined to
-    themselves, which is the shape this falls back to when the row counts do
-    not agree.
-    """
-    blocks = []
-    for state in scop_states.values():
-        rows = state.get("discarded_directions")
-        if rows is None:
-            continue
-        rows = np.asarray(rows, dtype=np.float64)
-        if rows.ndim != 2 or rows.shape[0] == 0:
-            continue
-        blocks.append((state["group_sl"], rows))
-
-    if not blocks:
-        return np.zeros((0, width), dtype=np.float64)
-
-    row_counts = {rows.shape[0] for _, rows in blocks}
-    if len(row_counts) == 1 and len(blocks) > 1:
-        nullity = row_counts.pop()
-        directions = np.zeros((nullity, width), dtype=np.float64)
-        for group_slice, rows in blocks:
-            directions[:, group_slice] = rows
-        return directions
-
-    directions = np.zeros((sum(rows.shape[0] for _, rows in blocks), width), dtype=np.float64)
-    offset = 0
-    for group_slice, rows in blocks:
-        directions[offset : offset + rows.shape[0], group_slice] = rows
-        offset += rows.shape[0]
-    return directions
-
-
 def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
     """Return the estimable-range Newton correction for mode certification.
 
@@ -772,17 +740,14 @@ def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
     # after it: ``hessian_inverse`` is not diagonal in this basis, so a score
     # component along a discarded direction re-emerges as a correction pointing
     # somewhere else entirely, which no projection of the result can remove.
-    discarded = _scop_discarded_model_directions(mode.scop_states, len(profiled_score))
-    if discarded.size:
-        retained_basis, _ = np.linalg.qr(discarded.T)
-        profiled_score = profiled_score - retained_basis @ (retained_basis.T @ profiled_score)
-    else:
-        retained_basis = None
+    resolved = scop_resolved_range_projector(mode.scop_states, len(profiled_score))
+    if resolved is not None:
+        profiled_score = resolved @ profiled_score
 
     slope_correction = geometry.hessian_inverse @ profiled_score
-    if retained_basis is not None:
+    if resolved is not None:
         # The correction must also lie where the solver can move.
-        slope_correction = slope_correction - retained_basis @ (retained_basis.T @ slope_correction)
+        slope_correction = resolved @ slope_correction
 
     intercept_correction = (
         score.intercept - float(geometry.transformed_intercept_cross @ slope_correction)
