@@ -1969,6 +1969,7 @@ def _fit_irls_direct_once(
         if _record_stagnation:
             stagnation_log.append(
                 StagnationRecord(
+                    iteration=it + 1,
                     deviance=dev,
                     step_rejected=step_rejected,
                     step_halvings=n_halvings,

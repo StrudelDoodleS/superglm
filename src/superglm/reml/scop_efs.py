@@ -836,6 +836,23 @@ def _scop_deviance_stagnated(result: Any, max_iter: int) -> bool:
         return False
 
     window = stagnation_log[-(required + 1) :]
+    # The slice is positional and the test below reads it as a run of
+    # consecutive iterations: it accepts only when every *adjacent* pair holds
+    # its deviance to roundoff. A window spanning a gap would compare
+    # non-adjacent iterations and could accept a fit that moved in between, so
+    # check rather than assume. This cannot fire from today's solver -- the
+    # append is unconditional, once per iteration -- which is exactly why it is
+    # a raise: it reports that the two have drifted apart instead of quietly
+    # measuring the wrong window.
+    for offset, entry in enumerate(window):
+        if entry.iteration != window[0].iteration + offset:
+            raise RuntimeError(
+                "SCOP stagnation window is not contiguous: iterations "
+                f"{[e.iteration for e in window]} from a log of "
+                f"{len(stagnation_log)} records. The gate slices by position, "
+                "so the per-iteration channel must be appended once per "
+                "iteration with no gaps."
+            )
     previous = float(window[0].deviance)
     if not np.isfinite(previous):
         return False
