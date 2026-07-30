@@ -39,8 +39,12 @@ not authorize a tag or PyPI publication. It does not create a second release pul
 MODE: PUBLISH
 
 PUBLISH requires a new explicit user instruction naming the exact v0.x.y tag.
-Resolve the approved assessed-PR merge commit and bind the tag to that exact
-commit. Revalidate version files, lock metadata, ancestry, included changes,
+Resolve the commit on origin/master produced by the approved assessed pull
+request and bind the tag to that exact commit. This repository rebase-merges
+and its master ruleset requires linear history, so no merge commit exists:
+the referent is the rebased head on origin/master, identified by matching the
+assessed head's tree and message, not by searching for a merge. Revalidate
+version files, lock metadata, ancestry, included changes,
 required CI, existing tags, GitHub releases, and PyPI before mutation. Push only
 the one approved annotated tag. The existing .github/workflows/release.yml is
 the sole publisher. Monitor it through completion, then verify PyPI and the
@@ -175,7 +179,8 @@ PUBLICATION PROCEDURE
 
 1. Fetch master, tags, the merged assessed PR, required checks, GitHub releases,
    and PyPI state.
-2. Resolve the exact approved assessed-PR merge commit, not merely master HEAD.
+2. Resolve the exact commit on origin/master produced by the approved assessed
+   pull request (the rebased head, not a merge commit and not merely master HEAD).
 3. Verify pyproject.toml, superglm.__version__, uv.lock, and the requested tag
    agree.
 4. Verify the release commit contains the assessed head, descends from the
