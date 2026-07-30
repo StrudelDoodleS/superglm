@@ -566,7 +566,8 @@ def solve_constrained_qp(
     max_iter : int
         Maximum active-set iterations.
     tol : float
-        Tolerance for constraint satisfaction and multiplier signs. The
+        Tolerance for constraint satisfaction and multiplier signs, required
+        to lie in ``(0, 1)``; anything else raises ``ValueError``. The
         constraint test is relative: row ``i`` is satisfied when
         ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i @ beta|)``, so a
         badly scaled constraint system does not read as infeasible purely
@@ -574,6 +575,31 @@ def solve_constrained_qp(
         nonzero ``b``: at ``b_i == 0`` the relative test is algebraically
         identical to the absolute one for any ``tol`` in ``(0, 1)``, and every
         in-tree caller passes ``b = 0``.
+
+        ``(0, 1)`` is the predicate's actual domain, not a house style. The
+        normalized slack saturates at ``-1`` -- at ``b = 0`` it is
+        ``x / max(1, |x|)``, which is exactly ``-1`` for every violation worse
+        than 1 -- so at ``tol >= 1`` the test accepts *every* finite violation
+        and the solve returns its unconstrained answer with
+        ``converged=True``. Measured on ``H = [[1]]``, ``g = [-100]``,
+        ``beta >= 0``: ``tol = 0.999999`` returns ``beta = 0``, ``tol = 1.0``
+        returns ``beta = -100`` and calls it converged.
+
+        Rejecting the value rather than reformulating the predicate is
+        deliberate. The vacuity is algebraic, not a rounding artifact: written
+        without the division, the test is ``x >= -tol * max(1, |x|)``, and at
+        ``tol = 1`` that is ``x >= -|x|``, which holds for every ``x <= 0``
+        however it is spelled. The only formulation that cannot saturate is one
+        whose scale excludes ``|A_i @ beta|`` -- which is precisely the term
+        this test grew in order to stop reading an exactly-active large
+        constraint row as violated. So a non-vacuous formulation is not a
+        reformulation but a revert. Validation is also honest about the other
+        two jobs this one parameter does: it is the step-norm convergence
+        threshold (``||step|| < tol``) and the multiplier-sign threshold
+        (``min lambda >= -tol``), and neither is meaningful at 1 either -- the
+        first declares stationarity for any step shorter than 1, the second
+        accepts a materially negative multiplier. No in-tree caller passes
+        ``tol`` at all, so the domain restriction is not a breaking change.
     _trace_run : TraceRun | None
         Internal seam, default off. When given an *enabled* ``TraceRun`` the
         active-set loop emits one ``step_decision`` event per blocking
@@ -591,6 +617,19 @@ def solve_constrained_qp(
     QPResult
         Solution with beta, active_set, iteration count, convergence flag.
     """
+    # Checked at the public boundary rather than at each use: every predicate
+    # below reads ``tol``, and a vacuous one is not detectable from the result.
+    # Spelled as a negated range so a NaN ``tol`` is rejected as well.
+    if not 0.0 < tol < 1.0:
+        raise ValueError(
+            f"solve_constrained_qp requires 0 < tol < 1, got {tol!r}. tol is a "
+            "relative tolerance whose normalized slack saturates at -1, so "
+            "tol >= 1 accepts every finite constraint violation and the solve "
+            "reports its unconstrained answer as converged. It is also the "
+            "step-norm and multiplier-sign threshold, neither of which is "
+            "meaningful at 1."
+        )
+
     p = H.shape[0]
     m = A.shape[0]
 

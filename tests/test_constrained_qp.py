@@ -1,5 +1,7 @@
 """Tests for the active-set constrained penalized least-squares solver."""
 
+import inspect
+
 import numpy as np
 import pytest
 
@@ -867,6 +869,63 @@ class TestFeasibilityToleranceScaling:
         # test must accept it -- so the projection leaves the point alone.
         assert _is_feasible(A, beta, b, 1e-12)
         np.testing.assert_array_equal(_project_feasible(beta, A, b, 1e-12), beta)
+
+
+class TestToleranceDomain:
+    """``tol`` is a relative tolerance, and its predicate has a real domain.
+
+    The normalized slack saturates at ``-1``, so ``slack >= -tol`` accepts
+    every finite violation once ``tol >= 1``.  The absolute test this replaced
+    could not become vacuous, so the domain arrived with the scale-aware slack
+    and is checked at the public boundary.
+    """
+
+    H = np.array([[1.0]])
+    G = np.array([-100.0])
+    A = np.array([[1.0]])
+    B = np.array([0.0])
+
+    def test_the_slack_saturates_which_is_why_the_domain_exists(self):
+        """The premise, measured rather than asserted: two violations three
+        orders of magnitude apart normalize to the same ``-1.0``."""
+        near = _feasibility_slack(self.A, np.array([-100.0]), self.B)
+        far = _feasibility_slack(self.A, np.array([-1e30]), self.B)
+        np.testing.assert_array_equal(near, [-1.0])
+        np.testing.assert_array_equal(far, [-1.0])
+        # ...so at tol = 1 the predicate accepts a violation of 1e30.
+        assert _is_feasible(self.A, np.array([-1e30]), self.B, 1.0)
+
+    @pytest.mark.parametrize("tol", [1.0, 1.0000000000000002, 2.0, 1e6, np.inf])
+    def test_a_tolerance_at_or_above_one_is_rejected(self, tol):
+        """Pre-fix ``tol = 1.0`` returned ``beta = [-100]`` -- the
+        unconstrained answer, violating ``beta >= 0`` by 100 -- with
+        ``converged=True`` and ``n_iter=0``."""
+        with pytest.raises(ValueError, match=r"requires 0 < tol < 1"):
+            solve_constrained_qp(self.H, self.G, self.A, self.B, tol=tol)
+
+    @pytest.mark.parametrize("tol", [0.0, -1e-12, -1.0, -np.inf, np.nan])
+    def test_a_non_positive_or_undefined_tolerance_is_rejected(self, tol):
+        """``tol <= 0`` makes the step-norm test ``||step|| < tol`` unreachable,
+        so the loop can only ever exhaust ``max_iter``; NaN is rejected by the
+        same negated-range spelling."""
+        with pytest.raises(ValueError, match=r"requires 0 < tol < 1"):
+            solve_constrained_qp(self.H, self.G, self.A, self.B, tol=tol)
+
+    @pytest.mark.parametrize("tol", [1e-15, 1e-12, 1e-8, 0.5, 0.999999])
+    def test_the_open_interval_is_accepted_and_still_binds_the_constraint(self, tol):
+        """The boundary is at 1, not below it: everything short of it must
+        still solve, and solve to the constrained optimum."""
+        result = solve_constrained_qp(self.H, self.G, self.A, self.B, tol=tol)
+
+        np.testing.assert_array_equal(result.beta, [0.0])
+        assert result.converged
+
+    def test_the_default_lies_inside_the_domain(self):
+        """The validated domain must not exclude the value every in-tree
+        caller relies on; no caller passes ``tol`` at all."""
+        default = inspect.signature(solve_constrained_qp).parameters["tol"].default
+        assert 0.0 < default < 1.0
+        assert default == 1e-12
 
 
 class TestProjectionSelectsTheWorstViolation:
