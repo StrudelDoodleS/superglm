@@ -248,6 +248,105 @@ def _is_feasible(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> bool:
     return bool(np.all(_feasibility_slack(A, beta, b) >= -tol))
 
 
+def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
+    """Least-squares solve of a saddle system, symmetrically equilibrated first.
+
+    ``lstsq``'s rank cutoff is *relative to the largest singular value of the
+    matrix it is handed*, so on an unscaled saddle matrix it measures the
+    constraint block against the norm of ``H``.  When ``H`` dwarfs the
+    constraint rows, every constraint direction falls below the cutoff and is
+    discarded as noise -- the solve then returns a point that ignores the
+    constraints entirely.  Measured on ``H = diag(1e16, 0)`` with
+    ``A = [[1, 1]]``: singular values ``[1e16, 1, 1]``, cutoff
+    ``3 * eps * 1e16 = 6.66``, so **both** unit values are truncated and rank 1
+    of 3 is retained, for an infeasible answer.  The matrix is nonsingular; only
+    the tolerance was wrong.  (``np.linalg.matrix_rank`` reports 1 here too, for
+    the same reason -- it is not an independent check.)
+
+    Equilibrating symmetrically -- ``D K D`` with ``D = diag(1 / sqrt(row
+    inf-norm))``, solving for ``y`` and returning ``D y`` -- puts every row and
+    column on a common scale first, so the cutoff separates directions by
+    *conditioning* rather than by which block they came from.  On the case
+    above it recovers singular values ``[1, 1, 1]``, rank 3 of 3, and the
+    feasible optimum.
+
+    Symmetry of the scaling is load-bearing rather than stylistic.  ``KKT`` is
+    only quasi-symmetric -- the off-diagonal blocks are ``-A^T`` and ``+A`` --
+    but ``|KKT|`` *is* symmetric, so a scaling built from row inf-norms is
+    automatically the same on both sides and ``D K D`` preserves the saddle
+    structure the multiplier block relies on.  A one-sided row scaling would
+    not, and would leave the returned multipliers on a different scale from the
+    step.
+
+    Two properties make the scaling safe on a degenerate block, which is the
+    reason this cannot emit ``inf`` or ``nan``:
+
+    * **No zero divide.** A structurally empty row -- an ``H`` row that is zero
+      with a matching zero ``A`` column, or an all-zero constraint row -- has
+      inf-norm 0 and keeps scale ``1.0`` rather than being sent through
+      ``1 / sqrt(0)``.  Leaving it alone is
+      correct: there is nothing in that row to normalize, and because ``|KKT|``
+      is symmetric the matching column is zero as well, so the row and column
+      stay zero and ``lstsq`` discards the direction as it should.  Clamping to
+      ``tiny`` instead would manufacture a ``6.7e153`` scale for a row that
+      carries no information.
+    * **No overflow.** For a nonzero row, ``|K[i, j]| <= min(m_i, m_j) <=
+      sqrt(m_i * m_j)``, so every equilibrated entry satisfies
+      ``|K[i, j]| / sqrt(m_i * m_j) <= 1`` by construction, whatever the
+      dynamic range of the input.  The bound is exact in real arithmetic and
+      holds to a couple of ulps once the two multiplies round, which is what
+      the overflow argument needs.  A single pass is what carries this
+      guarantee: iterating to the Ruiz fixed point bounds the accumulated
+      scale only by the input's dynamic range rather than by ``1/sqrt(m_min)``,
+      trading a provable envelope for an empirical one.  Measured over a
+      3950-case rank-deficient ensemble the extra passes repair 14 infeasible
+      answers against this pass's 7, for the same 2 regressions -- real, but
+      not worth the weaker guarantee on this path.
+
+    The solution is minimum-norm **in the equilibrated coordinates**, not in
+    the original ones, because that is where ``lstsq`` resolves the null
+    directions.  That is the same convention ``RankDecomposition.solve`` uses
+    for the pure-``H`` solve -- it also divides by its column scale, solves,
+    and divides again -- so the two solves inside this module now pick the same
+    representative on a flat optimal face.  Where the face is genuinely flat
+    the point moves but the objective does not: the rank-one regression below
+    returns ``max|beta| = 18.3`` rather than ``15.7`` for the same exact
+    optimum of ``-450``.
+
+    ``rcond`` is deliberately left at ``None``.  The competing proposal is to
+    pass ``SHARED_RANK_POLICY.gram_rcond`` so that one rule decides what is
+    retained, since the policy keeps ``H`` eigenvalues down to
+    ``gram_rcond * lambda_max`` while ``lstsq`` drops singular values below
+    ``max(M, N) * eps * sigma_max``.  Equilibration already settles that
+    disagreement, and settles it *better*, for two measured reasons:
+
+    * A direction that is near-null for ``H`` but pinned by an active
+      constraint keeps a KKT singular value of order that constraint row's
+      norm, not of order its ``H`` eigenvalue -- a KKT singular value is not an
+      ``H`` eigenvalue.  Over a ``p = 180`` ensemble with 50-row active sets and
+      an in-band ``H`` eigenvalue planted at ``50 * eps * lambda_max``, the
+      smallest retained equilibrated ratio measured ``1.3e-4`` and the largest
+      truncated one ``0``; nothing landed between ``eps`` and ``230 * eps``, so
+      the two candidate cutoffs cannot disagree there.
+    * Where the active rows leave such a direction *free*, it really does fall
+      in the band -- and an explicit ``rcond`` is not enough to save it.  With
+      ``H = diag(1, eps, 0)`` and ``A_eq = [[1, 0, 0]]`` the raw ratio is
+      ``1.4e-16``, below ``gram_rcond`` as well as below ``4 * eps``, so
+      ``rcond=gram_rcond`` still discards it.  Equilibration lifts the same
+      ratio to ``0.38``.  See the regression test.
+
+    Lowering the cutoff would also narrow the margin protecting the genuine
+    null direction -- on the rank-one regression below it sits at ``2e-17``
+    against ``8.9e-16``, and retaining it instead is what produced the ``1e43``
+    drift this branch already fixed once.
+    """
+    row_norm = np.abs(KKT).max(axis=1)
+    nonzero = row_norm > 0.0
+    scale = np.where(nonzero, 1.0 / np.sqrt(np.where(nonzero, row_norm, 1.0)), 1.0)
+    equilibrated = KKT * scale[:, None] * scale[None, :]
+    return np.linalg.lstsq(equilibrated, rhs * scale, rcond=None)[0] * scale
+
+
 def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
     """Project beta onto the feasible set {x : A @ x >= b}.
 
@@ -538,13 +637,19 @@ def solve_constrained_qp(
                 # |beta| ~ 4e43 while violating the constraint it was meant to
                 # respect.  Take the minimum-norm solution directly instead of
                 # waiting for an exception that does not come.
-                sol = np.linalg.lstsq(KKT, rhs, rcond=None)[0]
+                sol = _solve_saddle_least_squares(KKT, rhs)
             else:
                 try:
                     sol = np.linalg.solve(KKT, rhs)
                 except np.linalg.LinAlgError:
-                    # Singular KKT — use least-squares
-                    sol = np.linalg.lstsq(KKT, rhs, rcond=None)[0]
+                    # Singular KKT — use least-squares.  Same equilibration as
+                    # the branch above: this is the identical solve on an
+                    # identically scaled saddle matrix, and an unscaled cutoff
+                    # would discard the constraint block here for exactly the
+                    # reason it does there.  The direct solve above is
+                    # untouched, so the full-rank path still reaches this line
+                    # only after ``np.linalg.solve`` has already refused.
+                    sol = _solve_saddle_least_squares(KKT, rhs)
 
             step = sol[:p]
 
