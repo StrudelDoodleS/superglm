@@ -428,7 +428,12 @@ Two refinements the first draft did not have:
 - **Active-set cycling has no anti-cycling rule.** Not observed (the trace
   above shows monotone growth to a stable set, 4 distinct sets over the run),
   but there is nothing preventing it. Filed for completeness.
-- **The negative-`alpha` ratio test.** `alpha` can go negative when the current
+- **The negative-`alpha` ratio test** *(population moved, not merely
+  inherited)*. The scaled blocking gate skips rows with
+  `-tol·scale < raw_step_i < -tol`; some of those are violated and would have
+  produced a negative `alpha`, so that side of the population shrank, with
+  those iterations now terminating `converged=False` instead of stepping
+  backward. The remainder is unchanged and still deferred. `alpha` can go negative when the current
   iterate already violates constraint `i` (`slack < 0` with `a_step < -tol`),
   stepping backwards. Reachable only from an infeasible start. Confirmed
   pre-existing and byte-identical to `e8e31f4`, originating in `234adee`.

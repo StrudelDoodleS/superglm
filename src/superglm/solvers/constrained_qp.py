@@ -48,6 +48,17 @@ _NULL_BASIS_ACCURACY_SLACK = 32.0
 # hold the same numeric value; that coincidence is not a dependency, and
 # deriving one from the other would re-create, one level down, exactly the
 # coupling ``_NULL_BASIS_ACCURACY_SLACK`` exists to avoid.
+# Dimension term for the spectral floor.  The retained-condition term above
+# models error amplification, but ``eigh``'s own backward error grows with the
+# problem's width and does not vanish as the retained block becomes perfectly
+# conditioned -- so at low condition the condition term bottoms out *below* the
+# eigensolver's own roundoff in the null basis and rejects consistent systems.
+# Measured worst case across widths 2..24 and ranks 1..width-1 is 17.3 * eps
+# per unit width; 512 leaves roughly 30x margin.  It is deliberately separate
+# from the condition slack: at any condition worth worrying about the condition
+# term dominates, so this cannot move detection at the high end.
+_SPECTRAL_DIMENSION_SLACK = 512.0
+
 _STRUCTURAL_NORM_ROUNDING_SLACK = 32.0
 _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 
@@ -185,7 +196,16 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
         retained_condition = (
             float(np.max(magnitudes)) / smallest if smallest > 0.0 else float("inf")
         )
-    return float(min(1.0, _NULL_BASIS_ACCURACY_SLACK * _EPS * max(1.0, retained_condition)))
+    return float(
+        min(
+            1.0,
+            _EPS
+            * max(
+                _NULL_BASIS_ACCURACY_SLACK * max(1.0, retained_condition),
+                _SPECTRAL_DIMENSION_SLACK * decomposition.width,
+            ),
+        )
+    )
 
 
 def _feasibility_slack(
@@ -288,6 +308,7 @@ def _emit_blocking_decision(
     gated on the unscaled derivative records a ``blocking_row`` that is *not*
     in its own considered set.
     """
+    assert trace_run is not None  # narrowed by the caller's `tracing` guard
     derived_scale = _feasibility_scale(products, b)
     derived_scaled_step = raw_step / derived_scale
     considered = [
@@ -320,6 +341,9 @@ def _emit_blocking_decision(
             "alpha": float(alpha_min),
         },
         channel=BLOCKING_TRACE_CHANNEL,
+        # Fixed rather than taking the caller's ``trace_purpose`` as the
+        # sibling emit sites do: this seam is test-only and no caller threads a
+        # purpose through yet.  Thread one here if that changes.
         purpose="constrained_qp",
     )
 
@@ -369,6 +393,15 @@ def solve_constrained_qp(
         Warm-start active set from previous solve.
     max_iter : int
         Maximum active-set iterations.
+    tol : float
+        Tolerance for constraint satisfaction and multiplier signs. The
+        constraint test is relative: row ``i`` is satisfied when
+        ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i @ beta|)``, so a
+        badly scaled constraint system does not read as infeasible purely
+        because its rows are large. This matters only for callers with a
+        nonzero ``b``: at ``b_i == 0`` the relative test is algebraically
+        identical to the absolute one for any ``tol`` in ``(0, 1)``, and every
+        in-tree caller passes ``b = 0``.
     _trace_run : TraceRun | None
         Internal seam, default off. When given an *enabled* ``TraceRun`` the
         active-set loop emits one ``step_decision`` event per blocking
@@ -380,15 +413,6 @@ def solve_constrained_qp(
         is re-exported from ``superglm.solvers`` and this is not public API.
         The default path is bitwise unchanged: the flag is resolved once
         before the loop and the payload is never constructed.
-    tol : float
-        Tolerance for constraint satisfaction and multiplier signs. The
-        constraint test is relative: row ``i`` is satisfied when
-        ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i @ beta|)``, so a
-        badly scaled constraint system does not read as infeasible purely
-        because its rows are large. This matters only for callers with a
-        nonzero ``b``: at ``b_i == 0`` the relative test is algebraically
-        identical to the absolute one for any ``tol`` in ``(0, 1)``, and every
-        in-tree caller passes ``b = 0``.
 
     Returns
     -------
