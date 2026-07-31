@@ -82,20 +82,29 @@ factors:
 
 ```python
 table = model.screen_interactions(df, y, sample_weight=exposure)
-#   feature_a feature_b         kind  statistic      z   edf0    lambda0  n_cells  approx
-#      VehAge  VehBrand   spline_cat     48.470  5.740   16.0  4.972e-01      627   False
-#     DrivAge    Region   spline_cat     52.169  4.810   21.0  4.189e+09     1760   False
-#  BonusMalus  VehBrand  numeric_cat     29.311  4.318   10.0  0.000e+00       11   False
-#    VehBrand    Region      cat_cat    250.240  2.071  208.0  0.000e+00      242   False
-#  BonusMalus    Region  numeric_cat     29.473  1.307   21.0  0.000e+00       22   False
+print(table.to_string(index=False))
+#  feature_a feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
+#     VehAge  VehBrand  spline_cat  48.469650  5.739877  16.000001 4.972193e-01      627   False
+#    DrivAge    Region  spline_cat  52.169214  4.809500  21.000051 4.188659e+09     1760   False
+# BonusMalus  VehBrand numeric_cat  29.310887  4.318046  10.000000 0.000000e+00       11   False
+#   VehBrand    Region     cat_cat 250.240100  2.070991 208.000000 0.000000e+00      242   False
+# BonusMalus    Region numeric_cat  29.472832  1.307386  21.000000 0.000000e+00       22   False
+#    DrivAge  VehBrand  spline_cat  20.523540  0.799656  16.000001 6.816717e+01      880   False
+#    DrivAge    VehAge          ti  18.117031  0.374242  16.000001 1.903907e-02     4560   False
+#     VehAge    Region  spline_cat  17.874680 -0.482253  21.000036 1.195206e+09     1254   False
 ```
 
-Four kinds, one ranking. `statistic` is not comparable down that column — the
-`cat_cat` row's 250 is a 208-dimensional block and the `numeric_cat` row's 29
-a 10-dimensional one — and the `4.189e+09` is a bracket edge at a clamped
-rung, not a fitted smoothing parameter. Read the top row against its own
-kind's measured noise maximum below (7.11 for `spline_cat`): 5.74 does not
-clear it.
+Every eligible pair, four kinds, one ranking by `z` alone — the sweep's only
+spline x spline pair (`DrivAge x VehAge`, the `ti` row) places seventh of
+eight. Eight rows, not ten: the two spline x numeric pairs are deferred, so
+they never enter the sweep. `statistic` is not comparable down that column:
+the `cat_cat` row's 250 is a 208-dimensional block and the `numeric_cat` row's
+29 a 10-dimensional one. The large `lambda0` values are bracket edges at
+clamped rungs, not fitted smoothing parameters, and the last row's negative
+`z` is ordinary — a statistic can land below its rung's noise floor. Nothing
+here was binned or refused (`approx` is False throughout, no NaN rows). Read
+the top row against its own kind's measured noise maximum below (7.11 for
+`spline_cat`): 5.74 does not clear it.
 
 ## Reading the output
 
@@ -139,8 +148,10 @@ clear it.
   dimensions, so those skip with no binning attempted), or when the statistic
   degenerates. A `numeric_cat` pair has no grid to shrink, so a factor too
   wide for the pair's blocks is *refused* rather than approximated: the gate
-  is `(L + 2)^2 <= max_cells`, which admits 2234 levels at the default, and
-  raising `max_cells` lifts the refusal and computes the pair exactly.
+  holds the largest of those blocks, the `(L + 1)`-wide overlap curvature, to
+  the budget — `(L + 1)^2 <= max_cells`, which admits factors up to 2235
+  levels at the default — and raising `max_cells` lifts the refusal and
+  computes the pair exactly.
   `numeric_numeric` contracts to 3x3 blocks whatever the supports and is never
   refused. All such rows sort last.
 - **`approx=True` means the row's probe basis differs from what a confirmatory
