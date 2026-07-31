@@ -166,13 +166,21 @@ to carry.
 
 - `TestSCOPREMLDoesNotPublishDiagnostics` (`2839-2885`) — drop the
   `stagnation_log` assertions, keep the `iteration_log` ones.
-- `tests/test_scop_irls_state.py:374-388` — drop the channel assertions.
-- `tests/test_fit_transactions.py:373-395` — this test is about
-  `_freeze_result_arrays` not rebuilding a dataclass, and borrowed
-  `StagnationRecord` only as a convenient mutable dataclass reachable from a
-  result. Re-point it at `IterationDiagnostics`, which is the analogous
-  surviving per-iteration dataclass on `PIRLSResult` and preserves the test's
-  actual subject.
+- `tests/test_scop_irls_state.py:341-388` —
+  `test_stagnation_channel_matches_the_recorder_on_step_quality` exists to
+  compare the two channels, so its subject evaporates with one of them. Its
+  value does not: it is the only place that drives `step_halvings` and
+  `step_rejected` to non-trivial values instead of hoping a fixture reaches
+  them. Re-point it at `iteration_log` and rename accordingly.
+- `tests/test_fit_transactions.py:368-397` —
+  `test_published_stagnation_records_keep_their_fields` is about
+  `_freeze_result_arrays` not rebuilding a dataclass as a bare tuple, and
+  borrowed `StagnationRecord` only as a convenient example. **Delete it
+  outright rather than re-pointing:** `test_published_result_deeply_freezes_
+  diagnostics_and_rank_metadata` at `348-365` already asserts
+  `result.iteration_log[0].deviance = -1.0` raises `AttributeError`, which is
+  the same property on the surviving dataclass. Re-pointing would duplicate
+  existing coverage.
 - `TestIterationDiagnosticsSmallSample` (`2773-2838`) — one incidental mention.
 
 **Verify.** Re-run the instrumented probe after removal to confirm no gate path
