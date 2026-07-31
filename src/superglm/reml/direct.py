@@ -160,6 +160,9 @@ def optimize_direct_reml(
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
     observed_pirls_tol = min(pirls_tol, 1e-10) if use_observed_geometry else pirls_tol
+    # Floored at 100*eps, so unlike the SCOP certification bar
+    # (reml/scop_efs.py) the tolerance arm here is live -- do not
+    # generalise the #184 deletion to this expression.
     observed_mode_tol = max(10.0 * observed_pirls_tol, 100.0 * np.finfo(float).eps)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
