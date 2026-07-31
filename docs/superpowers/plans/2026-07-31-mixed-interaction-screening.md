@@ -1737,6 +1737,15 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 7 — measured null floors
 
+> **SUPERSEDED 2026-08-01 — the tables and dispositions in this subsection were
+> measured OFF the exposure contract and are kept only as the record.** The
+> benchmark's Poisson arm passed claim COUNTS as `y` alongside
+> `sample_weight=exposure`, where the library's contract is
+> `Var(y) = phi * V(mu) / w` — i.e. an exposure-weighted `y` is a RATE. That
+> under-estimated `phi` on the Poisson arm and inflated every Poisson `z` in
+> the battery. See "Task 7 (round 2) — measured null floors, on-contract"
+> below for the numbers that hold.
+
 `uv run python benchmarks/screening_null_floors.py --seeds 40` (n=8000,
 4 families x 40 seeds = 160 fits, 3520 screened rows, 2m10s wall):
 
@@ -1793,7 +1802,7 @@ diagnostics:
   (n=8000 rows per dataset, 4 families x 40 seeds)
 ```
 
-Dispositions for Task 8's docs:
+Dispositions for Task 8's docs (SUPERSEDED — see round 2 below):
 
 - **The floor is ~7.6, not the ~4.5 `docs/guide/screening.md` currently
   claims.** The old figure predates the mixed kinds and came from a far
@@ -1837,3 +1846,127 @@ Dispositions for Task 8's docs:
   battery reached 7.64 over 3520 rows. The floor rises with sweep width, so
   a wide book screened in one pass draws more null rows than this whole
   battery; 10 is generous for a handful of pairs and thinner for hundreds.
+
+### Task 7 (round 2) — measured null floors, on-contract
+
+**2026-08-01, final whole-branch review.** The round-1 battery above was
+measured off the exposure contract: `benchmarks/screening_null_floors.py`'s
+Poisson arm returned `rng.poisson(exposure * exp(eta))` — claim COUNTS — as
+`y` while passing `sample_weight=exposure`. Under `Var(y) = phi * V(mu) / w`
+an exposure-weighted response is a RATE, so the counts form under-estimated
+`phi` and inflated every Poisson `z` in the battery, worst at high df. The arm
+now returns `counts / exposure` with the same weight; nothing else about the
+battery changed.
+
+Measured on the 80k freMTPL2 sample the guide's worked example uses, with the
+same feature set: the off-contract form (counts as `y`, `sample_weight` the
+exposure) estimates `phi = 0.5557`, while BOTH on-contract forms — the rate
+form (`y = ClaimNb/Exposure`, `sample_weight` the exposure) and the offset
+form (`y = ClaimNb`, `offset = log(Exposure)`) — estimate `phi = 2.5193`, and
+they agree with each other to ten significant figures. The off-contract form
+was low by a factor of 4.53. The statistic is reported on the `T / phi` scale,
+so that factor multiplies it directly, and `z = (T/phi - edf0)/sqrt(2*edf0)`
+carries the excess through — worst at high `edf0`, where a 4.53x multiple of
+an `edf0`-sized statistic is a large absolute shift. Same command, same seeds:
+
+```
+max null z per kind over the battery:
+  kind              rows   max z  max|z|  mean z   p90 z     probe df  approx
+  cat_cat            480    3.98    3.98   -0.01    1.20   2.0-  6.0      0%
+  numeric_cat        960    7.53    7.53    0.00    1.19   1.0-  3.0      0%
+  numeric_numeric    160    4.91    4.91   -0.07    1.07   1.0-  1.0      0%
+  spline_cat        1440    5.53    5.53    0.42    1.82   2.0- 16.0      0%
+  ti                 480    7.31    7.31    0.42    1.56   2.0- 16.0     33%
+
+null tail by exact probe df (unpenalized kinds; low df = heavier tail):
+  kind                df  rows   max z  max|z|   p90 z
+  numeric_numeric    1.0   160    4.91    4.91    1.07
+  numeric_cat        1.0   320    7.53    7.53    0.83
+  numeric_cat        2.0   320    4.45    4.45    1.13
+  numeric_cat        3.0   320    4.78    4.78    1.62
+  cat_cat            2.0   160    3.18    3.18    1.17
+  cat_cat            3.0   160    3.98    3.98    1.28
+  cat_cat            6.0   160    2.90    2.90    1.14
+
+ordered-categorical margins vs plain spline margins (spline kinds only):
+  kind         margins     rows   max z  max|z|  mean z   p90 z     cells
+  ti           plain        160    7.31    7.31    0.35    1.49   1899008
+  ti           oc           320    4.25    4.25    0.45    1.58     38697
+  spline_cat   plain        960    5.34    5.34    0.46    1.80     23218
+  spline_cat   oc           480    5.53    5.53    0.35    1.85        15
+
+max null z by family (is the floor one family's artifact?):
+  kind              poisson    gamma binomial gaussian
+  cat_cat              3.98     3.20     2.90     3.18
+  numeric_cat          3.17     4.66     4.17     7.53
+  numeric_numeric      3.74     3.40     2.87     4.91
+  spline_cat           4.08     5.34     5.53     4.97
+  ti                   3.56     3.09     3.49     7.31
+
+the 6 largest single rows in the battery:
+  z= 7.53  numeric_cat      fuel x bm              seed=15  family=gaussian  edf0=1.0
+  z= 7.31  ti               age x power            seed=37  family=gaussian  edf0=2.0
+  z= 5.53  spline_cat       region x band          seed=15  family=binomial  edf0=3.0
+  z= 5.34  spline_cat       age x brand            seed=12  family=gamma     edf0=2.0
+  z= 4.97  spline_cat       age x fuel             seed=3   family=gaussian  edf0=2.0
+  z= 4.93  spline_cat       brand x band           seed=12  family=gaussian  edf0=2.0
+
+diagnostics:
+  fits attempted            160
+  fits that failed          0
+  rows screened             3520
+  non-finite z rows         0   (refusals or degenerate margins)
+  widest numeric_cat factor 4 levels; the gate (L+1)^2 <= max_cells=5000000 admits L <= 2235
+  warnings raised           0 in 0 distinct forms
+
+  (n=8000 rows per dataset, 4 families x 40 seeds)
+```
+
+Dispositions, revised against the on-contract numbers:
+
+- **The floor is 7.53, and only two of five kinds clear 6** (`numeric_cat`
+  7.53 and `ti` 7.31; `spline_cat` 5.53, `numeric_numeric` 4.91, `cat_cat`
+  3.98). Round 1's "four of five above 6" was the Poisson inflation: the
+  Poisson column fell from 7.23/7.64/4.84/7.11/5.40 to 3.98/3.17/3.74/4.08/
+  3.56 once `phi` was estimated on-contract. The headline correction against
+  the pre-branch guide still stands — the old "never exceeded ~4.5" came from
+  a smaller splines-only battery, and 7.53 supersedes it.
+- **The df story survives, but only at the extreme, and it is not monotone.**
+  All six of the largest rows sit at `edf0 <= 3` and the largest of all is the
+  1-df `numeric_cat`, 2.6 clear of every other configuration in the by-df
+  table. But neither kind is monotone now (`numeric_cat` 7.53/4.45/4.78 at df
+  1/2/3; `cat_cat` 3.18/3.98/2.90 at df 2/3/6), so round 1's "within `cat_cat`
+  the maximum falls monotonically with df" is retired. Still do NOT phrase
+  this as "`numeric_numeric` is the heavy kind": at 4.91 it sits below the
+  `numeric_cat` maximum on the same 1 df, on the fewest draws.
+- **One family DOES carry the floor now, and it is the dispersed Gaussian.**
+  Round 1's "no family drives the floor" is retired: Gaussian tops three of
+  five kinds and holds both maxima above 6, while no other family reached
+  beyond 5.53 anywhere (Poisson at most 4.08, gamma 5.34, binomial 5.53).
+  Quote the maxima as Gaussian-driven; the per-kind floor, being a max over
+  all four families, stays the conservative reading for any single one.
+- **OC margins still do not move the floor**, on smaller gaps than round 1
+  measured: within 0.11 on the means and 0.09 on the p90s, with the means
+  flipping sign between kinds (OC lower on `spline_cat`, higher on `ti`) and
+  the maxima disagreeing with the means on both (`spline_cat` OC 5.53 vs plain
+  5.34; `ti` OC 4.25 vs plain 7.31). The p90s are the one statistic where OC
+  is above plain on both kinds, by 0.05 and 0.09 against p90s of 1.5-1.9 —
+  small enough to read as sampling noise, and stated rather than dropped.
+- **The `numeric_cat` budget gate never fires here** (unchanged), but the
+  diagnostic that reported it was wrong and is fixed: the shipped gate is
+  `(k_g + 2)^2 <= max_cells` on the gridded margin's contrast count, i.e.
+  `(L + 1)^2` in level terms, admitting `L <= 2235` — not the `(L + 2)^2` /
+  2234 the benchmark printed. `docs/guide/screening.md` already carried the
+  corrected form; the benchmark now mirrors it.
+- **The release pins now cover every measured configuration.** The Gaussian
+  bounded-null pin gained a second `Numeric` (`dens`) and a 2-level factor
+  (`fuel`), so the union of the two pins covers `spline_cat`, `cat_cat` at df
+  2/3/6, `numeric_cat` at df 1/2/3 and `numeric_numeric` — with `ti` still in
+  the Poisson pin only. Round 1's "the three heaviest-tailed configurations
+  are measured but not gated" is therefore retired. Measured over the pins'
+  own 8 sweeps: Poisson max 4.27, Gaussian max 4.58, against the `z < 10`
+  bound.
+- **The gate's headroom caution stands** on the new number: the pins bound
+  `z < 10` and the battery reached 7.53 over 3520 rows. A floor is a maximum,
+  so it grows with sweep width — 10 is generous for a handful of pairs and
+  thinner for hundreds.

@@ -78,33 +78,47 @@ cannot re-screen a term already in the model.
 
 A mixed sweep comes back as one sorted table — here an 80,000-row sample of
 the freMTPL2 frequency book, fitted with two splines, a numeric and two
-factors:
+factors, on the house exposure contract (`y` the claim *rate*
+`ClaimNb / Exposure`, `sample_weight` the exposure, `phi` estimated at 2.52):
 
 ```python
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge  VehBrand  spline_cat  48.469650  5.739877  16.000001 4.972193e-01      627   False
-#    DrivAge    Region  spline_cat  52.169214  4.809500  21.000051 4.188659e+09     1760   False
-# BonusMalus  VehBrand numeric_cat  29.310887  4.318046  10.000000 0.000000e+00       11   False
-#   VehBrand    Region     cat_cat 250.240100  2.070991 208.000000 0.000000e+00      242   False
-# BonusMalus    Region numeric_cat  29.472832  1.307386  21.000000 0.000000e+00       22   False
-#    DrivAge  VehBrand  spline_cat  20.523540  0.799656  16.000001 6.816717e+01      880   False
-#    DrivAge    VehAge          ti  18.117031  0.374242  16.000001 1.903907e-02     4560   False
-#     VehAge    Region  spline_cat  17.874680 -0.482253  21.000036 1.195206e+09     1254   False
+#     VehAge  VehBrand  spline_cat  43.579430  4.875400  16.000000 6.820539e-01      627   False
+# BonusMalus  VehBrand numeric_cat  18.139171  1.819974  10.000000 0.000000e+00       11   False
+#    DrivAge    VehAge          ti   0.733057 -0.633471   2.000000 1.611914e+01     4560   False
+#    DrivAge    Region  spline_cat  13.267251 -1.193182  20.999944 6.861393e+09     1760   False
+# BonusMalus    Region numeric_cat  11.890018 -1.405701  21.000000 0.000000e+00       22   False
+#    DrivAge  VehBrand  spline_cat   3.632010 -1.423923   9.999981 1.300382e+10      880   False
+#     VehAge    Region  spline_cat   3.889631 -2.640197  21.000112 2.053060e+09     1254   False
+#   VehBrand    Region     cat_cat  76.234205 -6.460350 208.000000 0.000000e+00      242   False
 ```
 
 Every eligible pair, four kinds, one ranking by `z` alone — the sweep's only
-spline x spline pair (`DrivAge x VehAge`, the `ti` row) places seventh of
-eight. Eight rows, not ten: the two spline x numeric pairs are deferred, so
-they never enter the sweep. `statistic` is not comparable down that column:
-the `cat_cat` row's 250 is a 208-dimensional block and the `numeric_cat` row's
-29 a 10-dimensional one. The large `lambda0` values are bracket edges at
-clamped rungs, not fitted smoothing parameters, and the last row's negative
-`z` is ordinary — a statistic can land below its rung's noise floor. Nothing
-here was binned or refused (`approx` is False throughout, no NaN rows). Read
-the top row against its own kind's measured noise maximum below (7.11 for
-`spline_cat`): 5.74 does not clear it.
+spline x spline pair (`DrivAge x VehAge`, the `ti` row) places third of eight,
+on a rung-2 win worth less than its own noise floor. Eight rows, not ten: the
+two spline x numeric pairs are deferred, so they never enter the sweep. The
+queue this produces is one pair long: `VehAge x VehBrand` is three noise units
+clear of the next row, and refitting it as a `SplineCategorical` — the gate,
+not the score — buys 327.5 deviance on this sample.
+
+`statistic` is not comparable down that column: the `cat_cat` row's 76 is a
+208-dimensional block and the `numeric_cat` row's 18 a 10-dimensional one. The
+large `lambda0` values are bracket edges at clamped rungs, not fitted smoothing
+parameters. Six of the eight rows carry a negative `z`, which is ordinary: a
+statistic can land below its rung's noise floor, and on this book most pairs
+do. The `cat_cat` row's -6.46 is the extreme case — a 208-df block whose
+statistic, scaled by the *whole model's* dispersion, lands at 76, so the global
+`phi` is conservative for that block. A large negative `z` only pushes a pair
+down the queue; it never promotes one. Nothing here was binned or refused
+(`approx` is False throughout, no NaN rows).
+
+Read the top row against its own kind's measured noise maximum below (5.53 for
+`spline_cat`): 4.88 does not clear it — and the refit bought 327.5 deviance
+anyway. That is the screen working as described rather than a contradiction:
+the floor is the largest value a wide null battery produced, not a threshold a
+real pair must beat, and the confirmatory refit is what settles the question.
 
 ## Reading the output
 
@@ -171,65 +185,75 @@ truth, and screens 3520 pairs:
 
 | kind | rows | mean `z` | p90 `z` | max `z` | probe df |
 |---|---|---|---|---|---|
-| `ti` | 480 | 0.67 | 2.18 | 7.31 | 2-16 |
-| `spline_cat` | 1440 | 0.66 | 2.25 | 7.11 | 2-16 |
-| `numeric_cat` | 960 | 0.09 | 1.44 | 7.64 | 1-3 |
-| `cat_cat` | 480 | 0.12 | 1.46 | 7.23 | 2-6 |
-| `numeric_numeric` | 160 | -0.01 | 1.14 | 4.91 | 1 |
+| `ti` | 480 | 0.42 | 1.56 | 7.31 | 2-16 |
+| `spline_cat` | 1440 | 0.42 | 1.82 | 5.53 | 2-16 |
+| `numeric_cat` | 960 | 0.00 | 1.19 | 7.53 | 1-3 |
+| `cat_cat` | 480 | -0.01 | 1.20 | 3.98 | 2-6 |
+| `numeric_numeric` | 160 | -0.07 | 1.07 | 4.91 | 1 |
 
 Read the last three columns together: nine of every ten rows in the battery
-fell below 1.1-2.3 depending on kind, and yet the largest single row of each
-kind reached 4.91-7.64, four of the five kinds above 6. **A `z` of 5 is
+fell below 1.1-1.8 depending on kind, and yet the largest single row of each
+kind reached 3.98-7.53, two of the five kinds above 6. **A `z` of 5 is
 therefore not evidence by itself.** This supersedes the earlier reading of
 this guide ("the best null `z` never exceeded ~4.5; treat `z` below 4-5 as
 noise-level"), which came from a smaller, splines-only battery — a maximum
 grows with the number of draws, so that is a sample-size correction rather
 than a regression.
 
-Low-df probes carry the heaviest tails. Five of the six largest rows in the
-battery sit at `edf0 <= 2`, and the largest of all is a 1-df `numeric_cat`: a
-slope on a two-level factor.
+The heaviest tails sit at low probe df. The two largest rows in the battery
+are a 1-df `numeric_cat` (a slope on a two-level factor) and a rung-2 `ti`,
+and all six of the largest sit at `edf0 <= 3`.
 
 | kind | probe df | rows | max `z` |
 |---|---|---|---|
-| `numeric_cat` | 1 | 320 | 7.64 |
+| `numeric_cat` | 1 | 320 | 7.53 |
 | `numeric_cat` | 2 | 320 | 4.45 |
-| `numeric_cat` | 3 | 320 | 5.71 |
-| `cat_cat` | 2 | 160 | 7.23 |
-| `cat_cat` | 3 | 160 | 5.71 |
-| `cat_cat` | 6 | 160 | 3.34 |
+| `numeric_cat` | 3 | 320 | 4.78 |
+| `cat_cat` | 2 | 160 | 3.18 |
+| `cat_cat` | 3 | 160 | 3.98 |
+| `cat_cat` | 6 | 160 | 2.90 |
 | `numeric_numeric` | 1 | 160 | 4.91 |
 
 That is a statement about the *probe's* df, not about the kind, and it is a
-tendency rather than a law: within `cat_cat` the maximum falls monotonically
-with df (7.23 / 5.71 / 3.34 at df 2 / 3 / 6), while `numeric_cat` does not
-(7.64 / 4.45 / 5.71 at df 1 / 2 / 3). Rank a 1-df `numeric_cat` on a two-level
-factor against a 16-df `ti` and the low-df row can win on noise alone, so
-compare like with like before spending a refit. None of this makes
-`numeric_numeric` the heavy kind: it measured the *lowest* maximum of any kind
-(4.91), on the fewest draws — one pair per sweep, 160 rows.
+tendency at the extreme rather than a law: `numeric_cat`'s 1-df row tops every
+other configuration in the table by 2.6, but neither kind is monotone in df
+(`numeric_cat` 7.53 / 4.45 / 4.78 at df 1 / 2 / 3; `cat_cat` 3.18 / 3.98 /
+2.90 at df 2 / 3 / 6). Rank a 1-df `numeric_cat` on a two-level factor against
+a 16-df `ti` and the low-df row can win on noise alone, so compare like with
+like before spending a refit. None of this makes `numeric_numeric` the heavy
+kind: at 4.91 it sits below the `numeric_cat` maximum on the same 1 df, and on
+the fewest draws — one pair per sweep, 160 rows.
 
-No family drives the floor. Poisson tops three kinds and Gaussian the other
-two, with gamma and binomial milder (2.9-5.5) throughout.
+The families do not agree on the floor, and the dispersed Gaussian carries it:
+Gaussian tops three of the five kinds and holds both maxima above 6 (7.53 on
+`numeric_cat`, 7.31 on `ti`), where no other family reached beyond 5.53
+anywhere in the battery (Poisson at most 4.08, gamma 5.34, binomial 5.53).
+Read the headline maxima as Gaussian-driven rather than as something every
+family reproduces — the quoted floor is the maximum over all four, so for any
+one family it is the conservative reading.
 
-Ordered-categorical margins do not move it either. Against the plain spline
-margins of the same kind the four bulk gaps sit within 0.2 on the means and
-0.4 on the p90s (`spline_cat` mean 0.17 and p90 0.25; `ti` mean 0.14 and p90
-0.38), and every one of those gaps flips sign between the two kinds — OC is
-lower on both `spline_cat` statistics and higher on both `ti` ones — as do the
-maxima (`spline_cat` OC 7.11 against plain 5.69; `ti` OC 5.40 against plain
-7.31). A difference with no consistent direction across kinds is sampling
-noise, not a short score grid inflating anything.
+Ordered-categorical margins do not move it. Against the plain spline margins
+of the same kind the four bulk gaps sit within 0.11 on the means and 0.09 on
+the p90s (`spline_cat` mean 0.11 and p90 0.05; `ti` mean 0.10 and p90 0.09),
+and the direction is not consistent: OC is *lower* on the `spline_cat` mean
+and *higher* on the `ti` one, while the maxima disagree with the means on both
+kinds (`spline_cat` OC 5.53 against plain 5.34; `ti` OC 4.25 against plain
+7.31). The p90 is the one statistic where OC sits above plain on both kinds,
+by 0.05 and 0.09 against p90s of 1.5-1.9. Differences that small, with no
+direction that survives across kinds, are sampling noise rather than a short
+score grid inflating anything.
 
-Two things follow for the release-gate bound of `z < 10`. It is not asserted
-over every configuration: the suite's null gates cover `ti` (the Poisson gate
-only), `spline_cat`, `numeric_cat` at df 2 and 3, and `cat_cat` at df 6, while
-the heaviest-tailed configurations by probe df are measured in the benchmark
-rather than gated there — `numeric_cat` at df 1, `cat_cat` at df 2 and 3, and
-`numeric_numeric` throughout. And a floor is a maximum, so it grows with the
-width of the sweep: a wide book screened in one pass draws more null rows than
-this whole battery did. Treat 10 as generous for a handful of pairs and thin
-for hundreds.
+One thing follows for the release-gate bound of `z < 10`: it holds with
+headroom, but it is a bound, not a floor measurement. The suite's null gates
+cover every kind and every probe df this battery measures — `spline_cat`,
+`cat_cat` at df 6 and `numeric_cat` at df 2 and 3 in both gates, `ti` in the
+Poisson gate only, and `numeric_cat` at df 1, `cat_cat` at df 2 and 3 and
+`numeric_numeric` in the Gaussian one — against a battery whose widest single
+row anywhere was 7.53
+over 3520 rows. But a floor is a maximum, so it grows with the width of the
+sweep: a wide book screened in one pass draws more null rows than this whole
+battery did. Treat 10 as generous for a handful of pairs and thin for
+hundreds.
 
 ## What it inherits from the fit
 
