@@ -1734,3 +1734,93 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Append the Task 7 benchmark table and any disposition notes to this plan
   file at completion (house style: the narrative, not the checkboxes, is the
   record).
+
+### Task 7 — measured null floors
+
+`uv run python benchmarks/screening_null_floors.py --seeds 40` (n=8000,
+4 families x 40 seeds = 160 fits, 3520 screened rows, 2m10s wall):
+
+```
+max null z per kind over the battery:
+  kind              rows   max z  max|z|  mean z   p90 z     probe df  approx
+  cat_cat            480    7.23    7.23    0.12    1.46   2.0-  6.0      0%
+  numeric_cat        960    7.64    7.64    0.09    1.44   1.0-  3.0      0%
+  numeric_numeric    160    4.91    4.91   -0.01    1.14   1.0-  1.0      0%
+  spline_cat        1440    7.11    7.11    0.66    2.25   2.0- 16.0      0%
+  ti                 480    7.31    7.31    0.67    2.18   2.0- 16.0     33%
+
+null tail by exact probe df (unpenalized kinds; low df = heavier tail):
+  kind                df  rows   max z  max|z|   p90 z
+  numeric_numeric    1.0   160    4.91    4.91    1.14
+  numeric_cat        1.0   320    7.64    7.64    1.06
+  numeric_cat        2.0   320    4.45    4.45    1.42
+  numeric_cat        3.0   320    5.71    5.71    1.83
+  cat_cat            2.0   160    7.23    7.23    1.45
+  cat_cat            3.0   160    5.71    5.71    1.31
+  cat_cat            6.0   160    3.34    3.34    1.57
+
+ordered-categorical margins vs plain spline margins (spline kinds only):
+  kind         margins     rows   max z  max|z|  mean z   p90 z     cells
+  ti           plain        160    7.31    7.31    0.58    1.89   1899008
+  ti           oc           320    5.40    5.40    0.72    2.27     38697
+  spline_cat   plain        960    5.69    5.69    0.71    2.28     23218
+  spline_cat   oc           480    7.11    7.11    0.54    2.03        15
+
+max null z by family (is the floor one family's artifact?):
+  kind              poisson    gamma binomial gaussian
+  cat_cat              7.23     3.20     2.90     3.18
+  numeric_cat          7.64     4.66     4.17     7.53
+  numeric_numeric      4.84     3.40     2.87     4.91
+  spline_cat           7.11     5.34     5.53     4.97
+  ti                   5.40     3.09     3.49     7.31
+
+the 6 largest single rows in the battery:
+  z= 7.64  numeric_cat      fuel x dens            seed=27  family=poisson   edf0=1.0
+  z= 7.53  numeric_cat      fuel x bm              seed=15  family=gaussian  edf0=1.0
+  z= 7.31  ti               age x power            seed=37  family=gaussian  edf0=2.0
+  z= 7.23  cat_cat          brand x fuel           seed=6   family=poisson   edf0=2.0
+  z= 7.11  spline_cat       fuel x band            seed=10  family=poisson   edf0=2.0
+  z= 6.21  spline_cat       region x band          seed=13  family=poisson   edf0=12.0
+
+diagnostics:
+  fits attempted            160
+  fits that failed          0
+  rows screened             3520
+  non-finite z rows         0   (refusals or degenerate margins)
+  widest numeric_cat factor 4 levels; the gate (L+2)^2 <= max_cells=5000000 admits L <= 2234
+  warnings raised           0 in 0 distinct forms
+
+  (n=8000 rows per dataset, 4 families x 40 seeds)
+```
+
+Dispositions for Task 8's docs:
+
+- **The floor is ~7.6, not the ~4.5 `docs/guide/screening.md` currently
+  claims.** The old figure predates the mixed kinds and came from a far
+  smaller battery; a maximum grows with the number of draws, so this is a
+  sample-size correction, not a regression. Four of five kinds land above
+  6, which the plan already said must be stated rather than rounded down.
+  "Treat `z` below 4-5 as noise-level" needs to become a per-df reading.
+- **The tail is a function of the probe's df, not of the kind.** Five of the
+  six largest rows sit at `edf0 <= 2`; within `cat_cat` the maximum falls
+  monotonically with df (7.23 / 5.71 / 3.34 at df 2 / 3 / 6). Rank a 1-df
+  `numeric_cat` on a 2-level factor against a 16-df `ti` and the low-df row
+  wins on noise alone. Do NOT phrase this as "`numeric_numeric` is the
+  heavy kind": it measured the *lowest* maximum of any kind (4.91), because
+  it contributes one pair per sweep and a max over 160 draws is smaller
+  than a max over 320 of the same distribution.
+- **OC margins do not move the floor.** Mean and p90 sit within 0.25 of the
+  plain spline margins of the same kind, and the maxima differ in *both*
+  directions (`spline_cat` OC 7.11 vs plain 5.69, `ti` OC 5.40 vs plain
+  7.31) — the signature of max-over-a-few-hundred-draws noise, not of a
+  5-point grid inflating anything.
+- **No family drives the floor.** Poisson tops three kinds and Gaussian the
+  other two; gamma and binomial stay milder (2.9-5.5) throughout.
+- **The `numeric_cat` budget gate never fires here.** `(L+2)^2 <=
+  max_cells` admits L <= 2234 at the default; the widest factor in the
+  battery is 4 levels. The "policy, not law" flag from Task 5 stands
+  unrevised — nothing in the measured-floors pass touched it.
+- **Caution the release gate's headroom.** The pins bound `z < 10` and the
+  battery reached 7.64 over 3520 rows. The floor rises with sweep width, so
+  a wide book screened in one pass draws more null rows than this whole
+  battery; 10 is generous for a handful of pairs and thinner for hundreds.
