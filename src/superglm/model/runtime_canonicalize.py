@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributions import clip_mu
+from superglm.features.ordered_categorical import resolve_interaction_parent
 from superglm.links import stabilize_eta
 from superglm.solvers.pirls import PIRLSResult
 
@@ -376,13 +377,14 @@ def _live_public_runtime_state(
         spec = term["spec"]
         left_name, right_name = spec.parent_names
         beta = beta_all[term["beta_idx"]]
+        _, left = resolve_interaction_parent(
+            model._specs.get(left_name), frame.column_array(left_name)
+        )
+        _, right = resolve_interaction_parent(
+            model._specs.get(right_name), frame.column_array(right_name)
+        )
         contribution = np.asarray(
-            base._score_interaction(
-                spec,
-                frame.column_array(left_name),
-                frame.column_array(right_name),
-                beta,
-            ),
+            base._score_interaction(spec, left, right, beta),
             dtype=np.float64,
         ).ravel()
         contributions[term["name"]] = contribution
