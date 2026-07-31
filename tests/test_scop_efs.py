@@ -2505,6 +2505,56 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             model.fit_reml(frame, response, max_reml_iter=20)
         assert certifications == []
 
+    def test_a_failed_certification_gets_a_cold_final_attempt(self, monkeypatch):
+        """The final retry rung drops the warm start, not just the tolerance.
+
+        The two tolerance rungs re-fit from the mode that just failed. Once the
+        inner fit has converged tighter than the bar, that reproduces the same
+        mode bit-identically -- measured on the fit this exists for, three
+        attempts all returned 1.3792e-06 against a bar of 7.1463e-08. Only a
+        different starting point can move it, so the last rung starts cold.
+
+        Certification is forced to reject the first three attempts, so the fit
+        can only succeed if a fourth exists. The warm/cold pattern is asserted
+        too: a fourth attempt that also warm-started would not be the fix.
+        """
+        warm_starts: list[bool] = []
+        checks = {"n": 0}
+
+        real_fit = scop_efs_module._fit_scop_reml_mode
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        def recording_fit(context, lambdas, **kwargs):
+            warm_starts.append(kwargs.get("beta_init") is not None)
+            return real_fit(context, lambdas, **kwargs)
+
+        def reject_first_three(mode):
+            checks["n"] += 1
+            if checks["n"] <= 3:
+                return 1.0  # far above any achievable tolerance
+            return real_relative(mode)
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", recording_fit)
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", reject_first_three)
+
+        rng = np.random.default_rng(0)
+        n = 200
+        x = np.sort(rng.uniform(0, 1, n))
+        y = np.round(np.exp(1.0 + 1.5 * x)).astype(float)
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(frame, y, max_reml_iter=5)
+
+        assert checks["n"] >= 4, "the ladder must reach a fourth attempt"
+        assert warm_starts[1] is True, "rung 1 warm-starts"
+        assert warm_starts[2] is True, "rung 2 warm-starts"
+        assert warm_starts[3] is False, "the final rung must start cold"
+
 
 class TestIterationDiagnosticsSmallSample:
     """The diagnostics recorder must survive n <= 5.
