@@ -2579,9 +2579,7 @@ class TestCandidateStepBackoff:
             family="poisson",
             selection_penalty=0.0,
             discrete=True,
-            features={
-                "x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)
-            },
+            features={"x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)},
         )
         return model, frame, y
 
