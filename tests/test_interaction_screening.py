@@ -1066,3 +1066,44 @@ def test_screen_labels_every_spline_pair_ti():
     assert list(table.columns) == _RESULT_COLUMNS
     assert _RESULT_COLUMNS[:4] == ["feature_a", "feature_b", "kind", "statistic"]
     assert set(table["kind"]) == {"ti"}
+
+
+def _treatment_menu(n_levels):
+    """(L, L-1) treatment contrasts with level 0 as base — the screen's menu."""
+    return np.vstack([np.zeros((1, n_levels - 1)), np.eye(n_levels - 1)])
+
+
+def test_contrast_menu_kron_is_the_pair_indicator_block():
+    # kron of contrast menus on the level-pair grid == CategoricalInteraction's
+    # non-base pair indicator columns, row for row.
+    rng = np.random.default_rng(7)
+    n, L1, L2 = 400, 4, 3
+    codes_a = rng.integers(0, L1, n)
+    codes_b = rng.integers(0, L2, n)
+    menu_a = _treatment_menu(L1)
+    menu_b = _treatment_menu(L2)
+    X = _dense_row_kronecker(codes_a, codes_b, menu_a, menu_b)
+    expected = np.column_stack(
+        [
+            (codes_a == i).astype(float) * (codes_b == j).astype(float)
+            for i in range(1, L1)
+            for j in range(1, L2)
+        ]
+    )
+    np.testing.assert_allclose(X, expected)
+
+
+def test_cell_assembly_exact_for_contrast_menus():
+    rng = np.random.default_rng(8)
+    n, L1, L2 = 500, 5, 4
+    codes_a = rng.integers(0, L1, n)
+    codes_b = rng.integers(0, L2, n)
+    menu_a = _treatment_menu(L1)
+    menu_b = _treatment_menu(L2)
+    score = rng.normal(size=n)
+    w = rng.uniform(0.1, 3.0, n)
+    S_cell, W_cell = pair_cell_moments(codes_a, codes_b, L1, L2, score, w)
+    U, V = pair_score_curvature(menu_a, menu_b, S_cell, W_cell)
+    X = _dense_row_kronecker(codes_a, codes_b, menu_a, menu_b)
+    np.testing.assert_allclose(U, X.T @ score, rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(V, X.T @ (X * w[:, None]), rtol=1e-12, atol=1e-9)

@@ -1,11 +1,25 @@
 """PSST interaction screening over a fitted mains model.
 
-PSST — Penalized Smooth Score Test — ranks every candidate ``ti(a, b)`` pair
-by how much of the fitted model's leftover working signal the pair's actual
-tensor-product smooth could absorb at a fixed screening complexity.  One
+PSST — Penalized Smooth Score Test — ranks every candidate pair by how much
+of the fitted model's leftover working signal the interaction block the pair
+would actually refit as could absorb at a fixed screening complexity.  One
 fused O(n) cell pass per pair, no refits; the confirmatory ``fit_reml``
 refit of the top-ranked pairs is the gate.  Ranking-only: the statistic is
 not a calibrated p-value and must not be reported as one.
+
+The sweep is not spline-only.  The ``kind`` column names the interaction
+class each pair would refit as — ``ti`` (spline x spline), ``spline_cat``,
+and ``cat_cat`` today, with ``numeric_cat`` and ``numeric_numeric`` arriving
+later in this release series.  Every kind runs through the same cell kernels
+on a per-margin ``(codes, support size, menu, penalty)`` description: a
+categorical margin is a gridded margin over its fitted levels whose menu is
+the (L, L-1) treatment-contrast block and whose penalty is absent, so
+``kron`` of two such menus reproduces the cross-product indicator columns and
+``kron`` of a spline menu with one reproduces the per-level curve blocks,
+column for column.  ``z`` normalizes each kind against its own noise floor,
+so a single sorted table ranks them together.  A pair with no penalty
+anywhere in its block has no bandwidth to scan and is evaluated at a single
+rung: ``edf0`` then reports the block's achieved rank and ``lambda0`` is 0.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
@@ -17,8 +31,9 @@ contract (Var(y) = phi*V(mu)/w), deliberately NOT the frequency-weight
 known-dispersion exposure nulls, only ``n - edf`` is calibrated.
 
 Per-feature work (unique support, codes, marginal basis menus, marginal
-penalties) is cached across the sweep, so an all-pairs screen over P spline
-features builds each feature's marginal exactly once.  The caches trade
+penalties — level codes and the contrast menu for a categorical margin) is
+cached across the sweep, so an all-pairs screen over P screened features
+builds each feature's marginal exactly once.  The caches trade
 memory for time and live for the whole sweep: roughly the raw covariates
 plus codes plus menus per screened feature (plus binned variants where the
 fallback fires), instead of per-pair transients.
@@ -34,7 +49,11 @@ import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
 from superglm.distributions import _VARIANCE_FLOOR, validate_response
-from superglm.features.categorical import Categorical
+from superglm.features.categorical import (
+    Categorical,
+    _grouping_labels,
+    _validate_categorical_levels,
+)
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
@@ -181,6 +200,47 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, fitted_names):
     return pairs
 
 
+def _categorical_codes(spec, x_raw) -> tuple[np.ndarray, int]:
+    """Dense 0-based codes over ALL fitted levels, in ``spec._levels`` order.
+
+    Applies the same grouping collapse and unseen-level validation the fitted
+    spec's ``transform`` applies, so the screen sees exactly the mains' level
+    geometry — including the BASE level, which the main effect absorbs into
+    the intercept but the screen needs a grid row for.
+    """
+    x = np.asarray(x_raw).ravel()
+    if spec._grouping is not None:
+        x = _grouping_labels(x)
+        _validate_categorical_levels(x, set(spec._grouping.all_original_levels))
+        x = pd.Series(x).map(spec._grouping.original_to_group).to_numpy()
+    else:
+        _validate_categorical_levels(x, set(spec._levels))
+    codes = pd.Categorical(x, categories=spec._levels).codes.astype(np.intp)
+    if codes.size and codes.min() < 0:
+        # Reachable through a grouping whose collapsed label was absent from
+        # the training data: validation passes on the original level, but the
+        # group it maps to was never fitted and has no grid row.
+        raise ValueError(
+            "screen_interactions found categorical values outside the fitted "
+            f"level set {list(spec._levels)}"
+        )
+    return codes, len(spec._levels)
+
+
+def _contrast_menu(spec) -> np.ndarray:
+    """(L, L-1) treatment-contrast menu; the base level's row is all zeros.
+
+    Column ``j`` indicates ``spec._non_base[j]``, matching the main effect's
+    column order, so the interaction block this menu generates is exactly the
+    one the confirmatory refit would build.
+    """
+    position = {lev: i for i, lev in enumerate(spec._levels)}
+    menu = np.zeros((len(position), len(position) - 1), dtype=np.float64)
+    for j, lev in enumerate(spec._non_base):
+        menu[position[lev], j] = 1.0
+    return menu
+
+
 def _marginal_width_estimate(spec) -> int:
     """Guard-grade marginal width from the parent spline's geometry.
 
@@ -221,7 +281,17 @@ def screen_interactions(
     screen_bins: int = 256,
     phi: float | None = None,
 ) -> pd.DataFrame:
-    """Rank candidate spline-pair interactions of a fitted model by PSST.
+    """Rank candidate pair interactions of a fitted model by PSST.
+
+    Each pair is screened as the interaction class it would refit as, named
+    in the ``kind`` column: ``ti`` for spline x spline, ``spline_cat`` for a
+    spline crossed with a factor, ``cat_cat`` for two factors, with
+    ``numeric_cat`` and ``numeric_numeric`` arriving later in this release
+    series.  ``z`` normalizes each kind against its own noise floor, so one
+    sorted table ranks them together.  A kind whose block carries no penalty
+    (``cat_cat``) has no bandwidth to scan and is evaluated at a single
+    rung — ``edf0`` then reports the block's achieved rank and ``lambda0`` is
+    0, so the ``edf0`` argument does not apply to it.
 
     ``edf0`` is the probe bandwidth: a smooth surface is detected best by a
     small budget, a high-frequency one only by a budget at least as complex
@@ -267,12 +337,15 @@ def screen_interactions(
     whose tensor curvature block ``(k_a*k_b)^2`` alone exceeds the budget is
     skipped immediately — binning cannot shrink basis dimensions, so such
     rows may report the raw grid with no binning attempted.
-    ``approx`` is also True for any pair whose confirmatory ``ti()`` refit
+    ``approx`` is also True for any ``ti`` pair whose confirmatory refit
     would discretize LOSSILY — both parents resolve to fit-time
     discretization (per-spec ``discrete`` overriding the model flag) and at
     least one parent's cardinality exceeds its resolved bin count.
     Lossless binning returns the exact unique support, so such refits match
-    the probe basis and stay ``approx=False``.
+    the probe basis and stay ``approx=False``.  A categorical margin never
+    bins and never discretizes: its support is the fitted level set, so a
+    ``cat_cat`` row is ``approx=False`` and a ``spline_cat`` row only when
+    its spline margin was quantile-binned at screen time.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -366,8 +439,9 @@ def screen_interactions(
         )
 
     raw_x: dict[str, np.ndarray] = {}
+    raw_labels: dict[str, np.ndarray] = {}
 
-    def _raw(name):
+    def _raw_numeric(name):
         if name not in raw_x:
             x = frame.column_array(name, dtype=np.float64)
             if not np.all(np.isfinite(x)):
@@ -378,13 +452,25 @@ def screen_interactions(
             raw_x[name] = x
         return raw_x[name]
 
+    def _raw_object(name):
+        """The column as its native labels — no float cast, no finiteness gate.
+
+        Missing labels are rejected by the level validation in
+        ``_categorical_codes``, which reports them in the fitted spec's terms.
+        """
+        if name not in raw_labels:
+            raw_labels[name] = np.asarray(frame.column_array(name)).ravel()
+        return raw_labels[name]
+
     for name in sorted({name for pair in pairs for name in pair}):
-        # Categorical margins are read through their level codes and
-        # OrderedCategorical margins through their mapped level values, not a
-        # float column; prefetching either here would trip the finiteness cast
-        # on a label column and mask the per-pair diagnosis below.
-        if margin_kinds[name] != "categorical" and not _is_oc_margin(name):
-            _raw(name)
+        # A categorical margin is read through its level labels, and an
+        # OrderedCategorical margin through its mapped level values (a later
+        # task); prefetching the latter as a float column here would trip the
+        # finiteness cast on label data and mask the per-pair diagnosis below.
+        if margin_kinds[name] == "categorical":
+            _raw_object(name)
+        elif not _is_oc_margin(name):
+            _raw_numeric(name)
 
     distribution, link = model._distribution, model._link
     offset_inherited = False
@@ -447,11 +533,13 @@ def screen_interactions(
 
     support_cache: dict[tuple[str, bool], dict] = {}
     marginal_cache: dict[tuple[str, bool], tuple[np.ndarray, np.ndarray]] = {}
+    level_cache: dict[str, tuple[np.ndarray, int]] = {}
+    contrast_cache: dict[str, np.ndarray] = {}
 
     def _support(name, binned):
         key = (name, binned)
         if key not in support_cache:
-            x = _raw(name)
+            x = _raw_numeric(name)
             if binned:
                 x = _quantile_binned(x, screen_bins)
             uniq, codes, counts = np.unique(x, return_inverse=True, return_counts=True)
@@ -485,6 +573,56 @@ def screen_interactions(
             marginal_cache[key] = (menu, S)
         return marginal_cache[key]
 
+    def _levels_of(name):
+        if name not in level_cache:
+            level_cache[name] = _categorical_codes(model._specs[name], _raw_object(name))
+        return level_cache[name]
+
+    def _contrast_of(name):
+        if name not in contrast_cache:
+            contrast_cache[name] = _contrast_menu(model._specs[name])
+        return contrast_cache[name]
+
+    def _margin_support(name, binned):
+        """(codes, support size) for one margin, WITHOUT building its menu.
+
+        The budget gates run on support sizes alone, so an over-budget pair
+        must never pay for a menu it is about to bin or skip away — which for
+        a wide factor means never allocating its dense (L, L-1) contrast block.
+        """
+        if margin_kinds[name] == "categorical":
+            return _levels_of(name)
+        s = _support(name, binned)
+        return s["codes"], s["n"]
+
+    def _margin(name, binned):
+        """(codes, support size, menu, penalty) for one margin.
+
+        ``binned`` applies to spline margins only — a categorical margin's
+        support IS its fitted level set, which quantile binning cannot and
+        must not compress.  Its penalty is None: the contrast block is
+        unpenalized, so there is nothing to smooth along that direction.
+        """
+        codes, n = _margin_support(name, binned)
+        if margin_kinds[name] == "categorical":
+            return codes, n, _contrast_of(name), None
+        menu, S = _one_marginal(name, binned)
+        return codes, n, menu, S
+
+    def _pair_penalty(S_a, S_b, k_a, k_b):
+        """The pair's block penalty, or None when no margin carries one.
+
+        ``tensor_penalty(S, 0)`` is ``kron(S, I)``, which is exactly the
+        block-diagonal per-level penalty a varying-coefficient refit applies
+        (up to the column permutation the statistic is invariant to).
+        """
+        if S_a is None and S_b is None:
+            return None
+        return tensor_penalty(
+            np.zeros((k_a, k_a)) if S_a is None else S_a,
+            np.zeros((k_b, k_b)) if S_b is None else S_b,
+        )
+
     def _within_budget(n_a, n_b, k_a, k_b):
         cells_ok = n_a * n_b <= max_cells
         inter_ok = n_a * k_b * k_b + n_b * k_a * k_a <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
@@ -504,6 +642,11 @@ def screen_interactions(
     n_bins_config = getattr(model, "_n_bins", 256)
 
     def _pair_refits_discrete(feat_a, feat_b):
+        # Only a both-spline pair refits as a discretized tensor.  The guard is
+        # also what keeps _support (and its float cast) away from a label
+        # column, so it must key on the margin kind, not on should_discretize.
+        if any(margin_kinds[name] != "spline" for name in (feat_a, feat_b)):
+            return False
         if not all(
             should_discretize(model._specs[name], model_discrete) for name in (feat_a, feat_b)
         ):
@@ -518,7 +661,7 @@ def screen_interactions(
         # Dispatch before any raw-column or support access, so a deferred kind
         # surfaces as its own error rather than a dtype failure downstream.
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
-        if kind != "ti":
+        if kind not in ("ti", "spline_cat", "cat_cat"):
             raise NotImplementedError(f"screening kind {kind!r} lands in a later task")
         # An OC margin screens as a spline, but on its MAPPED level values;
         # reading them is a later task, so say so rather than letting the
@@ -528,63 +671,72 @@ def screen_interactions(
             raise NotImplementedError(
                 f"screening OrderedCategorical margins {oc_margins} lands in a later task"
             )
-        k_a = _marginal_width_estimate(model._specs[feat_a])
-        k_b = _marginal_width_estimate(model._specs[feat_b])
-        bin_flag = {feat_a: False, feat_b: False}
-        menus = None
+        # Assemble with the categorical margin LAST, so a mixed pair's penalty
+        # is kron(S_spline, I) — the varying-coefficient block layout.  The
+        # reported feature_a/feature_b keep the caller's order; the statistic
+        # is invariant to the column permutation the swap amounts to.
+        left, right = feat_a, feat_b
+        if margin_kinds[left] == "categorical" and margin_kinds[right] != "categorical":
+            left, right = right, left
+        k_l = _marginal_width_estimate(model._specs[left])
+        k_r = _marginal_width_estimate(model._specs[right])
+        bin_flag = {left: False, right: False}
+        margins = None
         while True:
-            sa = _support(feat_a, bin_flag[feat_a])
-            sb = _support(feat_b, bin_flag[feat_b])
-            n_a, n_b = sa["n"], sb["n"]
-            # V is (k_a*k_b)^2 doubles regardless of support: binning can't help
-            if (k_a * k_b) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
+            codes_l, n_l = _margin_support(left, bin_flag[left])
+            codes_r, n_r = _margin_support(right, bin_flag[right])
+            # V is (k_l*k_r)^2 doubles regardless of support: binning can't help
+            if (k_l * k_r) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
                 break
-            if _within_budget(n_a, n_b, k_a, k_b):
-                menu_a, S1 = _one_marginal(feat_a, bin_flag[feat_a])
-                menu_b, S2 = _one_marginal(feat_b, bin_flag[feat_b])
-                if (menu_a.shape[1], menu_b.shape[1]) != (k_a, k_b):
+            if _within_budget(n_l, n_r, k_l, k_r):
+                _, _, menu_l, S_l = _margin(left, bin_flag[left])
+                _, _, menu_r, S_r = _margin(right, bin_flag[right])
+                if (menu_l.shape[1], menu_r.shape[1]) != (k_l, k_r):
                     # authoritative dims from the built menus; re-run the gates
-                    k_a, k_b = menu_a.shape[1], menu_b.shape[1]
+                    k_l, k_r = menu_l.shape[1], menu_r.shape[1]
                     continue
-                menus = ((menu_a, S1), (menu_b, S2))
+                margins = ((menu_l, S_l), (menu_r, S_r))
                 break
-            # bin the largest not-yet-binned margin that binning can shrink
+            # bin the largest not-yet-binned margin that binning can shrink;
+            # a categorical margin is never binnable, whatever its level count
             binnable = sorted(
                 (
                     (n, name)
-                    for n, name in ((n_a, feat_a), (n_b, feat_b))
-                    if not bin_flag[name] and n > screen_bins
+                    for n, name in ((n_l, left), (n_r, right))
+                    if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
                 ),
                 reverse=True,
             )
             if not binnable:
                 break
             bin_flag[binnable[0][1]] = True
-        approx = bin_flag[feat_a] or bin_flag[feat_b] or _pair_refits_discrete(feat_a, feat_b)
-        if menus is None:
-            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
+        approx = bin_flag[left] or bin_flag[right] or _pair_refits_discrete(feat_a, feat_b)
+        n_cells = n_l * n_r
+        if margins is None:
+            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx))
             continue
 
-        (menu_a, S1), (menu_b, S2) = menus
+        (menu_l, S_l), (menu_r, S_r) = margins
         S_cell, W_cell = pair_cell_moments(
-            sa["codes"], sb["codes"], n_a, n_b, score, working_weights, max_cells=max_cells
+            codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
         )
-        U, V = pair_score_curvature(menu_a, menu_b, S_cell, W_cell)
-        M, C, u_m = pair_overlap_moments(menu_a, menu_b, S_cell, W_cell)
-        S_ti = tensor_penalty(S1, S2)
+        U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
+        M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
+        S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
+        # An unpenalized block has no bandwidth to scan: every rung returns the
+        # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
+        penalized = S_ti is not None and bool(np.any(S_ti))
         best_z, best = -np.inf, None
-        for budget in budgets:
+        for budget in budgets if penalized else budgets[:1]:
             result = penalized_score_statistic(U, V, C, M, S_ti, edf0=budget, U_nuisance=u_m)
             statistic = result.statistic / phi_hat
             z = (statistic - result.edf0) / np.sqrt(2.0 * result.edf0)
             if z > best_z:
                 best_z, best = z, (statistic, result.edf0, result.lambda0)
         if best is None:
-            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
+            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx))
         else:
-            rows.append(
-                (feat_a, feat_b, kind, best[0], best_z, best[1], best[2], n_a * n_b, approx)
-            )
+            rows.append((feat_a, feat_b, kind, best[0], best_z, best[1], best[2], n_cells, approx))
 
     table = pd.DataFrame(rows, columns=_RESULT_COLUMNS)
     table = table.sort_values("z", ascending=False, ignore_index=True)

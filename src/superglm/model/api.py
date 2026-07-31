@@ -625,13 +625,21 @@ class SuperGLM:
         screen_bins: int = 256,
         phi: float | None = None,
     ) -> pd.DataFrame:
-        """Rank candidate spline-pair interactions by PSST.
+        """Rank candidate pair interactions by PSST.
 
         PSST (Penalized Smooth Score Test) asks, for each candidate pair of
-        fitted spline features, how much of the model's leftover working
-        signal the pair's actual ``ti()`` tensor smooth could absorb at a
+        fitted features, how much of the model's leftover working signal the
+        interaction the pair would actually refit as could absorb at a
         fixed screening complexity, after profiling out what the pair's own
-        main effects already explain.  ``edf0`` is a probe bandwidth; the
+        main effects already explain.  The ``kind`` column names that refit
+        target — ``ti`` for spline x spline, ``spline_cat`` for a spline
+        crossed with a factor, ``cat_cat`` for two factors, with
+        ``numeric_cat`` and ``numeric_numeric`` arriving later in this
+        release series — and ``z`` is comparable across kinds, so the one
+        sorted table ranks them together.  A kind whose block carries no
+        penalty (``cat_cat``) has no bandwidth to scan and is evaluated at a
+        single rung: ``edf0`` then reports the block's achieved rank with
+        ``lambda0`` 0.  ``edf0`` is a probe bandwidth; the
         default ladder evaluates each pair at several budgets and ranks by
         the best noise-normalized score ``z`` (the statistic is scaled by
         the fit's Pearson dispersion estimate first, so the noise floor
@@ -650,17 +658,19 @@ class SuperGLM:
         unique-value grid exceeds ``max_cells`` are quantile-binned to
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
-        Screening always probes the exact-basis tensor; a pair whose
-        confirmatory ``ti()`` refit would discretize LOSSILY (both parents
+        A categorical margin never bins — its support is the fitted level
+        set.  Screening always probes the exact-basis tensor; a ``ti`` pair
+        whose confirmatory refit would discretize LOSSILY (both parents
         resolve to fit-time discretization and at least one parent's
         cardinality exceeds its bin count) is flagged ``approx=True`` to
         make that support-discretization gap — measured at ~3.5% on signal
         pairs, the same class as the quantile fallback — visible in the
         output.  Lossless binning returns the exact support and stays
         ``approx=False``.
-        Pairs already fitted as tensor terms are excluded from the sweep.  The
-        statistic is a ranking device, not a calibrated p-value: confirm
-        the top-ranked pairs by refitting them as ``ti()`` terms.
+        Pairs already fitted as an interaction of any class are excluded from
+        the sweep.  The statistic is a ranking device, not a calibrated
+        p-value: confirm the top-ranked pairs by refitting them as the
+        interaction their ``kind`` names.
         """
         from superglm.model.screening_ops import screen_interactions
 

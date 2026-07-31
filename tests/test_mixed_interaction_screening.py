@@ -178,3 +178,98 @@ def test_factor_smooth_pair_is_excluded():
     # already fitted rather than as ineligible.
     with pytest.raises(ValueError, match="already fitted"):
         model.screen_interactions(df, y, candidates=[("age", "band")])
+
+
+# _fit_mixed also fits a Numeric and an OrderedCategorical main, whose pairs
+# still raise until tasks 5-6, so a default sweep over it cannot run yet.  Name
+# the pairs whose kinds exist today; drop the candidates= argument once the
+# whole sweep is implemented.
+_IMPLEMENTED_PAIRS = [
+    ("age", "power"),
+    ("age", "region"),
+    ("age", "brand"),
+    ("power", "region"),
+    ("power", "brand"),
+    ("region", "brand"),
+]
+
+
+def test_cat_cat_planted_table_ranks_first_with_exact_df():
+    df, rng = _mixed_frame(n=20000, seed=3)
+    boost = ((df["region"] == "B") & (df["brand"] == "B2")).astype(float)
+    y = rng.poisson(np.exp(-1.3 + 0.5 * boost)).astype(np.float64)
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y, candidates=_IMPLEMENTED_PAIRS)
+    top = table.iloc[0]
+    assert {top["feature_a"], top["feature_b"]} == {"region", "brand"}
+    assert top["kind"] == "cat_cat"
+    # (L1-1)(L2-1) = 3*2; unpenalized rung reports the achieved rank as edf0
+    assert top["edf0"] == pytest.approx(6.0, abs=0.26)
+    assert top["lambda0"] == 0.0
+    assert top["z"] > 10.0
+    row = table[table["kind"] == "cat_cat"].iloc[0]
+    assert row["n_cells"] == 4 * 3
+    assert not row["approx"]
+
+
+def _planted_bend(seed=4):
+    """One region's age curve bends away from the shared main effect.
+
+    The age main absorbs the population average of the bump, so only the
+    across-level DEVIATION is screenable — the amplitude below leaves that
+    deviation well clear of the noise floor at this n.
+    """
+    df, rng = _mixed_frame(n=20000, seed=seed)
+    bend = np.where(df["region"] == "C", np.sin((df["age"] - 18.0) / 62.0 * np.pi) * 0.8, 0.0)
+    return df, rng.poisson(np.exp(-1.3 + bend)).astype(np.float64)
+
+
+def test_spline_cat_planted_deviation_curve_ranks_first():
+    df, y = _planted_bend()
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y, candidates=_IMPLEMENTED_PAIRS)
+    top = table.iloc[0]
+    assert {top["feature_a"], top["feature_b"]} == {"age", "region"}
+    assert top["kind"] == "spline_cat"
+    assert top["z"] > 8.0
+
+
+def test_mixed_pair_order_does_not_leak_into_the_row():
+    """A spline_cat pair is assembled with the categorical margin LAST, whichever
+    order the caller names it in.  That swap is a column permutation the
+    statistic is invariant to, and it must reach neither the reported columns
+    nor any number in the row."""
+    df, y = _planted_bend()
+    model = _fit_mixed(df, y)
+    fwd = model.screen_interactions(df, y, candidates=[("age", "region")]).iloc[0]
+    rev = model.screen_interactions(df, y, candidates=[("region", "age")]).iloc[0]
+    assert (fwd["feature_a"], fwd["feature_b"]) == ("age", "region")
+    assert (rev["feature_a"], rev["feature_b"]) == ("region", "age")
+    for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
+        assert fwd[column] == rev[column], column
+
+
+def test_two_level_factor_pairs_are_legal():
+    df, rng = _mixed_frame(n=6000, seed=12)
+    df = df.assign(fuel=rng.choice(["diesel", "petrol"], len(df)))
+    y = _null_y(df, rng)
+    model = SuperGLM(
+        family="poisson",
+        features={"fuel": Categorical(), "brand": Categorical()},
+    )
+    model.fit_reml(df, y)
+    table = model.screen_interactions(df, y)
+    row = table.iloc[0]
+    assert row["kind"] == "cat_cat"
+    assert row["edf0"] == pytest.approx(2.0, abs=0.26)  # (2-1)*(3-1)
+    assert np.isfinite(row["z"])
+
+
+def test_spline_cat_confirms_by_refit():
+    """The pair the screen ranks first is real: the SplineCategorical refit
+    the `spline_cat` kind names finds it in the likelihood too."""
+    df, y = _planted_bend()
+    base = _fit_mixed(df, y)
+    dev0 = base._result.deviance
+    confirm = _fit_mixed(df, y, interactions=[("age", "region")])
+    assert dev0 - confirm._result.deviance > 50.0
