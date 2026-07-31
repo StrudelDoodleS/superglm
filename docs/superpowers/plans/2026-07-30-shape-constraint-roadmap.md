@@ -205,9 +205,13 @@ Item 6 is a reference note, not scheduled work.
 
 Items 1b and 4 are cheap and independent; either can go first.
 
-**Status 2026-07-31:** Item 2 is implemented on `fix/scop-rank-truncation`
-(rank truncation moved to the factor, resolved range carried through the
-determinant and curvature, factor built only when the Gram cannot resolve the
-step). Item 2c is now answerable with evidence — the boundary fit converges in
-single figures rather than exhausting its budget — but the stagnation gate has
-deliberately not been removed; that is a separate change.
+**Status 2026-07-31:** Item 2 is implemented (rank truncation moved to the
+factor, resolved range carried through the determinant and curvature, factor
+built only when the Gram cannot resolve the step). **Item 2c is done:** the
+stagnation acceptance rule and the private `stagnation_log` channel behind it
+are removed. The evidence was that across the full suite the gate was reached
+only by its own stub-driven tests -- no real fit in the corpus could drive it.
+**Item 2b closes with it:** the penalized-score certification it asked for
+already exists (`_scop_mode_newton_relative` gated in `_fit_scop_reml_mode`)
+and is now the sole acceptance path, so a separate gradient-norm test would be
+redundant. Design: `docs/superpowers/specs/2026-07-31-scop-stagnation-gate-removal-design.md`.
