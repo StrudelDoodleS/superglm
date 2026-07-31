@@ -1998,3 +1998,30 @@ FactorSmooth drift loud); global-phi conservatism demotes wide low-signal
 unpenalized blocks on overdispersed books (documented in the guide);
 cat_cat cost cliff near the intermediate budget ceiling; df pins at
 abs=0.26 could tighten to 0.01.
+
+### Prior-art sweep (2026-08-01, post-implementation)
+
+Three-agent literature/tooling sweep run after the branch was complete, to
+test the design's originality claims. Outcome, folded into
+`docs/guide/screening.md` as a "Related tools" section:
+
+- **Not novel, has precedent:** the one-O(n)-pass cell-table assembly and the
+  ranking-only/refit-is-the-gate stance are both owned by FAST/GA2M (Lou,
+  Caruana, Gehrke & Hooker, KDD 2013), shipped as InterpretML/EBM's
+  `measure_interactions` — which bins gradients and hessians at a fitted
+  model's `init_score` and scores a Newton gain over 2-D totals, with Poisson,
+  gamma and Tweedie objectives available. The efficient-score profiling
+  algebra is the variance-component score test of GESAT/iSKAT (Lin et al.,
+  Biostatistics 2013), whose projection is algebraically our
+  `U_eff`/`V_eff`. Residual-table screening: GUIDE (Loh 2002).
+- **Closest statistical neighbour:** reluctant interaction inference
+  (arXiv 2506.01219) — the only method screening against a fitted nonlinear
+  spline additive null, but with a single linear product column as the probe,
+  Gaussian-only, selective p-values.
+- **No precedent found:** probing with the confirmatory basis per pair kind,
+  and fixed-EDF comparability (solve lambda for a target edf, scan a ladder,
+  normalize per rung). These are the defensible claims.
+- **Ecosystem gap confirmed:** mgcv and the wider GAM ecosystem expose no
+  interaction-screening facility (documented procedure is one refit per pair);
+  actuarial texts are fit-and-test; the GBM/H-statistic and NID frontier
+  reports no null behaviour.

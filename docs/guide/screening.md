@@ -352,3 +352,34 @@ independently surfaces the long:lat spatial interaction the literature models
 on that data), the 2015 Pricing Game book, and a null/power gauntlet across
 families, dispersions, support geometries, and every pair kind. It is a
 screening tool: it orders the refit queue, it does not certify significance.
+
+## Related tools, and what is new here
+
+The closest existing tool is the FAST algorithm behind GA2M (Lou, Caruana,
+Gehrke & Hooker 2013), shipped today as `measure_interactions` in
+InterpretML/EBM. It solves the same problem shape: rank every candidate pair
+against an already-fitted additive model, from one O(n) pass into per-pair
+cell tables, reporting a ranking whose gate is a subsequent refit. Its probe
+is a binned step function scored by a Newton gain carrying its own ridge, so
+it never evaluates the basis the refit will build and has no notion of a
+common complexity across candidates. Screening by a variance-component score
+test against a single null fit, with the pair's own mains profiled out by the
+same efficient-score algebra used here, is long established in genomics
+(GESAT/iSKAT, Lin et al. 2013); residual-table interaction screening goes back
+to GUIDE (Loh 2002). Within the penalized-GAM ecosystem there is no screening
+facility to compare against: the documented procedure is to fit the candidate
+term and read its p-value, one refit per pair. Actuarial practice is the same
+fit-and-test loop (Anderson et al., *A Practitioner's Guide to GLMs*; CAS
+Monograph 5), with the research frontier ranking pairs by black-box
+surrogates — gradient-boosting H-statistics or neural interaction detection —
+which report no null behaviour at all.
+
+What is new here is therefore narrow and specific. First, the probe is the
+exact basis the confirmatory refit builds, for every pair kind, rather than a
+binned or single-column surrogate for it. Second, candidates are compared at a
+solved-for common complexity: `lambda0` is chosen so
+`tr((V + lambda0 * S)^-1 V) = edf0`, scanned over a ladder of budgets and
+normalized against each rung's own null mean and scale. No precedent was found
+for that second device. The cell-collapsed assembly and the ranking-only
+stance are not new — FAST has both — and the null floors quoted above are
+measured here, not inherited from any of this work.
