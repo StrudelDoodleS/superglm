@@ -1911,16 +1911,21 @@ class TestSCOPEFSOuterLoop:
         assert scop_efs_module._scop_mode_newton_relative(mode) == pytest.approx(1.0)
 
     def test_mode_certificate_floor_scales_with_joint_rank(self):
-        """Factor/score roundoff accumulates at root-rank scale."""
-        epsilon = np.finfo(np.float64).eps
-        mode = SimpleNamespace(hessian_rank=36)
+        """Factor/score roundoff accumulates at root-rank scale.
 
-        assert scop_efs_module._scop_mode_tolerance(mode, 1.0e-12) == pytest.approx(
-            np.sqrt(36.0 * epsilon)
-        )
-        assert scop_efs_module._scop_mode_tolerance(mode, 1.0e-4) == pytest.approx(
-            np.sqrt(36.0 * epsilon)
-        )
+        Pinned with exact equality: the bar is deliberately ``sqrt(rank*eps)``
+        and independent of any solver tolerance. The ``pirls_tol`` term the
+        expression once carried was dead by arithmetic -- it could never
+        exceed the floor -- and is gone (#184); exactness keeps a live
+        tolerance knob from creeping back in unnoticed.
+        """
+        epsilon = np.finfo(np.float64).eps
+
+        mode = SimpleNamespace(hessian_rank=36)
+        assert scop_efs_module._scop_mode_tolerance(mode) == np.sqrt(36.0 * epsilon)
+
+        degenerate = SimpleNamespace(hessian_rank=0)
+        assert scop_efs_module._scop_mode_tolerance(degenerate) == np.sqrt(epsilon)
 
     def test_candidate_guard_requires_reflected_direction_to_be_downhill(self, monkeypatch):
         """The forward numerical tie tolerance must not admit an uphill reflection."""
