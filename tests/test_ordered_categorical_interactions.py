@@ -283,6 +283,34 @@ def test_oc_interaction_added_post_hoc_refits():
     assert np.all(np.isfinite(mu)) and np.all(mu > 0)
 
 
+def test_oc_interaction_metrics_on_evaluation_rows_resolve_the_parent():
+    # The evaluation-design path re-evaluates the frozen prediction plan on the
+    # requested rows, feeding the PARENT columns to the interaction transform.
+    # An OC parent's column holds labels, so it must be resolved to its mapped
+    # scores there exactly as the fit and predict paths resolve it.  Reachable
+    # from public metrics whenever the rows (or offset) differ from the fit's.
+    df, y = _frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "region": Categorical()},
+        interactions=[("age_band", "region")],
+    )
+    model.fit_reml(df, y)
+
+    fit_metrics = model.metrics(df, y)
+    assert fit_metrics._uses_fit_design
+    # Same rows, same offset -- but not the fit's frame OBJECT, which is what
+    # routes the diagnostics through EvaluationDesign instead of the fit design.
+    eval_metrics = model.metrics(df.copy(), y)
+    assert not eval_metrics._uses_fit_design
+    np.testing.assert_allclose(eval_metrics.leverage, fit_metrics.leverage, rtol=1e-8, atol=1e-10)
+
+    holdout = df.iloc[:200].copy()
+    holdout_leverage = model.metrics(holdout, y[:200]).leverage
+    assert holdout_leverage.shape == (len(holdout),)
+    assert np.all(np.isfinite(holdout_leverage))
+
+
 def test_oc_interaction_survives_discrete_mode():
     df, y = _frame()
     model = SuperGLM(
