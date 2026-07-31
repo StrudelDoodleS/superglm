@@ -27,7 +27,10 @@ MAPPED level scores — the geometry its own refit builds — so its pairs are
 ``ti`` and ``spline_cat`` like any other spline margin's, gridded on at most
 ``n_levels`` support points.
 ``z`` normalizes each kind against its own noise floor, so a single sorted
-table ranks them together.  A pair with no penalty anywhere in its block has
+table ranks them together — though that normalization is not equal across
+probe df: low-df blocks carry heavier null tails than high-df ones, as the
+measured floors in the screening guide show.  A pair with no penalty anywhere
+in its block has
 no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
 the block's achieved rank and ``lambda0`` is 0.
 
@@ -309,7 +312,9 @@ def screen_interactions(
     numerics.  A spline-mode ``OrderedCategorical`` margin screens as a spline
     on its mapped level scores, so its pairs carry the spline kinds.
     ``z`` normalizes each kind against its own noise floor, so one
-    sorted table ranks them together.  A kind whose block carries no penalty
+    sorted table ranks them together, though low-df blocks carry heavier null
+    tails than high-df ones — see the measured floors in the screening guide.
+    A kind whose block carries no penalty
     (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no bandwidth to
     scan and is evaluated at a single rung — ``edf0`` then reports the block's
     achieved rank and ``lambda0`` is 0, so the ``edf0`` argument does not
