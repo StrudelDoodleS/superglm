@@ -13,15 +13,20 @@ import pandas as pd
 from narwhals.dependencies import get_polars, is_into_dataframe
 from numpy.typing import NDArray
 
+# Deliberately the ``TypeAlias`` form, not PEP 695 ``type``: polars is optional,
+# so the runtime branch must bind a plain ``object`` while the checked branch
+# names ``pl.DataFrame``. A conditionally-defined ``type`` statement is legal but
+# resolves less predictably across type checkers, and the runtime saving here is
+# the whole point of the split.
 if TYPE_CHECKING:
     import polars as pl
 
-    FrameLike: TypeAlias = pd.DataFrame | pl.DataFrame
+    FrameLike: TypeAlias = pd.DataFrame | pl.DataFrame  # noqa: UP040
 else:
-    FrameLike: TypeAlias = object
+    FrameLike: TypeAlias = object  # noqa: UP040
 
-FrameBackend: TypeAlias = Literal["pandas", "polars"]
-ColumnKind: TypeAlias = Literal["numeric", "boolean", "categorical", "unsupported"]
+type FrameBackend = Literal["pandas", "polars"]
+type ColumnKind = Literal["numeric", "boolean", "categorical", "unsupported"]
 
 
 @dataclass

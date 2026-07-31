@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -270,7 +270,7 @@ def _augmented_inverse_from_mean(
     return result
 
 
-FisherWeights: TypeAlias = NDArray | Callable[[], NDArray]
+type FisherWeights = NDArray | Callable[[], NDArray]
 
 
 def _factor_certifier(

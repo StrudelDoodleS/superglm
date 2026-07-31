@@ -73,3 +73,6 @@ REML_BAD_BEHAVIOUR.txt
 node_modules/
 playwright-report/
 test-results/
+
+# Build caches (mkdocs-jupyter writes here during `mkdocs build`)
+.cache/
