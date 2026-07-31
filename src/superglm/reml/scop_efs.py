@@ -1143,7 +1143,7 @@ def _backoff_scop_candidate_step(
     proposed_lambdas: dict[str, float],
     *,
     reml_iteration: int,
-) -> tuple[_SCOPREMLMode, dict[str, float]] | None:
+) -> tuple[_SCOPREMLMode, dict[str, float], float] | None:
     """Retry a failed candidate at damped steps toward its certified origin.
 
     The candidate consumes the one EFS proposal that never went through the
@@ -1156,8 +1156,9 @@ def _backoff_scop_candidate_step(
     the original candidate fit, so the attempts complete the same forward
     ladder the line search runs.
 
-    Returns the first certified mode with its lambdas, or ``None`` when
-    every damped attempt fails, in which case the caller keeps its raise.
+    Returns the first certified mode with its lambdas and the damping that
+    produced it, or ``None`` when every damped attempt fails, in which case
+    the caller keeps its raise.
     """
     changed_names = [
         name
@@ -1177,7 +1178,10 @@ def _backoff_scop_candidate_step(
 
     for attempt in range(1, _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS):
         alpha = 0.5**attempt
-        trial_lambdas = origin.lambdas.copy()
+        # Seeded from the proposal, not the origin: the adopted dict must
+        # keep the loop's key set, so a name the origin never carried
+        # survives at its proposed value instead of vanishing.
+        trial_lambdas = proposed_lambdas.copy()
         for name in changed_names:
             log_trial = np.log(origin.lambdas[name]) + alpha * log_directions[name]
             trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
@@ -1193,7 +1197,7 @@ def _backoff_scop_candidate_step(
             require_converged=True,
         )
         if mode is not None:
-            return mode, trial_lambdas
+            return mode, trial_lambdas, alpha
     return None
 
 
@@ -1702,6 +1706,7 @@ def optimize_scop_efs_reml(
 
         # Step 1: Fit the current lambda mode, unless the preceding accepted
         # line-search trial already produced this exact coherent state.
+        rescue_alpha: float | None = None
         if retained_mode is None:
             current_mode = _fit_scop_reml_mode(
                 fit_context,
@@ -1726,7 +1731,13 @@ def optimize_scop_efs_reml(
                 )
                 if rescue is None:
                     raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
-                current_mode, lambdas = rescue
+                current_mode, lambdas, rescue_alpha = rescue
+                # The failed proposal was never fitted; the history entry for
+                # this step becomes the damped vector actually adopted, so
+                # consumers of lambda_history only ever see fitted vectors.
+                lambda_history[-1] = lambdas.copy()
+                if verbose:
+                    print(f"  SCOP REML candidate backoff: rescued at alpha={rescue_alpha:.4g}")
         else:
             current_mode = retained_mode
             retained_mode = None
@@ -1887,6 +1898,7 @@ def optimize_scop_efs_reml(
                     "strict_converged": bool(strict_converged),
                     "plateau_converged": bool(plateau_converged),
                     "candidate_accepted": bool(candidate_accepted),
+                    "candidate_backoff_alpha": rescue_alpha,
                     "estimated_names": sorted(estimated_names),
                     "active_names": sorted(active_names),
                     "frozen_names": sorted(frozen_names),
@@ -1897,6 +1909,11 @@ def optimize_scop_efs_reml(
         lambda_history.append(lambdas_new.copy())
 
         if not candidate_accepted:
+            # A rescued mode was chosen for certifiability, not objective
+            # merit; with no accepted step after it there is nothing a caller
+            # should be handed, and the pre-backoff behaviour was to raise.
+            if rescue_alpha is not None:
+                raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
             termination_reason = "line_search_stalled"
             lambdas = lambdas_new
             break
@@ -1912,6 +1929,8 @@ def optimize_scop_efs_reml(
         warm_beta = retained_mode.result.beta.copy()
         warm_intercept = float(retained_mode.result.intercept)
         warm_scop_states = retained_mode.scop_states if retained_mode.scop_states else None
+        # Never read today -- the candidate site only fires on iteration 1 --
+        # but kept current so a future loop shape cannot inherit a stale origin.
         step_origin = retained_mode
 
     # -- Terminal mode --

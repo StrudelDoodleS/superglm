@@ -128,11 +128,23 @@ failure — step-size control from that point on is owned by the adaptive
 - **Error semantics on exhaustion.** Same exception, same message, no new
   return path. `converged` and `termination_reason` never describe a rescue
   as anything other than a normal iteration.
-- **`lambda_history` semantics.** Its pre-loop entry remains the
-  post-bootstrap proposal entering the loop; after a rescue, iteration 1's
-  accepted entry reflects the damped path. The damped intermediate itself is
-  visible at full fidelity in the debug recorder and trace
-  (`phase="candidate"` with `trial_alpha` set), which no healthy fit emits.
+- **A rescue is never the returned terminal state without accepted progress
+  after it** (added in review — PR #183, Codex P2). The rescued mode is
+  chosen for certifiability, not objective merit; no acceptance gate ever
+  endorsed it. If the line search cannot accept a single trial from it, the
+  ordinary `line_search_stalled` return would publish half a bootstrap step
+  as a REML estimate on an input that raised before the backoff existed.
+  That branch now raises the candidate error instead, keyed on a
+  per-iteration `rescued_candidate` flag. Stalls from accepted-progress
+  states keep their existing semantics.
+- **`lambda_history` records fitted vectors only** (revised in review —
+  PR #183). At the candidate site the last history entry is by construction
+  the vector that just failed; on rescue it is replaced with the damped
+  vector the iteration actually adopted, so consumers reading deltas off
+  the history (`_lambda_max_delta`, the governance pack's "REML path
+  history") never see a vector no fit used. A rescue is also observable
+  outside the trace: `verbose` prints the damping, and the level-2 debug
+  payload carries `candidate_backoff_alpha` (null on ordinary iterations).
 
 ## Deliberately not doing
 
@@ -207,6 +219,10 @@ identified as recoverable.
 - **The principled boundary.** Reject every certification from the start: the
   bootstrap message must be raised (no certified predecessor → no rescue).
   Fixed-lambda likewise if not already covered.
+- **Rescue-then-stall.** Force the ladder to reject, let the rescue certify,
+  then reject every line-search certification: the candidate error must be
+  raised — a rescue the line search cannot move from is not a publishable
+  fit.
 - **Corpus inertness.** Across `tests/test_scop_efs.py` +
   `tests/test_scop_irls_state.py`, instrument the ladder on current master
   and again on the branch: the backoff must fire **zero** times, and every

@@ -2585,10 +2585,25 @@ class TestCandidateStepBackoff:
 
     @staticmethod
     def _phase_tracking(monkeypatch, state):
-        """Expose which top-level phase each certification check belongs to."""
+        """Expose which top-level phase each certification check belongs to.
+
+        Also records every top-level fit (retry depth 0) with its phase,
+        ``trial_alpha`` and lambdas in ``state["calls"]``, so tests can pin
+        the mechanism -- which vectors were fit, at which damping -- and
+        not just the outcome.
+        """
         real_fit = scop_efs_module._fit_scop_reml_mode
+        calls = state.setdefault("calls", [])
 
         def tracking_fit(context, lambdas, **kwargs):
+            if kwargs.get("_certification_retry", 0) == 0:
+                calls.append(
+                    {
+                        "phase": kwargs.get("phase"),
+                        "trial_alpha": kwargs.get("trial_alpha"),
+                        "lambdas": dict(lambdas),
+                    }
+                )
             previous = state["phase"]
             state["phase"] = kwargs.get("phase")
             try:
@@ -2632,6 +2647,62 @@ class TestCandidateStepBackoff:
         fitted = model.predict(frame)
         assert np.all(np.diff(fitted) >= -1e-8), "the rescued fit still honours the constraint"
 
+        # The mechanism, not just the outcome: the first backoff attempt is
+        # deterministically alpha=0.5, and the vector it adopts must lie
+        # strictly between the certified bootstrap and the failed proposal.
+        bootstrap = next(c for c in state["calls"] if c["phase"] == "bootstrap")["lambdas"]
+        candidate_calls = [c for c in state["calls"] if c["phase"] == "candidate"]
+        assert candidate_calls[0]["trial_alpha"] is None, "the full step is a plain candidate"
+        assert candidate_calls[1]["trial_alpha"] == pytest.approx(0.5)
+        proposal = candidate_calls[0]["lambdas"]
+        adopted = candidate_calls[-1]["lambdas"]
+        moved = [k for k in proposal if k in bootstrap and proposal[k] != bootstrap[k]]
+        assert moved, "the bootstrap EFS step must have proposed movement"
+        for key in moved:
+            low, high = sorted((bootstrap[key], proposal[key]))
+            assert low < adopted[key] < high, "the adopted step must be a strict shortening"
+
+    def test_the_backoff_preserves_the_proposal_key_set(self, monkeypatch):
+        """Adopted lambdas must keep the loop's key set, not the origin's.
+
+        The loop's consumers read every component name out of the adopted
+        dict, so a proposal key absent from the origin must survive the
+        rescue at its proposed value rather than vanish (found in review,
+        PR #183). Also pins the no-movement guard: a proposal identical to
+        the origin has no step to shorten and must return None without
+        fitting anything.
+        """
+        seen = []
+
+        def fake_fit(context, lambdas, **kwargs):
+            seen.append(dict(lambdas))
+            return "certified-mode-sentinel"
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", fake_fit)
+        origin = SimpleNamespace(
+            lambdas={"a": 1.0e-4},
+            result=SimpleNamespace(beta=np.zeros(1), intercept=0.0),
+            scop_states={},
+        )
+
+        rescue = scop_efs_module._backoff_scop_candidate_step(
+            None, origin, {"a": 1.0, "b": 2.0}, reml_iteration=1
+        )
+        assert rescue is not None
+        mode, adopted, alpha = rescue
+        assert mode == "certified-mode-sentinel"
+        assert alpha == pytest.approx(0.5)
+        assert adopted["b"] == 2.0, "a proposal-only key keeps its proposed value"
+        assert 1.0e-4 < adopted["a"] < 1.0, "a shared key is interpolated toward the origin"
+        assert seen and seen[0] == adopted
+
+        seen.clear()
+        no_movement = scop_efs_module._backoff_scop_candidate_step(
+            None, origin, {"a": 1.0e-4}, reml_iteration=1
+        )
+        assert no_movement is None
+        assert seen == [], "a no-movement proposal must not fit anything"
+
     def test_an_unrecoverable_candidate_still_raises(self, monkeypatch):
         """When no damped step certifies either, the failure stays loud.
 
@@ -2658,6 +2729,42 @@ class TestCandidateStepBackoff:
             RuntimeError, match="SCOP REML candidate did not converge to a coefficient mode"
         ):
             model.fit_reml(frame, y, max_reml_iter=5)
+
+    def test_a_rescue_the_line_search_cannot_move_from_still_raises(self, monkeypatch):
+        """A rescue must be followed by accepted progress, or the fit is loud.
+
+        The rescued mode is chosen for certifiability, not objective merit:
+        no acceptance gate ever endorsed it. If the line search then cannot
+        accept a single trial from it, returning it through the ordinary
+        ``line_search_stalled`` path would publish half a bootstrap step as
+        a REML estimate -- the silent degradation the design forbids, on an
+        input that raised before the backoff existed. Found in review
+        (PR #183, Codex P2).
+        """
+        state = {"phase": None, "candidate_rejections": 0}
+        self._phase_tracking(monkeypatch, state)
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        def reject_ladder_then_every_line_search_check(mode):
+            if state["phase"] == "candidate" and state["candidate_rejections"] < 4:
+                state["candidate_rejections"] += 1
+                return 1.0
+            if state["phase"] == "line_search":
+                return 1.0
+            return real_relative(mode)
+
+        monkeypatch.setattr(
+            scop_efs_module,
+            "_scop_mode_newton_relative",
+            reject_ladder_then_every_line_search_check,
+        )
+
+        model, frame, y = self._model()
+        with pytest.raises(
+            RuntimeError, match="SCOP REML candidate did not converge to a coefficient mode"
+        ):
+            model.fit_reml(frame, y, max_reml_iter=5)
+        assert state["candidate_rejections"] == 4, "the rescue path must actually be exercised"
 
     def test_a_failed_bootstrap_has_nothing_to_back_off_to(self, monkeypatch):
         """The recoverability principle's boundary: no predecessor, no rescue.
