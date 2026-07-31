@@ -23,7 +23,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import Distribution, Tweedie, resolve_distribution
-from superglm.features.ordered_categorical import resolve_interaction_parent
+from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -962,8 +962,8 @@ def build_design_matrix(
     for iname in interaction_order:
         ispec = interaction_specs[iname]
         p1, p2 = ispec.parent_names
-        spec1, x1 = resolve_interaction_parent(specs.get(p1), X.column_array(p1))
-        spec2, x2 = resolve_interaction_parent(specs.get(p2), X.column_array(p2))
+        spec1, x1 = resolve_interaction_parent_of(ispec, specs.get(p1), X.column_array(p1))
+        spec2, x2 = resolve_interaction_parent_of(ispec, specs.get(p2), X.column_array(p2))
         if spec1 is specs.get(p1) and spec2 is specs.get(p2):
             parent_specs = specs
         else:

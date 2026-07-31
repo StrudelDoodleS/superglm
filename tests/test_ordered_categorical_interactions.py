@@ -311,6 +311,57 @@ def test_oc_interaction_metrics_on_evaluation_rows_resolve_the_parent():
     assert np.all(np.isfinite(holdout_leverage))
 
 
+def test_factor_smooth_keeps_label_levels_over_an_oc_group_main():
+    """A FactorSmooth's second parent is a GROUPING column, not a margin.
+
+    The build loop resolves interaction parents so an OC margin contributes its
+    mapped level scores -- but a FactorSmooth factorizes its group column into
+    the term's own level set, so resolving it would silently re-key that
+    identity to ``[0.0, 0.25, ...]`` and every by-label lookup its inference
+    exposes would fail on the fitted labels.  Reachable from public API: an OC
+    main is the ONLY main a FactorSmooth's group column may carry (a
+    Categorical there is rejected as duplicated group-intercept geometry).
+    """
+    from superglm import FactorSmooth
+
+    df, y = _frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
+        interactions=[FactorSmooth("power", group="age_band", basis="fs", kind="ps", k=5)],
+        selection_penalty=0.0,
+    )
+    model.fit_reml(df, y)
+
+    spec = model._interaction_specs["power:age_band:fs"]
+    assert spec._levels == BANDS
+    assert list(spec._level_to_code) == BANDS
+
+    # ... and the public per-level accessor resolves a fitted label rather than
+    # raising KeyError on it (the level table always carries every level; the
+    # curves are what `levels=` selects).
+    result = model.factor_smooth("power:age_band:fs", levels=["18-25"], grid=8)
+    assert set(result.curves["level"]) == {"18-25"}
+    assert list(result.table["level"]) == BANDS
+
+    # The predict and evaluation-design paths resolve parents from the same
+    # fitted specs, so they have to make the SAME exception or the term goes
+    # silent: mapped scores against label levels index to -1 everywhere, and
+    # `unseen="population"` then serves a zero block without raising.  Pin it
+    # against the fit itself -- predictions on the training frame must
+    # reproduce the fitted deviance, which a zeroed block would not.
+    mu = model.predict(df)
+    deviance = float(np.sum(model.distribution_.deviance_unit(y, mu)))
+    assert deviance == pytest.approx(model._result.deviance, rel=1e-9)
+
+    # `df.copy()` is not the fit's frame OBJECT, which routes the diagnostics
+    # through EvaluationDesign -- the third path that resolves parents.
+    fit_metrics = model.metrics(df, y)
+    eval_metrics = model.metrics(df.copy(), y)
+    assert fit_metrics._uses_fit_design and not eval_metrics._uses_fit_design
+    np.testing.assert_allclose(eval_metrics.leverage, fit_metrics.leverage, rtol=1e-8, atol=1e-10)
+
+
 def test_oc_interaction_survives_discrete_mode():
     df, y = _frame()
     model = SuperGLM(

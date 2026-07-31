@@ -590,3 +590,23 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
     else:
         _validate_categorical_levels(x, spec._known_levels)
     return spec._spline, spec._map_to_numeric(x)
+
+
+def resolve_interaction_parent_of(ispec: Any, spec: Any, x: NDArray) -> tuple[Any, NDArray]:
+    """``resolve_interaction_parent`` for a parent OF a given interaction.
+
+    Identical to it for every interaction that reads both parents as
+    *marginal* columns.  ``FactorSmooth`` does not: its second parent is a
+    GROUPING column, read as labels and factorized into the term's own level
+    set.  Mapping a spline-mode ``OrderedCategorical`` main on that column to
+    its level scores would silently re-key that identity — ``_levels`` becomes
+    ``[0.0, 0.25, ...]`` instead of ``['18-25', ...]`` — and every by-label
+    lookup the term's inference exposes would fail on the fitted labels.  Its
+    variable parent is numeric and carries no OC form either, so a
+    ``FactorSmooth`` takes both columns as the frame carries them.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+
+    if isinstance(ispec, FactorSmooth):
+        return spec, x
+    return resolve_interaction_parent(spec, x)

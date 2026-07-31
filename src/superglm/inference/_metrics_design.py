@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm.features.ordered_categorical import resolve_interaction_parent
+from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import DesignMatrix
 
 # Diagnostic algebra can keep the dense block, a shifted copy, a weighted copy,
@@ -187,13 +187,16 @@ def _exact_runtime_design_block(
         # An interaction transform consumes the geometry its parents CONTRIBUTE,
         # not their raw columns: an OrderedCategorical parent contributes its
         # mapped level scores, and the transform would read its labels as
-        # float64.  Resolve exactly as the fit and exact-predict paths do.  A
-        # plan cached before parent specs were stashed carries no
-        # "parent_specs" key; ``None`` then resolves through the identity path.
+        # float64.  Resolve exactly as the fit and exact-predict paths do --
+        # including the FactorSmooth exception, whose grouping parent stays as
+        # the fit factorized it.  A plan cached before parent specs were
+        # stashed carries no "parent_specs" key; ``None`` then resolves through
+        # the identity path.
         left_spec, right_spec = term.get("parent_specs", (None, None))
-        _, left = resolve_interaction_parent(left_spec, X.column_array(left_name))
-        _, right = resolve_interaction_parent(right_spec, X.column_array(right_name))
-        transformed = term["spec"].transform(left, right)
+        ispec = term["spec"]
+        _, left = resolve_interaction_parent_of(ispec, left_spec, X.column_array(left_name))
+        _, right = resolve_interaction_parent_of(ispec, right_spec, X.column_array(right_name))
+        transformed = ispec.transform(left, right)
         transformed = _as_dense_block(
             transformed,
             n_rows=len(X),
