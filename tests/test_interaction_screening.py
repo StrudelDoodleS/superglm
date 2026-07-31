@@ -493,11 +493,11 @@ def test_screen_validates_inputs():
         model.screen_interactions(frame, y, sample_weight=w, edf0=-1.0)
     with pytest.raises(ValueError, match="finite and positive"):
         model.screen_interactions(frame, y, sample_weight=w, edf0=float("nan"))
-    with pytest.raises(ValueError, match="distinct fitted spline"):
+    with pytest.raises(ValueError, match="distinct screenable fitted"):
         model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x1")])
     with pytest.raises(ValueError, match="screenable features"):
         model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "nope")])
-    with pytest.raises(ValueError, match="distinct fitted spline"):
+    with pytest.raises(ValueError, match="distinct screenable fitted"):
         model.screen_interactions(frame, y, sample_weight=w, candidates=[("x1", "x2", "x3")])
 
 
@@ -1051,3 +1051,18 @@ def test_screen_weight_inheritance_reads_the_stored_array_not_the_stamp():
     model._fit_used_weights = False
     explicit_w = model.screen_interactions(frame, y, sample_weight=w)
     pd.testing.assert_frame_equal(model.screen_interactions(frame, y), explicit_w)
+
+
+def test_screen_labels_every_spline_pair_ti():
+    """The mixed-margin work added a `kind` column naming the refit target;
+    a spline-only model must be unchanged apart from a constant 'ti'."""
+    from superglm.model.screening_ops import _RESULT_COLUMNS
+
+    frame, y, w = _screening_data(24, interaction=0.5)
+    model = _fit_mains(frame, y, w)
+
+    table = model.screen_interactions(frame, y, sample_weight=w)
+
+    assert list(table.columns) == _RESULT_COLUMNS
+    assert _RESULT_COLUMNS[:4] == ["feature_a", "feature_b", "kind", "statistic"]
+    assert set(table["kind"]) == {"ti"}

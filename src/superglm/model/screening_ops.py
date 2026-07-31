@@ -34,6 +34,9 @@ import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
 from superglm.distributions import _VARIANCE_FLOOR, validate_response
+from superglm.features.categorical import Categorical
+from superglm.features.numeric import Numeric
+from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
     pair_cell_moments,
@@ -46,6 +49,7 @@ from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 _RESULT_COLUMNS = [
     "feature_a",
     "feature_b",
+    "kind",
     "statistic",
     "z",
     "edf0",
@@ -86,27 +90,77 @@ def _validated_budgets(edf0) -> tuple[float, ...]:
     return tuple(float(b) for b in budgets)
 
 
-def _validated_pairs(candidates, spline_names, fitted_pairs):
+_DEFERRED_KIND_HINT = (
+    "spline x numeric screening is deferred until a varying-coefficient "
+    "interaction term exists; respec the Numeric parent as a Spline to screen "
+    "the pair as ti(), or see the screening guide. Polynomial margins are "
+    "likewise deferred."
+)
+
+
+def _margin_kind(spec) -> str | None:
+    """Classify a fitted spec for screening; None means not screenable."""
+    if isinstance(spec, _SplineBase):
+        return "spline"
+    if isinstance(spec, OrderedCategorical):
+        # A spline-mode OC is a spline through the level values, so it screens
+        # (and refits) exactly like one; step mode has no interaction target.
+        if spec.basis == "spline" and spec._spline is not None:
+            return "spline"
+        return None
+    if isinstance(spec, Categorical):
+        return "categorical" if len(spec._levels) >= 2 else None
+    if isinstance(spec, Numeric):
+        return "numeric"
+    return None
+
+
+# Every entry names a pair kind that has a real refit target; a combination
+# absent from this table is DEFERRED, not merely unimplemented, and is dropped
+# from the default sweep rather than reported as a null result.
+_PAIR_KINDS = {
+    frozenset(("spline",)): "ti",
+    frozenset(("spline", "categorical")): "spline_cat",
+    frozenset(("numeric", "categorical")): "numeric_cat",
+    frozenset(("categorical",)): "cat_cat",
+    frozenset(("numeric",)): "numeric_numeric",
+}
+
+
+def _pair_kind(kind_a: str, kind_b: str) -> str | None:
+    return _PAIR_KINDS.get(frozenset((kind_a, kind_b)))
+
+
+def _validated_pairs(candidates, margin_kinds, fitted_pairs):
     if candidates is None:
-        # A pair the model already fits as a tensor term is not a candidate:
+        # A pair the model already fits as an interaction is not a candidate:
         # the screen profiles only the parent mains, so it would re-surface
         # the fitted interaction and the confirmation workflow would then
         # fail with "interaction already added".
         return [
-            pair for pair in combinations(spline_names, 2) if frozenset(pair) not in fitted_pairs
+            pair
+            for pair in combinations(margin_kinds, 2)
+            if _pair_kind(margin_kinds[pair[0]], margin_kinds[pair[1]]) is not None
+            and frozenset(pair) not in fitted_pairs
         ]
-    valid = set(spline_names)
     pairs = []
     for raw in candidates:
         pair = tuple(raw)
-        if len(pair) != 2 or pair[0] == pair[1] or not valid.issuperset(pair):
+        if len(pair) != 2 or pair[0] == pair[1] or not set(margin_kinds).issuperset(pair):
             raise ValueError(
-                "candidates entries must pair two distinct fitted spline features; "
-                f"got {raw!r} (screenable features: {spline_names})"
+                "candidates entries must pair two distinct screenable fitted "
+                f"features; got {raw!r} (screenable features: "
+                f"{sorted(margin_kinds)})"
+            )
+        if _pair_kind(margin_kinds[pair[0]], margin_kinds[pair[1]]) is None:
+            raise ValueError(
+                f"candidates entry {raw!r} pairs kinds "
+                f"({margin_kinds[pair[0]]}, {margin_kinds[pair[1]]}) with no "
+                f"refit target — {_DEFERRED_KIND_HINT}"
             )
         if frozenset(pair) in fitted_pairs:
             raise ValueError(
-                f"candidates entry {raw!r} is already fitted as a tensor interaction; "
+                f"candidates entry {raw!r} is already fitted as an interaction; "
                 "screening profiles only the parent mains and cannot re-screen it"
             )
         pairs.append(pair)
@@ -122,8 +176,15 @@ def _marginal_width_estimate(spec) -> int:
     the budget with no correction possible.  ``n_knots`` floors the centered
     marginal width of every built-in kind, including degree-0 ps/bs
     (``n_knots + degree``) and cr via the CardinalCR substitution
-    (``n_knots + 1``).
+    (``n_knots + 1``).  Categorical and numeric widths are exact, not
+    estimates: a contrast menu is (L - 1) wide and a numeric margin is 1.
     """
+    if isinstance(spec, OrderedCategorical) and spec._spline is not None:
+        spec = spec._spline
+    if isinstance(spec, Categorical):
+        return max(len(spec._levels) - 1, 1)
+    if isinstance(spec, Numeric):
+        return 1
     n_knots = getattr(spec, "n_knots", None)
     if n_knots is not None:
         # n_knots floors every built-in kind including degree-0 ps/bs
@@ -171,9 +232,10 @@ def screen_interactions(
     ``sum(w) - edf`` semantics).
 
     Returns a frame sorted by ``z`` (descending) with one row per screened
-    pair: ``feature_a, feature_b, statistic, z, edf0, lambda0, n_cells,
-    approx``, where ``statistic``/``edf0``/``lambda0`` describe the winning
-    rung.  ``statistic`` is therefore NOT comparable across rows (rungs
+    pair: ``feature_a, feature_b, kind, statistic, z, edf0, lambda0, n_cells,
+    approx``, where ``kind`` names the interaction class the pair would refit
+    as and ``statistic``/``edf0``/``lambda0`` describe the winning rung.
+    ``statistic`` is therefore NOT comparable across rows (rungs
     differ) — rank by ``z``.  At a clamped rung ``edf0`` holds the achieved
     value and ``lambda0`` is a bracket edge, not an interpretable smoothing
     parameter.
@@ -255,18 +317,30 @@ def screen_interactions(
         raise ValueError(f"phi override must be finite and positive, got {phi!r}")
     validate_response(y, model._distribution)
 
-    spline_names = [
-        name for name in model._feature_order if isinstance(model._specs.get(name), _SplineBase)
-    ]
+    margin_kinds = {
+        name: kind
+        for name in model._feature_order
+        if (kind := _margin_kind(model._specs.get(name))) is not None
+    }
+    # Every interaction class exposes parent_names, so exclusion covers the
+    # whole family (tensor, spline_cat, numeric_cat, cat_cat, ..., and
+    # FactorSmooth) rather than tensor terms alone.
     fitted_pairs = {
         frozenset(spec.parent_names)
         for spec in getattr(model, "_interaction_specs", {}).values()
-        if isinstance(spec, TensorInteraction)
+        if hasattr(spec, "parent_names")
     }
-    pairs = _validated_pairs(candidates, spline_names, fitted_pairs)
-    selected = sorted(
-        {name for pair in pairs for name in pair if getattr(model._specs[name], "select", False)}
-    )
+    pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs)
+
+    def _select_flag(name):
+        # Only spline margins carry a double-penalty flag; an OC margin's
+        # lives on its inner spline.
+        spec = model._specs[name]
+        if isinstance(spec, OrderedCategorical):
+            spec = spec._spline
+        return getattr(spec, "select", False)
+
+    selected = sorted({name for pair in pairs for name in pair if _select_flag(name)})
     if selected:
         raise ValueError(
             f"screen_interactions requires single-penalty parent smooths, but {selected} were "
@@ -288,7 +362,11 @@ def screen_interactions(
         return raw_x[name]
 
     for name in sorted({name for pair in pairs for name in pair}):
-        _raw(name)
+        # Categorical margins are read through their level codes, not a float
+        # column; prefetching them here would trip the finiteness cast on an
+        # object-dtype column.
+        if margin_kinds[name] != "categorical":
+            _raw(name)
 
     distribution, link = model._distribution, model._link
     offset_inherited = False
@@ -419,6 +497,11 @@ def screen_interactions(
         )
 
     for feat_a, feat_b in pairs:
+        # Dispatch before any raw-column or support access, so a deferred kind
+        # surfaces as its own error rather than a dtype failure downstream.
+        kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
+        if kind != "ti":
+            raise NotImplementedError(f"screening kind {kind!r} lands in a later task")
         k_a = _marginal_width_estimate(model._specs[feat_a])
         k_b = _marginal_width_estimate(model._specs[feat_b])
         bin_flag = {feat_a: False, feat_b: False}
@@ -453,7 +536,7 @@ def screen_interactions(
             bin_flag[binnable[0][1]] = True
         approx = bin_flag[feat_a] or bin_flag[feat_b] or _pair_refits_discrete(feat_a, feat_b)
         if menus is None:
-            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
+            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
             continue
 
         (menu_a, S1), (menu_b, S2) = menus
@@ -471,9 +554,11 @@ def screen_interactions(
             if z > best_z:
                 best_z, best = z, (statistic, result.edf0, result.lambda0)
         if best is None:
-            rows.append((feat_a, feat_b, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
+            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_a * n_b, approx))
         else:
-            rows.append((feat_a, feat_b, best[0], best_z, best[1], best[2], n_a * n_b, approx))
+            rows.append(
+                (feat_a, feat_b, kind, best[0], best_z, best[1], best[2], n_a * n_b, approx)
+            )
 
     table = pd.DataFrame(rows, columns=_RESULT_COLUMNS)
     table = table.sort_values("z", ascending=False, ignore_index=True)
