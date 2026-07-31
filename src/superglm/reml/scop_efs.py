@@ -12,7 +12,6 @@ Biometrics 73(4), 1071-1081.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -57,8 +56,6 @@ from superglm.solvers.rank import (
     needs_factor_certification,
 )
 from superglm.types import GroupSlice, PenaltyComponent
-
-logger = logging.getLogger(__name__)
 
 # These private thresholds intentionally mix units: absolute lambda scale for the
 # floor guard, log-lambda-step scale for stability/plateau checks, and relative
