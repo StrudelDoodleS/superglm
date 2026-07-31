@@ -2772,6 +2772,10 @@ class TestCandidateStepBackoff:
         ):
             model.fit_reml(frame, y, max_reml_iter=5)
         assert state["candidate_rejections"] == 4, "the rescue path must actually be exercised"
+        # [None, 0.5] pins that the rescue *certified* and the raise came from
+        # the guard -- backoff exhaustion would show the whole alpha ladder.
+        candidate_alphas = [c["trial_alpha"] for c in state["calls"] if c["phase"] == "candidate"]
+        assert candidate_alphas == [None, pytest.approx(0.5)]
 
     def test_a_rescue_with_a_no_op_proposal_still_raises(self, monkeypatch):
         """An EFS no-op after a rescue is not accepted progress.
@@ -2809,6 +2813,35 @@ class TestCandidateStepBackoff:
         ):
             model.fit_reml(frame, y, max_reml_iter=5)
         assert state["candidate_rejections"] == 4, "the rescue path must actually be exercised"
+        # [None, 0.5] pins that the rescue *certified* and the raise came from
+        # the guard -- backoff exhaustion would show the whole alpha ladder.
+        candidate_alphas = [c["trial_alpha"] for c in state["calls"] if c["phase"] == "candidate"]
+        assert candidate_alphas == [None, pytest.approx(0.5)]
+
+    def test_a_no_op_proposal_returns_the_identical_current_mode(self, monkeypatch):
+        """The identity contract the rescue guard rests on, pinned directly.
+
+        The guard detects "no acceptance gate saw a new state" by object
+        identity, so the line search must hand back the *identical* current
+        mode -- never a copy -- when a no-op proposal is accepted without
+        fitting anything. A harmless-looking ``replace(current)`` here would
+        silently disarm the guard with a green suite. Found in review
+        (PR #183, round 3).
+        """
+        fits = []
+
+        def counting_fit(context, lambdas, **kwargs):
+            fits.append(dict(lambdas))
+            raise AssertionError("a no-op proposal must not fit anything")
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", counting_fit)
+        current = SimpleNamespace(lambdas={"x": 2.5})
+        retained, accepted = scop_efs_module._backtrack_scop_efs_candidate(
+            None, current, {"x": 2.5}, reml_iteration=1
+        )
+        assert retained is current, "the no-endorsement return must be the identical object"
+        assert accepted is True
+        assert fits == []
 
     def test_a_failed_bootstrap_has_nothing_to_back_off_to(self, monkeypatch):
         """The recoverability principle's boundary: no predecessor, no rescue.

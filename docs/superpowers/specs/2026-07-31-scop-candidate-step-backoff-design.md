@@ -149,7 +149,13 @@ failure — step-size control from that point on is owned by the adaptive
   the history (`_lambda_max_delta`, the governance pack's "REML path
   history") never see a vector no fit used. A rescue is also observable
   outside the trace: `verbose` prints the damping, and the level-2 debug
-  payload carries `candidate_backoff_alpha` (null on ordinary iterations).
+  payload carries `candidate_backoff_alpha` and
+  `candidate_backoff_endorsed` (both null on ordinary iterations; the
+  latter false on the row the acceptance guard is about to reject, so the
+  trace never contradicts the exception). The identity contract the guard
+  reads — the line search returns the *identical* current object in both
+  no-endorsement cases — is stated in
+  `_backtrack_scop_efs_candidate`'s docstring and pinned by a direct test.
 
 ## Deliberately not doing
 
