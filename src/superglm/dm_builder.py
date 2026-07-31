@@ -23,6 +23,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import Distribution, Tweedie, resolve_distribution
+from superglm.features.ordered_categorical import resolve_interaction_parent
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -152,7 +153,15 @@ def should_discretize_tensor_interaction(
 ) -> bool:
     """Check if a tensor interaction should use fit-time discretization."""
     from superglm.features.interaction import TensorInteraction
+    from superglm.features.ordered_categorical import OrderedCategorical
 
+    if any(
+        isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
+    ):
+        # OC margins live on <= n_levels score points; there is nothing for
+        # fit-time discretization to compress, and the fast-discrete predict
+        # metadata reads raw columns as float64, which label data cannot be.
+        return False
     if not isinstance(ispec, TensorInteraction):
         return False
     p1, p2 = ispec.parent_names
@@ -166,7 +175,15 @@ def should_discretize_spline_categorical_interaction(
 ) -> bool:
     """Check if a spline-categorical interaction should use spline support compression."""
     from superglm.features.interaction import SplineCategorical
+    from superglm.features.ordered_categorical import OrderedCategorical
 
+    if any(
+        isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
+    ):
+        # OC margins live on <= n_levels score points; there is nothing for
+        # fit-time discretization to compress, and the fast-discrete predict
+        # metadata reads raw columns as float64, which label data cannot be.
+        return False
     if not isinstance(ispec, SplineCategorical):
         return False
     spline_name, _cat_name = ispec.parent_names
@@ -945,8 +962,12 @@ def build_design_matrix(
     for iname in interaction_order:
         ispec = interaction_specs[iname]
         p1, p2 = ispec.parent_names
-        x1 = X.column_array(p1)
-        x2 = X.column_array(p2)
+        spec1, x1 = resolve_interaction_parent(specs.get(p1), X.column_array(p1))
+        spec2, x2 = resolve_interaction_parent(specs.get(p2), X.column_array(p2))
+        if spec1 is specs.get(p1) and spec2 is specs.get(p2):
+            parent_specs = specs
+        else:
+            parent_specs = {**specs, p1: spec1, p2: spec2}
         use_discrete_tensor = should_discretize_tensor_interaction(ispec, specs, model_discrete)
         use_discrete_spline_cat = should_discretize_spline_categorical_interaction(
             ispec,
@@ -967,7 +988,7 @@ def build_design_matrix(
             result = ispec.build_discrete(
                 x1,
                 x2,
-                specs,
+                parent_specs,
                 n_bins_factor_smooth,
                 sample_weight=sample_weight,
             )
@@ -977,7 +998,7 @@ def build_design_matrix(
             tensor_build = ispec.build_discrete(
                 x1,
                 x2,
-                specs,
+                parent_specs,
                 (n_bins1, n_bins2),
                 sample_weight=sample_weight,
             )
@@ -996,12 +1017,12 @@ def build_design_matrix(
             result = ispec.build_discrete(
                 x1,
                 x2,
-                specs,
+                parent_specs,
                 n_bins_spline,
                 sample_weight=sample_weight,
             )
         else:
-            result = ispec.build(x1, x2, specs, sample_weight=sample_weight)
+            result = ispec.build(x1, x2, parent_specs, sample_weight=sample_weight)
 
         pi_kwargs = dict(
             B_unique=B_unique_inter,

@@ -561,3 +561,32 @@ class OrderedCategorical:
             self._spline.set_reparametrisation(R_inv)
         else:
             self._R_inv = R_inv
+
+
+def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
+    """Resolve one interaction parent (spec, column) for assembly.
+
+    Identity for every spec — including ``None``, which FactorSmooth group
+    columns carry — except spline-mode OrderedCategorical, which
+    contributes its inner Spline on the mapped numeric scores, applying
+    the same grouping, level validation, and score mapping its own
+    ``build``/``transform`` apply.  Step-mode OC cannot parent an
+    interaction: the deprecated one-hot geometry has no marginal smooth.
+    """
+    if not isinstance(spec, OrderedCategorical):
+        return spec, x
+    if spec.basis != "spline" or spec._spline is None:
+        raise NotImplementedError(
+            "OrderedCategorical with basis='step' is deprecated and cannot parent "
+            "an interaction; use basis=Spline(...) for a smoothed ordinal parent "
+            "or a Categorical feature for unsmoothed level effects."
+        )
+    x = np.asarray(x).ravel()
+    if spec._grouping is not None:
+        x = _grouping_labels(x)
+        valid = spec._known_levels | set(spec._grouping.grouped_levels)
+        _validate_categorical_levels(x, valid)
+        x = np.array([spec._grouping.original_to_group.get(v, v) for v in x], dtype=object)
+    else:
+        _validate_categorical_levels(x, spec._known_levels)
+    return spec._spline, spec._map_to_numeric(x)
