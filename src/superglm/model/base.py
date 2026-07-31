@@ -21,7 +21,7 @@ from superglm.dm_builder import (
     should_discretize_tensor_interaction,
     validate_term_name_namespace,
 )
-from superglm.features.ordered_categorical import resolve_interaction_parent
+from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import DesignMatrix, _discretize_column
 from superglm.links import Link, stabilize_eta
 from superglm.model.fit_state import (
@@ -354,11 +354,15 @@ def _score_prediction_term_local_exact(
 
     left_name, right_name = term["parent_names"]
     # A plan cached before parent specs were stashed carries no "parent_specs"
-    # key; ``None`` then resolves through the identity path.
+    # key; ``None`` then resolves through the identity path.  Resolution is
+    # keyed on the INTERACTION too: a FactorSmooth reads its second parent as a
+    # grouping column, so its columns must arrive exactly as the fit factorized
+    # them (see ``resolve_interaction_parent_of``).
     left_spec, right_spec = term.get("parent_specs", (None, None))
-    _, left = resolve_interaction_parent(left_spec, X.column_array(left_name))
-    _, right = resolve_interaction_parent(right_spec, X.column_array(right_name))
-    return _score_interaction(term["spec"], left, right, beta)
+    ispec = term["spec"]
+    _, left = resolve_interaction_parent_of(ispec, left_spec, X.column_array(left_name))
+    _, right = resolve_interaction_parent_of(ispec, right_spec, X.column_array(right_name))
+    return _score_interaction(ispec, left, right, beta)
 
 
 def _score_prediction_term_exact(
