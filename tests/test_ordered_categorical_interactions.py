@@ -214,3 +214,83 @@ def test_oc_tensor_fit_matches_manual_score_mapping():
     np.testing.assert_allclose(
         model_oc._link.inverse(eta_oc), model_num._link.inverse(eta_num), rtol=1e-10, atol=1e-12
     )
+
+
+def test_oc_interaction_predict_round_trips_training_frame():
+    df, y = _frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "region": Categorical()},
+        interactions=[("age_band", "region")],
+    )
+    model.fit_reml(df, y)
+    mu_train = model.predict(df)
+    assert mu_train.shape == (len(df),)
+    assert np.all(np.isfinite(mu_train)) and np.all(mu_train > 0)
+
+
+def test_oc_tensor_predict_matches_manual_score_mapping():
+    df, y = _frame()
+    oc = _oc()
+    model_oc = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
+        interactions=[("age_band", "power")],
+    )
+    model_oc.fit_reml(df, y)
+    new = df.iloc[:200].copy()
+    pred_oc = model_oc.predict(new)
+
+    df_num = df.copy()
+    df_num["age_band"] = df_num["age_band"].map(oc._level_to_value)
+    model_num = SuperGLM(
+        family="poisson",
+        features={"age_band": Spline(kind="ps", n_knots=4), "power": Spline(kind="ps", n_knots=5)},
+        interactions=[("age_band", "power")],
+    )
+    model_num.fit_reml(df_num, y)
+    new_num = new.copy()
+    new_num["age_band"] = new_num["age_band"].map(oc._level_to_value)
+    np.testing.assert_allclose(pred_oc, model_num.predict(new_num), rtol=1e-8)
+
+
+def test_oc_interaction_predict_rejects_unseen_level():
+    df, y = _frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "region": Categorical()},
+        interactions=[("age_band", "region")],
+    )
+    model.fit_reml(df, y)
+    bad = df.iloc[:5].copy()
+    bad.loc[bad.index[0], "age_band"] = "99+"
+    with pytest.raises(ValueError, match="unseen|levels"):
+        model.predict(bad)
+
+
+def test_oc_interaction_added_post_hoc_refits():
+    # Exercises the config-template deepcopy path (the editor-clone contract):
+    # add_interaction stores a deep-copied template that the next fit rebuilds.
+    df, y = _frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "region": Categorical()},
+    )
+    model.fit_reml(df, y)
+    model._add_interaction("age_band", "region")
+    model.fit_reml(df, y)
+    mu = model.predict(df.iloc[:50])
+    assert np.all(np.isfinite(mu)) and np.all(mu > 0)
+
+
+def test_oc_interaction_survives_discrete_mode():
+    df, y = _frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
+        interactions=[("age_band", "power")],
+        discrete=True,
+    )
+    model.fit_reml(df, y)
+    mu = model.predict(df.iloc[:100])
+    assert np.all(np.isfinite(mu))
