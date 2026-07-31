@@ -1970,3 +1970,31 @@ Dispositions, revised against the on-contract numbers:
   `z < 10` and the battery reached 7.53 over 3520 rows. A floor is a maximum,
   so it grows with sweep width — 10 is generous for a handful of pairs and
   thinner for hundreds.
+
+### Post-review dispositions (2026-08-01, controller)
+
+Final whole-branch review: With fixes -> fix wave `dcdc862`..`3c6b0ac` -> scoped
+re-review clean (all findings addressed, no new Critical/Important). Residual
+minors parked with rulings:
+
+- FactorSmooth with a spline-mode OC *variable* parent now raises loudly at
+  build — same behavior as master (the mid-branch resolver briefly made it
+  fit); ruling: acceptable withdrawal of an incidental capability, loud not
+  silent; OC-variable FactorSmooth support is its own future feature, and
+  `docs/guide/interactions.md` does not yet name the FactorSmooth exception
+  to the OC-parent rule (doc nit, next docs touch).
+- `runtime_canonicalize.py`'s FactorSmooth-skip site is demonstrably needed
+  (reverting it silently corrupts the recorded `max_abs_eta_delta`
+  diagnostic, 0.146 vs 4.4e-16) but unpinned — ruling: real, deferred; the
+  channel is diagnostic-only (recorded, never enforced — pre-existing
+  contract), covered site is correct at HEAD; follow-up test welcome.
+- The guide's freMTPL2 example prose omits the `Exposure.clip(lower=0.01)`
+  step its pasted table depends on — ruling: one-clause doc nit for the next
+  docs touch; the contract itself is stated correctly.
+
+Follow-ups worth issues (not this branch): `unseen="population"` accepts a
+100%-unseen frame silently (a raise-if-all-unseen guard would have made the
+FactorSmooth drift loud); global-phi conservatism demotes wide low-signal
+unpenalized blocks on overdispersed books (documented in the guide);
+cat_cat cost cliff near the intermediate budget ceiling; df pins at
+abs=0.26 could tighten to 0.01.
