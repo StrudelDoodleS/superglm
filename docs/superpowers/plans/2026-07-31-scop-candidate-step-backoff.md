@@ -706,3 +706,29 @@ level (two "better than asked": the stall guard as code, the history
 passed; corpus inertness diff empty (146-test population, 7 deselected);
 SCOP suites on numpy 2.4.1: 153 passed; full suite: **5119 passed /
 84 skipped** (baseline 5112 + the 7 new tests).
+
+## Review round 3 (2026-07-31, on `e4f8802`; CI on that head fully green)
+
+**Codex round 3: clean** — "Didn't find any major issues."
+
+**claude bot round 3:** re-derived the identity guard's correctness from
+scratch (its return-value table matches the design analysis), confirmed
+"success path bit-identical" survives, and declared nothing blocks merge on
+correctness. Three robustness items, all applied:
+1. The identity contract the guard rests on is now stated in
+   `_backtrack_scop_efs_candidate`'s docstring and pinned by a direct test
+   (`test_a_no_op_proposal_returns_the_identical_current_mode`) — a
+   `replace(current)` refactor of the no-op return can no longer disarm the
+   guard silently.
+2. Both rescue-raise tests now pin the candidate-phase alpha list
+   `[None, 0.5]`, distinguishing a guard-raise from backoff exhaustion
+   (which would show the whole alpha ladder).
+3. The guard condition is computed before the level-2 payload and recorded
+   as `candidate_backoff_endorsed` (null ordinarily, false on the row the
+   guard is about to reject), so the trace row no longer contradicts the
+   exception. The guard now reads that same value.
+
+**Re-verification on the round-3 tree:** backoff class 8 passed; file 143
+passed; corpus inertness diff empty (146-test population, 8 deselected);
+SCOP suites on numpy 2.4.1: 154 passed; full suite: **5120 passed /
+84 skipped** (baseline 5112 + the 8 new tests).

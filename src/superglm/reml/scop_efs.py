@@ -1220,6 +1220,12 @@ def _backtrack_scop_efs_candidate(
     the exact LAML objective near a mode.  In the failure case the exact
     current fitted mode is returned, so callers cannot accidentally publish an
     unevaluated lambda movement.
+
+    Contract relied on by the candidate-site rescue guard: whenever no trial
+    was objective-endorsed -- the failure case above, and the no-op early
+    exit when the proposal changes nothing -- the returned mode is the
+    *identical* ``current`` object, never a copy, so callers can detect
+    "no acceptance gate saw a new state" by identity.
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be positive")
@@ -1795,6 +1801,12 @@ def optimize_scop_efs_reml(
         )
         lambdas_new = retained_mode.lambdas.copy()
         obj_after = retained_mode.objective
+        # The line search returns the identical current mode in exactly the
+        # two no-endorsement cases (every trial rejected, or a no-op proposal
+        # accepted without fitting anything) -- a contract its docstring pins.
+        rescue_endorsed: bool | None = None
+        if rescue_alpha is not None:
+            rescue_endorsed = retained_mode is not current_mode
 
         # Update prev_dlsp from ACCEPTED (post-damping) step
         for name in estimated_names:
@@ -1901,6 +1913,7 @@ def optimize_scop_efs_reml(
                     "plateau_converged": bool(plateau_converged),
                     "candidate_accepted": bool(candidate_accepted),
                     "candidate_backoff_alpha": rescue_alpha,
+                    "candidate_backoff_endorsed": rescue_endorsed,
                     "estimated_names": sorted(estimated_names),
                     "active_names": sorted(active_names),
                     "frozen_names": sorted(frozen_names),
@@ -1910,15 +1923,13 @@ def optimize_scop_efs_reml(
 
         lambda_history.append(lambdas_new.copy())
 
-        # A rescued mode was chosen for certifiability, not objective merit.
-        # The line search returns the current mode itself in exactly the two
-        # no-endorsement cases -- every trial rejected, or a no-op proposal
-        # accepted without fitting anything -- and a rescue that no objective
-        # gate ever endorsed must not be published as stalled *or* converged.
-        # The message is deliberately the pre-backoff one: identical input,
-        # identical observable failure; the level-2 payload row above carries
-        # candidate_backoff_alpha for anyone debugging which stage stalled.
-        if rescue_alpha is not None and retained_mode is current_mode:
+        # A rescued mode was chosen for certifiability, not objective merit,
+        # and one that no objective gate ever endorsed must not be published
+        # as stalled *or* converged.  The message is deliberately the
+        # pre-backoff one: identical input, identical observable failure; the
+        # payload row above carries candidate_backoff_alpha and
+        # candidate_backoff_endorsed for anyone debugging which stage stalled.
+        if rescue_endorsed is False:
             raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
 
         if not candidate_accepted:
