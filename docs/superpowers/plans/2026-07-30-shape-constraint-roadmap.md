@@ -209,8 +209,10 @@ Items 1b and 4 are cheap and independent; either can go first.
 factor, resolved range carried through the determinant and curvature, factor
 built only when the Gram cannot resolve the step). **Item 2c is done:** the
 stagnation acceptance rule and the private `stagnation_log` channel behind it
-are removed. The evidence was that across the full suite the gate was reached
-only by its own stub-driven tests -- no real fit in the corpus could drive it.
+are removed. The evidence was that across the full suite the gate was driven to
+*accept* only by its own stub-driven tests -- no real fit in the corpus could
+make it accept. Real fits do reach it and get declined; only stagnating there
+is hard.
 
 **Item 2b is superseded, not completed.** 2b assumed the gate would survive in
 strengthened form: it asks for a published gradient-norm test on the penalized
@@ -218,12 +220,18 @@ deviance *and* says to keep deviance stagnation as the primary criterion. 2c's
 evidence removed that premise -- there is no acceptance gate left to
 strengthen, and deviance stagnation is gone rather than kept. What certifies a
 mode now is `_scop_mode_newton_relative`, gated unconditionally in
-`_fit_scop_reml_mode` and the sole acceptance path. It is score-based, and at a
-flat boundary it is stronger than what 2b asked for -- but it is not the same
-object: it is a Newton-scaled relative correction restricted to the estimable
-range (the score is projected before the pseudoinverse, so truncated directions
-are discarded), and it is vacuous on non-SCOP modes, where empty `scop_states`
-zero the mode score. Anyone who still wants 2b's literal gradient-norm test
-should treat it as unimplemented and re-argue it on its merits.
+`_fit_scop_reml_mode` and the sole *certification* -- not the sole acceptance
+precondition, since `require_converged and not result.converged` still rejects
+a mode before certification is ever computed. It is score-based but not the same
+object as what 2b asked for: it is a Newton-scaled relative correction
+restricted to the estimable range, which makes it asymmetric rather than
+uniformly stronger. On the resolved range it is stronger than a raw gradient
+norm, because the pseudoinverse amplifies a score lying in a near-singular but
+retained direction; on a truncated direction it is deliberately silent, because
+the score is projected before the pseudoinverse, so a component a gradient norm
+would flag is discarded rather than required to vanish. It is also vacuous on
+non-SCOP modes, where empty `scop_states` zero the mode score. Anyone who still
+wants 2b's literal gradient-norm test should treat it as unimplemented and
+re-argue it on its merits.
 
 Design: `docs/superpowers/specs/2026-07-31-scop-stagnation-gate-removal-design.md`.

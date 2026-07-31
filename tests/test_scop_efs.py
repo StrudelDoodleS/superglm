@@ -2462,13 +2462,34 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         self._run_gate(monkeypatch, self._stub(self.SHORT_RUN), captured=captured)
         assert captured.get("record_diagnostics", False) is False
 
-    def test_a_genuinely_non_converging_fit_still_raises(self):
+    def test_a_genuinely_non_converging_fit_still_raises(self, monkeypatch):
         """A real SCOP fit that never settles is reported as a failure.
 
         This quasi-separated Poisson exhausts all its PIRLS iterations with
         zero halvings and zero rejections, its deviance still moving by ~1e-3
         relative per iteration.
+
+        The message alone cannot pin that. ``did not converge to a coefficient
+        mode`` is raised for two distinct reasons: the inner fit not
+        converging, and a converged mode failing latent certification --
+        ``_fit_scop_reml_mode`` returns ``None`` for both. So we also pin
+        *which* one fired. A non-converged result returns at ``require_converged
+        and not result.converged`` before any certification is computed, so
+        ``_scop_mode_newton_relative`` is never reached on this path; a
+        certification failure would have to call it. Zero calls therefore
+        distinguishes the two, and keeps a future change that makes this fit
+        converge from leaving the test silently green on the other failure.
         """
+        certifications = []
+        original = scop_efs_module._scop_mode_newton_relative
+
+        def spy(mode):
+            value = original(mode)
+            certifications.append(value)
+            return value
+
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", spy)
+
         x = np.linspace(0, 1, 200)
         frame = pd.DataFrame({"x": x})
         response = np.where(x > 0.8, 5000.0, 0.0)
@@ -2482,6 +2503,7 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         )
         with pytest.raises(RuntimeError, match="did not converge to a coefficient mode"):
             model.fit_reml(frame, response, max_reml_iter=20)
+        assert certifications == []
 
 
 class TestIterationDiagnosticsSmallSample:
