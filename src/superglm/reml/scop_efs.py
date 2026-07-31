@@ -1804,6 +1804,9 @@ def optimize_scop_efs_reml(
         # The line search returns the identical current mode in exactly the
         # two no-endorsement cases (every trial rejected, or a no-op proposal
         # accepted without fitting anything) -- a contract its docstring pins.
+        # Computed here, not at the guard below, so the level-2 payload row
+        # records the same verdict the guard acts on; retained_mode must not
+        # be reassigned between the two points.
         rescue_endorsed: bool | None = None
         if rescue_alpha is not None:
             rescue_endorsed = retained_mode is not current_mode
