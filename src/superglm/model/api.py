@@ -659,14 +659,16 @@ class SuperGLM:
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
         A categorical margin never bins — its support is the fitted level
-        set.  Screening always probes the exact-basis tensor; a ``ti`` pair
-        whose confirmatory refit would discretize LOSSILY (both parents
-        resolve to fit-time discretization and at least one parent's
-        cardinality exceeds its bin count) is flagged ``approx=True`` to
-        make that support-discretization gap — measured at ~3.5% on signal
-        pairs, the same class as the quantile fallback — visible in the
-        output.  Lossless binning returns the exact support and stays
-        ``approx=False``.
+        set.  Screening always probes exact bases, so a pair whose
+        confirmatory refit would discretize LOSSILY is flagged
+        ``approx=True`` to make that support-discretization gap — measured
+        at ~3.5% on signal pairs, the same class as the quantile fallback —
+        visible in the output.  The flag applies the refit's own gate, which
+        differs by kind: a ``ti`` refit bins its marginals only when BOTH
+        parents resolve to fit-time discretization, a ``spline_cat`` refit
+        bins its spline margin whenever that ONE parent does, and a
+        ``cat_cat`` refit bins nothing.  Lossless binning returns the exact
+        support and stays ``approx=False``.
         Pairs already fitted as an interaction of any class are excluded from
         the sweep.  The statistic is a ranking device, not a calibrated
         p-value: confirm the top-ranked pairs by refitting them as the
