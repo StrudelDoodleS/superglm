@@ -1158,7 +1158,9 @@ def _backoff_scop_candidate_step(
 
     Returns the first certified mode with its lambdas and the damping that
     produced it, or ``None`` when every damped attempt fails, in which case
-    the caller keeps its raise.
+    the caller keeps its raise.  A proposal-only name (absent from the
+    origin) has no endpoint to interpolate from and is adopted undamped at
+    its proposed value, keeping the caller's key set intact.
     """
     changed_names = [
         name
@@ -1908,12 +1910,18 @@ def optimize_scop_efs_reml(
 
         lambda_history.append(lambdas_new.copy())
 
+        # A rescued mode was chosen for certifiability, not objective merit.
+        # The line search returns the current mode itself in exactly the two
+        # no-endorsement cases -- every trial rejected, or a no-op proposal
+        # accepted without fitting anything -- and a rescue that no objective
+        # gate ever endorsed must not be published as stalled *or* converged.
+        # The message is deliberately the pre-backoff one: identical input,
+        # identical observable failure; the level-2 payload row above carries
+        # candidate_backoff_alpha for anyone debugging which stage stalled.
+        if rescue_alpha is not None and retained_mode is current_mode:
+            raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
+
         if not candidate_accepted:
-            # A rescued mode was chosen for certifiability, not objective
-            # merit; with no accepted step after it there is nothing a caller
-            # should be handed, and the pre-backoff behaviour was to raise.
-            if rescue_alpha is not None:
-                raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
             termination_reason = "line_search_stalled"
             lambdas = lambdas_new
             break
