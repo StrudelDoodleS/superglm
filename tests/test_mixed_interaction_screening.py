@@ -49,7 +49,6 @@ def _null_y(df, rng):
     return rng.poisson(np.exp(-1.5 + 0.004 * df["age"]), len(df)).astype(np.float64)
 
 
-@pytest.mark.xfail(reason="kinds land in tasks 4-6", strict=True)
 def test_default_sweep_covers_every_eligible_kind():
     df, rng = _mixed_frame()
     y = _null_y(df, rng)
@@ -92,10 +91,6 @@ def test_candidates_rejects_deferred_and_ineligible_kinds():
         model2.screen_interactions(df2, y, candidates=[("age", "nope")])
 
 
-# The default sweep over this mixed model still hits deferred kinds (tasks
-# 4-5) and OrderedCategorical raw values (task 6); the exclusion itself is
-# pinned unconditionally by the candidates= test below.
-@pytest.mark.xfail(reason="kinds land in tasks 4-6", strict=True)
 def test_fitted_pairs_of_every_class_are_excluded():
     df, rng = _mixed_frame()
     y = _null_y(df, rng)
@@ -108,11 +103,11 @@ def test_fitted_pairs_of_every_class_are_excluded():
         model.screen_interactions(df, y, candidates=[("region", "brand")])
 
 
-def test_oc_margin_defers_by_name_without_breaking_its_siblings():
-    """An OC main screens as a spline margin, but on its MAPPED level values,
-    which lands in a later task.  Until then the pair must name that cause
-    instead of failing a float cast on the label column -- and it must not
-    poison the pure-spline pairs of the same model."""
+def test_oc_margin_screens_beside_its_spline_siblings():
+    """An OC main screens as a spline margin on its MAPPED level values, so it
+    pairs with a plain spline as a `ti` -- reading the label column through the
+    parent resolution rather than failing a float cast on it -- and computing it
+    must leave the pure-spline pairs of the same model untouched."""
     df, rng = _mixed_frame()
     y = _null_y(df, rng)
     model = SuperGLM(
@@ -125,12 +120,29 @@ def test_oc_margin_defers_by_name_without_breaking_its_siblings():
     )
     model.fit_reml(df, y)
 
-    table = model.screen_interactions(df, y, candidates=[("age", "power")])
-    assert list(table["kind"]) == ["ti"]
-    assert np.isfinite(table["z"]).all()
+    alone = model.screen_interactions(df, y, candidates=[("age", "power")])
+    assert list(alone["kind"]) == ["ti"]
+    assert np.isfinite(alone["z"]).all()
 
-    with pytest.raises(NotImplementedError, match="OrderedCategorical"):
-        model.screen_interactions(df, y, candidates=[("age", "band")])
+    oc_pair = model.screen_interactions(df, y, candidates=[("age", "band")]).iloc[0]
+    assert oc_pair["kind"] == "ti"
+    assert np.isfinite(oc_pair["z"])
+    # the band margin grids on its 5 mapped score points, age on its own support
+    assert int(oc_pair["n_cells"]) == 5 * len(np.unique(df["age"]))
+
+    swept = {
+        frozenset((row.feature_a, row.feature_b)): row
+        for row in model.screen_interactions(df, y).itertuples()
+    }
+    assert {pair: row.kind for pair, row in swept.items()} == {
+        frozenset(("age", "power")): "ti",
+        frozenset(("age", "band")): "ti",
+        frozenset(("power", "band")): "ti",
+    }
+    # The OC margin shares the sweep's caches with its siblings without moving
+    # them: the pure-spline pair scores exactly what it scores on its own.
+    assert swept[frozenset(("age", "power"))].z == pytest.approx(alone["z"].iloc[0])
+    assert swept[frozenset(("age", "band"))].z == pytest.approx(oc_pair["z"])
 
 
 def test_fitted_pairs_of_every_class_are_rejected_as_candidates():
@@ -180,28 +192,12 @@ def test_factor_smooth_pair_is_excluded():
         model.screen_interactions(df, y, candidates=[("age", "band")])
 
 
-# _fit_mixed also fits an OrderedCategorical main, whose pairs still raise
-# until task 6, so a default sweep over it cannot run yet.  Name the pairs
-# whose kinds exist today -- every kind the model can form except the OC
-# ones; drop the candidates= argument once the whole sweep is implemented.
-_IMPLEMENTED_PAIRS = [
-    ("age", "power"),
-    ("age", "region"),
-    ("age", "brand"),
-    ("power", "region"),
-    ("power", "brand"),
-    ("region", "brand"),
-    ("bm", "region"),
-    ("bm", "brand"),
-]
-
-
 def test_cat_cat_planted_table_ranks_first_with_exact_df():
     df, rng = _mixed_frame(n=20000, seed=3)
     boost = ((df["region"] == "B") & (df["brand"] == "B2")).astype(float)
     y = rng.poisson(np.exp(-1.3 + 0.5 * boost)).astype(np.float64)
     model = _fit_mixed(df, y)
-    table = model.screen_interactions(df, y, candidates=_IMPLEMENTED_PAIRS)
+    table = model.screen_interactions(df, y)
     top = table.iloc[0]
     assert {top["feature_a"], top["feature_b"]} == {"region", "brand"}
     assert top["kind"] == "cat_cat"
@@ -229,7 +225,7 @@ def _planted_bend(seed=4):
 def test_spline_cat_planted_deviation_curve_ranks_first():
     df, y = _planted_bend()
     model = _fit_mixed(df, y)
-    table = model.screen_interactions(df, y, candidates=_IMPLEMENTED_PAIRS)
+    table = model.screen_interactions(df, y)
     top = table.iloc[0]
     assert {top["feature_a"], top["feature_b"]} == {"age", "region"}
     assert top["kind"] == "spline_cat"
@@ -345,7 +341,7 @@ def test_numeric_cat_planted_slope_ranks_first_with_exact_df():
     slope = np.where(df["region"] == "D", 0.35, 0.0)
     y = rng.poisson(np.exp(-1.6 + slope * (df["bm"] - 1.0))).astype(np.float64)
     model = _fit_mixed(df, y)
-    table = model.screen_interactions(df, y, candidates=_IMPLEMENTED_PAIRS)
+    table = model.screen_interactions(df, y)
     top = table.iloc[0]
     assert {top["feature_a"], top["feature_b"]} == {"bm", "region"}
     assert top["kind"] == "numeric_cat"
@@ -378,17 +374,7 @@ def test_numeric_numeric_planted_product_ranks_first():
         },
     )
     model.fit_reml(df, y)
-    table = model.screen_interactions(
-        df,
-        y,
-        candidates=[
-            ("bm", "dens"),
-            ("bm", "region"),
-            ("dens", "brand"),
-            ("age", "region"),
-            ("region", "brand"),
-        ],
-    )
+    table = model.screen_interactions(df, y)
     top = table.iloc[0]
     assert top["kind"] == "numeric_numeric"
     assert {top["feature_a"], top["feature_b"]} == {"bm", "dens"}
@@ -435,3 +421,90 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     assert lifted["lambda0"] == 0.0
     assert lifted["n_cells"] == L
     assert not lifted["approx"]
+
+
+def test_oc_margin_screens_as_spline_and_confirms():
+    df, rng = _mixed_frame(n=20000, seed=8)
+    band_idx = df["band"].map({b: i for i, b in enumerate(BANDS)}).to_numpy()
+    ramp = (band_idx / 4.0) * (df["power"] - 110.0) / 90.0 * 0.35
+    y = rng.poisson(np.exp(-1.5 + ramp)).astype(np.float64)
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y)
+    top = table.iloc[0]
+    assert {top["feature_a"], top["feature_b"]} == {"band", "power"}
+    assert top["kind"] == "ti"
+    assert top["z"] > 6.0
+    # The ti() refit the kind names finds the same ramp in the likelihood.
+    # Measured 34.8 on 5 extra parameters at this amplitude; the OC-parented
+    # refit's deviance is bit-identical to the same fit on the mapped scores,
+    # so the margin under test is exact and the bound is just a floor.
+    confirm = _fit_mixed(df, y, interactions=[("band", "power")])
+    assert model._result.deviance - confirm._result.deviance > 30.0
+
+
+def test_oc_cat_pair_is_spline_cat_kind():
+    df, rng = _mixed_frame(n=8000, seed=9)
+    y = _null_y(df, rng)
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y, candidates=[("band", "region")])
+    assert list(table["kind"]) == ["spline_cat"]
+    assert np.isfinite(table["z"]).all()
+    # 5 score points x 4 levels
+    assert int(table["n_cells"].iloc[0]) == 5 * 4
+
+
+def test_oc_cat_planted_deviation_confirms():
+    df, rng = _mixed_frame(n=20000, seed=13)
+    band_idx = df["band"].map({b: i for i, b in enumerate(BANDS)}).to_numpy()
+    bend = np.where(df["region"] == "A", (band_idx / 4.0 - 0.5) * 0.5, 0.0)
+    y = rng.poisson(np.exp(-1.4 + bend)).astype(np.float64)
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y)
+    top = table.iloc[0]
+    assert {top["feature_a"], top["feature_b"]} == {"band", "region"}
+    assert top["kind"] == "spline_cat"
+    assert top["z"] > 6.0
+    confirm = _fit_mixed(df, y, interactions=[("band", "region")])
+    assert model._result.deviance - confirm._result.deviance > 30.0
+
+
+def test_oc_pairs_never_flag_approx_under_discrete_mode():
+    """An OC-parented refit refuses fit-time discretization outright, whatever
+    the model flag says and whatever its inner spline would say alone, so its
+    refit basis cannot drift from the probe's: the row stays exact at a bin
+    count that flags every plain spline margin of the same model."""
+    df, rng = _mixed_frame(n=6000, seed=14)
+    y = _null_y(df, rng)
+    # 4 bins < 5 score points: were the OC margin consulted as a bare spline,
+    # its support would bin LOSSILY and the pair would be flagged approximate.
+    model = _fit_mixed(df, y, discrete=True, n_bins=4)
+    table = model.screen_interactions(df, y)
+    flags = {
+        frozenset((row.feature_a, row.feature_b)): (row.kind, bool(row.approx))
+        for row in table.itertuples()
+    }
+    assert flags[frozenset(("band", "region"))] == ("spline_cat", False)
+    assert flags[frozenset(("band", "brand"))] == ("spline_cat", False)
+    assert flags[frozenset(("band", "power"))] == ("ti", False)
+    assert flags[frozenset(("band", "age"))] == ("ti", False)
+    # ... while the same model's plain-spline pairs DO flag, so it is the OC
+    # parent and not the model flag that keeps those rows exact.
+    assert flags[frozenset(("age", "region"))] == ("spline_cat", True)
+    assert flags[frozenset(("age", "power"))] == ("ti", True)
+
+
+def test_oc_select_inner_spline_raises_upfront():
+    df, rng = _mixed_frame(n=4000, seed=10)
+    y = _null_y(df, rng)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "band": OrderedCategorical(
+                order=BANDS, basis=Spline(kind="ps", n_knots=4, select=True)
+            ),
+            "power": Spline(kind="ps", n_knots=5),
+        },
+    )
+    model.fit_reml(df, y)
+    with pytest.raises(ValueError, match="select"):
+        model.screen_interactions(df, y, candidates=[("band", "power")])

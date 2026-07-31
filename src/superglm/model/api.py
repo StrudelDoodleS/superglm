@@ -636,7 +636,9 @@ class SuperGLM:
         crossed with a factor, ``cat_cat`` for two factors, ``numeric_cat``
         for a per-level numeric slope and ``numeric_numeric`` for a product
         of two numerics — and ``z`` is comparable across kinds, so the one
-        sorted table ranks them together.  A kind whose block carries no
+        sorted table ranks them together.  A spline-mode
+        ``OrderedCategorical`` margin screens as a spline on its mapped level
+        scores, so its pairs carry the spline kinds.  A kind whose block carries no
         penalty (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no
         bandwidth to scan and is evaluated at a single rung: ``edf0`` then
         reports the block's achieved rank with
