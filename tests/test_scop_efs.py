@@ -2360,224 +2360,26 @@ class TestSCOPEFSOuterLoop:
             assert "x" in entry
 
 
-class TestSCOPBoundaryStagnationAcceptance:
-    """A SCOP inner fit pinned at a boundary solution is accepted, not rejected.
+class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
+    """A non-converged SCOP inner fit is rejected, whatever its deviance did.
 
-    SCOP inner fits use ``convergence="coefficients"``. That criterion cannot
-    terminate when a SCOP coefficient drifts toward its log-space boundary
-    (``exp(gamma) -> 0``): the coefficient keeps changing while the fit stops
-    changing. The measured fit held its deviance to a single ULP for 86
-    consecutive iterations while the coefficient change decayed only ~0.9% per
-    iteration, so it exhausted ``max_pirls_iter`` and was reported as a
-    non-convergence even though nothing observable was still moving.
+    Item 2c retired the deviance-stagnation acceptance rule. It existed
+    because ``convergence="coefficients"`` cannot terminate when a SCOP
+    coefficient drifts to its log-space boundary (``exp(gamma) -> 0``): the
+    coefficient keeps moving while the fit stops. PR #176 fixed that at its
+    cause by truncating the unidentifiable direction out of the Newton step,
+    so the boundary fit converges normally and no fit in the corpus reaches
+    this path any more.
 
-    These tests pin the acceptance and, just as importantly, each guard that
-    keeps a genuine non-convergence failing.
+    What certifies a mode is the penalized-score check in
+    ``_fit_scop_reml_mode`` -- ``_scop_mode_newton_relative`` against
+    ``_scop_mode_tolerance`` -- which every accepted mode always had to pass.
     """
 
-    # The deviance the measured boundary fit stalled on.
-    STALLED_DEVIANCE = 696.9342068066064
-    # Comfortably longer and shorter than any plausible window, so the gate
-    # tests below exercise behaviour rather than the constant's exact value.
+    # Comfortably longer and shorter than any window the retired gate used, so
+    # these pin behaviour rather than a constant's exact value.
     LONG_RUN = 256
     SHORT_RUN = 4
-
-    # The default ``max_pirls_iter``. The window is 50 at this cap.
-    CAP = 100
-
-    def _stagnated(self, result, cap=None):
-        return scop_efs_module._scop_deviance_stagnated(result, self.CAP if cap is None else cap)
-
-    @property
-    def WINDOW(self):  # noqa: N802 - resolved lazily so collection never depends on it
-        return scop_efs_module._scop_stagnation_window(self.CAP)
-
-    @property
-    def TOLERANCE(self):  # noqa: N802
-        return scop_efs_module._STAGNANT_DEVIANCE_TOLERANCE
-
-    @staticmethod
-    def _entry(deviance, iteration, *, rejected=False, halvings=0):
-        return SimpleNamespace(
-            iteration=iteration,
-            deviance=deviance,
-            step_rejected=rejected,
-            step_halvings=halvings,
-        )
-
-    @classmethod
-    def _result(cls, deviances, *, reason="max_iter"):
-        # Numbered from 1 with no gaps, the way the solver appends them.
-        return SimpleNamespace(
-            converged=False,
-            termination_reason=reason,
-            stagnation_log=[
-                cls._entry(deviance, index + 1) for index, deviance in enumerate(deviances)
-            ],
-        )
-
-    @classmethod
-    def _flat(cls, n_entries):
-        return [cls.STALLED_DEVIANCE] * n_entries
-
-    def test_flat_deviance_across_the_window_is_accepted(self):
-        result = self._result(self._flat(self.WINDOW + 1))
-        assert self._stagnated(result) is True
-
-    def test_single_ulp_drift_is_accepted(self):
-        """The measured fit moved one ULP on its final iteration.
-
-        Exact-equality stagnation would therefore never have fired on the
-        very case this exists to accept.
-        """
-        deviances = [self.STALLED_DEVIANCE]
-        for _ in range(self.WINDOW):
-            deviances.append(np.nextafter(deviances[-1], np.inf))
-        assert deviances[-1] != deviances[0]
-        assert self._stagnated(self._result(deviances)) is True
-
-    def test_window_one_iteration_short_is_rejected(self):
-        result = self._result(self._flat(self.WINDOW))
-        assert self._stagnated(result) is False
-
-    def test_change_just_below_the_tolerance_is_accepted(self):
-        deviances = self._flat(self.WINDOW + 1)
-        step = 0.5 * self.TOLERANCE * (abs(self.STALLED_DEVIANCE) + 1.0)
-        deviances[-1] = self.STALLED_DEVIANCE + step
-        assert deviances[-1] != deviances[-2]
-        assert self._stagnated(self._result(deviances)) is True
-
-    def test_change_just_above_the_tolerance_is_rejected(self):
-        deviances = self._flat(self.WINDOW + 1)
-        step = 2.0 * self.TOLERANCE * (abs(self.STALLED_DEVIANCE) + 1.0)
-        deviances[-1] = self.STALLED_DEVIANCE + step
-        assert self._stagnated(self._result(deviances)) is False
-
-    def test_a_still_descending_fit_is_rejected(self):
-        """A fit crawling downhill is genuine non-convergence, not stagnation."""
-        deviances = [self.STALLED_DEVIANCE * (1.0 - 1e-6) ** i for i in range(self.WINDOW + 1)]
-        assert self._stagnated(self._result(deviances)) is False
-
-    def test_an_oscillating_fit_is_rejected(self):
-        deviances = [
-            self.STALLED_DEVIANCE + (1e-6 if i % 2 else -1e-6) for i in range(self.WINDOW + 1)
-        ]
-        assert self._stagnated(self._result(deviances)) is False
-
-    def test_a_rejected_step_inside_the_window_is_rejected(self):
-        result = self._result(self._flat(self.WINDOW + 1))
-        result.stagnation_log[-1].step_rejected = True
-        assert self._stagnated(result) is False
-
-    def test_a_halved_step_inside_the_window_is_rejected(self):
-        result = self._result(self._flat(self.WINDOW + 1))
-        result.stagnation_log[-1].step_halvings = 1
-        assert self._stagnated(result) is False
-
-    def test_a_non_max_iter_termination_is_rejected(self):
-        for reason in ("step_rejected", "nonfinite_deviance", "curvature_fallback", None):
-            result = self._result(self._flat(self.WINDOW + 1), reason=reason)
-            assert self._stagnated(result) is False
-
-    def test_a_nonfinite_deviance_is_rejected(self):
-        for bad in (np.nan, np.inf):
-            deviances = self._flat(self.WINDOW + 1)
-            deviances[-1] = bad
-            assert self._stagnated(self._result(deviances)) is False
-
-    def test_a_window_spanning_a_gap_is_refused_loudly(self):
-        """The window is taken by position and read as consecutive iterations.
-
-        Nothing in the solver can produce a gap today -- the append is
-        unconditional, once per iteration -- so this is a guard against a
-        future edit that conditionalizes or relocates it. Without the check the
-        gate would compare non-adjacent iterations and could accept a fit that
-        moved in between, silently: every visible symptom of the bug would be
-        an *acceptance*, which is the one outcome the gate is supposed to
-        withhold.
-        """
-        result = self._result(self._flat(self.WINDOW + 1))
-        # Control: the same fit, numbered contiguously, is accepted.
-        assert self._stagnated(result) is True
-
-        # Drop one iteration out of the middle of the sliced window.
-        result.stagnation_log[-3].iteration += 1
-        with pytest.raises(RuntimeError, match="not contiguous"):
-            self._stagnated(result)
-
-    def test_a_gap_outside_the_sliced_window_is_not_the_gate_s_business(self):
-        """Only the window the gate reads has to be contiguous.
-
-        The check is scoped to the slice rather than the whole log, so a fit
-        whose early history is irregular for some other reason is still
-        classifiable on its tail.
-        """
-        deviances = self._flat(self.WINDOW + 6)
-        result = self._result(deviances)
-        result.stagnation_log[0].iteration -= 4
-        assert self._stagnated(result) is True
-
-    def test_an_absent_stagnation_log_is_rejected(self):
-        """An injected solver that publishes no log keeps the strict gate.
-
-        The last case has no ``termination_reason`` and no per-iteration channel
-        of any kind. The gate must decline it, not raise: a result that does not
-        carry these attributes is a legitimate thing to hand the predicate.
-        """
-        for log in (None, []):
-            result = SimpleNamespace(
-                converged=False, termination_reason="max_iter", stagnation_log=log
-            )
-            assert self._stagnated(result) is False
-        assert self._stagnated(SimpleNamespace(converged=False)) is False
-
-    # ── the window scales with the iteration budget ─────────────────────────
-
-    def test_window_scales_with_the_iteration_budget(self):
-        """A fixed window would leave low-cap callers with the original bug.
-
-        The shape is ``max(30, min(50, cap // 2))``: half the budget, floored
-        at the shortest window the corpus can justify and capped at the
-        calibrated 50.
-        """
-        window = scop_efs_module._scop_stagnation_window
-        assert window(100) == 50  # default cap, unchanged
-        assert window(200) == 50  # capped
-        assert window(80) == 40
-        assert window(63) == 31  # tightest measured margin
-        assert window(60) == 30
-        assert window(49) == 30  # floored
-        assert window(31) == 30  # floored, still reachable
-
-    def test_the_window_never_drops_below_the_separating_floor(self):
-        """30 clears the longest run (29) ever seen on a converging fit."""
-        window = scop_efs_module._scop_stagnation_window
-        for cap in range(31, 400):
-            assert window(cap) >= 30
-            assert window(cap) <= 50
-            # always measurable within the budget
-            assert cap >= window(cap) + 1
-
-    def test_a_budget_too_short_to_classify_refuses(self):
-        """Below cap 31 a 30-transition window does not fit; refuse, do not guess."""
-        window = scop_efs_module._scop_stagnation_window
-        for cap in (0, 1, 5, 10, 25, 29, 30):
-            assert window(cap) is None
-        # ... and the predicate declines regardless of how flat the fit looks.
-        for cap in (1, 10, 30):
-            assert self._stagnated(self._result(self._flat(200)), cap=cap) is False
-
-    def test_a_low_cap_still_accepts_a_long_enough_run(self):
-        """At cap 60 the required run is 30, and a 46-run boundary fit qualifies.
-
-        46 is what the measured boundary fit presents at that cap: it begins
-        stagnating at iteration 14 regardless of where the budget ends.
-        """
-        assert self._stagnated(self._result(self._flat(47)), cap=60) is True
-        # one transition short of the required 30 is still refused
-        assert self._stagnated(self._result(self._flat(30)), cap=60) is False
-
-    # ── the gate itself, through _fit_scop_reml_mode ────────────────────────
 
     @staticmethod
     def _context():
@@ -2617,62 +2419,56 @@ class TestSCOPBoundaryStagnationAcceptance:
             require_converged=True,
         )
 
-    def _stub(self, n_entries):
-        result = self._result(self._flat(n_entries))
-        result.beta = np.array([0.0])
-        result.intercept = 0.0
-        result.rank_info = None
-        result.n_iter = n_entries
-        return result
+    @staticmethod
+    def _stub(n_iter):
+        """A non-converged solver result that exhausted its budget."""
+        return SimpleNamespace(
+            converged=False,
+            termination_reason="max_iter",
+            beta=np.array([0.0]),
+            intercept=0.0,
+            rank_info=None,
+            n_iter=n_iter,
+        )
 
-    def test_gate_admits_a_stagnant_candidate(self, monkeypatch):
-        """The stagnant candidate is no longer short-circuited to ``None``.
+    def test_a_stagnant_candidate_is_no_longer_specially_accepted(self, monkeypatch):
+        """A boundary-stagnant fit is a non-convergence like any other.
 
-        Admission is evidenced by the fit proceeding into geometry assembly,
-        which this bare stub cannot satisfy. Before deviance-stagnation
-        acceptance the gate returned ``None`` here and the caller raised
-        ``SCOP REML candidate did not converge to a coefficient mode``.
+        Before item 2c the gate admitted this stub: it flipped ``converged``
+        to True and the fit proceeded into geometry assembly, which a bare
+        stub cannot satisfy, so the failure surfaced as ``retained centered
+        fit geometry``. Rank truncation (PR #176) removes the cause, so the
+        workaround is gone and the mode is rejected at ``require_converged``.
         """
         stub = self._stub(self.LONG_RUN)
-        with pytest.raises(RuntimeError, match="retained centered fit geometry"):
-            self._run_gate(monkeypatch, stub)
-        # The accepted boundary mode is recorded as converged so downstream
-        # consumers see one coherent state, while ``termination_reason``
-        # preserves how the iteration actually ended.
-        assert stub.converged is True
+        assert self._run_gate(monkeypatch, stub) is None
+        # Nothing reclassifies how the iteration actually ended.
+        assert stub.converged is False
         assert stub.termination_reason == "max_iter"
 
-    def test_a_rejected_candidate_is_not_marked_converged(self, monkeypatch):
+    def test_a_short_run_candidate_is_rejected(self, monkeypatch):
+        """Run length never mattered to the outcome; now it cannot."""
         stub = self._stub(self.SHORT_RUN)
         assert self._run_gate(monkeypatch, stub) is None
         assert stub.converged is False
 
-    def test_gate_still_rejects_a_candidate_that_is_merely_slow(self, monkeypatch):
-        """Too short a stagnant run is still a non-convergence."""
-        assert self._run_gate(monkeypatch, self._stub(self.SHORT_RUN)) is None
+    def test_the_inner_fit_does_not_ask_for_the_full_recorder(self, monkeypatch):
+        """``record_diagnostics`` builds a forty-field row per iteration.
 
-    def test_gate_requests_only_the_narrow_channel_it_needs(self, monkeypatch):
-        """The inner fits ask for the three scalars, not the full recorder.
-
-        ``record_diagnostics`` would supply the same three, but it builds a
-        forty-field row per iteration and switches on the solver's extrema
-        capture with it -- measured at 7-16% of SCOP REML wall time. Asking for
-        it here is a performance regression, so the negative half of this
-        assertion is the part that matters.
+        It also switches on the solver's per-iteration extrema capture --
+        measured at 7-16% of SCOP REML wall time. Asking for it from the inner
+        fits is a performance regression, so this pins that we do not.
         """
         captured = {}
         self._run_gate(monkeypatch, self._stub(self.SHORT_RUN), captured=captured)
-        assert captured["_record_stagnation"] is True
         assert captured.get("record_diagnostics", False) is False
 
     def test_a_genuinely_non_converging_fit_still_raises(self):
-        """A real SCOP fit that never settles is still reported as a failure.
+        """A real SCOP fit that never settles is reported as a failure.
 
-        This quasi-separated Poisson exhausts all 100 PIRLS iterations with
-        zero halvings and zero rejections -- the same surface shape as the
-        boundary solution that is now accepted -- but its deviance is still
-        moving by ~1e-3 relative per iteration. Deviance stagnation, not the
-        step-quality guards, is what separates the two.
+        This quasi-separated Poisson exhausts all its PIRLS iterations with
+        zero halvings and zero rejections, its deviance still moving by ~1e-3
+        relative per iteration.
         """
         x = np.linspace(0, 1, 200)
         frame = pd.DataFrame({"x": x})
