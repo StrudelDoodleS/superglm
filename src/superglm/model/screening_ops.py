@@ -18,7 +18,10 @@ indicator columns and ``kron`` of a spline menu with one reproduces the
 per-level curve blocks, column for column.  A NUMERIC margin never grids: it
 enters its probe linearly (a per-level slope, or a product of two numerics),
 so z-weighted moments accumulated over the other margin's cells are the exact
-sufficient statistics at any cardinality — see ``screening/_numeric_margin``.
+sufficient statistics — see ``screening/_numeric_margin``.  Such a pair is
+therefore exact whenever it is computed at all: it has no binning fallback,
+so a factor margin too wide for the pair's blocks is REFUSED with a NaN row
+rather than approximated.
 ``z`` normalizes each kind against its own noise floor, so a single sorted
 table ranks them together.  A pair with no penalty anywhere in its block has
 no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
@@ -357,10 +360,17 @@ def screen_interactions(
     always ``approx=False``.  A numeric margin never contributes either: it
     enters its probe linearly, with no grid to build, no support to compress
     and no basis a refit could discretize, so ``numeric_cat`` and
-    ``numeric_numeric`` rows are exact at any cardinality, never reach the
-    binning fallback, and are always ``approx=False``.  Their ``n_cells``
-    counts the OTHER margin's cells alone — the factor's fitted levels, or 1
-    when both margins are numeric.
+    ``numeric_numeric`` rows never reach the binning fallback and are always
+    ``approx=False``.  Every such row that carries a statistic is exact; the
+    only degradation available to these kinds is REFUSAL, since there is
+    nothing to approximate.  A ``numeric_cat`` pair is refused with a NaN row
+    when the factor is too wide for the pair's blocks to fit ``max_cells``
+    (the ``(L+1)``-wide overlap curvature is the largest of them, so the
+    default admits factors up to roughly 2200 levels); raising ``max_cells``
+    lifts the refusal and the pair is then computed exactly.  A
+    ``numeric_numeric`` pair contracts to 3x3 blocks and is never refused.
+    Their ``n_cells`` counts the OTHER margin's cells alone — the factor's
+    fitted levels, or 1 when both margins are numeric.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -643,6 +653,22 @@ def screen_interactions(
         inter_ok = n_a * k_b * k_b + n_b * k_a * k_a <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
         return cells_ok and inter_ok
 
+    def _numeric_margin_within_budget(k_g):
+        """Budget a numeric x gridded pair BEFORE its menu is built.
+
+        A z-moment pair allocates no cell grid, but it does allocate four
+        blocks that all scale with the GRIDDED margin's width: the (L, L-1)
+        menu, the (L-1)^2 curvature, the (L+1)^2 overlap curvature, and the
+        cross block between them.  Holding the largest of those — the
+        ``(k_g + 2)^2`` overlap block — to ``max_cells`` leaves the pair's
+        total at roughly four ceiling-sized blocks, the same small multiple
+        the two cell tables of a gridded pair sit at, and refuses the factors
+        whose blocks would dwarf it (measured: ~160 MB at the threshold,
+        ~640 MB at twice it).  Runs on the level count alone, so an
+        over-budget pair never allocates the dense menu it was refused for.
+        """
+        return (k_g + 2) ** 2 <= max_cells
+
     rows = []
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 
@@ -701,27 +727,39 @@ def screen_interactions(
         if kind in ("numeric_cat", "numeric_numeric"):
             # A numeric margin enters the probe LINEARLY, so the pair has no
             # joint grid to assemble: z-weighted moments over the other
-            # margin's cells are the exact sufficient statistics at any
-            # cardinality — nothing to bin, and no cell grid to budget.  The
-            # block carries no penalty either, so one rung is the ladder.  The
-            # factor's own (L, L-1) contrast menu is the only allocation left.
+            # margin's cells are the exact sufficient statistics, with nothing
+            # to bin and no cell grid to budget.  The block carries no penalty
+            # either, so one rung is the ladder.  What is left to budget is the
+            # OTHER margin's own blocks, which is why a factor too wide for
+            # them is refused below — refusal is the only degradation a
+            # z-moment pair has, since it cannot approximate.
+            S_ti, approx = None, False
             if kind == "numeric_numeric":
                 U, V, C, M, u_m = numeric_numeric_moments(
                     _raw_numeric(feat_a), _raw_numeric(feat_b), score, working_weights
                 )
+                # Two numerics contract to 3x3 blocks whatever the supports.
                 n_cells = 1
             else:
                 num_name, cat_name = (
                     (feat_a, feat_b) if margin_kinds[feat_a] == "numeric" else (feat_b, feat_a)
                 )
-                codes_g, n_g, menu_g, _ = _margin(cat_name, False)
-                U, V, C, M, u_m = numeric_pair_moments(
-                    codes_g, n_g, menu_g, _raw_numeric(num_name), score, working_weights
-                )
+                codes_g, n_g = _margin_support(cat_name, False)
                 # The factor's levels ARE the cells: the numeric side contributes
                 # z-moments within them rather than cells of its own.
                 n_cells = n_g
-            S_ti, approx = None, False
+                # Exact, not an estimate: a factor margin's contrast menu is
+                # (L, L-1) wide, so the gate needs no post-menu recheck.
+                k_g = _marginal_width_estimate(model._specs[cat_name])
+                if not _numeric_margin_within_budget(k_g):
+                    rows.append(
+                        (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
+                    )
+                    continue
+                _, _, menu_g, _ = _margin(cat_name, False)
+                U, V, C, M, u_m = numeric_pair_moments(
+                    codes_g, n_g, menu_g, _raw_numeric(num_name), score, working_weights
+                )
         else:
             # Assemble with the categorical margin LAST, so a mixed pair's penalty
             # is kron(S_spline, I) — the varying-coefficient block layout.  The

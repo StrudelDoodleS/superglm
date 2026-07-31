@@ -661,8 +661,12 @@ class SuperGLM:
         ``approx=True``; pairs within budget are always computed exactly.
         A categorical margin never bins — its support is the fitted level
         set — and a numeric margin never grids at all: it enters its probe
-        linearly, so ``numeric_cat``/``numeric_numeric`` rows are exact at
-        any cardinality.  Screening always probes exact bases, so a pair whose
+        linearly, so a ``numeric_cat``/``numeric_numeric`` row that carries a
+        statistic is exact.  Those kinds have no binning fallback, so their
+        only degradation is refusal: a ``numeric_cat`` pair whose factor is
+        too wide for the pair's blocks to fit ``max_cells`` gets a NaN row
+        (the default admits roughly 2200 levels) and raising ``max_cells``
+        computes it exactly.  Screening always probes exact bases, so a pair whose
         confirmatory refit would discretize LOSSILY is flagged
         ``approx=True`` to make that support-discretization gap — measured
         at ~3.5% on signal pairs, the same class as the quantile fallback —
