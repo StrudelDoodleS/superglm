@@ -6,7 +6,7 @@ supported behavior only; optimizations must not depend on Tabmat private impleme
 ## Verified release and compatibility
 
 - Latest stable release checked on 2026-07-17: Tabmat 4.2.1, released 2026-02-04.
-- The project requires Python 3.10 or newer. PyPI publishes CPython 3.14 and 3.14t wheels.
+- The project requires Python 3.12 or newer. PyPI publishes CPython 3.14 and 3.14t wheels.
 - The 3.14t extension is not declared free-thread safe: importing it emits a warning and enables
   the GIL. Treat 3.14t as compatibility-only until Tabmat explicitly supports free threading.
 - Tabmat 4.2.2 is currently unreleased. Its changelog says fast-math is disabled to avoid invalid

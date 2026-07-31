@@ -203,8 +203,9 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert '      - ".test_durations"' in header
 
     assert "fail-fast: false" in compatibility_job
-    for version in ("3.10", "3.11", "3.12", "3.14"):
+    for version in ("3.12", "3.14"):
         assert f'"{version}"' in compatibility_job
+    # 3.13 gets dedicated coverage-shard jobs below; running it here too is waste.
     assert '"3.13"' not in compatibility_job
     assert "uv run --with pyarrow pytest tests/" in compatibility_job
     assert '-m "not browser"' in compatibility_job

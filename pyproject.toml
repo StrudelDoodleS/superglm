@@ -3,7 +3,7 @@ name = "superglm"
 version = "0.17.0"
 description = "Penalised GLMs for insurance pricing: group lasso, P-splines, Tweedie"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -23,8 +23,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -90,7 +88,7 @@ only-include = [
 
 # ── ruff ────────────────────────────────────────────────────────
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
 extend-exclude = ["docs/notebooks"]
