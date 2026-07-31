@@ -33,6 +33,17 @@ appropriate spline interaction; with no spline it selects the matching
 numeric, polynomial, or categorical geometry. Full tensor-product `te()` and
 thin-plate `tp()` APIs are not currently exposed.
 
+A spline-mode `OrderedCategorical` parent participates as a spline on its
+mapped level scores — the same axis its own main effect uses — so
+`OrderedCategorical` + `Categorical` builds a `SplineCategorical` and
+`OrderedCategorical` + `Spline` builds a `TensorInteraction`. Step-mode
+(deprecated) OC parents are rejected with an explicit error; a step basis has
+no interaction geometry to build. OC-parented tensors always use the exact
+prediction path: fit-time discretization is skipped for them, because the
+margin already lives on at most one score point per level and there is nothing
+for binning to compress. Such pairs also screen — as `ti` and `spline_cat`
+rows on the mapped scores; see [Interaction Screening](screening.md).
+
 ## Choosing a factor-varying curve
 
 `SplineCategorical` and `FactorSmooth` answer related but different questions:
