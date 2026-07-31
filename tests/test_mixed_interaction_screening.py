@@ -10,6 +10,8 @@ from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import Spline
 
+from . import _datasets
+
 BANDS = ["18-25", "26-35", "36-45", "46-55", "56+"]
 
 
@@ -508,3 +510,93 @@ def test_oc_select_inner_spline_raises_upfront():
     model.fit_reml(df, y)
     with pytest.raises(ValueError, match="select"):
         model.screen_interactions(df, y, candidates=[("band", "power")])
+
+
+# ── release gates: a pure null must not float any pair to the top ──────
+#
+# These are GATES, not floor measurements.  The measured per-kind noise
+# maxima live in benchmarks/screening_null_floors.py, which sweeps four
+# families over a wider battery; the bound of 10 below is deliberately
+# generous against those maxima so a routine seed change never reds the
+# suite, while a kind whose moments went wrong still trips it loudly.
+# `z` is a ranking score, never a p-value: "bounded" here means the null
+# sweep produced nothing a reader would mistake for signal.
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_mixed_null_z_stays_bounded_poisson(seed):
+    df, rng = _mixed_frame(n=8000, seed=100 + seed)
+    y = _null_y(df, rng)
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y)
+    # every kind of the full mixed sweep is under the gate, not just the
+    # kinds that happen to survive a NaN row
+    assert set(table["kind"]) == {"ti", "spline_cat", "numeric_cat", "cat_cat"}
+    finite = table["z"][np.isfinite(table["z"])]
+    assert len(finite) == len(table)  # no degenerate margin in this frame
+    assert (finite < 10.0).all()
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_mixed_null_z_stays_bounded_dispersed_gaussian(seed):
+    df, rng = _mixed_frame(n=8000, seed=200 + seed)
+    y = rng.normal(loc=1.0 + 0.01 * df["age"], scale=10.0, size=len(df))
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "age": Spline(kind="ps", n_knots=6),
+            "region": Categorical(),
+            "brand": Categorical(),
+            "bm": Numeric(),
+        },
+    )
+    model.fit_reml(df, y)
+    table = model.screen_interactions(df, y)
+    finite = table["z"][np.isfinite(table["z"])]
+    assert len(finite) == len(table)
+    assert (finite < 10.0).all()
+
+
+# ── real-book end-to-end sanity (skips when the parquet is absent) ─────
+
+
+def _freq_available():
+    return _datasets.find("freMTPL2freq.parquet") is not None
+
+
+FREQ_SKIP = pytest.mark.skipif(
+    not _freq_available(),
+    reason="data/freMTPL2freq.parquet not found (gitignored)",
+)
+
+
+def _fremtpl_features():
+    return {
+        "DrivAge": Spline(kind="ps", n_knots=8),
+        "VehAge": Spline(kind="ps", n_knots=6),
+        "BonusMalus": Numeric(),
+        "VehBrand": Categorical(),
+        "Region": Categorical(),
+    }
+
+
+@FREQ_SKIP
+def test_fremtpl_mixed_sweep_end_to_end():
+    df = _datasets.load_freq().sample(80_000, random_state=0).reset_index(drop=True)
+    y = df["ClaimNb"].to_numpy(dtype=np.float64)
+    exposure = df["Exposure"].to_numpy(dtype=np.float64)
+    model = SuperGLM(family="poisson", features=_fremtpl_features())
+    model.fit_reml(df, y, sample_weight=exposure)
+    table = model.screen_interactions(df, y, sample_weight=exposure)
+    # every v1 kind this feature set can produce shows up and computes
+    assert {"ti", "spline_cat", "numeric_cat", "cat_cat"} <= set(table["kind"])
+    assert np.isfinite(table["z"]).any()
+    # the queue is workable on a real book: the top pair refits and improves
+    top = table.iloc[0]
+    confirm = SuperGLM(
+        family="poisson",
+        features=_fremtpl_features(),
+        interactions=[(top["feature_a"], top["feature_b"])],
+    )
+    confirm.fit_reml(df, y, sample_weight=exposure)
+    assert confirm._result.deviance < model._result.deviance
