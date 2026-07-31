@@ -1809,17 +1809,30 @@ Dispositions for Task 8's docs:
   heavy kind": it measured the *lowest* maximum of any kind (4.91), because
   it contributes one pair per sweep and a max over 160 draws is smaller
   than a max over 320 of the same distribution.
-- **OC margins do not move the floor.** Mean and p90 sit within 0.25 of the
-  plain spline margins of the same kind, and the maxima differ in *both*
-  directions (`spline_cat` OC 7.11 vs plain 5.69, `ti` OC 5.40 vs plain
-  7.31) — the signature of max-over-a-few-hundred-draws noise, not of a
-  5-point grid inflating anything.
+- **OC margins do not move the floor.** Against the plain spline margins of
+  the same kind the four bulk gaps are: `spline_cat` mean 0.17 and p90 0.25,
+  `ti` mean 0.14 and p90 0.38 — within 0.2 on the means and within 0.4 on
+  the p90s. Every one of those gaps flips sign between the two kinds (OC is
+  *lower* on both `spline_cat` statistics, *higher* on both `ti` ones), as
+  do the maxima (`spline_cat` OC 7.11 vs plain 5.69, `ti` OC 5.40 vs plain
+  7.31). A difference with no consistent direction across kinds is
+  sampling noise, not a 5-point grid inflating anything.
 - **No family drives the floor.** Poisson tops three kinds and Gaussian the
   other two; gamma and binomial stay milder (2.9-5.5) throughout.
 - **The `numeric_cat` budget gate never fires here.** `(L+2)^2 <=
   max_cells` admits L <= 2234 at the default; the widest factor in the
   battery is 4 levels. The "policy, not law" flag from Task 5 stands
   unrevised — nothing in the measured-floors pass touched it.
+- **The release pins do not cover every measured configuration — do not
+  describe them as gating all kinds.** Both pin models run on frames with no
+  2-level factor and no second `Numeric`, so what they actually bound is:
+  `ti` (Poisson pin only), `spline_cat`, `numeric_cat` at df 2 and 3, and
+  `cat_cat` at df 6 alone. The three heaviest-tailed configurations the
+  battery measured are therefore measured but **not** gated — `numeric_cat`
+  at df=1 (7.64, the largest row in the battery), `cat_cat` at df=2 (7.23)
+  and df=3 (5.71), and the `numeric_numeric` kind in its entirety. The
+  benchmark carries a 2-level factor and a second `Numeric` precisely
+  because the pins do not.
 - **Caution the release gate's headroom.** The pins bound `z < 10` and the
   battery reached 7.64 over 3520 rows. The floor rises with sweep width, so
   a wide book screened in one pass draws more null rows than this whole
