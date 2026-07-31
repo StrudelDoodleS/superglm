@@ -1725,9 +1725,7 @@ def optimize_scop_efs_reml(
                     reml_iteration=n_reml_iter,
                 )
                 if rescue is None:
-                    raise RuntimeError(
-                        "SCOP REML candidate did not converge to a coefficient mode"
-                    )
+                    raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
                 current_mode, lambdas = rescue
         else:
             current_mode = retained_mode
