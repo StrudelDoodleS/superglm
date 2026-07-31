@@ -763,16 +763,23 @@ def _scop_mode_newton_relative(mode: _SCOPREMLMode) -> float:
     return max(slope_relative, intercept_relative)
 
 
-def _scop_mode_tolerance(mode: _SCOPREMLMode, pirls_tol: float) -> float:
-    """Return a rank-aware numerical floor for terminal mode certification.
+def _scop_mode_tolerance(mode: _SCOPREMLMode) -> float:
+    """Return the rank-aware numerical floor for terminal mode certification.
 
     The authoritative observation-factor policy resolves directions only to
     ``sqrt(eps)`` relative accuracy. A joint rank-dimensional correction
     aggregates that factor/score roundoff at root-rank scale. This remains a
     numerical floor, not an alternative score-based convergence criterion.
+
+    Deliberately independent of the solver tolerance: certification asks
+    whether the mode is stationary to the accuracy the factor policy can
+    resolve at all, which no request for a looser inner fit can relax.  The
+    ``pirls_tol`` term this once carried was dead by arithmetic --
+    ``10 * min(pirls_tol, 1e-10) <= 1e-9`` can never exceed this floor,
+    which is at least ``sqrt(eps) ~ 1.49e-8`` -- so the bar measured as
+    exactly this value on every certification the suites perform.
     """
-    numerical_floor = np.sqrt(max(1, mode.hessian_rank) * np.finfo(np.float64).eps)
-    return max(10.0 * min(pirls_tol, 1.0e-10), float(numerical_floor))
+    return float(np.sqrt(max(1, mode.hessian_rank) * np.finfo(np.float64).eps))
 
 
 def _fit_scop_reml_mode(
@@ -929,7 +936,7 @@ def _fit_scop_reml_mode(
         eta_unclipped=working_cache.get("eta_unclipped"),
     )
     mode_newton_relative = _scop_mode_newton_relative(mode)
-    mode_tolerance = _scop_mode_tolerance(mode, context.pirls_tol)
+    mode_tolerance = _scop_mode_tolerance(mode)
     if mode_newton_relative > mode_tolerance:
         if _certification_retry < 3:
             # Rungs 0->1 and 1->2 tighten the inner tolerance and re-fit from the
