@@ -22,6 +22,10 @@ sufficient statistics — see ``screening/_numeric_margin``.  Such a pair is
 therefore exact whenever it is computed at all: it has no binning fallback,
 so a factor margin too wide for the pair's blocks is REFUSED with a NaN row
 rather than approximated.
+A spline-mode ``OrderedCategorical`` margin rides the spline arm on its
+MAPPED level scores — the geometry its own refit builds — so its pairs are
+``ti`` and ``spline_cat`` like any other spline margin's, gridded on at most
+``n_levels`` support points.
 ``z`` normalizes each kind against its own noise floor, so a single sorted
 table ranks them together.  A pair with no penalty anywhere in its block has
 no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
@@ -37,12 +41,14 @@ contract (Var(y) = phi*V(mu)/w), deliberately NOT the frequency-weight
 known-dispersion exposure nulls, only ``n - edf`` is calibrated.
 
 Per-feature work (unique support, codes, marginal basis menus, marginal
-penalties — level codes and the contrast menu for a categorical margin) is
+penalties — level codes and the contrast menu for a categorical margin, the
+mapped level scores for an ordered-categorical one) is
 cached across the sweep, so an all-pairs screen over P screened features
 builds each feature's marginal exactly once.  The caches trade
 memory for time and live for the whole sweep: roughly the raw covariates
 plus codes plus menus per screened feature (plus binned variants where the
-fallback fires), instead of per-pair transients.
+fallback fires, and the mapped scores beside the labels for an
+ordered-categorical margin), instead of per-pair transients.
 """
 
 from __future__ import annotations
@@ -61,7 +67,10 @@ from superglm.features.categorical import (
     _validate_categorical_levels,
 )
 from superglm.features.numeric import Numeric
-from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.ordered_categorical import (
+    OrderedCategorical,
+    resolve_interaction_parent,
+)
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
     numeric_numeric_moments,
@@ -252,6 +261,10 @@ def _contrast_menu(spec) -> np.ndarray:
 def _marginal_width_estimate(spec) -> int:
     """Guard-grade marginal width from the parent spline's geometry.
 
+    Takes the margin's EFFECTIVE spec — the caller resolves an
+    OrderedCategorical margin to its inner spline first, because the wrapper's
+    own ``n_knots`` can predate the level-count clamp and would over-estimate.
+
     Deliberately biased LOW: an under-estimate self-heals (menus get built
     and the authoritative post-menu recheck re-runs the gates with true
     dimensions), while an over-estimate would bin or skip a pair that fits
@@ -261,8 +274,6 @@ def _marginal_width_estimate(spec) -> int:
     (``n_knots + 1``).  Categorical and numeric widths are exact, not
     estimates: a contrast menu is (L - 1) wide and a numeric margin is 1.
     """
-    if isinstance(spec, OrderedCategorical) and spec._spline is not None:
-        spec = spec._spline
     if isinstance(spec, Categorical):
         return max(len(spec._levels) - 1, 1)
     if isinstance(spec, Numeric):
@@ -295,7 +306,9 @@ def screen_interactions(
     in the ``kind`` column: ``ti`` for spline x spline, ``spline_cat`` for a
     spline crossed with a factor, ``cat_cat`` for two factors, ``numeric_cat``
     for a per-level numeric slope and ``numeric_numeric`` for a product of two
-    numerics.  ``z`` normalizes each kind against its own noise floor, so one
+    numerics.  A spline-mode ``OrderedCategorical`` margin screens as a spline
+    on its mapped level scores, so its pairs carry the spline kinds.
+    ``z`` normalizes each kind against its own noise floor, so one
     sorted table ranks them together.  A kind whose block carries no penalty
     (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no bandwidth to
     scan and is evaluated at a single rung — ``edf0`` then reports the block's
@@ -444,12 +457,12 @@ def screen_interactions(
     }
     pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs, set(model._specs))
 
-    def _is_oc_margin(name):
-        return isinstance(model._specs.get(name), OrderedCategorical)
-
     def _select_flag(name):
         # Only spline margins carry a double-penalty flag; an OC margin's
-        # lives on its inner spline.
+        # lives on its inner spline.  Unwrapped rather than resolved through
+        # ``_margin_spec``: this gate runs before any column is read, so that
+        # an unbuildable parent is named upfront rather than after the sweep
+        # has paid for (and possibly failed on) the covariates.
         spec = model._specs[name]
         if isinstance(spec, OrderedCategorical):
             spec = spec._spline
@@ -465,6 +478,7 @@ def screen_interactions(
 
     raw_x: dict[str, np.ndarray] = {}
     raw_labels: dict[str, np.ndarray] = {}
+    margin_source_cache: dict[str, tuple] = {}
 
     def _raw_numeric(name):
         if name not in raw_x:
@@ -487,15 +501,51 @@ def screen_interactions(
             raw_labels[name] = np.asarray(frame.column_array(name)).ravel()
         return raw_labels[name]
 
+    def _margin_source(name):
+        """(effective spec, x values) for a margin that grids on a spline.
+
+        A spline-mode OrderedCategorical margin contributes its INNER spline
+        on the mapped level scores — the same resolution the confirmatory
+        refit applies, with the same grouping collapse and level validation —
+        so its label column is read as labels and never float-cast.  Every
+        other spec contributes itself on its own numeric column.
+        """
+        if name not in margin_source_cache:
+            spec = model._specs[name]
+            if isinstance(spec, OrderedCategorical):
+                eff_spec, x = resolve_interaction_parent(spec, _raw_object(name))
+                if not np.all(np.isfinite(x)):
+                    raise ValueError(
+                        f"screen_interactions requires finite covariates; {name!r} "
+                        "maps to non-finite scores"
+                    )
+                margin_source_cache[name] = (eff_spec, x)
+            else:
+                margin_source_cache[name] = (spec, _raw_numeric(name))
+        return margin_source_cache[name]
+
+    def _margin_spec(name):
+        """The spec whose geometry this margin's block is built from.
+
+        A categorical margin is its own spec — its block is the contrast menu
+        over the fitted levels, and resolving it would read the label column
+        as numbers.  Any other margin is its EFFECTIVE spec, which for an
+        OrderedCategorical is the inner spline that carries the menu, the
+        marginal width and the penalty.
+        """
+        if margin_kinds[name] == "categorical":
+            return model._specs[name]
+        return _margin_source(name)[0]
+
     for name in sorted({name for pair in pairs for name in pair}):
-        # A categorical margin is read through its level labels, and an
-        # OrderedCategorical margin through its mapped level values (a later
-        # task); prefetching the latter as a float column here would trip the
-        # finiteness cast on label data and mask the per-pair diagnosis below.
+        # A categorical margin is read through its level labels; every other
+        # margin through its resolved source, which maps an OrderedCategorical's
+        # labels to scores rather than casting them.  Reading them all here
+        # keeps input validation ahead of every statistic.
         if margin_kinds[name] == "categorical":
             _raw_object(name)
-        elif not _is_oc_margin(name):
-            _raw_numeric(name)
+        else:
+            _margin_source(name)
 
     distribution, link = model._distribution, model._link
     offset_inherited = False
@@ -564,7 +614,7 @@ def screen_interactions(
     def _support(name, binned):
         key = (name, binned)
         if key not in support_cache:
-            x = _raw_numeric(name)
+            x = _margin_source(name)[1]
             if binned:
                 x = _quantile_binned(x, screen_bins)
             uniq, codes, counts = np.unique(x, return_inverse=True, return_counts=True)
@@ -580,6 +630,10 @@ def screen_interactions(
     def _one_marginal(name, binned):
         """Build (menu, penalty) for a single feature; each side independently.
 
+        Built from the margin's EFFECTIVE spec on its resolved values, so an
+        OrderedCategorical margin contributes its inner spline over the mapped
+        level scores — column for column the marginal its refit would build.
+
         Evaluated directly on the compact support via the same
         ``support=``/``counts=`` path the discrete builder uses (centering
         direction ``counts @ basis`` equals the full-row column sums), so a
@@ -590,7 +644,7 @@ def screen_interactions(
         if key not in marginal_cache:
             s = _support(name, binned)
             m = TensorInteraction._marginal_from_spec(
-                model._specs[name], s["x"], None, support=s["uniq"], counts=s["counts"]
+                _margin_spec(name), s["x"], None, support=s["uniq"], counts=s["counts"]
             )
             S = _normalize_tensor_penalty(m.penalty) if m.normalize_penalty else m.penalty
             basis = m.basis
@@ -687,28 +741,36 @@ def screen_interactions(
         ti() refit bins its marginal supports only when BOTH parents
         discretize, while a SplineCategorical refit bins its spline margin
         whenever that ONE parent does.  A categorical margin has nothing to
-        compress and never appears here, which is also what keeps ``_support``
-        (and its float cast) away from a label column.
+        compress and never appears here: only a margin that grids on a spline
+        can put a refit out of step with the probe, and the OC-parented pairs
+        that could are already short-circuited by the caller.
         """
         # By design: a numeric margin has no basis to bin, so numeric_cat and
-        # numeric_numeric can never contribute a binned margin — only a spline
-        # (or spline-mode OC) margin can put a refit out of step with the probe.
+        # numeric_numeric can never contribute a binned margin.
         if kind not in ("ti", "spline_cat"):
             return []
         splines = [
             name
             for name in (feat_a, feat_b)
             if margin_kinds[name] == "spline"
-            and should_discretize(model._specs[name], model_discrete)
+            and should_discretize(_margin_spec(name), model_discrete)
         ]
         if kind == "ti" and len(splines) < 2:
             return []
         return splines
 
     def _pair_refits_discrete(kind, feat_a, feat_b):
+        # An OrderedCategorical parent refuses fit-time discretization outright,
+        # whatever the model flag says and whatever its inner spline would say
+        # alone (should_discretize_tensor_interaction and its spline_cat sibling
+        # both gate on the parent spec): an OC margin already lives on at most
+        # n_levels score points, so the refit has nothing to compress and always
+        # sees the probe's own basis.
+        if any(isinstance(model._specs[name], OrderedCategorical) for name in (feat_a, feat_b)):
+            return False
         return any(
             _support(name, False)["n"]
-            > resolve_discrete_n_bins(name, model._specs[name], n_bins_config)
+            > resolve_discrete_n_bins(name, _margin_spec(name), n_bins_config)
             for name in _refit_binned_margins(kind, feat_a, feat_b)
         )
 
@@ -716,14 +778,6 @@ def screen_interactions(
         # Dispatch before any raw-column or support access, so a deferred kind
         # surfaces as its own error rather than a dtype failure downstream.
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
-        # An OC margin screens as a spline, but on its MAPPED level values;
-        # reading them is a later task, so say so rather than letting the
-        # label column fail a float cast three frames down.
-        oc_margins = [name for name in (feat_a, feat_b) if _is_oc_margin(name)]
-        if oc_margins:
-            raise NotImplementedError(
-                f"screening OrderedCategorical margins {oc_margins} lands in a later task"
-            )
         if kind in ("numeric_cat", "numeric_numeric"):
             # A numeric margin enters the probe LINEARLY, so the pair has no
             # joint grid to assemble: z-weighted moments over the other
@@ -750,7 +804,7 @@ def screen_interactions(
                 n_cells = n_g
                 # Exact, not an estimate: a factor margin's contrast menu is
                 # (L, L-1) wide, so the gate needs no post-menu recheck.
-                k_g = _marginal_width_estimate(model._specs[cat_name])
+                k_g = _marginal_width_estimate(_margin_spec(cat_name))
                 if not _numeric_margin_within_budget(k_g):
                     rows.append(
                         (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
@@ -768,8 +822,8 @@ def screen_interactions(
             left, right = feat_a, feat_b
             if margin_kinds[left] == "categorical" and margin_kinds[right] != "categorical":
                 left, right = right, left
-            k_l = _marginal_width_estimate(model._specs[left])
-            k_r = _marginal_width_estimate(model._specs[right])
+            k_l = _marginal_width_estimate(_margin_spec(left))
+            k_r = _marginal_width_estimate(_margin_spec(right))
             bin_flag = {left: False, right: False}
             margins = None
             while True:
