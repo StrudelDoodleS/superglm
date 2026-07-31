@@ -931,14 +931,27 @@ def _fit_scop_reml_mode(
     mode_newton_relative = _scop_mode_newton_relative(mode)
     mode_tolerance = _scop_mode_tolerance(mode, context.pirls_tol)
     if mode_newton_relative > mode_tolerance:
-        if _certification_retry < 2:
-            retry_tolerance = 10.0 ** (-10 - _certification_retry)
+        if _certification_retry < 3:
+            # Rungs 0->1 and 1->2 tighten the inner tolerance and re-fit from the
+            # mode that just failed. That rescues a residual left by loose inner
+            # convergence -- measured, 29 of 43 retries -- but it cannot move a
+            # fit already converged tighter than the bar, which returns the same
+            # mode bit-identically however hard the tolerance is squeezed.
+            #
+            # Rung 2->3 is therefore the cold one. It holds the tightest
+            # tolerance the ladder reached rather than squeezing further, so it
+            # differs from its predecessor in exactly one respect: the starting
+            # point. The warm start it drops comes from a bootstrap fitted at
+            # lambda=1e-4, a long way from these lambdas, which is the plausible
+            # reason the mode landed off-stationary in the first place.
+            cold_rung = _certification_retry == 2
+            retry_tolerance = 10.0 ** (-10 - min(_certification_retry, 1))
             retry_context = replace(
                 context,
                 pirls_tol=min(context.pirls_tol, retry_tolerance),
             )
             centered_scale = np.sqrt(np.maximum(np.diag(centered_xtwx), 0.0) / sum_w)
-            warm_retry = _raw_centering_well_scaled(fisher_mean_x, centered_scale)
+            warm_retry = not cold_rung and _raw_centering_well_scaled(fisher_mean_x, centered_scale)
             return _fit_scop_reml_mode(
                 retry_context,
                 lambdas,
