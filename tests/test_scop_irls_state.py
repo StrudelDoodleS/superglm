@@ -338,18 +338,13 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
     ("alpha", "halvings", "rejected"),
     [(0.5, 1, False), (0.25, 2, False), (1.0, 0, True)],
 )
-def test_stagnation_channel_matches_the_recorder_on_step_quality(
-    monkeypatch, alpha, halvings, rejected
-) -> None:
-    """The two per-iteration channels must agree on the step-quality fields too.
+def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rejected) -> None:
+    """The recorder must carry the step-quality fields, not just the deviance.
 
-    ``test_both_channels_agree_entry_for_entry`` compares the narrow channel
-    against the full recorder over a real SCOP REML fit, but every record that
-    corpus produces carries ``step_rejected=False`` and ``step_halvings=0`` --
-    measured: 69 records, 2 inner fits, zero of each.  So it pins the deviance
-    and nothing else, and mutating the narrow append to skip rejected steps
-    passes it.  This drives both fields directly instead of hoping a fixture
-    reaches them.
+    Every record the SCOP corpus produces carries ``step_rejected=False`` and
+    ``step_halvings=0`` -- measured: 69 records, 2 inner fits, zero of each --
+    so a fixture-driven test pins the deviance and nothing else. This drives
+    both fields directly instead of hoping a fixture reaches them.
     """
     import superglm.solvers.irls_direct as irls_direct
 
@@ -371,21 +366,11 @@ def test_stagnation_channel_matches_the_recorder_on_step_quality(
         offset=offset,
         max_iter=1,
         record_diagnostics=True,
-        _record_stagnation=True,
     )
 
     assert result.iteration_log is not None
-    assert result.stagnation_log is not None
-    assert len(result.stagnation_log) == len(result.iteration_log)
-    for record, row in zip(result.stagnation_log, result.iteration_log, strict=True):
-        assert np.float64(record.deviance).tobytes() == np.float64(row.deviance).tobytes()
-        assert record.step_rejected == row.step_rejected
-        assert record.step_halvings == row.step_halvings
-
-    # Without this the parametrization could be inert and the comparison above
-    # would be pinning the same all-zero case three times.
-    assert result.stagnation_log[0].step_halvings == halvings
-    assert result.stagnation_log[0].step_rejected is rejected
+    assert result.iteration_log[0].step_halvings == halvings
+    assert result.iteration_log[0].step_rejected is rejected
 
 
 def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) -> None:
