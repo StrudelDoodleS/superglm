@@ -2634,6 +2634,78 @@ class TestCandidateStepBackoff:
         fitted = model.predict(frame)
         assert np.all(np.diff(fitted) >= -1e-8), "the rescued fit still honours the constraint"
 
+    def test_an_unrecoverable_candidate_still_raises(self, monkeypatch):
+        """When no damped step certifies either, the failure stays loud.
+
+        Every candidate-phase certification is rejected, so the ladder and
+        then every backoff attempt fail. The exact candidate error must
+        surface: the backoff is bounded, and it must not convert a hard
+        failure into a silent stall or an unbounded retry.
+        """
+        state = {"phase": None}
+        self._phase_tracking(monkeypatch, state)
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        def reject_every_candidate_check(mode):
+            if state["phase"] == "candidate":
+                return 1.0
+            return real_relative(mode)
+
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_mode_newton_relative", reject_every_candidate_check
+        )
+
+        model, frame, y = self._model()
+        with pytest.raises(
+            RuntimeError, match="SCOP REML candidate did not converge to a coefficient mode"
+        ):
+            model.fit_reml(frame, y, max_reml_iter=5)
+
+    def test_a_failed_bootstrap_has_nothing_to_back_off_to(self, monkeypatch):
+        """The recoverability principle's boundary: no predecessor, no rescue.
+
+        Rejecting every certification kills the bootstrap after its ladder.
+        There is no earlier certified mode to damp toward, so the loud
+        error is the designed outcome, unchanged by the candidate backoff.
+        """
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        model, frame, y = self._model()
+        with pytest.raises(
+            RuntimeError, match="SCOP REML bootstrap did not converge to a coefficient mode"
+        ):
+            model.fit_reml(frame, y, max_reml_iter=5)
+
+    def test_a_failed_fixed_lambda_fit_has_nothing_to_back_off_to(self, monkeypatch):
+        """Fixed-lambda fits have no certified predecessor either.
+
+        With every SCOP lambda held fixed there is no bootstrap and no EFS
+        step to shorten -- the requested lambdas are the fit. A
+        certification failure there must stay a loud refusal.
+        """
+        monkeypatch.setattr(scop_efs_module, "_scop_mode_newton_relative", lambda mode: 1.0)
+        rng = np.random.default_rng(0)
+        n = 200
+        x = np.sort(rng.uniform(0, 1, n))
+        y = np.round(np.exp(1.0 + 1.5 * x)).astype(float)
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x": PSpline(
+                    n_knots=8,
+                    penalty="ssp",
+                    constraint=Constraint.fit.increasing,
+                    lambda_policy=LambdaPolicy(mode="fixed", value=1.0),
+                )
+            },
+        )
+        with pytest.raises(
+            RuntimeError, match="fixed-lambda SCOP fit did not converge to a coefficient mode"
+        ):
+            model.fit_reml(frame, y, max_reml_iter=5)
+
 
 class TestIterationDiagnosticsSmallSample:
     """The diagnostics recorder must survive n <= 5.
