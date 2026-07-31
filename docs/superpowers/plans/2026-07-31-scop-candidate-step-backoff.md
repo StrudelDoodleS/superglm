@@ -627,3 +627,49 @@ the change is invisible everywhere except injected failure.
 `ruff format --check` clean after formatting the two touched files;
 `uv lock --check`, `uv pip check`, and `run_test.py` ("END-TO-END COMPLETE")
 all clean.
+
+## Review round 1 (2026-07-31, PR #183 — Codex + claude bot, same day)
+
+CI on the PR: all checks green, including `Python 3.12 · complete
+non-browser suite` (the successor of the job where #179 surfaced).
+
+**Codex P2 (confirmed by a red test before fixing): rescue-then-stall.**
+If the rescue certified but the very next line search accepted nothing, the
+`line_search_stalled` branch would *return* the rescued mode
+(`converged=False`) where pre-backoff code raised — publishing a vector no
+acceptance gate ever endorsed. Fixed: a per-iteration `rescue_alpha` flag
+makes that branch raise the exact candidate error; stalls from
+accepted-progress states keep their existing semantics. Pinned by
+`test_a_rescue_the_line_search_cannot_move_from_still_raises`. The claude
+bot's finding 2 was the same boundary (it proposed documenting; the guard
+is stronger and matches Codex's remedy). Spec updated.
+
+**claude bot findings, dispositions:**
+1. *Latent `KeyError`* — `trial_lambdas` seeded from the origin's key set
+   could drop a proposal-only name. Not reachable today (upstream seeds
+   both dicts identically) but real; fixed by seeding from
+   `proposed_lambdas`, red-tested first
+   (`test_the_backoff_preserves_the_proposal_key_set`, which also covers
+   the no-movement `return None` branch).
+2. Fixed via the stall guard above.
+3. *No signal of a rescue outside the trace* — added a `verbose` line and
+   `candidate_backoff_alpha` (null normally) to the level-2 reml payload;
+   helper now returns its alpha.
+4. *`lambda_history` recorded the never-fitted proposal* — on rescue the
+   last entry (by construction the failed vector) is replaced with the
+   adopted damped vector; history now contains fitted vectors only.
+   Spec bullet rewritten.
+5. *Dead Step-9 `step_origin` update* — kept, with the requested comment
+   marking it defensive.
+6. *`ValueError` vs `RuntimeError` on non-finite endpoints* — left as is,
+   per the reviewer's own disposition (mirrors the line search, effectively
+   unreachable).
+7. *Mechanism not asserted* — the rescue test now pins the first backoff
+   attempt at `alpha=0.5` and the adopted vector strictly between the
+   bootstrap and the failed proposal (`_phase_tracking` records top-level
+   fits with phase, `trial_alpha`, lambdas).
+
+**Re-verification on the final tree:** backoff class 6 passed; file 141
+passed; corpus inertness diff empty (146-test population, 6 deselected);
+SCOP suites on numpy 2.4.1: 152 passed; full suite on the final tree:
+**5118 passed / 84 skipped** (baseline 5112 + the 6 new tests).
