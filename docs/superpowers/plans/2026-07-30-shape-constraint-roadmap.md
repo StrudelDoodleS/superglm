@@ -211,7 +211,19 @@ built only when the Gram cannot resolve the step). **Item 2c is done:** the
 stagnation acceptance rule and the private `stagnation_log` channel behind it
 are removed. The evidence was that across the full suite the gate was reached
 only by its own stub-driven tests -- no real fit in the corpus could drive it.
-**Item 2b closes with it:** the penalized-score certification it asked for
-already exists (`_scop_mode_newton_relative` gated in `_fit_scop_reml_mode`)
-and is now the sole acceptance path, so a separate gradient-norm test would be
-redundant. Design: `docs/superpowers/specs/2026-07-31-scop-stagnation-gate-removal-design.md`.
+
+**Item 2b is superseded, not completed.** 2b assumed the gate would survive in
+strengthened form: it asks for a published gradient-norm test on the penalized
+deviance *and* says to keep deviance stagnation as the primary criterion. 2c's
+evidence removed that premise -- there is no acceptance gate left to
+strengthen, and deviance stagnation is gone rather than kept. What certifies a
+mode now is `_scop_mode_newton_relative`, gated unconditionally in
+`_fit_scop_reml_mode` and the sole acceptance path. It is score-based, and at a
+flat boundary it is stronger than what 2b asked for -- but it is not the same
+object: it is a Newton-scaled relative correction restricted to the estimable
+range (the score is projected before the pseudoinverse, so truncated directions
+are discarded), and it is vacuous on non-SCOP modes, where empty `scop_states`
+zero the mode score. Anyone who still wants 2b's literal gradient-norm test
+should treat it as unimplemented and re-argue it on its merits.
+
+Design: `docs/superpowers/specs/2026-07-31-scop-stagnation-gate-removal-design.md`.
