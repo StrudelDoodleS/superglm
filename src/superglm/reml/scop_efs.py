@@ -780,9 +780,10 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode) -> float:
     exactly this value on every certification the suites perform.
 
     Do not generalise that deletion to the sibling bars in
-    ``model/reml_finalize.py`` and ``reml/direct.py``: they keep the same
-    term over a ``100*eps`` floor, far below ``1e-9``, so there the
-    tolerance arm is live and load-bearing.
+    ``model/reml_finalize.py`` (the same clamped term) and ``reml/direct.py``
+    (the clamp applies only on the observed-geometry path; the Fisher path
+    is unclamped ``10 * pirls_tol``): both sit over a ``100*eps`` floor,
+    far below ``1e-9``, so there the tolerance arm is live and load-bearing.
     """
     return float(np.sqrt(max(1, mode.hessian_rank) * np.finfo(np.float64).eps))
 

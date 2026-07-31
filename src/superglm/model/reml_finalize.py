@@ -544,6 +544,9 @@ def finalize_reml_fit(
             lambdas=lambdas if structured_linear_state is not None else None,
             reml_penalties=reml_penalties if structured_linear_state is not None else None,
         )
+        # Floored at 100*eps, so unlike the SCOP certification bar
+        # (reml/scop_efs.py) the tolerance arm here is live -- do not
+        # generalise the #184 deletion to this expression.
         terminal_mode_tolerance = max(
             10.0 * min(pirls_tol, 1e-10),
             100.0 * np.finfo(float).eps,
