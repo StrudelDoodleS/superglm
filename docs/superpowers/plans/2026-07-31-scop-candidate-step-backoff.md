@@ -732,3 +732,30 @@ correctness. Three robustness items, all applied:
 passed; corpus inertness diff empty (146-test population, 8 deselected);
 SCOP suites on numpy 2.4.1: 154 passed; full suite: **5120 passed /
 84 skipped** (baseline 5112 + the 8 new tests).
+
+## Review round 4 (2026-07-31, on `6b76f4d`; CI on that head fully green)
+
+**claude bot round 4: "This reads as done to me… nothing here needs another
+round before merge."** Verified all round-3 items at the code level
+(including deriving that the `rescue_endorsed` guard is logically equivalent
+to the round-3 identity check, and that the docstring contract is the exact
+contrapositive of what the guard needs). Two comment-level items:
+1. The `rescue_endorsed` comment now explains *why* the condition is
+   computed before the payload (the row must record the same verdict the
+   guard acts on; `retained_mode` must not be reassigned between the two
+   points). Applied.
+2. A correction to our round-2 reply's coverage reasoning, accepted: the
+   rescue tests never attach a recorder, so the payload dict is not built
+   there — null-case coverage of the two payload keys lives in
+   `tests/test_fit_reml_debug.py` under `set_debug_level(2)`, and the
+   guard expression itself is pinned by both "still raises" tests. No code
+   change requested; recorded here so the right reason survives.
+
+**Codex round 4: declined by design.** It proposed gating rescues on the
+*origin's* objective. Declined with rationale on the thread and a
+"Deliberately not doing" entry in the spec: iteration 1 adopts a certified
+full-step candidate unconditionally (the bootstrap is a degenerate warm-up,
+not a quality floor), so gating only damped steps would recreate the
+path-dependent asymmetry this issue was filed against; the
+uphill-accept-stall shape is reachable today without a rescue and returns
+flagged (`converged=False`). Codex round 3 on the same code was clean.

@@ -187,6 +187,23 @@ recoveries; the line search's `continue` is load-bearing — it is why NumPy
 rescued mode and everything after it is line-search-protected; teaching the
 step controller about the failure adds coupling with no case that needs it.
 
+**An objective gate against the origin on rescues** (proposed in review —
+PR #183, Codex round 4; declined). Iteration 1's contract adopts a certified
+full-step candidate unconditionally — the loop never compares any mode to
+the bootstrap's objective, because the bootstrap is a deliberately
+degenerate warm-up the EFS step exists to move away from, not a quality
+floor. Gating only the damped steps would make the rescue path stricter
+than the success path it substitutes for — a certified `alpha=0.5` mode
+rejected for an objective relationship a certified `alpha=1.0` mode is
+allowed to have — recreating exactly the path-dependent asymmetry this
+issue was filed against. The uphill-rescue-then-stall shape is reachable
+today without any rescue (a certified full-step candidate uphill of the
+bootstrap, one accepted trial, then a stall) and returns with
+`converged=False` and a termination reason, the loop's pre-existing signal.
+After a rescue, every subsequent movement is non-worsening under the loop's
+own acceptance gate, and the acceptance guard already refuses to publish a
+rescue that machinery never endorsed.
+
 **Reflection in the backoff.** The line search reflects because an EFS
 direction can be uphill in the exact objective. The backoff addresses
 certifiability, not descent, and by continuity damping toward the certified
