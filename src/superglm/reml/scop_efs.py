@@ -778,6 +778,11 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode) -> float:
     ``10 * min(pirls_tol, 1e-10) <= 1e-9`` can never exceed this floor,
     which is at least ``sqrt(eps) ~ 1.49e-8`` -- so the bar measured as
     exactly this value on every certification the suites perform.
+
+    Do not generalise that deletion to the sibling bars in
+    ``model/reml_finalize.py`` and ``reml/direct.py``: they keep the same
+    term over a ``100*eps`` floor, far below ``1e-9``, so there the
+    tolerance arm is live and load-bearing.
     """
     return float(np.sqrt(max(1, mode.hessian_rank) * np.finfo(np.float64).eps))
 
