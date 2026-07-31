@@ -2662,6 +2662,13 @@ class TestCandidateStepBackoff:
             low, high = sorted((bootstrap[key], proposal[key]))
             assert low < adopted[key] < high, "the adopted step must be a strict shortening"
 
+        # The history must record the damped vector that was fitted, not the
+        # proposal that never certified (governance reads lambda_history as
+        # the REML path of fitted vectors).
+        history = model._reml_result.lambda_history
+        assert history[0] == adopted, "the history records the fitted damped vector"
+        assert history[0] != proposal, "not the proposal that was never fitted"
+
     def test_the_backoff_preserves_the_proposal_key_set(self, monkeypatch):
         """Adopted lambdas must keep the loop's key set, not the origin's.
 
@@ -2758,6 +2765,43 @@ class TestCandidateStepBackoff:
             "_scop_mode_newton_relative",
             reject_ladder_then_every_line_search_check,
         )
+
+        model, frame, y = self._model()
+        with pytest.raises(
+            RuntimeError, match="SCOP REML candidate did not converge to a coefficient mode"
+        ):
+            model.fit_reml(frame, y, max_reml_iter=5)
+        assert state["candidate_rejections"] == 4, "the rescue path must actually be exercised"
+
+    def test_a_rescue_with_a_no_op_proposal_still_raises(self, monkeypatch):
+        """An EFS no-op after a rescue is not accepted progress.
+
+        When every active component's proposal equals the rescued mode's
+        lambdas, the line search returns the current mode accepted-by-default
+        without fitting a single trial. For a rescued iteration that
+        acceptance is vacuous -- no objective gate ever saw the mode -- and
+        the zero lambda delta would immediately satisfy strict convergence,
+        publishing the rescue as a converged fit on an input that previously
+        raised. Found in review (PR #183, Codex round 2).
+        """
+        state = {"phase": None, "candidate_rejections": 0}
+        self._phase_tracking(monkeypatch, state)
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        def reject_the_first_candidate_ladder(mode):
+            if state["phase"] == "candidate" and state["candidate_rejections"] < 4:
+                state["candidate_rejections"] += 1
+                return 1.0
+            return real_relative(mode)
+
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_mode_newton_relative", reject_the_first_candidate_ladder
+        )
+
+        def no_op_backtrack(context, current, proposed_lambdas, **kwargs):
+            return current, True
+
+        monkeypatch.setattr(scop_efs_module, "_backtrack_scop_efs_candidate", no_op_backtrack)
 
         model, frame, y = self._model()
         with pytest.raises(

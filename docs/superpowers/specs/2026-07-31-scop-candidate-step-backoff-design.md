@@ -135,8 +135,13 @@ failure — step-size control from that point on is owned by the adaptive
   ordinary `line_search_stalled` return would publish half a bootstrap step
   as a REML estimate on an input that raised before the backoff existed.
   That branch now raises the candidate error instead, keyed on a
-  per-iteration `rescued_candidate` flag. Stalls from accepted-progress
-  states keep their existing semantics.
+  per-iteration `rescue_alpha` marker and an identity check on the line
+  search's return — which hands back the current mode itself in exactly the
+  two no-endorsement cases (every trial rejected, or a no-op proposal
+  accepted without fitting anything; the latter found by Codex in round 2,
+  where the zero lambda delta would otherwise satisfy strict convergence).
+  Stalls and convergence from accepted-progress states keep their existing
+  semantics.
 - **`lambda_history` records fitted vectors only** (revised in review —
   PR #183). At the candidate site the last history entry is by construction
   the vector that just failed; on rescue it is replaced with the damped
@@ -163,8 +168,10 @@ stand: on iteration 1 the only fallback to *return* is the near-unpenalized
 `lambda=1e-4` bootstrap; most callers never check `converged`; it
 reintroduces the silent degradation #178 removed. The backoff is different in
 kind: it returns nothing degraded — it hands the loop a certified mode to
-continue from, and the fit that emerges is a converged REML fit or a loud
-error, never a quiet stall.
+continue from, under the acceptance guard above: a rescue is never published
+without acceptance-gated progress after it, and once such progress exists the
+result carries the loop's ordinary semantics (including, e.g., an eventual
+`max_reml_iter` exhaustion from an accepted state).
 
 **Symmetrizing the other way** (make the line search fatal): strictly fewer
 recoveries; the line search's `continue` is load-bearing — it is why NumPy

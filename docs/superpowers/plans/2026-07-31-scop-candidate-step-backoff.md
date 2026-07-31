@@ -673,3 +673,36 @@ is stronger and matches Codex's remedy). Spec updated.
 passed; corpus inertness diff empty (146-test population, 6 deselected);
 SCOP suites on numpy 2.4.1: 152 passed; full suite on the final tree:
 **5118 passed / 84 skipped** (baseline 5112 + the 6 new tests).
+
+## Review round 2 (2026-07-31, on `661ecda`; CI on that head fully green)
+
+**Codex round-2 P2 (confirmed by a red test): the no-op hole in the round-1
+guard.** `_backtrack_scop_efs_candidate` returns `(current, True)` for a
+no-op proposal *without fitting anything*; that vacuous acceptance skipped
+the `not candidate_accepted` guard, and the zero lambda delta then satisfied
+strict convergence — publishing a rescued mode `converged=True` with no
+objective gate ever having seen it. Fixed with a unified identity guard
+(`rescue_alpha is not None and retained_mode is current_mode`): the line
+search hands back the current mode itself in exactly the two no-endorsement
+cases, so one check now covers stall *and* no-op, subsuming the round-1
+guard. Red-tested via `test_a_rescue_with_a_no_op_proposal_still_raises`
+(monkeypatched no-op line search; previously returned a converged fit).
+
+**claude bot round 2:** verified all seven round-1 dispositions at the code
+level (two "better than asked": the stall guard as code, the history
+*replace* remedy preserving length and index alignment with
+`objective_history`). Remaining items, all applied:
+1. `lambda_history` replacement regression — the happy rescue test now pins
+   `history[0] == adopted != proposal` (deleting the replacement line fails
+   a test).
+2. Guard comment now states the message is deliberately the pre-backoff one
+   and points debuggers at `candidate_backoff_alpha`.
+3. Spec's later "never a quiet stall" sentence now defers to the acceptance
+   guard's precise claim.
+4. Drifts fixed: spec names `rescue_alpha`; helper docstring documents that
+   a proposal-only key is adopted undamped.
+
+**Re-verification on the round-2 tree:** backoff class 7 passed; file 142
+passed; corpus inertness diff empty (146-test population, 7 deselected);
+SCOP suites on numpy 2.4.1: 153 passed; full suite: **5119 passed /
+84 skipped** (baseline 5112 + the 7 new tests).
