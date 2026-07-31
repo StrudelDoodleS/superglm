@@ -1,5 +1,27 @@
 # SCOP Stagnation Gate Removal Implementation Plan
 
+> **Superseded in part — read the outcome, not this plan, for the position.**
+> The removal shipped as planned, but three claims in the body below did not
+> survive review and are retracted. **(1)** "Item 2b closes with it … a separate
+> gradient-norm test would be **redundant**" (`:635-638`, restated at `:667`) —
+> 2b is *unresolved*, not closed: its "keep deviance stagnation as the primary
+> criterion" clause is ambiguous between the retired acceptance gate and the
+> inner PIRLS convergence test, and on the second reading 2b is untouched and
+> more attractive than before. What shipped is asymmetric against a gradient
+> norm, not a superset of it. **(2)** "the sole acceptance path" (`:29`, `:342`)
+> — the penalized-score certification is the sole *certification*, but
+> `require_converged and not result.converged` still rejects a mode before it is
+> ever computed. **(3)** "the gate was **reached** only by its own stub-driven
+> tests" (`:34`, `:339`, `:663`) — reaching the gate and being accepted by it
+> are different bars. Any non-converged inner fit reaches it, and real
+> outer-loop fits do and are declined there. The measured finding is narrower:
+> no real fit in the corpus is *accepted* by it.
+>
+> Authoritative: the **Status 2026-07-31** paragraph of
+> `docs/superpowers/plans/2026-07-30-shape-constraint-roadmap.md`, and
+> `docs/superpowers/specs/2026-07-31-scop-stagnation-gate-removal-design.md`.
+> The body below is left unedited as the historical record of what was planned.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Retire the SCOP deviance-stagnation acceptance rule and the private
