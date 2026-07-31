@@ -337,15 +337,18 @@ def screen_interactions(
     whose tensor curvature block ``(k_a*k_b)^2`` alone exceeds the budget is
     skipped immediately — binning cannot shrink basis dimensions, so such
     rows may report the raw grid with no binning attempted.
-    ``approx`` is also True for any ``ti`` pair whose confirmatory refit
-    would discretize LOSSILY — both parents resolve to fit-time
-    discretization (per-spec ``discrete`` overriding the model flag) and at
-    least one parent's cardinality exceeds its resolved bin count.
-    Lossless binning returns the exact unique support, so such refits match
-    the probe basis and stay ``approx=False``.  A categorical margin never
-    bins and never discretizes: its support is the fitted level set, so a
-    ``cat_cat`` row is ``approx=False`` and a ``spline_cat`` row only when
-    its spline margin was quantile-binned at screen time.
+    ``approx`` is also True for any pair whose confirmatory refit would
+    discretize LOSSILY, applying the gate that refit itself uses — which
+    differs by kind.  A ``ti`` refit bins its marginal supports only when
+    BOTH parents resolve to fit-time discretization (per-spec ``discrete``
+    overriding the model flag); a ``spline_cat`` refit bins its spline margin
+    whenever that ONE parent does.  Either way the row is flagged only when
+    some margin the refit would bin has a cardinality exceeding its resolved
+    bin count: lossless binning returns the exact unique support, so those
+    refits match the probe basis and stay ``approx=False``.  A categorical
+    margin never bins and never discretizes — its support is the fitted level
+    set — so it never contributes to the flag, and a ``cat_cat`` row is
+    always ``approx=False``.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -632,29 +635,40 @@ def screen_interactions(
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 
     # Discretization is decided per SPEC, not per model: spec.discrete
-    # overrides the model flag, and a ti() refit bins marginal supports only
-    # when BOTH parents discretize.  Discretization is LOSSLESS when a
-    # parent's cardinality fits its resolved bin count (the binner returns
-    # the exact unique support), so approx flags only pairs whose refit
-    # basis genuinely differs: both parents discretize AND at least one
-    # discretization is lossy.
+    # overrides the model flag.  Discretization is LOSSLESS when a margin's
+    # cardinality fits its resolved bin count (the binner returns the exact
+    # unique support), so approx flags only a refit whose basis genuinely
+    # differs from the probe: some margin the refit would bin, binned lossily.
     model_discrete = bool(getattr(model, "_discrete", False))
     n_bins_config = getattr(model, "_n_bins", 256)
 
-    def _pair_refits_discrete(feat_a, feat_b):
-        # Only a both-spline pair refits as a discretized tensor.  The guard is
-        # also what keeps _support (and its float cast) away from a label
-        # column, so it must key on the margin kind, not on should_discretize.
-        if any(margin_kinds[name] != "spline" for name in (feat_a, feat_b)):
-            return False
-        if not all(
-            should_discretize(model._specs[name], model_discrete) for name in (feat_a, feat_b)
-        ):
-            return False
+    def _refit_binned_margins(kind, feat_a, feat_b):
+        """The margins whose basis the confirmatory refit would discretize.
+
+        Mirrors the gates the builder itself applies, which differ by class: a
+        ti() refit bins its marginal supports only when BOTH parents
+        discretize, while a SplineCategorical refit bins its spline margin
+        whenever that ONE parent does.  A categorical margin has nothing to
+        compress and never appears here, which is also what keeps ``_support``
+        (and its float cast) away from a label column.
+        """
+        if kind not in ("ti", "spline_cat"):
+            return []
+        splines = [
+            name
+            for name in (feat_a, feat_b)
+            if margin_kinds[name] == "spline"
+            and should_discretize(model._specs[name], model_discrete)
+        ]
+        if kind == "ti" and len(splines) < 2:
+            return []
+        return splines
+
+    def _pair_refits_discrete(kind, feat_a, feat_b):
         return any(
             _support(name, False)["n"]
             > resolve_discrete_n_bins(name, model._specs[name], n_bins_config)
-            for name in (feat_a, feat_b)
+            for name in _refit_binned_margins(kind, feat_a, feat_b)
         )
 
     for feat_a, feat_b in pairs:
@@ -710,7 +724,7 @@ def screen_interactions(
             if not binnable:
                 break
             bin_flag[binnable[0][1]] = True
-        approx = bin_flag[left] or bin_flag[right] or _pair_refits_discrete(feat_a, feat_b)
+        approx = bin_flag[left] or bin_flag[right] or _pair_refits_discrete(kind, feat_a, feat_b)
         n_cells = n_l * n_r
         if margins is None:
             rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx))

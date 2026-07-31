@@ -234,6 +234,67 @@ def test_spline_cat_planted_deviation_curve_ranks_first():
     assert top["z"] > 8.0
 
 
+def test_spline_cat_flags_approx_when_only_its_spline_margin_bins_lossily():
+    """A SplineCategorical refit discretizes on a SINGLE-parent gate: its spline
+    margin bins whenever that parent does, with no say from the factor.  So a
+    spline_cat row must flag approx exactly when the spline margin's
+    cardinality overruns its resolved bin count -- the same probe-vs-refit
+    basis gap ti flags, which a both-parents rule would silently miss."""
+    rng = np.random.default_rng(21)
+    n = 4000
+    df = pd.DataFrame(
+        {
+            # 40 distinct ages: binned exactly at 256 bins, lossily at 8
+            "age": rng.integers(20, 60, n).astype(float),
+            "power": rng.uniform(20.0, 200.0, n),
+            "region": rng.choice(list("ABCD"), n),
+            "brand": rng.choice(["B1", "B2", "B3"], n),
+        }
+    )
+    y = rng.poisson(np.exp(-1.5 + 0.01 * df["age"])).astype(np.float64)
+
+    def flags(**kwargs):
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "age": Spline(kind="ps", n_knots=6),
+                "power": Spline(kind="ps", n_knots=6),
+                "region": Categorical(),
+                "brand": Categorical(),
+            },
+            **kwargs,
+        )
+        model.fit_reml(df, y)
+        table = model.screen_interactions(df, y)
+        assert not table["approx"].isna().any()
+        return {
+            frozenset((row.feature_a, row.feature_b)): (row.kind, bool(row.approx))
+            for row in table.itertuples()
+        }
+
+    age_region = frozenset(("age", "region"))
+    power_region = frozenset(("power", "region"))
+    two_factors = frozenset(("region", "brand"))
+
+    # 8 bins: 40 distinct ages bin lossily, so the refit basis differs
+    lossy = flags(discrete=True, n_bins=8)
+    assert lossy[age_region] == ("spline_cat", True)
+    assert lossy[power_region] == ("spline_cat", True)
+    assert lossy[two_factors] == ("cat_cat", False)
+
+    # 256 bins: age's 40 values bin exactly, power's 4000 do not
+    partly = flags(discrete=True, n_bins=256)
+    assert partly[age_region] == ("spline_cat", False)
+    assert partly[power_region] == ("spline_cat", True)
+    assert partly[two_factors] == ("cat_cat", False)
+
+    # no fit-time discretization at all: no refit binning, nothing to flag
+    off = flags(discrete=False)
+    assert off[age_region] == ("spline_cat", False)
+    assert off[power_region] == ("spline_cat", False)
+    assert off[two_factors] == ("cat_cat", False)
+
+
 def test_mixed_pair_order_does_not_leak_into_the_row():
     """A spline_cat pair is assembled with the categorical margin LAST, whichever
     order the caller names it in.  That swap is a column permutation the
