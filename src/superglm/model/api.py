@@ -633,12 +633,13 @@ class SuperGLM:
         fixed screening complexity, after profiling out what the pair's own
         main effects already explain.  The ``kind`` column names that refit
         target — ``ti`` for spline x spline, ``spline_cat`` for a spline
-        crossed with a factor, ``cat_cat`` for two factors, with
-        ``numeric_cat`` and ``numeric_numeric`` arriving later in this
-        release series — and ``z`` is comparable across kinds, so the one
+        crossed with a factor, ``cat_cat`` for two factors, ``numeric_cat``
+        for a per-level numeric slope and ``numeric_numeric`` for a product
+        of two numerics — and ``z`` is comparable across kinds, so the one
         sorted table ranks them together.  A kind whose block carries no
-        penalty (``cat_cat``) has no bandwidth to scan and is evaluated at a
-        single rung: ``edf0`` then reports the block's achieved rank with
+        penalty (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no
+        bandwidth to scan and is evaluated at a single rung: ``edf0`` then
+        reports the block's achieved rank with
         ``lambda0`` 0.  ``edf0`` is a probe bandwidth; the
         default ladder evaluates each pair at several budgets and ranks by
         the best noise-normalized score ``z`` (the statistic is scaled by
@@ -659,16 +660,19 @@ class SuperGLM:
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
         A categorical margin never bins — its support is the fitted level
-        set.  Screening always probes exact bases, so a pair whose
+        set — and a numeric margin never grids at all: it enters its probe
+        linearly, so ``numeric_cat``/``numeric_numeric`` rows are exact at
+        any cardinality.  Screening always probes exact bases, so a pair whose
         confirmatory refit would discretize LOSSILY is flagged
         ``approx=True`` to make that support-discretization gap — measured
         at ~3.5% on signal pairs, the same class as the quantile fallback —
         visible in the output.  The flag applies the refit's own gate, which
         differs by kind: a ``ti`` refit bins its marginals only when BOTH
         parents resolve to fit-time discretization, a ``spline_cat`` refit
-        bins its spline margin whenever that ONE parent does, and a
-        ``cat_cat`` refit bins nothing.  Lossless binning returns the exact
-        support and stays ``approx=False``.
+        bins its spline margin whenever that ONE parent does, and the
+        ``cat_cat``/``numeric_cat``/``numeric_numeric`` refits bin nothing.
+        Lossless binning returns the exact support and stays
+        ``approx=False``.
         Pairs already fitted as an interaction of any class are excluded from
         the sweep.  The statistic is a ranking device, not a calibrated
         p-value: confirm the top-ranked pairs by refitting them as the
