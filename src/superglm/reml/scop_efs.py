@@ -1137,6 +1137,66 @@ def _finalize_scop_reml_mode(
     return result
 
 
+def _backoff_scop_candidate_step(
+    context: _SCOPREMLFitContext,
+    origin: _SCOPREMLMode,
+    proposed_lambdas: dict[str, float],
+    *,
+    reml_iteration: int,
+) -> tuple[_SCOPREMLMode, dict[str, float]] | None:
+    """Retry a failed candidate at damped steps toward its certified origin.
+
+    The candidate consumes the one EFS proposal that never went through the
+    line search, so a certification failure there had no damping behind it
+    and aborted the fit -- the same rejection the line search survives by
+    trying the next alpha.  This applies the line search's trial formula,
+    geometric interpolation in log-lambda at alpha = 0.5**attempt, between
+    the mode the step was taken from and the proposal that failed, warm-
+    starting each attempt from the origin.  The full step (alpha = 1.0) was
+    the original candidate fit, so the attempts complete the same forward
+    ladder the line search runs.
+
+    Returns the first certified mode with its lambdas, or ``None`` when
+    every damped attempt fails, in which case the caller keeps its raise.
+    """
+    changed_names = [
+        name
+        for name, proposed in proposed_lambdas.items()
+        if name in origin.lambdas and proposed != origin.lambdas[name]
+    ]
+    if not changed_names:
+        return None
+
+    log_directions: dict[str, float] = {}
+    for name in changed_names:
+        old = float(origin.lambdas[name])
+        proposed = float(proposed_lambdas[name])
+        if old <= 0.0 or proposed <= 0.0 or not np.isfinite(old + proposed):
+            raise ValueError("SCOP EFS lambda trials must be positive and finite")
+        log_directions[name] = float(np.log(proposed) - np.log(old))
+
+    for attempt in range(1, _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS):
+        alpha = 0.5**attempt
+        trial_lambdas = origin.lambdas.copy()
+        for name in changed_names:
+            log_trial = np.log(origin.lambdas[name]) + alpha * log_directions[name]
+            trial_lambdas[name] = float(np.clip(np.exp(log_trial), 1.0e-6, 1.0e10))
+        mode = _fit_scop_reml_mode(
+            context,
+            trial_lambdas,
+            beta_init=origin.result.beta,
+            intercept_init=float(origin.result.intercept),
+            scop_state_init=origin.scop_states if origin.scop_states else None,
+            phase="candidate",
+            reml_iteration=reml_iteration,
+            trial_alpha=alpha,
+            require_converged=True,
+        )
+        if mode is not None:
+            return mode, trial_lambdas
+    return None
+
+
 def _backtrack_scop_efs_candidate(
     context: _SCOPREMLFitContext,
     current: _SCOPREMLMode,
@@ -1609,6 +1669,7 @@ def optimize_scop_efs_reml(
     warm_beta: NDArray | None = boot_result.beta.copy()
     warm_intercept: float = float(boot_result.intercept)
     warm_scop_states: dict[int, dict] | None = boot_scop_states if boot_scop_states else None
+    step_origin: _SCOPREMLMode = boot_mode
     retained_mode: _SCOPREMLMode | None = None
     current_mode: _SCOPREMLMode | None = None
 
@@ -1653,7 +1714,21 @@ def optimize_scop_efs_reml(
                 require_converged=True,
             )
             if current_mode is None:
-                raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
+                # The one EFS proposal with no line search behind it; back the
+                # step off toward the certified mode it was taken from.  The
+                # bootstrap and fixed-lambda sites have no such mode and stay
+                # fatal.
+                rescue = _backoff_scop_candidate_step(
+                    fit_context,
+                    step_origin,
+                    lambdas,
+                    reml_iteration=n_reml_iter,
+                )
+                if rescue is None:
+                    raise RuntimeError(
+                        "SCOP REML candidate did not converge to a coefficient mode"
+                    )
+                current_mode, lambdas = rescue
         else:
             current_mode = retained_mode
             retained_mode = None
@@ -1839,6 +1914,7 @@ def optimize_scop_efs_reml(
         warm_beta = retained_mode.result.beta.copy()
         warm_intercept = float(retained_mode.result.intercept)
         warm_scop_states = retained_mode.scop_states if retained_mode.scop_states else None
+        step_origin = retained_mode
 
     # -- Terminal mode --
     # An accepted line-search state has already paid for both its converged

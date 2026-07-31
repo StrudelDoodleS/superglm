@@ -2556,6 +2556,85 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         assert warm_starts[3] is False, "the final rung must start cold"
 
 
+class TestCandidateStepBackoff:
+    """A candidate certification failure backs the lambda step off (#179).
+
+    The iteration-1 candidate consumes the one EFS proposal that bypasses
+    the line search, so it was the one lambda movement with no damping
+    behind it: four call sites raised on a rejection the line search
+    survives. The backoff applies the line search's own trial formula --
+    damped geometric steps in log-lambda -- between the certified mode the
+    step was taken from and the proposal that failed. Sites with no
+    certified predecessor (bootstrap, fixed-lambda) keep raising.
+    """
+
+    @staticmethod
+    def _model():
+        rng = np.random.default_rng(0)
+        n = 200
+        x = np.sort(rng.uniform(0, 1, n))
+        y = np.round(np.exp(1.0 + 1.5 * x)).astype(float)
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "x": PSpline(n_knots=8, penalty="ssp", constraint=Constraint.fit.increasing)
+            },
+        )
+        return model, frame, y
+
+    @staticmethod
+    def _phase_tracking(monkeypatch, state):
+        """Expose which top-level phase each certification check belongs to."""
+        real_fit = scop_efs_module._fit_scop_reml_mode
+
+        def tracking_fit(context, lambdas, **kwargs):
+            previous = state["phase"]
+            state["phase"] = kwargs.get("phase")
+            try:
+                return real_fit(context, lambdas, **kwargs)
+            finally:
+                state["phase"] = previous
+
+        monkeypatch.setattr(scop_efs_module, "_fit_scop_reml_mode", tracking_fit)
+
+    def test_a_failed_candidate_ladder_gets_a_damped_step(self, monkeypatch):
+        """Candidate certification failure damps the lambda step, not the fit.
+
+        The iteration-1 candidate's entire four-rung ladder is forced to
+        reject; every other check is real. Before the backoff this raised
+        ``SCOP REML candidate did not converge to a coefficient mode``; now
+        a shorter step toward the certified bootstrap must be found and the
+        fit must succeed. Asserted through the observable outcome -- the
+        fit completes and the fitted curve respects the constraint -- plus
+        the forced-rejection count, which pins that the whole ladder was
+        exhausted rather than the rescue arriving early.
+        """
+        state = {"phase": None, "candidate_rejections": 0}
+        self._phase_tracking(monkeypatch, state)
+        real_relative = scop_efs_module._scop_mode_newton_relative
+
+        def reject_the_first_candidate_ladder(mode):
+            if state["phase"] == "candidate" and state["candidate_rejections"] < 4:
+                state["candidate_rejections"] += 1
+                return 1.0  # far above any achievable bar
+            return real_relative(mode)
+
+        monkeypatch.setattr(
+            scop_efs_module, "_scop_mode_newton_relative", reject_the_first_candidate_ladder
+        )
+
+        model, frame, y = self._model()
+        model.fit_reml(frame, y, max_reml_iter=5)
+
+        assert state["candidate_rejections"] == 4, "the full ladder must be exhausted first"
+        assert model.result.beta is not None
+        fitted = model.predict(frame)
+        assert np.all(np.diff(fitted) >= -1e-8), "the rescued fit still honours the constraint"
+
+
 class TestIterationDiagnosticsSmallSample:
     """The diagnostics recorder must survive n <= 5.
 
