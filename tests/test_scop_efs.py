@@ -4,7 +4,6 @@ Part 1: Tests for SCOP state returned from fit_irls_direct.
 Part 2: Tests for build_scop_penalty_components.
 """
 
-import contextlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -2485,98 +2484,15 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             model.fit_reml(frame, response, max_reml_iter=20)
 
 
-class TestStagnationChannelMatchesTheDiagnosticsRecorder:
-    """The narrow channel must carry exactly what the full recorder would.
-
-    The gate originally read ``IterationDiagnostics`` rows, which meant every
-    SCOP inner fit paid for a forty-field row and the solver's per-iteration
-    extrema capture to hand over three scalars. It now reads
-    ``StagnationRecord``s from a narrow flag instead. Both are appended from the
-    same loop variables at the same point in the iteration; this pins that, by
-    running a real SCOP REML fit with *both* channels on and requiring exact
-    equality field by field. Byte equality is deliberate: ``allclose`` would not
-    catch a channel that had drifted onto a different quantity.
-    """
-
-    @staticmethod
-    def _bits(value):
-        return np.float64(value).tobytes()
-
-    def test_both_channels_agree_entry_for_entry(self, monkeypatch):
-        real = scop_efs_module.fit_irls_direct
-        compared = []
-
-        def both_channels(**kwargs):
-            out = real(**dict(kwargs, record_diagnostics=True))
-            result = out[0]
-            compared.append((result.stagnation_log, result.iteration_log))
-            return out
-
-        monkeypatch.setattr(scop_efs_module, "fit_irls_direct", both_channels)
-
-        # A monotone-increasing constraint on decreasing data: SCOP coefficients
-        # are driven to their log-space boundary, which is where the two
-        # channels have to be compared -- a boundary fit exercises step
-        # rejection and halving, not just a quiet converged tail.
-        #
-        # This fixture used to exhaust its 35-iteration budget here. Rank
-        # truncation in the SCOP Newton step discards the unidentifiable
-        # boundary direction, so the coefficient stops drifting and the fit now
-        # converges in single figures. That is the fix working; it leaves fewer
-        # iterations to compare, which is why the count asserted below is what
-        # the boundary fit actually produces rather than a budget-sized run.
-        x = np.linspace(0.0, 1.0, 300)
-        y = 5.0 - 4.0 * x + 0.05 * np.random.default_rng(1).standard_normal(300)
-        model = SuperGLM(
-            family="gaussian",
-            selection_penalty=0.0,
-            discrete=True,
-            features={"x": PSpline(n_knots=10, constraint=Constraint.fit.increasing)},
-        )
-        # Whether the *outer* REML optimizer then converges is not what this
-        # test checks, and it is not portable: the fixture is chosen to sit on
-        # the log-space boundary, which is exactly the regime where acceptance
-        # turns on last-bit differences between interpreters (3.14 raises here
-        # where 3.13 does not).  The inner fits have already run and been
-        # captured by the wrapper above either way; ``entries >= 30`` below is
-        # what keeps this from passing vacuously.
-        with contextlib.suppress(RuntimeError):
-            model.fit_reml(pd.DataFrame({"x": x}), y, max_reml_iter=2, max_pirls_iter=35)
-
-        assert compared, "no SCOP inner fit ran"
-        entries = 0
-        for narrow, full in compared:
-            assert narrow is not None
-            assert full is not None
-            assert len(narrow) == len(full)
-            for record, row in zip(narrow, full, strict=True):
-                assert record.iteration == row.iteration
-                assert self._bits(record.deviance) == self._bits(row.deviance)
-                assert record.step_rejected == row.step_rejected
-                assert record.step_halvings == row.step_halvings
-            # The gate slices this log by position and reads it as a
-            # contiguous run, so the numbering has to be one per iteration
-            # with no gaps -- checked here rather than only inside the gate,
-            # which sees a tail rather than the whole history.
-            assert [r.iteration for r in narrow] == list(range(1, len(narrow) + 1))
-            entries += len(narrow)
-        # Enough iterations that agreement is evidence, not a coincidence. Each
-        # entry compares four independent fields including bitwise deviance, so
-        # a run this long cannot agree throughout by chance.
-        assert entries >= 10
-
-
 class TestIterationDiagnosticsSmallSample:
     """The diagnostics recorder must survive n <= 5.
 
     ``k = min(5, n)`` makes ``k == n`` for small samples, and numpy requires
-    ``-n <= kth < n``, so the bottom-k partition needs ``k - 1``. The bug was
-    latent while diagnostics were opt-in; the SCOP stagnation gate briefly
-    turned the recorder on unconditionally, which converted it into a crash on
-    a default-argument REML fit. The gate now reads a narrow channel and the
-    recorder is opt-in again, so the crash is no longer reachable from
-    ``fit_reml`` -- the opt-in test below is what keeps the fix pinned, and the
-    REML test below keeps small-n SCOP fits themselves covered.
+    ``-n <= kth < n``, so the bottom-k partition needs ``k - 1``. The bug is
+    latent while diagnostics are opt-in, and a caller that turns the recorder
+    on unconditionally converts it into a crash on a default-argument REML
+    fit. The opt-in test below is what keeps the fix pinned, and the REML test
+    below keeps small-n SCOP fits themselves covered.
     """
 
     @staticmethod
@@ -2637,10 +2553,8 @@ class TestSCOPREMLDoesNotPublishDiagnostics:
 
     ``fit_reml`` exposes no diagnostics parameter and the non-SCOP REML path
     records nothing, so a REML caller has never been able to ask for a
-    per-iteration log. The stagnation gate needs one internally -- now the
-    narrow ``stagnation_log`` rather than the full ``iteration_log`` -- and
-    neither may leak onto the published result, or a SCOP REML fit would carry
-    fields no other engine populates.
+    per-iteration log. Nothing may leak one onto the published result, or a
+    SCOP REML fit would carry a field no other engine populates.
     """
 
     @staticmethod
@@ -2659,14 +2573,6 @@ class TestSCOPREMLDoesNotPublishDiagnostics:
 
     def test_published_result_carries_no_iteration_log(self):
         assert self._scop_model().result.iteration_log is None
-
-    def test_published_result_carries_no_stagnation_log(self):
-        """The gate's own channel is scrubbed too, not just the recorder's."""
-        result = self._scop_model().result
-        # The field still exists -- this passes because it was cleared, not
-        # because the attribute went missing.
-        assert hasattr(result, "stagnation_log")
-        assert result.stagnation_log is None
 
     def test_accessor_raises_as_documented(self):
         with pytest.raises(RuntimeError, match="No iteration diagnostics recorded"):
@@ -3690,7 +3596,7 @@ class TestMultiSCOPIntegration:
         Curved, the mode is interior: zero truncating solves and reproduction
         to ~7e-15, so 1e-8 holds with seven orders of margin rather than
         resting on a platform's rounding. Boundary modes are covered by
-        ``test_two_scop_terms_auto_lambda`` and the stagnation-channel test.
+        ``test_two_scop_terms_auto_lambda``.
         """
         from superglm.distributions import _VARIANCE_FLOOR, clip_mu
         from superglm.group_matrix import _block_xtwx

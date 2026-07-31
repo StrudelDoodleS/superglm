@@ -223,50 +223,6 @@ class IterationDiagnostics:
     termination_reason: str | None = None
 
 
-@dataclass(frozen=True)
-class StagnationRecord:
-    """The per-iteration scalars a stagnation gate reads, and nothing else.
-
-    ``IterationDiagnostics`` carries the same ones among its forty fields, but
-    populating one costs roughly fourteen O(n) reductions, two ``argpartition``
-    calls and two ``argsort`` calls per iteration -- and switching it on also
-    switches on the solver's per-iteration extrema capture. A caller that only
-    needs to classify a fit's terminal behaviour should not pay for a debugging
-    record it never reads, so this is the narrow channel it asks for instead.
-    Both are written from the same loop variables in the same iteration, so a
-    deviance seen here is bitwise the one a diagnostics row would have carried.
-
-    A dataclass rather than a ``NamedTuple``: ``_freeze_result_arrays`` rebuilds
-    any tuple it meets as a plain ``tuple``, which would strip a NamedTuple of
-    its field names at the publication boundary and turn every later
-    ``entry.deviance`` into an ``AttributeError``. Dataclasses are reconstructed
-    by type, which is why ``IterationDiagnostics`` survives publication intact.
-
-    ``iteration`` carries no information the gate computes anything from; it is
-    there so the gate can *check* the window it slices.  The gate takes its
-    window by position (``log[-(required + 1):]``) and reads it as a run of
-    consecutive iterations.  Nothing enforces that today -- the append is
-    unconditional -- but an edit that **conditionalized** it would make the
-    window span a gap and the gate would measure stagnation across it with
-    nothing to notice.  One int per iteration converts that silent wrong answer
-    into a loud one, which is cheaper than testing for every way the two could
-    drift apart.  Numbered ``it + 1``, matching ``IterationDiagnostics``.
-
-    Relocation is a different case and this guard does not cover it: moving the
-    append *below* the non-finite-deviance break shortens the log by one entry
-    on that iteration but leaves it contiguous, so the contiguity check passes.
-    That is harmless in fact, but for an unrelated reason -- the break sets
-    ``termination_reason = "nonfinite_deviance"``, and ``_scop_boundary_stagnation``
-    rejects anything but ``"max_iter"`` before it slices at all.  Two guards,
-    not one; do not read this one as covering both.
-    """
-
-    iteration: int
-    deviance: float
-    step_rejected: bool
-    step_halvings: int
-
-
 @dataclass
 class PIRLSResult:
     beta: NDArray
@@ -277,23 +233,6 @@ class PIRLSResult:
     phi: float
     effective_df: float
     iteration_log: list[IterationDiagnostics] | tuple[IterationDiagnostics, ...] | None = None
-    # Narrow per-iteration channel, independent of ``iteration_log``: populated
-    # only for the internal callers that classify terminal behaviour (the SCOP
-    # deviance-stagnation gate), and scrubbed before publication so it never
-    # becomes a solver-dependent public surface.
-    #
-    # Written by ``fit_irls_direct`` alone, under its ``_record_stagnation``
-    # flag. ``fit_pirls`` builds its ``PIRLSResult`` without this field and has
-    # no flag to ask for it, so a result from that solver always reports
-    # ``None`` -- which ``_scop_deviance_stagnated`` reads as "no evidence" and
-    # declines on, reverting to pre-gate behaviour and raising the
-    # non-convergence a boundary solution was meant to be accepted through.
-    # That is a silent downgrade rather than an error, and it is not reachable
-    # today only because ``_fit_scop_reml_mode`` calls ``fit_irls_direct``
-    # directly. The field lives here rather than beside its writer because
-    # ``PIRLSResult`` is the shared result type; route a new caller through
-    # ``fit_pirls`` and it must populate this or accept that downgrade.
-    stagnation_log: list[StagnationRecord] | tuple[StagnationRecord, ...] | None = None
     # REML geometry after profiling the intercept. At full rank ``log_det_H``
     # is log|H_aug|. Under rank truncation it is the identified-coordinate
     # measure log(sum(W)) + log|H_c|_+, not the raw augmented matrix's

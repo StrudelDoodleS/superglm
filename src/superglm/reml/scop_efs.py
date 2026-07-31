@@ -845,15 +845,6 @@ def _fit_scop_reml_mode(
         compute_rank_info=False,
         _compute_fit_statistics=False,
         _compute_reml_geometry=False,
-        # Supplies the per-iteration deviance history that
-        # ``_scop_deviance_stagnated`` needs to recognise a boundary solution.
-        # Purely a record: it feeds no numerics and cannot move a fitted value.
-        # Deliberately the narrow channel and not ``record_diagnostics``: the
-        # gate reads three scalars, while the full recorder builds a forty-field
-        # row and switches on per-iteration extrema capture, costing every SCOP
-        # inner fit ~14 O(n) reductions, 2 ``argpartition``s and 2 ``argsort``s
-        # per iteration for fields nothing here reads.
-        _record_stagnation=True,
         cache_out=working_cache,
     )
     scop_states: dict[int, dict]
@@ -1130,20 +1121,6 @@ def _finalize_scop_reml_mode(
     )
     if not np.isfinite(result.phi) or not np.isfinite(result.effective_df):
         raise RuntimeError("SCOP REML terminal hydration left non-finite fit statistics")
-    # The inner fits set ``_record_stagnation=True`` so the stagnation gate can
-    # read the per-iteration deviance history. That is an internal need:
-    # ``fit_reml`` exposes no diagnostics parameter, and the non-SCOP REML path
-    # records nothing, so a REML caller has never been able to ask for a
-    # per-iteration log. Publishing one here would give SCOP REML fits a field
-    # no other engine populates -- a contract that varies by solver. Drop it on
-    # the one result that reaches users; every gate decision was already taken
-    # during the fit.
-    #
-    # ``iteration_log`` needs no scrub of its own: the SCOP path no longer asks
-    # for ``record_diagnostics``, so the solver leaves that field None (there is
-    # exactly one ``PIRLSResult`` construction, at ``irls_direct.py``'s tail, and
-    # nothing between it and here rebinds the field).
-    result.stagnation_log = None
     return result
 
 
