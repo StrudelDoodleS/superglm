@@ -214,24 +214,59 @@ are removed. The evidence was that across the full suite the gate was driven to
 make it accept. Real fits do reach it and get declined; only stagnating there
 is hard.
 
-**Item 2b is superseded, not completed.** 2b assumed the gate would survive in
-strengthened form: it asks for a published gradient-norm test on the penalized
-deviance *and* says to keep deviance stagnation as the primary criterion. 2c's
-evidence removed that premise -- there is no acceptance gate left to
-strengthen, and deviance stagnation is gone rather than kept. What certifies a
-mode now is `_scop_mode_newton_relative`, gated unconditionally in
-`_fit_scop_reml_mode` and the sole *certification* -- not the sole acceptance
-precondition, since `require_converged and not result.converged` still rejects
-a mode before certification is ever computed. It is score-based but not the same
-object as what 2b asked for: it is a Newton-scaled relative correction
-restricted to the estimable range, which makes it asymmetric rather than
-uniformly stronger. On the resolved range it is stronger than a raw gradient
-norm, because the pseudoinverse amplifies a score lying in a near-singular but
-retained direction; on a truncated direction it is deliberately silent, because
-the score is projected before the pseudoinverse, so a component a gradient norm
-would flag is discarded rather than required to vanish. It is also vacuous on
-non-SCOP modes, where empty `scop_states` zero the mode score. Anyone who still
-wants 2b's literal gradient-norm test should treat it as unimplemented and
-re-argue it on its merits.
+**Item 2b's status is unresolved, and should not be recorded either way.** 2b
+asks for two things: the published gradient-norm acceptance test, and "keep
+deviance stagnation as the primary criterion; the reference method does". The
+second clause is ambiguous, and the strategy note it derives from
+(`docs/superpowers/specs/2026-07-30-shape-constraint-strategy.md` §4.2)
+distinguishes exactly the two objects it could name -- the reference method's
+*primary convergence test* (relative penalized-deviance stagnation) and its
+*acceptance gate* (the gradient norm).
+
+- **Gate reading.** "Deviance stagnation" means the acceptance rule 2c removed.
+  Then 2b's premise is gone: there is no gate left to strengthen and the thing
+  it wanted kept is retired.
+- **Criterion reading.** It means the *inner PIRLS convergence test*, which is
+  what the reference method runs it as; the reference method has no acceptance
+  override at all. Then 2c removes neither of 2b's objects. It removes a third
+  thing this library invented -- a post-hoc acceptance override applied after a
+  coefficient-criterion fit had already failed -- and both of 2b's asks (adopt
+  the gradient-norm acceptance test; make deviance stagnation the inner
+  criterion) remain implementable and untouched.
+
+Neither reading is obviously right. "and abandons the coefficient-step test
+exactly as we did" cuts toward the gate reading, since the coefficient-step
+test is what the gate stood in for here. But on the criterion reading 2b
+becomes *more* attractive rather than moot: a fit whose penalized deviance has
+stopped moving would then converge legitimately on its own criterion instead of
+being overridden after the fact -- which is precisely the residual risk this
+change leaves standing (data that still stagnates after rank truncation, of
+which we have no example). **Do not mark 2b closed, superseded, or done.** It
+needs a decision on which object it meant before it can carry a status.
+
+What certifies a mode now is `_scop_mode_newton_relative`, gated
+unconditionally in `_fit_scop_reml_mode` and the sole *certification* -- not the
+sole acceptance precondition, since `require_converged and not result.converged`
+still rejects a mode before certification is ever computed. It is score-based
+but not the same object as what 2b asked for: a Newton-scaled relative
+correction restricted to the estimable range, asymmetric against a raw gradient
+norm on two independent axes rather than uniformly stronger.
+
+- **Resolved vs truncated.** On a truncated direction it is deliberately
+  silent: the score is projected before the pseudoinverse, so a component a
+  gradient norm would flag is discarded rather than required to vanish.
+- **Flat vs stiff.** On the resolved range the two are not orderable. In an
+  eigendirection of curvature `h` the criterion is `|g| / (h * max(1, |beta|))`
+  against a fixed floor, against `|g|` against a gradient threshold -- so it is
+  relatively more demanding as `h` falls and less as `h` rises. `H⁺g` is a step
+  and `g` is a slope; no threshold pair makes the Newton form uniformly more
+  demanding across the resolved range. It is more demanding exactly where
+  curvature is small -- the flat-boundary regime 2b was aimed at -- and less
+  where curvature is large.
+
+Both asymmetries point the same way: what shipped is not a superset of 2b. It
+is also vacuous on non-SCOP modes, where empty `scop_states` zero the mode
+score. Anyone who wants 2b's literal gradient-norm test should treat it as
+unimplemented and argue it on its merits.
 
 Design: `docs/superpowers/specs/2026-07-31-scop-stagnation-gate-removal-design.md`.

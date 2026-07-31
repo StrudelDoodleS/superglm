@@ -69,15 +69,40 @@ the posture that a loud refusal beats a silent accept. And the gate was never
 the stationarity test: every mode it admitted still had to pass the penalized-
 score certification downstream, which is untouched here.
 
-### 2b is superseded, not satisfied
+### 2b is ambiguous, and this change does not resolve it
 
 The roadmap sequences 2b — "strengthen the acceptance gate to the published
 gradient-norm test on the penalized deviance" — before 2c, and in the same
-breath says to **keep deviance stagnation as the primary criterion**. This
-change removes deviance stagnation, so 2b and 2c cannot both hold as written:
-there is no acceptance gate left to strengthen, and the criterion 2b wanted
-preserved is the one being retired. 2b's premise is gone, not its request
-fulfilled.
+breath says to **keep deviance stagnation as the primary criterion; the
+reference method does**. That second clause has two readings, and
+`docs/superpowers/specs/2026-07-30-shape-constraint-strategy.md` §4.2 (127-135)
+— the note 2b was written from — names both objects explicitly: the reference
+method's *primary convergence test* (relative penalized-deviance stagnation)
+and its *acceptance gate* (the gradient norm).
+
+**Gate reading.** "Deviance stagnation" is the acceptance rule this change
+removes. Then 2b's premise is gone: there is no acceptance gate left to
+strengthen, and the thing it asked to preserve is the thing being retired.
+
+**Criterion reading.** It is the *inner PIRLS convergence test* — which is what
+the reference method actually runs it as, that method having no acceptance
+override at all. Then 2c removes neither of 2b's objects. What it removes is a
+third thing, invented here: a post-hoc acceptance override applied after a
+fit under `convergence="coefficients"` had already failed. Both of 2b's asks —
+adopt the gradient-norm acceptance test, and make deviance stagnation the inner
+convergence criterion — survive intact and remain implementable.
+
+Neither reading is obviously right. The following clause, "and abandons the
+coefficient-step test exactly as we did", cuts toward the gate reading, because
+the coefficient-step test is what the gate stood in for. But under the criterion
+reading 2b is *more* attractive after this change, not moot: making deviance
+stagnation the inner criterion is arguably the principled replacement for what
+is removed here. A fit whose penalized deviance had stopped moving would then
+converge legitimately on its own criterion, rather than being overridden after
+the fact — which is exactly the residual risk named under **Behaviour change**
+below (data that still stagnates after rank truncation, of which we have no
+example). This spec therefore records 2b as **unresolved**: not closed, not
+superseded, not done. Deciding it requires deciding what it meant.
 
 What certifies a mode afterwards is `_scop_mode_newton_relative`
 (`scop_efs.py:698`), gated unconditionally at `scop_efs.py:931-962` against
@@ -87,25 +112,29 @@ the *sole* certification. It is not the sole acceptance precondition:
 still rejects a mode before certification is ever computed.
 
 It is score-based, but a different object — a Newton-scaled *relative*
-correction restricted to the estimable range — and so asymmetric where a raw
-gradient norm is uniform. On the resolved range it is **stronger**: `H⁺g`
-amplifies a score lying in a near-singular but retained direction. On a
-truncated direction it is strictly **weaker** — the profiled score is projected
-onto the solver's resolved range **before** the pseudoinverse
-(`scop_efs.py:740-747`), so a score a gradient-norm test would flag is discarded
-outright rather than required to vanish. That deliberate silence on the
-truncated range is precisely what 2b's literal test would have covered and this
-does not, which strengthens the supersession argument rather than weakening it:
-what shipped is not a superset of 2b, so 2b cannot be marked done. And it is
-vacuous on non-SCOP modes, where an empty `scop_states` zeroes the mode score
-outright (`scop_efs.py:894-916`), leaving nothing for the certification to
-measure.
+correction restricted to the estimable range — and asymmetric against a raw
+gradient norm on two independent axes, not uniformly stronger on either.
 
-So the posture after 2c is stronger than the 2a->2b->2c sequence anticipated on
-the resolved range of the boundary it was aimed at, deliberately silent on the
-truncated one, and silent off SCOP entirely. Anyone who still wants 2b's literal
-gradient-norm test should treat it as unimplemented and re-argue it on its
-merits.
+- **Resolved vs truncated.** On a truncated direction it is deliberately
+  silent: the profiled score is projected onto the solver's resolved range
+  **before** the pseudoinverse (`scop_efs.py:740-747`), so a score a
+  gradient-norm test would flag is discarded outright rather than required to
+  vanish.
+- **Flat vs stiff.** On the resolved range the two are not orderable. In an
+  eigendirection of curvature `h` the criterion is `|g| / (h * max(1, |beta|))`
+  against a fixed floor (`scop_efs.py:753-763`, `766-775`), against `|g|`
+  against a gradient threshold — relatively more demanding as `h` falls, less
+  as `h` rises. `H⁺g` is a step and `g` is a slope, so no threshold pair makes
+  the Newton form uniformly more demanding across the resolved range. It is
+  more demanding exactly where curvature is small — the flat-boundary regime 2b
+  was aimed at — and less demanding where curvature is large.
+
+Both asymmetries point the same way: what shipped is not a superset of 2b, so
+2b cannot be marked done on the strength of it under either reading. And the
+certification is vacuous on non-SCOP modes, where an empty `scop_states` zeroes
+the mode score outright (`scop_efs.py:894-916`), leaving nothing to measure.
+Anyone who wants 2b's literal gradient-norm test should treat it as
+unimplemented and argue it on its merits.
 
 ## What is removed
 
@@ -217,7 +246,7 @@ to carry.
   entry as a bare tuple — the exact failure the deleted test guarded — the
   assignment would raise `AttributeError` for the wrong reason and the
   assertion would still pass. What does cover it is `iteration_diagnostics()`
-  (`src/superglm/model/api.py:773-808`), which reads 31 *named* fields off a
+  (`src/superglm/model/api.py:773-808`), which reads 30 *named* fields off a
   published result's `iteration_log`, exercised by
   `TestIterationDiagnosticsSmallSample::test_opt_in_diagnostics_survive_small_samples`
   in `tests/test_scop_efs.py`. A bare-tuple rebuild fails loudly there.
