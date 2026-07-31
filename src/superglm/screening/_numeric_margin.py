@@ -3,9 +3,13 @@
 A numeric covariate enters every v1 probe LINEARLY (``z * contrast`` slopes,
 ``z1 * z2`` products), so the pair needs no joint grid: z-weighted moments
 accumulated over the other margin's cells are the complete sufficient
-statistics, exact at any cardinality.  Channels: ``s``, ``s*z``, ``w``,
-``w*z``, ``w*z**2`` (and the symmetric set for two numerics).  Exactness is
-pinned against the dense assembly in tests/test_interaction_screening.py.
+statistics, at any support size of the numeric side.  Channels: ``s``,
+``s*z``, ``w``, ``w*z``, ``w*z**2`` (and the symmetric set for two numerics).
+These moments never approximate — but they are not free of the OTHER margin:
+an ``(n_g, k)`` menu makes every block here scale with ``k``, so the caller
+budgets ``n_g`` and refuses a pair whose blocks it cannot afford rather than
+compressing anything.  Exactness is pinned against the dense assembly in
+tests/test_interaction_screening.py.
 """
 
 from __future__ import annotations

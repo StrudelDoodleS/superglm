@@ -355,6 +355,12 @@ def test_numeric_cat_planted_slope_ranks_first_with_exact_df():
     # refit sees the probe's own columns: numeric kinds are never approximate.
     assert not top["approx"]
     assert top["z"] > 6.0
+    # The pair's budget scales with the FACTOR's width, never with n: a
+    # 4-level pair over 20000 rows computes unchanged at a cell budget that
+    # would refuse any gridded pair outright.
+    tiny = model.screen_interactions(df, y, candidates=[("bm", "region")], max_cells=100).iloc[0]
+    assert tiny["z"] == pytest.approx(top["z"])
+    assert tiny["n_cells"] == 4
 
 
 def test_numeric_numeric_planted_product_ranks_first():
@@ -390,3 +396,42 @@ def test_numeric_numeric_planted_product_ranks_first():
     assert top["n_cells"] == 1
     assert not top["approx"]
     assert top["z"] > 5.0
+
+
+def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
+    """A z-moment pair has no grid to bin, so it cannot approximate: an
+    unaffordable numeric_cat pair is REFUSED, never degraded.  Every block it
+    builds scales with the factor's width and the largest is the (L+1)-wide
+    overlap curvature, so the gate is `(L+1)**2 <= max_cells` -- applied to
+    the level count alone, before the dense (L, L-1) menu is ever built."""
+    L, reps = 2300, 2
+    rng = np.random.default_rng(31)
+    df = pd.DataFrame(
+        {
+            "g": np.repeat([f"L{i}" for i in range(L)], reps),
+            "bm": rng.uniform(0.5, 2.0, L * reps),
+        }
+    )
+    # A Gaussian fit keeps this wide-factor model cheap to build; the gate
+    # reads level counts, so the family it was fitted with is immaterial.
+    y = rng.normal(size=len(df))
+    model = SuperGLM(family="gaussian", features={"g": Categorical(), "bm": Numeric()})
+    model.fit_reml(df, y)
+
+    refused = model.screen_interactions(df, y).iloc[0]  # default max_cells
+    assert refused["kind"] == "numeric_cat"
+    assert np.isnan(refused["statistic"]) and np.isnan(refused["z"])
+    assert refused["n_cells"] == L  # the grid it was refused for
+    assert not refused["approx"]  # refusal is not approximation
+
+    # One cell short of the block budget is still a refusal ...
+    short = model.screen_interactions(df, y, max_cells=(L + 1) ** 2 - 1).iloc[0]
+    assert np.isnan(short["z"])
+    assert short["n_cells"] == L
+    # ... and at the budget the same pair computes, exactly and unpenalized.
+    lifted = model.screen_interactions(df, y, max_cells=(L + 1) ** 2).iloc[0]
+    assert np.isfinite(lifted["z"])
+    assert lifted["edf0"] == pytest.approx(L - 1, abs=0.26)  # achieved rank
+    assert lifted["lambda0"] == 0.0
+    assert lifted["n_cells"] == L
+    assert not lifted["approx"]
