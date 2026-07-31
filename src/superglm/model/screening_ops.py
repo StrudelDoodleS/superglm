@@ -9,17 +9,20 @@ not a calibrated p-value and must not be reported as one.
 
 The sweep is not spline-only.  The ``kind`` column names the interaction
 class each pair would refit as — ``ti`` (spline x spline), ``spline_cat``,
-and ``cat_cat`` today, with ``numeric_cat`` and ``numeric_numeric`` arriving
-later in this release series.  Every kind runs through the same cell kernels
-on a per-margin ``(codes, support size, menu, penalty)`` description: a
-categorical margin is a gridded margin over its fitted levels whose menu is
-the (L, L-1) treatment-contrast block and whose penalty is absent, so
-``kron`` of two such menus reproduces the cross-product indicator columns and
-``kron`` of a spline menu with one reproduces the per-level curve blocks,
-column for column.  ``z`` normalizes each kind against its own noise floor,
-so a single sorted table ranks them together.  A pair with no penalty
-anywhere in its block has no bandwidth to scan and is evaluated at a single
-rung: ``edf0`` then reports the block's achieved rank and ``lambda0`` is 0.
+``cat_cat``, ``numeric_cat`` and ``numeric_numeric``.  The gridded kinds run
+through the same cell kernels on a per-margin ``(codes, support size, menu,
+penalty)`` description: a categorical margin is a gridded margin over its
+fitted levels whose menu is the (L, L-1) treatment-contrast block and whose
+penalty is absent, so ``kron`` of two such menus reproduces the cross-product
+indicator columns and ``kron`` of a spline menu with one reproduces the
+per-level curve blocks, column for column.  A NUMERIC margin never grids: it
+enters its probe linearly (a per-level slope, or a product of two numerics),
+so z-weighted moments accumulated over the other margin's cells are the exact
+sufficient statistics at any cardinality — see ``screening/_numeric_margin``.
+``z`` normalizes each kind against its own noise floor, so a single sorted
+table ranks them together.  A pair with no penalty anywhere in its block has
+no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
+the block's achieved rank and ``lambda0`` is 0.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
@@ -58,6 +61,8 @@ from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
+    numeric_numeric_moments,
+    numeric_pair_moments,
     pair_cell_moments,
     pair_score_curvature,
     penalized_score_statistic,
@@ -285,13 +290,14 @@ def screen_interactions(
 
     Each pair is screened as the interaction class it would refit as, named
     in the ``kind`` column: ``ti`` for spline x spline, ``spline_cat`` for a
-    spline crossed with a factor, ``cat_cat`` for two factors, with
-    ``numeric_cat`` and ``numeric_numeric`` arriving later in this release
-    series.  ``z`` normalizes each kind against its own noise floor, so one
+    spline crossed with a factor, ``cat_cat`` for two factors, ``numeric_cat``
+    for a per-level numeric slope and ``numeric_numeric`` for a product of two
+    numerics.  ``z`` normalizes each kind against its own noise floor, so one
     sorted table ranks them together.  A kind whose block carries no penalty
-    (``cat_cat``) has no bandwidth to scan and is evaluated at a single
-    rung — ``edf0`` then reports the block's achieved rank and ``lambda0`` is
-    0, so the ``edf0`` argument does not apply to it.
+    (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no bandwidth to
+    scan and is evaluated at a single rung — ``edf0`` then reports the block's
+    achieved rank and ``lambda0`` is 0, so the ``edf0`` argument does not
+    apply to it.
 
     ``edf0`` is the probe bandwidth: a smooth surface is detected best by a
     small budget, a high-frequency one only by a budget at least as complex
@@ -348,7 +354,13 @@ def screen_interactions(
     refits match the probe basis and stay ``approx=False``.  A categorical
     margin never bins and never discretizes — its support is the fitted level
     set — so it never contributes to the flag, and a ``cat_cat`` row is
-    always ``approx=False``.
+    always ``approx=False``.  A numeric margin never contributes either: it
+    enters its probe linearly, with no grid to build, no support to compress
+    and no basis a refit could discretize, so ``numeric_cat`` and
+    ``numeric_numeric`` rows are exact at any cardinality, never reach the
+    binning fallback, and are always ``approx=False``.  Their ``n_cells``
+    counts the OTHER margin's cells alone — the factor's fitted levels, or 1
+    when both margins are numeric.
     """
     if getattr(model, "_result", None) is None:
         raise RuntimeError("screen_interactions requires a fitted model; call fit_reml first")
@@ -652,6 +664,9 @@ def screen_interactions(
         compress and never appears here, which is also what keeps ``_support``
         (and its float cast) away from a label column.
         """
+        # By design: a numeric margin has no basis to bin, so numeric_cat and
+        # numeric_numeric can never contribute a binned margin — only a spline
+        # (or spline-mode OC) margin can put a refit out of step with the probe.
         if kind not in ("ti", "spline_cat"):
             return []
         splines = [
@@ -675,8 +690,6 @@ def screen_interactions(
         # Dispatch before any raw-column or support access, so a deferred kind
         # surfaces as its own error rather than a dtype failure downstream.
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
-        if kind not in ("ti", "spline_cat", "cat_cat"):
-            raise NotImplementedError(f"screening kind {kind!r} lands in a later task")
         # An OC margin screens as a spline, but on its MAPPED level values;
         # reading them is a later task, so say so rather than letting the
         # label column fail a float cast three frames down.
@@ -685,58 +698,85 @@ def screen_interactions(
             raise NotImplementedError(
                 f"screening OrderedCategorical margins {oc_margins} lands in a later task"
             )
-        # Assemble with the categorical margin LAST, so a mixed pair's penalty
-        # is kron(S_spline, I) — the varying-coefficient block layout.  The
-        # reported feature_a/feature_b keep the caller's order; the statistic
-        # is invariant to the column permutation the swap amounts to.
-        left, right = feat_a, feat_b
-        if margin_kinds[left] == "categorical" and margin_kinds[right] != "categorical":
-            left, right = right, left
-        k_l = _marginal_width_estimate(model._specs[left])
-        k_r = _marginal_width_estimate(model._specs[right])
-        bin_flag = {left: False, right: False}
-        margins = None
-        while True:
-            codes_l, n_l = _margin_support(left, bin_flag[left])
-            codes_r, n_r = _margin_support(right, bin_flag[right])
-            # V is (k_l*k_r)^2 doubles regardless of support: binning can't help
-            if (k_l * k_r) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
-                break
-            if _within_budget(n_l, n_r, k_l, k_r):
-                _, _, menu_l, S_l = _margin(left, bin_flag[left])
-                _, _, menu_r, S_r = _margin(right, bin_flag[right])
-                if (menu_l.shape[1], menu_r.shape[1]) != (k_l, k_r):
-                    # authoritative dims from the built menus; re-run the gates
-                    k_l, k_r = menu_l.shape[1], menu_r.shape[1]
-                    continue
-                margins = ((menu_l, S_l), (menu_r, S_r))
-                break
-            # bin the largest not-yet-binned margin that binning can shrink;
-            # a categorical margin is never binnable, whatever its level count
-            binnable = sorted(
-                (
-                    (n, name)
-                    for n, name in ((n_l, left), (n_r, right))
-                    if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
-                ),
-                reverse=True,
+        if kind in ("numeric_cat", "numeric_numeric"):
+            # A numeric margin enters the probe LINEARLY, so the pair has no
+            # joint grid to assemble: z-weighted moments over the other
+            # margin's cells are the exact sufficient statistics at any
+            # cardinality — nothing to bin, and no cell grid to budget.  The
+            # block carries no penalty either, so one rung is the ladder.  The
+            # factor's own (L, L-1) contrast menu is the only allocation left.
+            if kind == "numeric_numeric":
+                U, V, C, M, u_m = numeric_numeric_moments(
+                    _raw_numeric(feat_a), _raw_numeric(feat_b), score, working_weights
+                )
+                n_cells = 1
+            else:
+                num_name, cat_name = (
+                    (feat_a, feat_b) if margin_kinds[feat_a] == "numeric" else (feat_b, feat_a)
+                )
+                codes_g, n_g, menu_g, _ = _margin(cat_name, False)
+                U, V, C, M, u_m = numeric_pair_moments(
+                    codes_g, n_g, menu_g, _raw_numeric(num_name), score, working_weights
+                )
+                # The factor's levels ARE the cells: the numeric side contributes
+                # z-moments within them rather than cells of its own.
+                n_cells = n_g
+            S_ti, approx = None, False
+        else:
+            # Assemble with the categorical margin LAST, so a mixed pair's penalty
+            # is kron(S_spline, I) — the varying-coefficient block layout.  The
+            # reported feature_a/feature_b keep the caller's order; the statistic
+            # is invariant to the column permutation the swap amounts to.
+            left, right = feat_a, feat_b
+            if margin_kinds[left] == "categorical" and margin_kinds[right] != "categorical":
+                left, right = right, left
+            k_l = _marginal_width_estimate(model._specs[left])
+            k_r = _marginal_width_estimate(model._specs[right])
+            bin_flag = {left: False, right: False}
+            margins = None
+            while True:
+                codes_l, n_l = _margin_support(left, bin_flag[left])
+                codes_r, n_r = _margin_support(right, bin_flag[right])
+                # V is (k_l*k_r)^2 doubles regardless of support: binning can't help
+                if (k_l * k_r) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
+                    break
+                if _within_budget(n_l, n_r, k_l, k_r):
+                    _, _, menu_l, S_l = _margin(left, bin_flag[left])
+                    _, _, menu_r, S_r = _margin(right, bin_flag[right])
+                    if (menu_l.shape[1], menu_r.shape[1]) != (k_l, k_r):
+                        # authoritative dims from the built menus; re-run the gates
+                        k_l, k_r = menu_l.shape[1], menu_r.shape[1]
+                        continue
+                    margins = ((menu_l, S_l), (menu_r, S_r))
+                    break
+                # bin the largest not-yet-binned margin that binning can shrink;
+                # a categorical margin is never binnable, whatever its level count
+                binnable = sorted(
+                    (
+                        (n, name)
+                        for n, name in ((n_l, left), (n_r, right))
+                        if margin_kinds[name] == "spline" and not bin_flag[name] and n > screen_bins
+                    ),
+                    reverse=True,
+                )
+                if not binnable:
+                    break
+                bin_flag[binnable[0][1]] = True
+            approx = (
+                bin_flag[left] or bin_flag[right] or _pair_refits_discrete(kind, feat_a, feat_b)
             )
-            if not binnable:
-                break
-            bin_flag[binnable[0][1]] = True
-        approx = bin_flag[left] or bin_flag[right] or _pair_refits_discrete(kind, feat_a, feat_b)
-        n_cells = n_l * n_r
-        if margins is None:
-            rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx))
-            continue
+            n_cells = n_l * n_r
+            if margins is None:
+                rows.append((feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx))
+                continue
 
-        (menu_l, S_l), (menu_r, S_r) = margins
-        S_cell, W_cell = pair_cell_moments(
-            codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
-        )
-        U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
-        M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
-        S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
+            (menu_l, S_l), (menu_r, S_r) = margins
+            S_cell, W_cell = pair_cell_moments(
+                codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
+            )
+            U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
+            M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
+            S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
         # An unpenalized block has no bandwidth to scan: every rung returns the
         # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
         penalized = S_ti is not None and bool(np.any(S_ti))

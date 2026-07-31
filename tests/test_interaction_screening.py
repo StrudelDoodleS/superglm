@@ -1107,3 +1107,45 @@ def test_cell_assembly_exact_for_contrast_menus():
     X = _dense_row_kronecker(codes_a, codes_b, menu_a, menu_b)
     np.testing.assert_allclose(U, X.T @ score, rtol=1e-12, atol=1e-9)
     np.testing.assert_allclose(V, X.T @ (X * w[:, None]), rtol=1e-12, atol=1e-9)
+
+
+def test_numeric_pair_moments_match_dense_assembly():
+    from superglm.screening import numeric_pair_moments
+
+    rng = np.random.default_rng(11)
+    n, L = 600, 5
+    codes = rng.integers(0, L, n)
+    menu = np.zeros((L, L - 1))
+    menu[1:, :] = np.eye(L - 1)
+    z = rng.uniform(-2.0, 3.0, n)
+    score = rng.normal(size=n)
+    w = rng.uniform(0.1, 3.0, n)
+
+    U, V, C, M, u_m = numeric_pair_moments(codes, L, menu, z, score, w)
+
+    X_T = menu[codes] * z[:, None]  # probe block
+    X_o = np.column_stack([np.ones(n), menu[codes], z])  # overlap span
+    np.testing.assert_allclose(U, X_T.T @ score, rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(V, X_T.T @ (X_T * w[:, None]), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(M, X_o.T @ (X_o * w[:, None]), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(C, X_o.T @ (X_T * w[:, None]), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(u_m, X_o.T @ score, rtol=1e-12, atol=1e-9)
+
+
+def test_numeric_numeric_moments_match_dense_assembly():
+    from superglm.screening import numeric_numeric_moments
+
+    rng = np.random.default_rng(12)
+    n = 500
+    z1 = rng.uniform(-1.0, 2.0, n)
+    z2 = rng.uniform(0.5, 1.5, n)
+    score = rng.normal(size=n)
+    w = rng.uniform(0.1, 3.0, n)
+    U, V, C, M, u_m = numeric_numeric_moments(z1, z2, score, w)
+    X_T = (z1 * z2)[:, None]
+    X_o = np.column_stack([np.ones(n), z1, z2])
+    np.testing.assert_allclose(U, X_T.T @ score, rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(V, X_T.T @ (X_T * w[:, None]), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(M, X_o.T @ (X_o * w[:, None]), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(C, X_o.T @ (X_T * w[:, None]), rtol=1e-12, atol=1e-9)
+    np.testing.assert_allclose(u_m, X_o.T @ score, rtol=1e-12, atol=1e-9)

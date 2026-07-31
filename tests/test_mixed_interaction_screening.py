@@ -180,10 +180,10 @@ def test_factor_smooth_pair_is_excluded():
         model.screen_interactions(df, y, candidates=[("age", "band")])
 
 
-# _fit_mixed also fits a Numeric and an OrderedCategorical main, whose pairs
-# still raise until tasks 5-6, so a default sweep over it cannot run yet.  Name
-# the pairs whose kinds exist today; drop the candidates= argument once the
-# whole sweep is implemented.
+# _fit_mixed also fits an OrderedCategorical main, whose pairs still raise
+# until task 6, so a default sweep over it cannot run yet.  Name the pairs
+# whose kinds exist today -- every kind the model can form except the OC
+# ones; drop the candidates= argument once the whole sweep is implemented.
 _IMPLEMENTED_PAIRS = [
     ("age", "power"),
     ("age", "region"),
@@ -191,6 +191,8 @@ _IMPLEMENTED_PAIRS = [
     ("power", "region"),
     ("power", "brand"),
     ("region", "brand"),
+    ("bm", "region"),
+    ("bm", "brand"),
 ]
 
 
@@ -296,18 +298,20 @@ def test_spline_cat_flags_approx_when_only_its_spline_margin_bins_lossily():
 
 
 def test_mixed_pair_order_does_not_leak_into_the_row():
-    """A spline_cat pair is assembled with the categorical margin LAST, whichever
-    order the caller names it in.  That swap is a column permutation the
-    statistic is invariant to, and it must reach neither the reported columns
-    nor any number in the row."""
+    """A spline_cat pair is assembled with the categorical margin LAST, and a
+    numeric_cat pair resolves which margin carries the slope by KIND rather
+    than by argument position -- whichever order the caller names them in.
+    Either reordering is a column permutation the statistic is invariant to,
+    and it must reach neither the reported columns nor any number in the row."""
     df, y = _planted_bend()
     model = _fit_mixed(df, y)
-    fwd = model.screen_interactions(df, y, candidates=[("age", "region")]).iloc[0]
-    rev = model.screen_interactions(df, y, candidates=[("region", "age")]).iloc[0]
-    assert (fwd["feature_a"], fwd["feature_b"]) == ("age", "region")
-    assert (rev["feature_a"], rev["feature_b"]) == ("region", "age")
-    for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
-        assert fwd[column] == rev[column], column
+    for a, b in (("age", "region"), ("bm", "region")):
+        fwd = model.screen_interactions(df, y, candidates=[(a, b)]).iloc[0]
+        rev = model.screen_interactions(df, y, candidates=[(b, a)]).iloc[0]
+        assert (fwd["feature_a"], fwd["feature_b"]) == (a, b)
+        assert (rev["feature_a"], rev["feature_b"]) == (b, a)
+        for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
+            assert fwd[column] == rev[column], (a, b, column)
 
 
 def test_two_level_factor_pairs_are_legal():
@@ -334,3 +338,55 @@ def test_spline_cat_confirms_by_refit():
     dev0 = base._result.deviance
     confirm = _fit_mixed(df, y, interactions=[("age", "region")])
     assert dev0 - confirm._result.deviance > 50.0
+
+
+def test_numeric_cat_planted_slope_ranks_first_with_exact_df():
+    df, rng = _mixed_frame(n=20000, seed=5)
+    slope = np.where(df["region"] == "D", 0.35, 0.0)
+    y = rng.poisson(np.exp(-1.6 + slope * (df["bm"] - 1.0))).astype(np.float64)
+    model = _fit_mixed(df, y)
+    table = model.screen_interactions(df, y, candidates=_IMPLEMENTED_PAIRS)
+    top = table.iloc[0]
+    assert {top["feature_a"], top["feature_b"]} == {"bm", "region"}
+    assert top["kind"] == "numeric_cat"
+    assert top["edf0"] == pytest.approx(3.0, abs=0.26)  # L-1 with L=4
+    assert top["n_cells"] == 4
+    # A numeric margin has no basis to bin and none to discretize, so the
+    # refit sees the probe's own columns: numeric kinds are never approximate.
+    assert not top["approx"]
+    assert top["z"] > 6.0
+
+
+def test_numeric_numeric_planted_product_ranks_first():
+    df, rng = _mixed_frame(n=20000, seed=6)
+    df = df.assign(dens=rng.uniform(0.0, 1.0, len(df)))
+    y = rng.poisson(np.exp(-1.6 + 0.3 * (df["bm"] - 1.25) * (df["dens"] - 0.5))).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "age": Spline(kind="ps", n_knots=6),
+            "region": Categorical(),
+            "brand": Categorical(),
+            "bm": Numeric(),
+            "dens": Numeric(),
+        },
+    )
+    model.fit_reml(df, y)
+    table = model.screen_interactions(
+        df,
+        y,
+        candidates=[
+            ("bm", "dens"),
+            ("bm", "region"),
+            ("dens", "brand"),
+            ("age", "region"),
+            ("region", "brand"),
+        ],
+    )
+    top = table.iloc[0]
+    assert top["kind"] == "numeric_numeric"
+    assert {top["feature_a"], top["feature_b"]} == {"bm", "dens"}
+    assert top["edf0"] == pytest.approx(1.0, abs=0.01)
+    assert top["n_cells"] == 1
+    assert not top["approx"]
+    assert top["z"] > 5.0
