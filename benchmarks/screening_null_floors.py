@@ -94,7 +94,13 @@ def _features():
 def _null_response(df, exposure, family, rng):
     eta = -1.5 + 0.004 * df["age"] + 0.1 * (df["region"] == "B")
     if family == "poisson":
-        return rng.poisson(exposure * np.exp(eta)).astype(np.float64), exposure
+        # The library's weight contract is Var(y) = phi * V(mu) / w, so the
+        # exposure-weighted response is the RATE, not the count: counts passed
+        # as y alongside sample_weight=exposure would under-estimate phi and
+        # inflate every z in the battery.  (Counts + offset=log(exposure) is
+        # the other on-contract form; the rate form is the house one.)
+        counts = rng.poisson(exposure * np.exp(eta)).astype(np.float64)
+        return counts / exposure, exposure
     if family == "gamma":
         mu = np.exp(eta)
         return rng.gamma(2.0, mu / 2.0), None
@@ -259,14 +265,16 @@ def _print_diagnostics(rows, diag, n, max_cells=5_000_000):
             zip(bad["kind"], bad["feature_a"], bad["feature_b"])
         ).most_common(10):
             print(f"    {kind} {a} x {b}: {count}")
-    # The numeric_cat budget gate is (L + 2)^2 <= max_cells on the FACTOR's
-    # level count alone.  Eyeballing it against the battery is the point:
-    # the widest factor here is 4 levels, so no pair is anywhere near it.
+    # The numeric_cat budget gate holds the (k_g + 2)^2 overlap curvature block
+    # to max_cells, and a factor margin's k_g is its contrast count L - 1 -- so
+    # in LEVEL terms the gate is (L + 1)^2 <= max_cells.  Eyeballing it against
+    # the battery is the point: the widest factor here is 4 levels, so no pair
+    # is anywhere near it.
     factors = rows[rows["kind"] == "numeric_cat"]["n_cells"] if len(rows) else []
     widest = int(max(factors)) if len(factors) else 0
-    admits = int(np.sqrt(max_cells)) - 2
+    admits = int(np.sqrt(max_cells)) - 1
     print(
-        f"  widest numeric_cat factor {widest} levels; the gate (L+2)^2 <= "
+        f"  widest numeric_cat factor {widest} levels; the gate (L+1)^2 <= "
         f"max_cells={max_cells} admits L <= {admits}"
     )
     warned = diag["warned"]

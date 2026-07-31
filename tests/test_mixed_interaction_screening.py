@@ -27,6 +27,13 @@ def _mixed_frame(n=6000, seed=0):
             "band": rng.choice(BANDS, n),
         }
     )
+    # A second Numeric and a 2-level factor, so a caller that declares them as
+    # features gets numeric_numeric, a 1-df numeric_cat and a 2-df cat_cat.
+    # Drawn from their OWN stream: the columns above, and every draw a caller
+    # takes from `rng` afterwards, are what they were before these existed.
+    extra = np.random.default_rng(9000 + seed)
+    df["dens"] = extra.uniform(0.0, 1.0, n)
+    df["fuel"] = extra.choice(["diesel", "petrol"], n)
     return df, rng
 
 
@@ -149,9 +156,9 @@ def test_oc_margin_screens_beside_its_spline_siblings():
 
 def test_fitted_pairs_of_every_class_are_rejected_as_candidates():
     """Exclusion now keys on parent_names, so it covers every interaction
-    class rather than TensorInteraction alone.  The candidates= path proves
-    the fitted-pair set without needing the deferred kinds to compute, so it
-    stands in for the default-sweep half of the pin above until tasks 4-6."""
+    class rather than TensorInteraction alone.  The class names are pinned
+    below: a rename or a re-dispatch that quietly stopped building one of
+    these four would otherwise leave the exclusion untested for it."""
     df, rng = _mixed_frame()
     y = _null_y(df, rng)
     fitted = [("age", "power"), ("age", "region"), ("region", "brand"), ("bm", "region")]
@@ -438,8 +445,9 @@ def test_oc_margin_screens_as_spline_and_confirms():
     assert top["z"] > 6.0
     # The ti() refit the kind names finds the same ramp in the likelihood.
     # Measured 34.8 on 5 extra parameters at this amplitude; the OC-parented
-    # refit's deviance is bit-identical to the same fit on the mapped scores,
-    # so the margin under test is exact and the bound is just a floor.
+    # refit's deviance is identical to floating-point tolerance to the same fit
+    # on the mapped scores, so the margin under test is exact and the bound is
+    # just a floor.
     confirm = _fit_mixed(df, y, interactions=[("band", "power")])
     assert model._result.deviance - confirm._result.deviance > 30.0
 
@@ -548,10 +556,18 @@ def test_mixed_null_z_stays_bounded_dispersed_gaussian(seed):
             "region": Categorical(),
             "brand": Categorical(),
             "bm": Numeric(),
+            # the second Numeric and the 2-level factor put the battery's
+            # heaviest-tailed configurations under a gate: numeric_numeric,
+            # numeric_cat at df 1, and cat_cat at df 2
+            "dens": Numeric(),
+            "fuel": Categorical(),
         },
     )
     model.fit_reml(df, y)
     table = model.screen_interactions(df, y)
+    # every kind of this sweep is under the gate, not just the kinds that
+    # happen to survive a NaN row (no ti: one spline margin, so no pair of them)
+    assert set(table["kind"]) == {"spline_cat", "numeric_cat", "cat_cat", "numeric_numeric"}
     finite = table["z"][np.isfinite(table["z"])]
     assert len(finite) == len(table)
     assert (finite < 10.0).all()
@@ -583,8 +599,14 @@ def _fremtpl_features():
 @FREQ_SKIP
 def test_fremtpl_mixed_sweep_end_to_end():
     df = _datasets.load_freq().sample(80_000, random_state=0).reset_index(drop=True)
-    y = df["ClaimNb"].to_numpy(dtype=np.float64)
+    # The weight contract is Var(y) = phi * V(mu) / w, so an exposure-weighted
+    # response is the claim RATE, not the count -- counts weighted by exposure
+    # under-estimate phi and inflate every z in the sweep.  Clip the exposure
+    # first, exactly as tests/test_realdata_parity.py::_prep_freq does, so a
+    # near-zero denominator cannot manufacture a several-hundred-claim rate.
+    df["Exposure"] = df["Exposure"].clip(lower=0.01)
     exposure = df["Exposure"].to_numpy(dtype=np.float64)
+    y = df["ClaimNb"].to_numpy(dtype=np.float64) / exposure
     model = SuperGLM(family="poisson", features=_fremtpl_features())
     model.fit_reml(df, y, sample_weight=exposure)
     table = model.screen_interactions(df, y, sample_weight=exposure)
