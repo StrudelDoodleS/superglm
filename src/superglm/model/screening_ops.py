@@ -131,7 +131,7 @@ def _pair_kind(kind_a: str, kind_b: str) -> str | None:
     return _PAIR_KINDS.get(frozenset((kind_a, kind_b)))
 
 
-def _validated_pairs(candidates, margin_kinds, fitted_pairs):
+def _validated_pairs(candidates, margin_kinds, fitted_pairs, fitted_names):
     if candidates is None:
         # A pair the model already fits as an interaction is not a candidate:
         # the screen profiles only the parent mains, so it would re-surface
@@ -146,6 +146,20 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs):
     pairs = []
     for raw in candidates:
         pair = tuple(raw)
+        if len(pair) == 2 and pair[0] != pair[1]:
+            # A name the model DID fit but cannot screen (Polynomial, step-mode
+            # OrderedCategorical, a one-level Categorical) is deferred, not a
+            # typo; listing the screenable features would send the caller
+            # hunting for a misspelling that isn't there.
+            deferred_names = sorted(
+                name for name in pair if name not in margin_kinds and name in fitted_names
+            )
+            if deferred_names:
+                raise ValueError(
+                    f"candidates entry {raw!r} names fitted feature(s) "
+                    f"{deferred_names} that have no screenable margin — "
+                    f"{_DEFERRED_KIND_HINT}"
+                )
         if len(pair) != 2 or pair[0] == pair[1] or not set(margin_kinds).issuperset(pair):
             raise ValueError(
                 "candidates entries must pair two distinct screenable fitted "
@@ -330,7 +344,10 @@ def screen_interactions(
         for spec in getattr(model, "_interaction_specs", {}).values()
         if hasattr(spec, "parent_names")
     }
-    pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs)
+    pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs, set(model._specs))
+
+    def _is_oc_margin(name):
+        return isinstance(model._specs.get(name), OrderedCategorical)
 
     def _select_flag(name):
         # Only spline margins carry a double-penalty flag; an OC margin's
@@ -362,10 +379,11 @@ def screen_interactions(
         return raw_x[name]
 
     for name in sorted({name for pair in pairs for name in pair}):
-        # Categorical margins are read through their level codes, not a float
-        # column; prefetching them here would trip the finiteness cast on an
-        # object-dtype column.
-        if margin_kinds[name] != "categorical":
+        # Categorical margins are read through their level codes and
+        # OrderedCategorical margins through their mapped level values, not a
+        # float column; prefetching either here would trip the finiteness cast
+        # on a label column and mask the per-pair diagnosis below.
+        if margin_kinds[name] != "categorical" and not _is_oc_margin(name):
             _raw(name)
 
     distribution, link = model._distribution, model._link
@@ -502,6 +520,14 @@ def screen_interactions(
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
         if kind != "ti":
             raise NotImplementedError(f"screening kind {kind!r} lands in a later task")
+        # An OC margin screens as a spline, but on its MAPPED level values;
+        # reading them is a later task, so say so rather than letting the
+        # label column fail a float cast three frames down.
+        oc_margins = [name for name in (feat_a, feat_b) if _is_oc_margin(name)]
+        if oc_margins:
+            raise NotImplementedError(
+                f"screening OrderedCategorical margins {oc_margins} lands in a later task"
+            )
         k_a = _marginal_width_estimate(model._specs[feat_a])
         k_b = _marginal_width_estimate(model._specs[feat_b])
         bin_flag = {feat_a: False, feat_b: False}

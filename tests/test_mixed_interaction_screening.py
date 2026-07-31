@@ -83,8 +83,13 @@ def test_candidates_rejects_deferred_and_ineligible_kinds():
         features={"age": Spline(kind="ps", n_knots=6), "poly": Polynomial(degree=2)},
     )
     model2.fit_reml(df2, y)
-    with pytest.raises(ValueError, match="screenable|eligible"):
+    # A fitted-but-unscreenable main is DEFERRED, and must say so: the generic
+    # "screenable features" listing would send the caller hunting for a typo.
+    with pytest.raises(ValueError, match="deferred"):
         model2.screen_interactions(df2, y, candidates=[("age", "poly")])
+    # ... while a name the model never fitted still gets the generic message.
+    with pytest.raises(ValueError, match="screenable features"):
+        model2.screen_interactions(df2, y, candidates=[("age", "nope")])
 
 
 # The default sweep over this mixed model still hits deferred kinds (tasks
@@ -101,6 +106,31 @@ def test_fitted_pairs_of_every_class_are_excluded():
     assert frozenset(("age", "region")) not in pairs
     with pytest.raises(ValueError, match="already fitted"):
         model.screen_interactions(df, y, candidates=[("region", "brand")])
+
+
+def test_oc_margin_defers_by_name_without_breaking_its_siblings():
+    """An OC main screens as a spline margin, but on its MAPPED level values,
+    which lands in a later task.  Until then the pair must name that cause
+    instead of failing a float cast on the label column -- and it must not
+    poison the pure-spline pairs of the same model."""
+    df, rng = _mixed_frame()
+    y = _null_y(df, rng)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "age": Spline(kind="ps", n_knots=6),
+            "power": Spline(kind="ps", n_knots=6),
+            "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", n_knots=4)),
+        },
+    )
+    model.fit_reml(df, y)
+
+    table = model.screen_interactions(df, y, candidates=[("age", "power")])
+    assert list(table["kind"]) == ["ti"]
+    assert np.isfinite(table["z"]).all()
+
+    with pytest.raises(NotImplementedError, match="OrderedCategorical"):
+        model.screen_interactions(df, y, candidates=[("age", "band")])
 
 
 def test_fitted_pairs_of_every_class_are_rejected_as_candidates():
