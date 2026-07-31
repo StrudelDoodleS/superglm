@@ -45,8 +45,13 @@ stagnant stub (`n_iter=256` against `max_iter=200`) inside the gate's own test
 class. The declines are the same class plus outer-loop tests running caps of 1
 and 10.
 
-**No real fit anywhere in the corpus reaches the gate.** Its only remaining
-consumers are the tests that exist to test it. The boundary fixture that
+**No real fit anywhere in the corpus is accepted by the gate.** Reaching it and
+being accepted by it are different bars — any non-converged inner fit reaches
+it, and only a stagnant deviance is admitted, so the declines above already
+include real outer-loop fits, as does this branch's own
+`test_a_genuinely_non_converging_fit_still_raises`: a real fit that reaches the
+gate's site and would be declined there. The only things that can still drive
+the gate to accept are the tests that exist to test it. The boundary fixture that
 motivated it went from 34 iterations plus a 35-iteration `max_iter` run to 9, 1,
 1 — all converged — under #176.
 
@@ -77,19 +82,30 @@ fulfilled.
 What certifies a mode afterwards is `_scop_mode_newton_relative`
 (`scop_efs.py:698`), gated unconditionally at `scop_efs.py:931-962` against
 `_scop_mode_tolerance` with up to two tightening retries, and after this change
-the *sole* acceptance path. It is score-based, and at a flat boundary it is
-stronger than a raw gradient norm — but it is a different object. It forms a
-Newton-scaled *relative* correction restricted to the estimable range: the
-profiled score is projected onto the solver's resolved range **before** the
-pseudoinverse (`scop_efs.py:740-747`), so directions the factor truncated are
-discarded rather than required to vanish. And it is vacuous on non-SCOP modes,
-where an empty `scop_states` zeroes the mode score outright
-(`scop_efs.py:894-916`), leaving nothing for the certification to measure.
+the *sole* certification. It is not the sole acceptance precondition:
+`require_converged and not result.converged: return None` (`scop_efs.py:857`)
+still rejects a mode before certification is ever computed.
+
+It is score-based, but a different object — a Newton-scaled *relative*
+correction restricted to the estimable range — and so asymmetric where a raw
+gradient norm is uniform. On the resolved range it is **stronger**: `H⁺g`
+amplifies a score lying in a near-singular but retained direction. On a
+truncated direction it is strictly **weaker** — the profiled score is projected
+onto the solver's resolved range **before** the pseudoinverse
+(`scop_efs.py:740-747`), so a score a gradient-norm test would flag is discarded
+outright rather than required to vanish. That deliberate silence on the
+truncated range is precisely what 2b's literal test would have covered and this
+does not, which strengthens the supersession argument rather than weakening it:
+what shipped is not a superset of 2b, so 2b cannot be marked done. And it is
+vacuous on non-SCOP modes, where an empty `scop_states` zeroes the mode score
+outright (`scop_efs.py:894-916`), leaving nothing for the certification to
+measure.
 
 So the posture after 2c is stronger than the 2a->2b->2c sequence anticipated on
-the boundary it was aimed at, and silent off it. Anyone who still wants 2b's
-literal gradient-norm test should treat it as unimplemented and re-argue it on
-its merits.
+the resolved range of the boundary it was aimed at, deliberately silent on the
+truncated one, and silent off SCOP entirely. Anyone who still wants 2b's literal
+gradient-norm test should treat it as unimplemented and re-argue it on its
+merits.
 
 ## What is removed
 
@@ -192,11 +208,19 @@ to carry.
   `test_published_stagnation_records_keep_their_fields` is about
   `_freeze_result_arrays` not rebuilding a dataclass as a bare tuple, and
   borrowed `StagnationRecord` only as a convenient example. **Delete it
-  outright rather than re-pointing:** `test_published_result_deeply_freezes_
-  diagnostics_and_rank_metadata` at `348-365` already asserts
-  `result.iteration_log[0].deviance = -1.0` raises `AttributeError`, which is
-  the same property on the surviving dataclass. Re-pointing would duplicate
-  existing coverage.
+  outright rather than re-pointing:** the property it guarded is already
+  covered on the surviving dataclass — though *not* by
+  `test_published_result_deeply_freezes_diagnostics_and_rank_metadata` at
+  `348-365`, despite the surface resemblance. That test asserts
+  `result.iteration_log[0].deviance = -1.0` raises `AttributeError`, which pins
+  immutability, not field retention: if `_freeze_result_arrays` rebuilt the
+  entry as a bare tuple — the exact failure the deleted test guarded — the
+  assignment would raise `AttributeError` for the wrong reason and the
+  assertion would still pass. What does cover it is `iteration_diagnostics()`
+  (`src/superglm/model/api.py:773-808`), which reads 31 *named* fields off a
+  published result's `iteration_log`, exercised by
+  `TestIterationDiagnosticsSmallSample::test_opt_in_diagnostics_survive_small_samples`
+  in `tests/test_scop_efs.py`. A bare-tuple rebuild fails loudly there.
 - `TestIterationDiagnosticsSmallSample` (`2773-2838`) — one incidental mention.
 
 **Verify.** Re-run the instrumented probe after removal to confirm no gate path
