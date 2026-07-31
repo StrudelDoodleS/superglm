@@ -21,6 +21,7 @@ from superglm.dm_builder import (
     should_discretize_tensor_interaction,
     validate_term_name_namespace,
 )
+from superglm.features.ordered_categorical import resolve_interaction_parent
 from superglm.group_matrix import DesignMatrix, _discretize_column
 from superglm.links import Link, stabilize_eta
 from superglm.model.fit_state import (
@@ -227,6 +228,9 @@ def _build_prediction_plan(
                 "name": name,
                 "spec": model._interaction_specs[name],
                 "parent_names": tuple(model._interaction_specs[name].parent_names),
+                "parent_specs": tuple(
+                    model._specs.get(p) for p in model._interaction_specs[name].parent_names
+                ),
                 "beta_idx": _group_beta_indices(model._groups, name),
                 "fast_discrete": copy.deepcopy(fast_prediction_state["interactions"].get(name)),
             }
@@ -349,12 +353,12 @@ def _score_prediction_term_local_exact(
         return _score_feature(term["spec"], X.column_array(term["name"]), beta)
 
     left_name, right_name = term["parent_names"]
-    return _score_interaction(
-        term["spec"],
-        X.column_array(left_name),
-        X.column_array(right_name),
-        beta,
-    )
+    # A plan cached before parent specs were stashed carries no "parent_specs"
+    # key; ``None`` then resolves through the identity path.
+    left_spec, right_spec = term.get("parent_specs", (None, None))
+    _, left = resolve_interaction_parent(left_spec, X.column_array(left_name))
+    _, right = resolve_interaction_parent(right_spec, X.column_array(right_name))
+    return _score_interaction(term["spec"], left, right, beta)
 
 
 def _score_prediction_term_exact(
