@@ -1,7 +1,10 @@
 # Retiring the SCOP deviance-stagnation acceptance gate
 
 **Roadmap item:** `docs/superpowers/plans/2026-07-30-shape-constraint-roadmap.md`, Item 2c
-**Status:** approved 2026-07-31, not yet implemented
+**Status:** approved 2026-07-31; implemented on branch
+`refactor/retire-scop-stagnation-gate`, commits `9d0d67c..e6868e3`
+(`f3c3ac9` spec, `51d6036` plan, `00ff8a3` gate removal, `b5d1c74` dead logger,
+`17d1439` `stagnation_log` channel, `e6868e3` roadmap status)
 **Release:** folds into the unpublished `0.17.0`; no version bump
 
 ---
@@ -61,19 +64,32 @@ the posture that a loud refusal beats a silent accept. And the gate was never
 the stationarity test: every mode it admitted still had to pass the penalized-
 score certification downstream, which is untouched here.
 
-### 2b is already satisfied
+### 2b is superseded, not satisfied
 
 The roadmap sequences 2b — "strengthen the acceptance gate to the published
-gradient-norm test on the penalized deviance" — before 2c. That sequencing is
-moot once the gate is gone, and the criterion it asks for is already in place:
-`_scop_mode_newton_relative` (`scop_efs.py:701`) forms a relative Newton
-correction from the profiled penalized score, and `scop_efs.py:1089` rejects any
-mode exceeding `_scop_mode_tolerance`, with up to two tightening retries. That
-is a score-based stationarity certification on the penalized objective, and
-after this change it is the *sole* acceptance path. Removing the gate leaves a
-stronger posture than the 2a->2b->2c sequence anticipated, not a weaker one.
+gradient-norm test on the penalized deviance" — before 2c, and in the same
+breath says to **keep deviance stagnation as the primary criterion**. This
+change removes deviance stagnation, so 2b and 2c cannot both hold as written:
+there is no acceptance gate left to strengthen, and the criterion 2b wanted
+preserved is the one being retired. 2b's premise is gone, not its request
+fulfilled.
 
-Implementing a second gradient-norm test would be redundant. 2b closes with 2c.
+What certifies a mode afterwards is `_scop_mode_newton_relative`
+(`scop_efs.py:698`), gated unconditionally at `scop_efs.py:931-962` against
+`_scop_mode_tolerance` with up to two tightening retries, and after this change
+the *sole* acceptance path. It is score-based, and at a flat boundary it is
+stronger than a raw gradient norm — but it is a different object. It forms a
+Newton-scaled *relative* correction restricted to the estimable range: the
+profiled score is projected onto the solver's resolved range **before** the
+pseudoinverse (`scop_efs.py:740-747`), so directions the factor truncated are
+discarded rather than required to vanish. And it is vacuous on non-SCOP modes,
+where an empty `scop_states` zeroes the mode score outright
+(`scop_efs.py:894-916`), leaving nothing for the certification to measure.
+
+So the posture after 2c is stronger than the 2a->2b->2c sequence anticipated on
+the boundary it was aimed at, and silent off it. Anyone who still wants 2b's
+literal gradient-norm test should treat it as unimplemented and re-argue it on
+its merits.
 
 ## What is removed
 
