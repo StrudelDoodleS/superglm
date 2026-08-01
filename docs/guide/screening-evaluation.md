@@ -255,16 +255,22 @@ while the block's df is varied over a wide range, which one real book cannot
 supply. Read it as a mechanism study; the freMTPL2 numbers above are the
 evidence on real data.
 
-A 41×41 `cat_cat` pair carrying a genuine 6σ effect in 5 of its 1,681 cells
-scores **z = 17.75** — unambiguous by any conventional reading — and costs
-**+22.5% holdout MSE** when refit as a fixed interaction (three replicates:
-+22.3%, +20.5%, +24.6%). In sample the refit looks like the best model
-available: train MSE 1.1244 → 0.7249. It spends 1,635 effective df on 6,000
-rows to recover five cells and memorises the other 1,676.
+Two things are established below and one is not, so it is worth separating them
+up front.
 
-The same pair fitted as a `RandomEffect` on the cell — 645 effective df instead
-of 1,635 — *improves* holdout by 3.2%. So the pair is real, the detection is
-correct, and "add it as a fixed interaction" is still the wrong action.
+**Established.** Mallows' Cp, written on PSST's own `z` scale, is an *exact*
+restatement rather than an approximation — `z > sqrt(edf0/2)` is the same
+statement as `T/φ > 2·edf0`, and the bar it implies grows with the block's df.
+Separately, the *shape* of a score carries information its total does not: at
+deliberately matched `z`, a truth concentrated in five cells and a diffuse one
+are separated 34-fold by the participation ratio.
+
+**Not established.** Whether thresholding on `sqrt(edf0/2)` actually beats a
+well-chosen constant cutoff. On the sixteen-point sweep below it agrees with
+the sign of the holdout change one row more often than the best constant does,
+which at this sample size settles nothing. And whether fitting only the
+concentrated cells pays — the harness measures it, but no completed run of it
+backs a figure here, so none is quoted. See [caveats 9 and 15](#caveats).
 
 ### The threshold is not a constant
 
@@ -283,36 +289,55 @@ split, which is routine at these widths. The `edf0` column below is therefore
 the screen's own value, read off the same row as `z`; the nominal rank is shown
 beside it.
 
-The bar **grows with the block's df**: z > 4.95 at 8×8, z > 28.3 at 41×41.
-Sweeping table width against effect size, taking the screen's own z and the
-holdout change from actually refitting:
+The bar **grows with the block's df**: z > 4.95 at 8×8, z > 28.27 at 41×41
+(both measured — the 41×41 value is the achieved rank from the next table's
+screen). Sweeping table width against effect size, taking the screen's own z
+and the holdout change from actually refitting:
 
-| levels | edf0 | threshold | z | z/threshold | holdout Δ |
-|---:|---:|---:|---:|---:|---:|
-| 8 | 49 | 4.95 | 0.02 | 0.00 | +0.7% |
-| 8 | 49 | 4.95 | 0.72 | 0.15 | +0.4% |
-| 8 | 49 | 4.95 | 3.28 | 0.66 | −0.3% ✗ |
-| 8 | 49 | 4.95 | 12.02 | 2.43 | −2.2% |
-| 16 | 225 | 10.61 | 2.13 | 0.20 | +3.4% |
-| 16 | 225 | 10.61 | 5.95 | 0.56 | +2.1% |
-| 16 | 225 | 10.61 | 13.31 | 1.26 | −0.4% |
-| 16 | 225 | 10.61 | 28.92 | 2.73 | −5.9% |
-| 25 | 576 | 16.97 | 1.84 | 0.11 | +10.5% |
-| 25 | 576 | 16.97 | 7.16 | 0.42 | +6.9% |
-| 25 | 576 | 16.97 | 16.76 | 0.99 | +0.4% |
-| 25 | 576 | 16.97 | 32.94 | 1.94 | −10.8% |
-| 32 | 961 | 21.92 | 1.76 | 0.08 | +18.9% |
-| 32 | 961 | 21.92 | 7.57 | 0.35 | +12.5% |
-| 32 | 961 | 21.92 | 18.30 | 0.84 | +0.7% |
-| 32 | 961 | 21.92 | 30.53 | 1.39 | −12.8% |
+| levels | edf0 | nominal | threshold | z | z/threshold | holdout Δ |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 49.0 | 49 | 4.95 | 0.80 | 0.16 | +0.8% |
+| 8 | 49.0 | 49 | 4.95 | 2.04 | 0.41 | +0.6% |
+| 8 | 49.0 | 49 | 4.95 | 5.46 | 1.10 | +0.0% ✗ |
+| 8 | 49.0 | 49 | 4.95 | 15.83 | 3.20 | −1.7% |
+| 16 | 225.0 | 225 | 10.61 | 2.32 | 0.22 | +3.1% |
+| 16 | 225.0 | 225 | 10.61 | 6.17 | 0.58 | +1.8% |
+| 16 | 225.0 | 225 | 10.61 | 13.49 | 1.27 | −0.7% |
+| 16 | 225.0 | 225 | 10.61 | 28.96 | 2.73 | −6.2% |
+| 25 | 576.0 | 576 | 16.97 | 0.68 | 0.04 | +9.0% |
+| 25 | 576.0 | 576 | 16.97 | 5.73 | 0.34 | +5.2% |
+| 25 | 576.0 | 576 | 16.97 | 15.01 | 0.88 | −1.5% ✗ |
+| 25 | 576.0 | 576 | 16.97 | 30.88 | 1.82 | −12.8% |
+| 32 | 957.7 | 961 | 21.88 | 0.74 | 0.03 | +15.9% |
+| 32 | 957.7 | 961 | 21.88 | 5.86 | 0.27 | +9.9% |
+| 32 | 957.7 | 961 | 21.88 | 15.54 | 0.71 | −1.1% ✗ |
+| 32 | 957.7 | 961 | 21.88 | 26.97 | 1.23 | −13.4% |
 
-**The rule agrees with the sign of the holdout change in 15/16.** Fixed cutoffs
-on the same data: `z > 2` in 10/16, `z > 3` in 11/16, `z > 5` in 10/16. The one
-disagreement is a −0.3% change, which is zero.
+Only the 32×32 rows show the achieved rank falling below the nominal one — at
+the narrower widths 6,000 training rows fill every joint cell.
 
-Every fixed-cutoff failure is the same kind — z = 5.95, 7.16, 16.76, 18.30, all
-comfortably "significant" and all harmful. That population grows with the table,
-which is why no constant can be chosen to replace the width term.
+**The rule agrees with the sign of the holdout change in 13/16.** Fixed cutoffs
+on the same data: `z > 2` in **10/16**, `z > 3` in **12/16**, `z > 5` in
+**12/16** — the last two score identically because no row falls between them.
+
+**This does not establish that the gate beats a fixed cutoff.** One row out of
+sixteen is the entire margin, on a grid of sixteen points at three replicates,
+with the effect sizes chosen to straddle the bar in the first place
+([caveat 9](#caveats)). The comparison is inconclusive at this sample size and
+should not be quoted as a result. What the sweep does show is that the crossing
+tracks `sqrt(edf0/2)` across a 20× range of df, which is the shape the identity
+predicts.
+
+How the two rules fail is more informative than the count. Every fixed-cutoff
+miss here is a **false positive**: `z > 3` admits z = 5.46, 6.17, 5.73 and 5.86,
+all comfortably "significant" and all harmful, and that population appears at
+every width in the sweep with the damage it admits growing from +0.0% at 8×8 to
++9.9% at 32×32. The width-scaled rule misses three rows, of two kinds: one where
+the holdout change rounds to zero (z = 5.46 at 8×8), and two **false negatives**
+at the wide end — z = 15.01 at 25×25 and z = 15.54 at 32×32, where refitting
+actually helped by 1.5% and 1.1%. Its bar is too *high* there. That is the
+opposite of a constant cutoff's failure, and it is direct evidence that the
+constant in `sqrt(edf0/2)` is not pinned by this data.
 
 ### The total does not say how to fit it
 
@@ -335,51 +360,57 @@ construction). See [caveat 14](#caveats).
 
 Spiky and diffuse truths at 41×41, magnitudes chosen so their **z values
 coincide** — the only honest way to ask whether `P` carries information `z`
-lacks:
+lacks. These fit the full 12,000 rows, where the table above and the one below
+fit a 6,000-row train split, so their `edf0` is the achieved rank on the full
+sample: 1,598.7 of a nominal 1,600, for a threshold of 28.27.
 
-| truth | z | P/(k/3) |
-|---|---:|---:|
-| noise | −0.26 | 1.015 |
-| 5 cells @ 4.0 | 7.38 | **0.154** |
-| diffuse sd=0.20 | 7.15 | 1.015 |
-| 5 cells @ 6.0 | 15.67 | **0.054** |
-| diffuse sd=0.30 | 14.99 | 1.007 |
-| 5 cells @ 8.0 | 26.09 | **0.030** |
-| diffuse sd=0.41 | 25.88 | 0.989 |
+| truth | z | P | P/(k/3) |
+|---|---:|---:|---:|
+| noise | −0.25 | 574.1 | 1.025 |
+| 5 cells @ 4.0 | 8.02 | 81.1 | **0.145** |
+| diffuse sd=0.20 | 7.48 | 571.3 | 1.020 |
+| 5 cells @ 6.0 | 16.54 | 29.1 | **0.052** |
+| diffuse sd=0.30 | 15.28 | 562.6 | 1.005 |
+| 5 cells @ 8.0 | 27.15 | 16.3 | **0.029** |
+| diffuse sd=0.41 | 26.15 | 548.8 | 0.980 |
 
-At z = 26.09 against z = 25.88 the scores are indistinguishable and `P` differs
-by 33×. The measured null, 568.2 against a predicted 560, calibrates as claimed.
+At z = 27.15 against z = 26.15 the scores are indistinguishable and `P` differs
+by 34×. The null checks out: 1,680 of the 1,681 cells are occupied at this
+sample size, so `k/3` predicts 559.9, and the noise row measures 574.1 — 2.5%
+high, in the direction the finite-k bias goes ([caveat 14](#caveats)).
 
-It pays off in the fitting decision. Ranking cells on **training residuals
-only** — ranking on the full sample is the target leakage that makes supervised
-binning look better than it is — and adding only the top m as levels:
+Note also what the `z` column does *not* contain: no diffuse truth here clears
+the 28.27 bar, the widest reaching 26.15. That gap is why two cells of the
+decision table below are inference rather than measurement.
 
-| truth | top-5 | top-10 | top-25 | top-50 | all 1,681 |
-|---|---:|---:|---:|---:|---:|
-| 5 cells @ 6.0 (P/(k/3) = 0.054) | **−7.2%** | −6.4% | −4.5% | −1.2% | +22.5% |
-| diffuse sd=0.30 (P/(k/3) = 1.007) | +0.6% | +1.0% | +2.5% | +4.2% | +22.5% |
+That separation is where this section stops. **Whether it pays off in the
+fitting decision is not measured here.** The obvious follow-on — rank cells on
+training residuals only, add the top m as levels, and compare against the full
+fixed refit on the same seed and split — is implemented in the harness
+(`--tables 3`), but no completed run of it stands behind a figure in this
+guide, so no figure is quoted. The same applies to the wide pair through
+different model classes (`--tables 4`). Both are multi-hour jobs at the default
+width; see [caveat 15](#caveats), which also records why the numbers previously
+published in their place could not be kept.
 
-**Five parameters beat 1,680 by 29.7 points**, and the optimum sits exactly at
-the true number of live cells. On the diffuse truth the identical procedure
-degrades monotonically — there is nothing localised to find, so every cell added
-is a memorised residual. `P` predicts which of the two you are in; `z` cannot,
-because by construction it is the same in both.
-
-Together the two readings give a decision rather than a score:
+What the two readings would imply, if the fitting side were established, is a
+decision rather than a score:
 
 | | `P/(k/3)` ≈ 1 | `P/(k/3)` ≪ 1 |
 |---|---|---|
 | **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
 | **z above threshold** | refit the pair as a fixed interaction | fit the few cells that carry it, and check the full refit against it |
 
-The right-hand column stays the same above and below the bar because the two
-readings answer different questions. Clearing the Cp gate says a **full refit
-beats leaving the pair out** — not that it beats fitting the handful of cells
-that carry the signal. Raise the magnitude on a concentrated truth far enough
-and z crosses any bar while `P` stays near zero; taking that as "refit as fixed"
-throws away the shape information and spends the other 1,600-odd df on nothing.
-The gate is a floor on the full refit, not a ranking of it against the sparse
-one.
+**None of those four cells is measured by what remains in this section** — the
+table is a proposal, not a result ([caveat 11](#caveats)). It is kept because
+the reasoning behind one cell is worth recording: the right-hand column stays
+the same above and below the bar because the two readings answer different
+questions. Clearing the Cp gate says a full refit beats *leaving the pair out* —
+not that it beats fitting the handful of cells that carry the signal. Raise the
+magnitude on a concentrated truth far enough and z crosses any bar while `P`
+stays near zero; taking that as "refit as fixed" throws away the shape
+information the participation ratio just supplied. The gate is a floor on the
+full refit, not a ranking of it against the sparse one.
 
 Neither reading is implemented in `screen_interactions`, and they do not cost
 the same to obtain. The **gate is** arithmetic on the returned row: `z` and
@@ -430,34 +461,36 @@ only, which is a separate simulated study.
    anywhere else.
 9. **Sixteen points, three replicates, and a grid chosen to straddle the bar.**
    Enough to establish that the crossing tracks `sqrt(edf0/2)` across a 20×
-   range of df, not enough to pin the constant. A true crossing at 1.2 rather
-   than 1.0 would not be resolved by this data. Separately, the effect sizes at
+   range of df, not enough to pin the constant — and the two false negatives at
+   25×25 and 32×32 are direct evidence that it is not pinned, since both sit
+   below a bar the refit went on to beat. A true crossing at 0.8 rather than
+   1.0 would not be resolved by this data. Separately, the effect sizes at
    each width were **selected so z brackets `sqrt(edf0/2)` there**, which is the
    right design for locating the crossing but also guarantees a grid whose
    boundary moves with width — precisely the configuration no constant cutoff
    can track. Part of the margin over fixed cutoffs is therefore a property of
    that selection rather than of the data; a grid drawn from some plausible
-   distribution over (width, effect) would give a different one.
+   distribution over (width, effect) would give a different one. The margin is
+   one row in sixteen, which is not a result.
 10. **The gate is for a plain fixed refit.** A shrunk term spends less edf, so
-    its bar is lower: the `RandomEffect` fit spent 645 df against the fixed
-    fit's 1,635 and improved holdout where the fixed fit cost 22%. The
-    threshold answers "gate this into `interactions=[...]`", not "is this pair
-    ever usable".
-11. **Two of the decision table's four cells are unmeasured.** Pooling on a
-    diffuse truth was never run, so the "pool the cell" half of the lower-left
-    cell is inference. And *no* diffuse truth in the study clears its own
-    threshold, while every truth in the gate ladder is spiky, so all of the
-    above-threshold evidence sits in the right-hand column. The upper-right
-    cell ("z above threshold, `P` ≈ 1 → refit as fixed") is inference from the
-    spiky rows, not a measurement. The two right-hand cells' shared advice is
-    likewise reasoning, not a comparison: no run in the study puts a
-    concentrated truth above its threshold and then fits the sparse and full
-    models against each other there.
+    its bar is lower, and the threshold answers "gate this into
+    `interactions=[...]`", not "is this pair ever usable". How much lower, and
+    whether a `RandomEffect` on the cell rescues a pair the gate excludes, is
+    the `--tables 4` comparison — not run to completion here, so no figure for
+    it appears above.
+11. **The decision table is a proposal, not a measurement.** None of its four
+    cells is established by what remains in this section. Two were never
+    measurable from this study even in principle: pooling on a diffuse truth
+    was never run, and *no* diffuse truth here clears its own threshold — the
+    widest, sd = 0.41, reaches z = 26.15 against 28.27 — while every truth in
+    the gate ladder is spiky, so all above-threshold evidence sits in the
+    right-hand column. The other two rest on the sparse-payoff and
+    model-class comparisons, which are not reported.
 12. **Planted truths are scattered single cells.** That is the best case for
     top-m cell selection and the worst case for a group-structured penalty. A
     contiguous block of live cells — arguably the more realistic shape for a
-    rating interaction — was not tested, and would likely reorder the last
-    table.
+    rating interaction — was not tested, and would change what the unreported
+    fitting comparisons say.
 13. **`P` is measured on the mains-model residuals**, so it inherits whatever
     the mains model failed to absorb. On a book where the additive fit is poor,
     concentration would read structure that belongs to a margin.
@@ -469,6 +502,35 @@ only, which is a separate simulated study.
     ratio reads 3, the value that elsewhere means "as diffuse as noise". A
     narrow or thinly occupied block needs a finite-k calibration before its
     reading means anything.
+15. **An earlier version of this section published figures the harness does not
+    produce, and they have been removed rather than corrected.** This is the
+    most useful thing recorded here, so it is worth stating precisely. The two
+    tables above are re-measured; a sparse-payoff table and a
+    three-model-class table that used to sit below them are gone, along with a
+    41×41 worked example (a z, a holdout cost, effective-df counts and a
+    `RandomEffect` comparison). None of it reproduced.
+
+    The earlier gate ladder published z = 0.02, 0.72, 3.28, 12.02 at 8×8 and
+    claimed the width-scaled rule agreed with the holdout sign in **15/16**
+    against 10/16, 11/16 and 10/16 for fixed cutoffs. Running the harness
+    unchanged gives z = 0.80, 2.04, 5.46, 15.83 on that rung and **13/16**
+    against 10/16, 12/16 and 12/16 — so the headline margin was five rows and
+    is one. The concentration and sparse-payoff tables disagreed with the
+    harness too, the latter by 2 points of holdout MSE per column on its spiky
+    row.
+
+    Version drift does not explain it: the branch touches no `src/` file, and
+    its merge base is the tip of `master`, so the library was byte-identical
+    when those numbers were written and when they were re-checked. No `--n` in
+    {4k, 6k, 8k, 12k, 24k} reproduces the published row either. The figures
+    were simply never produced by the committed benchmark.
+
+    The removed tables are not deleted from the harness — `--tables 3` and
+    `--tables 4` still run them, and their arms were fixed while this was being
+    checked. Each 41×41 refit is a tens-of-minutes job and the pair of tables
+    is a multi-hour one, which is a plausible reason nobody re-ran them; it is
+    not a reason to publish the output of a run that did not happen. Anything
+    quoted from them in future should name the command that produced it.
 
 ## Reproducing
 
@@ -486,8 +548,20 @@ uv run python benchmarks/screening_worth_gate.py
 ```
 
 It prints four tables: the gate ladder, concentration at matched z, the sparse
-payoff, and the three-model-class comparison the `+22.5%` and `−3.2%` figures
-come from. Expect roughly 45 minutes at the defaults, nearly all of it in the
+payoff, and the three-model-class comparison. **Only the first two are quoted
+above**, and both come from one run at the defaults — three replicates,
+n = 12,000, 41×41 for the wide table. `--tables 1,2` reruns exactly those:
+
+```
+uv run python benchmarks/screening_worth_gate.py --tables 1,2
+```
+
+The other two are not reported here ([caveat 15](#caveats)). `--tables` exists
+so that a partial rerun is a quotable command rather than a hand edit: anything
+taken from tables 3 or 4 in future should be published with the command that
+produced it.
+
+Expect roughly 45 minutes at the defaults, nearly all of it in the
 wide fixed refits — which is part of what the section is about. Their
 wall-clock moves several-fold under CPU contention and should not be read as a
 benchmark of the fitting paths; the holdout columns are unaffected. The
