@@ -438,9 +438,14 @@ is simulated and needs neither, so it runs from a clean checkout:
 uv run python benchmarks/screening_worth_gate.py
 ```
 
-Expect roughly 25 minutes at the defaults, nearly all of it in the wide fixed
-refits — which is part of what the section is about. The arithmetic underneath
-the two readings is guarded by `tests/test_screening_worth_gate.py`.
+It prints four tables: the gate ladder, concentration at matched z, the sparse
+payoff, and the three-model-class comparison the `+22.5%` and `−3.2%` figures
+come from. Expect roughly 45 minutes at the defaults, nearly all of it in the
+wide fixed refits — which is part of what the section is about. Their
+wall-clock moves several-fold under CPU contention and should not be read as a
+benchmark of the fitting paths; the holdout columns are unaffected. The
+arithmetic underneath the two readings is guarded by
+`tests/test_screening_worth_gate.py`.
 
 One trap worth recording for anyone extending the FAST comparison:
 InterpretML's `term_features_` is **sorted by arity then feature index**

@@ -35,7 +35,7 @@ arithmetic on quantities the screen already produces.
 
 Run:  uv run python benchmarks/screening_worth_gate.py [--reps 3]
 
-Three tables come out, because the threshold alone answers only half of it:
+Four tables come out, because the threshold alone answers only half of it:
 
   1. the gate ladder -- table width x effect size, the screen's z, and the
      holdout change from actually refitting.  The question is whether the sign
@@ -46,12 +46,18 @@ Three tables come out, because the threshold alone answers only half of it:
   3. the sparse payoff -- if `P` says the signal is concentrated, does fitting
      only those cells pay?  Cells are ranked on TRAINING residuals only;
      ranking them on the full sample is the target leakage that makes
-     supervised binning look better than it is.
+     supervised binning look better than it is;
+  4. the same pair through three model classes -- mains, a fixed interaction,
+     and the cell partially pooled.  The gate says what NOT to do with a wide
+     pair; this says whether the pair is worth having at all in some other
+     class, and it is where the guide's +22.5% and -3.2% come from.
 
 These are measurements of a simulated Gaussian book, not calibrated quantiles
 and not p-values.  `2*edf` is a Gaussian-family argument; the constant has not
-been checked for Poisson with exposure.  Expect ~25 minutes at the defaults --
-most of it in the wide fixed refits, which is itself part of the finding.
+been checked for Poisson with exposure.  Expect ~45 minutes at the defaults --
+most of it in the wide fixed refits, which is itself part of the finding.  Their
+wall-clock moves several-fold under CPU contention; the holdout columns do not,
+so do not read the timings as a benchmark of the fitting paths.
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ from numpy.typing import NDArray
 
 from superglm import SuperGLM
 from superglm.features import Categorical
+from superglm.features.random_effect import RandomEffect
 
 # widths, and effect sizes chosen so z straddles sqrt(edf0/2) at each width
 LADDER: dict[int, tuple[float, ...]] = {
@@ -87,6 +94,10 @@ MATCHED: tuple[tuple[str, str, float], ...] = (
 )
 TOP_M: tuple[int, ...] = (5, 10, 25, 50)
 HOT_CELLS = 5
+# the three model classes table 4 compares.  `pooled` is load-bearing: it is the
+# only arm that shows the pair is worth HAVING once it stops being 1681 free
+# cells, and the guide quotes its holdout gain.
+SHRINKAGE_ARMS: tuple[str, ...] = ("mains", "fixed", "pooled")
 
 
 def worth_threshold(edf0: float) -> float:
@@ -273,6 +284,91 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
     return rows
 
 
+def _shrinkage_spec(arm: str) -> tuple[dict[str, object], list[str]]:
+    """Model spec for one arm of table 4.
+
+    `fit_reml` finds no REML-eligible group in a pure-`Categorical` model and
+    falls back to `fit()`, so `mains` and `fixed` are plain fits and only
+    `pooled` estimates a variance component.  That asymmetry IS the comparison:
+    the fixed arm spends its df whatever the data says, the pooled arm spends
+    what REML thinks the data supports.
+    """
+    if arm == "mains":
+        return {"features": {"g": Categorical(), "h": Categorical()}}, ["g", "h"]
+    if arm == "fixed":
+        return (
+            {
+                "features": {"g": Categorical(), "h": Categorical()},
+                "interactions": [("g", "h")],
+            },
+            ["g", "h"],
+        )
+    if arm == "pooled":
+        return (
+            {
+                "features": {
+                    "g": Categorical(),
+                    "h": Categorical(),
+                    "gh": RandomEffect(),
+                }
+            },
+            ["g", "h", "gh"],
+        )
+    raise ValueError(f"unknown shrinkage arm: {arm!r}")
+
+
+def _run_shrinkage(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
+    """mains vs a fixed cat_cat interaction vs the same cell partially pooled.
+
+    The gate says a wide pair should not be refit as a fixed interaction. This
+    asks the follow-on question the gate does not answer: is the pair worth
+    having at all, in some other model class?
+    """
+    acc: dict[str, list[tuple[float, float, float, float, float]]] = {
+        arm: [] for arm in SHRINKAGE_ARMS
+    }
+    for rep in range(reps):
+        data = _make("spike", 6.0, n_levels, n, 4242 + rep)
+        frame = data.frame.copy()
+        frame["gh"] = data.joint.astype(str)
+        train, test = _split(n, 4242 + rep)
+        ytr, yte = data.y[train], data.y[test]
+
+        for arm in SHRINKAGE_ARMS:
+            kwargs, cols = _shrinkage_spec(arm)
+            dtr, dte = frame[cols].iloc[train], frame[cols].iloc[test]
+            started = time.perf_counter()
+            model = SuperGLM(family="gaussian", **kwargs)
+            model.fit_reml(dtr, ytr)
+            seconds = time.perf_counter() - started
+            result = model._result
+            acc[arm].append(
+                (
+                    seconds,
+                    float(np.asarray(result.beta).size),
+                    float(result.effective_df),
+                    float(np.mean((model.predict(dtr) - ytr) ** 2)),
+                    float(np.mean((model.predict(dte) - yte) ** 2)),
+                )
+            )
+            print(f"  rep {rep} {arm} done", flush=True)
+
+    rows: list[dict[str, object]] = []
+    for arm in SHRINKAGE_ARMS:
+        values = np.array(acc[arm])
+        rows.append(
+            {
+                "model": arm,
+                "seconds": float(values[:, 0].mean()),
+                "params": float(values[:, 1].mean()),
+                "edf": float(values[:, 2].mean()),
+                "train": float(values[:, 3].mean()),
+                "holdout": float(values[:, 4].mean()),
+            }
+        )
+    return rows
+
+
 def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
     print("\n1. Does z > sqrt(edf0/2) predict the sign of the holdout change?\n")
     print(
@@ -320,6 +416,27 @@ def _print_sparse_payoff(rows: list[dict[str, object]]) -> None:
         print(f"{row['kind']:>10} {row['top_m']:>12} {row['delta_pct']:>+17.1f}%")
 
 
+def _print_shrinkage(rows: list[dict[str, object]], n_levels: int) -> None:
+    print(
+        f"\n4. Same pair, three model classes ({n_levels}x{n_levels}, 5 cells @ 6.0).\n"
+        "   The detection is not in doubt; the question is what to DO with it.\n"
+    )
+    print(
+        f"{'model':>8} {'fit':>8} {'params':>8} {'edf':>9} {'train':>8} {'HOLDOUT':>9} {'vs mains':>10}"
+    )
+    base = next((r["holdout"] for r in rows if r["model"] == "mains"), None)
+    for row in rows:
+        delta = "" if base is None else f"{(row['holdout'] / base - 1) * 100:+9.1f}%"
+        print(
+            f"{row['model']:>8} {row['seconds']:>7.1f}s {row['params']:>8.0f} "
+            f"{row['edf']:>9.1f} {row['train']:>8.4f} {row['holdout']:>9.4f} {delta:>10}"
+        )
+    print(
+        "\n  Wall-clock here is indicative only -- it moves several-fold under CPU\n"
+        "  contention.  The holdout column does not."
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reps", type=int, default=3)
@@ -336,6 +453,7 @@ def main() -> None:
     _print_gate_ladder(_run_gate_ladder(args.reps, args.n))
     _print_concentration(_run_concentration(args.reps, args.n, args.wide_levels), args.wide_levels)
     _print_sparse_payoff(_run_sparse_payoff(args.reps, args.n, args.wide_levels))
+    _print_shrinkage(_run_shrinkage(args.reps, args.n, args.wide_levels), args.wide_levels)
     print(f"\ntotal {time.perf_counter() - started:.0f}s")
 
 
