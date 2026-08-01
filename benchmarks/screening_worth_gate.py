@@ -7,16 +7,17 @@ z = 17.75 -- unambiguous by any conventional reading -- and costs +22% holdout
 MSE when refitted as a fixed interaction.  A screen that only reports z hands
 the caller a number that is correct and still points the wrong way.
 
-Two derived numbers close that gap.  Neither is new machinery; both are
-arithmetic on quantities the screen already produces.
+Two derived numbers close that gap.  Neither is new machinery, but they do not
+cost the same to obtain: the first is arithmetic on the returned screening row,
+the second needs one pass over the residuals the screen does not hand back.
 
 1. WORTH THRESHOLD.  Mallows' Cp says a term earns its place when its score
-   beats twice the df it spends, `T > 2*edf0`.  The evaluation guide already
+   beats twice the df it spends, `T/phi > 2*edf0`.  The evaluation guide already
    notes `gain - 2*edf` as a scoring variant; what is added here is the same
    rule on PSST's own z scale, plus a measurement of where the crossing lands.
    Since `z = (T/phi - edf0) / sqrt(2*edf0)`,
 
-       T > 2*edf0   <=>   z > sqrt(edf0 / 2)
+       T/phi > 2*edf0   <=>   z > sqrt(edf0 / 2)
 
    The bar GROWS with the block's df -- z > 4.95 at 8x8, z > 28.3 at 41x41 --
    which is exactly what a constant cutoff cannot express.
@@ -32,6 +33,10 @@ arithmetic on quantities the screen already produces.
    For k independent chi^2_1 contributions E[t] = 1 and E[t^2] = 3, so the null
    sits at P = k/3.  Reporting `P / (k/3)` gives ~1 for noise AND for genuinely
    diffuse truths, and near zero when a handful of cells carry everything.
+   Unlike the gate, this is NOT arithmetic on the screening row:
+   `screen_interactions` returns aggregates (`statistic`, `z`, `edf0`), not the
+   per-cell contributions, so `cell_contributions` below recomputes them from
+   the mains-model residuals and the joint cell index.
 
 Run:  uv run python benchmarks/screening_worth_gate.py [--reps 3]
 
@@ -103,7 +108,7 @@ SHRINKAGE_ARMS: tuple[str, ...] = ("mains", "fixed", "pooled")
 def worth_threshold(edf0: float) -> float:
     """z a pair must clear for a plain fixed refit to pay for its own df.
 
-    `T > 2*edf0` (Mallows' Cp) expressed on the z scale the screen reports.
+    `T/phi > 2*edf0` (Mallows' Cp) expressed on the z scale the screen reports.
     """
     return float(np.sqrt(edf0 / 2.0))
 

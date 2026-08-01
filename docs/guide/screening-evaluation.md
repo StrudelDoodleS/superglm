@@ -273,7 +273,7 @@ screen wins. That is Mallows' Cp, and on PSST's own scale it is not a rescoring
 but a threshold. Since `z = (T/φ − edf0) / sqrt(2·edf0)`:
 
 ```
-T > 2·edf0    ⟺    z > sqrt(edf0 / 2)
+T/φ > 2·edf0    ⟺    z > sqrt(edf0 / 2)
 ```
 
 The bar **grows with the block's df**: z > 4.95 at 8×8, z > 28.3 at 41×41.
@@ -361,8 +361,13 @@ Together the two readings give a decision rather than a score:
 | **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
 | **z above threshold** | refit the pair as a fixed interaction | refit the pair as a fixed interaction |
 
-Neither reading is implemented in `screen_interactions`; both are arithmetic on
-what it already returns. Reproduce with
+Neither reading is implemented in `screen_interactions`, and they do not cost
+the same to obtain. The **gate is** arithmetic on the returned row: `z` and
+`edf0` are both columns of it. **`P` is not** — `screen_interactions` returns
+aggregates (`statistic`, `z`, `edf0`, `n_cells`), not the per-cell
+contributions, so obtaining it takes one extra pass over the mains-model
+residuals grouped by joint cell, which is what `cell_contributions` in the
+benchmark does. Reproduce with
 `uv run python benchmarks/screening_worth_gate.py`.
 
 ## Caveats
