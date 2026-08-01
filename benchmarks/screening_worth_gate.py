@@ -609,11 +609,26 @@ def _print_shrinkage(rows: list[dict[str, object]], screen: dict, n_levels: int)
     )
 
 
+def _tables(value: str) -> tuple[int, ...]:
+    """Parse `--tables 3,4` into a validated tuple.
+
+    A subset has to be a first-class option rather than an ad-hoc edit: the
+    wide refits run for tens of minutes each, so a guide figure will sometimes
+    be refreshed one table at a time, and the command that produced it has to
+    be quotable.
+    """
+    wanted = tuple(int(part) for part in value.replace(",", " ").split())
+    if not wanted or any(t not in (1, 2, 3, 4) for t in wanted):
+        raise argparse.ArgumentTypeError(f"tables must be drawn from 1,2,3,4; got {value!r}")
+    return wanted
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--n", type=int, default=12_000)
     parser.add_argument("--wide-levels", type=int, default=41)
+    parser.add_argument("--tables", type=_tables, default=(1, 2, 3, 4))
     return parser
 
 
@@ -626,11 +641,17 @@ def main() -> None:
     args = _build_parser().parse_args()
     started = time.perf_counter()
 
-    _print_gate_ladder(_run_gate_ladder(args.reps, args.n))
-    _print_concentration(_run_concentration(args.reps, args.n, args.wide_levels), args.wide_levels)
-    _print_sparse_payoff(_run_sparse_payoff(args.reps, args.n, args.wide_levels))
-    shrinkage, screen = _run_shrinkage(args.reps, args.n, args.wide_levels)
-    _print_shrinkage(shrinkage, screen, args.wide_levels)
+    if 1 in args.tables:
+        _print_gate_ladder(_run_gate_ladder(args.reps, args.n))
+    if 2 in args.tables:
+        _print_concentration(
+            _run_concentration(args.reps, args.n, args.wide_levels), args.wide_levels
+        )
+    if 3 in args.tables:
+        _print_sparse_payoff(_run_sparse_payoff(args.reps, args.n, args.wide_levels))
+    if 4 in args.tables:
+        shrinkage, screen = _run_shrinkage(args.reps, args.n, args.wide_levels)
+        _print_shrinkage(shrinkage, screen, args.wide_levels)
     print(f"\ntotal {time.perf_counter() - started:.0f}s")
 
 

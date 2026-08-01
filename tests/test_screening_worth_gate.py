@@ -146,6 +146,22 @@ def test_concentration_is_nan_rather_than_a_crash_on_a_dead_block() -> None:
 def test_parser_defaults_match_the_documented_run() -> None:
     args = _build_parser().parse_args([])
     assert (args.reps, args.n, args.wide_levels) == (3, 12_000, 41)
+    assert args.tables == (1, 2, 3, 4)
+
+
+def test_table_subsets_are_a_supported_flag_rather_than_an_edit() -> None:
+    """A guide figure refreshed one table at a time needs a quotable command.
+
+    The wide refits run for tens of minutes each, so partial reruns happen; if
+    the only way to do one is to comment out a call, the command that produced
+    a published number cannot be cited.
+    """
+    assert _build_parser().parse_args(["--tables", "3,4"]).tables == (3, 4)
+    assert _build_parser().parse_args(["--tables", "2"]).tables == (2,)
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--tables", "5"])
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--tables", ""])
 
 
 def test_generator_plants_exactly_the_advertised_number_of_live_cells() -> None:
