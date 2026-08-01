@@ -418,6 +418,39 @@ def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable():
             assert r.lambda0 == once[0].lambda0
 
 
+def test_an_exact_arrow_score_beats_an_approximate_dense_one(monkeypatch):
+    """Bin only when neither path can score the pair exactly.
+
+    The dense path gets first refusal, but the handoff to the arrow kernel
+    used to happen only once binning had run out — so a pair whose DENSE
+    intermediate is over budget got its spline margin compressed even where
+    the arrow path, whose intermediate is the transpose of that one, would
+    have taken the pair whole. Failing one says nothing about the other.
+    """
+    L, support, n = 169, 1000, 4000
+    rng = np.random.default_rng(21)
+    grid = np.linspace(0.0, 1.0, support)
+    df = pd.DataFrame(
+        {
+            "g": np.array([f"L{i}" for i in range(L)])[rng.integers(0, L, n)],
+            "x": grid[np.arange(n) % support],
+        }
+    )
+    y = rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian", features={"g": Categorical(), "x": Spline(kind="ps", n_knots=8)}
+    )
+    model.fit_reml(df, y)
+    row, seen = _routed_shapes(model, df, y, monkeypatch)
+    assert seen, "the pair must route through the arrow kernel"
+    # The dense intermediate is 1000 * 168^2 = 28.2M against a 20M budget, so
+    # the dense path has to bin; the arrow one is 1000 * 11^2 = 121k, which
+    # fits 165x over.
+    assert seen["support"] == support
+    assert not bool(row["approx"])
+    assert np.isfinite(row["z"])
+
+
 def test_a_full_rank_penalty_makes_every_rung_search():
     """The kernel's cost is not a function of the pair's dimensions.
 

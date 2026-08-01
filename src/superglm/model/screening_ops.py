@@ -1076,9 +1076,14 @@ def screen_interactions(
             structured = False
             arrow_budget = 0
             # The dense path gets first refusal, so nothing it can already
-            # score changes.  Cleared when it runs out of moves, which hands a
-            # spline_cat pair to the arrow kernel below.
+            # score EXACTLY changes.  Cleared when it runs out of exact moves,
+            # which hands a spline_cat pair to the arrow kernel below.
             allow_dense = True
+            # Set when that handoff was taken speculatively, on a width
+            # estimate that is biased low: if the true width then puts the
+            # pair outside the arrow budgets, the dense path gets its binning
+            # fallback back rather than the pair becoming a NaN row.
+            arrow_lookahead = False
             while True:
                 codes_l, n_l = _margin_support(left, bin_flag[left])
                 codes_r, n_r = _margin_support(right, bin_flag[right])
@@ -1105,6 +1110,11 @@ def screen_interactions(
                     # to afford the two evaluations that bracket it.
                     arrow_budget = _structured_evaluation_budget(k_l, n_r)
                     if not _within_structured_budget(k_l, n_r) or arrow_budget < 2:
+                        if arrow_lookahead:
+                            # Speculation did not survive the true width; put
+                            # the dense path back on the track it was on.
+                            allow_dense, arrow_lookahead = True, False
+                            continue
                         break
                 # Both paths build the (n_l, n_r) cell tables and a curvature
                 # intermediate that scales with the support -- transposed
@@ -1154,6 +1164,22 @@ def screen_interactions(
                         allow_dense = False
                         continue
                     break
+                if allow_dense and not structured and kind == "spline_cat":
+                    # About to compress the spline margin, which means the
+                    # dense path can no longer score this pair EXACTLY.  The
+                    # arrow path may still be able to, on the support as it
+                    # stands — its intermediate is the transpose of the one
+                    # that just failed, so failing that one says nothing about
+                    # this one.  An exact score beats an approximate one, so
+                    # try it before binning rather than after.  `left` is the
+                    # spline margin for spline_cat, by the swap above.
+                    if (
+                        _within_structured_budget(k_l, n_r)
+                        and _structured_evaluation_budget(k_l, n_r) >= 2
+                        and _within_structured_cells(n_l, n_r, k_l)
+                    ):
+                        allow_dense, arrow_lookahead = False, True
+                        continue
                 bin_flag[binnable[0][1]] = True
             approx = (
                 bin_flag[left] or bin_flag[right] or _pair_refits_discrete(kind, feat_a, feat_b)
