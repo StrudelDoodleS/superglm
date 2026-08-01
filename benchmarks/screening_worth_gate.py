@@ -272,13 +272,19 @@ def _require_converged(model: SuperGLM, label: str) -> SuperGLM:
     """
     reml = model.reml_diagnostics()
     solver_converged = bool(model.result.converged)
-    reml_converged = bool(reml["converged"]) if reml["enabled"] else True
+    enabled = bool(reml["enabled"])
+    # `.get`, not `[...]`: when REML did not run the payload carries only
+    # `enabled`, `lambdas`, `lambda_history` and `profile` -- no `converged`
+    # and no `termination_reason` at all.  Subscripting them here turned the
+    # one path this guard exists for, a failed plain `fit()`, into a bare
+    # KeyError naming neither the arm nor the flag.
+    reml_converged = bool(reml.get("converged")) if enabled else True
     if solver_converged and reml_converged:
         return model
     raise NonconvergedFitError(
         f"{label}: fit did not converge "
         f"(solver converged={solver_converged}, n_iter={int(model.result.n_iter)}; "
-        f"reml enabled={reml['enabled']}, converged={reml['converged']!r}, "
+        f"reml enabled={enabled}, converged={reml.get('converged')!r}, "
         f"termination={reml.get('termination_reason')!r}). "
         "Refusing to average a failed fit into the table."
     )
