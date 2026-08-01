@@ -289,12 +289,18 @@ def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
     rank.  A Cholesky trace reports ``k`` on the accepted seeds and ``k - 1``
     on the rest, which is two.
 
-    ``matrix_rank`` is a cross-check here, not the contract: its default cut
-    (``max(M, N) * eps``) is not the ``_RCOND`` the screen counts at, and on a
-    block with an eigenvalue between them the two would part company.  They
-    agree on every seed below because a profiled block is bimodal -- measured
-    over these 20, the smallest kept relative eigenvalue is 1.2e-02 and the
-    largest dropped one 4.6e-16.
+    ``matrix_rank`` is the contract, not a cross-check: the screen counts at
+    ``_rank_floor``, which IS ``matrix_rank``'s own tolerance, so the reported
+    edf can never exceed it.
+
+    **Swept wide on purpose.**  An earlier version of this test ran 20 seeds
+    and passed while CI failed, because the round-off eigenvalue this layout
+    leaves behind has a TAIL: measured over 400 replicates its median is
+    2.2e-16 but it reaches 1.2e-15, so a cut placed at 1e-15 misreports rank
+    on roughly one seed in two hundred and twenty seeds had a nine-in-ten
+    chance of missing it.  Locally that bit seeds 22 and 88; on CI's numpy it
+    bit seed 16.  Anything narrow enough to miss a 0.5% failure is not a
+    regression test for it.
     """
     from superglm.screening import penalized_score_statistic
     from superglm.screening._numeric_margin import numeric_pair_moments
@@ -303,7 +309,7 @@ def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
     L, n = 40, 8000
     menu = np.eye(L)[:, 1:]
     reported = set()
-    for seed in range(20):
+    for seed in range(200):
         rng = np.random.default_rng(seed)
         codes = rng.integers(0, L - 1, n)
         codes[0] = L - 1  # the singleton level

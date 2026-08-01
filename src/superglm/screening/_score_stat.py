@@ -50,23 +50,40 @@ from superglm.screening._arrow import psd_ranks
 _EDF_TOL = 1e-6
 _MAX_BISECT = 200
 
-# Below this share of a matrix's own largest eigenvalue a direction is treated
-# as ABSENT rather than merely small.  It is deliberately a round-off floor and
-# not a smallness heuristic, and it is pinned to what the fallback solver here
-# actually inverts with: ``numpy.linalg.pinv``'s default cut, measured at 1e-15
-# relative on numpy 2.4.2 by bisecting ``diag(1, x, 0)`` -- the pinv trace flips
-# between x = 1e-14 and x = 1e-15.  Matching it buys an invariant: on the
-# pseudo-inverse branch a direction this module COUNTS is exactly a direction
-# the solve RESOLVES.
-#
-# It was 1e-12, which is four orders above round-off and therefore a claim
-# about smallness rather than absence.  That silently deleted identifiable
-# modes: with ``V = S = diag(1, 1e-13, 0)`` and ``U = (0, sqrt(1e-13), 0)`` the
-# whitening below discarded the 1e-13 direction -- which carries a genuine
-# ``a = 0.5`` and ALL of ``U``'s mass -- and the ladder returned
-# ``statistic 0, lambda0 1e-10`` where the direct pseudo-inverse ladder
-# resolves ``lambda0 1, statistic 0.5`` at the same edf.
-_RCOND = 1e-15
+
+def _rank_floor(n: int) -> float:
+    """Share of the largest eigenvalue below which a direction is ROUND-OFF.
+
+    ``max(n, 1) * eps`` -- LAPACK's convention and exactly what
+    ``numpy.linalg.matrix_rank`` uses by default.  It scales with the
+    dimension because round-off accumulates with it, and that dependence is
+    the whole point: no fixed constant works at both ends.
+
+    Two failures bound it from either side, and they are three orders apart,
+    so this is not a free parameter.
+
+    ABOVE round-off it deletes real curvature.  At 1e-12, ``V = S =
+    diag(1, 1e-13, 0)`` with ``U = (0, sqrt(1e-13), 0)`` had its 1e-13
+    direction discarded by the whitening below -- a direction carrying a
+    genuine ``a = 0.5`` and ALL of ``U``'s mass -- and the ladder returned
+    ``statistic 0, lambda0 1e-10`` where the direct pseudo-inverse ladder
+    resolves ``lambda0 1, statistic 0.5``.  Here that direction sits 150x
+    above the floor and survives.
+
+    AT round-off it keeps subtraction dust and reports a degree of freedom
+    that does not exist.  A fixed 1e-15 is only 4.5x ``eps``, which is inside
+    the dust's own distribution rather than above it: measured over 400
+    replicates of a 39-wide profiled block whose true rank is 38, the
+    round-off eigenvalue has median 2.2e-16 and a tail to 1.2e-15, so 2 of
+    400 read rank 39.  ``39 * eps`` is 8.7e-15, above the whole measured tail
+    by 7x.
+
+    Because this IS ``matrix_rank``'s tolerance, the count it produces cannot
+    exceed ``matrix_rank`` -- the contract the unpenalized rung rests on holds
+    by construction rather than by luck, and only tightens where a negative
+    eigenvalue makes ``psd_ranks`` stricter than a singular-value count.
+    """
+    return max(int(n), 1) * float(np.finfo(np.float64).eps)
 
 
 @dataclass(frozen=True)
@@ -124,26 +141,22 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     200.  Through the public screen the same layout reported 209 on 3 of 12
     seeds, moving ``z`` by +0.050; at 4 df of 5 the same flip moved it by
     +0.29, since ``z`` divides by ``sqrt(2 * edf0)``.
-    :func:`superglm.screening._arrow.psd_ranks` is the counter, at this
-    module's ``_RCOND`` rather than the arrow kernel's own: same RULE — count
-    eigenvalues, respect their sign — at a cut each path can justify, the
-    arrow kernel counting on a deliberately BALANCED reference where 1e-12
-    means something and this path counting on a raw profiled block where the
-    fallback solver's cut does.
+    :func:`superglm.screening._arrow.psd_ranks` is the counter, at
+    :func:`_rank_floor` rather than the arrow kernel's own constant: same RULE
+    — count eigenvalues, respect their sign — at a cut each path can justify,
+    the arrow kernel counting on a deliberately BALANCED reference where a
+    fixed 1e-12 means something, and this path counting on a raw profiled
+    block where only round-off does.
 
-    The cut here was 1e-12 when this counting first landed, on the argument
-    that matching the module elsewhere beat matching the previous dense
-    behaviour.  A later finding on the whitening path retired that argument:
-    at 1e-12 an identifiable mode whose only fault is being small beside
-    another direction is deleted outright, which is a worse failure than the
-    one being fixed.  Pinning ``_RCOND`` to round-off instead settles both,
-    and it makes the count agree with the fallback ``pinv`` solve exactly, so
-    a direction counted here is one that solve resolves.  The primary fix is
-    untouched by that: the modes #199 is about sit at 1e-16 relative — over
-    the 20-replicate layout in the regression test the largest dropped one is
-    4.6e-16 and the smallest kept 1.2e-02 — so they are dropped by any
-    round-off cut, and the spectrum is bimodal enough that no measured block
-    lands near either candidate.
+    The cut here was a fixed 1e-12 when this counting first landed, then a
+    fixed 1e-15; both were wrong and in opposite directions, which is why it
+    is now dimension-scaled.  ``_rank_floor`` carries the two measurements
+    that bound it.  What matters for THIS rung is the lower one: at a fixed
+    1e-15 the count could exceed ``matrix_rank`` on a profiled block whose
+    round-off dust ran into the tail, reporting a degree of freedom that does
+    not exist — the exact defect this counting exists to remove, reintroduced
+    from the other side.  At ``k * eps`` the count is ``matrix_rank``'s own
+    tolerance, so it cannot.
 
     One difference from ``pinv`` is kept on purpose: it scores directions by
     ``|lambda|``, so it counted a curvature of -1e-11 as a degree of freedom
@@ -165,13 +178,14 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     overlap absorbs carries no profiled score — so the Cholesky and
     pseudo-inverse solves answer it the same: over the 76 affected replicates
     above, ``|T_chol - T_pinv| / |T_pinv|`` had median 3.9e-16 and max 2.9e-15.
-    ``apply`` is deliberately NOT rank-limited to match.  With ``_RCOND`` at
-    ``pinv``'s own cut the two now agree on the fallback branch by
-    construction, so the only remaining gap is the sign case above — a
-    direction ``pinv`` inverts and this does not count — which is the
-    difference being sought rather than a defect.  On the Cholesky branch the
-    solve makes no rank decision at all, which is exactly why the edf is
-    counted separately here.
+    ``apply`` is deliberately NOT rank-limited to match.  The count sits a
+    little above ``pinv``'s own cut, so on the fallback branch a direction
+    between them is inverted by the solve without being counted here — which
+    is the conservative side of that gap: the edf never claims a degree of
+    freedom the data does not carry, and ``U_eff`` has no mass there to
+    contribute anyway (measured above at 2.9e-15 relative, worst case).  On
+    the Cholesky branch the solve makes no rank decision at all, which is
+    exactly why the edf is counted separately here.
     """
     A = V if S is None else V + lam * S
     try:
@@ -180,7 +194,7 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     except scipy.linalg.LinAlgError:
         apply = np.linalg.pinv(A, hermitian=True).__matmul__
     if S is None:
-        return float(psd_ranks(V, _RCOND)), apply
+        return float(psd_ranks(V, _rank_floor(V.shape[0]))), apply
     return float(np.trace(apply(V))), apply
 
 
@@ -203,12 +217,17 @@ def _build_pencil(V: NDArray, S: NDArray, U: NDArray) -> _Pencil:
     Relative is necessary but not sufficient: the cut must also sit at
     ROUND-OFF, because what it is entitled to discard is the common null
     space and nothing else.  At 1e-12 it discarded identifiable modes whose
-    only fault was being small beside another direction -- see ``_RCOND``,
-    where the case that forced this is recorded.  A mode surviving the cut
-    is whitened by ``1 / sqrt(w)``, so a cut this low does amplify a direction
-    it keeps; that is the right trade, because keeping a noise direction costs
-    at most one spurious degree of freedom in ``edf`` while dropping a real
-    one zeroes the statistic outright.
+    only fault was being small beside another direction -- see
+    :func:`_rank_floor`, which records the case that forced it.  ``G`` is a
+    SUM of two PSD terms, so nothing cancels in forming it and its round-off
+    floor really is ``eps`` times its own largest eigenvalue; that is why the
+    same floor serves here and on the profiled block in :func:`_edge`, where
+    the arithmetic is a difference but was measured not to cancel.
+
+    A mode surviving the cut is whitened by ``1 / sqrt(w)``, so a floor this
+    low does amplify a direction it keeps.  That is the right trade: keeping
+    a noise direction costs at most one spurious degree of freedom in ``edf``,
+    where dropping a real one zeroes the statistic outright.
     """
     G = 0.5 * (V + S + (V + S).T)
     try:
@@ -216,7 +235,7 @@ def _build_pencil(V: NDArray, S: NDArray, U: NDArray) -> _Pencil:
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
         w, Q = np.linalg.eigh(G)
         top = float(w.max()) if w.size else 0.0
-        keep = w > _RCOND * max(top, np.finfo(np.float64).tiny)
+        keep = w > _rank_floor(w.size) * max(top, np.finfo(np.float64).tiny)
         if not np.any(keep):
             return _Pencil(a=np.zeros(0), u=np.zeros(0))
         whiten = Q[:, keep] / np.sqrt(w[keep])
