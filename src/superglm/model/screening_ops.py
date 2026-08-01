@@ -132,8 +132,9 @@ def _validated_budgets(edf0) -> tuple[float, ...]:
 _DEFERRED_KIND_HINT = (
     "spline x numeric screening is deferred until a varying-coefficient "
     "interaction term exists; respec the Numeric parent as a Spline to screen "
-    "the pair as ti(), or see the screening guide. Polynomial margins are "
-    "likewise deferred."
+    "the pair as ti(), or see the screening guide. Polynomial margins and "
+    "grouped Categorical margins (whose interaction refits cannot yet map "
+    "original labels through the grouping) are likewise deferred."
 )
 
 
@@ -148,6 +149,15 @@ def _margin_kind(spec) -> str | None:
             return "spline"
         return None
     if isinstance(spec, Categorical):
+        if spec._grouping is not None:
+            # A grouped factor screens fine — _categorical_codes collapses to
+            # the fitted level set — but no interaction builder maps its raw
+            # column through the grouping, so every confirmatory refit of such
+            # a pair validates original labels against grouped levels and
+            # raises.  Screening a pair whose refit cannot be built would break
+            # the confirm-by-refit contract, so the margin is excluded until
+            # the builders learn the grouping.
+            return None
         return "categorical" if len(spec._levels) >= 2 else None
     if isinstance(spec, Numeric):
         return "numeric"

@@ -622,3 +622,45 @@ def test_fremtpl_mixed_sweep_end_to_end():
     )
     confirm.fit_reml(df, y, sample_weight=exposure)
     assert confirm._result.deviance < model._result.deviance
+
+
+def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
+    """A grouped factor is excluded: its confirmatory refit cannot be built.
+
+    `Categorical(grouping=...)` fits fine as a main effect, and the screen's own
+    `_categorical_codes` collapses it correctly — but no interaction builder maps
+    the raw column through the grouping, so a confirmatory refit validates
+    original labels against grouped levels and raises.  Screening such a pair
+    would hand the caller a refit that cannot run, so the margin is excluded.
+    The `pytest.raises` below pins the underlying defect: when it starts passing,
+    the exclusion in `_margin_kind` can go.
+    """
+    from superglm.features.grouping import collapse_levels
+
+    rng = np.random.default_rng(4321)
+    n = 4000
+    levels = ["R1", "R2", "R3", "R4", "R5"]
+    df = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "region": rng.choice(levels, n)})
+    y = rng.poisson(0.3, n).astype(np.float64)
+    grouping = collapse_levels(df["region"], groups={"R45": ["R4", "R5"]})
+
+    def feats():
+        return {
+            "age": Spline(kind="ps", n_knots=5),
+            "region": Categorical(grouping=grouping),
+        }
+
+    model = SuperGLM(family="poisson", features=feats())
+    model.fit_reml(df, y)
+
+    table = model.screen_interactions(df, y)
+    assert "region" not in set(table["feature_a"]) | set(table["feature_b"])
+
+    with pytest.raises(ValueError, match="deferred|screenable"):
+        model.screen_interactions(df, y, candidates=[("age", "region")])
+
+    # The defect the exclusion protects against: the refit itself cannot be built.
+    with pytest.raises(ValueError, match="unseen categorical levels"):
+        SuperGLM(
+            family="poisson", features=feats(), interactions=[("age", "region")]
+        ).fit_reml(df, y)
