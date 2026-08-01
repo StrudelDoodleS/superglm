@@ -664,3 +664,85 @@ def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
         SuperGLM(
             family="poisson", features=feats(), interactions=[("age", "region")]
         ).fit_reml(df, y)
+
+
+def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
+    """Review finding: for a spline_cat whose factor is wide, kron(S, I) has a
+    null space above every budget, so all four rungs clamp to the same achieved
+    edf and repeat the same O(k^3) solves for one answer.  The ladder skips
+    every budget strictly below an achieved clamp, and the row is unchanged."""
+    import superglm.model.screening_ops as screening_ops
+
+    L, reps = 40, 25
+    rng = np.random.default_rng(77)
+    n = L * reps
+    df = pd.DataFrame(
+        {
+            "g": np.repeat([f"L{i}" for i in range(L)], reps),
+            "x": rng.uniform(0.0, 1.0, n),
+        }
+    )
+    y = rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        features={"g": Categorical(), "x": Spline(kind="ps", n_knots=6)},
+    )
+    model.fit_reml(df, y)
+
+    calls = []
+    real = screening_ops.penalized_score_statistic
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs["edf0"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(screening_ops, "penalized_score_statistic", counted)
+
+    ladder = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
+    # every rung clamps upward to the null-space dimension, so only the first
+    # budget is ever solved
+    assert calls == [2.0]
+    assert ladder["kind"] == "spline_cat"
+    assert ladder["edf0"] > 16.0  # the achieved clamp sits above every budget
+
+    # ... and the skipped rungs would have returned exactly this row
+    calls.clear()
+    for budget in (4.0, 8.0, 16.0):
+        rung = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=budget).iloc[0]
+        assert rung["statistic"] == ladder["statistic"]
+        assert rung["edf0"] == ladder["edf0"]
+        assert rung["lambda0"] == ladder["lambda0"]
+        assert rung["z"] == ladder["z"]
+
+
+def test_bisecting_ladder_still_evaluates_every_rung(monkeypatch):
+    """The skip is fenced to clamped rungs: a ti pair whose budget lands inside
+    the bracket resolves a different lambda0 per rung, so all four must run."""
+    import superglm.model.screening_ops as screening_ops
+
+    rng = np.random.default_rng(5)
+    n = 20000
+    x1 = rng.integers(0, 200, n) / 200.0
+    x2 = rng.integers(0, 200, n) / 200.0
+    df = pd.DataFrame({"x1": x1, "x2": x2})
+    y = rng.normal(0.0, 1.0, n) + 1.5 * x1 * x2
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x1": Spline(kind="ps", n_knots=8),
+            "x2": Spline(kind="ps", n_knots=8),
+        },
+    )
+    model.fit_reml(df, y)
+
+    calls = []
+    real = screening_ops.penalized_score_statistic
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs["edf0"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(screening_ops, "penalized_score_statistic", counted)
+    row = model.screen_interactions(df, y, candidates=[("x1", "x2")]).iloc[0]
+    assert calls == [2.0, 4.0, 8.0, 16.0]
+    assert row["edf0"] == pytest.approx(2.0, abs=1e-3)
