@@ -306,8 +306,18 @@ def structured_ladder(
 
     # The dense path scales its bracket by tr(V_eff)/tr(S); the unprofiled
     # tr(V) is used here because profiling the trace structurally would cost
-    # more than the bracket is worth.  The two differ by a few percent, ten
-    # orders of magnitude outside the region where edf varies with lambda.
+    # more than the bracket is worth.  That is a safe substitution only while
+    # the mains leave most of the pair's curvature unexplained, which is the
+    # ordinary case and where the two agree to a few percent -- ten orders
+    # outside the region where edf varies with lambda.  It is NOT safe when
+    # the mains nearly absorb the pair: measured on a spline whose support is
+    # near-constant within each level, tr(V_eff)/tr(V) is 1.9e-14 and the two
+    # bracket scales sit 5.4e13 apart, far enough that the brackets barely
+    # overlap and the two paths answer at different lambda.  That pair's
+    # overlap block is numerically indefinite, so neither path's answer is
+    # determined -- a relative 1e-15 perturbation of the moments moves the
+    # dense statistic by 21% -- but the ladder does not detect it and reports
+    # a confident z either way.  See issue tracking on PR #194.
     #
     # The 1e+-10 edges are the dense ladder's, kept identical so a pair the
     # two paths can both score gets the same lambda0.  Nothing in the arrow
