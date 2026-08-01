@@ -92,9 +92,13 @@ def spline_cat_moments(
     built.  Nor is the dense path's ``(n_a, L, L)`` curvature intermediate,
     which is diagonal in its last two axes: measured at 380,880 doubles
     carrying 690 nonzeros for a 24-level factor.
+
+    A missing ``S_a`` is carried as a zero penalty rather than refused, which
+    is what the dense path does with the same input: an unpenalized block has
+    no bandwidth to scan, and :func:`structured_ladder` reports it at a
+    single rung.  Refusing here would abort the whole sweep over one pair,
+    where the contract is a NaN row.
     """
-    if S_a is None:
-        raise ValueError("the spline margin of a spline_cat pair must carry a penalty")
     B_a = np.asarray(B_a, dtype=np.float64)
     n_a, k_a = B_a.shape
     level_rows = np.asarray(level_rows, dtype=np.intp)
@@ -125,7 +129,7 @@ def spline_cat_moments(
         U=(B_a.T @ Sq).T,
         c=(B_a.T @ Wq).T,
         m=Wq.sum(axis=0),
-        S_a=np.asarray(S_a, dtype=np.float64),
+        S_a=np.zeros((k_a, k_a)) if S_a is None else np.asarray(S_a, dtype=np.float64),
         border=border,
         u_border=u_border,
         u_cat=Sq.sum(axis=0),
@@ -271,6 +275,15 @@ def structured_ladder(
     """
     U_eff, rank_m = _profile(p)
     ranks = block_ranks(p)
+
+    if not np.any(p.S_a):
+        # No penalty to scan, exactly the predicate the dense ladder applies:
+        # one rung, at the block's own achieved rank, with lambda0 = 0.  A
+        # zero penalty would otherwise make the bracket below infinite and
+        # every rung NaN, since inf * 0 is not a number.
+        stat, rank = _evaluate(p, U_eff, rank_m, 0.0, ranks)
+        return [ScreenedPair(statistic=stat, edf0=rank, lambda0=0.0) for _ in budgets]
+
     # The dense path scales its bracket by tr(V_eff)/tr(S); the unprofiled
     # tr(V) is used here because profiling the trace structurally would cost
     # more than the bracket is worth.  The two differ by a few percent, ten
