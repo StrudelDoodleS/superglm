@@ -197,47 +197,77 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     recovered at all, and both of those moved on this branch while every
     threshold stayed exactly where it was.
 
-    Measured over 479 deficient blocks: where the shipped prefix walk could
-    fill its set, it and the null-basis read-off agree on every column -- 0
-    disagreements.  But the walk tests each prefix against the whole matrix's
-    cutoff, so it can mis-reject a column early, run out of candidates and
-    return nothing, and on 60 of those 479 blocks it did.  Those are not slower
-    answers, they are different ones: `gram_eigh` with no representative basis
-    where the branch reports `pivoted_cholesky`.
+    The half checked HERE is the one a single design can pin: at ``eps=1e-4``
+    the shipped walk keeps the near-duplicate pair and the branch does not.
+    The SELECTION is far from any boundary -- the 2x2 prefix's smaller
+    eigenvalue is 6.0823e-09 against a cutoff of 4.445e-16, a margin of
+    1.37e+07 -- so no eigensolver difference can move it.  ``eps=5e-8`` gives a
+    margin of only 3.0 and is deliberately not used.
 
-    A stored `RankDecomposition` cannot re-derive which of those it came from,
-    so the version is the only thing that can tell them apart.
+    The RANK is a different matter and is asserted separately below, on
+    purpose.  This design is exactly rank 2, so its third eigenvalue is a
+    computed zero sitting at roughly the cutoff itself: measured
+    ``cutoff / (m * eps * ||A||) = 0.3333``, i.e. the cutoff is BELOW what a
+    symmetric eigensolver resolves.  Every test of this code path shares that
+    property -- a rank-deficient matrix has no other kind of zero -- and it is
+    empirically stable for a fixed matrix, holding on this machine at 1 and 16
+    threads and on CI's 3.12 runner across five values of eps.  What is NOT
+    stable is a CHAIN of such comparisons, which is why the walk's own failure
+    mode is tested as a rate instead.  The rank is asserted first so that if a
+    driver ever does move it, the failure says so instead of surfacing as a
+    confusing selection mismatch.
     """
     assert SHARED_RANK_POLICY.version == 2
 
-    rng = np.random.default_rng(4)
-    _, gram = _aliased_gram(rng, 60, 45)
-    equilibrated, _, rank, cutoff = _equilibrated_geometry(gram)
-
-    assert _shipped_prefix_walk(equilibrated, rank, cutoff) is None
-    decomposition = decompose_gram(gram)
-    assert decomposition.method == "pivoted_cholesky"
-    assert decomposition.policy_version == 2
-
-    # and the other half: the same thresholds, a different column retained
-    design = _near_alias(5e-8)
+    design = _near_alias(1e-4)
     gram = design.T @ design
+    decomposition = decompose_gram(gram)
+    assert decomposition.rank == 2, (
+        f"fixture is no longer rank 2 (got {decomposition.rank}); the computed zero "
+        "has crossed the cutoff and this design can no longer pin a selection"
+    )
+
     equilibrated, _, rank, cutoff = _equilibrated_geometry(gram)
     walked = _shipped_prefix_walk(equilibrated, rank, cutoff)
     assert walked is not None and walked.tolist() == [0, 1]
-    assert decompose_gram(gram).active_columns.tolist() == [0, 2]
+
+    assert decomposition.active_columns.tolist() == [0, 2]
+    assert decomposition.policy_version == 2
 
 
-def test_where_the_shipped_walk_filled_its_set_the_convention_is_unchanged() -> None:
-    """The version bump is not licence to have changed the convention.
+def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
+    """The other half of the version's justification, as a RATE not an outcome.
 
-    Version 2 says the deficient answer can differ; it must still differ ONLY
-    where the walk failed or where conditioning forced a different column.  On
-    blocks the walk could resolve, the read-off reproduces it exactly.
+    Whether the shipped walk fills its set on any ONE block is not a stable
+    fact.  The walk tests each prefix against the whole matrix's cutoff,
+    ``eps * ||A||``, and by Cauchy interlacing a prefix's spectrum is bounded
+    by the full matrix's -- so the walk only fails when a genuine direction is
+    represented in the prefix at roughly the cutoff itself.  A symmetric
+    eigensolver resolves eigenvalues to about ``m * eps * ||A||``, so that
+    comparison sits below the resolution of the thing computing it, and the
+    per-block answer moves with the LAPACK kernel.  It did: this assertion was
+    first written against one block, passed here and failed on CI's 3.12 runner
+    with the same numpy 2.4.2 and scipy 1.17.1.
+
+    The RATE is stable, because it is a property of the algorithm rather than
+    of one rounding decision.  Measured over 958 deficient blocks across 16
+    seeds: the walk returned nothing on 126 of them (13.2%), the branch
+    recovers a `pivoted_cholesky` representative basis on 42, and per-seed
+    failures ranged from 5 to 11 out of ~60.  Identical at 1 and at 16 threads.
+
+    So the thresholds below are set far under what was measured -- roughly a
+    sixth of the expected count -- to survive a platform where the rate moves,
+    while still failing outright if the walk stops failing.
+
+    The exactness assertion is the one that carries no margin at all: across
+    all 958 blocks there was NOT ONE where both filled a set and the sets
+    differed.  That is the equivalence `b2de09d` claims, and it is what makes
+    one version bump sufficient rather than a licence.
     """
     agreed = 0
     walk_failed = 0
-    for seed in (4, 11, 2029, 77_003):
+    recovered = 0
+    for seed in (4, 11, 2029, 77_003, 5, 6, 7, 8):
         rng = np.random.default_rng(seed)
         for _ in range(60):
             width = int(rng.integers(6, 40))
@@ -249,12 +279,17 @@ def test_where_the_shipped_walk_filled_its_set_the_convention_is_unchanged() -> 
             read_off = _earliest_representatives(null, rank)
             if walked is None:
                 walk_failed += 1
+                if read_off is not None and decompose_gram(gram).method == "pivoted_cholesky":
+                    recovered += 1
                 continue
             assert read_off is not None
+            # no margin: the conventions are identical wherever both resolve
             assert np.array_equal(read_off, walked)
             agreed += 1
-    assert agreed > 100, f"only {agreed} blocks compared"
-    assert walk_failed > 0, "fixture no longer exercises the walk's own failure"
+
+    assert agreed > 200, f"only {agreed} blocks resolved by both"
+    assert walk_failed >= 10, f"the walk failed on only {walk_failed} blocks"
+    assert recovered >= 3, f"the branch recovered a basis on only {recovered}"
 
 
 def _near_alias(eps: float, rows: int = 200, seed: int = 7) -> np.ndarray:
