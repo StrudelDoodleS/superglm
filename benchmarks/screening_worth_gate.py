@@ -1,13 +1,12 @@
 """Two readings that turn a screening rank into a fitting decision.
 
 `z` says whether a pair carries signal.  It does not say whether refitting that
-pair will help, and at wide factors the two answers routinely disagree: a 41x41
-`cat_cat` pair carrying a genuine 6-sigma effect in 5 of its 1681 cells scores a
-z that is unambiguous by any conventional reading and still costs holdout MSE
-when refitted as a fixed interaction.  A screen that only reports z hands the
-caller a number that is correct and points the wrong way.  Table 4 measures both
-halves of that sentence on ONE train split, screen included, so the z and the
-holdout cost quoted beside each other come from the same data.
+pair will help, and at wide factors the two answers come apart: table 1 has
+spiky truths whose z is comfortably "significant" at every width and whose
+fixed refit costs holdout MSE anyway.  A screen that only reports z hands the
+caller a number that is correct and points the wrong way.  Table 4 measures the
+screen and the refit on ONE train split so the two can be quoted side by side --
+which is the only way such a sentence should ever be written.
 
 Two derived numbers close that gap.  Neither is new machinery, but they do not
 cost the same to obtain: the first is arithmetic on the returned screening row,
@@ -65,8 +64,14 @@ Four tables come out, because the threshold alone answers only half of it:
   4. the same pair through three model classes -- mains, a fixed interaction,
      and the cell partially pooled, plus the screen on that same split.  The
      gate says what NOT to do with a wide pair; this says whether the pair is
-     worth having at all in some other class, and it is where the guide's
-     headline z, its +22% and its -3% all come from.
+     worth having at all in some other class.
+
+Tables 3 and 4 are NOT reported in the evaluation guide.  Figures that used to
+stand in their place were not reproducible from this file and were removed
+rather than corrected; each 41x41 refit is a tens-of-minutes job and the pair of
+tables is a multi-hour one, which is the likeliest reason they went stale.  The
+arms are kept, and fixed, so the numbers can be produced properly -- run them
+with `--tables 3` / `--tables 4` and publish the command beside the figure.
 
 These are measurements of a simulated Gaussian book, not calibrated quantiles
 and not p-values.  `2*edf` is a Gaussian-family argument; the constant has not
