@@ -312,15 +312,23 @@ class TestDirectSolverBasic:
             "return_xtwx": True,
         }
 
-        original = irls_direct.decompose_gram
         decomposition_calls = 0
 
-        def counted(matrix, *args, **kwargs):
-            nonlocal decomposition_calls
-            decomposition_calls += 1
-            return original(matrix, *args, **kwargs)
+        # Both entry points count: a terminal decomposition the candidate fit
+        # skips is skipped whether or not the retained fit would have had to
+        # certify it against the observation factor.
+        def _counting(name):
+            original = getattr(irls_direct, name)
 
-        monkeypatch.setattr(irls_direct, "decompose_gram", counted)
+            def counted(matrix, *args, **kwargs):
+                nonlocal decomposition_calls
+                decomposition_calls += 1
+                return original(matrix, *args, **kwargs)
+
+            return counted
+
+        for name in ("decompose_gram", "decompose_gram_if_authoritative"):
+            monkeypatch.setattr(irls_direct, name, _counting(name))
         retained, _, _ = irls_direct.fit_irls_direct(**common)
         retained_geometry_calls = decomposition_calls
         assert retained.rank_info is not None
