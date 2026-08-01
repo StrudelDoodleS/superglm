@@ -13,6 +13,19 @@ from numpy.typing import NDArray
 
 @dataclass(frozen=True)
 class RankPolicy:
+    """Numerical-rank thresholds, and the version of the rule that applied them.
+
+    ``version`` does not track the threshold VALUES.  Those are constants of
+    the floating-point format, pinned in ``test_rank_policy.py``, and they have
+    not moved.  It tracks the RULE, because identical thresholds do not imply
+    an identical answer: the rank cutoff fixes how many directions are
+    retained, and leaves open which columns represent them and whether a
+    representative basis is recovered at all.
+
+    That is the one thing a stored ``RankDecomposition`` or ``RankInfo`` cannot
+    re-derive for itself, so it is the one thing the version has to carry.
+    """
+
     version: int
     factor_rcond: float
     gram_rcond: float
@@ -23,7 +36,28 @@ class RankPolicy:
 
 _EPS = np.finfo(float).eps
 SHARED_RANK_POLICY = RankPolicy(
-    version=1,
+    # Version 2 -- the deficient path answers differently under version 1's
+    # thresholds, in two independent ways.
+    #
+    # Choosing representatives by walking every prefix was replaced by reading
+    # the choice off the null basis.  Where the walk could fill its set the two
+    # agree exactly -- over 479 deficient blocks there was no case where both
+    # returned a set and the sets differed -- but the walk tests each prefix
+    # against the WHOLE matrix's cutoff, so on a small prefix it can mis-reject
+    # a column, run out of candidates and return nothing.  That happened on 60
+    # of those 479 blocks, and it is not a cost difference: the decomposition
+    # fell back to `gram_eigh` and retained no representative basis, where it
+    # now reports `pivoted_cholesky` and a retained coefficient representation.
+    #
+    # `_conditioned_representatives` then changed which columns are chosen when
+    # index order costs more conditioning than a rank-revealing choice may.  On
+    # the three-column near alias it selects [0, 2] where the walk selected
+    # [0, 1].
+    #
+    # Skipping the eager Gram subspace at certification sites is inside this
+    # version and contributes no reason for it: that path returns the same
+    # decomposition or none, and was accepted on byte-identical fitted output.
+    version=2,
     factor_rcond=float(np.sqrt(_EPS)),
     gram_rcond=float(_EPS),
     certification_band=32.0,

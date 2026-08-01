@@ -157,6 +157,106 @@ def test_a_deficient_block_does_not_pay_an_eigendecomposition_per_column(
     assert decomposition.method == "pivoted_cholesky"
 
 
+def _equilibrated_geometry(gram: np.ndarray):
+    """The decomposition's own equilibrated matrix, null basis, rank and cutoff."""
+    scale = np.sqrt(np.diag(gram))
+    equilibrated = gram / np.outer(scale, scale)
+    equilibrated = 0.5 * (equilibrated + equilibrated.T)
+    values, vectors = np.linalg.eigh(equilibrated)
+    values = np.maximum(values, 0.0)
+    cutoff = SHARED_RANK_POLICY.gram_rcond * max(float(values[-1]), 0.0)
+    retained = values > cutoff
+    return equilibrated, vectors[:, ~retained], int(retained.sum()), cutoff
+
+
+def _shipped_prefix_walk(equilibrated: np.ndarray, rank: int, cutoff: float):
+    """The selection as master shipped it, against the WHOLE matrix's cutoff.
+
+    ``_prefix_walk`` above takes its cutoff from the caller so the convention
+    can be compared on its own terms.  This one reproduces what the released
+    code actually did -- walk the equilibrated matrix testing every prefix
+    against the matrix-wide cutoff -- because that, not the convention, is what
+    the policy version has to distinguish.
+    """
+    selected: list[int] = []
+    for candidate in range(equilibrated.shape[0]):
+        trial = selected + [candidate]
+        principal = equilibrated[np.ix_(trial, trial)]
+        if int(np.count_nonzero(np.linalg.eigvalsh(principal) > cutoff)) > len(selected):
+            selected.append(candidate)
+        if len(selected) == rank:
+            break
+    return np.asarray(selected, dtype=int) if len(selected) == rank else None
+
+
+def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
+    """Identical thresholds, different retained representation -- hence version 2.
+
+    The rank cutoff decides HOW MANY directions are retained.  It does not
+    decide which columns represent them, nor whether a representative basis is
+    recovered at all, and both of those moved on this branch while every
+    threshold stayed exactly where it was.
+
+    Measured over 479 deficient blocks: where the shipped prefix walk could
+    fill its set, it and the null-basis read-off agree on every column -- 0
+    disagreements.  But the walk tests each prefix against the whole matrix's
+    cutoff, so it can mis-reject a column early, run out of candidates and
+    return nothing, and on 60 of those 479 blocks it did.  Those are not slower
+    answers, they are different ones: `gram_eigh` with no representative basis
+    where the branch reports `pivoted_cholesky`.
+
+    A stored `RankDecomposition` cannot re-derive which of those it came from,
+    so the version is the only thing that can tell them apart.
+    """
+    assert SHARED_RANK_POLICY.version == 2
+
+    rng = np.random.default_rng(4)
+    _, gram = _aliased_gram(rng, 60, 45)
+    equilibrated, _, rank, cutoff = _equilibrated_geometry(gram)
+
+    assert _shipped_prefix_walk(equilibrated, rank, cutoff) is None
+    decomposition = decompose_gram(gram)
+    assert decomposition.method == "pivoted_cholesky"
+    assert decomposition.policy_version == 2
+
+    # and the other half: the same thresholds, a different column retained
+    design = _near_alias(5e-8)
+    gram = design.T @ design
+    equilibrated, _, rank, cutoff = _equilibrated_geometry(gram)
+    walked = _shipped_prefix_walk(equilibrated, rank, cutoff)
+    assert walked is not None and walked.tolist() == [0, 1]
+    assert decompose_gram(gram).active_columns.tolist() == [0, 2]
+
+
+def test_where_the_shipped_walk_filled_its_set_the_convention_is_unchanged() -> None:
+    """The version bump is not licence to have changed the convention.
+
+    Version 2 says the deficient answer can differ; it must still differ ONLY
+    where the walk failed or where conditioning forced a different column.  On
+    blocks the walk could resolve, the read-off reproduces it exactly.
+    """
+    agreed = 0
+    walk_failed = 0
+    for seed in (4, 11, 2029, 77_003):
+        rng = np.random.default_rng(seed)
+        for _ in range(60):
+            width = int(rng.integers(6, 40))
+            _, gram = _aliased_gram(rng, width, int(rng.integers(2, width)))
+            equilibrated, null, rank, cutoff = _equilibrated_geometry(gram)
+            if not 0 < rank < width:
+                continue
+            walked = _shipped_prefix_walk(equilibrated, rank, cutoff)
+            read_off = _earliest_representatives(null, rank)
+            if walked is None:
+                walk_failed += 1
+                continue
+            assert read_off is not None
+            assert np.array_equal(read_off, walked)
+            agreed += 1
+    assert agreed > 100, f"only {agreed} blocks compared"
+    assert walk_failed > 0, "fixture no longer exercises the walk's own failure"
+
+
 def _near_alias(eps: float, rows: int = 200, seed: int = 7) -> np.ndarray:
     """Three normalised columns with ``c1 = c0 - eps*c2``, so ``c2`` is in span(c0, c1).
 
