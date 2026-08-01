@@ -38,6 +38,7 @@ from ._group_matrix._group_matrix_discretized import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 from ._group_matrix._group_matrix_execution import MatrixExecutionPlan
@@ -64,6 +65,7 @@ DiscretizedSSPGroupMatrix.__module__ = __name__
 SupportCompressedSSPGroupMatrix.__module__ = __name__
 DiscretizedSCOPGroupMatrix.__module__ = __name__
 DiscretizedSplineCategoricalGroupMatrix.__module__ = __name__
+SupportCompressedSplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedTensorGroupMatrix.__module__ = __name__
 
 

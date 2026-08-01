@@ -8,7 +8,8 @@ weighted gram into an O(n) bincount plus an O(n_support) dense gram.
 This is deduplication, not binning: it introduces no discretisation error and is
 unrelated to ``discrete=True``.
 
-Two entry points, differing only in how the row grouping is obtained:
+Three entry points, differing only in how the row grouping is obtained and
+whether it is checked against the basis:
 
 ``detect_row_support``
     The production path (``dm_builder._build_ssp_group``).  Derives the
@@ -22,6 +23,13 @@ Two entry points, differing only in how the row grouping is obtained:
     Core gate + materialisation for callers that already know the grouping --
     a single-covariate spline basis repeats rows exactly where the covariate
     value repeats -- letting them skip the detection scan entirely.
+
+``plan_verified_row_support``
+    The same caller-supplied grouping, checked against the basis before it is
+    used.  It gates on a one-dimensional scan, so a declined block never
+    touches the basis at all, and it densifies once on accept to verify.
+    Exact like ``detect_row_support`` and cheaper than it at both outcomes;
+    the price is that the caller must have a grouping to offer.
 """
 
 from __future__ import annotations
@@ -59,7 +67,9 @@ DEFAULT_MAX_SUPPORT_BYTES = 64 << 20
 _MIN_CALIBRATED_ROWS = 1_000
 
 
-def _estimated_speedup(n_rows: int, n_support: int, p_b: int, nnz: int) -> float:
+def _estimated_speedup(
+    n_rows: int, n_support: int, p_b: int, nnz: int, gram_repeats: int = 1
+) -> float:
     """Estimated gram speedup from deduplicating rows.
 
     The current path (``_csr_weighted_gram``) accumulates only nonzero pairs
@@ -68,14 +78,21 @@ def _estimated_speedup(n_rows: int, n_support: int, p_b: int, nnz: int) -> float
     row-Kronecker rows are dense.  The compressed path costs one bincount over
     ``n`` plus a dense ``(n_support, p_b)`` gram.
 
+    ``gram_repeats`` is how many separate grams run over the one shared support.
+    A single block runs one, so the default leaves the model unchanged.  A
+    ``spline_cat`` term shares one support across its levels and each level runs
+    its own gram over the whole of it, while the levels partition the rows
+    between them -- so the ``n_rows`` bincount term is counted once and the
+    dense term once per level.
+
     The flop ratio is scaled by ``_BLAS_ADVANTAGE`` because the two sides run on
     very different hardware paths; the raw ratio under-predicts by 5-12x.
     """
-    if n_rows <= 0 or n_support <= 0:
+    if n_rows <= 0 or n_support <= 0 or gram_repeats <= 0:
         return 0.0
     nnz_per_row = nnz / n_rows
     current = n_rows * nnz_per_row * (nnz_per_row + 1.0) / 2.0
-    compressed = n_rows + n_support * float(p_b) ** 2
+    compressed = n_rows + gram_repeats * n_support * float(p_b) ** 2
     return _BLAS_ADVANTAGE * current / compressed
 
 
@@ -161,6 +178,29 @@ def _verified_representatives(
     return representatives
 
 
+def _chunk_rows(p_b: int, max_support_bytes: int) -> int:
+    """Rows per densified chunk, sized in BYTES rather than rows.
+
+    A fixed 65,536-row chunk of a wide tensor basis (p_b ~ 10k) would densify
+    gigabytes before any gate runs, so scan transients honor the same ceiling
+    as the support block itself.
+    """
+    return int(min(65_536, max(1, max_support_bytes // (max(p_b, 1) * 8))))
+
+
+def _first_occurrence(row_index: NDArray, n_rows: int, n_support: int) -> NDArray | None:
+    """First row of each group, taken without densifying the basis.
+
+    Returns None when the grouping leaves a group empty, which would make the
+    representative block undefined.
+    """
+    first_occurrence = np.full(n_support, -1, dtype=np.intp)
+    first_occurrence[row_index[::-1]] = np.arange(n_rows - 1, -1, -1, dtype=np.intp)
+    if np.any(first_occurrence < 0):
+        return None
+    return first_occurrence
+
+
 def _passes_support_gates(
     n_rows: int,
     n_support: int,
@@ -168,6 +208,7 @@ def _passes_support_gates(
     nnz: int,
     min_speedup: float,
     max_support_bytes: int,
+    gram_repeats: int = 1,
 ) -> bool:
     """Cheap accept/decline gates, evaluated before anything is densified."""
     # Strict inequality: equal counts mean no row actually repeats, so there is
@@ -178,9 +219,11 @@ def _passes_support_gates(
     # negligible either way and the calibration does not apply.
     if n_rows < _MIN_CALIBRATED_ROWS:
         return False
+    # One shared support block is stored however many grams read it, so the
+    # byte budget is not scaled by ``gram_repeats``.
     if n_support * p_b * 8 > max_support_bytes:
         return False
-    return _estimated_speedup(n_rows, n_support, p_b, nnz) >= min_speedup
+    return _estimated_speedup(n_rows, n_support, p_b, nnz, gram_repeats) >= min_speedup
 
 
 def plan_row_support(
@@ -189,6 +232,7 @@ def plan_row_support(
     *,
     min_speedup: float = DEFAULT_MIN_SPEEDUP,
     max_support_bytes: int = DEFAULT_MAX_SUPPORT_BYTES,
+    gram_repeats: int = 1,
 ) -> tuple[NDArray, NDArray] | None:
     """Return ``(B_unique, row_index)`` when compression pays, else ``None``.
 
@@ -204,17 +248,61 @@ def plan_row_support(
         return None
     n_support = int(row_index.max()) + 1
     if not _passes_support_gates(
-        n_rows, n_support, p_b, int(B_csr.nnz), min_speedup, max_support_bytes
+        n_rows, n_support, p_b, int(B_csr.nnz), min_speedup, max_support_bytes, gram_repeats
     ):
         return None
 
-    # First occurrence of each group, taken without densifying the whole basis.
-    first_occurrence = np.full(n_support, -1, dtype=np.intp)
-    first_occurrence[row_index[::-1]] = np.arange(n_rows - 1, -1, -1, dtype=np.intp)
-    if np.any(first_occurrence < 0):
+    first_occurrence = _first_occurrence(row_index, n_rows, n_support)
+    if first_occurrence is None:
         return None
     b_unique = np.asarray(B_csr[first_occurrence].todense(), dtype=np.float64)
     return b_unique, row_index
+
+
+def plan_verified_row_support(
+    B_csr: sp.spmatrix,
+    row_index: NDArray,
+    *,
+    min_speedup: float = DEFAULT_MIN_SPEEDUP,
+    max_support_bytes: int = DEFAULT_MAX_SUPPORT_BYTES,
+    gram_repeats: int = 1,
+) -> tuple[NDArray, NDArray] | None:
+    """``plan_row_support`` with the caller's grouping checked against the basis.
+
+    The gates run on ``row_index`` alone, so a declined block costs one scan of
+    a one-dimensional array and never densifies anything.  On accept the basis
+    is densified once, in bounded chunks, and every row is compared bitwise
+    against its group representative -- the same check ``detect_row_support``
+    makes, so this is exact for non-finite values on the same terms.
+
+    A grouping the basis contradicts is not an error: it means equal covariate
+    values did not produce identical rows, and the fallback derives the
+    grouping from the basis instead.
+    """
+    n_rows, p_b = B_csr.shape
+    row_index = np.asarray(row_index, dtype=np.intp).ravel()
+    if n_rows == 0 or row_index.shape[0] != n_rows:
+        return None
+    n_support = int(row_index.max()) + 1
+    if not _passes_support_gates(
+        n_rows, n_support, p_b, int(B_csr.nnz), min_speedup, max_support_bytes, gram_repeats
+    ):
+        return None
+    first_occurrence = _first_occurrence(row_index, n_rows, n_support)
+    if first_occurrence is None:
+        return None
+
+    representatives = _verified_representatives(
+        B_csr, first_occurrence, row_index, _chunk_rows(p_b, max_support_bytes)
+    )
+    if representatives is None:
+        return detect_row_support(
+            B_csr,
+            min_speedup=min_speedup,
+            max_support_bytes=max_support_bytes,
+            gram_repeats=gram_repeats,
+        )
+    return representatives, row_index
 
 
 def detect_row_support(
@@ -222,6 +310,7 @@ def detect_row_support(
     *,
     min_speedup: float = DEFAULT_MIN_SPEEDUP,
     max_support_bytes: int = DEFAULT_MAX_SUPPORT_BYTES,
+    gram_repeats: int = 1,
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
 
@@ -234,7 +323,9 @@ def detect_row_support(
     allocation is exactly the no-repeats case where compression is refused.
     On accept the verified representative block is returned directly, so the
     support rows are densified exactly once.  Callers that already know the
-    grouping can skip the scan via :func:`plan_row_support`.
+    grouping can skip the scan via :func:`plan_row_support`, or keep the
+    bitwise check and skip only the hash pass via
+    :func:`plan_verified_row_support`.
 
     Only bit-identical densified rows merge, so reconstruction is exact even
     for non-finite values: NaN rows merge only when their bit patterns match.
@@ -244,15 +335,18 @@ def detect_row_support(
     n_rows, p_b = B_csr.shape
     if n_rows == 0:
         return None
-    # Chunk by BYTES, not rows: a fixed 65,536-row chunk of a wide tensor
-    # basis (p_b ~ 10k) would densify gigabytes before any gate runs.  The
-    # scan's transients honor the same ceiling as the support block itself.
-    chunk_rows = int(min(65_536, max(1, max_support_bytes // (max(p_b, 1) * 8))))
+    chunk_rows = _chunk_rows(p_b, max_support_bytes)
     hashes = _row_hashes(B_csr, chunk_rows)
     _, first_occurrence, row_index = np.unique(hashes, return_index=True, return_inverse=True)
     row_index = np.asarray(row_index, dtype=np.intp).ravel()
     if not _passes_support_gates(
-        n_rows, len(first_occurrence), p_b, int(B_csr.nnz), min_speedup, max_support_bytes
+        n_rows,
+        len(first_occurrence),
+        p_b,
+        int(B_csr.nnz),
+        min_speedup,
+        max_support_bytes,
+        gram_repeats,
     ):
         return None
     representatives = _verified_representatives(B_csr, first_occurrence, row_index, chunk_rows)
@@ -264,5 +358,6 @@ def detect_row_support(
             _row_index_chunked(B_csr, chunk_rows=chunk_rows),
             min_speedup=min_speedup,
             max_support_bytes=max_support_bytes,
+            gram_repeats=gram_repeats,
         )
     return representatives, row_index

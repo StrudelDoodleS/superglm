@@ -277,7 +277,10 @@ class DiscretizedSplineCategoricalGroupMatrix:
         else:
             pos_sub = np.empty(0, dtype=np.intp)
             bin_idx_level = np.empty(0, dtype=np.intp)
-        sub = DiscretizedSplineCategoricalGroupMatrix(
+        # type(self) rather than the parent: a subclass carries semantics the
+        # parent does not (lossless support vs binning), and subsetting must not
+        # silently downcast it.
+        sub = type(self)(
             self.B_unique,
             self.R_inv,
             bin_idx_level,
@@ -430,6 +433,27 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         return sub
+
+
+class SupportCompressedSplineCategoricalGroupMatrix(DiscretizedSplineCategoricalGroupMatrix):
+    """Exact ``spline_cat`` basis stored one row per distinct row.
+
+    Numerically identical to :class:`SplineCategoricalGroupMatrix` over the same
+    basis; only the storage differs.  Kept distinct from its binned parent for
+    the same reason :class:`SupportCompressedSSPGroupMatrix` is: ``discrete=True``
+    is a lossy fREML path and this is not, so ``bin_idx_level`` here indexes
+    exact distinct rows of the shared spline basis rather than bins.
+
+    The support is shared across the levels of the categorical parent -- one
+    dense ``(n_support, p_b)`` block for the whole term -- while each level
+    keeps its own row index into it.
+    """
+
+    __slots__ = ()
+
+    @property
+    def is_lossless_support(self) -> bool:
+        return True
 
 
 class SupportCompressedSSPGroupMatrix(DiscretizedSSPGroupMatrix):

@@ -157,6 +157,10 @@ class GroupInfo:
     # the builder can keep fit algebra on B_unique/bin_idx instead of B_level.
     spline_cat_basis_unique: NDArray | None = None
     spline_cat_bin_idx: NDArray | None = None
+    # True when the support above is exact distinct rows rather than bin
+    # centres, so ``bin_idx`` introduces no discretisation error.  Set only by
+    # the exact path; ``discrete=True`` leaves it False.
+    spline_cat_support_lossless: bool = False
     spline_cat_level: str | None = None
     spline_cat_feature: str | None = None
     # Structured terms retain compact geometry for specialized solvers.

@@ -556,16 +556,27 @@ def _cross_gram_tensor_spline_categorical(
 
     if hasattr(gm_spline_cat, "B_unique"):
         bin_cat = gm_spline_cat.bin_idx_level
+        # A lossless spline_cat support is bounded by its row count, not by a
+        # bin count, so the joint histogram is not automatically small; expand
+        # the level's rows once and aggregate on them when it is not.
+        if gm_tensor.n_bins1 * gm_spline_cat.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
+            for j2 in range(K2):
+                w_col = W_rows * B2[idx2, j2]
+                H = _disc_disc_2d_hist(
+                    idx1,
+                    bin_cat,
+                    w_col,
+                    gm_tensor.n_bins1,
+                    gm_spline_cat.n_bins,
+                )
+                result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
+            return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
+        B_cat_rows = gm_spline_cat.B_unique[bin_cat]
         for j2 in range(K2):
             w_col = W_rows * B2[idx2, j2]
-            H = _disc_disc_2d_hist(
-                idx1,
-                bin_cat,
-                w_col,
-                gm_tensor.n_bins1,
-                gm_spline_cat.n_bins,
-            )
-            result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
+            B_cat_agg = _weighted_bincount_2d(idx1, w_col, B_cat_rows, gm_tensor.n_bins1)
+            result_raw[j2::K2, :] = B1.T @ B_cat_agg
         return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
     for j2 in range(K2):
@@ -582,6 +593,27 @@ def _cross_gram_tensor_spline_categorical(
         result_raw[j2::K2, :] = B1.T @ B_cat_agg
 
     return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
+
+def _support_support_raw_cross(
+    B_unique_i: NDArray,
+    bin_idx_i: NDArray,
+    B_unique_j: NDArray,
+    bin_idx_j: NDArray,
+    W_rows: NDArray,
+) -> NDArray:
+    """``B_i.T @ diag(W) @ B_j`` for two support-indexed blocks over shared rows.
+
+    The 2-D weight histogram both callers prefer costs ``n_bins_i * n_bins_j``
+    cells, which is bounded only when the supports are bins.  A lossless
+    support is bounded by the row count instead, so on wide supports this
+    expands both sides to the shared rows and lets BLAS do the contraction:
+    ``O(n_rows * (p_i + p_j))`` working memory, no dependence on the product of
+    the support sizes.
+    """
+    left = B_unique_i[bin_idx_i]
+    right = B_unique_j[bin_idx_j]
+    return left.T @ (right * W_rows[:, None])
 
 
 def _cross_gram_categorical_spline_categorical(
@@ -631,14 +663,23 @@ def _cross_gram_spline_categorical_spline_categorical(
         i_discrete = hasattr(gm_i, "B_unique")
         j_discrete = hasattr(gm_j, "B_unique")
         if i_discrete and j_discrete:
-            H = _disc_disc_2d_hist(
-                gm_i.bin_idx_level,
-                gm_j.bin_idx_level,
-                W[rows],
-                gm_i.n_bins,
-                gm_j.n_bins,
-            )
-            raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+            if gm_i.n_bins * gm_j.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
+                H = _disc_disc_2d_hist(
+                    gm_i.bin_idx_level,
+                    gm_j.bin_idx_level,
+                    W[rows],
+                    gm_i.n_bins,
+                    gm_j.n_bins,
+                )
+                raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+            else:
+                raw = _support_support_raw_cross(
+                    gm_i.B_unique,
+                    gm_i.bin_idx_level,
+                    gm_j.B_unique,
+                    gm_j.bin_idx_level,
+                    W[rows],
+                )
             return gm_i.R_inv.T @ raw @ gm_j.R_inv
         if i_discrete:
             B_i = gm_i.B_unique[gm_i.bin_idx_level]
@@ -666,14 +707,23 @@ def _cross_gram_spline_categorical_spline_categorical(
     i_discrete = hasattr(gm_i, "B_unique")
     j_discrete = hasattr(gm_j, "B_unique")
     if i_discrete and j_discrete:
-        H = _disc_disc_2d_hist(
-            gm_i.bin_idx_level[pos_i],
-            gm_j.bin_idx_level[pos_j],
-            W[common_rows],
-            gm_i.n_bins,
-            gm_j.n_bins,
-        )
-        raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+        if gm_i.n_bins * gm_j.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
+            H = _disc_disc_2d_hist(
+                gm_i.bin_idx_level[pos_i],
+                gm_j.bin_idx_level[pos_j],
+                W[common_rows],
+                gm_i.n_bins,
+                gm_j.n_bins,
+            )
+            raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+        else:
+            raw = _support_support_raw_cross(
+                gm_i.B_unique,
+                gm_i.bin_idx_level[pos_i],
+                gm_j.B_unique,
+                gm_j.bin_idx_level[pos_j],
+                W[common_rows],
+            )
         return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     if i_discrete:
