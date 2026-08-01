@@ -16,6 +16,7 @@ from __future__ import annotations
 import faulthandler
 
 import numpy as np
+import pandas as pd
 import pytest
 from benchmarks import screening_worth_gate as gate
 from benchmarks.screening_worth_gate import (
@@ -27,6 +28,7 @@ from benchmarks.screening_worth_gate import (
     SHRINKAGE_ARMS,
     NonconvergedFitError,
     _build_parser,
+    _mains,
     _make,
     _require_converged,
     _run_concentration,
@@ -292,7 +294,19 @@ def test_a_nonconverged_fit_is_refused_rather_than_averaged() -> None:
         def reml_diagnostics(self) -> dict:
             return self._reml
 
-    no_reml = {"enabled": False, "converged": None, "termination_reason": None}
+    # The no-REML payload is taken from a REAL plain fit rather than written
+    # out here.  Inventing it is what hid a bug: the stub carried `converged`
+    # and `termination_reason`, production omits both keys entirely, and the
+    # error message subscripted them -- so a failed plain `fit()`, the exact
+    # case this guard exists for, raised KeyError instead.
+    real = _mains(
+        pd.DataFrame({"g": ["A", "B"] * 50, "h": ["X", "Y"] * 50}),
+        np.linspace(0.0, 1.0, 100),
+    ).reml_diagnostics()
+    assert real["enabled"] is False
+    assert "converged" not in real, "payload shape changed; the stub below must follow"
+
+    no_reml = dict(real)
     reml_ok = {"enabled": True, "converged": True, "termination_reason": "tol"}
     reml_bad = {"enabled": True, "converged": False, "termination_reason": "max_iter"}
 
