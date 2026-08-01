@@ -600,32 +600,56 @@ FREQ_SKIP = pytest.mark.skipif(
 
 
 def _fremtpl_features():
+    # This mirrors the worked example in docs/guide/screening.md, and the
+    # specification is deliberate.  BonusMalus is strongly curved on this book
+    # (splined it reports edf 7.5 of rank 11), so specifying it as a Numeric
+    # would both mis-fit the margin and demote every BonusMalus pair to the
+    # deferred spline x numeric kind -- the sweep would then screen fewer
+    # kinds than it can.  LogDensity is the honest linear margin: give it a
+    # spline and the smooth collapses to edf 1.4 of rank 11.
     return {
         "DrivAge": Spline(kind="ps", n_knots=8),
-        "VehAge": Spline(kind="ps", n_knots=6),
-        "BonusMalus": Numeric(),
+        "VehAge": Spline(kind="ps", n_knots=12),
+        "BonusMalus": Spline(
+            kind="ps",
+            n_knots=12,
+            knot_strategy="quantile_tempered",
+            knot_alpha=0.2,
+        ),
+        "LogDensity": Numeric(),
         "VehBrand": Categorical(),
         "Region": Categorical(),
     }
 
 
-@FREQ_SKIP
-def test_fremtpl_mixed_sweep_end_to_end():
-    df = _datasets.load_freq().sample(80_000, random_state=0).reset_index(drop=True)
+def _fremtpl_frame(n_rows=80_000):
+    df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
     # The weight contract is Var(y) = phi * V(mu) / w, so an exposure-weighted
     # response is the claim RATE, not the count -- counts weighted by exposure
     # under-estimate phi and inflate every z in the sweep.  Clip the exposure
     # first, exactly as tests/test_realdata_parity.py::_prep_freq does, so a
     # near-zero denominator cannot manufacture a several-hundred-claim rate.
     df["Exposure"] = df["Exposure"].clip(lower=0.01)
+    # log1p is the house transform for this column (see the credibility demo).
+    df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))
     exposure = df["Exposure"].to_numpy(dtype=np.float64)
     y = df["ClaimNb"].to_numpy(dtype=np.float64) / exposure
+    return df, y, exposure
+
+
+@FREQ_SKIP
+def test_fremtpl_mixed_sweep_end_to_end():
+    df, y, exposure = _fremtpl_frame()
     model = SuperGLM(family="poisson", features=_fremtpl_features())
     model.fit_reml(df, y, sample_weight=exposure)
     table = model.screen_interactions(df, y, sample_weight=exposure)
     # every v1 kind this feature set can produce shows up and computes
     assert {"ti", "spline_cat", "numeric_cat", "cat_cat"} <= set(table["kind"])
     assert np.isfinite(table["z"]).any()
+    # Six features make fifteen pairs; the three LogDensity x spline pairs are
+    # deferred, so the sweep reports twelve.  This pins the deferral as a
+    # silent drop from the default sweep rather than a NaN row.
+    assert len(table) == 12
     # the queue is workable on a real book: the top pair refits and improves
     top = table.iloc[0]
     confirm = SuperGLM(
@@ -635,6 +659,32 @@ def test_fremtpl_mixed_sweep_end_to_end():
     )
     confirm.fit_reml(df, y, sample_weight=exposure)
     assert confirm._result.deviance < model._result.deviance
+
+
+@FREQ_SKIP
+def test_fremtpl_example_specification_is_not_mis_specified():
+    """The guide's worked example is an exemplar, so its spec must hold up.
+
+    Two claims in docs/guide/screening.md are load-bearing and both are
+    measurable: BonusMalus is curved (so specifying it as a Numeric would be
+    wrong, and would demote its pairs to the deferred spline x numeric kind),
+    and LogDensity is not (so it is an honest Numeric rather than one chosen
+    to dodge a deferral).
+    """
+    df, y, exposure = _fremtpl_frame()
+    base = _fremtpl_features()
+
+    def deviance(overrides):
+        model = SuperGLM(family="poisson", features={**base, **overrides})
+        model.fit_reml(df, y, sample_weight=exposure)
+        return model._result.deviance
+
+    splined = deviance({})
+    # Linearising BonusMalus costs real deviance -- it is genuinely curved.
+    assert deviance({"BonusMalus": Numeric()}) - splined > 50.0
+    # Splining LogDensity buys almost nothing -- it is genuinely linear.
+    smoothed = deviance({"LogDensity": Spline(kind="ps", n_knots=8)})
+    assert splined - smoothed < 10.0
 
 
 def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
