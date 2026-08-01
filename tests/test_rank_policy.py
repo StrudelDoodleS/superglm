@@ -892,9 +892,9 @@ def test_retained_representative_factor_rhs_uses_one_rank_svd(
     original_svd = rank_module.np.linalg.svd
     svd_shapes: list[tuple[int, int]] = []
 
-    def counted_svd(values, *, full_matrices=True):
+    def counted_svd(values, *, full_matrices=True, compute_uv=True):
         svd_shapes.append(values.shape)
-        return original_svd(values, full_matrices=full_matrices)
+        return original_svd(values, full_matrices=full_matrices, compute_uv=compute_uv)
 
     monkeypatch.setattr(rank_module.np.linalg, "svd", counted_svd)
     decomposition = decompose_factor(factor, retain_factor_solve=True)
@@ -904,7 +904,12 @@ def test_retained_representative_factor_rhs_uses_one_rank_svd(
     np.testing.assert_array_equal(decomposition.active_columns, [0, 2])
     np.testing.assert_allclose(actual, [1.5, 0.0, -0.4], rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(factor @ actual, response, rtol=1e-12, atol=1e-12)
-    assert svd_shapes == [factor.shape]
+    # One decomposition of the design, and one certificate on the rejected rows
+    # of the null basis -- 1x1 here, because the block is a single column short
+    # of full rank.  What this guards is that nothing re-decomposes the DESIGN:
+    # the certificate is sized by the NULLITY, so it cannot reintroduce a cost
+    # that scales with the width.
+    assert svd_shapes == [factor.shape, (1, 1)]
 
 
 def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
