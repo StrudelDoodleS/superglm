@@ -459,6 +459,71 @@ def _null_basis(
     return np.column_stack(pieces) if pieces else np.zeros((width, 0))
 
 
+def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+    """Earliest independent representatives, read off a null basis already in hand.
+
+    Index-order greedy selection keeps column ``j`` unless it is a combination
+    of the columns before it -- equivalently, unless some null vector has its
+    LAST nonzero at ``j``.  Eliminating the null basis from the right-hand end
+    pivots on precisely those positions, so the pivots are the rejected columns
+    and the complement is the greedy selection, not an approximation of it.
+
+    Deciding the same question by testing each prefix's spectrum costs one
+    eigendecomposition per candidate, which is ``O(m**4)`` across the sweep and
+    is why a rank-deficient block used to cost hundreds of times a full-rank one
+    of the same width.  This is ``O(k**2 m)`` in the NULLITY ``k``, so a block
+    that is a few columns short of full rank is nearly free.
+
+    The pivot threshold is relative to each ROW's own norm, not to the matrix
+    maximum.  These vectors come out of an eigendecomposition of a singular
+    system, so a component that is mathematically zero arrives as noise many
+    orders above machine epsilon -- measured at 1e-12 against a 1e-14 absolute
+    threshold on an 8-column block, which pivoted on dust and returned a
+    rank-deficient selection.  ``sqrt(eps)`` is the floor below which a
+    component of a unit-norm null vector carries no information here.
+
+    Returns ``None`` when elimination cannot place all ``k`` pivots.  The caller
+    then keeps whatever exact path it already had rather than proceeding on a
+    selection this could not certify.
+    """
+    width, nullity = null_vectors.shape
+    if nullity == 0:
+        return np.arange(width, dtype=int)
+    working = np.array(null_vectors.T, dtype=float)
+    if not np.all(np.isfinite(working)):
+        return None
+    relative = float(np.sqrt(np.finfo(float).eps))
+
+    rejected: list[int] = []
+    live = np.ones(nullity, dtype=bool)
+    # Row norms only move when a pivot eliminates into them, which happens k
+    # times, not once per column -- recomputing per column would put an m**2
+    # term back into a routine whose whole point is not having one.
+    floors = relative * np.linalg.norm(working, axis=1)
+    for column in range(width - 1, -1, -1):
+        candidates = np.flatnonzero(live)
+        if candidates.size == 0:
+            break
+        entries = np.abs(working[candidates, column])
+        significant = np.flatnonzero(entries > floors[candidates])
+        if significant.size == 0:
+            continue
+        best = int(significant[np.argmax(entries[significant])])
+        pivot = int(candidates[best])
+        rejected.append(column)
+        working[pivot] /= working[pivot, column]
+        others = candidates[candidates != pivot]
+        if others.size:
+            working[others] -= np.outer(working[others, column], working[pivot])
+            floors[others] = relative * np.linalg.norm(working[others], axis=1)
+        live[pivot] = False
+
+    if len(rejected) != nullity:
+        return None
+    keep = np.setdiff1d(np.arange(width), np.asarray(rejected, dtype=int))
+    return keep if keep.size == rank else None
+
+
 def _scaled_subspace_logdet(coordinates: NDArray) -> float:
     """Return ``log(det(coordinates.T @ coordinates))`` across extreme row scales."""
     width = coordinates.shape[1]
@@ -700,18 +765,12 @@ def decompose_gram(
         # Choose the earliest original-coordinate representative whose
         # principal system has the certified rank. This gives exact aliases a
         # reproducible zero coefficient while estimability still uses the true
-        # spectral null space above.
-        selected_local: list[int] = []
-        for candidate in range(len(active_columns)):
-            trial = selected_local + [candidate]
-            principal = equilibrated[np.ix_(trial, trial)]
-            principal_rank = int(np.count_nonzero(np.linalg.eigvalsh(principal) > cutoff))
-            if principal_rank > len(selected_local):
-                selected_local.append(candidate)
-            if len(selected_local) == rank:
-                break
-        if len(selected_local) == rank:
-            selected_local_array = np.asarray(selected_local, dtype=int)
+        # spectral null space above.  The selection is read off the null basis
+        # this decomposition has already computed -- `_earliest_representatives`
+        # documents why eliminating it from the right gives the same columns as
+        # walking prefixes, without an eigendecomposition per candidate.
+        selected_local_array = _earliest_representatives(discarded_vectors, rank)
+        if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
             representative = equilibrated[np.ix_(selected_local_array, selected_local_array)]
             try:
@@ -843,19 +902,12 @@ def decompose_factor(
         else float("inf")
     )
     if 0 < rank < len(active_columns):
-        equilibrated_gram = equilibrated.T @ equilibrated
-        selected_local: list[int] = []
-        gram_cutoff = cutoff**2
-        for candidate in range(len(active_columns)):
-            trial = selected_local + [candidate]
-            principal = equilibrated_gram[np.ix_(trial, trial)]
-            principal_rank = int(np.count_nonzero(np.linalg.eigvalsh(principal) > gram_cutoff))
-            if principal_rank > len(selected_local):
-                selected_local.append(candidate)
-            if len(selected_local) == rank:
-                break
-        if len(selected_local) == rank:
-            selected_local_array = np.asarray(selected_local, dtype=int)
+        # Same earliest-representative choice as the Gram path, off the right
+        # singular vectors that span this factor's null space.  The Gram is
+        # formed only for the selected block, not to search for it.
+        selected_local_array = _earliest_representatives(discarded_vectors, rank)
+        if selected_local_array is not None:
+            equilibrated_gram = equilibrated.T @ equilibrated
             representative_columns = active_columns[selected_local_array]
             representative = equilibrated_gram[np.ix_(selected_local_array, selected_local_array)]
             try:
