@@ -54,7 +54,9 @@ Four tables come out, because the threshold alone answers only half of it:
   3. the sparse payoff -- if `P` says the signal is concentrated, does fitting
      only those cells pay?  Cells are ranked on TRAINING residuals only;
      ranking them on the full sample is the target leakage that makes
-     supervised binning look better than it is;
+     supervised binning look better than it is.  The widest arm is the full
+     fixed refit, so the whole row -- sparse arms and full refit alike -- comes
+     from one seed and one split;
   4. the same pair through three model classes -- mains, a fixed interaction,
      and the cell partially pooled.  The gate says what NOT to do with a wide
      pair; this says whether the pair is worth having at all in some other
@@ -282,9 +284,27 @@ def _run_concentration(reps: int, n: int, n_levels: int) -> list[dict[str, objec
 
 
 def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
+    """Top-m cells against the full refit, every arm from ONE seed and split.
+
+    The widest arm is the plain fixed `cat_cat` refit -- the same model class
+    table 4 fits, but on THIS row's seed and split, so the full-refit cell of
+    each row is measured here rather than imported from a second simulation.
+    It has to be the interaction rather than another `hot` factor: at these
+    widths the training split leaves cells empty, a level unseen in training is
+    a predict-time error rather than a zero, and the `cat_cat` block already
+    drops the unidentified columns and predicts those rows off the margins.
+
+    The concentration reported here is computed on the TRAINING residuals that
+    ranked the cells, so it labels the same fit its deltas come from -- table 2
+    fits the full sample and its value is a different quantity.
+    """
+    n_cells = n_levels * n_levels
+    arms: tuple[int, ...] = (*TOP_M, n_cells)
     rows: list[dict[str, object]] = []
     for kind, magnitude in (("spike", 6.0), ("diffuse", 0.30)):
-        acc: dict[int, list[float]] = {m: [] for m in TOP_M}
+        acc: dict[int, list[float]] = {m: [] for m in arms}
+        used: dict[int, list[float]] = {m: [] for m in arms}
+        cons: list[float] = []
         for rep in range(reps):
             data = _make(kind, magnitude, n_levels, n, 31337 + rep)
             train, test = _split(n, 31337 + rep)
@@ -296,26 +316,52 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
             resid = ytr - mains.predict(dtr)
             # ranked on TRAINING residuals only -- ranking on the full sample
             # would leak the test rows into the cell choice
-            t, _ = cell_contributions(resid, jtr, n_levels * n_levels, 1.0)
+            t, occupied = cell_contributions(resid, jtr, n_cells, 1.0)
+            cons.append(concentration(t, occupied))
+            live = np.flatnonzero(np.bincount(jtr, minlength=n_cells) > 0)
+            ranked = np.argsort(t)[::-1]
+            mains_edf = float(mains.result.effective_df)
 
-            for m in TOP_M:
-                hot = set(np.argsort(t)[-m:].tolist())
-                a, b = dtr.copy(), dte.copy()
-                a["hot"] = np.where([j in hot for j in jtr], jtr.astype(str), "other")
-                b["hot"] = np.where([j in hot for j in jte], jte.astype(str), "other")
-                model = SuperGLM(
-                    family="gaussian",
-                    features={
-                        "g": Categorical(),
-                        "h": Categorical(),
-                        "hot": Categorical(),
-                    },
-                )
-                model.fit(a, ytr)
-                got = float(np.mean((model.predict(b) - yte) ** 2))
+            for m in arms:
+                if m == n_cells:
+                    model = SuperGLM(
+                        family="gaussian",
+                        features={"g": Categorical(), "h": Categorical()},
+                        interactions=[("g", "h")],
+                    )
+                    model.fit(dtr, ytr)
+                    got = float(np.mean((model.predict(dte) - yte) ** 2))
+                else:
+                    hot = set(np.intersect1d(ranked[:m], live).tolist())
+                    a, b = dtr.copy(), dte.copy()
+                    a["hot"] = np.where([j in hot for j in jtr], jtr.astype(str), "other")
+                    b["hot"] = np.where([j in hot for j in jte], jte.astype(str), "other")
+                    model = SuperGLM(
+                        family="gaussian",
+                        features={
+                            "g": Categorical(),
+                            "h": Categorical(),
+                            "hot": Categorical(),
+                        },
+                    )
+                    model.fit(a, ytr)
+                    got = float(np.mean((model.predict(b) - yte) ** 2))
                 acc[m].append((got / base - 1.0) * 100.0)
-        for m, vals in acc.items():
-            rows.append({"kind": kind, "top_m": m, "delta_pct": float(np.mean(vals))})
+                # df bought over the mains model, so the sparse arms and the
+                # full refit are priced on one scale
+                used[m].append(float(model.result.effective_df) - mains_edf)
+                print(f"  {kind} rep {rep} arm-{m} done", flush=True)
+        for m in arms:
+            rows.append(
+                {
+                    "kind": kind,
+                    "top_m": m,
+                    "n_cells": n_cells,
+                    "extra_edf": float(np.mean(used[m])),
+                    "concentration": float(np.mean(cons)),
+                    "delta_pct": float(np.mean(acc[m])),
+                }
+            )
     return rows
 
 
@@ -445,11 +491,16 @@ def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
 def _print_sparse_payoff(rows: list[dict[str, object]]) -> None:
     print(
         "\n3. If P says concentrated, does fitting only those cells pay?\n"
-        "   Cells ranked on training residuals only.\n"
+        "   Cells ranked on training residuals only.  `P/(k/3)` is the TRAINING\n"
+        "   -split value, the same fit these deltas come from.\n"
     )
-    print(f"{'truth':>10} {'top-m cells':>12} {'holdout vs mains':>18}")
+    print(f"{'truth':>10} {'P/(k/3)':>9} {'arm':>10} {'+edf':>8} {'holdout vs mains':>18}")
     for row in rows:
-        print(f"{row['kind']:>10} {row['top_m']:>12} {row['delta_pct']:>+17.1f}%")
+        label = "full refit" if row["top_m"] == row["n_cells"] else f"top-{row['top_m']}"
+        print(
+            f"{row['kind']:>10} {row['concentration']:>9.3f} {label:>10} "
+            f"{row['extra_edf']:>8.1f} {row['delta_pct']:>+17.1f}%"
+        )
 
 
 def _print_shrinkage(rows: list[dict[str, object]], n_levels: int) -> None:
