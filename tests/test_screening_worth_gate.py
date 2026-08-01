@@ -109,6 +109,32 @@ def test_concentration_separates_spiky_from_diffuse_at_equal_total() -> None:
     assert concentration(spiky, k) < 0.25
 
 
+def test_concentration_null_is_a_large_k_limit_and_fails_at_small_k() -> None:
+    """`k/3` is the limit, not the finite-sample expectation.
+
+    The reading is only comparable across widths where the null is ~1, so the
+    width at which that stops being true is worth pinning rather than
+    discovering on a narrow block.  A single occupied cell is the extreme: `P`
+    is 1 by construction, `k/3` is 1/3, and the ratio reads 3 -- the value that
+    elsewhere means "as diffuse as noise" -- for the most concentrated block
+    there is.
+    """
+    assert concentration(np.array([4.0]), 1) == pytest.approx(3.0)
+
+    rng = np.random.default_rng(4242)
+    measured = {
+        k: float(np.mean([concentration(rng.chisquare(df=1, size=k), k) for _ in range(400)]))
+        for k in (8, 25, 100, 1600)
+    }
+    # the null mean sits ABOVE 1 and decays toward it; these are the widths at
+    # which the docstring says the reading becomes usable
+    assert measured[8] == pytest.approx(1.39, abs=0.06)
+    assert measured[25] == pytest.approx(1.15, abs=0.04)
+    assert measured[100] == pytest.approx(1.04, abs=0.02)
+    assert measured[1600] == pytest.approx(1.003, abs=0.01)
+    assert measured[8] > measured[25] > measured[100] > measured[1600]
+
+
 def test_concentration_is_nan_rather_than_a_crash_on_a_dead_block() -> None:
     assert np.isnan(concentration(np.zeros(10), 10))
     assert np.isnan(concentration(np.ones(3), 0))
