@@ -521,9 +521,18 @@ def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
         )
     agree = sum(1 for r in rows if r["agrees"])
     print(f"\n  sqrt(edf0/2) agrees with the holdout sign in {agree}/{len(rows)}")
+    # a fixed cutoff fails in BOTH directions; counting only one understates it
     for fixed in (2.0, 3.0, 5.0):
         hit = sum(1 for r in rows if (r["z"] > fixed) == (r["delta_pct"] < 0.0))
-        print(f"    a fixed z > {fixed}: {hit}/{len(rows)}")
+        admitted = [r for r in rows if r["z"] > fixed and r["delta_pct"] >= 0.0]
+        rejected = [r for r in rows if r["z"] <= fixed and r["delta_pct"] < 0.0]
+        print(
+            f"    a fixed z > {fixed}: {hit}/{len(rows)}"
+            f"   admits harmful z=[{', '.join(f'{r["z"]:.2f}' for r in admitted)}]"
+            f"   rejects helpful z=[{', '.join(f'{r["z"]:.2f}' for r in rejected)}]"
+        )
+    missed = [r for r in rows if not r["agrees"]]
+    print(f"    sqrt(edf0/2) misses: {[f'z={r["z"]:.2f} {r["delta_pct"]:+.1f}%' for r in missed]}")
 
 
 def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
