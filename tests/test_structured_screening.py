@@ -451,6 +451,44 @@ def test_an_exact_arrow_score_beats_an_approximate_dense_one(monkeypatch):
     assert np.isfinite(row["z"])
 
 
+def test_a_failed_arrow_speculation_hands_the_dense_track_back():
+    """Speculating on the arrow path must not cost the pair its dense score.
+
+    The handoff above is taken on a width estimate that is biased LOW, to try
+    for an EXACT score before compressing the spline.  When the authoritative
+    width then puts the arrow intermediate over budget, the arrow path bins
+    its own margin and can still run out -- and at that exit ``allow_dense``
+    was left False with no binnable margin remaining, so the loop broke and
+    the pair became a NaN row.  The dense path could score it all along, on
+    the very support the arrow path had just binned to.
+
+    Measured on this configuration: a NaN row before, ``z`` finite after, and
+    the dense route is the approximate one it would have taken anyway.
+    """
+    L, support, n = 10, 6_000, 24_000
+    rng = np.random.default_rng(0)
+    grid = np.linspace(0.0, 10.0, support)
+    df = pd.DataFrame(
+        {
+            "x": grid[np.arange(n) % support],
+            "g": np.array([f"L{i}" for i in range(L)])[rng.integers(0, L, n)],
+        }
+    )
+    y = rng.poisson(np.exp(-1.0 + 0.15 * df["x"].to_numpy())).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind="ps", n_knots=8), "g": Categorical()},
+    )
+    model.fit_reml(df, y)
+
+    row = model.screen_interactions(
+        df, y, candidates=[("x", "g")], max_cells=100_000, screen_bins=4_000
+    ).iloc[0]
+    assert np.isfinite(row["z"]), "a pair the dense path can score must not be a NaN row"
+    assert np.isfinite(row["statistic"])
+    assert bool(row["approx"]), "the surviving route is the binned dense one"
+
+
 def test_a_full_rank_penalty_makes_every_rung_search():
     """The kernel's cost is not a function of the pair's dimensions.
 

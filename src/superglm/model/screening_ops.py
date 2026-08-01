@@ -1167,6 +1167,21 @@ def screen_interactions(
                     reverse=True,
                 )
                 if not binnable:
+                    if arrow_lookahead:
+                        # The speculative handoff has now run out of support
+                        # fallback too, so the arrow path cannot score this
+                        # pair either.  Hand the dense track back rather than
+                        # dropping the pair: the handoff was taken to try for
+                        # an EXACT score in place of an approximate one, and
+                        # giving up the approximate one as well trades a
+                        # scored row for a NaN.  Measured on a 10-level factor
+                        # against a 6,000-point ps(8) support at
+                        # max_cells=100_000, screen_bins=4_000: NaN here,
+                        # against z=1.1374404130844136 once the dense track is
+                        # restored.  The same restore the width recheck above
+                        # already performs, at the other exit.
+                        allow_dense, arrow_lookahead = True, False
+                        continue
                     # The dense path has no moves left.  Hand a spline_cat
                     # pair to the arrow kernel before giving up: the width
                     # estimate that kept it on the dense track is biased LOW
