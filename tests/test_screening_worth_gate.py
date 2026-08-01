@@ -21,6 +21,7 @@ from benchmarks.screening_worth_gate import (
     _run_concentration,
     _run_gate_ladder,
     _run_shrinkage,
+    _run_sparse_payoff,
     _shrinkage_spec,
     cell_contributions,
     concentration,
@@ -205,6 +206,36 @@ def test_gate_ladder_thresholds_on_the_edf0_the_screen_reported(monkeypatch) -> 
     # and the published threshold is the one that goes with the reported z
     assert row["threshold"] == pytest.approx(worth_threshold(row["edf0"]))
     assert row["threshold"] != pytest.approx(worth_threshold(row["nominal_edf0"]))
+
+
+@pytest.mark.slow
+def test_sparse_payoff_measures_its_own_full_refit_arm() -> None:
+    """The widest column must be measured, not imported from table 4.
+
+    Table 4 runs a different seed on a different split, so quoting its fixed
+    arm as the last cell of this row subtracts two simulations.  The widest arm
+    here is the same model class -- a plain fixed `cat_cat` interaction -- on
+    this row's own seed and split.
+    """
+    n_levels, n = 6, 1_200
+    rows = _run_sparse_payoff(reps=1, n=n, n_levels=n_levels)
+    widest = [row for row in rows if row["top_m"] == n_levels**2]
+    assert {row["kind"] for row in widest} == {"spike", "diffuse"}
+
+    by_arm = {(row["kind"], row["top_m"]): row for row in rows}
+    for kind in ("spike", "diffuse"):
+        full = by_arm[(kind, n_levels**2)]
+        assert np.isfinite(full["delta_pct"])
+        # the full refit must buy far more df than any sparse arm -- that is
+        # the whole point of the column, and an arm that quietly fell back to
+        # the top-50 model would not
+        assert full["extra_edf"] > by_arm[(kind, 5)]["extra_edf"] + 10
+        # the row label carries the concentration of the fit it labels
+        assert np.isfinite(full["concentration"])
+        assert full["concentration"] == by_arm[(kind, 5)]["concentration"]
+
+    # the sparse arms buy roughly one df per cell they name
+    assert by_arm[("spike", 5)]["extra_edf"] == pytest.approx(5.0, abs=1.0)
 
 
 @pytest.mark.slow
