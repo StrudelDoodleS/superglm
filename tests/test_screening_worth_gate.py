@@ -1,10 +1,10 @@
 """Guards for the worth-gate benchmark's two derived readings.
 
 The benchmark itself is a measurement and is not run in CI.  What is guarded
-here is the arithmetic underneath it: the Cp identity that turns `T > 2*edf0`
-into a threshold on `z`, and the participation ratio that reads the shape of a
-score the total cannot see.  Both are cheap and deterministic; the one test
-that fits real models is marked `slow`.
+here is the arithmetic underneath it: the Cp identity that turns `T/phi >
+2*edf0` into a threshold on `z`, and the participation ratio that reads the
+shape of a score the total cannot see.  Both are cheap and deterministic; the
+tests that fit real models are marked `slow`.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from benchmarks.screening_worth_gate import (
 
 @pytest.mark.parametrize("edf0", [1.0, 49.0, 225.0, 576.0, 1599.0])
 def test_threshold_is_exactly_where_the_cp_criterion_switches(edf0: float) -> None:
-    """`z > sqrt(edf0/2)` must be the same statement as `T > 2*edf0`.
+    """`z > sqrt(edf0/2)` must be the same statement as `T/phi > 2*edf0`.
 
     The screen reports z, not T, so the gate is only usable if the two agree
     exactly rather than approximately.
