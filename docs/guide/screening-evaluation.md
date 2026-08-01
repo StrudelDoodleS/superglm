@@ -243,6 +243,128 @@ Two practical notes fell out of the same measurements:
   problem, and it does not currently work through `fit_reml()`. See
   [issue #189](https://github.com/StrudelDoodleS/superglm/issues/189).
 
+## From rank to decision: does the pair pay for its own df?
+
+Everything above ranks pairs. Ranking is a different question from whether the
+top-ranked pair should be refit, and at wide factors the two answers come apart
+far enough to invert the decision.
+
+This section is a **simulation, not freMTPL2** — Gaussian, balanced parents, a
+planted truth of known shape. The question needs the ground truth held fixed
+while the block's df is varied over a wide range, which one real book cannot
+supply. Read it as a mechanism study; the freMTPL2 numbers above are the
+evidence on real data.
+
+A 41×41 `cat_cat` pair carrying a genuine 6σ effect in 5 of its 1,681 cells
+scores **z = 17.75** — unambiguous by any conventional reading — and costs
+**+22.5% holdout MSE** when refit as a fixed interaction (three replicates:
++22.3%, +20.5%, +24.6%). In sample the refit looks like the best model
+available: train MSE 1.1244 → 0.7249. It spends 1,635 effective df on 6,000
+rows to recover five cells and memorises the other 1,676.
+
+The same pair fitted as a `RandomEffect` on the cell — 645 effective df instead
+of 1,635 — *improves* holdout by 3.2%. So the pair is real, the detection is
+correct, and "add it as a fixed interaction" is still the wrong action.
+
+### The threshold is not a constant
+
+[Caveat 3](#caveats) already notes that scoring by `gain - 2*edf` changes which
+screen wins. That is Mallows' Cp, and on PSST's own scale it is not a rescoring
+but a threshold. Since `z = (T/φ − edf0) / sqrt(2·edf0)`:
+
+```
+T > 2·edf0    ⟺    z > sqrt(edf0 / 2)
+```
+
+The bar **grows with the block's df**: z > 4.95 at 8×8, z > 28.3 at 41×41.
+Sweeping table width against effect size, taking the screen's own z and the
+holdout change from actually refitting:
+
+| levels | edf0 | threshold | z | z/threshold | holdout Δ |
+|---:|---:|---:|---:|---:|---:|
+| 8 | 49 | 4.95 | 0.02 | 0.00 | +0.7% |
+| 8 | 49 | 4.95 | 0.72 | 0.15 | +0.4% |
+| 8 | 49 | 4.95 | 3.28 | 0.66 | −0.3% ✗ |
+| 8 | 49 | 4.95 | 12.02 | 2.43 | −2.2% |
+| 16 | 225 | 10.61 | 2.13 | 0.20 | +3.4% |
+| 16 | 225 | 10.61 | 5.95 | 0.56 | +2.1% |
+| 16 | 225 | 10.61 | 13.31 | 1.26 | −0.4% |
+| 16 | 225 | 10.61 | 28.92 | 2.73 | −5.9% |
+| 25 | 576 | 16.97 | 1.84 | 0.11 | +10.5% |
+| 25 | 576 | 16.97 | 7.16 | 0.42 | +6.9% |
+| 25 | 576 | 16.97 | 16.76 | 0.99 | +0.4% |
+| 25 | 576 | 16.97 | 32.94 | 1.94 | −10.8% |
+| 32 | 961 | 21.92 | 1.76 | 0.08 | +18.9% |
+| 32 | 961 | 21.92 | 7.57 | 0.35 | +12.5% |
+| 32 | 961 | 21.92 | 18.30 | 0.84 | +0.7% |
+| 32 | 961 | 21.92 | 30.53 | 1.39 | −12.8% |
+
+**The rule agrees with the sign of the holdout change in 15/16.** Fixed cutoffs
+on the same data: `z > 2` in 10/16, `z > 3` in 11/16, `z > 5` in 10/16. The one
+disagreement is a −0.3% change, which is zero.
+
+Every fixed-cutoff failure is the same kind — z = 5.95, 7.16, 16.76, 18.30, all
+comfortably "significant" and all harmful. That population grows with the table,
+which is why no constant can be chosen to replace the width term.
+
+### The total does not say how to fit it
+
+Every χ²-family score reads only the total: PSST's `T`, FAST's RSS gain,
+Information Value, mutual information, deviance change. None reads the shape, so
+none separates five live cells from 1,681 faintly live ones carrying the same
+total. The participation ratio of the per-cell contributions does:
+
+```
+P = (Σ t_c)² / Σ t_c²        with  t_c = n_c · mean_c² / φ
+```
+
+For k independent χ²₁ contributions E[t] = 1 and E[t²] = 3, so the null sits at
+`P = k/3`. Reporting `P / (k/3)` makes it comparable across widths, the same
+property that makes `z` comparable across them.
+
+Spiky and diffuse truths at 41×41, magnitudes chosen so their **z values
+coincide** — the only honest way to ask whether `P` carries information `z`
+lacks:
+
+| truth | z | P/(k/3) |
+|---|---:|---:|
+| noise | −0.26 | 1.015 |
+| 5 cells @ 4.0 | 7.38 | **0.154** |
+| diffuse sd=0.20 | 7.15 | 1.015 |
+| 5 cells @ 6.0 | 15.67 | **0.054** |
+| diffuse sd=0.30 | 14.99 | 1.007 |
+| 5 cells @ 8.0 | 26.09 | **0.030** |
+| diffuse sd=0.41 | 25.88 | 0.989 |
+
+At z = 26.09 against z = 25.88 the scores are indistinguishable and `P` differs
+by 33×. The measured null, 568.2 against a predicted 560, calibrates as claimed.
+
+It pays off in the fitting decision. Ranking cells on **training residuals
+only** — ranking on the full sample is the target leakage that makes supervised
+binning look better than it is — and adding only the top m as levels:
+
+| truth | top-5 | top-10 | top-25 | top-50 | all 1,681 |
+|---|---:|---:|---:|---:|---:|
+| 5 cells @ 6.0 (P/(k/3) = 0.054) | **−7.2%** | −6.4% | −4.5% | −1.2% | +22.5% |
+| diffuse sd=0.30 (P/(k/3) = 1.007) | +0.6% | +1.0% | +2.5% | +4.2% | +22.5% |
+
+**Five parameters beat 1,680 by 29.7 points**, and the optimum sits exactly at
+the true number of live cells. On the diffuse truth the identical procedure
+degrades monotonically — there is nothing localised to find, so every cell added
+is a memorised residual. `P` predicts which of the two you are in; `z` cannot,
+because by construction it is the same in both.
+
+Together the two readings give a decision rather than a score:
+
+| | `P/(k/3)` ≈ 1 | `P/(k/3)` ≪ 1 |
+|---|---|---|
+| **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
+| **z above threshold** | refit the pair as a fixed interaction | refit the pair as a fixed interaction |
+
+Neither reading is implemented in `screen_interactions`; both are arithmetic on
+what it already returns. Reproduce with
+`uv run python benchmarks/screening_worth_gate.py`.
+
 ## Caveats
 
 Any of these could change a conclusion.
@@ -272,6 +394,35 @@ Any of these could change a conclusion.
 7. **`DisableNewton`** is not reachable through the public
    `measure_interactions` surface and was not swept.
 
+The remaining caveats apply to
+[From rank to decision](#from-rank-to-decision-does-the-pair-pay-for-its-own-df)
+only, which is a separate simulated study.
+
+8. **Gaussian and balanced.** `2*edf` is a Gaussian-family argument. The
+   constant has not been checked for Poisson with exposure — the family this
+   library is actually aimed at — and there is no reason to assume it carries
+   over unchanged. This is the first thing to check before the gate is quoted
+   anywhere else.
+9. **Sixteen points, three replicates.** Enough to establish that the crossing
+   tracks `sqrt(edf0/2)` across a 20× range of df, not enough to pin the
+   constant. A true crossing at 1.2 rather than 1.0 would not be resolved by
+   this data, and the 15/16 would be unchanged by it.
+10. **The gate is for a plain fixed refit.** A shrunk term spends less edf, so
+    its bar is lower: the `RandomEffect` fit spent 645 df against the fixed
+    fit's 1,635 and improved holdout where the fixed fit cost 22%. The
+    threshold answers "gate this into `interactions=[...]`", not "is this pair
+    ever usable".
+11. **Pooling on a diffuse truth was never measured.** The decision table's
+    "pool it" cell is inference from the other three, not a measurement.
+12. **Planted truths are scattered single cells.** That is the best case for
+    top-m cell selection and the worst case for a group-structured penalty. A
+    contiguous block of live cells — arguably the more realistic shape for a
+    rating interaction — was not tested, and would likely reorder the last
+    table.
+13. **`P` is measured on the mains-model residuals**, so it inherits whatever
+    the mains model failed to absorb. On a book where the additive fit is poor,
+    concentration would read structure that belongs to a margin.
+
 ## Reproducing
 
 The FAST comparison requires `interpret-core`, which is not a dependency of
@@ -279,3 +430,23 @@ this library; it was supplied out of tree and nothing in the package was
 modified to run it. The mains-model and relativity measurements in
 [the baseline section](#the-baseline-deviance-against-shape) need only
 superglm and the freMTPL2 parquet.
+
+[From rank to decision](#from-rank-to-decision-does-the-pair-pay-for-its-own-df)
+is simulated and needs neither, so it runs from a clean checkout:
+
+```
+uv run python benchmarks/screening_worth_gate.py
+```
+
+Expect roughly 25 minutes at the defaults, nearly all of it in the wide fixed
+refits — which is part of what the section is about. The arithmetic underneath
+the two readings is guarded by `tests/test_screening_worth_gate.py`.
+
+One trap worth recording for anyone extending the FAST comparison:
+InterpretML's `term_features_` is **sorted by arity then feature index**
+(`order_terms`), not by FAST rank. Reading `term_features_[0]` as "the pair
+FAST liked most" measures column order — on the setup above, relabelling so the
+narrow pair sits at indices 0,1 rather than 2,3 moves it from "chosen first in
+0/6" to "6/6" on identical data. Recovering the real ranking requires
+instrumenting `calc_interaction_strength` and replaying the cross-bag
+aggregation, which averages ordinal ranks and discards strength.
