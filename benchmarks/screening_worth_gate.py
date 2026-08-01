@@ -77,15 +77,17 @@ These are measurements of a simulated Gaussian book, not calibrated quantiles
 and not p-values.  `2*edf` is a Gaussian-family argument; the constant has not
 been checked for Poisson with exposure.
 
-The default runs all four tables, and the cost is NOT evenly spread: tables 3
-and 4 need twelve wide `cat_cat` refits between them and those dominate.  An
-earlier "~45 minutes at the defaults" here was never reproducible and has been
-withdrawn rather than replaced with a guess -- the total has not been re-timed
-since `rank.py` stopped choosing alias representatives by prefix walk, which
-took one 41x41 refit from 668.55 s to 9.27 s.  Use `--tables` to bound what you
-are paying for.  Wall-clock moves several-fold under CPU contention either way;
-the holdout columns do not, so do not read the timings as a benchmark of the
-fitting paths.
+The default runs all four tables, and the cost is NOT evenly spread: between
+them tables 3 and 4 need twelve wide fits -- nine plain `cat_cat` refits (six in
+the sparse payoff, three in the model-class table) and three `RandomEffect` fits
+on the same 1681-level cell -- and those dominate everything else.  An earlier
+"~45 minutes at the defaults" here was never reproducible and has been withdrawn
+rather than replaced with a guess: the total has not been re-timed since
+`rank.py` stopped choosing alias representatives by prefix walk, which took one
+of the nine from 668.55 s to 9.27 s.  Use `--tables` to bound what you are
+paying for.  Wall-clock moves several-fold under CPU contention either way; the
+holdout columns do not, so do not read the timings as a benchmark of the fitting
+paths.
 """
 
 from __future__ import annotations

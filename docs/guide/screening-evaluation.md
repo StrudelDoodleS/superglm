@@ -571,12 +571,17 @@ three-model-class comparison, which are **not** reported here:
 uv run python benchmarks/screening_worth_gate.py
 ```
 
-Budget for that one carefully, because the cost is not evenly spread. Tables 3
-and 4 need twelve wide `cat_cat` refits between them and those dominate
-everything else. On the code these tables were abandoned at, one such refit was
-measured at **668.55 s**, putting the bare command in the multi-hour range;
-the alias-representative fix in this branch takes the same refit to **9.27 s**
-(both figures measured in that commit, not by this benchmark). **The total for
+Budget for that one carefully, because the cost is not evenly spread. Between
+them tables 3 and 4 need twelve wide fits — **nine** plain `cat_cat` refits
+(six in the sparse payoff, three in the model-class table) and **three**
+`RandomEffect` fits on the same 1,681-level cell — and those dominate
+everything else in the run.
+
+On the code these tables were abandoned at, one of the nine was measured at
+**668.55 s**, which puts the bare command in the multi-hour range on its own;
+the alias-representative fix in this branch takes that same refit to **9.27 s**
+(both figures measured in that commit, not by this benchmark). The three
+`RandomEffect` fits are extra and were not separately timed. **The total for
 the bare command has not been re-timed since**, so no figure for it is quoted
 here — the earlier "roughly 45 minutes" was never reproducible and has been
 withdrawn rather than replaced with a guess.
