@@ -326,8 +326,12 @@ P = (Σ t_c)² / Σ t_c²        with  t_c = n_c · mean_c² / φ
 ```
 
 For k independent χ²₁ contributions E[t] = 1 and E[t²] = 3, so the null sits at
-`P = k/3`. Reporting `P / (k/3)` makes it comparable across widths, the same
-property that makes `z` comparable across them.
+`P = k/3` **for large k**. Reporting `P / (k/3)` makes it comparable across the
+wide blocks this section is about, the same property that makes `z` comparable
+across them — but `k/3` is a limit, not the finite-sample expectation, and the
+null ratio sits above 1 at small k (measured: ≈1.15 at k = 25, ≈1.04 at k = 100,
+and exactly 3 at k = 1, where a single occupied cell carries everything by
+construction). See [caveat 14](#caveats).
 
 Spiky and diffuse truths at 41×41, magnitudes chosen so their **z values
 coincide** — the only honest way to ask whether `P` carries information `z`
@@ -434,6 +438,14 @@ only, which is a separate simulated study.
 13. **`P` is measured on the mains-model residuals**, so it inherits whatever
     the mains model failed to absorb. On a book where the additive fit is poor,
     concentration would read structure that belongs to a margin.
+14. **`P/(k/3)` is calibrated for wide blocks only.** `k/3` is the large-k
+    limit of the null, not its finite-sample expectation: the ratio's null mean
+    is ≈1.39 at k = 8, ≈1.15 at k = 25, ≈1.04 at k = 100 and ≈1.003 at k = 1600
+    (measured; pinned in `tests/test_screening_worth_gate.py`). At the bottom it
+    inverts outright — one occupied cell gives `P` = 1 by construction and the
+    ratio reads 3, the value that elsewhere means "as diffuse as noise". A
+    narrow or thinly occupied block needs a finite-k calibration before its
+    reading means anything.
 
 ## Reproducing
 

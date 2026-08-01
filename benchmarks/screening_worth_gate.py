@@ -36,8 +36,9 @@ the second needs one pass over the residuals the screen does not hand back.
        P = (sum_c t_c)^2 / sum_c t_c^2,    t_c = n_c * mean_c^2 / phi
 
    For k independent chi^2_1 contributions E[t] = 1 and E[t^2] = 3, so the null
-   sits at P = k/3.  Reporting `P / (k/3)` gives ~1 for noise AND for genuinely
-   diffuse truths, and near zero when a handful of cells carry everything.
+   sits at P = k/3 for large k.  Reporting `P / (k/3)` gives ~1 for noise AND
+   for genuinely diffuse truths, and near zero when a handful of cells carry
+   everything.
    Unlike the gate, this is NOT arithmetic on the screening row:
    `screen_interactions` returns aggregates (`statistic`, `z`, `edf0`), not the
    per-cell contributions, so `cell_contributions` below recomputes them from
@@ -157,6 +158,17 @@ def concentration(t: NDArray, n_occupied: int) -> float:
 
     ~1 means the score is spread as noise spreads it -- which a genuinely
     diffuse truth also does.  Near 0 means a few cells carry the pair.
+
+    LARGE BLOCKS ONLY.  ``k/3`` is the large-``k`` LIMIT, not the finite-sample
+    expectation.  For k independent chi^2_1 contributions ``E[(sum t)^2] =
+    k^2 + 2k`` against ``E[sum t^2] = 3k``, so the null mean of P is ``(k+2)/3``
+    to first order and this ratio sits ABOVE 1 at finite k -- measured and
+    pinned in the tests at ~1.39 (k=8), ~1.15 (k=25), ~1.04 (k=100), ~1.003
+    (k=1600).  At the bottom it is not a small bias: a single occupied cell
+    gives ``P = 1`` exactly and this function returns 3, the value that is
+    supposed to mean "as diffuse as noise".  The reading is calibrated for the
+    wide blocks it was introduced for; a narrow or thinly occupied block needs
+    a finite-``k`` calibration before its value means anything.
     """
     if n_occupied <= 0:
         return float("nan")
