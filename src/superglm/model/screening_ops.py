@@ -888,8 +888,23 @@ def screen_interactions(
         # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
         penalized = S_ti is not None and bool(np.any(S_ti))
         best_z, best = -np.inf, None
+        # A rung that clamps UPWARD sat below the penalty's null-space
+        # dimension, so it took the bracket's high edge; every budget strictly
+        # below that achieved value takes the same edge and returns the
+        # identical (statistic, edf0, lambda0) triple.  Skipping those rungs is
+        # output-identical and saves the O(k^3) solves they would repeat —
+        # the whole ladder, for a spline_cat whose factor is wide enough that
+        # kron(S, I) leaves a null space above every budget.  Only a STRICTLY
+        # lower budget is skipped: a budget equal to the achieved value can
+        # instead land on the bracket's low edge and report a different
+        # lambda0.
+        clamped_above = None
         for budget in budgets if penalized else budgets[:1]:
+            if clamped_above is not None and budget < clamped_above:
+                continue
             result = penalized_score_statistic(U, V, C, M, S_ti, edf0=budget, U_nuisance=u_m)
+            if result.edf0 > budget:
+                clamped_above = result.edf0
             statistic = result.statistic / phi_hat
             z = (statistic - result.edf0) / np.sqrt(2.0 * result.edf0)
             if z > best_z:
