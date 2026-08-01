@@ -54,7 +54,18 @@ columns: the kron of two contrast menus on a level-pair cell is that cell's
 indicator, and the per-level slope columns are exactly what a
 `NumericCategorical` builds. For `ti` and `spline_cat` the probe spans the
 refit term's identifiable deviation space — the part the pair's own mains
-cannot absorb. `probe df` is the unpenalized block's dimension before the data
+cannot absorb.
+
+One exception is known and is being fixed: a `spline_cat` row whose spline
+parent is a `Spline(kind="cr")` on the default `knot_strategy="uniform"`
+probes a *different* function space from the one its `SplineCategorical`
+refit builds — measured minimum principal cosine 0.885 between the two
+spans — because the marginal helper the probe shares with `ti` re-places
+that basis on quantile knots. `ps` parents, `cr` parents already on quantile
+knots, and every unpenalized kind are unaffected. See
+[issue #191](https://github.com/StrudelDoodleS/superglm/issues/191).
+
+`probe df` is the unpenalized block's dimension before the data
 reduces it: for those kinds the `edf0` column reports the rank actually
 achieved, which is lower when cells are empty or their columns collinear (an
 11 x 22 `cat_cat` table can report 208 rather than 210).
@@ -447,8 +458,9 @@ surrogates — gradient-boosting H-statistics or neural interaction detection �
 which report no null behaviour at all.
 
 What is new here is therefore narrow and specific. First, the probe is the
-exact basis the confirmatory refit builds, for every pair kind, rather than a
-binned or single-column surrogate for it. Second, candidates are compared at a
+exact basis the confirmatory refit builds — for every pair kind, with the one
+`cr`-parent exception noted above — rather than a binned or single-column
+surrogate for it. Second, candidates are compared at a
 solved-for common complexity: `lambda0` is chosen so
 `tr((V + lambda0 * S)^-1 V) = edf0`, scanned over a ladder of budgets and
 normalized against each rung's own null mean and scale. No precedent was found
