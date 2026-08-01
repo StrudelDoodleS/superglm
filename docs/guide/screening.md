@@ -401,7 +401,10 @@ discretize at all, so OC pairs stay exact on both sides.
   ladder can bisect rather than clamp. At the default that admits `k <= 1709`
   (`cat_cat` on two 42-level factors, `numeric_cat` on a 1710-level factor)
   and `k <= 1357` for `ti`/`spline_cat`, measured on the reference box at
-  0.81 s and 0.67 s per pair. Wider blocks are refused with a NaN row,
+  0.81 s and 0.67 s per pair — the unpenalized figure a few percent low since
+  that rung's rank became a count rather than a trace (measured 1.056x at that
+  corner, and it is what makes the reported `edf0` the rank rather than `k`).
+  Wider blocks are refused with a NaN row,
   immediately — binning cannot shrink a basis dimension — and raising
   `max_cells` lifts the refusal. For scale, the block the old
   allocation-only ceiling admitted (`k = 4290`, two 67-level factors)

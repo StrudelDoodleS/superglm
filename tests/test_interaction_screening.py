@@ -194,6 +194,78 @@ def test_statistic_reduces_to_unpenalized_without_penalty():
     assert result.lambda0 == 0.0
 
 
+def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
+    """A barely positive-definite block still reports its RANK, not ``k``.
+
+    The unpenalized rung's edf used to be ``tr(A^-1 V)``, which equals the rank
+    only when ``A^-1`` is a pseudo-inverse.  ``cho_factor`` is entitled to
+    accept a block like this one -- it IS positive definite, by 1e-18 -- and
+    the trace then reports ``k``.  Diagonal on purpose: this is the one
+    construction whose Cholesky cannot come out platform-dependent, since
+    every pivot is a stored entry rather than a round-off residue.
+    """
+    import scipy.linalg
+
+    from superglm.screening import penalized_score_statistic
+
+    V = np.diag([3.0, 2.0, 1e-18])
+    scipy.linalg.cho_factor(V, check_finite=False)  # accepts it; that is the trap
+    assert np.linalg.matrix_rank(V) == 2
+
+    result = penalized_score_statistic(np.array([1.0, 1.0, 1.0]), V, S_ti=None)
+    assert result.edf0 == 2.0
+    assert result.lambda0 == 0.0
+
+
+def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
+    """The reachable case: a factor level in which the numeric is constant.
+
+    ``numeric_cat`` profiles out ``[1 | menu | z]``, so a level carrying a
+    single row has its probe column exactly absorbed and the block's true rank
+    is ``k - 1``.  ``V_eff`` is formed by SUBTRACTION though, so that direction
+    lands at round-off rather than at zero and whether ``cho_factor`` accepts
+    the block is decided by rounding alone -- 10 of these 20 seeds are accepted
+    here.  The edf must not depend on which, so the reported values over
+    statistically identical replicates must be ONE value, and it must be the
+    rank.  A Cholesky trace reports ``k`` on the accepted seeds and ``k - 1``
+    on the rest, which is two.
+
+    ``matrix_rank`` is a cross-check here, not the contract: its default cut
+    (``max(M, N) * eps``) is not the ``_RCOND`` the screen counts at, and on a
+    block with an eigenvalue between them the two would part company.  They
+    agree on every seed below because a profiled block is bimodal -- measured
+    over these 20, the smallest kept relative eigenvalue is 1.2e-02 and the
+    largest dropped one 4.6e-16.
+    """
+    from superglm.screening import penalized_score_statistic
+    from superglm.screening._numeric_margin import numeric_pair_moments
+    from superglm.screening._score_stat import _solve_psd
+
+    L, n = 40, 8000
+    menu = np.eye(L)[:, 1:]
+    reported = set()
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        codes = rng.integers(0, L - 1, n)
+        codes[0] = L - 1  # the singleton level
+        z = rng.normal(size=n)
+        score = rng.normal(size=n)
+        w = rng.uniform(0.5, 1.5, n)
+        U, V, C, M, u_m = numeric_pair_moments(codes, L, menu, z, score, w)
+
+        V_eff = V - C.T @ _solve_psd(M, C)
+        V_eff = 0.5 * (V_eff + V_eff.T)
+        assert np.linalg.matrix_rank(V_eff) == L - 2, seed
+
+        result = penalized_score_statistic(U, V, C, M, None, U_nuisance=u_m)
+        # Never ABOVE the rank: that inequality is the defect itself, and it
+        # fires only on the seeds cho_factor accepts.
+        assert result.edf0 <= L - 2, (seed, result.edf0)
+        reported.add(result.edf0)
+    # An exact count, identical across replicates -- not a float trace.
+    assert reported == {float(L - 2)}
+
+
 def test_singular_pencil_answer_does_not_depend_on_the_units():
     """The whitening fallback's rank cut has to be RELATIVE.
 
