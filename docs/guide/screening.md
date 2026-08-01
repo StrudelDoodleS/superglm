@@ -427,6 +427,31 @@ discretize at all, so OC pairs stay exact on both sides.
   per level and which no `discrete=` setting compresses — discretization is
   support compression for *continuous* covariates, and a factor is already
   on its own grid.
+- **A wide factor's `z` is an omnibus statistic, and it is diluted. Read the
+  `edf0` column before comparing a wide `spline_cat` row against a narrow
+  one.** `kron(S_spline, I)` leaves the constant and the linear direction
+  unpenalized *per level*, so its null space is `2(L-1)`; the mains absorb
+  the constants and roughly `L-1` degrees of freedom survive at any penalty.
+  Every rung of the ladder therefore clamps to the same edge, and the pair is
+  only ever tested at `edf0 ~ L-1` — the ladder's whole point, scanning
+  budgets for the one that best matches the signal, is unavailable to it.
+  Calibration is unharmed: `z` is standardized against its own `edf0`, and
+  measured `mean 0.13, sd 1.12` at `edf0 = 499` — closer to normal than the
+  low-df rows, not further, since the chi-square skew is `sqrt(8/edf0)`.
+  Power is what suffers, at `E[z] = lambda / sqrt(2*edf0)`, measured decaying
+  as `1/sqrt(edf0)` to within 1.5% over a 125-fold range of df. Two
+  consequences, both worth stating plainly. A wide row and a narrow row are
+  not on the same footing — the wide one needs `sqrt(edf0_wide /
+  edf0_narrow)` times the signal to tie. And a CONCENTRATED interaction, a
+  few unusual levels against a quiet background, can vanish outright:
+  measured at 500 levels, three levels carrying a large slope scored
+  `z = 2.68` against a null maximum of `2.79`, while the same total signal
+  spread across every level scored `26.8`. **A near-zero `z` on a wide factor
+  is evidence about diffuse structure only. It is not evidence that no
+  interaction is present.** If a few deviating levels is the hypothesis, the
+  model class to reach for is `FactorSmooth(basis="fs")`, which penalizes
+  every direction (nullity 0) and so shrinks level curves toward a common
+  one rather than leaving each free.
 - **Factor and numeric margins have no such cardinality limit.** A factor
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the
