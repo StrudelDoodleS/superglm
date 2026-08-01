@@ -8,6 +8,7 @@ assembly exactly, so these tolerances must not be loosened.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
@@ -191,6 +192,32 @@ def test_statistic_reduces_to_unpenalized_without_penalty():
 
     np.testing.assert_allclose(result.statistic, U @ np.linalg.solve(V, U), rtol=1e-11)
     assert result.lambda0 == 0.0
+
+
+def test_singular_pencil_answer_does_not_depend_on_the_units():
+    """The whitening fallback's rank cut has to be RELATIVE.
+
+    ``V`` and ``S`` share a null space here, so the generalized driver fails
+    and the explicit whitening runs.  The same problem is posed twice, once
+    at a scale a thousand times smaller; an absolute floor in that cut called
+    every identifiable direction null below 1e-12 and returned a zero
+    statistic at zero df, which makes the screening table depend on whether
+    a covariate is carried in metres or kilometres.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    answers = []
+    for s in (1e-10, 1e-12, 1e-13, 1e-16):
+        V = s * np.diag([1.0, 2.0, 0.0])
+        S = s * np.diag([2.0, 1.0, 0.0])
+        U = np.sqrt(s) * np.array([1.0, 1.0, 0.0])
+        got = penalized_score_statistic(U, V, S_ti=S, edf0=1.0)
+        answers.append((got.statistic, got.edf0))
+    # lambda0 = 1 makes V + lambda S = 3s I on the identifiable block, so the
+    # statistic is U' (3s I)^-1 U = 2/3 and edf0 is 1 -- at every scale.
+    for statistic, edf0 in answers:
+        assert statistic == pytest.approx(2.0 / 3.0, rel=1e-9)
+        assert edf0 == pytest.approx(1.0, rel=1e-9)
 
 
 def test_edf_solver_hits_target():
