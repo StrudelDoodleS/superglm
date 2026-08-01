@@ -394,6 +394,30 @@ def test_the_ladder_refuses_a_search_it_cannot_afford():
     assert structured_ladder(p, budgets=(24.0,), max_evaluations=200) is not None
 
 
+def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable():
+    """The ladder is charged for distinct SEARCH TARGETS, not for rungs.
+
+    ``edf0`` is allowed to repeat a budget, and every copy of one bisects to
+    the same lambda, so charging each copy separately let a repeated budget
+    decide whether the pair got a score at all — the same pair came back
+    finite at ``(24.0,)`` and a NaN row at ``(24.0, 24.0)``.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    p = spline_cat_moments(*_structured_inputs(_thin_level_pair(1.0)))
+    once = structured_ladder(p, budgets=(24.0,), max_evaluations=48)
+    assert once is not None
+    for repeats in (2, 3):
+        many = structured_ladder(p, budgets=(24.0,) * repeats, max_evaluations=48)
+        assert many is not None
+        assert len(many) == repeats
+        # ...and the repeats are the same answer, computed once
+        for r in many:
+            assert r.statistic == once[0].statistic
+            assert r.edf0 == once[0].edf0
+            assert r.lambda0 == once[0].lambda0
+
+
 def test_a_full_rank_penalty_makes_every_rung_search():
     """The kernel's cost is not a function of the pair's dimensions.
 

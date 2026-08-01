@@ -322,30 +322,38 @@ def structured_ladder(
     stat_lo, edf_lo = _evaluate(p, U_eff, rank_m, lo, ranks)
     stat_hi, edf_hi = _evaluate(p, U_eff, rank_m, hi, ranks)
 
-    searching = sum(1 for b in budgets if edf_hi < float(b) < edf_lo)
-    if max_evaluations is not None and 2 + _MAX_STEPS_PER_RUNG * searching > max_evaluations:
+    # DISTINCT search targets, not rungs: the ladder's budgets are permitted to
+    # repeat, every copy of one bisects to the same lambda, and charging each
+    # copy separately would let repeating a budget decide whether the pair is
+    # screenable at all.  The same set drives the cache below, so a repeat
+    # costs nothing rather than a second bisection.
+    searchable = {float(b) for b in budgets if edf_hi < float(b) < edf_lo}
+    if max_evaluations is not None and 2 + _MAX_STEPS_PER_RUNG * len(searchable) > max_evaluations:
         return None
 
+    solved: dict[float, ScreenedPair] = {}
     out: list[ScreenedPair] = []
     for budget in budgets:
         edf0 = float(budget)
-        if not edf_hi < edf0 < edf_lo:
+        if edf0 not in searchable:
             lam = lo if edf0 >= edf_lo else hi
             stat, achieved = (stat_lo, edf_lo) if lam == lo else (stat_hi, edf_hi)
             out.append(ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam)))
             continue
-        a, b = lo, hi
-        lam, stat, achieved = hi, stat_hi, edf_hi
-        for _ in range(_MAX_BISECT):
-            if b <= a * (1.0 + 1e-12):
-                break
-            lam = float(np.sqrt(a * b))
-            stat, achieved = _evaluate(p, U_eff, rank_m, lam, ranks)
-            if abs(achieved - edf0) <= _EDF_TOL:
-                break
-            if achieved > edf0:
-                a = lam
-            else:
-                b = lam
-        out.append(ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam)))
+        if edf0 not in solved:
+            a, b = lo, hi
+            lam, stat, achieved = hi, stat_hi, edf_hi
+            for _ in range(_MAX_BISECT):
+                if b <= a * (1.0 + 1e-12):
+                    break
+                lam = float(np.sqrt(a * b))
+                stat, achieved = _evaluate(p, U_eff, rank_m, lam, ranks)
+                if abs(achieved - edf0) <= _EDF_TOL:
+                    break
+                if achieved > edf0:
+                    a = lam
+                else:
+                    b = lam
+            solved[edf0] = ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam))
+        out.append(solved[edf0])
     return out
