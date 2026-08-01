@@ -377,6 +377,151 @@ def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
             assert s.statistic == pytest.approx(d.statistic, rel=1e-6)
 
 
+def test_the_ladder_refuses_a_search_it_cannot_afford():
+    """``max_evaluations`` is checked BEFORE the first bisection step.
+
+    A clamping ladder is two arrow factorizations; a searching one is tens.
+    A caller that budgeted for the first must get a refusal rather than the
+    second, and must pay only the bracket to find out.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    p = spline_cat_moments(*_structured_inputs(_thin_level_pair(1.0)))
+    # edf at maximum penalty is about L - 1 = 19 here, so 16 clamps and 24
+    # has to search.
+    assert structured_ladder(p, budgets=(16.0,), max_evaluations=2) is not None
+    assert structured_ladder(p, budgets=(24.0,), max_evaluations=2) is None
+    assert structured_ladder(p, budgets=(24.0,), max_evaluations=200) is not None
+
+
+def test_a_full_rank_penalty_makes_every_rung_search():
+    """The kernel's cost is not a function of the pair's dimensions.
+
+    ``ps``, ``bs`` and ``cr`` margins leave one direction per level
+    unpenalized, so ``edf`` at maximum penalty outranks every budget and the
+    whole ladder clamps at two evaluations.  A natural spline's penalty is
+    full rank, so ``edf`` there is zero and EVERY rung bisects -- same
+    dimensions, tens of times the work.  This is why the ladder is capped by
+    a ceiling it checks against rather than by a prediction from ``k`` and
+    ``L``.
+    """
+    import superglm.screening._structured as st
+    from superglm.screening._structured import structured_ladder
+
+    counts = {}
+    for kind in ("ps", "ns"):
+        rng = np.random.default_rng(11)
+        L, reps = 30, 20
+        n = L * reps
+        g = np.repeat([f"L{i}" for i in range(L)], reps)
+        x = rng.uniform(0.0, 1.0, n)
+        df = pd.DataFrame({"g": g, "x": x})
+        y = rng.normal(size=n)
+        grab = _capture(df, y, {"g": Categorical(), "x": Spline(kind=kind, n_knots=8)}, ("x", "g"))
+        p = spline_cat_moments(*_structured_inputs(grab))
+        calls = [0]
+        real = st._evaluate
+
+        def counted(*a, _real=real, _calls=calls, **k):
+            _calls[0] += 1
+            return _real(*a, **k)
+
+        st._evaluate = counted
+        try:
+            out = structured_ladder(p, budgets=BUDGETS)
+        finally:
+            st._evaluate = real
+        counts[kind] = calls[0]
+        assert all(np.isfinite(r.edf0) for r in out)
+
+    assert counts["ps"] == 2
+    assert counts["ns"] > 2 * len(BUDGETS)
+
+
+def _routed_shapes(model, df, y, monkeypatch, **kw):
+    """Run a screen and report the moment shapes the arrow kernel actually saw."""
+    seen = {}
+    real = ops.spline_cat_moments
+
+    def spy(B_a, S_a, S_cell, W_cell, level_rows):
+        seen["support"] = B_a.shape[0]
+        seen["width"] = B_a.shape[1]
+        return real(B_a, S_a, S_cell, W_cell, level_rows)
+
+    monkeypatch.setattr(ops, "spline_cat_moments", spy)
+    row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS, **kw).iloc[0]
+    return row, seen
+
+
+def test_the_structured_path_bins_rather_than_allocate_its_own_intermediate(monkeypatch):
+    """The kernel's ``(n_a, k_s, k_s)`` outer products need a gate of their own.
+
+    It is the TRANSPOSE of the intermediate the dense path is gated on, and
+    no other structured gate bounds it: the block stacks are ``L * k_s^2``
+    and the cell table is ``n_a * L``, and neither is ``n_a * k_s^2``.  Left
+    ungated it grows with the spline's support, which the cell table alone
+    lets run to ``max_cells / L``.  Both terms scale with the support, so the
+    answer is to bin the spline margin, exactly as the dense path does.
+    """
+    rng = np.random.default_rng(17)
+    L, n, support = 40, 5000, 4000
+    # The support is chosen so the CELL term passes on its own -- 4000 x 40
+    # is 160,000 against a 400,000 ceiling -- and only the intermediate is
+    # over, so nothing but the new term can be what bins the margin.
+    grid = np.linspace(0.0, 1.0, support)
+    df = pd.DataFrame(
+        {
+            "g": np.array([f"L{i}" for i in range(L)])[rng.integers(0, L, n)],
+            "x": grid[np.arange(n) % support],
+        }
+    )
+    y = rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian", features={"g": Categorical(), "x": Spline(kind="ps", n_knots=20)}
+    )
+    model.fit_reml(df, y)
+    row, seen = _routed_shapes(model, df, y, monkeypatch, max_cells=400_000)
+    assert seen, "the pair must route through the arrow kernel"
+    # 4000 support points at width 23 is 2,116,000 doubles against a
+    # 1,600,000 double intermediate budget; binned to 256 it is 135,424.
+    assert seen["width"] > 20
+    assert seen["support"] <= 256
+    assert bool(row["approx"])
+    assert np.isfinite(row["z"])
+
+
+def test_a_pair_whose_ladder_must_bisect_is_refused_when_it_cannot_afford_to(monkeypatch):
+    """The structured path needs a TIME gate as well as allocation gates.
+
+    One evaluation batches ``L`` eigendecompositions of ``(k_s + 1)`` blocks,
+    so it costs ``L * k_s^3`` where every allocation gate costs ``L * k_s^2``
+    — and a searching ladder runs tens of them.  A natural spline's penalty
+    is full rank, so every rung of this pair's ladder searches; the pair is
+    otherwise identical to one that clamps.
+    """
+    rng = np.random.default_rng(19)
+    L, reps = 160, 6
+    n = L * reps
+    df = pd.DataFrame(
+        {"g": np.repeat([f"L{i}" for i in range(L)], reps), "x": rng.uniform(0.0, 1.0, n)}
+    )
+    y = rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian", features={"g": Categorical(), "x": Spline(kind="ns", n_knots=8)}
+    )
+    model.fit_reml(df, y)
+    row, seen = _routed_shapes(model, df, y, monkeypatch, max_cells=400_000)
+    assert seen, "the pair must route through the arrow kernel"
+    assert np.isnan(row["z"])
+    assert np.isnan(row["edf0"])
+    # ...and raising the budget lifts the refusal, as it lifts every other.
+    # The pair is still over the dense ceiling at the higher budget, so it is
+    # the structured path that scores it, not a fallback to the dense one.
+    lifted, lifted_seen = _routed_shapes(model, df, y, monkeypatch, max_cells=1_000_000)
+    assert lifted_seen
+    assert np.isfinite(lifted["z"])
+
+
 def test_degenerate_levels_are_scored_not_skipped():
     """Singleton levels are the routine case at high cardinality, not an edge
     case: they make their own block singular, and the kernel has to keep going

@@ -53,6 +53,15 @@ from superglm.screening._score_stat import ScreenedPair
 _EDF_TOL = 1e-6
 _MAX_BISECT = 200
 
+# The most steps one rung's bisection can take.  It halves the log of a
+# bracket spanning 1e20 and stops when the two ends are within 1e-12 of each
+# other relatively, so it exhausts at ceil(log2(ln(1e20) / ln(1 + 1e-12)))
+# steps whatever the data does -- _EDF_TOL usually stops it sooner (measured
+# 26 to 28 on the pairs that search), but nothing guarantees that, and a
+# ceiling is what lets a caller decide BEFORE the search whether to pay for
+# it rather than after.
+_MAX_STEPS_PER_RUNG = min(_MAX_BISECT, 46)
+
 
 @dataclass(frozen=True)
 class SplineCatPair:
@@ -259,7 +268,8 @@ def structured_ladder(
     p: SplineCatPair,
     *,
     budgets: tuple[float, ...] = (4.0,),
-) -> list[ScreenedPair]:
+    max_evaluations: int | None = None,
+) -> list[ScreenedPair] | None:
     """Score one spline x categorical pair at every budget, structurally.
 
     Mirrors :func:`penalized_score_statistic_ladder`'s contract — clamp a
@@ -267,11 +277,21 @@ def structured_ladder(
     actually achieved — but every evaluation is an arrow factorization rather
     than a dense one.
 
-    A wide factor never searches: ``kron(S_a, I)`` has a null space of about
-    one dimension per level, so ``edf`` at maximum penalty already exceeds
-    every budget on the ladder and all rungs clamp to the same edge.  The
-    search below therefore runs only for factors narrow enough that the dense
-    path would have taken the pair anyway.
+    **Whether the ladder searches is not a function of the pair's dimensions,
+    so the caller caps it and the decision is taken here.**  A rung whose
+    budget falls inside the bracket bisects, and each step of that bisection
+    is a fresh arrow factorization where the dense ladder's equivalent is
+    ``O(k)`` on a prebuilt pencil.  Whether any rung does depends on ``edf``
+    at maximum penalty, which is the dimension of the penalty's null space
+    per level: measured at ``L - 1`` for ``ps``, ``bs`` and ``cr`` margins,
+    where every rung clamps and the whole ladder is 2 evaluations — but at
+    ZERO for ``ns``, whose penalty is full rank, so every rung searches and a
+    400-level pair measured 106.  ``max_evaluations`` bounds the arrow
+    factorizations this call may spend.  The bracket settles which rungs
+    search, and the worst case for those is checked against the ceiling
+    BEFORE the first bisection step, so a pair that cannot afford its search
+    pays only for the bracket and returns ``None`` — the caller's cue for the
+    same NaN row an unaffordable dense pair gets.  ``None`` means unbounded.
     """
     U_eff, rank_m = _profile(p)
     ranks = block_ranks(p)
@@ -301,6 +321,10 @@ def structured_ladder(
 
     stat_lo, edf_lo = _evaluate(p, U_eff, rank_m, lo, ranks)
     stat_hi, edf_hi = _evaluate(p, U_eff, rank_m, hi, ranks)
+
+    searching = sum(1 for b in budgets if edf_hi < float(b) < edf_lo)
+    if max_evaluations is not None and 2 + _MAX_STEPS_PER_RUNG * searching > max_evaluations:
+        return None
 
     out: list[ScreenedPair] = []
     for budget in budgets:

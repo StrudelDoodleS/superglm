@@ -937,19 +937,23 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     # k = 12 * 12 = 144 for every pair.  max_cells is chosen so 144 lands
     # between the unpenalized ceiling (5.5e6^(1/3) = 176) and the penalized
     # one (2.75e6^(1/3) = 140), and still clears the (k^2 <= 4*max_cells)
-    # intermediate gate at 20736 <= 22000.
+    # intermediate gate at 20736 <= 22000.  The spline margins are carried on
+    # a 40-point grid so that every pair also clears the SUPPORT-scaled
+    # intermediate budgets (dense and structured alike); the subject here is
+    # the cubic charge, and an allocation refusal would mask it.
     max_cells = 5_500
     n_levels, reps = 13, 14
     rng = np.random.default_rng(23)
     n = n_levels * n_levels * reps
     a = np.repeat(np.arange(n_levels), n_levels * reps)
     b = np.tile(np.repeat(np.arange(n_levels), reps), n_levels)
+    grid = np.linspace(0.0, 1.0, 40)
     df = pd.DataFrame(
         {
             "g": np.array([f"G{i}" for i in range(n_levels)])[a],
             "h": np.array([f"H{i}" for i in range(n_levels)])[b],
-            "x1": rng.uniform(0.0, 1.0, n),
-            "x2": rng.uniform(0.0, 1.0, n),
+            "x1": grid[rng.integers(0, grid.size, n)],
+            "x2": grid[rng.integers(0, grid.size, n)],
         }
     )
     y = rng.normal(size=n)
@@ -963,7 +967,11 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
         },
     )
     model.fit_reml(df, y)
-    table = model.screen_interactions(df, y, max_cells=max_cells).set_index(
+    # edf at maximum penalty is about L - 1 = 12 for the spline_cat pair, so
+    # the default ladder's top rung would bisect and be charged for it.  The
+    # subject here is the CUBIC charge; capping the ladder at 8 keeps every
+    # rung clamped so the structured evaluation budget stays out of the way.
+    table = model.screen_interactions(df, y, max_cells=max_cells, edf0=(2.0, 4.0, 8.0)).set_index(
         ["feature_a", "feature_b"]
     )
     assert table.loc[("g", "h"), "kind"] == "cat_cat"

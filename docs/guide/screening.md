@@ -414,19 +414,31 @@ discretize at all, so OC pairs stay exact on both sides.
   a border of `1 + k_spline` columns, independent of the level count. So a
   pair the ceiling above refuses is retried through a kernel that factorizes
   that arrow in time and memory *linear* in the level count, rather than
-  cubic and quadratic. What is left binding is the cell table, `support x L`,
-  which `max_cells` bounds directly and which raising `max_cells` lifts
-  proportionally. The dense path still scores every pair it can, unchanged;
-  the structured path only extends where it stops. Measured end to end on the
-  reference box: 200 levels 0.01 s, 1,000 levels 0.04 s, 5,000 levels 0.27 s
-  — against 0.51 s for the *124* levels the dense path tops out at. The
-  kernel itself, timed apart from fitting the mains model, stays linear well
-  past that: 0.31 s at 10,000 levels, 3.46 s at 100,000. Above roughly five
-  thousand levels the binding cost is no longer screening but fitting the
-  mains model the screen runs against, whose factor contributes one column
-  per level and which no `discrete=` setting compresses — discretization is
-  support compression for *continuous* covariates, and a factor is already
-  on its own grid.
+  cubic and quadratic. The dense path still scores every pair it can,
+  unchanged; the structured path only extends where it stops. Measured end to
+  end, best of three, one BLAS thread: 200 levels 0.013 s, 1,000 levels
+  0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124* levels the
+  dense path tops out at. Above roughly five thousand levels the binding cost
+  is no longer screening but fitting the mains model the screen runs against,
+  whose factor contributes one column per level and which no `discrete=`
+  setting compresses — discretization is support compression for *continuous*
+  covariates, and a factor is already on its own grid.
+
+  Three things bound the structured path, and `max_cells` scales all three.
+  The level blocks are `L x (k_spline + 1)^2`, which at the default and a
+  width-11 spline admits 34,722 levels — the kernel alone measured there at
+  1.22 s and 201 MB for a four-rung ladder, and linear below it at 0.16 s for
+  5,000 and 0.63 s for 20,000. The cell table is `support x L`, and beside it
+  the spline menu's outer products are `support x k_spline^2`; a pair over
+  either is quantile-binned on its spline margin and flagged `approx`, the
+  same degradation the dense path applies to its own intermediate. And the
+  ladder itself is budgeted in *arrow factorizations*: a clamped ladder is
+  two, but a rung whose budget lands inside the bracket bisects and costs
+  tens, so a pair that cannot afford the search is refused with a NaN row.
+  Which of those a pair hits depends on its shape — a narrow spline against a
+  huge factor is bounded by the block stacks, a wide spline against a small
+  one by the ladder, since one evaluation is cubic in `k_spline` where every
+  allocation is quadratic.
 - **A wide factor's `z` is an omnibus statistic, and it is diluted. Read the
   `edf0` column before comparing a wide `spline_cat` row against a narrow
   one.** `kron(S_spline, I)` leaves the constant and the linear direction
@@ -435,6 +447,13 @@ discretize at all, so OC pairs stay exact on both sides.
   Every rung of the ladder therefore clamps to the same edge, and the pair is
   only ever tested at `edf0 ~ L-1` — the ladder's whole point, scanning
   budgets for the one that best matches the signal, is unavailable to it.
+  This is a property of the *penalty*, not of the level count: it holds for
+  `ps`, `bs` and `cr` margins, whose penalties have a null space, and not for
+  `ns`, whose penalty is full rank. A `spline_cat` pair on an `ns` margin has
+  `edf0 = 0` at maximum penalty, so every rung genuinely searches and the
+  ladder costs tens of arrow factorizations rather than two — measured 106
+  against 2 on the same 400-level pair. That is the cost the evaluation
+  budget above exists to bound.
   Calibration is unharmed: `z` is standardized against its own `edf0`, and
   measured `mean 0.13, sd 1.12` at `edf0 = 499` — closer to normal than the
   low-df rows, not further, since the chi-square skew is `sqrt(8/edf0)`.
