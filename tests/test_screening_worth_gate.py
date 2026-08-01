@@ -33,6 +33,8 @@ from benchmarks.screening_worth_gate import (
     worth_threshold,
 )
 
+from superglm.features.random_effect import RandomEffect
+
 
 @pytest.mark.parametrize("edf0", [1.0, 49.0, 225.0, 576.0, 1599.0])
 def test_threshold_is_exactly_where_the_cp_criterion_switches(edf0: float) -> None:
@@ -207,7 +209,7 @@ def test_every_documented_shrinkage_arm_is_actually_built() -> None:
     assert cols == ["g", "h", "gh"]
     # the cell must be a RandomEffect, not another fixed factor -- a plain
     # Categorical here would silently make `pooled` a second `fixed`
-    assert type(kwargs["features"]["gh"]).__name__ == "RandomEffect"
+    assert isinstance(kwargs["features"]["gh"], RandomEffect)
 
 
 def test_unknown_shrinkage_arm_is_rejected_rather_than_silently_skipped() -> None:
@@ -269,7 +271,7 @@ def test_sparse_payoff_measures_its_own_full_refit_arm() -> None:
 
 
 @pytest.mark.slow
-def test_shrinkage_table_reproduces_its_arms_and_prefers_pooling_over_fixed() -> None:
+def test_shrinkage_table_reproduces_its_arms_and_pooling_spends_less_df() -> None:
     """Small-width end-to-end: the arms run and report a full row each.
 
     Width is kept small so this stays a harness check. The ordering the guide
