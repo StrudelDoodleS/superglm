@@ -41,13 +41,20 @@ SHARED_RANK_POLICY = RankPolicy(
     #
     # Choosing representatives by walking every prefix was replaced by reading
     # the choice off the null basis.  Where the walk could fill its set the two
-    # agree exactly -- over 479 deficient blocks there was no case where both
+    # agree exactly -- over 958 deficient blocks there was NOT ONE where both
     # returned a set and the sets differed -- but the walk tests each prefix
     # against the WHOLE matrix's cutoff, so on a small prefix it can mis-reject
-    # a column, run out of candidates and return nothing.  That happened on 60
-    # of those 479 blocks, and it is not a cost difference: the decomposition
-    # fell back to `gram_eigh` and retained no representative basis, where it
-    # now reports `pivoted_cholesky` and a retained coefficient representation.
+    # a column, run out of candidates and return nothing.  That happened on 126
+    # of those 958, and on 42 of them the branch goes on to retain a
+    # `pivoted_cholesky` representative basis where the walk's failure left
+    # `gram_eigh` and no retained coefficient representation.  So it is not a
+    # cost difference.
+    #
+    # Which blocks those are is NOT reproducible across machines: the walk only
+    # fails when a prefix eigenvalue lands near `eps * ||A||`, which is below
+    # what a symmetric eigensolver resolves.  The rate is stable, the identity
+    # of the blocks is not -- see the test of the same name for the measurement
+    # and for how that constrains what can be asserted.
     #
     # `_conditioned_representatives` then changed which columns are chosen when
     # index order costs more conditioning than a rank-revealing choice may.  On
@@ -1213,8 +1220,11 @@ def decompose_factor(
     )
     if 0 < rank < len(active_columns):
         # Same certified representative choice as the Gram path, off the right
-        # singular vectors that span this factor's null space.  The Gram is
-        # formed only for the selected block, not to search for it.
+        # singular vectors that span this factor's null space.  Unlike the Gram
+        # path, which indexes a matrix it already holds, this forms the full
+        # equilibrated Gram and slices the selected block out of it -- so the
+        # saving here is that the SEARCH costs no Gram, not that the Gram is
+        # never formed.
         selected_local_array = _conditioned_representatives(discarded_vectors, rank)
         if selected_local_array is not None:
             equilibrated_gram = equilibrated.T @ equilibrated
