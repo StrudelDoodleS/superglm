@@ -164,9 +164,19 @@ _PENALIZED_LADDER_COST = 2
 
 # Every constant above budgets a DENSE block.  A spline x categorical pair
 # refused by them is retried through the arrow kernel, whose cost is linear in
-# the level count rather than cubic; see screening/_structured.py.  Its own
-# gate is _within_structured_budget.
+# the level count rather than cubic; see screening/_structured.py.  It needs
+# the same two KINDS of budget the dense path needs and for the same reasons:
+# _within_structured_budget and _within_structured_cells bound allocations,
+# which grow as k_s^2, and _structured_evaluation_budget bounds solve time,
+# which grows as k_s^3 -- one batched eigendecomposition of (k_s + 1) blocks
+# per level per evaluation, and a ladder that has to bisect runs tens of them.
+# The cubic factor is set so a CLAMPING ladder still fits wherever the
+# allocation budget admits it at the narrow spline widths that reach high
+# cardinality, and so a searching one is refused where it would miss the same
+# ~1.5 s per-pair target the dense constants were fitted to; measured corners
+# are in the gate's own docstring.
 _STRUCTURED_BUDGET_FACTOR = 1
+_STRUCTURED_CUBIC_BUDGET_FACTOR = 50
 
 
 def _quantile_binned(x, bins):
@@ -470,11 +480,18 @@ def screen_interactions(
     probe column collinear with the overlap span).  ``_within_cubic_budget``
     therefore refuses a pair whose block is too wide to solve inside the
     budget: ``k^3 <= 1000 * max_cells`` for an unpenalized block, and the
-    same budget against 16x the work for a penalized one whose ladder can
-    bisect.  At the default that admits ``k <= 1709`` and ``k <= 678``
-    respectively, measured there at 1.3 s and 1.9 s per pair; raising
-    ``max_cells`` lifts both.  Binning cannot shrink a basis dimension, so the
-    refusal is immediate and no fallback is attempted.
+    same budget against twice the work for a penalized one whose ladder can
+    bisect.  At the default that admits ``k <= 1709`` and ``k <= 1357``
+    respectively; the times measured at those ceilings are in this module's
+    docstring, and raising ``max_cells`` lifts both.  Binning cannot shrink a
+    basis dimension, so the refusal is immediate and no fallback is
+    attempted.  A ``spline_cat`` pair refused here is retried through the
+    arrow kernel, which has no block-dimension ceiling but budgets of its
+    own: the level blocks must fit ``max_cells``, the spline menu's outer
+    products must fit the same intermediate budget the dense path uses (and
+    are quantile-binned first if they do not), and the ladder must be able to
+    afford its arrow factorizations — a pair whose rungs have to bisect costs
+    tens of them and is refused with a NaN row when that does not fit.
     ``approx`` is also True for any pair whose confirmatory refit would
     discretize LOSSILY, applying the gate that refit itself uses — which
     differs by kind.  A ``ti`` refit bins its marginal supports only when
@@ -859,7 +876,8 @@ def screen_interactions(
         return work <= _CUBIC_BUDGET_FACTOR * max_cells
 
     def _within_structured_budget(k_s, n_levels):
-        """Budget a spline_cat pair scored through the ARROW kernel.
+        """Budget the BLOCK STACKS of a spline_cat pair scored through the
+        arrow kernel.
 
         Nothing here is cubic in the level count and nothing is quadratic in
         it either, so this gate is linear where every gate above is not.  The
@@ -867,14 +885,81 @@ def screen_interactions(
         the blocks, their inverses, the border coupling, the diagonal blocks
         of the inverse — so the level count is held against
         ``max_cells / (k_s + 1)^2``, which at the default and a width-11
-        spline admits 34,722 levels.  Measured there on the reference box with
-        one BLAS thread: 1.20 s and 251 MB for the whole four-rung ladder,
+        spline admits 34,722 levels.  Measured there with one BLAS thread,
+        best of five: 1.22 s and 201 MB for the whole four-rung ladder,
         against the ~1.5 s per-pair target the dense constants above were
-        fitted to.  Cost is LINEAR, so the two scale together and stay on
-        that target: 10,000 levels is 0.31 s and 72 MB, 100,000 is 3.46 s and
-        722 MB.
+        fitted to.  Cost is LINEAR in the level count, so the two scale
+        together: 5,000 levels is 0.16 s and 29 MB, 20,000 is 0.63 s and
+        116 MB.
+
+        This bounds neither of the pair's other two costs.  The moment
+        assembly's ``(n_a, k_s, k_s)`` intermediate is bounded by
+        ``_within_structured_cells``, because it scales with the SUPPORT and
+        binning can shrink it; the batched eigendecomposition is bounded by
+        ``_structured_evaluation_budget``, because it is cubic in ``k_s``
+        where this gate is quadratic.
         """
         return int(n_levels) * (int(k_s) + 1) ** 2 <= _STRUCTURED_BUDGET_FACTOR * max_cells
+
+    def _within_structured_cells(n_a, n_levels, k_s):
+        """Budget a structured pair's cell table and its curvature intermediate.
+
+        The structured counterpart of ``_within_budget``, and the same two
+        terms.  The kernel forms one ``(n_a, k_s, k_s)`` stack of the spline
+        menu's outer products and contracts it against every level's weights
+        — the TRANSPOSE of the intermediate the dense path is gated on, which
+        no gate above bounds: ``_within_structured_budget`` holds
+        ``n_levels * k_s^2`` and the cell term holds ``n_a * n_levels``, and
+        neither is ``n_a * k_s^2``.  Measured on a width-45 spline over
+        147,000 support points against a 34-level factor — a pair that passes
+        both of those, the block-stack gate at 1/69th of its budget —
+        ``screen_interactions`` peaked at 2,545 MB on that one pair, of which
+        2,271 MB was this one array.
+
+        Both terms scale with the SUPPORT, so failing either bins the spline
+        margin first and refuses only when binning runs out, exactly as the
+        dense path does; that same pair binned to 256 points peaks at 27 MB
+        and is still scored, flagged ``approx``.
+        """
+        cells_ok = int(n_a) * int(n_levels) <= max_cells
+        inter_ok = int(n_a) * int(k_s) ** 2 <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
+        return cells_ok and inter_ok
+
+    def _structured_evaluation_budget(k_s, n_levels):
+        """How many arrow factorizations a structured pair may spend.
+
+        Budgets the pair's SOLVE TIME, which the allocation gates do not —
+        the same job ``_within_cubic_budget`` does for a dense block, and for
+        the same reason: one evaluation batches ``n_levels`` eigendecomposit-
+        ions of ``(k_s + 1)`` blocks, so it costs ``n_levels * k_s^3`` where
+        the gates above cost ``n_levels * k_s^2``.  A pair that cannot afford
+        two of them cannot even bracket the ladder and is refused outright.
+
+        How many MORE it needs is not a function of its dimensions.  A rung
+        whose budget lands inside the bracket bisects, at one factorization
+        per step, and whether one does turns on the penalty's null space
+        rather than on any size: measured on a 400-level pair, a ``ps``
+        margin clamps every rung and the whole ladder is 2 evaluations, while
+        an ``ns`` margin — whose penalty is full rank, so ``edf`` at maximum
+        penalty is 0 and no rung can clamp — took 106.  Same dimensions, 53x
+        the work.  So the ceiling is passed to the kernel, which brackets
+        first, then checks the worst case for the rungs that genuinely have
+        to search before spending anything on them.
+
+        Calibrated so the level ceiling stays where it stands: a clamping
+        ladder is two evaluations, and at a width-11 spline that leaves the
+        allocation gate binding at its own 34,722 levels.  This one binds as
+        ``k_s`` grows and as the ladder searches — width 45 admits 1,284
+        levels clamping where allocation alone would have taken 2,363, and a
+        full-rank penalty at width 9 admits 1,344.  Measured at those
+        corners, one BLAS thread, best of five: 1.22 s, 0.61 s and 1.16 s
+        against the ~1.5 s target.  Just outside them, width 243 on 6 levels
+        would have taken 1.73 s and width 483 on 4 levels 10.06 s; the second
+        cannot afford even the bracket, so it is refused before the pair
+        allocates anything at all.
+        """
+        per_evaluation = int(n_levels) * (int(k_s) + 1) ** 3
+        return (_STRUCTURED_CUBIC_BUDGET_FACTOR * max_cells) // max(per_evaluation, 1)
 
     rows = []
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
@@ -989,6 +1074,7 @@ def screen_interactions(
             bin_flag = {left: False, right: False}
             margins = None
             structured = False
+            arrow_budget = 0
             # The dense path gets first refusal, so nothing it can already
             # score changes.  Cleared when it runs out of moves, which hands a
             # spline_cat pair to the arrow kernel below.
@@ -1012,12 +1098,22 @@ def screen_interactions(
                 structured = kind == "spline_cat" and not dense_ok
                 if not (dense_ok or structured):
                     break
-                if structured and not _within_structured_budget(k_l, n_r):
-                    break
-                # Both paths build the (n_l, n_r) cell tables; only the dense
-                # one also builds the (n_l, k_r, k_r) curvature intermediate,
-                # which is what _within_budget's second term bounds.
-                fits = n_l * n_r <= max_cells if structured else _within_budget(n_l, n_r, k_l, k_r)
+                if structured:
+                    # Neither of these depends on the support, so binning
+                    # cannot rescue a pair they refuse and none is attempted:
+                    # the block stacks must fit, and the ladder must be able
+                    # to afford the two evaluations that bracket it.
+                    arrow_budget = _structured_evaluation_budget(k_l, n_r)
+                    if not _within_structured_budget(k_l, n_r) or arrow_budget < 2:
+                        break
+                # Both paths build the (n_l, n_r) cell tables and a curvature
+                # intermediate that scales with the support -- transposed
+                # between them, so each has its own second term.
+                fits = (
+                    _within_structured_cells(n_l, n_r, k_l)
+                    if structured
+                    else _within_budget(n_l, n_r, k_l, k_r)
+                )
                 if fits:
                     _, _, menu_l, S_l = _margin(left, bin_flag[left])
                     if structured:
@@ -1054,7 +1150,7 @@ def screen_interactions(
                     # by design, so a pair whose true dimension would have
                     # routed it structurally can reach here still believing
                     # it was dense-affordable.
-                    if allow_dense and structured is False and kind == "spline_cat":
+                    if allow_dense and not structured and kind == "spline_cat":
                         allow_dense = False
                         continue
                     break
@@ -1077,7 +1173,19 @@ def screen_interactions(
                 structured_results = structured_ladder(
                     spline_cat_moments(menu_l, S_l, S_cell, W_cell, menu_r),
                     budgets=budgets,
+                    max_evaluations=arrow_budget,
                 )
+                if structured_results is None:
+                    # A rung landed inside the bracket and had to bisect, at
+                    # one arrow factorization per step.  That is the one part
+                    # of the cost no gate can see in advance — it turns on
+                    # the penalty's null space, not on any dimension — so it
+                    # is refused here rather than predicted, and refused the
+                    # way an unaffordable dense block is: a NaN row.
+                    rows.append(
+                        (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
+                    )
+                    continue
             else:
                 U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
                 M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
