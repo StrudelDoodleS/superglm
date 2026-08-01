@@ -93,6 +93,9 @@ paths.
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import signal
+import sys
 import time
 import warnings
 from collections.abc import Sequence
@@ -297,6 +300,14 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
                 with_pair = float(np.mean((full.predict(dte) - yte) ** 2))
                 deltas.append((with_pair / base - 1.0) * 100.0)
 
+            # the Cp identity is a statement about ONE fit, so the gate is
+            # aggregated on its own scale: the ratio z_i / sqrt(edf0_i / 2) per
+            # replicate, averaged.  Thresholding mean(z) against a threshold
+            # built from mean(edf0) is a different statement whenever the
+            # achieved rank varies between replicates, and it is not the
+            # identity this section sells as exact.
+            ratios = [z_i / worth_threshold(e_i) for z_i, e_i in zip(zs, edfs, strict=True)]
+            ratio = float(np.mean(ratios))
             edf0 = float(np.mean(edfs))
             z = float(np.mean(zs))
             delta = float(np.mean(deltas))
@@ -308,8 +319,13 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
                     "effect": effect,
                     "z": z,
                     "threshold": worth_threshold(edf0),
+                    "ratio": ratio,
+                    # how many replicates individually cleared their own bar,
+                    # so a cell where they disagree cannot hide behind the mean
+                    "reps_above": sum(1 for r in ratios if r > 1.0),
+                    "reps": len(ratios),
                     "delta_pct": delta,
-                    "agrees": (z > worth_threshold(edf0)) == (delta < 0.0),
+                    "agrees": (ratio > 1.0) == (delta < 0.0),
                 }
             )
     return rows
@@ -537,12 +553,18 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, obj
     mains_reps = next(r["holdout_reps"] for r in rows if r["model"] == "mains")
     for row in rows:
         row["delta_reps"] = paired_deltas(row["holdout_reps"], mains_reps)
+    # same rule as the ladder: the Cp ratio is per fit, so aggregate it on its
+    # own scale rather than dividing a mean z by a mean threshold
+    ratios = [z_i / worth_threshold(e_i) for z_i, e_i in zip(zs, edfs, strict=True)]
     edf0 = float(np.mean(edfs))
     screen = {
         "z": float(np.mean(zs)),
         "z_reps": [float(v) for v in zs],
         "edf0": edf0,
         "threshold": worth_threshold(edf0),
+        "ratio": float(np.mean(ratios)),
+        "reps_above": sum(1 for r in ratios if r > 1.0),
+        "reps": len(ratios),
     }
     return rows, screen
 
@@ -551,16 +573,16 @@ def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
     print("\n1. Does z > sqrt(edf0/2) predict the sign of the holdout change?\n")
     print(
         f"{'levels':>7} {'edf0':>7} {'nominal':>8} {'effect':>7} {'z':>8} {'thresh':>7} "
-        f"{'z/thresh':>9} {'gate':>8} {'holdout':>9}"
+        f"{'ratio':>9} {'above':>6} {'gate':>8} {'holdout':>9}"
     )
     for row in rows:
-        gate = "INCLUDE" if row["z"] > row["threshold"] else "exclude"
+        gate = "INCLUDE" if row["ratio"] > 1.0 else "exclude"
         flag = "" if row["agrees"] else "   <- disagrees"
         print(
             f"{row['n_levels']:>7} {row['edf0']:>7.1f} {row['nominal_edf0']:>8.0f} "
             f"{row['effect']:>7.2f} "
             f"{row['z']:>8.2f} {row['threshold']:>7.2f} "
-            f"{row['z'] / row['threshold']:>9.2f} {gate:>8} "
+            f"{row['ratio']:>9.2f} {row['reps_above']:>3}/{row['reps']:<2} {gate:>8} "
             f"{row['delta_pct']:>+8.1f}%{flag}"
         )
     agree = sum(1 for r in rows if r["agrees"])
@@ -622,8 +644,9 @@ def _print_shrinkage(rows: list[dict[str, object]], screen: dict, n_levels: int)
     print(
         f"  screened on this table's own train split: z = {screen['z']:.2f} "
         f"(reps {', '.join(f'{v:.2f}' for v in screen['z_reps'])}), "
-        f"edf0 = {screen['edf0']:.1f}, threshold = {screen['threshold']:.2f} -> "
-        f"{'INCLUDE' if screen['z'] > screen['threshold'] else 'exclude'}\n"
+        f"edf0 = {screen['edf0']:.1f}, threshold = {screen['threshold']:.2f}, "
+        f"ratio = {screen['ratio']:.2f} ({screen['reps_above']}/{screen['reps']} reps above) -> "
+        f"{'INCLUDE' if screen['ratio'] > 1.0 else 'exclude'}\n"
     )
     print(
         f"{'model':>8} {'fit':>8} {'params':>8} {'edf':>9} {'train':>8} {'HOLDOUT':>9} {'vs mains':>10}"
@@ -660,12 +683,56 @@ def _tables(value: str) -> tuple[int, ...]:
     return wanted
 
 
+def arm_watchdog(seconds: float) -> bool:
+    """Make a stuck fit name itself instead of looking merely expensive.
+
+    Every few minutes, dump every thread's stack to stderr without interrupting
+    the run.  A frame that repeats across two dumps is the hot spot, and that is
+    the whole diagnosis: this file spent an afternoon treating a pathological
+    41x41 refit as a big one, and the profile that ended it took twenty minutes
+    once someone looked.  `SIGUSR1` dumps on demand for a run already in flight
+    (`kill -SIGUSR1 <pid>`).
+
+    Returns whether the periodic dump was armed; `seconds <= 0` disables it.
+    """
+    if hasattr(faulthandler, "register") and hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, file=sys.stderr)
+    if seconds <= 0:
+        return False
+    faulthandler.dump_traceback_later(seconds, repeat=True, file=sys.stderr)
+    return True
+
+
+def _positive_int(value: str) -> int:
+    """A benchmark dimension that must be >= 1.
+
+    Zero is the dangerous one: `--reps 0` used to run every loop zero times,
+    average empty lists into `nan`, and print a complete, well-formatted,
+    entirely meaningless table -- exit code 0 and all.  A report that looks
+    valid and is not is worse than a crash, and this whole section exists
+    because of numbers nobody could reproduce.
+    """
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reps", type=int, default=3)
-    parser.add_argument("--n", type=int, default=12_000)
-    parser.add_argument("--wide-levels", type=int, default=41)
+    parser.add_argument("--reps", type=_positive_int, default=3)
+    parser.add_argument("--n", type=_positive_int, default=12_000)
+    parser.add_argument("--wide-levels", type=_positive_int, default=41)
     parser.add_argument("--tables", type=_tables, default=(1, 2, 3, 4))
+    parser.add_argument(
+        "--watchdog",
+        type=float,
+        default=300.0,
+        help="seconds between stack dumps to stderr; 0 disables (default: 300)",
+    )
     return parser
 
 
@@ -676,6 +743,8 @@ def main() -> None:
     # run readable without hiding anything that fires.
     warnings.simplefilter("once")
     args = _build_parser().parse_args()
+    if arm_watchdog(args.watchdog):
+        print(f"watchdog: stack dump to stderr every {args.watchdog:.0f}s", flush=True)
     started = time.perf_counter()
 
     if 1 in args.tables:

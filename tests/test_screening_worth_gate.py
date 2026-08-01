@@ -13,6 +13,8 @@ headline z that no arm measured.  Each is now pinned to the run it belongs to.
 
 from __future__ import annotations
 
+import faulthandler
+
 import numpy as np
 import pytest
 from benchmarks import screening_worth_gate as gate
@@ -28,6 +30,7 @@ from benchmarks.screening_worth_gate import (
     _run_sparse_payoff,
     _shrinkage_spec,
     _split,
+    arm_watchdog,
     cell_contributions,
     concentration,
     paired_deltas,
@@ -179,6 +182,42 @@ def test_parser_defaults_match_the_documented_run() -> None:
     assert args.tables == (1, 2, 3, 4)
 
 
+@pytest.mark.parametrize("flag", ["--reps", "--n", "--wide-levels"])
+@pytest.mark.parametrize("bad", ["0", "-1", "1.5", "many"])
+def test_benchmark_dimensions_are_rejected_at_the_boundary(flag: str, bad: str) -> None:
+    """A run that cannot produce a number must fail, not print one.
+
+    `--reps 0` used to run every loop zero times, average empty lists into
+    `nan`, print a complete well-formatted table of them, and exit 0.  A report
+    that looks valid and is not is the exact failure this section documents.
+    """
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([flag, bad])
+
+
+@pytest.mark.parametrize("flag", ["--reps", "--n", "--wide-levels"])
+def test_benchmark_dimensions_accept_one(flag: str) -> None:
+    assert _build_parser().parse_args([flag, "1"]) is not None
+
+
+def test_watchdog_is_armed_by_default_so_a_stuck_fit_names_itself() -> None:
+    """A long fit must be distinguishable from a pathological one.
+
+    This benchmark's wide refits run for seconds-to-minutes, and the failure
+    mode that cost real time was treating a pathological fit as merely big.
+    A periodic stack dump turns that into a named frame at no cost to the run.
+    """
+    assert _build_parser().parse_args([]).watchdog == 300.0
+    assert _build_parser().parse_args(["--watchdog", "0"]).watchdog == 0.0
+
+    try:
+        assert arm_watchdog(600.0) is True
+        # 0 disables the periodic dump but still leaves the on-demand handler
+        assert arm_watchdog(0.0) is False
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
 def test_table_subsets_are_a_supported_flag_rather_than_an_edit() -> None:
     """A guide figure refreshed one table at a time needs a quotable command.
 
@@ -289,6 +328,28 @@ def test_every_documented_shrinkage_arm_is_actually_built() -> None:
 def test_unknown_shrinkage_arm_is_rejected_rather_than_silently_skipped() -> None:
     with pytest.raises(ValueError, match="unknown shrinkage arm"):
         _shrinkage_spec("credibility")
+
+
+@pytest.mark.slow
+def test_gate_ladder_aggregates_the_cp_ratio_per_replicate(monkeypatch) -> None:
+    """The Cp identity is a statement about ONE fit, so it aggregates per fit.
+
+    Averaging `z` and `edf0` separately and then thresholding the averages is a
+    different statement whenever the achieved rank varies between replicates --
+    and this section's whole claim is that the identity is exact, so the
+    aggregate has to be on the identity's own scale.
+    """
+    monkeypatch.setattr(gate, "LADDER", {10: (0.5,)})
+    rows = _run_gate_ladder(reps=3, n=600)
+    row = rows[0]
+
+    assert row["reps"] == 3
+    assert 0 <= row["reps_above"] <= 3
+    # the published ratio is the mean of per-replicate ratios, which is NOT
+    # mean(z) / worth_threshold(mean(edf0)) once the achieved rank varies
+    assert row["ratio"] != pytest.approx(row["z"] / row["threshold"], rel=1e-12)
+    # and the gate reads off that ratio, not off the mean-of-means comparison
+    assert row["agrees"] == ((row["ratio"] > 1.0) == (row["delta_pct"] < 0.0))
 
 
 @pytest.mark.slow
