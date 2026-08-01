@@ -716,10 +716,18 @@ class TestMetricsCaching:
             covariance_calls += 1
             return original(matrix, *args, **kwargs)
 
-        def counted_metrics_decomposition(matrix, *args, **kwargs):
-            nonlocal metrics_calls
-            metrics_calls += 1
-            return original(matrix, *args, **kwargs)
+        # Both entry points count: a decomposition this path consumes is one it
+        # performed, whether or not the shared policy had to certify it against
+        # the observation factor.
+        def counted_metrics_decomposition(name):
+            metrics_original = getattr(metrics_module, name)
+
+            def counted(matrix, *args, **kwargs):
+                nonlocal metrics_calls
+                metrics_calls += 1
+                return metrics_original(matrix, *args, **kwargs)
+
+            return counted
 
         monkeypatch.setattr(
             covariance_module,
@@ -731,7 +739,8 @@ class TestMetricsCaching:
             "moments",
             lambda *_args, **_kwargs: pytest.fail("rebuilt the grouped raw Gram"),
         )
-        monkeypatch.setattr(metrics_module, "decompose_gram", counted_metrics_decomposition)
+        for name in ("decompose_gram", "decompose_gram_if_authoritative"):
+            monkeypatch.setattr(metrics_module, name, counted_metrics_decomposition(name))
 
         _ = metrics._active_info
 
