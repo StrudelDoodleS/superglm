@@ -351,6 +351,32 @@ def test_the_block_rank_is_the_one_a_dense_rank_call_reports():
     assert int(block_ranks(p).sum()) == want
 
 
+def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
+    """The two ladders must agree on the DEGENERATE-penalty predicate too.
+
+    The dense ladder answers a missing or all-zero penalty with an
+    unpenalized single rung.  Raising instead would abort the whole sweep
+    over one pair, and letting a zero penalty through makes the bracket
+    infinite and every rung NaN, since ``inf * 0`` is not a number.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    grab = _thin_level_pair(1.0)
+    B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
+    U, V, C, M, _, u_m = grab["args"]
+    dense = penalized_score_statistic_ladder(U, V, C, M, None, budgets=BUDGETS, U_nuisance=u_m)
+    for penalty in (None, np.zeros_like(S_a)):
+        struct = structured_ladder(
+            spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows), budgets=BUDGETS
+        )
+        assert len(struct) == len(BUDGETS)
+        for d, s in zip(dense, struct, strict=True):
+            assert s.lambda0 == 0.0
+            assert np.isfinite(s.statistic) and np.isfinite(s.edf0)
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-3)
+            assert s.statistic == pytest.approx(d.statistic, rel=1e-6)
+
+
 def test_degenerate_levels_are_scored_not_skipped():
     """Singleton levels are the routine case at high cardinality, not an edge
     case: they make their own block singular, and the kernel has to keep going
