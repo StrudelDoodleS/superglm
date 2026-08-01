@@ -18,8 +18,8 @@ from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
+    decompose_gram_if_authoritative,
     diagonal_of_square,
-    needs_factor_certification,
     selected_group_name_set,
 )
 from superglm.solvers.structured import (
@@ -195,19 +195,19 @@ def _legacy_active_state(model, solver, W: NDArray):
         penalty=curvature,
     )
     raw_gram, xtw1, _, _ = centered.raw_weighted_moments()
-    coefficient_rank = decompose_gram(raw_gram + curvature)
-    data_rank = decompose_gram(centered.data_gram)
-    if needs_factor_certification(data_rank):
+    coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
+    data_rank = decompose_gram_if_authoritative(centered.data_gram)
+    if data_rank is None:
         certified = decompose_factor(grouped_weighted_factor(design, W, center=centered.mean_x))
         data_rank = certified
-    if needs_factor_certification(coefficient_rank):
+    if coefficient_rank is None:
         certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
         coefficient_rank = certified
     if not np.any(curvature):
         profile_rank = data_rank
     else:
-        profile_rank = decompose_gram(centered.data_gram + curvature)
-        if needs_factor_certification(profile_rank):
+        profile_rank = decompose_gram_if_authoritative(centered.data_gram + curvature)
+        if profile_rank is None:
             certified = decompose_factor(
                 grouped_augmented_factor(
                     design,

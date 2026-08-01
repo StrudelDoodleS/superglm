@@ -41,6 +41,7 @@ from superglm.solvers.rank import (
     _symmetric_part,
     decompose_factor,
     decompose_gram,
+    decompose_gram_if_authoritative,
     needs_factor_certification,
     selected_group_name_set,
 )
@@ -2030,3 +2031,158 @@ def test_symmetric_part_is_finite_wherever_the_input_is() -> None:
         symmetrized = _symmetric_part(matrix)
         assert np.isfinite(symmetrized).all(), f"{matrix} symmetrized to {symmetrized}"
         np.testing.assert_allclose(symmetrized, 0.5 * (matrix / 2.0 + matrix.T / 2.0) * 2.0)
+
+
+def _gram(values: np.ndarray) -> np.ndarray:
+    return values.T @ values
+
+
+def _rank_geometry_battery() -> list[tuple[str, np.ndarray]]:
+    """Grams spanning both certification arms and both sides of each boundary."""
+    rng = np.random.default_rng(20260801)
+    cases: list[tuple[str, np.ndarray]] = [
+        ("empty", np.empty((0, 0))),
+        ("all-zero", np.zeros((4, 4))),
+    ]
+    for width in (3, 9, 30):
+        cases.append((f"full-rank-{width}", _gram(rng.standard_normal((5 * width, width)))))
+        for nullity in (1, max(2, width // 3)):
+            if nullity >= width:
+                continue
+            block = rng.standard_normal((5 * width, width - nullity))
+            aliased = np.hstack((block, block[:, :nullity]))
+            cases.append((f"exact-alias-{width}x{nullity}", _gram(aliased)))
+            perturbed = aliased.copy()
+            perturbed[:, -nullity:] += 1e-9 * rng.standard_normal((5 * width, nullity))
+            cases.append((f"near-alias-{width}x{nullity}", _gram(perturbed)))
+        dead = _gram(rng.standard_normal((5 * width, width)))
+        dead[0, :] = 0.0
+        dead[:, 0] = 0.0
+        cases.append((f"dead-column-{width}", dead))
+        rotation, _ = np.linalg.qr(rng.standard_normal((width, width)))
+        for condition in (1e6, 1e12, 1e14, 1e15, 1e16):
+            spectrum = np.logspace(0.0, -np.log10(condition), width)
+            cases.append(
+                (
+                    f"condition-{condition:.0e}-{width}",
+                    rotation @ np.diag(spectrum) @ rotation.T,
+                )
+            )
+    return cases
+
+
+_DECOMPOSITION_FIELDS = (
+    "policy_version",
+    "method",
+    "rank",
+    "pre_truncation_condition",
+    "cutoff",
+    "rank_truncated",
+    "used_svd_fallback",
+    "resolution_limited",
+    "log_pdet",
+)
+_DECOMPOSITION_ARRAYS = (
+    "column_scale",
+    "active_columns",
+    "cholesky_factor",
+    "pivots",
+    "solution_basis",
+    "parameter_null_basis",
+    "estimable_functional_basis",
+    "structural_aliases",
+    "retained_values",
+)
+
+
+@pytest.mark.parametrize("name,matrix", _rank_geometry_battery(), ids=lambda value: value)
+def test_authoritative_gram_is_the_eager_decomposition_or_nothing(
+    name: str, matrix: np.ndarray
+) -> None:
+    """Skipping the superseded subspace must not move a single retained field.
+
+    ``decompose_gram_if_authoritative`` returns ``None`` on exactly the geometry
+    ``needs_factor_certification`` rejects, and otherwise the same object the
+    eager path builds -- bitwise, arrays included.  Anything looser would make
+    this a semantic change wearing a performance change's clothes.
+    """
+    eager = decompose_gram(matrix)
+    spared = decompose_gram_if_authoritative(matrix)
+
+    assert (spared is None) == needs_factor_certification(eager), name
+    if spared is None:
+        return
+    for field in _DECOMPOSITION_FIELDS:
+        expected, actual = getattr(eager, field), getattr(spared, field)
+        if isinstance(expected, float) and np.isnan(expected):
+            assert np.isnan(actual), f"{name}.{field}"
+            continue
+        assert actual == expected, f"{name}.{field}"
+    for field in _DECOMPOSITION_ARRAYS:
+        expected, actual = getattr(eager, field), getattr(spared, field)
+        assert (expected is None) == (actual is None), f"{name}.{field}"
+        if expected is not None:
+            assert actual.tobytes() == expected.tobytes(), f"{name}.{field}"
+
+
+def test_uncertifiable_gram_skips_the_subspace_it_cannot_certify(monkeypatch) -> None:
+    """The guaranteed-discard arm must not build what only it could have read.
+
+    A PSD Gram whose rank falls below its active width is ``resolution_limited``
+    by construction, so ``needs_factor_certification`` fires and every caller in
+    this shape rebinds to the factor certificate.  The representative selection,
+    its Cholesky and the retained pseudo-determinant are reachable only through
+    the object that rebinding throws away.
+    """
+    from superglm.solvers import rank as rank_module
+
+    block = np.random.default_rng(0).standard_normal((120, 23))
+    aliased = _gram(np.hstack((block, block[:, :2])))
+    assert needs_factor_certification(decompose_gram(aliased)), "fixture is not superseded"
+
+    calls: list[str] = []
+    for name in ("_conditioned_representatives", "_retained_log_pdet"):
+        original = getattr(rank_module, name)
+
+        def spy(*args, _name=name, _original=original, **kwargs):
+            calls.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(rank_module, name, spy)
+
+    assert decompose_gram(aliased).method == "pivoted_cholesky"
+    assert sorted(set(calls)) == ["_conditioned_representatives", "_retained_log_pdet"]
+
+    calls.clear()
+    assert decompose_gram_if_authoritative(aliased) is None
+    assert calls == []
+
+
+def test_authoritative_gram_still_builds_the_subspace_it_certifies(monkeypatch) -> None:
+    """The certified arm keeps every basis: the skip is not allowed to widen.
+
+    A rank-truncated Gram whose truncation is purely structural is *not*
+    resolution limited, so it survives the predicate and its consumers read the
+    bases off it directly.  Sparing that geometry too would silently strip the
+    null space out of a decomposition that is still authoritative.
+    """
+    from superglm.solvers import rank as rank_module
+
+    structural = _gram(np.random.default_rng(5).standard_normal((90, 12)))
+    structural[3, :] = 0.0
+    structural[:, 3] = 0.0
+    eager = decompose_gram(structural)
+    assert eager.rank_truncated and not needs_factor_certification(eager), "fixture is superseded"
+
+    skipped: list[str] = []
+    monkeypatch.setattr(
+        rank_module,
+        "_null_basis",
+        lambda *a, _o=rank_module._null_basis, **k: (skipped.append("_null_basis"), _o(*a, **k))[1],
+    )
+    spared = decompose_gram_if_authoritative(structural)
+
+    assert spared is not None
+    assert skipped == ["_null_basis"]
+    assert spared.parameter_null_basis is not None
+    assert spared.parameter_null_basis.tobytes() == eager.parameter_null_basis.tobytes()
