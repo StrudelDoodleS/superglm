@@ -987,14 +987,15 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     assert np.isfinite(lifted.iloc[0]["z"])
 
 
-def _containment_cosine(inner, outer):
-    """How completely ``inner``'s column span sits inside ``outer``'s.
+def _span_cosine(probe, refit):
+    """Minimum principal cosine between two column spans of equal rank.
 
-    1.0 means every direction of *inner* is reproducible by *outer*.  This is
-    containment rather than equality on purpose: a probe is the refit's
-    IDENTIFIABLE DEVIATION space, so it is one dimension short of a refit
-    basis that carries no identifiability projection of its own.  What must
-    never happen is a probe direction the refit cannot build.
+    Both sides are identifiable deviation spaces -- the probe centered by
+    ``tensor_marginal_ingredients()``, the refit by the build of the spec it
+    resolved -- so they must have the same rank AND the same span.  Equal rank
+    is asserted here rather than left to the cosine because containment alone
+    is too weak: a refit that skipped centering carries one extra direction and
+    still reproduces every probe direction.
     """
 
     def orth(m):
@@ -1003,8 +1004,8 @@ def _containment_cosine(inner, outer):
         diag = np.abs(np.diag(r))
         return q[:, diag > 1e-10 * max(1.0, diag.max())]
 
-    qi, qo = orth(inner), orth(outer)
-    assert qi.shape[1] <= qo.shape[1], f"probe rank {qi.shape[1]} > refit rank {qo.shape[1]}"
+    qi, qo = orth(probe), orth(refit)
+    assert qi.shape[1] == qo.shape[1], f"probe rank {qi.shape[1]} != refit rank {qo.shape[1]}"
     return float(np.linalg.svd(qo.T @ qi, compute_uv=False).min())
 
 
@@ -1017,8 +1018,9 @@ def test_spline_cat_probe_spans_the_basis_its_refit_builds(spline_kind):
     failed for ``cr``, because cubic regression splines carry two bases: a
     main effect uses the projected-B-spline ``CubicRegressionSpline`` while an
     interaction marginal uses ``CardinalCRSpline``.  ``TensorInteraction`` had
-    that routing and ``SplineCategorical`` did not, so a ``spline_cat`` probe
-    and its own refit sat a ~1.9 degree rotation apart.
+    that routing and ``SplineCategorical`` did not, so on the margin below the
+    ``cr`` probe and its own refit spanned different spaces -- minimum
+    principal cosine 0.9028, a 25.5 degree rotation.
     """
     import scipy.sparse as sp
 
@@ -1053,7 +1055,39 @@ def test_spline_cat_probe_spans_the_basis_its_refit_builds(spline_kind):
     projection = getattr(stored, "_interaction_projection", None)
     refit = raw if projection is None else raw @ np.asarray(projection, dtype=np.float64)
 
-    assert _containment_cosine(probe, refit) == pytest.approx(1.0, abs=1e-9)
+    assert _span_cosine(probe, refit) == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("spline_kind", ["ps", "cr"])
+def test_spline_cat_design_keeps_full_rank_beside_its_mains(spline_kind, discrete):
+    """A masked interaction block must not rebuild its own level indicator.
+
+    An interaction marginal resolved but never built carries no identifiability
+    projection, and the cardinal cr basis reproduces the constant function
+    exactly -- its columns sum to 1 at every x.  Masking that uncentered block
+    to a level then duplicates the categorical main effect's indicator column
+    for that level: one lost rank per non-base level, in a design the solver
+    still has to invert.
+    """
+    rng = np.random.default_rng(3)
+    n = 4000
+    x = rng.uniform(0.0, 10.0, n)
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(2.0, n).astype(np.float64)
+
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind=spline_kind, n_knots=8), "f": Categorical()},
+        interactions=[("x", "f")],
+        discrete=discrete,
+        n_bins=64 if discrete else None,
+    )
+    model._build_design_matrix(df, y, np.ones(n), None)
+    design = model._dm.toarray()
+    singular = np.linalg.svd(design, compute_uv=False)
+    rank = int(np.sum(singular > singular.max() * 1e-10))
+    assert rank == design.shape[1], f"{design.shape[1] - rank} deficient column(s)"
 
 
 @pytest.mark.parametrize("spline_kind", ["ps", "cr"])

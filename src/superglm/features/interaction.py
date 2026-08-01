@@ -94,6 +94,29 @@ def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = Non
     return cardinal
 
 
+def _varying_coefficient_spline_spec(spec, x: NDArray):
+    """``interaction_spline_spec`` for a per-level masked block, centered.
+
+    A resolved spec is freshly constructed, so unlike a fitted parent it
+    carries no identifiability projection until something builds it.  A
+    varying-coefficient block cannot go without one: the cardinal basis
+    reproduces the constant function exactly -- its columns sum to 1 at every
+    x -- so masking the uncentered block to a level rebuilds that level's own
+    categorical main-effect indicator, and the combined design loses one rank
+    per non-base level.  ``build_knots_and_penalty()`` runs the same
+    constraint + identifiability steps a main effect runs and leaves the
+    projection on the spec.
+
+    ``tensor_marginal_ingredients()`` centers its own marginals over the
+    compressed support it is handed, so the tensor path resolves the spec
+    without paying for this one.
+    """
+    resolved = interaction_spline_spec(spec, x)
+    if resolved is not spec:
+        resolved.build_knots_and_penalty(x)
+    return resolved
+
+
 # ── SplineCategorical ──────────────────────────────────────────
 
 
@@ -144,7 +167,7 @@ class SplineCategorical:
         x_cat = np.asarray(x_cat).ravel()
         # Interaction marginals use the cardinal cr basis; store the resolved
         # spec so transform()/score() rebuild the SAME basis at predict time.
-        spline_spec = interaction_spline_spec(spline_spec, x_spline)
+        spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
 
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
@@ -209,8 +232,8 @@ class SplineCategorical:
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         x_cat = np.asarray(x_cat).ravel()
-        # Same resolution as build(); see interaction_spline_spec.
-        spline_spec = interaction_spline_spec(spline_spec, x_spline)
+        # Same resolution as build(); see _varying_coefficient_spline_spec.
+        spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
 
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
