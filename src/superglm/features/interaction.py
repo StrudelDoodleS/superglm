@@ -46,7 +46,8 @@ def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = Non
     coincidence.
 
     Returns *spec* unchanged for every other spline kind, so ``ps`` -- the
-    default -- is untouched.  The returned spec has its knots already placed on
+    default -- is untouched, and for the cr configurations the cardinal basis
+    cannot express (below).  The returned spec has its knots already placed on
     *x*; callers must STORE it and read the basis back from the stored copy,
     since a predict-time basis rebuilt from the original spec would disagree
     with the design that was fitted.
@@ -56,18 +57,19 @@ def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = Non
     if not isinstance(spec, CubicRegressionSpline):
         return spec
 
-    # The cardinal spec below is built with select=False and a single penalty
-    # order, so it cannot carry either configuration's geometry: a select=True
-    # parent's double-penalty shrinkage lives in its own identifiability
-    # projection, and substituting drops it, widening the interaction block and
-    # leaving the design rank-deficient.  ``SplineCategorical`` supports both;
-    # ``TensorInteraction`` rejects them upstream and never reaches here.  The
-    # probe==refit identity is unaffected either way, because
-    # ``screen_interactions`` refuses these parents outright -- a pair it
-    # cannot screen needs no matching probe.
+    # A select=True parent's double-penalty shrinkage lives in its own
+    # identifiability projection.  The cardinal spec below is built with
+    # select=False, so substituting drops that shrinkage, widening the
+    # interaction block and leaving the design rank-deficient.
     if getattr(spec, "select", False):
         return spec
-    if len(getattr(spec, "_m_orders", (2,))) > 1:
+    # ``CardinalCRSpline._build_penalty`` is the exact integrated squared
+    # SECOND derivative and nothing else -- the class advertises
+    # _penalty_semantics="fixed" and rejects m > 2 outright.  So any other
+    # requested order has to keep the parent's quadrature penalty: routing it
+    # here would raise for m=3 and silently swap m=1's first-derivative
+    # penalty for a second-derivative one.
+    if getattr(spec, "_m_orders", (2,)) != (2,):
         return spec
 
     knot_strategy = spec.knot_strategy
@@ -972,11 +974,6 @@ class TensorInteraction:
                 "This matches the mgcv te()/ti() marginal-smooth contract."
             )
 
-        # For tensor marginals, route cubic regression splines through the
-        # cardinal CR implementation, which is much closer to mgcv's bs="cr"
-        # geometry than the older projected-B-spline CR path.
-        from superglm.features.spline import CubicRegressionSpline
-
         def marginal_ingredients(candidate) -> TensorMarginalInfo:
             method = candidate.tensor_marginal_ingredients
             if support is None:
@@ -1008,8 +1005,13 @@ class TensorInteraction:
             # but retain only its evaluation on the discrete support.
             return compact_legacy(method(x))
 
-        if isinstance(spec, CubicRegressionSpline):
-            cardinal = interaction_spline_spec(spec, x, n_knots_override)
+        # Route cubic regression splines through the cardinal CR
+        # implementation, which is much closer to mgcv's bs="cr" geometry than
+        # the older projected-B-spline CR path.  A cr parameterisation the
+        # cardinal basis cannot express comes back unchanged and takes the
+        # ordinary marginal path below, penalty order and all.
+        cardinal = interaction_spline_spec(spec, x, n_knots_override)
+        if cardinal is not spec:
             info = marginal_ingredients(cardinal)
             info.normalize_penalty = True
             return info
@@ -1021,6 +1023,10 @@ class TensorInteraction:
                 penalty=spec.penalty,
                 boundary=(spec._lo, spec._hi),
                 knot_alpha=spec.knot_alpha,
+                # Single-penalty by the guard above, so the parent's order
+                # carries over intact; dropping it would rebuild a cr m=1 or
+                # m=3 margin on the default second-derivative penalty.
+                m=spec._m_orders[0],
             )
             # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
             if "degree" in inspect.signature(type(spec).__init__).parameters:
