@@ -164,6 +164,9 @@ class PairData:
     y: NDArray
     joint: NDArray
     n_levels: int
+    # the planted interaction surface, carried out so the truth can be COUNTED
+    # rather than inferred from a difference of two noise draws
+    cell: NDArray
 
 
 def _make(kind: str, magnitude: float, n_levels: int, n: int, seed: int) -> PairData:
@@ -176,9 +179,18 @@ def _make(kind: str, magnitude: float, n_levels: int, n: int, seed: int) -> Pair
         cell.flat[rng.choice(n_levels * n_levels, size=HOT_CELLS, replace=False)] = magnitude
     elif kind == "diffuse":
         cell[:] = rng.normal(scale=magnitude, size=(n_levels, n_levels))
+    elif kind != "none":
+        # a typo must not produce a valid-looking null run
+        raise ValueError(f"unknown truth kind: {kind!r}")
     y = eta + cell[left, right] + rng.normal(scale=1.0, size=n)
     frame = pd.DataFrame({"g": [f"G{i}" for i in left], "h": [f"H{i}" for i in right]})
-    return PairData(frame=frame, y=y, joint=left * n_levels + right, n_levels=n_levels)
+    return PairData(
+        frame=frame,
+        y=y,
+        joint=left * n_levels + right,
+        n_levels=n_levels,
+        cell=cell,
+    )
 
 
 def _mains(frame: pd.DataFrame, y: NDArray) -> SuperGLM:
