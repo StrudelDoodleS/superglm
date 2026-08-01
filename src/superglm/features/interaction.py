@@ -26,6 +26,72 @@ from superglm.features.categorical import _validate_categorical_levels
 from superglm.group_matrix import _discretize_column
 from superglm.types import DiscreteTensorBuildResult, GroupInfo, TensorMarginalInfo
 
+
+def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = None):
+    """The spline spec an INTERACTION marginal is built from.
+
+    Cubic regression splines carry two implementations.  A main effect uses
+    ``CubicRegressionSpline`` -- a B-spline basis projected via Z.  Every
+    interaction marginal instead uses ``CardinalCRSpline``, which is much
+    closer to mgcv's ``bs="cr"`` geometry than the older projected path.
+
+    That routing belongs to *interactions as a class*, not to one interaction
+    type.  Applying it in ``TensorInteraction`` alone left ``SplineCategorical``
+    building a different basis from the ``ti`` beside it and, more sharply,
+    from the screening probe that names it as its refit target: the probe could
+    span directions the refit could not build at all.  How badly depends on the
+    margin -- containment of probe span in refit span measured 0.9996 on a
+    uniform margin but 0.675 on a skewed one at ``n_knots=16`` (issue #191).
+    Both go through here so the invariant holds by construction rather than by
+    coincidence.
+
+    Returns *spec* unchanged for every other spline kind, so ``ps`` -- the
+    default -- is untouched.  The returned spec has its knots already placed on
+    *x*; callers must STORE it and read the basis back from the stored copy,
+    since a predict-time basis rebuilt from the original spec would disagree
+    with the design that was fitted.
+    """
+    from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+
+    if not isinstance(spec, CubicRegressionSpline):
+        return spec
+
+    # The cardinal spec below is built with select=False and a single penalty
+    # order, so it cannot carry either configuration's geometry: a select=True
+    # parent's double-penalty shrinkage lives in its own identifiability
+    # projection, and substituting drops it, widening the interaction block and
+    # leaving the design rank-deficient.  ``SplineCategorical`` supports both;
+    # ``TensorInteraction`` rejects them upstream and never reaches here.  The
+    # probe==refit identity is unaffected either way, because
+    # ``screen_interactions`` refuses these parents outright -- a pair it
+    # cannot screen needs no matching probe.
+    if getattr(spec, "select", False):
+        return spec
+    if len(getattr(spec, "_m_orders", (2,))) > 1:
+        return spec
+
+    knot_strategy = spec.knot_strategy
+    if knot_strategy == "uniform" and spec._explicit_knots is None:
+        knot_strategy = "quantile"
+    cardinal = CardinalCRSpline(
+        n_knots=n_knots_override if n_knots_override is not None else spec.n_knots,
+        knot_strategy=knot_strategy,
+        penalty=spec.penalty,
+        knots=spec._explicit_knots,
+        discrete=spec.discrete,
+        n_bins=spec.n_bins,
+        extrapolation=spec.extrapolation,
+        boundary=spec._explicit_boundary,
+        knot_alpha=spec.knot_alpha,
+        select=False,
+        constraint=None,
+        m=spec._m_orders[0],
+        lambda_policy=None,
+    )
+    cardinal._place_knots(np.asarray(x, dtype=np.float64).ravel())
+    return cardinal
+
+
 # ── SplineCategorical ──────────────────────────────────────────
 
 
@@ -72,6 +138,12 @@ class SplineCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
+        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
+        x_cat = np.asarray(x_cat).ravel()
+        # Interaction marginals use the cardinal cr basis; store the resolved
+        # spec so transform()/score() rebuild the SAME basis at predict time.
+        spline_spec = interaction_spline_spec(spline_spec, x_spline)
+
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
@@ -82,8 +154,6 @@ class SplineCategorical:
         self._base_level = cat_spec._base_level
         self._projection = getattr(spline_spec, "_interaction_projection", None)
 
-        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
         B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
 
         omega = spline_spec._build_penalty()
@@ -135,6 +205,11 @@ class SplineCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
+        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
+        x_cat = np.asarray(x_cat).ravel()
+        # Same resolution as build(); see interaction_spline_spec.
+        spline_spec = interaction_spline_spec(spline_spec, x_spline)
+
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
@@ -145,8 +220,6 @@ class SplineCategorical:
         self._base_level = cat_spec._base_level
         self._projection = getattr(spline_spec, "_interaction_projection", None)
 
-        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
         support, bin_idx = _discretize_column(x_spline, int(n_bins))
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
 
@@ -902,7 +975,7 @@ class TensorInteraction:
         # For tensor marginals, route cubic regression splines through the
         # cardinal CR implementation, which is much closer to mgcv's bs="cr"
         # geometry than the older projected-B-spline CR path.
-        from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+        from superglm.features.spline import CubicRegressionSpline
 
         def marginal_ingredients(candidate) -> TensorMarginalInfo:
             method = candidate.tensor_marginal_ingredients
@@ -936,25 +1009,7 @@ class TensorInteraction:
             return compact_legacy(method(x))
 
         if isinstance(spec, CubicRegressionSpline):
-            knot_strategy = spec.knot_strategy
-            if knot_strategy == "uniform" and spec._explicit_knots is None:
-                knot_strategy = "quantile"
-            cardinal = CardinalCRSpline(
-                n_knots=n_knots_override if n_knots_override is not None else spec.n_knots,
-                knot_strategy=knot_strategy,
-                penalty=spec.penalty,
-                knots=spec._explicit_knots,
-                discrete=spec.discrete,
-                n_bins=spec.n_bins,
-                extrapolation=spec.extrapolation,
-                boundary=spec._explicit_boundary,
-                knot_alpha=spec.knot_alpha,
-                select=False,
-                constraint=None,
-                m=spec._m_orders[0],
-                lambda_policy=None,
-            )
-            cardinal._place_knots(x)
+            cardinal = interaction_spline_spec(spec, x, n_knots_override)
             info = marginal_ingredients(cardinal)
             info.normalize_penalty = True
             return info

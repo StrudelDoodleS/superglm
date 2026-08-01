@@ -985,3 +985,137 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     # raising max_cells lifts the ti refusal, as it lifts every other budget
     lifted = model.screen_interactions(df, y, candidates=[("x1", "x2")], max_cells=20_000_000)
     assert np.isfinite(lifted.iloc[0]["z"])
+
+
+def _containment_cosine(inner, outer):
+    """How completely ``inner``'s column span sits inside ``outer``'s.
+
+    1.0 means every direction of *inner* is reproducible by *outer*.  This is
+    containment rather than equality on purpose: a probe is the refit's
+    IDENTIFIABLE DEVIATION space, so it is one dimension short of a refit
+    basis that carries no identifiability projection of its own.  What must
+    never happen is a probe direction the refit cannot build.
+    """
+
+    def orth(m):
+        m = np.asarray(m, dtype=np.float64)
+        q, r = np.linalg.qr(m)
+        diag = np.abs(np.diag(r))
+        return q[:, diag > 1e-10 * max(1.0, diag.max())]
+
+    qi, qo = orth(inner), orth(outer)
+    assert qi.shape[1] <= qo.shape[1], f"probe rank {qi.shape[1]} > refit rank {qo.shape[1]}"
+    return float(np.linalg.svd(qo.T @ qi, compute_uv=False).min())
+
+
+@pytest.mark.parametrize("spline_kind", ["ps", "cr"])
+def test_spline_cat_probe_spans_the_basis_its_refit_builds(spline_kind):
+    """The screen's probe and the term it names as its refit must agree.
+
+    This is the invariant the whole confirm-by-refit contract rests on, so it
+    is pinned as an identity rather than as a value.  It held for ``ps`` and
+    failed for ``cr``, because cubic regression splines carry two bases: a
+    main effect uses the projected-B-spline ``CubicRegressionSpline`` while an
+    interaction marginal uses ``CardinalCRSpline``.  ``TensorInteraction`` had
+    that routing and ``SplineCategorical`` did not, so a ``spline_cat`` probe
+    and its own refit sat a ~1.9 degree rotation apart.
+    """
+    import scipy.sparse as sp
+
+    from superglm.features.interaction import TensorInteraction
+
+    rng = np.random.default_rng(0)
+    n = 8000
+    # Skewed, so uniform and quantile knot placement genuinely disagree.
+    x = np.round(np.concatenate([rng.uniform(0, 1, 6400), rng.uniform(0, 10, 1600)]), 2)
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(np.exp(0.2 + 0.15 * np.log1p(x))).astype(np.float64)
+    features = {"x": Spline(kind=spline_kind, n_knots=10), "f": Categorical()}
+    support = np.unique(x)
+    counts = np.unique(x, return_counts=True)[1]
+
+    # The probe, exactly as screen_interactions assembles it from the mains fit.
+    mains = SuperGLM(family="poisson", features=features)
+    mains.fit_reml(df, y)
+    info = TensorInteraction._marginal_from_spec(
+        mains._specs["x"], x, None, support=support, counts=counts
+    )
+    basis = info.basis
+    probe = np.asarray(basis.todense() if sp.issparse(basis) else basis, dtype=np.float64)
+
+    # The refit, read back from the spec the fitted term actually stored --
+    # not from the parent spec, which is the thing that used to differ.
+    confirmed = SuperGLM(family="poisson", features=features, interactions=[("x", "f")])
+    confirmed.fit_reml(df, y)
+    ispec = confirmed._interaction_specs[next(iter(confirmed._interaction_specs))]
+    stored = ispec._spline_spec
+    raw = np.asarray(sp.csr_matrix(stored._raw_basis_matrix(support)).todense(), dtype=np.float64)
+    projection = getattr(stored, "_interaction_projection", None)
+    refit = raw if projection is None else raw @ np.asarray(projection, dtype=np.float64)
+
+    assert _containment_cosine(probe, refit) == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("spline_kind", ["ps", "cr"])
+def test_spline_cat_predicts_the_design_it_fitted(spline_kind):
+    """Storing a resolved parent spec is only safe if predict reads it back.
+
+    ``transform``/``score`` rebuild the basis from ``self._spline_spec``, so
+    substituting the interaction basis at build time without storing it would
+    silently score a different linear predictor than the fitted design.
+    """
+    rng = np.random.default_rng(1)
+    n = 8000
+    x = np.round(np.concatenate([rng.uniform(0, 1, 6400), rng.uniform(0, 10, 1600)]), 2)
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(np.exp(0.2 + 0.15 * np.log1p(x))).astype(np.float64)
+
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind=spline_kind, n_knots=10), "f": Categorical()},
+        interactions=[("x", "f")],
+    )
+    model.fit_reml(df, y)
+    mu = model.predict(df)
+    term = np.where(y > 0, y * np.log(np.maximum(y, 1e-300) / mu), 0.0)
+    assert 2.0 * float(np.sum(term - (y - mu))) == pytest.approx(
+        model._result.deviance, rel=1e-9, abs=1e-9
+    )
+
+
+def test_select_cr_parent_keeps_its_own_basis_in_an_interaction():
+    """The interaction cr routing must not touch a select=True parent.
+
+    The cardinal spec an interaction marginal resolves to is built with
+    ``select=False`` and one penalty order, so it cannot carry a select
+    parent's double-penalty geometry -- substituting drops the identifiability
+    projection that shrinks the block and leaves the design rank-deficient.
+    ``screen_interactions`` refuses select parents outright, so no probe goes
+    unmatched by leaving them alone.
+    """
+    from superglm.features.interaction import interaction_spline_spec
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    x = rng.uniform(0.0, 10.0, n)
+    spec = Spline(kind="cr", n_knots=8, select=True)
+    plain = Spline(kind="cr", n_knots=8)
+
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(1.5, n).astype(np.float64)
+    fitted_select = SuperGLM(family="poisson", features={"x": spec, "f": Categorical()})
+    fitted_select.fit_reml(df, y)
+    fitted_plain = SuperGLM(family="poisson", features={"x": plain, "f": Categorical()})
+    fitted_plain.fit_reml(df, y)
+
+    sel = fitted_select._specs["x"]
+    assert interaction_spline_spec(sel, x) is sel, "select parent must pass through"
+    # The control: an ordinary cr parent IS resolved, so the guard is specific
+    # rather than the routing being dead.
+    ordinary = fitted_plain._specs["x"]
+    assert interaction_spline_spec(ordinary, x) is not ordinary
+
+    # And screening refuses the select parent, so nothing is left unscreened
+    # that a probe would have needed to match.
+    with pytest.raises(ValueError, match="select=True"):
+        fitted_select.screen_interactions(df, y)
