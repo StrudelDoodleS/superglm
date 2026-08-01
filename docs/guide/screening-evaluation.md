@@ -370,7 +370,16 @@ Together the two readings give a decision rather than a score:
 | | `P/(k/3)` ≈ 1 | `P/(k/3)` ≪ 1 |
 |---|---|---|
 | **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
-| **z above threshold** | refit the pair as a fixed interaction | refit the pair as a fixed interaction |
+| **z above threshold** | refit the pair as a fixed interaction | fit the few cells that carry it, and check the full refit against it |
+
+The right-hand column stays the same above and below the bar because the two
+readings answer different questions. Clearing the Cp gate says a **full refit
+beats leaving the pair out** — not that it beats fitting the handful of cells
+that carry the signal. Raise the magnitude on a concentrated truth far enough
+and z crosses any bar while `P` stays near zero; taking that as "refit as fixed"
+throws away the shape information and spends the other 1,600-odd df on nothing.
+The gate is a floor on the full refit, not a ranking of it against the sparse
+one.
 
 Neither reading is implemented in `screen_interactions`, and they do not cost
 the same to obtain. The **gate is** arithmetic on the returned row: `z` and
@@ -419,17 +428,31 @@ only, which is a separate simulated study.
    library is actually aimed at — and there is no reason to assume it carries
    over unchanged. This is the first thing to check before the gate is quoted
    anywhere else.
-9. **Sixteen points, three replicates.** Enough to establish that the crossing
-   tracks `sqrt(edf0/2)` across a 20× range of df, not enough to pin the
-   constant. A true crossing at 1.2 rather than 1.0 would not be resolved by
-   this data, and the 15/16 would be unchanged by it.
+9. **Sixteen points, three replicates, and a grid chosen to straddle the bar.**
+   Enough to establish that the crossing tracks `sqrt(edf0/2)` across a 20×
+   range of df, not enough to pin the constant. A true crossing at 1.2 rather
+   than 1.0 would not be resolved by this data. Separately, the effect sizes at
+   each width were **selected so z brackets `sqrt(edf0/2)` there**, which is the
+   right design for locating the crossing but also guarantees a grid whose
+   boundary moves with width — precisely the configuration no constant cutoff
+   can track. Part of the margin over fixed cutoffs is therefore a property of
+   that selection rather than of the data; a grid drawn from some plausible
+   distribution over (width, effect) would give a different one.
 10. **The gate is for a plain fixed refit.** A shrunk term spends less edf, so
     its bar is lower: the `RandomEffect` fit spent 645 df against the fixed
     fit's 1,635 and improved holdout where the fixed fit cost 22%. The
     threshold answers "gate this into `interactions=[...]`", not "is this pair
     ever usable".
-11. **Pooling on a diffuse truth was never measured.** The decision table's
-    "pool it" cell is inference from the other three, not a measurement.
+11. **Two of the decision table's four cells are unmeasured.** Pooling on a
+    diffuse truth was never run, so the "pool the cell" half of the lower-left
+    cell is inference. And *no* diffuse truth in the study clears its own
+    threshold, while every truth in the gate ladder is spiky, so all of the
+    above-threshold evidence sits in the right-hand column. The upper-right
+    cell ("z above threshold, `P` ≈ 1 → refit as fixed") is inference from the
+    spiky rows, not a measurement. The two right-hand cells' shared advice is
+    likewise reasoning, not a comparison: no run in the study puts a
+    concentrated truth above its threshold and then fits the sparse and full
+    models against each other there.
 12. **Planted truths are scattered single cells.** That is the best case for
     top-m cell selection and the worst case for a group-structured penalty. A
     contiguous block of live cells — arguably the more realistic shape for a

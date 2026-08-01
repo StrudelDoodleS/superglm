@@ -50,7 +50,10 @@ Four tables come out, because the threshold alone answers only half of it:
 
   1. the gate ladder -- table width x effect size, the screen's z, and the
      holdout change from actually refitting.  The question is whether the sign
-     of the holdout change flips where `z / sqrt(edf0/2)` crosses 1;
+     of the holdout change flips where `z / sqrt(edf0/2)` crosses 1.  The effect
+     sizes at each width were CHOSEN so z straddles the threshold there, which
+     locates the crossing but also guarantees a grid no constant cutoff can
+     track -- read the margin over fixed cutoffs with that in mind;
   2. concentration at matched z -- spiky and diffuse truths tuned so their z
      values coincide, which is the only honest way to ask whether `P` carries
      information `z` does not;
