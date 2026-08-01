@@ -112,13 +112,22 @@ def _build_pencil(V: NDArray, S: NDArray, U: NDArray) -> _Pencil:
     reduction in one pass; falls back to explicit whitening when ``G`` is
     singular, i.e. when the two share a null space.  That common null space
     contributes to neither sum, so discarding it is exact.
+
+    The whitening cut is relative to ``G``'s own largest eigenvalue, with
+    only a floor against a matrix that is genuinely zero.  An absolute floor
+    would make the statistic depend on the units the curvature is carried in:
+    with an absolute 1.0, ``V = 1e-13 diag(1, 2, 0)`` against
+    ``S = 1e-13 diag(2, 1, 0)`` classified every identifiable direction as
+    null and returned ``statistic 0, edf0 0`` where the identically scaled
+    problem at ``1e-12`` returned ``2/3`` and ``1``.
     """
     G = 0.5 * (V + S + (V + S).T)
     try:
         a, basis = scipy.linalg.eigh(V, G, check_finite=False)
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
         w, Q = np.linalg.eigh(G)
-        keep = w > _RCOND * max(1.0, float(w.max()) if w.size else 1.0)
+        top = float(w.max()) if w.size else 0.0
+        keep = w > _RCOND * max(top, np.finfo(np.float64).tiny)
         if not np.any(keep):
             return _Pencil(a=np.zeros(0), u=np.zeros(0), rank_v=0.0)
         whiten = Q[:, keep] / np.sqrt(w[keep])
