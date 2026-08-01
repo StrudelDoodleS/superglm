@@ -1132,6 +1132,31 @@ def test_numeric_pair_moments_match_dense_assembly():
     np.testing.assert_allclose(u_m, X_o.T @ score, rtol=1e-12, atol=1e-9)
 
 
+def test_numeric_pair_moments_reject_a_menu_that_is_not_the_grid():
+    """Review finding: row agreement and the code bounds were validated but the
+    menu's own row count was not, so a menu built for a different margin
+    surfaced as a numpy broadcast error instead of this module's contract."""
+    import pytest
+
+    from superglm.screening import numeric_pair_moments
+
+    rng = np.random.default_rng(11)
+    n, L = 200, 5
+    codes = rng.integers(0, L, n)
+    z = rng.uniform(-2.0, 3.0, n)
+    score = rng.normal(size=n)
+    w = rng.uniform(0.1, 3.0, n)
+    menu = np.zeros((L, L - 1))
+    menu[1:, :] = np.eye(L - 1)
+
+    with pytest.raises(ValueError, match="one row per gridded cell"):
+        numeric_pair_moments(codes, L, menu[:-1], z, score, w)
+    with pytest.raises(ValueError, match="one row per gridded cell"):
+        numeric_pair_moments(codes, L, menu[:, 0], z, score, w)
+    # the matching menu still computes
+    assert numeric_pair_moments(codes, L, menu, z, score, w)[0].shape == (L - 1,)
+
+
 def test_numeric_numeric_moments_match_dense_assembly():
     from superglm.screening import numeric_numeric_moments
 
