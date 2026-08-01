@@ -11,15 +11,31 @@ width that was not.
 What is pinned here is both halves: that the cheap route picks the SAME
 columns as the prefix walk it replaced, and that it no longer pays an
 eigendecomposition per column to do it.
+
+Index order is only a convention, though, and the rest of this file pins the
+price it is allowed to charge.  Where the earliest independent columns happen
+to be two near-duplicates, keeping them is a real numerical cost paid on every
+downstream solve -- and one no rank test can detect, because the block is
+positive definite, Cholesky accepts it, and its smallest eigenvalue is above
+the very cutoff that decided the rank.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
+import scipy.linalg
 
 from superglm.solvers import rank as rank_module
-from superglm.solvers.rank import _earliest_representatives, decompose_gram
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    _achievable_amplification,
+    _conditioned_representatives,
+    _earliest_representatives,
+    _selection_amplification,
+    decompose_factor,
+    decompose_gram,
+)
 
 
 def _prefix_walk(gram: np.ndarray, rank: int, cutoff: float) -> np.ndarray | None:
@@ -139,3 +155,200 @@ def test_a_deficient_block_does_not_pay_an_eigendecomposition_per_column(
     # Reading the selection off the null basis succeeds where the walk's
     # matrix-wide cutoff mis-rejected a column on a small prefix.
     assert decomposition.method == "pivoted_cholesky"
+
+
+def _near_alias(eps: float, rows: int = 200, seed: int = 7) -> np.ndarray:
+    """Three normalised columns with ``c1 = c0 - eps*c2``, so ``c2`` is in span(c0, c1).
+
+    ``c2`` genuinely IS a combination of the two columns before it, so index
+    order is entitled to drop it -- but only with a multiplier of ``1/eps``,
+    which is exactly the conditioning that multiplier costs.
+    """
+    rng = np.random.default_rng(seed)
+    first = rng.normal(size=rows)
+    third = rng.normal(size=rows)
+    design = np.column_stack([first, first - eps * third, third])
+    return design / np.linalg.norm(design, axis=0)
+
+
+def test_the_rank_cutoff_cannot_see_a_near_alias_but_the_certificate_can() -> None:
+    """The measurement that rules out certifying against the decomposition cutoff.
+
+    At ``eps=5e-8`` the earliest selection ``[0, 1]`` has a smallest
+    equilibrated eigenvalue of 1.3323e-15 against a decomposition cutoff of
+    4.4447e-16.  It is ABOVE the cutoff: not rank deficient by the standard
+    that chose the rank, and Cholesky factorises it without complaint.  Its
+    condition is nonetheless 3.6267e+07 in design terms and 1.5012e+15 on the
+    equilibrated Gram.  Neither policy constant separates that from an ordinary
+    block: the Gram figure falls between `warning_condition` (6.7109e+07) and
+    `severe_condition` (4.5036e+15), while the design figure is below the
+    warning threshold outright.
+
+    What does separate it is that this is a property of the SELECTION.  The
+    amplification the choice adds is 2.5634e+07 where a rank-revealing choice
+    provably reaches 1.7321, and the alternative selection is sitting right
+    there at condition 1.0299.
+    """
+    design = _near_alias(5e-8)
+    gram = design.T @ design
+    scale = np.sqrt(np.diag(gram))
+    equilibrated = gram / np.outer(scale, scale)
+    values, vectors = np.linalg.eigh(equilibrated)
+    cutoff = SHARED_RANK_POLICY.gram_rcond * max(float(values[-1]), 0.0)
+    retained = values > cutoff
+    rank = int(retained.sum())
+    null = vectors[:, ~retained]
+
+    earliest = _earliest_representatives(null, rank)
+    assert earliest is not None
+    assert earliest.tolist() == [0, 1]
+
+    block = equilibrated[np.ix_(earliest, earliest)]
+    smallest = float(np.linalg.eigvalsh(block)[0])
+    assert smallest > cutoff, "the rank cutoff accepts this block, which is the whole problem"
+    scipy.linalg.cholesky(block, lower=True)  # and so does Cholesky
+
+    amplification = _selection_amplification(null, earliest)
+    achievable = _achievable_amplification(*null.shape)
+    assert amplification > 1e7 > achievable
+
+    chosen = _conditioned_representatives(null, rank)
+    assert chosen is not None
+    assert chosen.tolist() == [0, 2]
+    assert _selection_amplification(null, chosen) <= achievable
+
+
+@pytest.mark.parametrize("eps", [2e-8, 5e-8, 1e-6, 1e-4, 1e-2])
+def test_a_near_alias_is_never_handed_on_as_two_near_duplicate_columns(eps: float) -> None:
+    """Both decomposition paths, across the scale where index order goes wrong.
+
+    Index order picks ``[0, 1]`` at every one of these, at conditions
+    9.0668e+07, 3.6267e+07, 1.8134e+06, 1.8133e+04 and 1.8128e+02 -- the
+    condition tracks ``1/eps``, because that is the multiplier index order
+    accepted when it declared ``c2`` redundant.  Certifying the selection picks
+    ``[0, 2]`` at 1.0299 throughout.
+    """
+    design = _near_alias(eps)
+
+    from_gram = decompose_gram(design.T @ design)
+    from_factor = decompose_factor(design)
+
+    for decomposition in (from_gram, from_factor):
+        assert decomposition.rank == 2
+        assert decomposition.active_columns.tolist() == [0, 2]
+        selected = design[:, decomposition.active_columns]
+        assert np.linalg.cond(selected) < 2.0
+
+
+def test_reselection_leaves_an_exact_alias_convention_where_it_was() -> None:
+    """One near alias must not relabel the exact aliases sharing its block.
+
+    Columns 0 and 1 are a 5e-8 near alias; columns 2 and 4 are an exact
+    duplicate pair.  Index order alone selects ``[0, 1, 2]`` at condition
+    3.6532e+07.  Re-selecting by complete pivoting would answer ``[1, 3, 4]``,
+    which fixes the conditioning but surrenders the EARLIER member of the exact
+    pair for no reason.  The threshold pivot answers ``[0, 2, 3]``: the near
+    alias gives up its second column, the exact pair still gives up its later
+    one, and the condition is 1.1309 either way.
+    """
+    rng = np.random.default_rng(7)
+    first = rng.normal(size=200)
+    third = rng.normal(size=200)
+    shared = rng.normal(size=200)
+    design = np.column_stack([first, first - 5e-8 * third, shared, third, shared])
+    design = design / np.linalg.norm(design, axis=0)
+
+    from_gram = decompose_gram(design.T @ design)
+    from_factor = decompose_factor(design)
+
+    for decomposition in (from_gram, from_factor):
+        assert decomposition.active_columns.tolist() == [0, 2, 3]
+        assert np.linalg.cond(design[:, decomposition.active_columns]) < 2.0
+
+
+def test_the_certificate_is_the_condition_the_selection_itself_adds() -> None:
+    """``1/sigma_min(N_R)`` is exactly the amplification, not a proxy for it.
+
+    Both facts the fix rests on, over 200 random rank-deficient blocks: the
+    identity ``1/sigma_min(N_R)**2 == 1 + ||N_K N_R^-1||**2``, and the bound
+    ``sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)`` that makes it a
+    statement about the selected block rather than about the null basis.
+    """
+    rng = np.random.default_rng(20260801)
+    checked = 0
+    for _ in range(200):
+        width = int(rng.integers(4, 16))
+        true_rank = int(rng.integers(2, width))
+        nullity = width - true_rank
+        design = rng.normal(size=(60, true_rank)) @ rng.normal(size=(true_rank, width))
+        design = design / np.linalg.norm(design, axis=0)
+        singular, right = np.linalg.svd(design, full_matrices=True)[1:]
+        if singular[true_rank - 1] < 1e-8 * singular[0]:
+            continue
+        null = right.T[:, true_rank:]
+        if null.shape[1] != nullity:
+            continue
+        rejected = rng.permutation(width)[:nullity]
+        keep = np.setdiff1d(np.arange(width), rejected)
+        smallest = float(np.linalg.svd(null[rejected, :], compute_uv=False).min())
+        if smallest < 1e-10:
+            continue
+        checked += 1
+
+        amplification = _selection_amplification(null, keep)
+        assert amplification == pytest.approx(1.0 / smallest)
+        coupling = np.linalg.norm(null[keep, :] @ np.linalg.inv(null[rejected, :]), 2)
+        assert amplification**2 == pytest.approx(1.0 + coupling**2, rel=1e-9)
+
+        floor = singular[true_rank - 1] / amplification
+        assert float(np.linalg.svd(design[:, keep], compute_uv=False).min()) >= floor * (1 - 1e-9)
+    assert checked > 100, f"only {checked} blocks exercised"
+
+
+@pytest.mark.parametrize("seed", [11, 2029, 77_003])
+def test_certification_never_returns_a_worse_conditioned_selection(seed: int) -> None:
+    """The certificate may only improve the block, and must leave good ones alone.
+
+    Every selection is either the earliest one unchanged, or one whose
+    amplification is strictly smaller.  There is no third outcome, so no design
+    can be made worse by this than it was by index order alone.
+    """
+    rng = np.random.default_rng(seed)
+    improved = 0
+    untouched = 0
+    for _ in range(120):
+        width = int(rng.integers(4, 20))
+        true_rank = int(rng.integers(2, width))
+        coefficients = rng.normal(size=(true_rank, width))
+        for column in range(true_rank, width):
+            source = int(rng.integers(0, column))
+            coefficients[:, column] = coefficients[:, source]
+            if rng.random() < 0.5:
+                coefficients[:, column] += 10.0 ** rng.uniform(-9, -5) * rng.normal(size=true_rank)
+        design = rng.normal(size=(80, true_rank)) @ coefficients[:, rng.permutation(width)]
+        design = design / np.linalg.norm(design, axis=0)
+        gram = design.T @ design
+        scale = np.sqrt(np.diag(gram))
+        equilibrated = gram / np.outer(scale, scale)
+        values, vectors = np.linalg.eigh(equilibrated)
+        cutoff = SHARED_RANK_POLICY.gram_rcond * max(float(values[-1]), 0.0)
+        retained = values > cutoff
+        rank = int(retained.sum())
+        if not 0 < rank < width:
+            continue
+        null = vectors[:, ~retained]
+        earliest = _earliest_representatives(null, rank)
+        chosen = _conditioned_representatives(null, rank)
+        if earliest is None:
+            assert chosen is None
+            continue
+        assert chosen is not None
+        before = _selection_amplification(null, earliest)
+        after = _selection_amplification(null, chosen)
+        if np.array_equal(chosen, earliest):
+            assert before <= _achievable_amplification(*null.shape)
+            untouched += 1
+        else:
+            assert after < before
+            improved += 1
+    assert improved > 0 and untouched > 0, f"improved={improved} untouched={untouched}"

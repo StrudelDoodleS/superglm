@@ -524,6 +524,174 @@ def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | Non
     return keep if keep.size == rank else None
 
 
+# A fallback pivot may be this fraction of the largest component available, so
+# a single elimination step costs at most a factor ``1 / _PIVOT_THRESHOLD`` in
+# ``_selection_amplification``.  See ``_threshold_pivot_representatives`` for why
+# it is not 1.
+_PIVOT_THRESHOLD = 0.5
+
+
+def _threshold_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+    """Representatives chosen for conditioning rather than for index order.
+
+    Same elimination as ``_earliest_representatives``, with the column order
+    freed.  Each step rejects the LATEST column whose largest live component is
+    within ``_PIVOT_THRESHOLD`` of the largest component available anywhere,
+    instead of the latest column carrying any component at all.  At threshold 1
+    this is Gaussian elimination with complete pivoting on the null basis --
+    the standard route to the largest-volume ``k x k`` submatrix, and so to the
+    smallest ``_selection_amplification``.
+
+    It is not 1, because index order is still worth keeping wherever
+    conditioning does not pay for it.  Complete pivoting reorders the WHOLE
+    block, including exact aliases elsewhere in it that were never the problem:
+    on a design carrying both a 5e-8 near alias at columns (0, 1) and an exact
+    duplicate at columns (2, 4), complete pivoting selects ``[1, 3, 4]`` --
+    surrendering the earlier member of the exact pair -- where every threshold
+    from 0.1 to 0.75 selects ``[0, 2, 3]``, which keeps the convention.  Both
+    reach amplification 1.414214 and condition 1.1309, against 2.5634e+07 and
+    3.6532e+07 for the earliest selection, so the conditioning is not what is
+    being traded.
+
+    Relaxing further does start to cost: over 300 random alias-carrying blocks,
+    173 of which failed the earliest rule's certificate, thresholds 0.25, 0.5,
+    0.75 and 1.0 each landed under ``_achievable_amplification`` on all 173,
+    while 0.1 left one block at 4.04 times it.  0.5 sits in the middle of the
+    range that costs nothing measurable and bounds one step's multiplier by 2.
+
+    Cost is the same ``O(k**2 m)`` in the nullity ``k`` as the earliest rule:
+    revisiting every remaining column at each of the ``k`` steps is the same
+    ``O(k m)`` per step that the elimination itself already pays.
+    """
+    width, nullity = null_vectors.shape
+    if nullity == 0:
+        return np.arange(width, dtype=int)
+    working = np.array(null_vectors.T, dtype=float)
+    if not np.all(np.isfinite(working)):
+        return None
+    relative = float(np.sqrt(np.finfo(float).eps))
+
+    rejected: list[int] = []
+    live = np.ones(nullity, dtype=bool)
+    remaining = np.ones(width, dtype=bool)
+    floors = relative * np.linalg.norm(working, axis=1)
+    for _step in range(nullity):
+        candidates = np.flatnonzero(live)
+        columns = np.flatnonzero(remaining)
+        if candidates.size == 0 or columns.size == 0:
+            break
+        block = np.abs(working[np.ix_(candidates, columns)])
+        # Same per-row noise floor as the earliest rule: a component of a unit
+        # null vector below sqrt(eps) of its own row norm is elimination dust,
+        # and pivoting on it is exactly the failure this module already guards.
+        block[block <= floors[candidates][:, None]] = 0.0
+        column_peaks = block.max(axis=0)
+        peak = float(column_peaks.max(initial=0.0))
+        if peak <= 0.0:
+            break
+        # Latest qualifying column, so an exact alias -- whose null direction
+        # carries equal weight on every column it ties together -- still gives
+        # up its last column rather than its first.
+        local = int(np.flatnonzero(column_peaks >= _PIVOT_THRESHOLD * peak)[-1])
+        chosen = int(columns[local])
+        pivot = int(candidates[int(np.argmax(block[:, local]))])
+        rejected.append(chosen)
+        remaining[chosen] = False
+        working[pivot] /= working[pivot, chosen]
+        others = candidates[candidates != pivot]
+        if others.size:
+            working[others] -= np.outer(working[others, chosen], working[pivot])
+            floors[others] = relative * np.linalg.norm(working[others], axis=1)
+        live[pivot] = False
+
+    if len(rejected) != nullity:
+        return None
+    keep = np.setdiff1d(np.arange(width), np.asarray(rejected, dtype=int))
+    return keep if keep.size == rank else None
+
+
+def _selection_amplification(null_vectors: NDArray, keep: NDArray) -> float:
+    """How much worse than the retained subspace itself a selection is.
+
+    Split the rows of the null basis ``N`` -- orthonormal columns, so
+    ``N.T @ N = I`` -- into the REJECTED rows ``N_R`` and the KEPT rows ``N_K``.
+    Then ``N_R.T N_R = I - N_K.T N_K`` gives
+
+        (N_R.T N_R)^-1 - I = (N_K N_R^-1).T (N_K N_R^-1),
+
+    so ``1 / sigma_min(N_R)**2 == 1 + ||N_K N_R^-1||_2**2`` identically, and the
+    selected block inherits
+
+        sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R).
+
+    The returned ``1 / sigma_min(N_R)`` is therefore the factor by which the
+    CHOICE OF REPRESENTATIVES multiplies the condition number the retained
+    subspace already has.  It is a property of the selection alone, which is
+    why it sees what no test against the rank cutoff can: a block may sit
+    comfortably above the cutoff that decided the rank -- not deficient by that
+    standard, and accepted by Cholesky -- while still being the worst basis
+    available for the subspace it spans.
+
+    Verified over 400 random rank-deficient blocks: the identity holds to
+    2.37e-13 relative, and the tightest observed
+    ``sigma_min(X_keep) / (sigma_rank(X) * sigma_min(N_R))`` was 1.000002, so
+    the bound is attained rather than merely true.
+    """
+    width = null_vectors.shape[0]
+    rejected = np.setdiff1d(np.arange(width), keep)
+    if rejected.size == 0:
+        return 1.0
+    spectrum = np.linalg.svd(null_vectors[rejected, :], compute_uv=False)
+    smallest = float(np.min(spectrum)) if spectrum.size else 0.0
+    return float("inf") if smallest <= 0.0 else 1.0 / smallest
+
+
+def _achievable_amplification(width: int, nullity: int) -> float:
+    """``sqrt(1 + k*(m-k))``, the amplification a rank-revealing choice reaches.
+
+    The largest-volume ``k x k`` submatrix of a null basis with orthonormal
+    columns has ``|N_K N_R^-1|`` bounded entrywise by 1 -- otherwise a swap
+    would increase the volume -- so its spectral norm is at most
+    ``sqrt(k*(m-k))`` and, by the identity in ``_selection_amplification``, its
+    amplification is at most ``sqrt(1 + k*(m-k))``.  A selection worse than
+    that is worse than one that provably exists, which makes this the natural
+    place to stop trusting index order, rather than a tuned constant.
+    """
+    return float(np.sqrt(1.0 + float(nullity) * float(width - nullity)))
+
+
+def _conditioned_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+    """Earliest representatives, unless index order costs more than it may.
+
+    The earliest rule is a labelling convention -- it decides which of a set of
+    aliased columns carries the reproducible zero -- and it is chosen blind to
+    conditioning.  Where the earliest independent columns happen to be two
+    near-duplicates, that convention is paid for in every downstream solve: the
+    block is positive definite, Cholesky accepts it, its smallest eigenvalue is
+    above the cutoff that decided the rank, and it is still the worst basis for
+    its own span.
+
+    So the convention is kept, and certified.  ``_selection_amplification`` is
+    exact and costs ``O(k**3)`` in the NULLITY, below the ``O(m**3)``
+    eigendecomposition this path has already paid.  Only when it exceeds what a
+    rank-revealing selection provably achieves is a second, conditioning-driven
+    selection computed, and even then the better-conditioned of the two is
+    returned -- so this can only improve the block it hands on.
+    """
+    earliest = _earliest_representatives(null_vectors, rank)
+    if earliest is None:
+        return None
+    amplification = _selection_amplification(null_vectors, earliest)
+    if amplification <= _achievable_amplification(*null_vectors.shape):
+        return earliest
+    alternative = _threshold_pivot_representatives(null_vectors, rank)
+    if alternative is None:
+        return earliest
+    if _selection_amplification(null_vectors, alternative) < amplification:
+        return alternative
+    return earliest
+
+
 def _scaled_subspace_logdet(coordinates: NDArray) -> float:
     """Return ``log(det(coordinates.T @ coordinates))`` across extreme row scales."""
     width = coordinates.shape[1]
@@ -768,8 +936,10 @@ def decompose_gram(
         # spectral null space above.  The selection is read off the null basis
         # this decomposition has already computed -- `_earliest_representatives`
         # documents why eliminating it from the right gives the same columns as
-        # walking prefixes, without an eigendecomposition per candidate.
-        selected_local_array = _earliest_representatives(discarded_vectors, rank)
+        # walking prefixes, without an eigendecomposition per candidate, and
+        # `_conditioned_representatives` documents when index order is too
+        # expensive a convention to keep.
+        selected_local_array = _conditioned_representatives(discarded_vectors, rank)
         if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
             representative = equilibrated[np.ix_(selected_local_array, selected_local_array)]
@@ -902,10 +1072,10 @@ def decompose_factor(
         else float("inf")
     )
     if 0 < rank < len(active_columns):
-        # Same earliest-representative choice as the Gram path, off the right
+        # Same certified representative choice as the Gram path, off the right
         # singular vectors that span this factor's null space.  The Gram is
         # formed only for the selected block, not to search for it.
-        selected_local_array = _earliest_representatives(discarded_vectors, rank)
+        selected_local_array = _conditioned_representatives(discarded_vectors, rank)
         if selected_local_array is not None:
             equilibrated_gram = equilibrated.T @ equilibrated
             representative_columns = active_columns[selected_local_array]
