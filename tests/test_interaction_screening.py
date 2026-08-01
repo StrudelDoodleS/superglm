@@ -194,6 +194,65 @@ def test_statistic_reduces_to_unpenalized_without_penalty():
     assert result.lambda0 == 0.0
 
 
+def test_whitening_keeps_an_identifiable_mode_that_is_merely_small():
+    """The singular-pencil whitening may discard the common null space, no more.
+
+    ``G = V + S`` here is ``diag(2, 2e-13, 0)``.  The third direction is the
+    genuine shared null space; the second is NOT -- it carries ``a = 0.5``, an
+    honest half-share of the curvature, and all of ``U``'s mass.  A cut set by
+    smallness relative to the largest eigenvalue rather than by round-off
+    deletes it, and the ladder then reports a statistic of 0 for a pair whose
+    score is entirely in that direction.
+
+    The direct pseudo-inverse ladder is the reference: solving
+    ``(V + lam S)`` at ``lam = 1`` gives edf 1.0 and T 0.5.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    V = np.diag([1.0, 1e-13, 0.0])
+    S = np.diag([1.0, 1e-13, 0.0])
+    U = np.array([0.0, np.sqrt(1e-13), 0.0])
+
+    got = penalized_score_statistic(U, V, S_ti=S, edf0=1.0)
+
+    # what the direct solver resolves, recomputed here rather than asserted
+    A = V + 1.0 * S
+    Ainv = np.linalg.pinv(A, hermitian=True)
+    assert float(np.trace(Ainv @ V)) == pytest.approx(1.0, abs=1e-9)
+    assert float(U @ (Ainv @ U)) == pytest.approx(0.5, rel=1e-9)
+
+    assert got.edf0 == pytest.approx(1.0, abs=1e-6)
+    assert got.statistic == pytest.approx(0.5, rel=1e-6)
+    assert got.lambda0 == pytest.approx(1.0, rel=1e-6)
+
+
+def test_screening_kernels_are_internal_and_the_root_api_is_self_consistent():
+    """The screening package is a kernel, not public API — pinned deliberately.
+
+    ``superglm.screening.__all__`` reads like a public claim, and a reviewer
+    took it as one: ``from superglm import penalized_score_statistic_ladder``
+    raises.  So it does for all eight names there, every one of which predates
+    the ladder, and the resolution is that none of them belongs at the root
+    rather than that the ladder does -- they take raw assembled moment
+    matrices, so they are unusable without the internals that build them.
+
+    This test pins that decision so it is not silently reversed, and guards the
+    class of defect the reviewer was actually pointing at: a name advertised
+    somewhere it cannot be imported from.
+    """
+    import superglm
+    import superglm.screening as screening
+
+    # The root advertises nothing it cannot supply.
+    assert [n for n in superglm.__all__ if not hasattr(superglm, n)] == []
+    # Each kernel name resolves from its OWN package, which is where it lives.
+    assert [n for n in screening.__all__ if not hasattr(screening, n)] == []
+    # And none of them is root API.
+    assert set(screening.__all__).isdisjoint(superglm.__all__)
+    # The supported entry point is the model method.
+    assert hasattr(superglm.SuperGLM, "screen_interactions")
+
+
 def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
     """A barely positive-definite block still reports its RANK, not ``k``.
 

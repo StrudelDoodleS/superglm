@@ -7,6 +7,17 @@ on its fitted levels.  A numeric margin never grids: ``_numeric_margin``
 accumulates its z-weighted moments over the other margin's cells instead,
 which is the exact channel for ``numeric_cat`` and ``numeric_numeric``.
 
+**This package is internal, and ``__all__`` below is not a public-API claim.**
+It names what these kernels offer the REST OF THE LIBRARY — ``screening_ops``
+and the tests — not what a caller imports.  The supported entry point for
+screening is ``SuperGLM.screen_interactions``; nothing here is re-exported from
+the package root, deliberately and uniformly, and that includes
+``penalized_score_statistic_ladder``.  Promoting any of it would be promoting
+an interface that takes raw assembled moment matrices — ``U``, ``V``, the
+overlap ``C``/``M``, a tensor penalty — whose construction is itself internal
+and undocumented, so it is not usable without the internals that build it.
+Every module here is underscore-prefixed for the same reason.
+
 Plans: docs/superpowers/plans/2026-07-28-interaction-screening.md and
 docs/superpowers/plans/2026-07-31-mixed-interaction-screening.md.
 """
