@@ -2,10 +2,12 @@
 
 `z` says whether a pair carries signal.  It does not say whether refitting that
 pair will help, and at wide factors the two answers routinely disagree: a 41x41
-`cat_cat` pair carrying a genuine 6-sigma effect in 5 of its 1681 cells scores
-z = 17.75 -- unambiguous by any conventional reading -- and costs +22% holdout
-MSE when refitted as a fixed interaction.  A screen that only reports z hands
-the caller a number that is correct and still points the wrong way.
+`cat_cat` pair carrying a genuine 6-sigma effect in 5 of its 1681 cells scores a
+z that is unambiguous by any conventional reading and still costs holdout MSE
+when refitted as a fixed interaction.  A screen that only reports z hands the
+caller a number that is correct and points the wrong way.  Table 4 measures both
+halves of that sentence on ONE train split, screen included, so the z and the
+holdout cost quoted beside each other come from the same data.
 
 Two derived numbers close that gap.  Neither is new machinery, but they do not
 cost the same to obtain: the first is arithmetic on the returned screening row,
@@ -58,9 +60,10 @@ Four tables come out, because the threshold alone answers only half of it:
      fixed refit, so the whole row -- sparse arms and full refit alike -- comes
      from one seed and one split;
   4. the same pair through three model classes -- mains, a fixed interaction,
-     and the cell partially pooled.  The gate says what NOT to do with a wide
-     pair; this says whether the pair is worth having at all in some other
-     class, and it is where the guide's +22.5% and -3.2% come from.
+     and the cell partially pooled, plus the screen on that same split.  The
+     gate says what NOT to do with a wide pair; this says whether the pair is
+     worth having at all in some other class, and it is where the guide's
+     headline z, its +22% and its -3% all come from.
 
 These are measurements of a simulated Gaussian book, not calibrated quantiles
 and not p-values.  `2*edf` is a Gaussian-family argument; the constant has not
@@ -260,24 +263,40 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
 
 
 def _run_concentration(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
+    """Spiky and diffuse truths tuned so their z values coincide.
+
+    `edf0` and the raw `P` are reported alongside the ratio so the guide can
+    quote the null (`k/3`) and the gate threshold at this width without
+    re-deriving either.  Note the scope: these fit the FULL sample, where the
+    ladder and the sparse payoff fit a half-sample train split.
+    """
     rows: list[dict[str, object]] = []
     for label, kind, magnitude in MATCHED:
-        zs, cons, occs = [], [], []
+        zs, edfs, ratios, prs, occs = [], [], [], [], []
         for rep in range(reps):
             data = _make(kind, magnitude, n_levels, n, 31337 + rep)
             mains = _mains(data.frame, data.y)
-            zs.append(float(mains.screen_interactions(data.frame, data.y).iloc[0]["z"]))
+            screened = mains.screen_interactions(data.frame, data.y).iloc[0]
+            zs.append(float(screened["z"]))
+            edfs.append(float(screened["edf0"]))
             resid = data.y - mains.predict(data.frame)
-            phi = float(np.var(resid, ddof=1))
-            t, occupied = cell_contributions(resid, data.joint, n_levels * n_levels, phi)
-            cons.append(concentration(t, occupied))
+            # P is scale-free, so phi cancels out of the reported ratio; passing
+            # 1.0 keeps that visible rather than implying a calibrated scale
+            t, occupied = cell_contributions(resid, data.joint, n_levels * n_levels, 1.0)
+            ratios.append(concentration(t, occupied))
+            prs.append(participation_ratio(t))
             occs.append(occupied)
+            print(f"  {label} rep {rep} done", flush=True)
+        edf0 = float(np.mean(edfs))
         rows.append(
             {
                 "label": label,
                 "z": float(np.mean(zs)),
+                "edf0": edf0,
+                "threshold": worth_threshold(edf0),
                 "occupied": float(np.mean(occs)),
-                "concentration": float(np.mean(cons)),
+                "participation": float(np.mean(prs)),
+                "concentration": float(np.mean(ratios)),
             }
         )
     return rows
@@ -398,16 +417,23 @@ def _shrinkage_spec(arm: str) -> tuple[dict[str, object], list[str]]:
     raise ValueError(f"unknown shrinkage arm: {arm!r}")
 
 
-def _run_shrinkage(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
+def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, object]], dict]:
     """mains vs a fixed cat_cat interaction vs the same cell partially pooled.
 
     The gate says a wide pair should not be refit as a fixed interaction. This
     asks the follow-on question the gate does not answer: is the pair worth
     having at all, in some other model class?
+
+    The screen is run HERE, on this table's own train split, so the z the guide
+    quotes beside the +22% comes from the data that produced it.  Table 2's z at
+    the same width is a different quantity -- a different seed, and the full
+    sample rather than a half-sample train split.  Per-replicate holdout deltas
+    come back too, since the guide quotes their spread.
     """
     acc: dict[str, list[tuple[float, float, float, float, float]]] = {
         arm: [] for arm in SHRINKAGE_ARMS
     }
+    zs, edfs = [], []
     for rep in range(reps):
         data = _make("spike", 6.0, n_levels, n, 4242 + rep)
         frame = data.frame.copy()
@@ -432,6 +458,10 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
                     float(np.mean((model.predict(dte) - yte) ** 2)),
                 )
             )
+            if arm == "mains":
+                screened = model.screen_interactions(dtr, ytr).iloc[0]
+                zs.append(float(screened["z"]))
+                edfs.append(float(screened["edf0"]))
             print(f"  rep {rep} {arm} done", flush=True)
 
     rows: list[dict[str, object]] = []
@@ -445,9 +475,17 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
                 "edf": float(values[:, 2].mean()),
                 "train": float(values[:, 3].mean()),
                 "holdout": float(values[:, 4].mean()),
+                "holdout_reps": [float(v) for v in values[:, 4]],
             }
         )
-    return rows
+    edf0 = float(np.mean(edfs))
+    screen = {
+        "z": float(np.mean(zs)),
+        "z_reps": [float(v) for v in zs],
+        "edf0": edf0,
+        "threshold": worth_threshold(edf0),
+    }
+    return rows, screen
 
 
 def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
@@ -477,12 +515,17 @@ def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
     print(
         f"\n2. Concentration at matched z ({n_levels}x{n_levels}). Rows are paired so "
         "spiky and\n   diffuse truths carry the SAME z -- any separation is "
-        "information z lacks.\n"
+        "information z lacks.\n   Fitted on the FULL sample, unlike tables 1 and 3.\n"
     )
-    print(f"{'case':>22} {'z':>8} {'occupied':>9} {'P/(k/3)':>9}")
+    print(
+        f"{'case':>22} {'z':>8} {'edf0':>8} {'thresh':>7} {'occupied':>9} "
+        f"{'k/3':>8} {'P':>9} {'P/(k/3)':>9}"
+    )
     for row in rows:
         print(
-            f"{row['label']:>22} {row['z']:>8.2f} {row['occupied']:>9.0f} "
+            f"{row['label']:>22} {row['z']:>8.2f} {row['edf0']:>8.1f} "
+            f"{row['threshold']:>7.2f} {row['occupied']:>9.0f} "
+            f"{row['occupied'] / 3.0:>8.1f} {row['participation']:>9.1f} "
             f"{row['concentration']:>9.3f}"
         )
     print("\n  ~1.0 = spread as noise spreads it;  << 1.0 = a few cells carry it")
@@ -503,10 +546,16 @@ def _print_sparse_payoff(rows: list[dict[str, object]]) -> None:
         )
 
 
-def _print_shrinkage(rows: list[dict[str, object]], n_levels: int) -> None:
+def _print_shrinkage(rows: list[dict[str, object]], screen: dict, n_levels: int) -> None:
     print(
         f"\n4. Same pair, three model classes ({n_levels}x{n_levels}, 5 cells @ 6.0).\n"
         "   The detection is not in doubt; the question is what to DO with it.\n"
+    )
+    print(
+        f"  screened on this table's own train split: z = {screen['z']:.2f} "
+        f"(reps {', '.join(f'{v:.2f}' for v in screen['z_reps'])}), "
+        f"edf0 = {screen['edf0']:.1f}, threshold = {screen['threshold']:.2f} -> "
+        f"{'INCLUDE' if screen['z'] > screen['threshold'] else 'exclude'}\n"
     )
     print(
         f"{'model':>8} {'fit':>8} {'params':>8} {'edf':>9} {'train':>8} {'HOLDOUT':>9} {'vs mains':>10}"
@@ -518,6 +567,10 @@ def _print_shrinkage(rows: list[dict[str, object]], n_levels: int) -> None:
             f"{row['model']:>8} {row['seconds']:>7.1f}s {row['params']:>8.0f} "
             f"{row['edf']:>9.1f} {row['train']:>8.4f} {row['holdout']:>9.4f} {delta:>10}"
         )
+    if base is not None:
+        for row in rows:
+            per_rep = ", ".join(f"{(v / base - 1) * 100:+.1f}%" for v in row["holdout_reps"])
+            print(f"    {row['model']:>8} per-replicate vs the mains MEAN: {per_rep}")
     print(
         "\n  Wall-clock here is indicative only -- it moves several-fold under CPU\n"
         "  contention.  The holdout column does not."
@@ -540,7 +593,8 @@ def main() -> None:
     _print_gate_ladder(_run_gate_ladder(args.reps, args.n))
     _print_concentration(_run_concentration(args.reps, args.n, args.wide_levels), args.wide_levels)
     _print_sparse_payoff(_run_sparse_payoff(args.reps, args.n, args.wide_levels))
-    _print_shrinkage(_run_shrinkage(args.reps, args.n, args.wide_levels), args.wide_levels)
+    shrinkage, screen = _run_shrinkage(args.reps, args.n, args.wide_levels)
+    _print_shrinkage(shrinkage, screen, args.wide_levels)
     print(f"\ntotal {time.perf_counter() - started:.0f}s")
 
 
