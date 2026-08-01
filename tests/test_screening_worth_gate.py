@@ -27,6 +27,7 @@ from benchmarks.screening_worth_gate import (
     _run_shrinkage,
     _run_sparse_payoff,
     _shrinkage_spec,
+    _split,
     cell_contributions,
     concentration,
     participation_ratio,
@@ -186,6 +187,33 @@ def test_unknown_truth_kind_is_rejected_rather_than_planting_nothing() -> None:
     """A typo must not produce a valid-looking null run."""
     with pytest.raises(ValueError, match="unknown truth kind"):
         _make("spikey", 6.0, n_levels=9, n=200, seed=5)
+
+
+def test_the_split_is_independent_of_the_levels_despite_the_shared_seed() -> None:
+    """Every runner opens `_make` and `_split` on the same seed.
+
+    Two fresh streams on one seed is the kind of thing that deserves a check
+    rather than an argument, since a fold whose membership tracked the cell
+    assignment would bias every holdout delta in the section.  Standardised
+    against the finite-population sd -- half of a fixed sample, so the t's
+    spread is sqrt(1 - 1/2), not 1.
+    """
+    n = 4_000
+    stats = []
+    for seed in range(7000, 7150):
+        data = _make("spike", 6.0, n_levels=12, n=n, seed=seed)
+        train, _ = _split(n, seed)
+        for column in (data.joint // 12, data.joint % 12):
+            se = column.std(ddof=1) / np.sqrt(train.size)
+            stats.append((column[train].mean() - column.mean()) / se)
+        hot = np.isin(data.joint, np.flatnonzero(data.cell.ravel()))
+        p = hot.mean()
+        stats.append((hot[train].mean() - p) / np.sqrt(p * (1 - p) / train.size))
+
+    t = np.asarray(stats)
+    assert abs(t.mean()) < 0.15
+    assert t.std(ddof=1) == pytest.approx(np.sqrt(0.5), abs=0.12)
+    assert np.abs(t).max() < 4.0
 
 
 def test_every_documented_shrinkage_arm_is_actually_built() -> None:

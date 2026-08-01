@@ -38,8 +38,7 @@ the second needs one pass over the residuals the screen does not hand back.
    For k independent chi^2_1 contributions E[t] = 1 and E[t^2] = 3, so the null
    sits at P = k/3 for large k.  Reporting `P / (k/3)` gives ~1 for noise AND
    for genuinely diffuse truths, and near zero when a handful of cells carry
-   everything.
-   Unlike the gate, this is NOT arithmetic on the screening row:
+   everything.  Unlike the gate, this is NOT arithmetic on the screening row:
    `screen_interactions` returns aggregates (`statistic`, `z`, `edf0`), not the
    per-cell contributions, so `cell_contributions` below recomputes them from
    the mains-model residuals and the joint cell index.
@@ -220,6 +219,15 @@ def _mains(frame: pd.DataFrame, y: NDArray) -> SuperGLM:
 
 
 def _split(n: int, seed: int) -> tuple[NDArray, NDArray]:
+    """Half-sample train/test split.
+
+    Every runner calls this with the SAME seed it passed to `_make`, so the
+    permutation and the level assignment come off two fresh streams opened on
+    one seed.  That is worth a second look and it survives it: the two draws use
+    different bounded-integer paths, and fold membership shows no measurable
+    dependence on the levels or on any fixed cell set -- pinned in
+    `tests/test_screening_worth_gate.py`.
+    """
     order = np.random.default_rng(seed).permutation(n)
     return order[: n // 2], order[n // 2 :]
 
