@@ -565,13 +565,21 @@ only, which is a separate simulated study.
     the fix's own equivalence claim predicts. Tables 3 and 4 exist only on the
     fixed code.
 
-    That fix is also why the last two tables exist at all. On the old code each
-    41×41 refit ran for tens of minutes and the pair of tables was a multi-hour
-    job — a plausible reason nobody re-ran them, and not a reason to publish
-    the output of a run that did not happen. Both now complete in minutes. The
-    lesson is not "check your arithmetic"; it is that when re-running gets
-    expensive enough, published numbers quietly stop being re-run, and the
-    remedy is to make the rerun cheap and to name the command beside the figure.
+    That fix is also why the last two tables exist at all. On the old code one
+    41×41 refit was measured at 668.55 s and the pair of tables needed twelve
+    wide fits — a plausible reason nobody re-ran them, and not a reason to
+    publish the output of a run that did not happen. The lesson is not "check
+    your arithmetic"; it is that when re-running gets expensive enough,
+    published numbers quietly stop being re-run, and the remedy is to make the
+    rerun cheap and to name the command beside the figure.
+
+    **No wall-clock figure for this section is quoted anywhere in this guide**,
+    and the reason is worth recording as evidence rather than as a preference.
+    Three consecutive runs of `--tables 4` — identical work, identical output —
+    took **67 s, 100 s and 542 s** on a shared machine whose load average moved
+    from 21 to 37 across them. An eight-fold spread on a fixed workload is what
+    a contended wall-clock measurement is worth. The holdout and df columns are
+    unaffected by any of it, which is why those are the only things quoted.
 
 ## Reproducing
 
@@ -604,15 +612,14 @@ Each was taken from its own run of that command. The tables are deterministic
 given the seeds: three consecutive runs of `--tables 3` and of `--tables 4`
 produced byte-identical output apart from the wall-clock columns.
 
-**No runtime figure is quoted here.** The wide `cat_cat` refits dominate the
-cost — twelve wide fits between tables 3 and 4, nine plain refits and three
-`RandomEffect` fits on the 1,681-level cell — and every timing taken while
-this section was written came off a heavily loaded machine, so none of it is
-publishable as a wall-clock claim. What can be said without a stopwatch is
-structural: on the code before the alias-representative fix in this branch one
-of the nine refits was measured at **668.55 s**, against **9.27 s** after it
-(both figures from that commit, not from this benchmark). That is the
-difference between a run nobody repeats and a run anyone can.
+**No runtime figure is quoted here**, and [caveat 15](#caveats) records the
+measurement that is the reason. The wide `cat_cat` refits dominate the cost —
+twelve wide fits between tables 3 and 4, nine plain refits and three
+`RandomEffect` fits on the 1,681-level cell. What can be said without a
+stopwatch is structural: on the code before the alias-representative fix in
+this branch one of the nine refits was measured at **668.55 s**, against
+**9.27 s** after it (both figures from that commit, not from this benchmark).
+That is the difference between a run nobody repeats and a run anyone can.
 
 `--tables` exists so that a partial rerun is a quotable command rather than a
 hand edit: anything taken from this section in future should be published with
