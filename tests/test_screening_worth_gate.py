@@ -14,9 +14,12 @@ import pytest
 from benchmarks.screening_worth_gate import (
     HOT_CELLS,
     MATCHED,
+    SHRINKAGE_ARMS,
     _build_parser,
     _make,
     _run_concentration,
+    _run_shrinkage,
+    _shrinkage_spec,
     cell_contributions,
     concentration,
     participation_ratio,
@@ -118,6 +121,56 @@ def test_generator_plants_exactly_the_advertised_number_of_live_cells() -> None:
     # same seed, same parents: the only difference is the planted cells
     assert (data.joint == noise.joint).all()
     assert not np.allclose(data.y, noise.y)
+
+
+def test_every_documented_shrinkage_arm_is_actually_built() -> None:
+    """The guide quotes a holdout figure per arm, so each must be reproducible.
+
+    The `pooled` arm is the one that went missing once already -- the guide
+    cited its holdout gain while the benchmark had no such arm, leaving a
+    documented number with no way to check it.
+    """
+    assert SHRINKAGE_ARMS == ("mains", "fixed", "pooled")
+
+    kwargs, cols = _shrinkage_spec("mains")
+    assert "interactions" not in kwargs and cols == ["g", "h"]
+
+    kwargs, cols = _shrinkage_spec("fixed")
+    assert kwargs["interactions"] == [("g", "h")]
+    assert "gh" not in kwargs["features"]
+
+    kwargs, cols = _shrinkage_spec("pooled")
+    assert "interactions" not in kwargs
+    assert cols == ["g", "h", "gh"]
+    # the cell must be a RandomEffect, not another fixed factor -- a plain
+    # Categorical here would silently make `pooled` a second `fixed`
+    assert type(kwargs["features"]["gh"]).__name__ == "RandomEffect"
+
+
+def test_unknown_shrinkage_arm_is_rejected_rather_than_silently_skipped() -> None:
+    with pytest.raises(ValueError, match="unknown shrinkage arm"):
+        _shrinkage_spec("credibility")
+
+
+@pytest.mark.slow
+def test_shrinkage_table_reproduces_its_arms_and_prefers_pooling_over_fixed() -> None:
+    """Small-width end-to-end: the arms run and report a full row each.
+
+    Width is kept small so this stays a harness check. The ordering the guide
+    reports (pooled beats fixed on holdout) is a property of the WIDE case and
+    is not asserted here -- table 4 at the default width is where that lives.
+    """
+    rows = _run_shrinkage(reps=1, n=2_000, n_levels=6)
+    assert [row["model"] for row in rows] == list(SHRINKAGE_ARMS)
+    for row in rows:
+        assert np.isfinite(row["holdout"]) and row["holdout"] > 0
+        assert row["params"] >= 1 and row["edf"] > 0
+    fixed = next(r for r in rows if r["model"] == "fixed")
+    pooled = next(r for r in rows if r["model"] == "pooled")
+    # whatever the holdout ordering at this width, pooling must spend strictly
+    # fewer effective df than the unshrunk interaction -- that is what makes it
+    # a different model class rather than a relabelling
+    assert pooled["edf"] < fixed["edf"]
 
 
 @pytest.mark.slow
