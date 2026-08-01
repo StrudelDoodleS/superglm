@@ -75,10 +75,17 @@ with `--tables 3` / `--tables 4` and publish the command beside the figure.
 
 These are measurements of a simulated Gaussian book, not calibrated quantiles
 and not p-values.  `2*edf` is a Gaussian-family argument; the constant has not
-been checked for Poisson with exposure.  Expect ~45 minutes at the defaults --
-most of it in the wide fixed refits, which is itself part of the finding.  Their
-wall-clock moves several-fold under CPU contention; the holdout columns do not,
-so do not read the timings as a benchmark of the fitting paths.
+been checked for Poisson with exposure.
+
+The default runs all four tables, and the cost is NOT evenly spread: tables 3
+and 4 need twelve wide `cat_cat` refits between them and those dominate.  An
+earlier "~45 minutes at the defaults" here was never reproducible and has been
+withdrawn rather than replaced with a guess -- the total has not been re-timed
+since `rank.py` stopped choosing alias representatives by prefix walk, which
+took one 41x41 refit from 668.55 s to 9.27 s.  Use `--tables` to bound what you
+are paying for.  Wall-clock moves several-fold under CPU contention either way;
+the holdout columns do not, so do not read the timings as a benchmark of the
+fitting paths.
 """
 
 from __future__ import annotations
@@ -86,6 +93,7 @@ from __future__ import annotations
 import argparse
 import time
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -146,6 +154,21 @@ def cell_contributions(
     t = np.zeros(n_cells)
     t[occupied] = total[occupied] ** 2 / count[occupied] / phi
     return t, int(occupied.sum())
+
+
+def paired_deltas(arm: Sequence[float], mains: Sequence[float]) -> list[float]:
+    """Percent holdout change of each replicate against ITS OWN mains fit.
+
+    The three arms of table 4 share a draw and a split within a replicate, so
+    the comparison is paired and the pairing is the point: dividing every
+    replicate by the mains MEAN puts between-seed baseline variation back into
+    a number that is supposed to isolate the model class.  At three replicates
+    that is not a rounding difference -- it can invert the sign of an
+    individual split, which is exactly what the spread is being read for.
+    """
+    if len(arm) != len(mains):
+        raise ValueError(f"paired arms must be the same length, got {len(arm)} and {len(mains)}")
+    return [(a / m - 1.0) * 100.0 for a, m in zip(arm, mains, strict=True)]
 
 
 def participation_ratio(t: NDArray) -> float:
@@ -506,6 +529,12 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, obj
                 "holdout_reps": [float(v) for v in values[:, 4]],
             }
         )
+    # every arm in a replicate is fitted on the SAME draw and the SAME split,
+    # so the comparison is paired -- price each arm against its own replicate's
+    # mains fit rather than against the mains mean
+    mains_reps = next(r["holdout_reps"] for r in rows if r["model"] == "mains")
+    for row in rows:
+        row["delta_reps"] = paired_deltas(row["holdout_reps"], mains_reps)
     edf0 = float(np.mean(edfs))
     screen = {
         "z": float(np.mean(zs)),
@@ -597,17 +626,18 @@ def _print_shrinkage(rows: list[dict[str, object]], screen: dict, n_levels: int)
     print(
         f"{'model':>8} {'fit':>8} {'params':>8} {'edf':>9} {'train':>8} {'HOLDOUT':>9} {'vs mains':>10}"
     )
-    base = next((r["holdout"] for r in rows if r["model"] == "mains"), None)
+    mains = next((r for r in rows if r["model"] == "mains"), None)
     for row in rows:
-        delta = "" if base is None else f"{(row['holdout'] / base - 1) * 100:+9.1f}%"
+        # mean of the PAIRED deltas, not a ratio of means -- see `paired_deltas`
+        delta = "" if mains is None else f"{np.mean(row['delta_reps']):+9.1f}%"
         print(
             f"{row['model']:>8} {row['seconds']:>7.1f}s {row['params']:>8.0f} "
             f"{row['edf']:>9.1f} {row['train']:>8.4f} {row['holdout']:>9.4f} {delta:>10}"
         )
-    if base is not None:
+    if mains is not None:
         for row in rows:
-            per_rep = ", ".join(f"{(v / base - 1) * 100:+.1f}%" for v in row["holdout_reps"])
-            print(f"    {row['model']:>8} per-replicate vs the mains MEAN: {per_rep}")
+            per_rep = ", ".join(f"{v:+.1f}%" for v in row["delta_reps"])
+            print(f"    {row['model']:>8} per-replicate vs ITS OWN mains fit: {per_rep}")
     print(
         "\n  Wall-clock here is indicative only -- it moves several-fold under CPU\n"
         "  contention.  The holdout column does not."
@@ -640,8 +670,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     # NOT `ignore`: the pooled arm asks REML to estimate a variance component
     # over 1681 levels, and a run that mutes its own convergence warnings
-    # reports a number where it should report a problem.  `once` keeps a
-    # 45-minute run readable without hiding anything that fires.
+    # reports a number where it should report a problem.  `once` keeps a long
+    # run readable without hiding anything that fires.
     warnings.simplefilter("once")
     args = _build_parser().parse_args()
     started = time.perf_counter()

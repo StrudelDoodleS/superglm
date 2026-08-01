@@ -30,6 +30,7 @@ from benchmarks.screening_worth_gate import (
     _split,
     cell_contributions,
     concentration,
+    paired_deltas,
     participation_ratio,
     worth_threshold,
 )
@@ -110,6 +111,35 @@ def test_concentration_separates_spiky_from_diffuse_at_equal_total() -> None:
     assert spiky.sum() == pytest.approx(diffuse.sum())
     assert concentration(diffuse, k) == pytest.approx(1.0, abs=0.15)
     assert concentration(spiky, k) < 0.25
+
+
+def test_paired_deltas_price_each_replicate_against_its_own_mains_fit() -> None:
+    """Table 4's arms share a draw and a split, so the comparison is paired.
+
+    Dividing every replicate by the mains MEAN instead puts between-seed
+    baseline variation back into a number meant to isolate the model class.
+    The two do not merely differ in magnitude -- at three replicates the
+    unpaired form can report the wrong SIGN for an individual split, which is
+    the case constructed here.
+    """
+    mains = [1.0, 3.0]
+    arm = [1.5, 1.6]
+
+    paired = paired_deltas(arm, mains)
+    assert paired[0] == pytest.approx(50.0)  # worse on the replicate it shares
+    assert paired[1] == pytest.approx(-46.667, abs=1e-3)
+
+    # what the mains MEAN would have said: both replicates look like gains
+    unpaired = [(v / np.mean(mains) - 1.0) * 100.0 for v in arm]
+    assert all(u < 0 for u in unpaired)
+    assert paired[0] > 0 > unpaired[0]
+
+    # an arm identical to mains is exactly zero on every replicate, whatever
+    # the spread of the baseline
+    assert paired_deltas(mains, mains) == [0.0, 0.0]
+
+    with pytest.raises(ValueError, match="same length"):
+        paired_deltas([1.0], [1.0, 2.0])
 
 
 def test_concentration_null_is_a_large_k_limit_and_fails_at_small_k() -> None:
@@ -328,6 +358,9 @@ def test_shrinkage_table_reproduces_its_arms_and_pooling_spends_less_df() -> Non
         assert np.isfinite(row["holdout"]) and row["holdout"] > 0
         assert row["params"] >= 1 and row["edf"] > 0
         assert len(row["holdout_reps"]) == 1
+        # paired against this replicate's own mains fit, so mains is exactly 0
+        assert len(row["delta_reps"]) == 1
+    assert next(r for r in rows if r["model"] == "mains")["delta_reps"] == [0.0]
 
     # the z the guide quotes beside this table's holdout cost must come from
     # this table's own train split, not from table 2's full-sample fit on a

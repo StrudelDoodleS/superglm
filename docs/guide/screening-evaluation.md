@@ -519,18 +519,30 @@ only, which is a separate simulated study.
     harness too, the latter by 2 points of holdout MSE per column on its spiky
     row.
 
-    Version drift does not explain it: the branch touches no `src/` file, and
-    its merge base is the tip of `master`, so the library was byte-identical
-    when those numbers were written and when they were re-checked. No `--n` in
-    {4k, 6k, 8k, 12k, 24k} reproduces the published row either. The figures
-    were simply never produced by the committed benchmark.
+    Version drift does not explain it. Both the original figures and the
+    re-check ran against `src/` at **`a2611cc`** — the tip of `master`, and the
+    merge base of the branch that published them, which touched no `src/` file
+    at the time. No `--n` in {4k, 6k, 8k, 12k, 24k} reproduces the published
+    row either. The figures were simply never produced by the committed
+    benchmark.
+
+    **The library is no longer byte-identical to that state.** The same branch
+    now carries a fix to `src/superglm/solvers/rank.py` — alias-representative
+    selection on the rank-deficient path, which is exactly the path a wide
+    `cat_cat` refit takes. It is asserted equivalent (same edf, same deviance
+    to nine decimals, same zero positions on the real designs) and the two
+    tables above are expected to be unaffected, but they were measured at
+    `a2611cc` and **have not been re-run since**. Treat the SHA, not the
+    branch, as the provenance of those numbers.
 
     The removed tables are not deleted from the harness — `--tables 3` and
     `--tables 4` still run them, and their arms were fixed while this was being
-    checked. Each 41×41 refit is a tens-of-minutes job and the pair of tables
-    is a multi-hour one, which is a plausible reason nobody re-ran them; it is
-    not a reason to publish the output of a run that did not happen. Anything
-    quoted from them in future should name the command that produced it.
+    checked. On the code those tables were abandoned at, each 41×41 refit was a
+    tens-of-minutes job and the pair of tables a multi-hour one, which is a
+    plausible reason nobody re-ran them; it is not a reason to publish the
+    output of a run that did not happen. The solver fix above removes most of
+    that cost. Anything quoted from them in future should name both the command
+    and the commit that produced it.
 
 ## Reproducing
 
@@ -541,31 +553,41 @@ modified to run it. The mains-model and relativity measurements in
 superglm and the freMTPL2 parquet.
 
 [From rank to decision](#from-rank-to-decision-does-the-pair-pay-for-its-own-df)
-is simulated and needs neither, so it runs from a clean checkout:
-
-```
-uv run python benchmarks/screening_worth_gate.py
-```
-
-It prints four tables: the gate ladder, concentration at matched z, the sparse
-payoff, and the three-model-class comparison. **Only the first two are quoted
-above**, and both come from one run at the defaults — three replicates,
-n = 12,000, 41×41 for the wide table. `--tables 1,2` reruns exactly those:
+is simulated and needs neither, so it runs from a clean checkout. **To
+reproduce the two tables quoted above, and only those:**
 
 ```
 uv run python benchmarks/screening_worth_gate.py --tables 1,2
 ```
 
-The other two are not reported here ([caveat 15](#caveats)). `--tables` exists
-so that a partial rerun is a quotable command rather than a hand edit: anything
-taken from tables 3 or 4 in future should be published with the command that
-produced it.
+Both come from one such run at the defaults — three replicates, n = 12,000,
+41×41 for the wide table — against `src/` at `a2611cc` ([caveat
+15](#caveats)).
 
-Expect roughly 45 minutes at the defaults, nearly all of it in the
-wide fixed refits — which is part of what the section is about. Their
-wall-clock moves several-fold under CPU contention and should not be read as a
-benchmark of the fitting paths; the holdout columns are unaffected. The
-arithmetic underneath the two readings is guarded by
+The bare command runs all four tables, including the sparse payoff and the
+three-model-class comparison, which are **not** reported here:
+
+```
+uv run python benchmarks/screening_worth_gate.py
+```
+
+Budget for that one carefully, because the cost is not evenly spread. Tables 3
+and 4 need twelve wide `cat_cat` refits between them and those dominate
+everything else. On the code these tables were abandoned at, one such refit was
+measured at **668.55 s**, putting the bare command in the multi-hour range;
+the alias-representative fix in this branch takes the same refit to **9.27 s**
+(both figures measured in that commit, not by this benchmark). **The total for
+the bare command has not been re-timed since**, so no figure for it is quoted
+here — the earlier "roughly 45 minutes" was never reproducible and has been
+withdrawn rather than replaced with a guess.
+
+`--tables` exists so that a partial rerun is a quotable command rather than a
+hand edit: anything taken from tables 3 or 4 in future should be published with
+the command and the commit that produced it.
+
+Whatever the total, wall-clock here moves several-fold under CPU contention and
+should not be read as a benchmark of the fitting paths; the holdout columns are
+unaffected. The arithmetic underneath the two readings is guarded by
 `tests/test_screening_worth_gate.py`.
 
 One trap worth recording for anyone extending the FAST comparison:
