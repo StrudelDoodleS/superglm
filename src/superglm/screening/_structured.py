@@ -47,7 +47,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.screening._arrow import factor_arrow
+from superglm.screening._arrow import factor_arrow, psd_ranks
 from superglm.screening._score_stat import ScreenedPair
 
 _EDF_TOL = 1e-6
@@ -147,7 +147,47 @@ def _overlap_arrow(p: SplineCatPair):
     return factor_arrow(p.m.reshape(L, 1, 1), E, p.border)
 
 
-def _pair_arrow(p: SplineCatPair, lam: float):
+def _unpenalized_blocks(p: SplineCatPair) -> NDArray:
+    """The ``(L, k_a + 1, k_a + 1)`` level blocks at ``lambda = 0``."""
+    L, k_a = p.dims
+    g = k_a + 1
+    G = np.empty((L, g, g), dtype=np.float64)
+    G[:, :k_a, :k_a] = p.V
+    G[:, :k_a, k_a] = p.c
+    G[:, k_a, :k_a] = p.c
+    G[:, k_a, k_a] = p.m
+    return G
+
+
+def block_ranks(p: SplineCatPair) -> NDArray:
+    """The rank of every level block, counted where the two terms BALANCE.
+
+    A block is ``P_q + lambda T`` with both terms PSD, so its null space is
+    ``null(P_q) & null(T)`` for every ``lambda > 0`` and its rank is the same
+    throughout.  That lets it be counted ONCE, and counted on the one member
+    of the family a relative eigenvalue cut can actually resolve: each term
+    scaled to unit trace, so neither is judged against the other's magnitude.
+
+    Counting it at a bracket edge instead — which is what reading it off the
+    factorization does — loses a whole degree of freedom whenever the two
+    terms are far enough apart there.  Measured on a 20-level pair with one
+    level weighted 1/100th of the others: the block-rank sum reads 227 at
+    each edge where the balanced count and ``numpy.linalg.matrix_rank`` both
+    read 228, and the pair's ``edf0`` came back 17.99995 against the dense
+    path's 18.99991.  The low edge is not safe either — it under-counted by
+    one on the same pair at EQUAL weights, the mirror image of the same
+    failure.  Rare levels are the routine case at high cardinality, so this
+    is not an edge case; see :mod:`superglm.screening._arrow`.
+    """
+    _, k_a = p.dims
+    tiny = np.finfo(np.float64).tiny
+    G = _unpenalized_blocks(p)
+    G /= np.maximum(np.einsum("lpp->l", G, optimize=True), tiny)[:, None, None]
+    G[:, :k_a, :k_a] += p.S_a / max(float(np.trace(p.S_a)), tiny)
+    return psd_ranks(G)
+
+
+def _pair_arrow(p: SplineCatPair, lam: float, ranks: NDArray | None = None):
     """``K(lambda)`` in arrow form: one ``(k_a + 1)`` block per level.
 
     Level q's block holds its tensor coefficients beside its own contrast;
@@ -158,17 +198,14 @@ def _pair_arrow(p: SplineCatPair, lam: float):
     """
     L, k_a = p.dims
     g, r = k_a + 1, 1 + k_a
-    G = np.empty((L, g, g), dtype=np.float64)
-    G[:, :k_a, :k_a] = p.V + lam * p.S_a
-    G[:, :k_a, k_a] = p.c
-    G[:, k_a, :k_a] = p.c
-    G[:, k_a, k_a] = p.m
+    G = _unpenalized_blocks(p)
+    G[:, :k_a, :k_a] += lam * p.S_a
     E = np.empty((L, r, g), dtype=np.float64)
     E[:, 0, :k_a] = p.c
     E[:, 0, k_a] = p.m
     E[:, 1:, :k_a] = p.V
     E[:, 1:, k_a] = p.c
-    return factor_arrow(G, E, p.border)
+    return factor_arrow(G, E, p.border, block_ranks=ranks)
 
 
 def _profile(p: SplineCatPair) -> tuple[NDArray, int]:
@@ -187,15 +224,24 @@ def _profile(p: SplineCatPair) -> tuple[NDArray, int]:
     return U_eff, f.rank
 
 
-def _evaluate(p: SplineCatPair, U_eff: NDArray, rank_m: int, lam: float) -> tuple[float, float]:
+def _evaluate(
+    p: SplineCatPair,
+    U_eff: NDArray,
+    rank_m: int,
+    lam: float,
+    ranks: NDArray | None = None,
+) -> tuple[float, float]:
     """``(T, edf)`` at one lambda, from ONE arrow factorization.
 
     ``rank(V_eff + lambda S)`` is Guttman rank additivity on the bordered
-    system — ``rank(K) = rank(M) + rank(A)`` — and both ranks come free from
-    the arrow factorizations, which already counted the directions they kept.
+    system — ``rank(K) = rank(M) + rank(A)``.  ``ranks`` carries the level
+    blocks' contribution, counted once by :func:`block_ranks` because it does
+    not depend on ``lambda`` and cannot be resolved reliably at the edges
+    where the ladder brackets; the border's own rank comes from this
+    factorization.
     """
     L, k_a = p.dims
-    f = _pair_arrow(p, lam)
+    f = _pair_arrow(p, lam, block_ranks(p) if ranks is None else ranks)
     b = np.zeros((L, k_a + 1), dtype=np.float64)
     b[:, :k_a] = U_eff
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
@@ -224,17 +270,24 @@ def structured_ladder(
     path would have taken the pair anyway.
     """
     U_eff, rank_m = _profile(p)
+    ranks = block_ranks(p)
     # The dense path scales its bracket by tr(V_eff)/tr(S); the unprofiled
     # tr(V) is used here because profiling the trace structurally would cost
     # more than the bracket is worth.  The two differ by a few percent, ten
     # orders of magnitude outside the region where edf varies with lambda.
+    #
+    # The 1e+-10 edges are the dense ladder's, kept identical so a pair the
+    # two paths can both score gets the same lambda0.  Nothing in the arrow
+    # kernel's numerics is tied to their width any more: rank is counted from
+    # a balanced reference (see block_ranks) precisely so that widening them
+    # cannot move an edf by a whole degree of freedom.
     tr_S = float(np.trace(p.S_a)) * p.dims[0]
     tr_V = float(np.einsum("lpp->", p.V, optimize=True))
     scale = max(tr_V, 1e-300) / max(tr_S, 1e-300)
     lo, hi = 1e-10 * scale, 1e10 * scale
 
-    stat_lo, edf_lo = _evaluate(p, U_eff, rank_m, lo)
-    stat_hi, edf_hi = _evaluate(p, U_eff, rank_m, hi)
+    stat_lo, edf_lo = _evaluate(p, U_eff, rank_m, lo, ranks)
+    stat_hi, edf_hi = _evaluate(p, U_eff, rank_m, hi, ranks)
 
     out: list[ScreenedPair] = []
     for budget in budgets:
@@ -250,7 +303,7 @@ def structured_ladder(
             if b <= a * (1.0 + 1e-12):
                 break
             lam = float(np.sqrt(a * b))
-            stat, achieved = _evaluate(p, U_eff, rank_m, lam)
+            stat, achieved = _evaluate(p, U_eff, rank_m, lam, ranks)
             if abs(achieved - edf0) <= _EDF_TOL:
                 break
             if achieved > edf0:

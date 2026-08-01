@@ -95,9 +95,11 @@ def test_arrow_reports_the_rank_of_a_singular_system():
     assert f.rank == np.linalg.matrix_rank(K)
 
 
-def _capture(df, y, features, cand, **kw):
+def _capture(df, y, features, cand, sample_weight=None, **kw):
     model = SuperGLM(family="gaussian", features=features)
-    model.fit_reml(df, y)
+    model.fit_reml(df, y, sample_weight=sample_weight)
+    if sample_weight is not None:
+        kw["sample_weight"] = sample_weight
     grab = {}
     real_curv, real_cells, real_ladder = (
         ops.pair_score_curvature,
@@ -280,6 +282,73 @@ def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
     row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS).iloc[0]
     assert np.isfinite(row["z"])
     assert calls == []
+
+
+def _thin_level_pair(low_weight):
+    """A 20-level pair the DENSE path can also score, one level down-weighted.
+
+    A rare level is the routine case at high cardinality, and it is what
+    makes the arrow kernel's per-block rank cut disagree with the dense
+    path's: at the ladder's high edge that level's own curvature sits below
+    ``lambda * S_a`` by its weight share, not by 1e-10.
+    """
+    rng = np.random.default_rng(3)
+    L, reps = 20, 40
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.0, 1.0, n)
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    w = np.ones(n)
+    w[g == "L0"] = low_weight
+    grab = _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="ps", n_knots=8)},
+        ("x", "g"),
+        sample_weight=w,
+    )
+    return grab
+
+
+@pytest.mark.parametrize("low_weight", [1.0, 0.01, 0.001])
+def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
+    """Cross-path agreement on a system the rank cut has to resolve.
+
+    ``edf`` is ``rank(A) - lambda tr(A^-1 S)`` and the rank is an INTEGER, so
+    a mis-counted one moves the answer by a whole degree of freedom -- which
+    is a different ``z``, not a rounding difference.  Counting it at the
+    bracket edge did exactly that: measured 17.99995 against the dense path's
+    18.99991 with one level of twenty carried at 1/100th the weight.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    grab = _thin_level_pair(low_weight)
+    U, V, C, M, S_ti, u_m = grab["args"]
+    dense = penalized_score_statistic_ladder(U, V, C, M, S_ti, budgets=BUDGETS, U_nuisance=u_m)
+    struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=BUDGETS)
+    for d, s in zip(dense, struct, strict=True):
+        assert s.edf0 == pytest.approx(d.edf0, abs=1e-3)
+        assert s.statistic == pytest.approx(d.statistic, rel=1e-3)
+
+
+def test_the_block_rank_is_the_one_a_dense_rank_call_reports():
+    """The balanced count is not merely self-consistent, it is right.
+
+    ``rank(P + lambda T)`` is the same for every positive ``lambda``, so an
+    independent dense rank of the same blocks has to agree -- and the counts
+    read off the two bracket edges are what must not be trusted for it.
+    """
+    from superglm.screening._structured import _unpenalized_blocks, block_ranks
+
+    p = spline_cat_moments(*_structured_inputs(_thin_level_pair(0.01)))
+    L, k_a = p.dims
+    P = _unpenalized_blocks(p)
+    T = np.zeros((k_a + 1, k_a + 1))
+    T[:k_a, :k_a] = p.S_a
+    want = sum(np.linalg.matrix_rank(P[q] / np.trace(P[q]) + T / np.trace(T)) for q in range(L))
+    assert int(block_ranks(p).sum()) == want
 
 
 def test_degenerate_levels_are_scored_not_skipped():
