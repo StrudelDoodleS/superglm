@@ -77,8 +77,8 @@ from superglm.solvers.rank import (
     RankInfo,
     decompose_factor,
     decompose_gram,
+    decompose_gram_if_authoritative,
     decompose_symmetric,
-    needs_factor_certification,
 )
 from superglm.solvers.scop import SCOPSolverReparam
 from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
@@ -1383,9 +1383,9 @@ def _fit_irls_direct_once(
 
                 # Step 4: Solve for unconstrained coefficients
                 _t0 = time.perf_counter()
-                reduced_rank = decompose_gram(reduced_centered.hessian)
+                reduced_rank = decompose_gram_if_authoritative(reduced_centered.hessian)
                 reduced_factor_rhs = None
-                if needs_factor_certification(reduced_rank):
+                if reduced_rank is None:
                     reduced_factor, certified_rhs = grouped_augmented_factor_rhs(
                         _reduced_dm,
                         W,
@@ -1535,9 +1535,9 @@ def _fit_irls_direct_once(
                 _last_working_centered = centered
                 _t_gram += time.perf_counter() - _t0
                 _t0 = time.perf_counter()
-                iteration_rank = decompose_gram(centered.hessian)
+                iteration_rank = decompose_gram_if_authoritative(centered.hessian)
                 iteration_factor_rhs = None
-                if needs_factor_certification(iteration_rank):
+                if iteration_rank is None:
                     certification = certify_centered_factor(
                         centered,
                         W,
@@ -2390,8 +2390,8 @@ def _fit_irls_direct_once(
         XtWX_beta = XtWX
         reml_slope_rank: RankDecomposition | None
         if _compute_reml_geometry:
-            reml_slope_rank = decompose_gram(centered_final.hessian)
-            if needs_factor_certification(reml_slope_rank):
+            reml_slope_rank = decompose_gram_if_authoritative(centered_final.hessian)
+            if reml_slope_rank is None:
                 certification = certify_centered_factor(
                     centered_final,
                     W,
@@ -2420,8 +2420,8 @@ def _fit_irls_direct_once(
             M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
                 centered_final.mean_x, centered_final.mean_x
             )
-            coefficient_rank = decompose_gram(M_beta)
-            if needs_factor_certification(coefficient_rank):
+            coefficient_rank = decompose_gram_if_authoritative(M_beta)
+            if coefficient_rank is None:
                 certification = certify_centered_factor(centered_final, W)
                 raw_factor = np.vstack(
                     (
@@ -2439,8 +2439,12 @@ def _fit_irls_direct_once(
                 data_rank = decompose_factor(A_data_final) if compute_rank_info else None
                 augmented_rank = reml_slope_rank
             else:
-                data_rank = decompose_gram(centered_final.data_gram) if compute_rank_info else None
-                if data_rank is not None and needs_factor_certification(data_rank):
+                data_rank = (
+                    decompose_gram_if_authoritative(centered_final.data_gram)
+                    if compute_rank_info
+                    else None
+                )
+                if compute_rank_info and data_rank is None:
                     if not np.any(centered_final.penalty):
                         certification = certify_centered_factor(centered_final, W)
                         data_rank = certification.decomposition

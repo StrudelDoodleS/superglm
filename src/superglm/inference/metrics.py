@@ -42,8 +42,8 @@ from superglm.solvers.centered_system import penalty_factor
 from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram,
+    decompose_gram_if_authoritative,
     diagonal_of_square,
-    needs_factor_certification,
     selected_group_name_set,
     streamed_weighted_factor,
 )
@@ -154,8 +154,8 @@ def _certified_data_rank(
     xtw1: NDArray,
 ):
     """Certify ambiguous centered data geometry with observation rows."""
-    decomposition = decompose_gram(data_gram)
-    if not needs_factor_certification(decomposition):
+    decomposition = decompose_gram_if_authoritative(data_gram)
+    if decomposition is not None:
         return decomposition
     factor = streamed_weighted_factor(
         iter_dense_chunks(design),
@@ -172,8 +172,8 @@ def _certified_coefficient_rank(
     penalty: NDArray,
 ):
     """Certify ambiguous raw penalized geometry with observation rows."""
-    decomposition = decompose_gram(raw_gram + penalty)
-    if not needs_factor_certification(decomposition):
+    decomposition = decompose_gram_if_authoritative(raw_gram + penalty)
+    if decomposition is not None:
         return decomposition
     factor = streamed_weighted_factor(iter_dense_chunks(design), W)
     smooth_factor = penalty_factor(penalty)
@@ -193,8 +193,8 @@ def _certified_profile_rank(
     """Return the certified centered Hessian decomposition for covariance."""
     if not np.any(penalty):
         return data_rank
-    decomposition = decompose_gram(data_gram + penalty)
-    if not needs_factor_certification(decomposition):
+    decomposition = decompose_gram_if_authoritative(data_gram + penalty)
+    if decomposition is not None:
         return decomposition
     factor = streamed_weighted_factor(
         iter_dense_chunks(design),

@@ -141,6 +141,37 @@ def streamed_weighted_factor_rhs(
     return np.asarray(joint_factor[:, :width]), np.asarray(joint_factor[:, width])
 
 
+def _certification_required(
+    *,
+    method: str,
+    width: int,
+    rank: int,
+    pre_truncation_condition: float,
+    resolution_limited: bool,
+    policy: RankPolicy,
+) -> bool:
+    """The certification predicate, over the five fields that decide it.
+
+    ``decompose_gram`` knows all five before it builds the retained subspace,
+    so the predicate is kept callable without a decomposition in hand --
+    otherwise the eager path and the deferring path would each carry their own
+    copy of the band, free to drift apart.
+    """
+    if method == "qr_svd":
+        # A factor decomposition is already the authoritative certificate;
+        # never stream and factor the same rows again merely because the
+        # factor policy itself truncated a nonzero singular value.
+        return False
+    certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
+    return bool(
+        width > 0
+        and (
+            (rank == width and pre_truncation_condition >= certification_condition)
+            or (rank < width and resolution_limited)
+        )
+    )
+
+
 def needs_factor_certification(
     decomposition: RankDecomposition,
     *,
@@ -152,21 +183,13 @@ def needs_factor_certification(
     Normal equations can erase a factor-scale direction at the numerical
     boundary, or retain a different direction while reporting the same rank.
     """
-    if decomposition.method == "qr_svd":
-        # A factor decomposition is already the authoritative certificate;
-        # never stream and factor the same rows again merely because the
-        # factor policy itself truncated a nonzero singular value.
-        return False
-    certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
-    return bool(
-        decomposition.width > 0
-        and (
-            (
-                decomposition.rank == decomposition.width
-                and decomposition.pre_truncation_condition >= certification_condition
-            )
-            or (decomposition.rank < decomposition.width and decomposition.resolution_limited)
-        )
+    return _certification_required(
+        method=decomposition.method,
+        width=decomposition.width,
+        rank=decomposition.rank,
+        pre_truncation_condition=decomposition.pre_truncation_condition,
+        resolution_limited=decomposition.resolution_limited,
+        policy=policy,
     )
 
 
@@ -742,15 +765,23 @@ def _retained_log_pdet(
     return coordinate_logdet + float(np.sum(np.log(np.abs(retained_values))))
 
 
-def decompose_gram(
+def _decompose_gram(
     matrix: NDArray,
     *,
     policy: RankPolicy = SHARED_RANK_POLICY,
     residual_tol: float = 1e-6,
     fallback_factor: NDArray | None = None,
     allow_indefinite: bool = False,
-) -> RankDecomposition:
-    """Equilibrate and decompose a symmetric positive-semidefinite matrix."""
+    omit_uncertifiable: bool = False,
+) -> RankDecomposition | None:
+    """Equilibrate and decompose a symmetric positive-semidefinite matrix.
+
+    ``omit_uncertifiable`` is a pure optimization hint, never a semantic one:
+    when it is set this may return ``None`` instead of a decomposition that
+    :func:`needs_factor_certification` would have rejected anyway.  It is
+    permitted to return a decomposition in that case too, so the caller still
+    owns the predicate -- see :func:`decompose_gram_if_authoritative`.
+    """
     equilibrated, column_scale, active_columns, _ = _equilibrate_gram(
         matrix, allow_indefinite=allow_indefinite
     )
@@ -901,6 +932,35 @@ def decompose_gram(
         except (np.linalg.LinAlgError, ValueError):
             pass
 
+    # Normal equations cannot distinguish an exact active-column alias from a
+    # full-rank factor direction whose squared singular value rounded to zero.
+    # Structural zero columns were removed above; every other PSD truncation
+    # therefore needs observation-factor certification when one is available.
+    #
+    # Hoisted above the subspace construction on purpose: it reads only the
+    # spectrum, and it is the last field the certification predicate needs.
+    resolution_limited = bool(
+        (psd_semantics and rank < len(active_columns))
+        or np.any((np.abs(raw_eigenvalues) > 0.0) & ~retained_mask)
+        or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
+    )
+    # Everything past this point -- two width-by-rank bases, the null basis,
+    # the retained pseudo-determinant, the representative selection and its
+    # Cholesky -- exists only to be read off the returned decomposition.  Both
+    # returns below are reached with the ``rank``, ``width``,
+    # ``pre_truncation_condition`` and ``resolution_limited`` computed above,
+    # and neither reports ``qr_svd``, so the predicate settles here exactly as
+    # it would on the finished object.  When it says the caller must certify
+    # against the observation factor, none of that work can be read back.
+    if omit_uncertifiable and _certification_required(
+        method="gram_eigh",
+        width=width,
+        rank=rank,
+        pre_truncation_condition=condition,
+        resolution_limited=resolution_limited,
+        policy=policy,
+    ):
+        return None
     retained_vectors = eigenvectors[:, retained_mask]
     discarded_vectors = eigenvectors[:, ~retained_mask]
     solution_basis = np.zeros((width, rank))
@@ -910,15 +970,6 @@ def decompose_gram(
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = eigenvalues[retained_mask]
-    # Normal equations cannot distinguish an exact active-column alias from a
-    # full-rank factor direction whose squared singular value rounded to zero.
-    # Structural zero columns were removed above; every other PSD truncation
-    # therefore needs observation-factor certification when one is available.
-    resolution_limited = bool(
-        (psd_semantics and rank < len(active_columns))
-        or np.any((np.abs(raw_eigenvalues) > 0.0) & ~retained_mask)
-        or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
-    )
     log_pdet = (
         2.0 * float(np.sum(np.log(active_scale))) + float(np.sum(np.log(np.abs(retained_values))))
         if rank == width
@@ -993,6 +1044,61 @@ def decompose_gram(
         structural_aliases=_freeze(structural_aliases, dtype=bool),
         retained_values=_freeze(retained_values),
     )
+
+
+def decompose_gram(
+    matrix: NDArray,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+    residual_tol: float = 1e-6,
+    fallback_factor: NDArray | None = None,
+    allow_indefinite: bool = False,
+) -> RankDecomposition:
+    """Equilibrate and decompose a symmetric positive-semidefinite matrix."""
+    decomposition = _decompose_gram(
+        matrix,
+        policy=policy,
+        residual_tol=residual_tol,
+        fallback_factor=fallback_factor,
+        allow_indefinite=allow_indefinite,
+    )
+    if decomposition is None:  # pragma: no cover - omit_uncertifiable defaults off
+        raise RuntimeError("gram decomposition omitted its subspace without being asked to")
+    return decomposition
+
+
+def decompose_gram_if_authoritative(
+    matrix: NDArray,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+    residual_tol: float = 1e-6,
+    fallback_factor: NDArray | None = None,
+) -> RankDecomposition | None:
+    """The Gram decomposition when it is authoritative, else ``None``.
+
+    ``None`` means exactly what ``needs_factor_certification`` means on the
+    eager result: this Gram cannot certify its own retained subspace, and the
+    caller must go to the observation factor.  Callers that do nothing else in
+    that case should prefer this to ``decompose_gram`` plus the predicate,
+    because a Gram that is about to be superseded never builds the retained
+    subspace, the null basis, the representative Cholesky or the retained
+    pseudo-determinant that only the superseded object could have exposed.
+
+    The predicate below is the authority, so the contract holds whatever the
+    hint inside chooses to skip: the eager and deferring paths agree on every
+    field that decides it, and a spared decomposition is one no caller in this
+    shape could have read.
+    """
+    decomposition = _decompose_gram(
+        matrix,
+        policy=policy,
+        residual_tol=residual_tol,
+        fallback_factor=fallback_factor,
+        omit_uncertifiable=True,
+    )
+    if decomposition is None or needs_factor_certification(decomposition, policy=policy):
+        return None
+    return decomposition
 
 
 def decompose_symmetric(
