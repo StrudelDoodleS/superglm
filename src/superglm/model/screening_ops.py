@@ -200,6 +200,10 @@ def _margin_kind(spec) -> str | None:
             # the confirm-by-refit contract, so the margin is excluded until
             # the builders learn the grouping.
             return None
+        # KEPT as a guard, not a live case: Categorical.build raises below two
+        # levels, so a FITTED spec always clears this and the None branch is
+        # unreachable from screen_interactions.  Left in place because the
+        # alternative is a (1, 0) contrast menu reaching the cell kernels.
         return "categorical" if len(spec._levels) >= 2 else None
     if isinstance(spec, Numeric):
         return "numeric"
@@ -239,7 +243,7 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, fitted_names):
         pair = tuple(raw)
         if len(pair) == 2 and pair[0] != pair[1]:
             # A name the model DID fit but cannot screen (Polynomial, step-mode
-            # OrderedCategorical, a one-level Categorical) is deferred, not a
+            # OrderedCategorical, a grouped Categorical) is deferred, not a
             # typo; listing the screenable features would send the caller
             # hunting for a misspelling that isn't there.
             deferred_names = sorted(

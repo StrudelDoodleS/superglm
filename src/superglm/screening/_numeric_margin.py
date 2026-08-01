@@ -38,6 +38,11 @@ def numeric_pair_moments(
     w = np.asarray(working_weights, dtype=np.float64)
     if not (codes_g.shape == z.shape == score.shape == w.shape):
         raise ValueError("codes, z, score, and working weights must share one row dimension")
+    if menu_g.ndim != 2 or menu_g.shape[0] != n_g:
+        raise ValueError(
+            f"menu_g must be (n_g, k) with one row per gridded cell; got shape "
+            f"{menu_g.shape} for n_g={n_g}"
+        )
     if codes_g.size and (int(codes_g.min()) < 0 or int(codes_g.max()) >= n_g):
         raise ValueError("codes_g fall outside [0, n_g)")
 

@@ -64,9 +64,9 @@ across levels is wanted rather than reference-coded deviations — same parents,
 penalized level curves; see [Interactions](interactions.md).
 
 **What gets swept.** `candidates=None` pairs every eligible fitted feature:
-splines, spline-mode `OrderedCategorical`, `Categorical` with at least two
-levels, and `Numeric`. `Polynomial`, `RandomEffect`,
-step-mode `OrderedCategorical` and single-level factors have no screenable
+splines, spline-mode `OrderedCategorical`, `Categorical` and `Numeric`.
+`Polynomial`, `RandomEffect` and
+step-mode `OrderedCategorical` have no screenable
 margin. A `Categorical` carrying a `grouping=` is excluded for a different
 reason: it screens perfectly well, but no interaction builder yet maps its raw
 column through the grouping, so the confirmatory refit of such a pair cannot be
