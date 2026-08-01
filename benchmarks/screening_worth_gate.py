@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import math
 import signal
 import sys
 import time
@@ -245,10 +246,48 @@ def _make(kind: str, magnitude: float, n_levels: int, n: int, seed: int) -> Pair
     )
 
 
+class NonconvergedFitError(RuntimeError):
+    """A fit that did not converge, refused before it can reach a table."""
+
+
+def _require_converged(model: SuperGLM, label: str) -> SuperGLM:
+    """Refuse a fit whose own convergence flags say it failed.
+
+    Every number in this file is a mean over replicates, so one failed fit does
+    not announce itself -- it moves a column and leaves the table looking
+    exactly as valid as before.  That is the same failure `_positive_int`
+    exists to prevent, and it deserves the same treatment: stop, rather than
+    average it in.
+
+    Both flags are checked because the arms disagree about which one is
+    meaningful.  `reml_diagnostics()["enabled"]` is False for `mains` and
+    `fixed` -- `fit_reml` finds no REML-eligible group in a pure-`Categorical`
+    model and falls back to `fit()` -- so for those the outer flag is `None`
+    and only the solver's own convergence exists.  `pooled` estimates a
+    variance component and reports both.  Reading only one of them would
+    exempt two arms of table 4 from the check, or all of tables 1 and 3.
+
+    This mirrors what the public report shows: `diagnostics()["_model"]`
+    reports the REML flag when REML ran and the solver flag otherwise.
+    """
+    reml = model.reml_diagnostics()
+    solver_converged = bool(model.result.converged)
+    reml_converged = bool(reml["converged"]) if reml["enabled"] else True
+    if solver_converged and reml_converged:
+        return model
+    raise NonconvergedFitError(
+        f"{label}: fit did not converge "
+        f"(solver converged={solver_converged}, n_iter={int(model.result.n_iter)}; "
+        f"reml enabled={reml['enabled']}, converged={reml['converged']!r}, "
+        f"termination={reml.get('termination_reason')!r}). "
+        "Refusing to average a failed fit into the table."
+    )
+
+
 def _mains(frame: pd.DataFrame, y: NDArray) -> SuperGLM:
     model = SuperGLM(family="gaussian", features={"g": Categorical(), "h": Categorical()})
     model.fit(frame[["g", "h"]], y)
-    return model
+    return _require_converged(model, "mains")
 
 
 def _split(n: int, seed: int) -> tuple[NDArray, NDArray]:
@@ -296,6 +335,7 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
                     interactions=[("g", "h")],
                 )
                 full.fit(dtr, ytr)
+                _require_converged(full, f"gate ladder L={n_levels} effect={effect} rep={rep}")
                 base = float(np.mean((mains.predict(dte) - yte) ** 2))
                 with_pair = float(np.mean((full.predict(dte) - yte) ** 2))
                 deltas.append((with_pair / base - 1.0) * 100.0)
@@ -418,6 +458,7 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
                         interactions=[("g", "h")],
                     )
                     model.fit(dtr, ytr)
+                    _require_converged(model, f"sparse payoff {kind} rep={rep} full refit")
                     got = float(np.mean((model.predict(dte) - yte) ** 2))
                 else:
                     hot = set(np.intersect1d(ranked[:m], live).tolist())
@@ -433,6 +474,7 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
                         },
                     )
                     model.fit(a, ytr)
+                    _require_converged(model, f"sparse payoff {kind} rep={rep} arm-{m}")
                     got = float(np.mean((model.predict(b) - yte) ** 2))
                 acc[m].append((got / base - 1.0) * 100.0)
                 # df bought over the mains model, so the sparse arms and the
@@ -517,6 +559,7 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, obj
             model = SuperGLM(family="gaussian", **kwargs)
             model.fit_reml(dtr, ytr)
             seconds = time.perf_counter() - started
+            _require_converged(model, f"shrinkage arm={arm} rep={rep}")
             result = model.result
             acc[arm].append(
                 (
@@ -703,29 +746,89 @@ def arm_watchdog(seconds: float) -> bool:
     return True
 
 
-def _positive_int(value: str) -> int:
-    """A benchmark dimension that must be >= 1.
+# Smallest width the spiky generator is defined at: it draws HOT_CELLS
+# DISTINCT cells from the L x L grid, so L*L must reach HOT_CELLS.  At L = 1
+# and 2 `rng.choice` raises "Cannot take a larger sample than population when
+# replace is False".
+MIN_WIDE_LEVELS = math.ceil(math.sqrt(HOT_CELLS))
+# Smallest sample `_split` is defined at: below this the training half is
+# empty and the first fit sees no rows at all.
+MIN_ROWS = 2
 
-    Zero is the dangerous one: `--reps 0` used to run every loop zero times,
-    average empty lists into `nan`, and print a complete, well-formatted,
-    entirely meaningless table -- exit code 0 and all.  A report that looks
-    valid and is not is worse than a crash, and this whole section exists
-    because of numbers nobody could reproduce.
+
+def _at_least(minimum: int, what: str):
+    """An argparse type for a dimension with its own floor.
+
+    A single `>= 1` floor was not enough.  `--wide-levels 1` and `2` clear it
+    and then fail inside `rng.choice`, and `--n 1` clears it and then hands the
+    first fit an empty training split -- both a long way from the flag that
+    caused them.  These floors are STRUCTURAL: the smallest values at which the
+    generator and the split are defined at all.  They are not a claim that the
+    configuration has enough data to fit; that stays data-dependent and is
+    checked per table in `_validate_configuration`.
     """
-    try:
-        parsed = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from None
-    if parsed < 1:
-        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
-    return parsed
+
+    def parse(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"expected an integer >= {minimum}, got {value!r}"
+            ) from None
+        if parsed < minimum:
+            raise argparse.ArgumentTypeError(f"{what}, so must be >= {minimum}, got {parsed}")
+        return parsed
+
+    return parse
+
+
+def _validate_configuration(args: argparse.Namespace) -> None:
+    """Reject a table configuration that provably cannot run.
+
+    With `n // 2` training rows and `L` levels per factor, `n // 2 < L` leaves
+    at least one level absent from the training half by pigeonhole, and a level
+    seen only at predict time is a hard error rather than a zero.  So this is a
+    NECESSARY condition, exactly derivable, and it catches the configurations
+    that otherwise surface far downstream as an unseen-level error naming a
+    category rather than a flag.
+
+    It is not sufficient -- a level can still be missing when the inequality
+    holds -- and that residue is left to fail loudly at fit time, where the
+    message names the actual level.
+    """
+    train_rows = args.n // 2
+    required: list[tuple[str, int]] = []
+    if 1 in args.tables:
+        required.append(("table 1 (gate ladder)", max(LADDER)))
+    for table in (2, 3, 4):
+        if table in args.tables:
+            required.append((f"table {table}", args.wide_levels))
+    for label, levels in required:
+        if train_rows < levels:
+            raise SystemExit(
+                f"--n {args.n} gives {train_rows} training rows, but {label} needs at least "
+                f"{levels} (one per level of each factor, or a level is certainly missing "
+                f"from the training half and predict fails on it)."
+            )
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reps", type=_positive_int, default=3)
-    parser.add_argument("--n", type=_positive_int, default=12_000)
-    parser.add_argument("--wide-levels", type=_positive_int, default=41)
+    parser.add_argument(
+        "--reps", type=_at_least(1, "a run needs at least one replicate"), default=3
+    )
+    parser.add_argument(
+        "--n",
+        type=_at_least(MIN_ROWS, "the split must leave both halves non-empty"),
+        default=12_000,
+    )
+    parser.add_argument(
+        "--wide-levels",
+        type=_at_least(
+            MIN_WIDE_LEVELS, f"the spiky truth plants {HOT_CELLS} distinct cells in L*L"
+        ),
+        default=41,
+    )
     parser.add_argument("--tables", type=_tables, default=(1, 2, 3, 4))
     parser.add_argument(
         "--watchdog",
@@ -743,6 +846,7 @@ def main() -> None:
     # run readable without hiding anything that fires.
     warnings.simplefilter("once")
     args = _build_parser().parse_args()
+    _validate_configuration(args)
     if arm_watchdog(args.watchdog):
         print(f"watchdog: stack dump to stderr every {args.watchdog:.0f}s", flush=True)
     started = time.perf_counter()

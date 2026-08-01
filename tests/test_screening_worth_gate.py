@@ -20,16 +20,22 @@ import pytest
 from benchmarks import screening_worth_gate as gate
 from benchmarks.screening_worth_gate import (
     HOT_CELLS,
+    LADDER,
     MATCHED,
+    MIN_ROWS,
+    MIN_WIDE_LEVELS,
     SHRINKAGE_ARMS,
+    NonconvergedFitError,
     _build_parser,
     _make,
+    _require_converged,
     _run_concentration,
     _run_gate_ladder,
     _run_shrinkage,
     _run_sparse_payoff,
     _shrinkage_spec,
     _split,
+    _validate_configuration,
     arm_watchdog,
     cell_contributions,
     concentration,
@@ -195,9 +201,110 @@ def test_benchmark_dimensions_are_rejected_at_the_boundary(flag: str, bad: str) 
         _build_parser().parse_args([flag, bad])
 
 
-@pytest.mark.parametrize("flag", ["--reps", "--n", "--wide-levels"])
-def test_benchmark_dimensions_accept_one(flag: str) -> None:
-    assert _build_parser().parse_args([flag, "1"]) is not None
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--n", "1"), ("--wide-levels", "1"), ("--wide-levels", "2")],
+)
+def test_a_dimension_that_cannot_run_is_rejected_at_the_flag(flag: str, value: str) -> None:
+    """`>= 1` was the wrong floor for two of the three dimensions.
+
+    These values cleared the old check and then failed a long way from the flag
+    that caused them: `--wide-levels 1` and `2` reach `rng.choice` asking for
+    HOT_CELLS distinct cells out of 1 and 4, and `--n 1` hands the first fit a
+    training half of zero rows.  Each flag now carries the floor its own
+    generator or split is defined at.
+    """
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([flag, value])
+
+
+def test_the_structural_floors_are_the_smallest_values_that_are_defined() -> None:
+    """The floors are derived, not chosen, so they track their constants.
+
+    `HOT_CELLS` distinct cells need an `L x L` grid with `L*L >= HOT_CELLS`,
+    and a half-sample split needs two rows before both halves are non-empty.
+    Measured against the generator itself: at L = 2 `rng.choice` raises, at
+    L = 3 it does not; at n = 1 the training half is empty, at n = 2 it is not.
+    """
+    assert MIN_WIDE_LEVELS == 3
+    assert MIN_ROWS == 2
+
+    with pytest.raises(ValueError, match="larger sample than population"):
+        _make("spike", 6.0, MIN_WIDE_LEVELS - 1, 200, 1)
+    assert _make("spike", 6.0, MIN_WIDE_LEVELS, 200, 1).cell.size >= HOT_CELLS
+
+    assert _split(MIN_ROWS - 1, 1)[0].size == 0
+    assert _split(MIN_ROWS, 1)[0].size >= 1
+
+    # and the floors themselves parse
+    args = _build_parser().parse_args(["--n", str(MIN_ROWS), "--wide-levels", str(MIN_WIDE_LEVELS)])
+    assert (args.n, args.wide_levels) == (MIN_ROWS, MIN_WIDE_LEVELS)
+
+
+def test_a_configuration_too_small_for_its_tables_is_refused_before_fitting() -> None:
+    """Clearing the flag floors is necessary, not sufficient.
+
+    With `n // 2` training rows and L levels, `n // 2 < L` leaves a level out of
+    the training half by pigeonhole, and an unseen level is a predict-time
+    error.  Before this, such a configuration ran until superglm raised
+    `Encountered unseen categorical levels at predict time`, naming a category
+    rather than the flag that caused it.
+    """
+    parser = _build_parser()
+
+    too_small = parser.parse_args(["--n", "20", "--tables", "1"])
+    with pytest.raises(SystemExit, match="training rows"):
+        _validate_configuration(too_small)
+
+    # table 1 sweeps LADDER's own widths, so its requirement is the widest rung
+    just_enough = parser.parse_args(["--n", str(2 * max(LADDER)), "--tables", "1"])
+    _validate_configuration(just_enough)
+
+    # tables 2-4 are sized by --wide-levels instead
+    wide = parser.parse_args(["--n", "60", "--wide-levels", "41", "--tables", "4"])
+    with pytest.raises(SystemExit, match="table 4"):
+        _validate_configuration(wide)
+    _validate_configuration(parser.parse_args(["--n", "12000", "--tables", "1,2,3,4"]))
+
+
+def test_a_nonconverged_fit_is_refused_rather_than_averaged() -> None:
+    """A failed fit must not reach a table as an ordinary replicate.
+
+    Every published figure here is a mean over replicates, so one failed fit
+    moves a column silently.  `fit_reml` reports its outer convergence only at
+    INFO, so nothing in the run's own output would have said so.
+
+    Both flags matter: `mains` and `fixed` fall back to plain `fit()` and carry
+    no REML flag at all, so a check that read only the REML flag would exempt
+    them.
+    """
+
+    class _Result:
+        def __init__(self, converged: bool) -> None:
+            self.converged = converged
+            self.n_iter = 7
+
+    class _Model:
+        def __init__(self, solver: bool, reml: dict) -> None:
+            self.result = _Result(solver)
+            self._reml = reml
+
+        def reml_diagnostics(self) -> dict:
+            return self._reml
+
+    no_reml = {"enabled": False, "converged": None, "termination_reason": None}
+    reml_ok = {"enabled": True, "converged": True, "termination_reason": "tol"}
+    reml_bad = {"enabled": True, "converged": False, "termination_reason": "max_iter"}
+
+    assert _require_converged(_Model(True, no_reml), "ok") is not None
+    assert _require_converged(_Model(True, reml_ok), "ok") is not None
+
+    # solver failed, no REML flag to hide behind
+    with pytest.raises(NonconvergedFitError, match="solver converged=False"):
+        _require_converged(_Model(False, no_reml), "mains rep=0")
+    # REML outer loop failed while the inner solve reported success
+    with pytest.raises(NonconvergedFitError, match="max_iter"):
+        _require_converged(_Model(True, reml_bad), "pooled rep=0")
 
 
 def test_watchdog_is_armed_by_default_so_a_stuck_fit_names_itself() -> None:
