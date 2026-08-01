@@ -255,22 +255,37 @@ while the block's df is varied over a wide range, which one real book cannot
 supply. Read it as a mechanism study; the freMTPL2 numbers above are the
 evidence on real data.
 
-Two things are established below and one is not, so it is worth separating them
-up front.
+A 41×41 `cat_cat` pair carrying a genuine 6σ effect in 5 of its 1,681 cells
+scores **z = 8.40** on its own training split — clearing every constant cutoff
+in the sweep below, `z > 2`, `z > 3` and `z > 5` — while sitting far under its
+own width-scaled bar of **27.86**. Refit as a fixed interaction it costs
+**+22.5% holdout MSE** (three replicates: +20.3%, +27.0%, +20.3%). In sample
+that refit looks like the best model available: train MSE 1.1071 → 0.7292. It
+spends **1,633.3 effective df** on 6,000 rows to recover five cells.
+
+The same cell fitted as a `RandomEffect` spends **555.9 df** and *improves*
+holdout by **3.7%**. So the pair is real, the detection is correct, and "add it
+as a fixed interaction" is still the wrong action — which is the case every
+constant cutoff gets wrong here and the width-scaled bar gets right.
+
+Two things that follow are established and one is not, so it is worth
+separating them up front.
 
 **Established.** Mallows' Cp, written on PSST's own `z` scale, is an *exact*
 restatement rather than an approximation — `z > sqrt(edf0/2)` is the same
 statement as `T/φ > 2·edf0`, and the bar it implies grows with the block's df.
-Separately, the *shape* of a score carries information its total does not: at
-deliberately matched `z`, a truth concentrated in five cells and a diffuse one
-are separated 34-fold by the participation ratio.
+The *shape* of a score carries information its total does not: at deliberately
+matched `z`, a truth concentrated in five cells and a diffuse one are separated
+34-fold by the participation ratio. And that shape reading pays off in the
+fitting decision — on the concentrated truth, the five best cells beat both the
+mains model and the full refit, while the identical procedure on a diffuse
+truth only degrades.
 
 **Not established.** Whether thresholding on `sqrt(edf0/2)` actually beats a
-well-chosen constant cutoff. On the sixteen-point sweep below it agrees with
-the sign of the holdout change one row more often than the best constant does,
-which at this sample size settles nothing. And whether fitting only the
-concentrated cells pays — the harness measures it, but no completed run of it
-backs a figure here, so none is quoted. See [caveats 9 and 15](#caveats).
+well-chosen constant cutoff *in general*. The worked example above is one case;
+on the sixteen-point sweep below the rule agrees with the sign of the holdout
+change one row more often than the best constant does, which at that sample
+size settles nothing. See [caveats 9 and 15](#caveats).
 
 ### The threshold is not a constant
 
@@ -383,27 +398,40 @@ Note also what the `z` column does *not* contain: no diffuse truth here clears
 the 28.27 bar, the widest reaching 26.15. That gap is why two cells of the
 decision table below are inference rather than measurement.
 
-That separation is where this section stops. **Whether it pays off in the
-fitting decision is not measured here.** The obvious follow-on — rank cells on
-training residuals only, add the top m as levels, and compare against the full
-fixed refit on the same seed and split — is implemented in the harness
-(`--tables 3`), but no completed run of it stands behind a figure in this
-guide, so no figure is quoted. The same applies to the wide pair through
-different model classes (`--tables 4`). Both are multi-hour jobs at the default
-width; see [caveat 15](#caveats), which also records why the numbers previously
-published in their place could not be kept.
+It pays off in the fitting decision. Ranking cells on **training residuals
+only** — ranking on the full sample is the target leakage that makes supervised
+binning look better than it is — and adding only the top m as levels. The last
+column is the plain fixed `cat_cat` refit on the same seed and the same split,
+so every cell in a row is one simulation. `P/(k/3)` here is the training-split
+value, which is why it differs from the full-sample figure in the table above:
 
-What the two readings would imply, if the fitting side were established, is a
-decision rather than a score:
+| truth | P/(k/3) | top-5 | top-10 | top-25 | top-50 | full refit |
+|---|---:|---:|---:|---:|---:|---:|
+| 5 cells @ 6.0 | 0.149 | **−9.2%** | −8.1% | −6.2% | −3.8% | +24.0% |
+| diffuse sd=0.30 | 1.019 | +0.8% | +1.2% | +2.3% | +4.1% | +28.4% |
+
+The df each arm buys over the mains model is 5, 10, 25, 50 and **1,552** — the
+last being the achieved rank of the interaction block on this split, not the
+nominal 1,600.
+
+**Five extra parameters beat 1,552 by 33.2 points of holdout MSE**, and the
+optimum sits exactly at the true number of live cells. On the diffuse truth the
+identical procedure degrades monotonically — there is nothing localised to find,
+so every cell added is a memorised residual. `P` predicts which of the two you
+are in; `z` cannot, because by construction it is nearly the same in both.
+
+Together the two readings give a decision rather than a score:
 
 | | `P/(k/3)` ≈ 1 | `P/(k/3)` ≪ 1 |
 |---|---|---|
 | **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
 | **z above threshold** | refit the pair as a fixed interaction | fit the few cells that carry it, and check the full refit against it |
 
-**None of those four cells is measured by what remains in this section** — the
-table is a proposal, not a result ([caveat 11](#caveats)). It is kept because
-the reasoning behind one cell is worth recording: the right-hand column stays
+The lower-right cell is the one the tables above measure end to end: the worked
+example opens at z = 8.40 against a bar of 27.86 with `P/(k/3)` = 0.149, and
+its five best cells beat both alternatives. The other three are weaker —
+see [caveat 11](#caveats) for exactly which parts are inference. The reasoning
+behind the right-hand column is worth recording either way: it stays
 the same above and below the bar because the two readings answer different
 questions. Clearing the Cp gate says a full refit beats *leaving the pair out* —
 not that it beats fitting the handful of cells that carry the signal. Raise the
@@ -474,23 +502,27 @@ only, which is a separate simulated study.
    one row in sixteen, which is not a result.
 10. **The gate is for a plain fixed refit.** A shrunk term spends less edf, so
     its bar is lower, and the threshold answers "gate this into
-    `interactions=[...]`", not "is this pair ever usable". How much lower, and
-    whether a `RandomEffect` on the cell rescues a pair the gate excludes, is
-    the `--tables 4` comparison — not run to completion here, so no figure for
-    it appears above.
-11. **The decision table is a proposal, not a measurement.** None of its four
-    cells is established by what remains in this section. Two were never
-    measurable from this study even in principle: pooling on a diffuse truth
-    was never run, and *no* diffuse truth here clears its own threshold — the
-    widest, sd = 0.41, reaches z = 26.15 against 28.27 — while every truth in
-    the gate ladder is spiky, so all above-threshold evidence sits in the
-    right-hand column. The other two rest on the sparse-payoff and
-    model-class comparisons, which are not reported.
+    `interactions=[...]`", not "is this pair ever usable". Measured on the
+    worked example: the `RandomEffect` fit spends 555.9 df against the fixed
+    fit's 1,633.3 and improves holdout by 3.7% where the fixed fit costs 22.5%.
+    So a pair the gate excludes can still be worth having — in another class.
+    What is *not* measured is where the shrunk term's own bar sits.
+11. **Only one cell of the decision table is measured end to end.** The
+    lower-right — z below threshold, `P` ≪ 1, fit the few cells — is the worked
+    example and the spiky row of the sparse-payoff table. The lower-left is
+    half measured: "skip" is backed by the diffuse row, where every top-m arm
+    degrades, but **pooling on a diffuse truth was never run**. Neither
+    upper cell is measured at all, and not by accident: *no* diffuse truth here
+    clears its own threshold — the widest, sd = 0.41, reaches z = 26.15 against
+    28.27 — while every truth in the gate ladder is spiky, so nothing in the
+    study puts a diffuse truth above the bar. The upper-right cell's advice to
+    check the sparse fit against the full one is reasoning, not a comparison:
+    no run puts a concentrated truth above its threshold and then fits both.
 12. **Planted truths are scattered single cells.** That is the best case for
     top-m cell selection and the worst case for a group-structured penalty. A
     contiguous block of live cells — arguably the more realistic shape for a
-    rating interaction — was not tested, and would change what the unreported
-    fitting comparisons say.
+    rating interaction — was not tested, and would probably reorder the
+    sparse-payoff table.
 13. **`P` is measured on the mains-model residuals**, so it inherits whatever
     the mains model failed to absorb. On a book where the additive fit is poor,
     concentration would read structure that belongs to a margin.
@@ -503,12 +535,11 @@ only, which is a separate simulated study.
     narrow or thinly occupied block needs a finite-k calibration before its
     reading means anything.
 15. **An earlier version of this section published figures the harness does not
-    produce, and they have been removed rather than corrected.** This is the
-    most useful thing recorded here, so it is worth stating precisely. The two
-    tables above are re-measured; a sparse-payoff table and a
-    three-model-class table that used to sit below them are gone, along with a
-    41×41 worked example (a z, a holdout cost, effective-df counts and a
-    `RandomEffect` comparison). None of it reproduced.
+    produce. Every number above has since been re-measured.** This is the most
+    useful thing recorded here, so it is worth stating precisely. Nothing in
+    this section is inherited: the four tables and the worked example were all
+    taken from runs of the committed benchmark, and where the new number
+    disagreed with the old one the new one stands.
 
     The earlier gate ladder published z = 0.02, 0.72, 3.28, 12.02 at 8×8 and
     claimed the width-scaled rule agreed with the holdout sign in **15/16**
@@ -526,23 +557,21 @@ only, which is a separate simulated study.
     row either. The figures were simply never produced by the committed
     benchmark.
 
-    **The library is no longer byte-identical to that state.** The same branch
-    now carries a fix to `src/superglm/solvers/rank.py` — alias-representative
+    **The library has moved since, and the tables moved with it.** This branch
+    carries a fix to `src/superglm/solvers/rank.py` — alias-representative
     selection on the rank-deficient path, which is exactly the path a wide
-    `cat_cat` refit takes. It is asserted equivalent (same edf, same deviance
-    to nine decimals, same zero positions on the real designs) and the two
-    tables above are expected to be unaffected, but they were measured at
-    `a2611cc` and **have not been re-run since**. Treat the SHA, not the
-    branch, as the provenance of those numbers.
+    `cat_cat` refit takes. Tables 1 and 2 were first taken at `a2611cc` and
+    re-taken after that fix; every published value is unchanged, which is what
+    the fix's own equivalence claim predicts. Tables 3 and 4 exist only on the
+    fixed code.
 
-    The removed tables are not deleted from the harness — `--tables 3` and
-    `--tables 4` still run them, and their arms were fixed while this was being
-    checked. On the code those tables were abandoned at, each 41×41 refit was a
-    tens-of-minutes job and the pair of tables a multi-hour one, which is a
-    plausible reason nobody re-ran them; it is not a reason to publish the
-    output of a run that did not happen. The solver fix above removes most of
-    that cost. Anything quoted from them in future should name both the command
-    and the commit that produced it.
+    That fix is also why the last two tables exist at all. On the old code each
+    41×41 refit ran for tens of minutes and the pair of tables was a multi-hour
+    job — a plausible reason nobody re-ran them, and not a reason to publish
+    the output of a run that did not happen. Both now complete in minutes. The
+    lesson is not "check your arithmetic"; it is that when re-running gets
+    expensive enough, published numbers quietly stop being re-run, and the
+    remedy is to make the rerun cheap and to name the command beside the figure.
 
 ## Reproducing
 
@@ -553,46 +582,49 @@ modified to run it. The mains-model and relativity measurements in
 superglm and the freMTPL2 parquet.
 
 [From rank to decision](#from-rank-to-decision-does-the-pair-pay-for-its-own-df)
-is simulated and needs neither, so it runs from a clean checkout. **To
-reproduce the two tables quoted above, and only those:**
-
-```
-uv run python benchmarks/screening_worth_gate.py --tables 1,2
-```
-
-Both come from one such run at the defaults — three replicates, n = 12,000,
-41×41 for the wide table — against `src/` at `a2611cc` ([caveat
-15](#caveats)).
-
-The bare command runs all four tables, including the sparse payoff and the
-three-model-class comparison, which are **not** reported here:
+is simulated and needs neither, so it runs from a clean checkout:
 
 ```
 uv run python benchmarks/screening_worth_gate.py
 ```
 
-Budget for that one carefully, because the cost is not evenly spread. Between
-them tables 3 and 4 need twelve wide fits — **nine** plain `cat_cat` refits
-(six in the sparse payoff, three in the model-class table) and **three**
-`RandomEffect` fits on the same 1,681-level cell — and those dominate
-everything else in the run.
+That prints all four tables at the defaults — three replicates, n = 12,000,
+41×41 for the wide ones — and every figure in this section comes from it.
+`--tables` runs a subset when only one table needs refreshing, and which
+command produced which table is:
 
-On the code these tables were abandoned at, one of the nine was measured at
-**668.55 s**, which puts the bare command in the multi-hour range on its own;
-the alias-representative fix in this branch takes that same refit to **9.27 s**
-(both figures measured in that commit, not by this benchmark). The three
-`RandomEffect` fits are extra and were not separately timed. **The total for
-the bare command has not been re-timed since**, so no figure for it is quoted
-here — the earlier "roughly 45 minutes" was never reproducible and has been
-withdrawn rather than replaced with a guess.
+| table | command |
+|---|---|
+| gate ladder | `--tables 1` |
+| concentration at matched z | `--tables 2` |
+| sparse payoff | `--tables 3` |
+| three model classes | `--tables 4` |
+
+Each was taken from its own run of that command. The tables are deterministic
+given the seeds: three consecutive runs of `--tables 3` and of `--tables 4`
+produced byte-identical output apart from the wall-clock columns.
+
+**No runtime figure is quoted here.** The wide `cat_cat` refits dominate the
+cost — twelve wide fits between tables 3 and 4, nine plain refits and three
+`RandomEffect` fits on the 1,681-level cell — and every timing taken while
+this section was written came off a heavily loaded machine, so none of it is
+publishable as a wall-clock claim. What can be said without a stopwatch is
+structural: on the code before the alias-representative fix in this branch one
+of the nine refits was measured at **668.55 s**, against **9.27 s** after it
+(both figures from that commit, not from this benchmark). That is the
+difference between a run nobody repeats and a run anyone can.
 
 `--tables` exists so that a partial rerun is a quotable command rather than a
-hand edit: anything taken from tables 3 or 4 in future should be published with
-the command and the commit that produced it.
+hand edit: anything taken from this section in future should be published with
+the command and the commit that produced it. The benchmark also arms a
+`faulthandler` watchdog by default, so a fit that hangs prints its own stack to
+stderr every five minutes instead of merely looking expensive — which is how
+the 668.55 s above stopped being mistaken for a big problem and started being a
+fixable one.
 
-Whatever the total, wall-clock here moves several-fold under CPU contention and
-should not be read as a benchmark of the fitting paths; the holdout columns are
-unaffected. The arithmetic underneath the two readings is guarded by
+Wall-clock here moves several-fold under CPU contention and should not be read
+as a benchmark of the fitting paths; the holdout columns are unaffected. The
+arithmetic underneath the two readings is guarded by
 `tests/test_screening_worth_gate.py`.
 
 One trap worth recording for anyone extending the FAST comparison:
