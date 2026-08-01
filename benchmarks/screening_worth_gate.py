@@ -463,7 +463,7 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, obj
             model = SuperGLM(family="gaussian", **kwargs)
             model.fit_reml(dtr, ytr)
             seconds = time.perf_counter() - started
-            result = model._result
+            result = model.result
             acc[arm].append(
                 (
                     seconds,
@@ -610,7 +610,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    warnings.filterwarnings("ignore")
+    # NOT `ignore`: the pooled arm asks REML to estimate a variance component
+    # over 1681 levels, and a run that mutes its own convergence warnings
+    # reports a number where it should report a problem.  `once` keeps a
+    # 45-minute run readable without hiding anything that fires.
+    warnings.simplefilter("once")
     args = _build_parser().parse_args()
     started = time.perf_counter()
 
