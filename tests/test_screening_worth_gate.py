@@ -14,6 +14,7 @@ headline z that no arm measured.  Each is now pinned to the run it belongs to.
 from __future__ import annotations
 
 import faulthandler
+import inspect
 
 import numpy as np
 import pandas as pd
@@ -262,11 +263,40 @@ def test_a_configuration_too_small_for_its_tables_is_refused_before_fitting() ->
     just_enough = parser.parse_args(["--n", str(2 * max(LADDER)), "--tables", "1"])
     _validate_configuration(just_enough)
 
-    # tables 2-4 are sized by --wide-levels instead
+    # tables 3 and 4 are sized by --wide-levels instead
     wide = parser.parse_args(["--n", "60", "--wide-levels", "41", "--tables", "4"])
     with pytest.raises(SystemExit, match="table 4"):
         _validate_configuration(wide)
     _validate_configuration(parser.parse_args(["--n", "12000", "--tables", "1,2,3,4"]))
+
+
+def test_table_two_is_exempt_from_the_half_sample_requirement() -> None:
+    """The bound comes from the split, and table 2 does not split.
+
+    `_run_concentration` fits the mains model on all `n` rows and takes
+    residuals on those same rows -- no holdout, so no level can appear only at
+    predict time.  Requiring `n // 2 >= n_levels` there rejected configurations
+    that run perfectly well.  The three runners that call `_split` are tables
+    1, 3 and 4.
+    """
+    parser = _build_parser()
+    lopsided = ["--n", "50", "--wide-levels", "41"]
+
+    # accepted: no split, so the half-sample bound does not apply
+    _validate_configuration(parser.parse_args([*lopsided, "--tables", "2"]))
+
+    # the same shape IS rejected for the tables that do split
+    for table in ("3", "4"):
+        with pytest.raises(SystemExit, match=f"table {table}"):
+            _validate_configuration(parser.parse_args([*lopsided, "--tables", table]))
+
+    # and selecting table 2 alongside one of them still fails on that one
+    with pytest.raises(SystemExit, match="table 3"):
+        _validate_configuration(parser.parse_args([*lopsided, "--tables", "2,3"]))
+
+    # the exemption is not a claim that _run_concentration splits secretly
+    source = inspect.getsource(gate._run_concentration)
+    assert "_split(" not in source, "table 2 now splits; the exemption must be revisited"
 
 
 def test_a_nonconverged_fit_is_refused_rather_than_averaged() -> None:

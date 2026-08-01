@@ -801,12 +801,20 @@ def _validate_configuration(args: argparse.Namespace) -> None:
     It is not sufficient -- a level can still be missing when the inequality
     holds -- and that residue is left to fail loudly at fit time, where the
     message names the actual level.
+
+    TABLE 2 IS EXEMPT, and deliberately so.  The requirement comes from the
+    half-sample split, and `_run_concentration` never calls `_split`: it fits
+    the mains model on all `n` rows and takes residuals on those same rows, so
+    it has no holdout and therefore no level that can appear only at predict
+    time.  Applying the half-sample bound there rejected configurations that
+    run perfectly well, such as `--tables 2 --n 50 --wide-levels 41`.  The
+    three runners that DO split are tables 1, 3 and 4.
     """
     train_rows = args.n // 2
     required: list[tuple[str, int]] = []
     if 1 in args.tables:
         required.append(("table 1 (gate ladder)", max(LADDER)))
-    for table in (2, 3, 4):
+    for table in (3, 4):
         if table in args.tables:
             required.append((f"table {table}", args.wide_levels))
     for label, levels in required:
