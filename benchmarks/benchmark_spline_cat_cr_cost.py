@@ -21,35 +21,38 @@ that commit plus the routing.  The two differ only in
 
 | case        | ref    | wall med | wall min | peak RSS |   entries | basis MB |      deviance |
 |-------------|--------|---------:|---------:|---------:|----------:|---------:|--------------:|
-| exact ps    | before |   2.45 s |   2.41 s |  388 MiB |   699,556 |     9.09 | 114330.085957 |
-| exact ps    | after  |   2.50 s |   2.46 s |  388 MiB |   699,556 |     9.09 | 114330.085957 |
-| exact cr    | before |   2.52 s |   2.46 s |  388 MiB |   699,544 |     9.09 | 114329.828614 |
-| exact cr    | after  |   4.72 s |   4.54 s |  472 MiB | 3,497,704 |    42.67 | 114330.094237 |
-| discrete cr | before |   0.80 s |   0.74 s |  366 MiB |     5,632 |     0.05 | 114329.178061 |
-| discrete cr | after  |   0.54 s |   0.53 s |  407 MiB |     5,120 |     0.04 | 114329.391279 |
+| exact ps    | before |   2.46 s |   2.40 s |  391 MiB |   699,556 |     9.09 | 114330.085957 |
+| exact ps    | after  |   2.44 s |   2.41 s |  391 MiB |   699,556 |     9.09 | 114330.085957 |
+| exact cr    | before |   2.46 s |   2.36 s |  391 MiB |   699,544 |     9.09 | 114329.828614 |
+| exact cr    | after  |   4.43 s |   4.37 s |  473 MiB | 3,497,704 |    42.67 | 114330.094237 |
+| discrete cr | before |   0.77 s |   0.77 s |  365 MiB |     5,632 |     0.05 | 114329.178061 |
+| discrete cr | after  |   0.52 s |   0.51 s |  407 MiB |     5,120 |     0.04 | 114329.391279 |
 
-Quote the MIN column for ratios, not the median.  Contention only ever adds
-time, so the min over repeats is the best available estimate of uncontended
-cost, and this harness runs all repeats of one case before moving to the next
--- a spike lands inside a single case's block and the between-case ratio
-absorbs all of it.  The rows above were taken on a heavily oversubscribed box
-(``/proc/loadavg`` 62 on 16 cores), so treat every wall figure as an upper
-bound pending a serial re-run on a quiet machine; the non-timing columns are
-deterministic given the seed and do not move.
+Taken serially on an idle box (``/proc/loadavg`` under 2 on 16 cores).  Quote
+the MIN column for ratios, not the median.  Contention only ever adds time, so
+the min over repeats is the best available estimate of uncontended cost, and
+this harness runs all repeats of one case before moving to the next -- a spike
+lands inside a single case's block and the between-case ratio absorbs all of
+it.  An earlier run of this table on a box at ``loadavg`` 62 is what that
+warning is drawn from, and it is worth recording which column survived: the min
+basis moved 1.84x -> 1.85x, while the median basis moved 1.87x -> 1.80x.  The
+non-timing columns are deterministic given the seed and did not move at all.
 
 ``p`` is 79 on every row, and the dispatched group-matrix classes are identical
 before and after -- the block dimension and the backend do not move, only what
-is stored in them.  So the exact cr path costs 1.84x the wall time (min basis;
-1.87x on medians), 5.0x the stored entries and 4.7x the basis bytes of the
-projected-B-spline marginal it replaced, at +84 MiB peak RSS, for a fit that
+is stored in them.  So the exact cr path costs 1.85x the wall time (min basis;
+1.80x on medians), 5.0x the stored entries and 4.7x the basis bytes of the
+projected-B-spline marginal it replaced, at +82 MiB peak RSS, for a fit that
 agrees to 2.3e-6 relative.  ``ps`` is unmoved and the discrete path is if
 anything faster, because it stores one basis row per bin rather than per
 observation.
 
 Under cProfile the extra time is the cross-block gram, at unchanged call
 counts (220 ``_cross_gram_by_columns``, ~7.2k sparse matvecs): 1.43 s before,
-2.16 s after -- single runs under the same contention, so directional rather
-than exact.  Two things are on the table if that is judged too expensive.
+2.16 s after.  Those two are single runs taken during the contended session and
+have NOT been re-measured here, so read them as an attribution -- the extra time
+is in the gram -- and not as a wall figure; the table above is the wall
+measurement.  Two things are on the table if that is judged too expensive.
 The stored form is one: at 12 bytes per entry (float64 + int32 index) against
 8 dense, the 42.7 MB above would be 28.0 MB as a dense block, and the gram
 would run on BLAS rather than a scalar CSR loop.  Row-support compression is
