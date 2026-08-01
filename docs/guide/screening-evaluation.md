@@ -276,6 +276,13 @@ but a threshold. Since `z = (T/φ − edf0) / sqrt(2·edf0)`:
 T/φ > 2·edf0    ⟺    z > sqrt(edf0 / 2)
 ```
 
+Both sides read the **same** `edf0`, and for an unpenalized `cat_cat` the value
+`screen_interactions` returns is the block's *achieved rank*, not `(L−1)²` — it
+drops below the nominal rank whenever a joint cell is empty in the training
+split, which is routine at these widths. The `edf0` column below is therefore
+the screen's own value, read off the same row as `z`; the nominal rank is shown
+beside it.
+
 The bar **grows with the block's df**: z > 4.95 at 8×8, z > 28.3 at 41×41.
 Sweeping table width against effect size, taking the screen's own z and the
 holdout change from actually refitting:

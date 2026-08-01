@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from benchmarks import screening_worth_gate as gate
 from benchmarks.screening_worth_gate import (
     HOT_CELLS,
     MATCHED,
@@ -18,6 +19,7 @@ from benchmarks.screening_worth_gate import (
     _build_parser,
     _make,
     _run_concentration,
+    _run_gate_ladder,
     _run_shrinkage,
     _shrinkage_spec,
     cell_contributions,
@@ -150,6 +152,29 @@ def test_every_documented_shrinkage_arm_is_actually_built() -> None:
 def test_unknown_shrinkage_arm_is_rejected_rather_than_silently_skipped() -> None:
     with pytest.raises(ValueError, match="unknown shrinkage arm"):
         _shrinkage_spec("credibility")
+
+
+@pytest.mark.slow
+def test_gate_ladder_thresholds_on_the_edf0_the_screen_reported(monkeypatch) -> None:
+    """The Cp identity needs the SAME edf0 on both sides.
+
+    For an unpenalized `cat_cat` the screen normalizes `z` by the block's
+    ACHIEVED rank, which drops below `(n_levels - 1)**2` as soon as a joint
+    cell is empty in the training split.  Re-deriving the nominal rank for the
+    threshold compares a z on one scale against a bar on another.  The width
+    here is deliberately sparse so the two values differ.
+    """
+    monkeypatch.setattr(gate, "LADDER", {10: (0.5,)})
+    rows = _run_gate_ladder(reps=1, n=600)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["nominal_edf0"] == 81.0
+    # the split leaves cells empty, so the achieved rank is strictly lower
+    assert row["edf0"] < row["nominal_edf0"]
+    # and the published threshold is the one that goes with the reported z
+    assert row["threshold"] == pytest.approx(worth_threshold(row["edf0"]))
+    assert row["threshold"] != pytest.approx(worth_threshold(row["nominal_edf0"]))
 
 
 @pytest.mark.slow

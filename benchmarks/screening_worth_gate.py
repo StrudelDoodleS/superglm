@@ -20,7 +20,10 @@ the second needs one pass over the residuals the screen does not hand back.
        T/phi > 2*edf0   <=>   z > sqrt(edf0 / 2)
 
    The bar GROWS with the block's df -- z > 4.95 at 8x8, z > 28.3 at 41x41 --
-   which is exactly what a constant cutoff cannot express.
+   which is exactly what a constant cutoff cannot express.  Both sides read the
+   SAME `edf0`, and for an unpenalized `cat_cat` that is the block's achieved
+   rank, not `(L-1)^2`; this file therefore takes `edf0` off the screening row
+   rather than re-deriving it (see `_run_gate_ladder`).
 
 2. CONCENTRATION.  Every chi^2-family score reads only the TOTAL: PSST's `T`,
    FAST's RSS gain, Information Value, mutual information, deviance change.
@@ -109,6 +112,8 @@ def worth_threshold(edf0: float) -> float:
     """z a pair must clear for a plain fixed refit to pay for its own df.
 
     `T/phi > 2*edf0` (Mallows' Cp) expressed on the z scale the screen reports.
+    `edf0` must be the SAME value the screen normalized z by -- read it off the
+    returned row rather than re-deriving it from the factor widths.
     """
     return float(np.sqrt(edf0 / 2.0))
 
@@ -188,10 +193,20 @@ def _split(n: int, seed: int) -> tuple[NDArray, NDArray]:
 
 
 def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
+    """Does `z > sqrt(edf0/2)` predict the sign of the holdout change?
+
+    `edf0` is READ from the same screening row as `z`, not re-derived as
+    `(n_levels - 1)**2`.  For an unpenalized `cat_cat` the screen reports the
+    block's achieved rank, which drops below the nominal rank whenever a joint
+    cell is empty in the training split -- routine at these widths.  The Cp
+    identity needs the same `edf0` on both sides of `T/phi > 2*edf0`, so
+    normalizing z by the achieved rank and thresholding on the nominal one
+    would compare two different quantities.
+    """
     rows: list[dict[str, object]] = []
     for n_levels, effects in LADDER.items():
         for effect in effects:
-            zs, deltas = [], []
+            zs, edfs, deltas = [], [], []
             for rep in range(reps):
                 data = _make("spike", effect, n_levels, n, 7000 + rep)
                 train, test = _split(n, 7000 + rep)
@@ -199,7 +214,9 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
                 dte, yte = data.frame.iloc[test], data.y[test]
 
                 mains = _mains(dtr, ytr)
-                zs.append(float(mains.screen_interactions(dtr, ytr).iloc[0]["z"]))
+                screened = mains.screen_interactions(dtr, ytr).iloc[0]
+                zs.append(float(screened["z"]))
+                edfs.append(float(screened["edf0"]))
                 full = SuperGLM(
                     family="gaussian",
                     features={"g": Categorical(), "h": Categorical()},
@@ -210,13 +227,14 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
                 with_pair = float(np.mean((full.predict(dte) - yte) ** 2))
                 deltas.append((with_pair / base - 1.0) * 100.0)
 
-            edf0 = float((n_levels - 1) ** 2)
+            edf0 = float(np.mean(edfs))
             z = float(np.mean(zs))
             delta = float(np.mean(deltas))
             rows.append(
                 {
                     "n_levels": n_levels,
                     "edf0": edf0,
+                    "nominal_edf0": float((n_levels - 1) ** 2),
                     "effect": effect,
                     "z": z,
                     "threshold": worth_threshold(edf0),
@@ -377,14 +395,15 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> list[dict[str, object]]:
 def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
     print("\n1. Does z > sqrt(edf0/2) predict the sign of the holdout change?\n")
     print(
-        f"{'levels':>7} {'edf0':>6} {'effect':>7} {'z':>8} {'thresh':>7} "
+        f"{'levels':>7} {'edf0':>7} {'nominal':>8} {'effect':>7} {'z':>8} {'thresh':>7} "
         f"{'z/thresh':>9} {'gate':>8} {'holdout':>9}"
     )
     for row in rows:
         gate = "INCLUDE" if row["z"] > row["threshold"] else "exclude"
         flag = "" if row["agrees"] else "   <- disagrees"
         print(
-            f"{row['n_levels']:>7} {row['edf0']:>6.0f} {row['effect']:>7.2f} "
+            f"{row['n_levels']:>7} {row['edf0']:>7.1f} {row['nominal_edf0']:>8.0f} "
+            f"{row['effect']:>7.2f} "
             f"{row['z']:>8.2f} {row['threshold']:>7.2f} "
             f"{row['z'] / row['threshold']:>9.2f} {gate:>8} "
             f"{row['delta_pct']:>+8.1f}%{flag}"
