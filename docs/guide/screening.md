@@ -163,7 +163,8 @@ real pair must beat, and the confirmatory refit is what settles the question.
   (`ti`, `spline_cat`) is skipped when it exceeds the cell or intermediate
   budgets even after the quantile-binning fallback, when its tensor curvature
   block alone is too large for the budget (binning cannot shrink basis
-  dimensions, so those skip with no binning attempted), or when the statistic
+  dimensions, so those skip with no binning attempted), when its block is too
+  wide to *solve* inside the budget (see below), or when the statistic
   degenerates. A `numeric_cat` pair has no grid to shrink, so a factor too
   wide for the pair's blocks is *refused* rather than approximated: the gate
   holds the largest of those blocks, the `(L + 1)`-wide overlap curvature, to
@@ -326,6 +327,23 @@ discretize at all, so OC pairs stay exact on both sides.
   within budget are always computed exactly — the fallback never touches
   them. Screening-only: a confirmatory refit of a flagged pair
   uses the full data.
+- **Block dimension, which costs time rather than memory.** `max_cells` is an
+  allocation ceiling, and every allocation above grows as `k^2` in the probe
+  block's dimension — but the *solve* grows as `k^3`, because each rung
+  factorizes or pseudo-inverts a `(k, k)` system, and for the gridded kinds
+  the pseudo-inverse is the routine branch rather than the exception (one
+  empty `cat_cat` cell or one singleton level makes a probe column collinear
+  with the overlap span; the `VehBrand x Region` row above reports
+  `edf0 = 208` against a nominal 210 for exactly this reason). The same knob
+  therefore bounds time: `k^3 <= 1000 * max_cells` for an unpenalized block,
+  and the same budget against 16x the work for a penalized one whose ladder
+  can bisect rather than clamp. At the default that admits `k <= 1709`
+  (`cat_cat` on two 42-level factors, `numeric_cat` on a 1710-level factor)
+  and `k <= 678` for `ti`/`spline_cat`, each measured at ~1.5 s per pair on
+  the reference box. Wider blocks are refused with a NaN row, immediately —
+  binning cannot shrink a basis dimension — and raising `max_cells` lifts the
+  refusal. For scale, the block the old allocation-only ceiling admitted
+  (`k = 4290`, two 67-level factors) measured 24 s and 1.3 GB for one pair.
 - **Factor and numeric margins have no such cardinality limit.** A factor
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the

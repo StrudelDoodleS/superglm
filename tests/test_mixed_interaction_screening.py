@@ -398,7 +398,11 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     unaffordable numeric_cat pair is REFUSED, never degraded.  Every block it
     builds scales with the factor's width and the largest is the (L+1)-wide
     overlap curvature, so the gate is `(L+1)**2 <= max_cells` -- applied to
-    the level count alone, before the dense (L, L-1) menu is ever built."""
+    the level count alone, before the dense (L, L-1) menu is ever built.  The
+    cubic gate applies to the same width for the same reason (the blocks are
+    also FACTORIZED at that width), and at the default budget it is the
+    binding one: `(L-1)**3 <= 1000 * max_cells` admits 1710 levels where the
+    allocation gate admits 2235."""
     L, reps = 2300, 2
     rng = np.random.default_rng(31)
     df = pd.DataFrame(
@@ -419,12 +423,21 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     assert refused["n_cells"] == L  # the grid it was refused for
     assert not refused["approx"]  # refusal is not approximation
 
-    # One cell short of the block budget is still a refusal ...
+    # One cell short of the allocation budget is still a refusal ...
     short = model.screen_interactions(df, y, max_cells=(L + 1) ** 2 - 1).iloc[0]
     assert np.isnan(short["z"])
     assert short["n_cells"] == L
-    # ... and at the budget the same pair computes, exactly and unpenalized.
-    lifted = model.screen_interactions(df, y, max_cells=(L + 1) ** 2).iloc[0]
+    # ... and so is the allocation budget on its own: the (L-1)^3 solve the
+    # blocks feed needs more than twice that, and BOTH gates must pass.
+    allocation_only = model.screen_interactions(df, y, max_cells=(L + 1) ** 2).iloc[0]
+    assert np.isnan(allocation_only["z"])
+
+    budget = max((L + 1) ** 2, -(-((L - 1) ** 3) // 1000))
+    one_short = model.screen_interactions(df, y, max_cells=budget - 1).iloc[0]
+    assert np.isnan(one_short["z"])
+    # At the budget that clears both, the same pair computes, exactly and
+    # unpenalized.
+    lifted = model.screen_interactions(df, y, max_cells=budget).iloc[0]
     assert np.isfinite(lifted["z"])
     assert lifted["edf0"] == pytest.approx(L - 1, abs=0.26)  # achieved rank
     assert lifted["lambda0"] == 0.0
@@ -661,9 +674,9 @@ def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
 
     # The defect the exclusion protects against: the refit itself cannot be built.
     with pytest.raises(ValueError, match="unseen categorical levels"):
-        SuperGLM(
-            family="poisson", features=feats(), interactions=[("age", "region")]
-        ).fit_reml(df, y)
+        SuperGLM(family="poisson", features=feats(), interactions=[("age", "region")]).fit_reml(
+            df, y
+        )
 
 
 def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
@@ -746,3 +759,124 @@ def test_bisecting_ladder_still_evaluates_every_rung(monkeypatch):
     row = model.screen_interactions(df, y, candidates=[("x1", "x2")]).iloc[0]
     assert calls == [2.0, 4.0, 8.0, 16.0]
     assert row["edf0"] == pytest.approx(2.0, abs=1e-3)
+
+
+def _balanced_factorial(la, lb, reps=2, seed=19):
+    """A fully populated La x Lb design: every cell occupied, no singletons.
+
+    Keeps the pair's curvature full rank so the lifted screen takes the
+    Cholesky branch -- the point under test is the block DIMENSION gate, and a
+    rank-deficient block would spend the test's time in the pseudo-inverse.
+    """
+    a = np.repeat(np.arange(la), lb * reps)
+    b = np.tile(np.repeat(np.arange(lb), reps), la)
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(
+        {
+            "a": np.array([f"A{i}" for i in range(la)])[a],
+            "b": np.array([f"B{i}" for i in range(lb)])[b],
+            "z": rng.uniform(0.5, 2.0, la * lb * reps),
+        }
+    )
+    return df, rng.normal(size=len(df))
+
+
+def test_cat_cat_refuses_a_block_too_wide_to_solve():
+    """Review finding: the cell and intermediate budgets bound ALLOCATION,
+    which grows as k^2, while the per-rung factorization grows as k^3 -- so
+    they admitted cat_cat blocks up to k = 4472, measured at 24s and 1.3GB per
+    pair.  The cubic gate refuses on the block dimension, with the same NaN-row
+    semantics as every other budget, and `max_cells` lifts it."""
+    la, lb = 44, 41
+    k = (la - 1) * (lb - 1)  # 1720, one rung above the default ceiling of 1709
+    df, y = _balanced_factorial(la, lb)
+    model = SuperGLM(
+        family="gaussian",
+        features={"a": Categorical(), "b": Categorical(), "z": Numeric()},
+    )
+    model.fit_reml(df, y)
+
+    table = model.screen_interactions(df, y)
+    refused = table[table["kind"] == "cat_cat"].iloc[0]
+    assert np.isnan(refused["statistic"]) and np.isnan(refused["z"])
+    assert refused["n_cells"] == la * lb  # the grid it was refused for
+    assert not refused["approx"]  # refusal is not approximation
+    assert table.index[table["kind"] == "cat_cat"][0] == len(table) - 1  # sorts last
+    # the other pairs in the same sweep are unaffected
+    assert np.isfinite(table[table["kind"] != "cat_cat"]["z"]).all()
+
+    # One unit short of the cubic budget is still a refusal ...
+    budget = -(-(k**3) // 1000)
+    short = model.screen_interactions(df, y, candidates=[("a", "b")], max_cells=budget - 1).iloc[0]
+    assert np.isnan(short["z"])
+    assert short["n_cells"] == la * lb
+    # ... and at the budget the same pair computes, exactly and unpenalized.
+    lifted = model.screen_interactions(df, y, candidates=[("a", "b")], max_cells=budget).iloc[0]
+    assert np.isfinite(lifted["z"])
+    assert lifted["edf0"] == pytest.approx(k, abs=0.5)  # achieved rank
+    assert lifted["lambda0"] == 0.0
+    assert lifted["n_cells"] == la * lb
+    assert not lifted["approx"]
+
+
+def test_cubic_gate_leaves_ordinary_pairs_alone():
+    """The gate is a tail guard: a pair whose block is small enough to solve
+    quickly must screen identically to before, at the default budget and at
+    any budget above its own cubic threshold."""
+    la, lb = 20, 20
+    k = (la - 1) * (lb - 1)  # 361 -- the cost here is 0.04s, not seconds
+    df, y = _balanced_factorial(la, lb, reps=3)
+    model = SuperGLM(family="gaussian", features={"a": Categorical(), "b": Categorical()})
+    model.fit_reml(df, y)
+
+    default = model.screen_interactions(df, y).iloc[0]
+    assert np.isfinite(default["z"])
+    assert default["n_cells"] == la * lb
+
+    budget = -(-(k**3) // 1000)
+    at_threshold = model.screen_interactions(df, y, max_cells=budget).iloc[0]
+    assert at_threshold["z"] == default["z"]
+    assert at_threshold["statistic"] == default["statistic"]
+    # below it, the same pair is refused -- the gate scales with max_cells the
+    # way every other budget here does
+    below = model.screen_interactions(df, y, max_cells=budget - 1).iloc[0]
+    assert np.isnan(below["z"])
+
+
+def test_penalized_blocks_are_charged_the_ladder_they_run():
+    """A penalized block re-solves its system per rung, and its bisection
+    re-solves it ~27 times within a rung (measured 109 solves per pair against
+    2 for an unpenalized block), so the same dimension buys far less time.  The
+    gate charges it 16x the work: a spline_cat block is refused at a dimension
+    an unpenalized cat_cat block screens at in the same sweep."""
+    lg, lh, reps = 80, 22, 2
+    a = np.repeat(np.arange(lg), lh * reps)
+    b = np.tile(np.repeat(np.arange(lh), reps), lg)
+    rng = np.random.default_rng(23)
+    df = pd.DataFrame(
+        {
+            "g": np.array([f"G{i}" for i in range(lg)])[a],
+            "h": np.array([f"H{i}" for i in range(lh)])[b],
+            "x": rng.uniform(0.0, 1.0, lg * lh * reps),
+        }
+    )
+    y = rng.normal(size=len(df))
+    model = SuperGLM(
+        family="gaussian",
+        features={"g": Categorical(), "h": Categorical(), "x": Spline(kind="ps", n_knots=10)},
+    )
+    model.fit_reml(df, y)
+
+    table = model.screen_interactions(df, y).set_index(["feature_a", "feature_b"])
+    # unpenalized, k = 79 * 21 = 1659, under the 1709 unpenalized ceiling
+    assert np.isfinite(table.loc[("g", "h"), "z"])
+    # penalized, k = 13 * 79 = 1027 -- well under 1709, and well over the 678
+    # a 16x work charge leaves a penalized block
+    assert np.isnan(table.loc[("g", "x"), "z"])
+    assert table.loc[("g", "x"), "n_cells"] > 0
+    # the narrow factor's spline_cat pair is inside the penalized budget
+    assert np.isfinite(table.loc[("h", "x"), "z"])
+
+    # raising max_cells lifts the penalized refusal, as it lifts every other
+    lifted = model.screen_interactions(df, y, candidates=[("x", "g")], max_cells=20_000_000)
+    assert np.isfinite(lifted.iloc[0]["z"])
