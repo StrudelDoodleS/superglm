@@ -676,7 +676,7 @@ class SuperGLM:
         inside the budget is refused with a NaN row by the same
         cubic-work gate (``k^3 <= 1000 * max_cells`` unpenalized, 16x the
         work charged to a penalized block: ``k <= 1709`` and ``k <= 678`` at
-        the default, ~1.5 s per pair at either ceiling).
+        the default, measured there at 1.3 s and 1.9 s per pair).
         A categorical margin never bins — its support is the fitted level
         set — and a numeric margin never grids at all: it enters its probe
         linearly, so a ``numeric_cat``/``numeric_numeric`` row that carries a

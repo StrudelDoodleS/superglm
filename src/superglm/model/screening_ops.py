@@ -141,8 +141,12 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
 # _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
 # budget against _PENALIZED_LADDER_COST times the work for a penalized one:
-# k <= 1709 and k <= 678 respectively at the default max_cells.  Raising
-# max_cells lifts both, as it lifts every other budget here.
+# k <= 1709 and k <= 678 respectively at the default max_cells, measured
+# there at 1.3 s (cat_cat, k = 1681) and 1.9 s (bisecting ti, k = 676).  The
+# penalized budget is set by the BISECTING path because whether a rung
+# bisects is not knowable before the solve; a clamped ladder at the same
+# dimension measured 0.14 s, so that budget is deliberately conservative.
+# Raising max_cells lifts both, as it lifts every other budget here.
 _CUBIC_BUDGET_FACTOR = 1000
 _PENALIZED_LADDER_COST = 16
 
@@ -435,9 +439,9 @@ def screen_interactions(
     budget: ``k^3 <= 1000 * max_cells`` for an unpenalized block, and the
     same budget against 16x the work for a penalized one whose ladder can
     bisect.  At the default that admits ``k <= 1709`` and ``k <= 678``
-    respectively, each measured at ~1.5 s per pair; raising ``max_cells``
-    lifts both.  Binning cannot shrink a basis dimension, so the refusal is
-    immediate and no fallback is attempted.
+    respectively, measured there at 1.3 s and 1.9 s per pair; raising
+    ``max_cells`` lifts both.  Binning cannot shrink a basis dimension, so the
+    refusal is immediate and no fallback is attempted.
     ``approx`` is also True for any pair whose confirmatory refit would
     discretize LOSSILY, applying the gate that refit itself uses — which
     differs by kind.  A ``ti`` refit bins its marginal supports only when

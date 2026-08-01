@@ -169,8 +169,9 @@ real pair must beat, and the confirmatory refit is what settles the question.
   wide for the pair's blocks is *refused* rather than approximated: the gate
   holds the largest of those blocks, the `(L + 1)`-wide overlap curvature, to
   the budget — `(L + 1)^2 <= max_cells`, which admits factors up to 2235
-  levels at the default — and raising `max_cells` lifts the refusal and
-  computes the pair exactly.
+  levels — and the block-dimension gate below holds the same width to the
+  *solve* budget, which at the default is the binding one and admits 1710.
+  Raising `max_cells` lifts both and computes the pair exactly.
   `numeric_numeric` contracts to 3x3 blocks whatever the supports and is never
   refused. All such rows sort last.
 - **`approx=True` means the row's probe basis differs from what a confirmatory
@@ -339,8 +340,8 @@ discretize at all, so OC pairs stay exact on both sides.
   and the same budget against 16x the work for a penalized one whose ladder
   can bisect rather than clamp. At the default that admits `k <= 1709`
   (`cat_cat` on two 42-level factors, `numeric_cat` on a 1710-level factor)
-  and `k <= 678` for `ti`/`spline_cat`, each measured at ~1.5 s per pair on
-  the reference box. Wider blocks are refused with a NaN row, immediately —
+  and `k <= 678` for `ti`/`spline_cat`, measured on the reference box at 1.3 s
+  and 1.9 s per pair. Wider blocks are refused with a NaN row, immediately —
   binning cannot shrink a basis dimension — and raising `max_cells` lifts the
   refusal. For scale, the block the old allocation-only ceiling admitted
   (`k = 4290`, two 67-level factors) measured 24 s and 1.3 GB for one pair.
