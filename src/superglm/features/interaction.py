@@ -45,6 +45,15 @@ def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = Non
     Both go through here so the invariant holds by construction rather than by
     coincidence.
 
+    The knots move too, not just the basis: a default ``knot_strategy="uniform"``
+    parent is re-placed on quantiles, because a cardinal basis on knots that
+    ignore the margin's density is the weaker half of the geometry this routing
+    exists to get right.  So a ``cr`` main effect and the interaction beside it
+    sit on DIFFERENT interior knots -- on a gamma margin at ``n_knots=8``, 1.92
+    to 15.22 for the main effect against 0.87 to 5.69 here.  That is the same
+    placement the screening probe uses, which is what keeps probe and refit
+    identical; an explicitly knotted or already-quantile parent is left alone.
+
     Returns *spec* unchanged for every other spline kind, so ``ps`` -- the
     default -- is untouched, and for the cr configurations the cardinal basis
     cannot express (below).  The returned spec has its knots already placed on
