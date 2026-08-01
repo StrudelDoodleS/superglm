@@ -59,12 +59,14 @@ cannot absorb.
 This holds for `cr` parents as well as `ps`, but only because both
 interaction types now resolve a cubic regression spline the same way.
 Cubic regression splines carry two bases — a main effect uses the
-projected-B-spline `CubicRegressionSpline`, while every interaction
-marginal uses `CardinalCRSpline`, which is closer to mgcv's `bs="cr"`.
+projected-B-spline `CubicRegressionSpline`, while an interaction marginal
+uses `CardinalCRSpline`, which is closer to mgcv's `bs="cr"`.
 `TensorInteraction` had that routing and `SplineCategorical` did not, so a
 `spline_cat` probe could span directions its own refit could not build: on
 a skewed margin at `n_knots=16` the containment of probe span in refit span
-measured 0.675. Both now go through one shared resolution, so the identity
+measured 0.675. Both now go through one shared resolution — including its
+fallbacks, so a `select=True` parent or a penalty order the cardinal basis
+does not implement keeps its own basis on *both* sides — and the identity
 holds by construction. See
 [issue #191](https://github.com/StrudelDoodleS/superglm/issues/191).
 

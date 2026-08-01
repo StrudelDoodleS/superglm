@@ -1119,3 +1119,61 @@ def test_select_cr_parent_keeps_its_own_basis_in_an_interaction():
     # that a probe would have needed to match.
     with pytest.raises(ValueError, match="select=True"):
         fitted_select.screen_interactions(df, y)
+
+
+@pytest.mark.parametrize("m_order", [1, 2, 3])
+def test_cr_interaction_keeps_the_penalty_order_it_was_asked_for(m_order):
+    """A cr parent's penalty order must survive the interaction routing.
+
+    ``CardinalCRSpline`` implements one penalty -- the integrated squared
+    second derivative -- and rejects ``m=3`` outright.  Routing every cr parent
+    through it would therefore raise for ``m=3`` and silently answer ``m=1``
+    with a second-derivative penalty.  The parent's own quadrature penalty
+    supports all three, so anything but ``m=2`` keeps it, in the varying
+    coefficient block and the tensor marginal alike.
+    """
+    from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+
+    rng = np.random.default_rng(4)
+    n = 4000
+    x = rng.uniform(0.0, 10.0, n)
+    df = pd.DataFrame(
+        {
+            "x": x,
+            "z": rng.uniform(0.0, 5.0, n),
+            "f": pd.Categorical(rng.integers(0, 4, n).astype(str)),
+        }
+    )
+    y = rng.poisson(2.0, n).astype(np.float64)
+    parent = Spline(kind="cr", n_knots=8, m=m_order)
+
+    varying = SuperGLM(
+        family="poisson",
+        features={"x": parent, "f": Categorical()},
+        interactions=[("x", "f")],
+    )
+    varying.fit_reml(df, y)
+    stored = varying._interaction_specs[next(iter(varying._interaction_specs))]._spline_spec
+    assert stored._m_orders == (m_order,)
+
+    if m_order == 2:
+        # The one order the cardinal basis implements, so the routing is live.
+        assert isinstance(stored, CardinalCRSpline)
+    else:
+        # Everything else keeps the parent, whose quadrature penalty is the
+        # only implementation that has the requested order at all.  The second
+        # assertion is the control: these orders build genuinely different
+        # penalties, so "kept the parent" is not vacuously true.
+        assert isinstance(stored, CubicRegressionSpline)
+        charged = stored._build_penalty()
+        assert np.allclose(charged, stored._build_penalty_for_order(m_order))
+        assert not np.allclose(charged, stored._build_penalty_for_order(2))
+
+    # The tensor path takes the same routing, so it must survive m=3 too.
+    tensor = SuperGLM(
+        family="poisson",
+        features={"x": parent, "z": Spline(kind="cr", n_knots=8)},
+        interactions=[("x", "z")],
+    )
+    tensor.fit_reml(df, y)
+    assert np.isfinite(tensor._result.deviance)
