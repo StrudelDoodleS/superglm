@@ -408,3 +408,84 @@ def test_oc_interaction_survives_discrete_mode():
     model.fit_reml(df, y)
     mu = model.predict(df.iloc[:100])
     assert np.all(np.isfinite(mu))
+
+
+def _poisson_deviance(y, mu):
+    term = np.where(y > 0, y * np.log(np.maximum(y, 1e-300) / mu), 0.0)
+    return 2.0 * float(np.sum(term - (y - mu)))
+
+
+@pytest.mark.parametrize("level_dtype", ["int", "str"])
+def test_predict_reproduces_the_fit_for_non_string_partner_levels(level_dtype):
+    """An OC x Categorical fit must predict what it fitted, whatever the level type.
+
+    ``update_reml_r_inv`` recovers each level from a group's DISPLAY name, so a
+    non-string level arrives stringified -- integer ``2`` as ``"2"``.
+    ``SplineCategorical.score()`` looks the ORIGINAL key up, so keying the
+    reparametrisation dict on the parsed text drops it for every non-string
+    level and ``predict()`` silently diverges from the design it was fitted on.
+    The string case is the control: it was always correct and must stay so.
+    """
+    rng = np.random.default_rng(0)
+    n = 4000
+    codes = rng.integers(0, 4, n)
+    df = pd.DataFrame(
+        {
+            "age_band": pd.Categorical(rng.choice(BANDS, n), categories=BANDS, ordered=True),
+            "grp": codes if level_dtype == "int" else codes.astype(str),
+        }
+    )
+    band_codes = pd.Categorical(df["age_band"], categories=BANDS).codes
+    y = rng.poisson(np.exp(0.1 + 0.09 * band_codes + 0.06 * codes)).astype(float)
+
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "grp": Categorical()},
+        interactions=[("age_band", "grp")],
+    )
+    model.fit_reml(df, y)
+
+    # Not a value pin: predict() on the training frame must reproduce the
+    # fitted deviance exactly, because it is the same design.
+    assert _poisson_deviance(y, model.predict(df)) == pytest.approx(
+        model._result.deviance, rel=1e-9, abs=1e-9
+    )
+
+
+def test_classifier_decision_function_resolves_oc_interaction_parents():
+    """``decision_function`` must resolve parents like every other predict path.
+
+    It builds eta itself rather than routing through ``model.predict()``, so it
+    needs the same ``resolve_interaction_parent_of`` step: a spline-mode OC
+    enters an interaction through its mapped level scores.  Handing the raw
+    labels to ``ispec.transform`` raises on string levels and would score a
+    different linear predictor on numeric ones.
+    """
+    pytest.importorskip("sklearn")
+    from superglm.sklearn import SuperGLMClassifier
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    df = pd.DataFrame(
+        {
+            "age_band": pd.Categorical(rng.choice(BANDS, n), categories=BANDS, ordered=True),
+            "power": rng.uniform(20.0, 200.0, n),
+        }
+    )
+    lin = (
+        0.012 * df["power"].to_numpy()
+        + 0.2 * pd.Categorical(df["age_band"], categories=BANDS).codes
+    )
+    yb = (rng.uniform(size=n) < 1.0 / (1.0 + np.exp(-(lin - 1.4)))).astype(int)
+
+    clf = SuperGLMClassifier(features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)})
+    clf.fit(df, yb)
+    clf._model._add_interaction("age_band", "power")
+    clf._model.fit_reml(df, yb.astype(float))
+
+    # predict_proba goes through model.predict(), which already resolves;
+    # decision_function builds eta itself.  They must agree.
+    proba = clf.predict_proba(df)[:, 1]
+    np.testing.assert_allclose(
+        clf.decision_function(df), np.log(proba / (1.0 - proba)), rtol=1e-9, atol=1e-9
+    )
