@@ -5,6 +5,10 @@ here is the arithmetic underneath it: the Cp identity that turns `T/phi >
 2*edf0` into a threshold on `z`, and the participation ratio that reads the
 shape of a score the total cannot see.  Both are cheap and deterministic; the
 tests that fit real models are marked `slow`.
+
+Two of those guards exist because the guide quoted numbers the harness could
+not produce -- a full-refit column assembled from a second simulation, and a
+headline z that no arm measured.  Each is now pinned to the run it belongs to.
 """
 
 from __future__ import annotations
@@ -246,11 +250,21 @@ def test_shrinkage_table_reproduces_its_arms_and_prefers_pooling_over_fixed() ->
     reports (pooled beats fixed on holdout) is a property of the WIDE case and
     is not asserted here -- table 4 at the default width is where that lives.
     """
-    rows = _run_shrinkage(reps=1, n=2_000, n_levels=6)
+    rows, screen = _run_shrinkage(reps=1, n=2_000, n_levels=6)
     assert [row["model"] for row in rows] == list(SHRINKAGE_ARMS)
     for row in rows:
         assert np.isfinite(row["holdout"]) and row["holdout"] > 0
         assert row["params"] >= 1 and row["edf"] > 0
+        assert len(row["holdout_reps"]) == 1
+
+    # the z the guide quotes beside this table's holdout cost must come from
+    # this table's own train split, not from table 2's full-sample fit on a
+    # different seed -- otherwise the sentence subtracts two simulations
+    assert np.isfinite(screen["z"])
+    assert screen["edf0"] > 0
+    assert screen["threshold"] == pytest.approx(worth_threshold(screen["edf0"]))
+    assert len(screen["z_reps"]) == 1
+
     fixed = next(r for r in rows if r["model"] == "fixed")
     pooled = next(r for r in rows if r["model"] == "pooled")
     # whatever the holdout ordering at this width, pooling must spend strictly
