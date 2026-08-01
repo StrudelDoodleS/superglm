@@ -393,10 +393,30 @@ def add_interaction(
 
     Mutates ``interaction_specs`` and ``interaction_order`` in place.
     """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
     if feat1 not in specs:
         raise ValueError(f"Parent feature not found: {feat1}")
     if feat2 not in specs:
         raise ValueError(f"Parent feature not found: {feat2}")
+
+    # _spec_kind reads a step-mode OrderedCategorical as "categorical", which
+    # is right for its MAIN effect but wrong for an interaction parent: the
+    # deprecated one-hot geometry has no marginal smooth to cross with, and
+    # resolve_interaction_parent refuses it.  Without this the pair registers
+    # here and only fails much later, mid design-matrix build, after the
+    # caller has already committed a fit.
+    for parent in (feat1, feat2):
+        spec = specs[parent]
+        if isinstance(spec, OrderedCategorical) and (
+            spec.basis != "spline" or spec._spline is None
+        ):
+            raise NotImplementedError(
+                f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} is an "
+                "OrderedCategorical with basis='step', which is deprecated and cannot "
+                "parent an interaction; use basis=Spline(...) for a smoothed ordinal "
+                "parent or a Categorical feature for unsmoothed level effects."
+            )
 
     kind1 = _spec_kind(specs[feat1])
     kind2 = _spec_kind(specs[feat2])

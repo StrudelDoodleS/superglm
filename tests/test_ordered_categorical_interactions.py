@@ -62,6 +62,41 @@ def test_resolver_rejects_step_mode():
         resolve_interaction_parent(spec, np.array(BANDS, dtype=object))
 
 
+def test_step_mode_parent_is_rejected_when_the_interaction_is_added():
+    """Review finding: _spec_kind reads a step-mode OC as "categorical", so the
+    pair used to register and only fail mid design-matrix build, after the
+    caller had committed a fit.  It is refused where it is declared, naming the
+    pair and the deprecation; the resolver keeps its own guard behind this."""
+    df, y = _frame()
+    with pytest.warns(FutureWarning):
+        step = OrderedCategorical(order=BANDS, basis="step")
+
+    with pytest.raises(NotImplementedError, match="age_band.*basis='step'"):
+        SuperGLM(
+            family="poisson",
+            features={"age_band": step, "region": Categorical()},
+            interactions=[("age_band", "region")],
+        ).fit_reml(df, y)
+
+    # ... and through the incremental API, with the OC in either position
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": step, "power": Spline(kind="ps", n_knots=4)},
+    )
+    with pytest.raises(NotImplementedError, match=r"\('power', 'age_band'\)"):
+        model._add_interaction("power", "age_band")
+    assert model._interaction_specs == {}  # nothing was half-registered
+
+    # the spline-mode parent in the same position is accepted and fits
+    ok = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc(), "region": Categorical()},
+        interactions=[("age_band", "region")],
+    )
+    ok.fit_reml(df, y)
+    assert np.isfinite(ok._result.effective_df)
+
+
 def test_resolver_rejects_unseen_levels():
     spec = _oc()
     with pytest.raises(ValueError, match="unseen|levels"):
