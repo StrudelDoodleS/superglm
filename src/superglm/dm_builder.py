@@ -38,6 +38,7 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
@@ -528,7 +529,14 @@ def _process_info(
 
         n_cols = R_inv.shape[1]
         if use_discrete_spline_cat:
-            gm = DiscretizedSplineCategoricalGroupMatrix(
+            # Same storage, different contract: the lossless support indexes
+            # exact distinct rows, so the class must not claim the binned route.
+            spline_cat_cls = (
+                SupportCompressedSplineCategoricalGroupMatrix
+                if info.spline_cat_support_lossless
+                else DiscretizedSplineCategoricalGroupMatrix
+            )
+            gm = spline_cat_cls(
                 B_support,
                 R_inv,
                 info.spline_cat_bin_idx,
@@ -1267,7 +1275,9 @@ def rebuild_design_matrix_with_lambdas(
                 R_inv_new = P @ R_inv_local
             else:
                 R_inv_new = compute_R_inv(gm.B_unique, omega_eff, level_weight, lam)
-            new_gm = DiscretizedSplineCategoricalGroupMatrix(
+            # type(gm), not the parent: every REML lambda update comes through
+            # here, and a lossless block must not be downgraded to a binned one.
+            new_gm = type(gm)(
                 gm.B_unique,
                 R_inv_new,
                 gm.bin_idx_level,

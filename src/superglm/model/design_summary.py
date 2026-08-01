@@ -18,6 +18,7 @@ from superglm.group_matrix import (
     SparseGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 
@@ -94,6 +95,14 @@ _REPRESENTATION_BY_TYPE = MappingProxyType(
             True,
             "unique-basis",
             specialised_discrete_route="binned-spline-categorical",
+        ),
+        # Registered explicitly for the same reason the SSP one above is: the
+        # MRO fallback would report a lossless exact level block as the lossy
+        # binned route on a discrete=False fit.
+        SupportCompressedSplineCategoricalGroupMatrix: _RepresentationMetadata(
+            "support-compressed-spline-categorical",
+            True,
+            "unique-basis",
         ),
         DiscretizedTensorGroupMatrix: _RepresentationMetadata(
             "discretized-tensor",

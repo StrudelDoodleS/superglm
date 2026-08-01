@@ -126,6 +126,35 @@ def _varying_coefficient_spline_spec(spec, x: NDArray):
     return resolved
 
 
+def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, *, n_levels: int):
+    """Lossless row-support compression for a shared ``spline_cat`` basis.
+
+    A varying-coefficient term stores one CSR basis shared by its levels plus a
+    row subset per level, and every level runs its own weighted gram over its
+    rows.  When the spline covariate repeats -- a rating factor recorded in
+    whole years, the common insurance case -- those rows repeat too, and one
+    dense block of distinct rows serves every level.
+
+    This is the same deduplication ``_build_ssp_group`` applies to a main
+    effect, and the same gate decides it, with two differences.  The levels
+    partition the rows between them but each reads the whole shared support, so
+    the cost model is told how many grams that is.  And the grouping is offered
+    rather than detected: the basis is a function of *x* alone, so equal *x*
+    should give equal rows, which makes the decline a scan of one column
+    instead of the whole basis.  ``plan_verified_row_support`` still checks
+    that grouping against the basis before using it, so the saving is on the
+    detection scan and not on exactness.
+
+    Returns ``None`` when the gate declines, leaving CSR in place.
+    """
+    from superglm._group_matrix._group_matrix_support import plan_verified_row_support
+
+    if n_levels <= 0:
+        return None
+    row_index = np.unique(np.asarray(x, dtype=np.float64).ravel(), return_inverse=True)[1]
+    return plan_verified_row_support(sp.csr_matrix(B), np.ravel(row_index), gram_repeats=n_levels)
+
+
 # ── SplineCategorical ──────────────────────────────────────────
 
 
@@ -189,6 +218,7 @@ class SplineCategorical:
         self._projection = getattr(spline_spec, "_interaction_projection", None)
 
         B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
+        compressed = _plan_spline_cat_support(B, x_spline, n_levels=len(cat_spec._non_base))
 
         omega = spline_spec._build_penalty()
 
@@ -205,19 +235,28 @@ class SplineCategorical:
         groups: list[GroupInfo] = []
         for level in self._non_base:
             mask = x_cat == level
-            groups.append(
-                GroupInfo(
-                    columns=None,
-                    n_cols=n_cols,
-                    penalty_matrix=omega,
-                    reparametrize=True,
-                    projection=self._projection,
-                    spline_cat_basis=B,
-                    spline_cat_mask=mask,
-                    spline_cat_level=str(level),
-                    spline_cat_feature=self.cat_name,
-                )
+            shared = dict(
+                columns=None,
+                n_cols=n_cols,
+                penalty_matrix=omega,
+                reparametrize=True,
+                projection=self._projection,
+                spline_cat_mask=mask,
+                spline_cat_level=str(level),
+                spline_cat_feature=self.cat_name,
             )
+            if compressed is None:
+                groups.append(GroupInfo(spline_cat_basis=B, **shared))
+            else:
+                b_unique, row_index = compressed
+                groups.append(
+                    GroupInfo(
+                        spline_cat_basis_unique=b_unique,
+                        spline_cat_bin_idx=row_index,
+                        spline_cat_support_lossless=True,
+                        **shared,
+                    )
+                )
         return groups
 
     def build_discrete(

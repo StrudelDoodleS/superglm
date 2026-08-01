@@ -498,3 +498,441 @@ def test_hash_scan_chunks_honor_the_byte_ceiling(monkeypatch):
     assert detect_row_support(basis, max_support_bytes=budget) is None
     assert calls
     assert max(calls) <= budget // (p_b * 8)
+
+
+# ── spline_cat: one shared support, one gram per level ─────────────
+#
+# A varying-coefficient term stores a CSR basis shared by its levels plus a row
+# subset per level, and each level runs its own weighted gram.  Compression
+# replaces both with one dense block of distinct rows.  The levels partition the
+# rows between them but each reads the whole shared support, so the cost model
+# is told how many grams run over it.
+
+
+def _spline_cat_frame(n=6000, distinct=60, levels=3, seed=11):
+    """A repeated rating factor crossed with a small categorical."""
+    import pandas as pd
+
+    gen = np.random.default_rng(seed)
+    pool = np.linspace(18.0, 90.0, distinct)
+    x = pool[gen.integers(0, distinct, n)]
+    level = gen.integers(0, levels, n).astype(str)
+    frame = pd.DataFrame({"x": x, "f": pd.Categorical(level)})
+    response = gen.poisson(0.4, n).astype(np.float64)
+    return frame, response
+
+
+def _fit_spline_cat(frame, response, kind="cr", k=10, sample_weight=None):
+    from superglm import SuperGLM
+    from superglm.features.categorical import Categorical
+    from superglm.features.spline import Spline
+
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={"x": Spline(kind=kind, k=k), "f": Categorical()},
+        interactions=[("x", "f")],
+    )
+    model.fit_reml(frame, response, sample_weight=sample_weight)
+    return model
+
+
+def _spline_cat_blocks(model):
+    return [gm for gm in model._dm.group_matrices if "SplineCategorical" in type(gm).__name__]
+
+
+def test_verified_plan_declines_without_touching_the_basis(monkeypatch):
+    """The decline is the case the spline_cat caller pays on every continuous
+    covariate, so it must not densify the basis to reach it."""
+    from superglm._group_matrix._group_matrix_support import plan_verified_row_support
+
+    rng = np.random.default_rng(30)
+    n = 70_000
+    basis = sp.csr_matrix(rng.normal(size=(n, 3)))  # distinct rows a.s.
+    calls = []
+    _count_row_densifies(monkeypatch, calls)
+
+    assert plan_verified_row_support(basis, np.arange(n)) is None
+    assert not calls, f"declined block densified {calls} rows"
+
+
+def test_verified_plan_matches_detection_when_it_accepts():
+    from superglm._group_matrix._group_matrix_support import plan_verified_row_support
+
+    basis, _, row_index = _repeated_basis()
+
+    verified = plan_verified_row_support(basis, row_index)
+    detected = detect_row_support(basis)
+
+    assert verified is not None and detected is not None
+    np.testing.assert_array_equal(verified[0][verified[1]], basis.toarray())
+    np.testing.assert_allclose(verified[0][verified[1]], detected[0][detected[1]])
+
+
+def test_verified_plan_rejects_a_grouping_the_basis_contradicts():
+    """The caller's grouping is a claim about the basis, not a licence."""
+    from superglm._group_matrix._group_matrix_support import (
+        plan_row_support,
+        plan_verified_row_support,
+    )
+
+    basis, _, row_index = _repeated_basis()
+    # Merge two genuinely different groups: 0 and 1 become one.
+    wrong = np.where(row_index == 1, 0, row_index).astype(np.intp)
+    wrong = np.unique(wrong, return_inverse=True)[1].ravel().astype(np.intp)
+
+    trusted = plan_row_support(basis, wrong)
+    assert trusted is not None
+    assert not np.array_equal(trusted[0][trusted[1]], basis.toarray()), (
+        "the wrong grouping was supposed to be detectably wrong"
+    )
+
+    verified = plan_verified_row_support(basis, wrong)
+    assert verified is not None
+    np.testing.assert_array_equal(verified[0][verified[1]], basis.toarray())
+
+
+def test_gram_repeats_scales_only_the_dense_support_term():
+    """Levels share the support but partition the rows: the bincount term is
+    counted once, the dense gram once per level."""
+    from superglm._group_matrix._group_matrix_support import (
+        _BLAS_ADVANTAGE,
+        _estimated_speedup,
+    )
+
+    n, n_support, p_b, nnz = 100_000, 500, 20, 2_000_000
+    current = n * (nnz / n) * ((nnz / n) + 1.0) / 2.0
+
+    for repeats in (1, 3, 7):
+        expected = _BLAS_ADVANTAGE * current / (n + repeats * n_support * p_b**2)
+        assert _estimated_speedup(n, n_support, p_b, nnz, repeats) == expected
+
+
+def test_level_count_can_decline_a_block_a_single_gram_would_accept():
+    """The multiplier has to be able to change the decision, or it is decoration."""
+    from superglm._group_matrix._group_matrix_support import (
+        DEFAULT_MIN_SPEEDUP,
+        _estimated_speedup,
+    )
+
+    n, n_support, p_b, nnz = 100_000, 50_000, 20, 2_000_000
+
+    assert _estimated_speedup(n, n_support, p_b, nnz, 1) >= DEFAULT_MIN_SPEEDUP
+    assert _estimated_speedup(n, n_support, p_b, nnz, 6) < DEFAULT_MIN_SPEEDUP
+
+
+def test_spline_cat_exact_path_compresses_a_repeated_covariate():
+    """The whole point: a rating factor recorded in whole years must not store
+    one basis row per observation on the exact path."""
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+
+    frame, response = _spline_cat_frame()
+    blocks = _spline_cat_blocks(_fit_spline_cat(frame, response))
+
+    assert blocks, "expected the model to build spline_cat level blocks"
+    for block in blocks:
+        assert type(block) is SupportCompressedSplineCategoricalGroupMatrix
+        assert block.is_lossless_support is True
+        assert block.n_bins < frame.shape[0]
+
+
+def test_spline_cat_compression_leaves_every_fitted_quantity_unchanged(monkeypatch):
+    """The release gate: compression must move no result beyond rounding.
+
+    NOT bit-identity, and the distinction is the point of the weighting here.
+    The level weights are the one thing the two paths do not compute the same
+    way -- the compressed side aggregates them onto the shared support rows
+    before ``compute_projected_R_inv`` sees them, the CSR side passes them per
+    observation -- so a sum is reordered and the coefficients move at rounding
+    scale.  Measured at 3.5e-9 absolute on this fixture; pinned an order of
+    magnitude looser so the test does not fail on a different BLAS.
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+    from superglm.features import interaction as interaction_module
+
+    frame, response = _spline_cat_frame()
+    weights = np.random.default_rng(31).uniform(0.2, 1.0, frame.shape[0])
+
+    compressed = _fit_spline_cat(frame, response, sample_weight=weights)
+    assert all(
+        type(block) is SupportCompressedSplineCategoricalGroupMatrix
+        for block in _spline_cat_blocks(compressed)
+    ), "the comparison is vacuous unless the first fit actually compressed"
+
+    monkeypatch.setattr(interaction_module, "_plan_spline_cat_support", lambda *a, **k: None)
+    plain = _fit_spline_cat(frame, response, sample_weight=weights)
+    assert not any(hasattr(block, "B_unique") for block in _spline_cat_blocks(plain)), (
+        "the reference fit was supposed to stay on the CSR representation"
+    )
+
+    np.testing.assert_allclose(compressed._result.beta, plain._result.beta, rtol=1e-7, atol=1e-7)
+    np.testing.assert_allclose(compressed._result.deviance, plain._result.deviance, rtol=1e-9)
+    np.testing.assert_allclose(
+        compressed.predict(frame), plain.predict(frame), rtol=1e-8, atol=1e-8
+    )
+    np.testing.assert_allclose(
+        compressed.metrics(frame, response, sample_weight=weights).effective_df,
+        plain.metrics(frame, response, sample_weight=weights).effective_df,
+        rtol=1e-6,
+    )
+
+
+def test_spline_cat_declines_when_the_covariate_never_repeats():
+    """Guard, not a fix: a continuous covariate has nothing to deduplicate, and
+    routing it through the dense support would slow the column-at-a-time
+    cross-gram it still has to take."""
+    import pandas as pd
+
+    from superglm._group_matrix._group_matrix_core import SplineCategoricalGroupMatrix
+
+    gen = np.random.default_rng(12)
+    n = 6000
+    frame = pd.DataFrame(
+        {"x": gen.gamma(2.0, 1.5, n), "f": pd.Categorical(gen.integers(0, 3, n).astype(str))}
+    )
+    response = gen.poisson(0.4, n).astype(np.float64)
+
+    blocks = _spline_cat_blocks(_fit_spline_cat(frame, response))
+
+    assert blocks
+    for block in blocks:
+        assert type(block) is SplineCategoricalGroupMatrix
+
+
+def test_spline_cat_compressed_block_algebra_matches_the_csr_block():
+    from superglm._group_matrix._group_matrix_core import SplineCategoricalGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+
+    gen = np.random.default_rng(13)
+    n, n_support, p_b, p_g = 4000, 30, 6, 4
+    base = gen.normal(size=(n_support, p_b))
+    row_index = gen.integers(0, n_support, n).astype(np.intp)
+    basis = sp.csr_matrix(base[row_index])
+    r_inv = gen.normal(size=(p_b, p_g))
+    rows = np.flatnonzero(gen.integers(0, 3, n) == 1)
+    weights = gen.normal(1.0, 0.3, n)  # signed: REML's W-correction passes these
+
+    reference = SplineCategoricalGroupMatrix(basis, r_inv, rows)
+    compressed = SupportCompressedSplineCategoricalGroupMatrix(base, r_inv, row_index, rows)
+
+    assert compressed.shape == reference.shape
+    np.testing.assert_allclose(compressed.toarray(), reference.toarray(), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        compressed.gram(weights), reference.gram(weights), rtol=1e-11, atol=1e-11
+    )
+    vector = gen.normal(size=p_g)
+    np.testing.assert_allclose(
+        compressed.matvec(vector), reference.matvec(vector), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        compressed.rmatvec(weights), reference.rmatvec(weights), rtol=1e-11, atol=1e-11
+    )
+    for actual, expected in zip(
+        compressed.gram_rmatvec(weights, weights * 0.5),
+        reference.gram_rmatvec(weights, weights * 0.5),
+        strict=True,
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_spline_cat_row_subset_preserves_lossless_type():
+    """A CV split must not silently convert a lossless level block into a binned one."""
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+
+    gen = np.random.default_rng(14)
+    compressed = SupportCompressedSplineCategoricalGroupMatrix(
+        gen.normal(size=(12, 4)),
+        gen.normal(size=(4, 3)),
+        gen.integers(0, 12, 400).astype(np.intp),
+        np.arange(0, 400, 2, dtype=np.intp),
+    )
+
+    subset = compressed.row_subset(np.arange(0, 400, 3))
+
+    assert type(subset) is SupportCompressedSplineCategoricalGroupMatrix
+    assert subset.is_lossless_support is True
+    np.testing.assert_allclose(subset.toarray(), compressed.toarray()[np.arange(0, 400, 3)])
+
+
+def test_spline_cat_rebuild_with_lambdas_preserves_lossless_type():
+    """Every REML lambda update rebuilds the design; the marker must survive."""
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+    from superglm.dm_builder import rebuild_design_matrix_with_lambdas
+
+    frame, response = _spline_cat_frame()
+    model = _fit_spline_cat(frame, response)
+    weights = np.ones(frame.shape[0])
+    lambdas = {group.name: 2.0 for group in model._groups}
+
+    rebuilt = rebuild_design_matrix_with_lambdas(model._dm, model._groups, lambdas, weights, 1.0)
+
+    original = _spline_cat_blocks(model)
+    assert original, "expected spline_cat blocks to rebuild"
+    rebuilt_blocks = [
+        gm for gm in rebuilt.group_matrices if "SplineCategorical" in type(gm).__name__
+    ]
+    assert len(rebuilt_blocks) == len(original)
+    for block in rebuilt_blocks:
+        assert type(block) is SupportCompressedSplineCategoricalGroupMatrix
+
+
+def test_design_summary_does_not_label_lossless_spline_cat_as_binned():
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+    from superglm.model.design_summary import _representation_metadata
+
+    gen = np.random.default_rng(15)
+    compressed = SupportCompressedSplineCategoricalGroupMatrix(
+        gen.normal(size=(10, 4)),
+        gen.normal(size=(4, 3)),
+        gen.integers(0, 10, 100).astype(np.intp),
+        np.arange(50, dtype=np.intp),
+    )
+
+    metadata = _representation_metadata(compressed)
+
+    assert metadata.representation != "discretized-spline-categorical"
+    assert metadata.specialised_discrete_route != "binned-spline-categorical", (
+        "a discrete=False fit must not be reported as taking the binned fREML route"
+    )
+    assert metadata.compressed is True
+
+
+def test_spline_cat_compressed_class_is_publicly_reachable():
+    """Pickled models must not carry a private module path."""
+    import pickle
+
+    from superglm import group_matrix as public
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+
+    assert hasattr(public, "SupportCompressedSplineCategoricalGroupMatrix")
+    assert SupportCompressedSplineCategoricalGroupMatrix.__module__ == "superglm.group_matrix"
+
+    gen = np.random.default_rng(16)
+    original = SupportCompressedSplineCategoricalGroupMatrix(
+        gen.normal(size=(6, 3)),
+        gen.normal(size=(3, 2)),
+        gen.integers(0, 6, 50).astype(np.intp),
+        np.arange(0, 50, 2, dtype=np.intp),
+    )
+    restored = pickle.loads(pickle.dumps(original))
+    assert type(restored) is SupportCompressedSplineCategoricalGroupMatrix
+    np.testing.assert_allclose(restored.toarray(), original.toarray())
+
+
+def _forbid_2d_histogram(monkeypatch, pair_name):
+    """Make the joint histogram fatal so a cap test cannot pass by taking it."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"{pair_name} built an unbounded joint histogram")
+
+    monkeypatch.setattr(algebra, "_disc_disc_2d_hist", refuse)
+
+
+def _spline_cat_support_block(n, n_support, p_b, p_g, rows, seed):
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSplineCategoricalGroupMatrix,
+    )
+
+    gen = np.random.default_rng(seed)
+    base = gen.normal(size=(n_support, p_b))
+    row_index = gen.integers(0, n_support, n).astype(np.intp)
+    block = SupportCompressedSplineCategoricalGroupMatrix(
+        base, gen.normal(size=(p_b, p_g)), row_index, rows
+    )
+    block.spline_cat_feature = "f"
+    block.spline_cat_level = "1"
+    return block
+
+
+def test_wide_supports_cross_gram_without_a_joint_histogram(monkeypatch):
+    """Two spline_cat terms over the same factor multiply their support sizes
+    into one histogram.  A lossless support is bounded by the row count, not by
+    a bin count, so that product has to be capped."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    n = 3000
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    weights = np.abs(np.random.default_rng(17).normal(1.0, 0.2, n))
+    left = _spline_cat_support_block(n, 400, 5, 3, rows, seed=18)
+    right = _spline_cat_support_block(n, 350, 4, 2, rows, seed=19)
+
+    expected = algebra._cross_gram_spline_categorical_spline_categorical(left, right, weights)
+
+    monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1_000)
+    _forbid_2d_histogram(monkeypatch, "spline_cat x spline_cat")
+    actual = algebra._cross_gram_spline_categorical_spline_categorical(left, right, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_wide_supports_cross_gram_on_partial_row_overlap_without_a_histogram(monkeypatch):
+    """Same cap, on the branch that intersects two different row sets."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    n = 3000
+    weights = np.abs(np.random.default_rng(20).normal(1.0, 0.2, n))
+    left = _spline_cat_support_block(n, 400, 5, 3, np.arange(0, n, 2, dtype=np.intp), seed=21)
+    right = _spline_cat_support_block(n, 350, 4, 2, np.arange(0, n, 3, dtype=np.intp), seed=22)
+    right.spline_cat_feature = "g"
+
+    expected = algebra._cross_gram_spline_categorical_spline_categorical(left, right, weights)
+
+    monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1_000)
+    _forbid_2d_histogram(monkeypatch, "spline_cat x spline_cat")
+    actual = algebra._cross_gram_spline_categorical_spline_categorical(left, right, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_tensor_by_wide_spline_cat_cross_gram_without_a_joint_histogram(monkeypatch):
+    """A per-feature ``discrete=True`` spline can put a binned tensor beside a
+    lossless spline_cat, and that pair histograms too."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedTensorGroupMatrix,
+    )
+
+    gen = np.random.default_rng(23)
+    n, n_bins1, n_bins2 = 3000, 12, 9
+    b1 = gen.normal(size=(n_bins1, 3))
+    b2 = gen.normal(size=(n_bins2, 2))
+    idx1 = gen.integers(0, n_bins1, n).astype(np.intp)
+    idx2 = gen.integers(0, n_bins2, n).astype(np.intp)
+    joint = np.einsum("ij,ik->ijk", b1[idx1], b2[idx2]).reshape(n, 6)
+    tensor = DiscretizedTensorGroupMatrix(
+        b1,
+        b2,
+        idx1,
+        idx2,
+        joint,
+        gen.normal(size=(6, 4)),
+        np.arange(n, dtype=np.intp),
+        tensor_id=0,
+    )
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    spline_cat = _spline_cat_support_block(n, 400, 5, 3, rows, seed=24)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+
+    monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1_000)
+    _forbid_2d_histogram(monkeypatch, "tensor x spline_cat")
+    actual = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
