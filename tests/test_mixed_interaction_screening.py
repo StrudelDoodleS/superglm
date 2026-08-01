@@ -729,12 +729,19 @@ def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
         )
 
 
-def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
-    """Review finding: for a spline_cat whose factor is wide, kron(S, I) has a
-    null space above every budget, so all four rungs clamp to the same achieved
-    edf and repeat the same O(k^3) solves for one answer.  The ladder skips
-    every budget strictly below an achieved clamp, and the row is unchanged."""
-    import superglm.model.screening_ops as screening_ops
+def test_clamped_ladder_costs_no_decomposition_and_agrees_with_every_rung(monkeypatch):
+    """For a spline_cat whose factor is wide, kron(S, I) has a null space above
+    every budget, so all four rungs clamp to the same achieved edf.
+
+    Two things must hold.  The whole ladder costs ZERO decompositions -- the
+    ladder brackets first with two ordinary solves, and a rung that clamps is
+    answered from that bracket, so the pencil is never built.  This is the
+    case that matters most for wide factors, where decomposing would be
+    strictly more expensive than the solves it would replace.  And running any
+    single budget on its own must reproduce the ladder's row exactly, which is
+    the property the old clamped-rung skip relied on for its correctness.
+    """
+    import superglm.screening._score_stat as score_stat
 
     L, reps = 40, 25
     rng = np.random.default_rng(77)
@@ -752,24 +759,23 @@ def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
     )
     model.fit_reml(df, y)
 
-    calls = []
-    real = screening_ops.penalized_score_statistic
+    builds = []
+    real = score_stat._build_pencil
 
     def counted(*args, **kwargs):
-        calls.append(kwargs["edf0"])
+        builds.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(screening_ops, "penalized_score_statistic", counted)
+    monkeypatch.setattr(score_stat, "_build_pencil", counted)
 
     ladder = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
-    # every rung clamps upward to the null-space dimension, so only the first
-    # budget is ever solved
-    assert calls == [2.0]
+    # four rungs, no decomposition at all -- every one of them clamps
+    assert builds == []
     assert ladder["kind"] == "spline_cat"
     assert ladder["edf0"] > 16.0  # the achieved clamp sits above every budget
 
-    # ... and the skipped rungs would have returned exactly this row
-    calls.clear()
+    # ... and each rung on its own returns exactly this row
+    builds.clear()
     for budget in (4.0, 8.0, 16.0):
         rung = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=budget).iloc[0]
         assert rung["statistic"] == ladder["statistic"]
@@ -778,10 +784,12 @@ def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
         assert rung["z"] == ladder["z"]
 
 
-def test_bisecting_ladder_still_evaluates_every_rung(monkeypatch):
-    """The skip is fenced to clamped rungs: a ti pair whose budget lands inside
-    the bracket resolves a different lambda0 per rung, so all four must run."""
-    import superglm.model.screening_ops as screening_ops
+def test_bisecting_ladder_resolves_every_rung_from_one_decomposition(monkeypatch):
+    """A ti pair whose budgets land inside the bracket resolves a DIFFERENT
+    lambda0 per rung, so every rung genuinely has to be evaluated -- and all
+    four come out of a single decomposition, since the pencil is independent
+    of both lambda and edf0."""
+    import superglm.screening._score_stat as score_stat
 
     rng = np.random.default_rng(5)
     n = 20000
@@ -798,16 +806,31 @@ def test_bisecting_ladder_still_evaluates_every_rung(monkeypatch):
     )
     model.fit_reml(df, y)
 
-    calls = []
-    real = screening_ops.penalized_score_statistic
+    builds = []
+    real_build = score_stat._build_pencil
+    lambdas = []
+    real_ladder = score_stat.penalized_score_statistic_ladder
 
-    def counted(*args, **kwargs):
-        calls.append(kwargs["edf0"])
-        return real(*args, **kwargs)
+    def counted_build(*args, **kwargs):
+        builds.append(1)
+        return real_build(*args, **kwargs)
 
-    monkeypatch.setattr(screening_ops, "penalized_score_statistic", counted)
+    def recording_ladder(*args, **kwargs):
+        out = real_ladder(*args, **kwargs)
+        lambdas.append([r.lambda0 for r in out])
+        return out
+
+    monkeypatch.setattr(score_stat, "_build_pencil", counted_build)
+    monkeypatch.setattr(
+        "superglm.model.screening_ops.penalized_score_statistic_ladder", recording_ladder
+    )
     row = model.screen_interactions(df, y, candidates=[("x1", "x2")]).iloc[0]
-    assert calls == [2.0, 4.0, 8.0, 16.0]
+
+    assert builds == [1], "one decomposition serves the whole ladder"
+    assert len(lambdas) == 1 and len(lambdas[0]) == 4, "all four rungs reported"
+    # The rungs are genuinely distinct -- this is the case the old
+    # clamped-rung skip had to be fenced away from.
+    assert len(set(lambdas[0])) == 4, f"expected four distinct lambda0, got {lambdas[0]}"
     assert row["edf0"] == pytest.approx(2.0, abs=1e-3)
 
 
@@ -894,12 +917,12 @@ def test_cubic_gate_leaves_ordinary_pairs_alone():
 
 
 def test_penalized_blocks_are_charged_the_ladder_they_run():
-    """A penalized block re-solves its system per rung, and its bisection
-    re-solves it ~27 times within a rung (measured 109 solves per pair against
-    2 for an unpenalized block), so the same dimension buys far less time.  The
-    gate charges it 16x the work: a spline_cat block is refused at a dimension
-    an unpenalized cat_cat block screens at in the same sweep."""
-    lg, lh, reps = 80, 22, 2
+    """A penalized block runs a whole ladder where an unpenalized one returns a
+    single rung, so the same dimension buys less time.  The gate charges it
+    _PENALIZED_LADDER_COST times the work, which keeps a spline_cat block
+    refused at a dimension an unpenalized cat_cat block screens at in the same
+    sweep -- 1357 against 1709 at the default max_cells."""
+    lg, lh, reps = 111, 16, 2
     a = np.repeat(np.arange(lg), lh * reps)
     b = np.tile(np.repeat(np.arange(lh), reps), lg)
     rng = np.random.default_rng(23)
@@ -918,10 +941,10 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     model.fit_reml(df, y)
 
     table = model.screen_interactions(df, y).set_index(["feature_a", "feature_b"])
-    # unpenalized, k = 79 * 21 = 1659, under the 1709 unpenalized ceiling
+    # unpenalized, k = 110 * 15 = 1650, under the 1709 unpenalized ceiling
     assert np.isfinite(table.loc[("g", "h"), "z"])
-    # penalized, k = 13 * 79 = 1027 -- well under 1709, and well over the 678
-    # a 16x work charge leaves a penalized block
+    # penalized, k = 13 * 110 = 1430 -- under that same 1709, and over the
+    # 1357 a 2x work charge leaves a penalized block
     assert np.isnan(table.loc[("g", "x"), "z"])
     assert table.loc[("g", "x"), "n_cells"] > 0
     # the narrow factor's spline_cat pair is inside the penalized budget

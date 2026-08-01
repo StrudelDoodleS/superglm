@@ -98,7 +98,7 @@ from superglm.screening import (
     numeric_pair_moments,
     pair_cell_moments,
     pair_score_curvature,
-    penalized_score_statistic,
+    penalized_score_statistic_ladder,
     working_score,
 )
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
@@ -133,22 +133,33 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 #              at two 67-level factors, k = 4290)
 #   2.0e-10 s  unpenalized block, Cholesky path (numeric_cat, full rank:
 #              2.1 s at the widest factor the allocation gate admits)
-#   7.0e-10 s  penalized block whose ladder clamps at every rung
-#   5.0e-09 s  penalized block whose ladder BISECTS -- ~17x the unpenalized
-#              constant, because each rung re-solves the system ~27 times to
-#              hit its edf target (measured 109 solves per pair, 29 s at
-#              k = 1849 for a 40-knot x 40-knot ti)
+#   2.7e-10 s  penalized block, WHOLE four-rung ladder
 # Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
 # _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
-# budget against _PENALIZED_LADDER_COST times the work for a penalized one:
-# k <= 1709 and k <= 678 respectively at the default max_cells, measured
-# there at 1.3 s (cat_cat, k = 1681) and 1.9 s (bisecting ti, k = 676).  The
-# penalized budget is set by the BISECTING path because whether a rung
-# bisects is not knowable before the solve; a clamped ladder at the same
-# dimension measured 0.14 s, so that budget is deliberately conservative.
-# Raising max_cells lifts both, as it lifts every other budget here.
+# budget against _PENALIZED_LADDER_COST times the work for a penalized one.
+#
+# That multiplier used to be 16.  A penalized ladder re-solved the (k, k)
+# system ~27 times PER RUNG to bisect for its edf target -- 109 solves per
+# pair, 5.0e-09 s/k^3, 29 s at k = 1849 -- and since whether a rung bisects is
+# not knowable before the solve, the budget had to assume it did.  The ladder
+# now brackets once for the whole ladder and, only when some rung genuinely
+# has to search, shares ONE simultaneous diagonalization of the pencil
+# (V_eff, S) across every rung that does, which makes edf(lambda) and
+# T(lambda) closed forms and reduces the search to O(k) arithmetic on them.
+# Measured after that change, at k = 1709, one BLAS thread: 1.6e-10 s/k^3
+# unpenalized against 2.7e-10 for the entire four-rung penalized ladder --
+# a ratio of 1.65, not 25.  End to end on a bisecting 28x28-knot ti the same
+# change is 4.20 s -> 0.54 s.  The multiplier is set to 2 rather than 1.65 to
+# keep headroom for the pseudo-inverse branch, which either path can take.
+#
+# At the default max_cells this admits k <= 1709 unpenalized and k <= 1357
+# penalized, measured there at 0.81 s and 0.67 s -- both inside the 1.5 s
+# target the old constants were chosen against.  Raising max_cells lifts
+# both, as it lifts every other budget here.  The remaining ceiling is an
+# artifact of densifying a block that is structurally block-diagonal; see
+# issue #188.
 _CUBIC_BUDGET_FACTOR = 1000
-_PENALIZED_LADDER_COST = 16
+_PENALIZED_LADDER_COST = 2
 
 
 def _quantile_binned(x, bins):
@@ -811,15 +822,16 @@ def screen_interactions(
     def _within_cubic_budget(k, penalized):
         """Budget the pair's SOLVE TIME, which the allocation gates do not.
 
-        Every rung of ``penalized_score_statistic`` factorizes or
-        pseudo-inverts a ``(k, k)`` system, so per-pair time grows as ``k^3``
-        while the gates above grow as ``k^2`` — a block that fits memory
-        comfortably can still take minutes.  A penalized block is charged
-        ``_PENALIZED_LADDER_COST`` times the work, the measured cost of a
-        ladder whose bisection runs rather than clamping.  Runs on the block
-        dimension alone, before any menu or cell table is built, so a refused
-        pair pays for nothing; the constants and the ~1.5 s per-pair target
-        they were fitted to are documented at the top of this module.
+        Scoring a pair decomposes a ``(k, k)`` system, so per-pair time grows
+        as ``k^3`` while the gates above grow as ``k^2`` — a block that fits
+        memory comfortably can still take minutes.  A penalized block is
+        charged ``_PENALIZED_LADDER_COST`` times the work: its ladder shares
+        ONE decomposition across every rung, so it now costs barely more than
+        an unpenalized block rather than the 25x a per-rung bisection did.
+        Runs on the block dimension alone, before any menu or cell table is
+        built, so a refused pair pays for nothing; the constants and the
+        ~1.5 s per-pair target they were fitted to are documented at the top
+        of this module.
         """
         work = (_PENALIZED_LADDER_COST if penalized else 1) * int(k) ** 3
         return work <= _CUBIC_BUDGET_FACTOR * max_cells
@@ -983,24 +995,29 @@ def screen_interactions(
         # An unpenalized block has no bandwidth to scan: every rung returns the
         # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
         penalized = S_ti is not None and bool(np.any(S_ti))
+        # The whole ladder shares ONE decomposition.  The pencil that turns
+        # edf(lambda) and T(lambda) into closed forms depends on neither
+        # lambda nor edf0, so every rung after the first costs O(k) instead of
+        # a fresh O(k^3) solve — and the bisection that used to re-solve ~27
+        # times per rung now runs on the closed form.
+        #
+        # This also retires the clamped-rung skip that used to guard the same
+        # cost.  Its own justification was that a rung clamping UPWARD returns
+        # an identical (statistic, edf0, lambda0) triple for every strictly
+        # lower budget; an identical triple gives an identical z, and the
+        # comparison below is STRICT, so recomputing those rungs cannot
+        # displace the incumbent.  Same output, one less special case.
+        results = penalized_score_statistic_ladder(
+            U,
+            V,
+            C,
+            M,
+            S_ti,
+            budgets=tuple(float(b) for b in (budgets if penalized else budgets[:1])),
+            U_nuisance=u_m,
+        )
         best_z, best = -np.inf, None
-        # A rung that clamps UPWARD sat below the penalty's null-space
-        # dimension, so it took the bracket's high edge; every budget strictly
-        # below that achieved value takes the same edge and returns the
-        # identical (statistic, edf0, lambda0) triple.  Skipping those rungs is
-        # output-identical and saves the O(k^3) solves they would repeat —
-        # the whole ladder, for a spline_cat whose factor is wide enough that
-        # kron(S, I) leaves a null space above every budget.  Only a STRICTLY
-        # lower budget is skipped: a budget equal to the achieved value can
-        # instead land on the bracket's low edge and report a different
-        # lambda0.
-        clamped_above = None
-        for budget in budgets if penalized else budgets[:1]:
-            if clamped_above is not None and budget < clamped_above:
-                continue
-            result = penalized_score_statistic(U, V, C, M, S_ti, edf0=budget, U_nuisance=u_m)
-            if result.edf0 > budget:
-                clamped_above = result.edf0
+        for result in results:
             statistic = result.statistic / phi_hat
             z = (statistic - result.edf0) / np.sqrt(2.0 * result.edf0)
             if z > best_z:
