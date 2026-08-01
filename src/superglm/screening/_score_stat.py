@@ -45,6 +45,8 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm.screening._arrow import psd_ranks
+
 _EDF_TOL = 1e-6
 _MAX_BISECT = 200
 _RCOND = 1e-12
@@ -92,9 +94,68 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     factorizations themselves.  One factorization per edge, reused, removes
     both duplicates.
 
-    ``S = None`` is the unpenalized block, where ``A`` IS ``V`` and the edf
-    is its rank; it takes the same one factorization rather than forming a
-    zero matrix to add to.
+    ``S = None`` is the unpenalized block, where ``A`` IS ``V`` and the edf is
+    its RANK — so it is counted, not traced.  ``tr(A^-1 V)`` reports the rank
+    only when ``A^-1`` is a pseudo-inverse; where ``cho_factor`` succeeds it
+    reports ``k``, and a barely positive-definite block is exactly the one
+    ``cho_factor`` is entitled to accept, since such a block is mathematically
+    PD.  Whether it accepts is then decided by rounding alone: on 200
+    replicates of one 210-level ``numeric_cat`` layout with a single singleton
+    level — a level whose numeric margin is constant is exactly collinear with
+    the profiled-out span, so every replicate's block has rank 208 of 209 —
+    ``cho_factor`` succeeded on 76 and the reported edf came back 209 on those
+    and 208 on the other 124.  ``numpy.linalg.matrix_rank`` read 208 on all
+    200.  Through the public screen the same layout reported 209 on 3 of 12
+    seeds, moving ``z`` by +0.050; at 4 df of 5 the same flip moved it by
+    +0.29, since ``z`` divides by ``sqrt(2 * edf0)``.
+    :func:`superglm.screening._arrow.psd_ranks` is the counter, so the dense
+    unpenalized rung and the arrow one are the same rule at the same cut.
+
+    **That deliberately moves the FALLBACK branch's cut too, not only the
+    Cholesky one.**  Where ``cho_factor`` fails, the old trace was
+    ``tr(pinv(V) V)``, whose cut is whatever ``numpy.linalg.pinv`` defaults to
+    — measured at 1e-15 relative on numpy 2.4.2, the trace flipping between a
+    relative eigenvalue of 1e-14 and one of 1e-15.  Counting at ``_RCOND``
+    instead makes the disputed band [1e-15, 1e-12), so a direction in it used
+    to be worth a whole degree of freedom and now is worth none.  That is the
+    same defect, not collateral from fixing it: a REPORTED degree of freedom
+    has no business depending on which branch the solver happened to take, and
+    1e-12 is already this module's answer to the same question everywhere else
+    — ``_build_pencil`` counts ``rank_v`` there, and so does the arrow kernel.
+    It is also the safer direction on a block built by subtraction: ``pinv``
+    scores directions by ``|lambda|``, so it counted a curvature of -1e-11 as a
+    degree of freedom and inverted it; ``psd_ranks`` reads the sign and drops
+    it.  No block in any sweep run against this change actually sits in the
+    band — on the 20-replicate layout in the regression test 10 replicates take
+    the fallback branch and none disagrees, because a profiled screening block
+    is bimodal: over those 20 the smallest KEPT relative eigenvalue is 1.2e-02
+    and the largest dropped one 4.6e-16, so both cuts fall in fourteen orders
+    of empty space.
+
+    The count is NOT free: eigenvalues cost more than the k-right-hand-side
+    trace they replace, by 2.13x, 1.60x, 1.28x, 1.19x and 1.42x at k = 100,
+    209, 400, 800 and 1600 (single-threaded).  Against the whole pair it is
+    much less -- 1.056x end to end on the widest unpenalized pair the cubic
+    budget admits, see the calibration comment in
+    :mod:`superglm.model.screening_ops`.  This is a correctness price, paid on
+    ONE rung of the one ladder that has no bandwidth to scan.
+
+    Only the edf moves.  The statistic is ``U_eff' A^-1 U_eff``, and ``U_eff``
+    is orthogonal to ``V_eff``'s null space by construction — a direction the
+    overlap absorbs carries no profiled score — so the Cholesky and
+    pseudo-inverse solves answer it the same: over the 76 affected replicates
+    above, ``|T_chol - T_pinv| / |T_pinv|`` had median 3.9e-16 and max 2.9e-15.
+    ``apply`` is deliberately NOT rank-limited to match, and the resulting gap
+    was measured rather than missed.  Inside [1e-15, 1e-12) — the band between
+    ``pinv``'s cut and ``_RCOND`` — a direction is INVERTED by the fallback
+    solve while not being COUNTED here, so the statistic can carry a direction
+    the edf does not.  Bound: on a constructed 6x6 with one eigenvalue at 1e-13
+    relative and ``U`` in the identified span, that direction is worth 3.0e-06
+    of the statistic, orders below anything the ranking resolves.  Judged and
+    left: #199 is a defect in the reported edf, and rank-limiting the solve as
+    well is a wider change than it calls for.  Revisit only with a block whose
+    spectrum actually populates that band — none measured so far does, see the
+    bimodality note above.
     """
     A = V if S is None else V + lam * S
     try:
@@ -102,6 +163,8 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
         apply = partial(scipy.linalg.cho_solve, factor, check_finite=False)
     except scipy.linalg.LinAlgError:
         apply = np.linalg.pinv(A, hermitian=True).__matmul__
+    if S is None:
+        return float(psd_ranks(V)), apply
     return float(np.trace(apply(V))), apply
 
 
@@ -214,8 +277,10 @@ def penalized_score_statistic_ladder(
             U = U - MinvC.T @ np.asarray(U_nuisance, dtype=np.float64)
 
     if S_ti is None or not np.any(S_ti):
-        # No penalty to scan: ONE factorization of the block, answering both
-        # the statistic and the achieved rank, at the block's own dimension.
+        # No penalty to scan: ONE factorization of the block answers the
+        # statistic, and the achieved rank is COUNTED beside it rather than
+        # read off that factorization -- see _edge on why the trace cannot
+        # answer it.
         rank, apply = _edge(V, None, 0.0)
         T = float(U @ apply(U))
         return [ScreenedPair(statistic=T, edf0=rank, lambda0=0.0) for _ in budgets]

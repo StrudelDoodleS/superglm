@@ -135,6 +135,19 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 #   2.0e-10 s  unpenalized block, Cholesky path (numeric_cat, full rank:
 #              2.1 s at the widest factor the allocation gate admits)
 #   2.7e-10 s  penalized block, WHOLE four-rung ladder
+# The two UNPENALIZED figures, and the 1.6e-10 s/k^3 (0.81 s at k = 1709)
+# below, are the cost before issue #199 replaced that rung's edf -- a Cholesky
+# trace, which reports k rather than the rank whenever cho_factor accepts a
+# barely definite block -- with a rank COUNT.  Counting is an eigenvalue
+# decomposition where the trace was a k-right-hand-side solve, so it is not
+# free.  Measured as an interleaved A/B in ONE process, single BLAS thread, so
+# that load drift cannot be mistaken for the change: 1.056x at the numeric_cat
+# corner the budget below actually admits (k = 1709, one singleton level:
+# 1.037 s -> 1.095 s, and the reported edf0 1709 -> 1708, which is the point)
+# and 1.209x on the pseudo-inverse path at two 67-level factors (k = 4356, one
+# empty cell: 14.0 s -> 16.9 s, 1.48 GB either way).  Carry the figures above
+# forward by those multipliers; the budget ceiling then lands near 1.1 s per
+# unpenalized pair, still inside the ~1.5 s target, so no constant here moves.
 # Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
 # _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
 # budget against _PENALIZED_LADDER_COST times the work for a penalized one.
