@@ -397,14 +397,36 @@ discretize at all, so OC pairs stay exact on both sides.
   with the overlap span; the `VehBrand x Region` row above reports
   `edf0 = 208` against a nominal 210 for exactly this reason). The same knob
   therefore bounds time: `k^3 <= 1000 * max_cells` for an unpenalized block,
-  and the same budget against 16x the work for a penalized one whose ladder
-  can bisect rather than clamp. At the default that admits `k <= 1709`
+  and the same budget against twice the work for a penalized one, whose
+  ladder can bisect rather than clamp. At the default that admits `k <= 1709`
   (`cat_cat` on two 42-level factors, `numeric_cat` on a 1710-level factor)
-  and `k <= 678` for `ti`/`spline_cat`, measured on the reference box at 1.3 s
-  and 1.9 s per pair. Wider blocks are refused with a NaN row, immediately —
-  binning cannot shrink a basis dimension — and raising `max_cells` lifts the
-  refusal. For scale, the block the old allocation-only ceiling admitted
-  (`k = 4290`, two 67-level factors) measured 24 s and 1.3 GB for one pair.
+  and `k <= 1357` for `ti`/`spline_cat`, measured on the reference box at
+  0.81 s and 0.67 s per pair. Wider blocks are refused with a NaN row,
+  immediately — binning cannot shrink a basis dimension — and raising
+  `max_cells` lifts the refusal. For scale, the block the old
+  allocation-only ceiling admitted (`k = 4290`, two 67-level factors)
+  measured 24 s and 1.3 GB for one pair.
+- **...except `spline_cat`, which has no block-dimension ceiling.** Grouped by
+  level, a spline x categorical pair's bordered system is an *arrow* matrix:
+  its curvature is block-diagonal because levels have disjoint row support,
+  its penalty `kron(S_spline, I)` is block-diagonal on the same grouping, and
+  the only thing coupling the levels is the intercept and the spline main —
+  a border of `1 + k_spline` columns, independent of the level count. So a
+  pair the ceiling above refuses is retried through a kernel that factorizes
+  that arrow in time and memory *linear* in the level count, rather than
+  cubic and quadratic. What is left binding is the cell table, `support x L`,
+  which `max_cells` bounds directly and which raising `max_cells` lifts
+  proportionally. The dense path still scores every pair it can, unchanged;
+  the structured path only extends where it stops. Measured end to end on the
+  reference box: 200 levels 0.01 s, 1,000 levels 0.04 s, 5,000 levels 0.27 s
+  — against 0.51 s for the *124* levels the dense path tops out at. The
+  kernel itself, timed apart from fitting the mains model, stays linear well
+  past that: 0.31 s at 10,000 levels, 3.46 s at 100,000. Above roughly five
+  thousand levels the binding cost is no longer screening but fitting the
+  mains model the screen runs against, whose factor contributes one column
+  per level and which no `discrete=` setting compresses — discretization is
+  support compression for *continuous* covariates, and a factor is already
+  on its own grid.
 - **Factor and numeric margins have no such cardinality limit.** A factor
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the

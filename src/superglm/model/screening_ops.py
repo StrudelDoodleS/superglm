@@ -102,6 +102,7 @@ from superglm.screening import (
     working_score,
 )
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
+from superglm.screening._structured import spline_cat_moments, structured_ladder
 
 _RESULT_COLUMNS = [
     "feature_a",
@@ -160,6 +161,12 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # issue #188.
 _CUBIC_BUDGET_FACTOR = 1000
 _PENALIZED_LADDER_COST = 2
+
+# Every constant above budgets a DENSE block.  A spline x categorical pair
+# refused by them is retried through the arrow kernel, whose cost is linear in
+# the level count rather than cubic; see screening/_structured.py.  Its own
+# gate is _within_structured_budget.
+_STRUCTURED_BUDGET_FACTOR = 1
 
 
 def _quantile_binned(x, bins):
@@ -330,6 +337,21 @@ def _contrast_menu(spec) -> np.ndarray:
     for j, lev in enumerate(spec._non_base):
         menu[position[lev], j] = 1.0
     return menu
+
+
+def _contrast_rows(spec) -> np.ndarray:
+    """The one row each contrast column indicates — the menu, without the menu.
+
+    ``_contrast_menu`` is one-hot by construction, so multiplying by it is
+    selecting ``L - 1`` columns of whatever it multiplies.  The structured
+    kernel takes these indices instead of the menu, which is the difference
+    between ``L - 1`` integers and an ``(L, L - 1)`` block of doubles: 20 GB
+    at fifty thousand levels, holding 49,999 nonzeros.
+    """
+    position = {lev: i for i, lev in enumerate(spec._levels)}
+    return np.fromiter(
+        (position[lev] for lev in spec._non_base), dtype=np.intp, count=len(spec._non_base)
+    )
 
 
 def _marginal_width_estimate(spec) -> int:
@@ -836,6 +858,24 @@ def screen_interactions(
         work = (_PENALIZED_LADDER_COST if penalized else 1) * int(k) ** 3
         return work <= _CUBIC_BUDGET_FACTOR * max_cells
 
+    def _within_structured_budget(k_s, n_levels):
+        """Budget a spline_cat pair scored through the ARROW kernel.
+
+        Nothing here is cubic in the level count and nothing is quadratic in
+        it either, so this gate is linear where every gate above is not.  The
+        pair allocates a handful of ``(n_levels, k_s + 1, k_s + 1)`` stacks —
+        the blocks, their inverses, the border coupling, the diagonal blocks
+        of the inverse — so the level count is held against
+        ``max_cells / (k_s + 1)^2``, which at the default and a width-11
+        spline admits 34,722 levels.  Measured there on the reference box with
+        one BLAS thread: 1.20 s and 251 MB for the whole four-rung ladder,
+        against the ~1.5 s per-pair target the dense constants above were
+        fitted to.  Cost is LINEAR, so the two scale together and stay on
+        that target: 10,000 levels is 0.31 s and 72 MB, 100,000 is 3.46 s and
+        722 MB.
+        """
+        return int(n_levels) * (int(k_s) + 1) ** 2 <= _STRUCTURED_BUDGET_FACTOR * max_cells
+
     rows = []
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 
@@ -891,6 +931,9 @@ def screen_interactions(
         # Dispatch before any raw-column or support access, so a deferred kind
         # surfaces as its own error rather than a dtype failure downstream.
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
+        # Set only by the spline_cat arrow path below; every other pair leaves
+        # it None and is scored from the dense moments as before.
+        structured_results = None
         if kind in ("numeric_cat", "numeric_numeric"):
             # A numeric margin enters the probe LINEARLY, so the pair has no
             # joint grid to assemble: z-weighted moments over the other
@@ -945,18 +988,48 @@ def screen_interactions(
             k_r = _marginal_width_estimate(_margin_spec(right))
             bin_flag = {left: False, right: False}
             margins = None
+            structured = False
+            # The dense path gets first refusal, so nothing it can already
+            # score changes.  Cleared when it runs out of moves, which hands a
+            # spline_cat pair to the arrow kernel below.
+            allow_dense = True
             while True:
                 codes_l, n_l = _margin_support(left, bin_flag[left])
                 codes_r, n_r = _margin_support(right, bin_flag[right])
-                # V is (k_l*k_r)^2 doubles regardless of support: binning can't help
-                if (k_l * k_r) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
+                # Both gates below bound a DENSE (k_l*k_r, k_l*k_r) block: its
+                # allocation, and the cubic solve it feeds.  Binning can shrink
+                # neither, since neither depends on the support.
+                dense_ok = allow_dense and (
+                    (k_l * k_r) ** 2 <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
+                    and _within_cubic_budget(k_l * k_r, kind in ("ti", "spline_cat"))
+                )
+                # But a spline x categorical pair never has to form that block.
+                # Grouped by level its bordered system is an arrow matrix — the
+                # levels touch each other nowhere, only the intercept and the
+                # spline main — which factorizes in time and memory LINEAR in
+                # the level count.  So a pair the dense gates refuse gets
+                # retried against the structured gate instead of skipped.
+                structured = kind == "spline_cat" and not dense_ok
+                if not (dense_ok or structured):
                     break
-                # Nor can binning shrink the (k_l*k_r)^3 solve those doubles
-                # feed, which is what actually costs minutes on a wide block.
-                if not _within_cubic_budget(k_l * k_r, kind in ("ti", "spline_cat")):
+                if structured and not _within_structured_budget(k_l, n_r):
                     break
-                if _within_budget(n_l, n_r, k_l, k_r):
+                # Both paths build the (n_l, n_r) cell tables; only the dense
+                # one also builds the (n_l, k_r, k_r) curvature intermediate,
+                # which is what _within_budget's second term bounds.
+                fits = n_l * n_r <= max_cells if structured else _within_budget(n_l, n_r, k_l, k_r)
+                if fits:
                     _, _, menu_l, S_l = _margin(left, bin_flag[left])
+                    if structured:
+                        # The contrast menu is one-hot, so the kernel takes the
+                        # rows it indicates rather than the menu itself — the
+                        # menu is the one allocation that is quadratic in L.
+                        level_rows = _contrast_rows(model._specs[right])
+                        if (menu_l.shape[1], level_rows.size) != (k_l, k_r):
+                            k_l, k_r = menu_l.shape[1], int(level_rows.size)
+                            continue
+                        margins = ((menu_l, S_l), (level_rows, None))
+                        break
                     _, _, menu_r, S_r = _margin(right, bin_flag[right])
                     if (menu_l.shape[1], menu_r.shape[1]) != (k_l, k_r):
                         # authoritative dims from the built menus; re-run the gates
@@ -975,6 +1048,15 @@ def screen_interactions(
                     reverse=True,
                 )
                 if not binnable:
+                    # The dense path has no moves left.  Hand a spline_cat
+                    # pair to the arrow kernel before giving up: the width
+                    # estimate that kept it on the dense track is biased LOW
+                    # by design, so a pair whose true dimension would have
+                    # routed it structurally can reach here still believing
+                    # it was dense-affordable.
+                    if allow_dense and structured is False and kind == "spline_cat":
+                        allow_dense = False
+                        continue
                     break
                 bin_flag[binnable[0][1]] = True
             approx = (
@@ -989,12 +1071,20 @@ def screen_interactions(
             S_cell, W_cell = pair_cell_moments(
                 codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
             )
-            U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
-            M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
-            S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
+            if structured:
+                # menu_r holds the contrast ROWS here, not a menu.  The whole
+                # ladder is resolved structurally; no dense block is formed.
+                structured_results = structured_ladder(
+                    spline_cat_moments(menu_l, S_l, S_cell, W_cell, menu_r),
+                    budgets=budgets,
+                )
+            else:
+                U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
+                M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
+                S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
         # An unpenalized block has no bandwidth to scan: every rung returns the
         # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
-        penalized = S_ti is not None and bool(np.any(S_ti))
+        penalized = structured_results is None and S_ti is not None and bool(np.any(S_ti))
         # The whole ladder shares ONE decomposition.  The pencil that turns
         # edf(lambda) and T(lambda) into closed forms depends on neither
         # lambda nor edf0, so every rung after the first costs O(k) instead of
@@ -1007,15 +1097,17 @@ def screen_interactions(
         # lower budget; an identical triple gives an identical z, and the
         # comparison below is STRICT, so recomputing those rungs cannot
         # displace the incumbent.  Same output, one less special case.
-        results = penalized_score_statistic_ladder(
-            U,
-            V,
-            C,
-            M,
-            S_ti,
-            budgets=tuple(float(b) for b in (budgets if penalized else budgets[:1])),
-            U_nuisance=u_m,
-        )
+        results = structured_results
+        if results is None:
+            results = penalized_score_statistic_ladder(
+                U,
+                V,
+                C,
+                M,
+                S_ti,
+                budgets=tuple(float(b) for b in (budgets if penalized else budgets[:1])),
+                U_nuisance=u_m,
+            )
         best_z, best = -np.inf, None
         for result in results:
             statistic = result.statistic / phi_hat
