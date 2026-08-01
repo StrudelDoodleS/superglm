@@ -65,9 +65,13 @@ penalized level curves; see [Interactions](interactions.md).
 
 **What gets swept.** `candidates=None` pairs every eligible fitted feature:
 splines, spline-mode `OrderedCategorical`, `Categorical` with at least two
-levels after any grouping, and `Numeric`. `Polynomial`, `RandomEffect`,
+levels, and `Numeric`. `Polynomial`, `RandomEffect`,
 step-mode `OrderedCategorical` and single-level factors have no screenable
-margin; spline x numeric has both margins but no refit target yet, and is
+margin. A `Categorical` carrying a `grouping=` is excluded for a different
+reason: it screens perfectly well, but no interaction builder yet maps its raw
+column through the grouping, so the confirmatory refit of such a pair cannot be
+built — screening it would hand you a refit that raises. Spline x numeric has
+both margins but no refit target yet, and is
 deferred until a varying-coefficient term exists (respec the `Numeric` as a
 `Spline` to screen the pair as `ti`). Both cases drop out of the default sweep
 rather than reporting a null result, and naming one in `candidates=` raises
