@@ -115,14 +115,44 @@ def test_parser_defaults_match_the_documented_run() -> None:
 
 
 def test_generator_plants_exactly_the_advertised_number_of_live_cells() -> None:
-    """A spiky truth with the wrong support would invalidate table 3."""
+    """A spiky truth with the wrong support would invalidate table 3.
+
+    The support is COUNTED off `PairData.cell`, not inferred from a difference
+    between two draws.  It cannot be inferred: the `spike` branch calls
+    `rng.choice` and the `none` branch does not, so the two share only their
+    parent draws and their noise terms diverge whatever the magnitude.  An
+    earlier version of this test asserted `y` differed between the two and
+    therefore passed at `magnitude=0.0` with nothing planted at all.
+    """
     data = _make("spike", 6.0, n_levels=9, n=2_000, seed=5)
     assert data.frame.shape == (2_000, 2)
     assert data.joint.max() < 81
+
+    assert np.count_nonzero(data.cell) == HOT_CELLS
+    assert np.allclose(data.cell[data.cell != 0], 6.0)
+
+    # and the planted cells must reach `y` at the advertised size
+    live = np.isin(data.joint, np.flatnonzero(data.cell.ravel()))
+    assert live.sum() >= HOT_CELLS
+    assert data.y[live].mean() - data.y[~live].mean() == pytest.approx(6.0, abs=0.5)
+
     noise = _make("none", 0.0, n_levels=9, n=2_000, seed=5)
-    # same seed, same parents: the only difference is the planted cells
+    assert np.count_nonzero(noise.cell) == 0
+    # same seed, same parents -- the cell assignment is drawn before the truth
     assert (data.joint == noise.joint).all()
-    assert not np.allclose(data.y, noise.y)
+
+
+def test_generator_plants_every_diffuse_cell() -> None:
+    """The diffuse arm is the contrast table 2 rests on: k live cells, not 5."""
+    data = _make("diffuse", 0.30, n_levels=9, n=2_000, seed=5)
+    assert np.count_nonzero(data.cell) == 81
+    assert data.cell.std() == pytest.approx(0.30, rel=0.35)
+
+
+def test_unknown_truth_kind_is_rejected_rather_than_planting_nothing() -> None:
+    """A typo must not produce a valid-looking null run."""
+    with pytest.raises(ValueError, match="unknown truth kind"):
+        _make("spikey", 6.0, n_levels=9, n=200, seed=5)
 
 
 def test_every_documented_shrinkage_arm_is_actually_built() -> None:
