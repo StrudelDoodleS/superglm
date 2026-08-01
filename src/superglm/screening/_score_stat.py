@@ -81,11 +81,7 @@ def _solve_psd(A: NDArray, B: NDArray) -> NDArray:
         return np.linalg.pinv(A, hermitian=True) @ B
 
 
-def _edf(V: NDArray, S: NDArray, lam: float) -> float:
-    return float(np.trace(_solve_psd(V + lam * S, V)))
-
-
-def _edge(V: NDArray, S: NDArray, lam: float) -> tuple[float, Callable[[NDArray], NDArray]]:
+def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[NDArray], NDArray]]:
     """Factor ``V + lam * S`` ONCE; return its edf and a solver against it.
 
     The bracket and the clamped rungs ask the same two matrices for both an
@@ -95,8 +91,12 @@ def _edge(V: NDArray, S: NDArray, lam: float) -> tuple[float, Callable[[NDArray]
     on -- measured at 58% of a wide pair's total time against 17% for the
     factorizations themselves.  One factorization per edge, reused, removes
     both duplicates.
+
+    ``S = None`` is the unpenalized block, where ``A`` IS ``V`` and the edf
+    is its rank; it takes the same one factorization rather than forming a
+    zero matrix to add to.
     """
-    A = V + lam * S
+    A = V if S is None else V + lam * S
     try:
         factor = scipy.linalg.cho_factor(A, check_finite=False)
         apply = partial(scipy.linalg.cho_solve, factor, check_finite=False)
@@ -214,9 +214,10 @@ def penalized_score_statistic_ladder(
             U = U - MinvC.T @ np.asarray(U_nuisance, dtype=np.float64)
 
     if S_ti is None or not np.any(S_ti):
-        # No penalty to scan: one solve, at the block's own dimension.
-        T = float(U @ _solve_psd(V, U))
-        rank = _edf(V, np.zeros_like(V), 0.0)
+        # No penalty to scan: ONE factorization of the block, answering both
+        # the statistic and the achieved rank, at the block's own dimension.
+        rank, apply = _edge(V, None, 0.0)
+        T = float(U @ apply(U))
         return [ScreenedPair(statistic=T, edf0=rank, lambda0=0.0) for _ in budgets]
 
     S = np.asarray(S_ti, dtype=np.float64)
