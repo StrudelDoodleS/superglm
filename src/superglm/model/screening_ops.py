@@ -27,12 +27,30 @@ MAPPED level scores — the geometry its own refit builds — so its pairs are
 ``ti`` and ``spline_cat`` like any other spline margin's, gridded on at most
 ``n_levels`` support points.
 ``z`` normalizes each kind against its own noise floor, so a single sorted
-table ranks them together — though that normalization is not equal across
-probe df: low-df blocks carry heavier null tails than high-df ones, as the
-measured floors in the screening guide show.  A pair with no penalty anywhere
+table ranks them together — but not on equal terms, and not simply by df.
+The measured null maxima span 3.98 to 7.53 across kinds; the heaviest tails
+sit at low probe df, yet "neither kind is monotone in df", and the headline
+maxima read as "Gaussian-driven rather than as something every family
+reproduces".  A maximum also grows with the number of draws, so a wide sweep
+draws more null rows than a narrow one.  Compare like with like before
+spending a refit, against the measured floors in the screening guide.
+A pair with no penalty anywhere
 in its block has
 no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
 the block's achieved rank and ``lambda0`` is 0.
+
+``max_cells`` bounds two different resources.  It is an ALLOCATION ceiling
+for the cell tables, the curvature intermediates and a numeric-margin pair's
+blocks; through ``_within_cubic_budget`` it is also a TIME ceiling, because
+the probe's block dimension ``k`` enters every rung as a ``(k, k)``
+factorization or pseudo-inverse.  Per-pair time therefore grows as ``k^3``
+where every allocation here grows as ``k^2``, and for the gridded kinds the
+pseudo-inverse branch is the routine path rather than the exception — one
+empty ``cat_cat`` cell or one singleton factor level makes a probe column
+collinear with the overlap span and the Cholesky falls back.  A block too
+wide to SOLVE inside the budget is refused with a NaN row exactly as an
+unaffordable allocation is, and refused immediately: binning cannot shrink a
+basis dimension, so no fallback is attempted first.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
@@ -103,6 +121,30 @@ _RESULT_COLUMNS = [
 # against a small multiple of max_cells; the marginal dimension is estimated
 # from the parent spec's k, which is a guard-grade bound, not an exact count.
 _INTERMEDIATE_BUDGET_FACTOR = 4
+
+# Every budget above bounds an ALLOCATION.  Per-pair TIME is cubic in the
+# probe block's dimension k, because each rung factorizes or pseudo-inverts a
+# (k, k) system, and the allocation budgets alone admit blocks whose solve
+# costs minutes: at the default they let a cat_cat pair reach k = 4472.
+# Measured end to end through screen_interactions on the reference box with a
+# single BLAS thread, per k^3 of block dimension:
+#   2.9e-10 s  unpenalized block, pseudo-inverse path (cat_cat with an empty
+#              cell or a singleton level -- the routine case: 24 s and 1.3 GB
+#              at two 67-level factors, k = 4290)
+#   2.0e-10 s  unpenalized block, Cholesky path (numeric_cat, full rank:
+#              2.1 s at the widest factor the allocation gate admits)
+#   7.0e-10 s  penalized block whose ladder clamps at every rung
+#   5.0e-09 s  penalized block whose ladder BISECTS -- ~17x the unpenalized
+#              constant, because each rung re-solves the system ~27 times to
+#              hit its edf target (measured 109 solves per pair, 29 s at
+#              k = 1849 for a 40-knot x 40-knot ti)
+# Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
+# _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
+# budget against _PENALIZED_LADDER_COST times the work for a penalized one:
+# k <= 1709 and k <= 678 respectively at the default max_cells.  Raising
+# max_cells lifts both, as it lifts every other budget here.
+_CUBIC_BUDGET_FACTOR = 1000
+_PENALIZED_LADDER_COST = 16
 
 
 def _quantile_binned(x, bins):
@@ -322,8 +364,12 @@ def screen_interactions(
     numerics.  A spline-mode ``OrderedCategorical`` margin screens as a spline
     on its mapped level scores, so its pairs carry the spline kinds.
     ``z`` normalizes each kind against its own noise floor, so one
-    sorted table ranks them together, though low-df blocks carry heavier null
-    tails than high-df ones — see the measured floors in the screening guide.
+    sorted table ranks them together — but not on equal terms, and not simply
+    by df: the measured null maxima span 3.98 to 7.53 across kinds.  The
+    heaviest tails sit at low probe df, yet "neither kind is monotone in df",
+    and the headline maxima read as "Gaussian-driven rather than as something
+    every family reproduces".  Compare like with like before spending a
+    refit — see the measured floors in the screening guide.
     A kind whose block carries no penalty
     (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no bandwidth to
     scan and is evaluated at a single rung — ``edf0`` then reports the block's
@@ -374,6 +420,20 @@ def screen_interactions(
     whose tensor curvature block ``(k_a*k_b)^2`` alone exceeds the budget is
     skipped immediately — binning cannot shrink basis dimensions, so such
     rows may report the raw grid with no binning attempted.
+
+    ``max_cells`` bounds allocation AND time.  The probe block's dimension
+    ``k`` enters every rung as a ``(k, k)`` factorization or pseudo-inverse,
+    so per-pair time grows as ``k^3`` where the allocations grow as ``k^2``
+    — and for the gridded kinds the pseudo-inverse is the routine branch, not
+    the exception (one empty ``cat_cat`` cell or one singleton level makes a
+    probe column collinear with the overlap span).  ``_within_cubic_budget``
+    therefore refuses a pair whose block is too wide to solve inside the
+    budget: ``k^3 <= 1000 * max_cells`` for an unpenalized block, and the
+    same budget against 16x the work for a penalized one whose ladder can
+    bisect.  At the default that admits ``k <= 1709`` and ``k <= 678``
+    respectively, each measured at ~1.5 s per pair; raising ``max_cells``
+    lifts both.  Binning cannot shrink a basis dimension, so the refusal is
+    immediate and no fallback is attempted.
     ``approx`` is also True for any pair whose confirmatory refit would
     discretize LOSSILY, applying the gate that refit itself uses — which
     differs by kind.  A ``ti`` refit bins its marginal supports only when
@@ -393,8 +453,10 @@ def screen_interactions(
     only degradation available to these kinds is REFUSAL, since there is
     nothing to approximate.  A ``numeric_cat`` pair is refused with a NaN row
     when the factor is too wide for the pair's blocks to fit ``max_cells``
-    (the ``(L+1)``-wide overlap curvature is the largest of them, so the
-    default admits factors up to roughly 2200 levels); raising ``max_cells``
+    (the ``(L+1)``-wide overlap curvature is the largest of them, admitting
+    factors up to 2235 levels at the default) or too wide for them to be
+    SOLVED inside it (``(L-1)^3 <= 1000 * max_cells``, which binds first at
+    the default and admits 1710 levels); raising ``max_cells``
     lifts the refusal and the pair is then computed exactly.  A
     ``numeric_numeric`` pair contracts to 3x3 blocks and is never refused.
     Their ``n_cells`` counts the OTHER margin's cells alone — the factor's
@@ -738,6 +800,22 @@ def screen_interactions(
         """
         return (k_g + 2) ** 2 <= max_cells
 
+    def _within_cubic_budget(k, penalized):
+        """Budget the pair's SOLVE TIME, which the allocation gates do not.
+
+        Every rung of ``penalized_score_statistic`` factorizes or
+        pseudo-inverts a ``(k, k)`` system, so per-pair time grows as ``k^3``
+        while the gates above grow as ``k^2`` — a block that fits memory
+        comfortably can still take minutes.  A penalized block is charged
+        ``_PENALIZED_LADDER_COST`` times the work, the measured cost of a
+        ladder whose bisection runs rather than clamping.  Runs on the block
+        dimension alone, before any menu or cell table is built, so a refused
+        pair pays for nothing; the constants and the ~1.5 s per-pair target
+        they were fitted to are documented at the top of this module.
+        """
+        work = (_PENALIZED_LADDER_COST if penalized else 1) * int(k) ** 3
+        return work <= _CUBIC_BUDGET_FACTOR * max_cells
+
     rows = []
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 
@@ -820,7 +898,13 @@ def screen_interactions(
                 # Exact, not an estimate: a factor margin's contrast menu is
                 # (L, L-1) wide, so the gate needs no post-menu recheck.
                 k_g = _marginal_width_estimate(_margin_spec(cat_name))
-                if not _numeric_margin_within_budget(k_g):
+                if not (
+                    _numeric_margin_within_budget(k_g)
+                    # ... and the (L-1)-wide blocks must be SOLVABLE in
+                    # bounded time, not merely allocatable: the pair's own
+                    # factorizations are cubic in the same width.
+                    and _within_cubic_budget(k_g, False)
+                ):
                     rows.append(
                         (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
                     )
@@ -846,6 +930,10 @@ def screen_interactions(
                 codes_r, n_r = _margin_support(right, bin_flag[right])
                 # V is (k_l*k_r)^2 doubles regardless of support: binning can't help
                 if (k_l * k_r) ** 2 > _INTERMEDIATE_BUDGET_FACTOR * max_cells:
+                    break
+                # Nor can binning shrink the (k_l*k_r)^3 solve those doubles
+                # feed, which is what actually costs minutes on a wide block.
+                if not _within_cubic_budget(k_l * k_r, kind in ("ti", "spline_cat")):
                     break
                 if _within_budget(n_l, n_r, k_l, k_r):
                     _, _, menu_l, S_l = _margin(left, bin_flag[left])

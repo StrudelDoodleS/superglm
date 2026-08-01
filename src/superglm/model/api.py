@@ -635,10 +635,14 @@ class SuperGLM:
         target — ``ti`` for spline x spline, ``spline_cat`` for a spline
         crossed with a factor, ``cat_cat`` for two factors, ``numeric_cat``
         for a per-level numeric slope and ``numeric_numeric`` for a product
-        of two numerics — and ``z`` is comparable across kinds, so the one
-        sorted table ranks them together, though low-df blocks carry heavier
-        null tails than high-df ones (see the measured floors in the
-        screening guide).  A spline-mode
+        of two numerics — and ``z`` normalizes each kind against its own
+        noise floor, so the one sorted table ranks them together, though not
+        on equal terms and not simply by df: the measured null maxima span
+        3.98 to 7.53 across kinds.  The heaviest tails sit at low probe df,
+        yet "neither kind is monotone in df", and the headline maxima read as
+        "Gaussian-driven rather than as something every family reproduces".
+        Compare like with like before spending a refit (see the measured
+        floors in the screening guide).  A spline-mode
         ``OrderedCategorical`` margin screens as a spline on its mapped level
         scores, so its pairs carry the spline kinds.  A kind whose block carries no
         penalty (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no
@@ -663,13 +667,24 @@ class SuperGLM:
         unique-value grid exceeds ``max_cells`` are quantile-binned to
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
+        ``max_cells`` bounds allocation AND time: the probe block's dimension
+        ``k`` enters every rung as a ``(k, k)`` factorization or
+        pseudo-inverse — routinely the pseudo-inverse, since one empty
+        ``cat_cat`` cell or one singleton level makes a probe column
+        collinear with the overlap span — so per-pair time grows as ``k^3``
+        where the allocations grow as ``k^2``.  A pair too wide to solve
+        inside the budget is refused with a NaN row by the same
+        cubic-work gate (``k^3 <= 1000 * max_cells`` unpenalized, 16x the
+        work charged to a penalized block: ``k <= 1709`` and ``k <= 678`` at
+        the default, ~1.5 s per pair at either ceiling).
         A categorical margin never bins — its support is the fitted level
         set — and a numeric margin never grids at all: it enters its probe
         linearly, so a ``numeric_cat``/``numeric_numeric`` row that carries a
         statistic is exact.  Those kinds have no binning fallback, so their
         only degradation is refusal: a ``numeric_cat`` pair whose factor is
-        too wide for the pair's blocks to fit ``max_cells`` gets a NaN row
-        (the default admits roughly 2200 levels) and raising ``max_cells``
+        too wide for the pair's blocks to fit ``max_cells`` — or to be solved
+        inside it, which binds first and admits 1710 levels at the default —
+        gets a NaN row, and raising ``max_cells``
         computes it exactly.  Screening always probes exact bases, so a pair whose
         confirmatory refit would discretize LOSSILY is flagged
         ``approx=True`` to make that support-discretization gap — measured
