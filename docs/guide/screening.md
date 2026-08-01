@@ -56,15 +56,16 @@ indicator, and the per-level slope columns are exactly what a
 refit term's identifiable deviation space — the part the pair's own mains
 cannot absorb.
 
-One narrow exception is known. A `spline_cat` row whose spline parent is a
-`Spline(kind="cr")` probes a space rotated very slightly from the one its
-`SplineCategorical` refit builds — same rank, measured minimum principal
-cosine 0.99947, about 1.9 degrees. The cause is that `cr` currently has two
-implementations: tensor marginals deliberately use the cardinal basis, which
-is closer to mgcv's `bs="cr"`, while a main effect and a `SplineCategorical`
-use the projected-B-spline one. `ti` is unaffected because its refit goes
-through the same helper as its probe, and `ps` parents — the default `kind`,
-and the worked example below — are exactly identical. See
+This holds for `cr` parents as well as `ps`, but only because both
+interaction types now resolve a cubic regression spline the same way.
+Cubic regression splines carry two bases — a main effect uses the
+projected-B-spline `CubicRegressionSpline`, while every interaction
+marginal uses `CardinalCRSpline`, which is closer to mgcv's `bs="cr"`.
+`TensorInteraction` had that routing and `SplineCategorical` did not, so a
+`spline_cat` probe could span directions its own refit could not build: on
+a skewed margin at `n_knots=16` the containment of probe span in refit span
+measured 0.675. Both now go through one shared resolution, so the identity
+holds by construction. See
 [issue #191](https://github.com/StrudelDoodleS/superglm/issues/191).
 
 `probe df` is the unpenalized block's dimension before the data
@@ -529,9 +530,8 @@ surrogates — gradient-boosting H-statistics or neural interaction detection �
 which report no null behaviour at all.
 
 What is new here is therefore narrow and specific. First, the probe is the
-exact basis the confirmatory refit builds — for every pair kind, up to the
-narrow `cr`-parent rotation noted above — rather than a binned or
-single-column surrogate for it. Second, candidates are compared at a
+exact basis the confirmatory refit builds, for every pair kind, rather than a
+binned or single-column surrogate for it. Second, candidates are compared at a
 solved-for common complexity: `lambda0` is chosen so
 `tr((V + lambda0 * S)^-1 V) = edf0`, scanned over a ladder of budgets and
 normalized against each rung's own null mean and scale. No precedent was found
