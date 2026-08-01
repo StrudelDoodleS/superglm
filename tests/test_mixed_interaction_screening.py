@@ -918,38 +918,62 @@ def test_cubic_gate_leaves_ordinary_pairs_alone():
 
 def test_penalized_blocks_are_charged_the_ladder_they_run():
     """A penalized block runs a whole ladder where an unpenalized one returns a
-    single rung, so the same dimension buys less time.  The gate charges it
-    _PENALIZED_LADDER_COST times the work, which keeps a spline_cat block
-    refused at a dimension an unpenalized cat_cat block screens at in the same
-    sweep -- 1357 against 1709 at the default max_cells."""
-    lg, lh, reps = 111, 16, 2
-    a = np.repeat(np.arange(lg), lh * reps)
-    b = np.tile(np.repeat(np.arange(lh), reps), lg)
+    single rung, so the same dimension buys less time, and the gate charges it
+    _PENALIZED_LADDER_COST times the work.
+
+    All three pairs below sit at exactly k = 144, which is deliberately
+    between the two ceilings the charge creates.  What separates them is what
+    each one has to solve:
+
+      * ``cat_cat`` is unpenalized, so k = 144 is inside its budget;
+      * ``ti`` is penalized and has no structure to exploit -- refused;
+      * ``spline_cat`` is penalized too, but its bordered system is an arrow
+        matrix, so being over the DENSE budget routes it to the structured
+        kernel rather than refusing it.
+
+    That last one is the whole point of the arrow path: the charge still
+    applies, it just no longer terminates the pair.
+    """
+    # k = 12 * 12 = 144 for every pair.  max_cells is chosen so 144 lands
+    # between the unpenalized ceiling (5.5e6^(1/3) = 176) and the penalized
+    # one (2.75e6^(1/3) = 140), and still clears the (k^2 <= 4*max_cells)
+    # intermediate gate at 20736 <= 22000.
+    max_cells = 5_500
+    n_levels, reps = 13, 14
     rng = np.random.default_rng(23)
+    n = n_levels * n_levels * reps
+    a = np.repeat(np.arange(n_levels), n_levels * reps)
+    b = np.tile(np.repeat(np.arange(n_levels), reps), n_levels)
     df = pd.DataFrame(
         {
-            "g": np.array([f"G{i}" for i in range(lg)])[a],
-            "h": np.array([f"H{i}" for i in range(lh)])[b],
-            "x": rng.uniform(0.0, 1.0, lg * lh * reps),
+            "g": np.array([f"G{i}" for i in range(n_levels)])[a],
+            "h": np.array([f"H{i}" for i in range(n_levels)])[b],
+            "x1": rng.uniform(0.0, 1.0, n),
+            "x2": rng.uniform(0.0, 1.0, n),
         }
     )
-    y = rng.normal(size=len(df))
+    y = rng.normal(size=n)
     model = SuperGLM(
         family="gaussian",
-        features={"g": Categorical(), "h": Categorical(), "x": Spline(kind="ps", n_knots=10)},
+        features={
+            "g": Categorical(),
+            "h": Categorical(),
+            "x1": Spline(kind="ps", n_knots=9),  # centered width 12
+            "x2": Spline(kind="ps", n_knots=9),
+        },
     )
     model.fit_reml(df, y)
+    table = model.screen_interactions(df, y, max_cells=max_cells).set_index(
+        ["feature_a", "feature_b"]
+    )
+    assert table.loc[("g", "h"), "kind"] == "cat_cat"
+    assert table.loc[("x1", "x2"), "kind"] == "ti"
+    assert table.loc[("g", "x1"), "kind"] == "spline_cat"
 
-    table = model.screen_interactions(df, y).set_index(["feature_a", "feature_b"])
-    # unpenalized, k = 110 * 15 = 1650, under the 1709 unpenalized ceiling
-    assert np.isfinite(table.loc[("g", "h"), "z"])
-    # penalized, k = 13 * 110 = 1430 -- under that same 1709, and over the
-    # 1357 a 2x work charge leaves a penalized block
-    assert np.isnan(table.loc[("g", "x"), "z"])
-    assert table.loc[("g", "x"), "n_cells"] > 0
-    # the narrow factor's spline_cat pair is inside the penalized budget
-    assert np.isfinite(table.loc[("h", "x"), "z"])
+    assert np.isfinite(table.loc[("g", "h"), "z"])  # unpenalized: inside budget
+    assert np.isnan(table.loc[("x1", "x2"), "z"])  # penalized, dense only
+    assert np.isfinite(table.loc[("g", "x1"), "z"])  # penalized, but structured
 
-    # raising max_cells lifts the penalized refusal, as it lifts every other
-    lifted = model.screen_interactions(df, y, candidates=[("x", "g")], max_cells=20_000_000)
+    # raising max_cells lifts the ti refusal, as it lifts every other budget
+    lifted = model.screen_interactions(df, y, candidates=[("x1", "x2")], max_cells=20_000_000)
     assert np.isfinite(lifted.iloc[0]["z"])
