@@ -72,57 +72,106 @@ reason: it screens perfectly well, but no interaction builder yet maps its raw
 column through the grouping, so the confirmatory refit of such a pair cannot be
 built — screening it would hand you a refit that raises. Spline x numeric has
 both margins but no refit target yet, and is
-deferred until a varying-coefficient term exists (respec the `Numeric` as a
-`Spline` to screen the pair as `ti`). Both cases drop out of the default sweep
+deferred until a varying-coefficient term exists.
+
+The deferral has two remedies, and which one applies is a modelling question
+rather than a screening one. If the `Numeric` margin is really curved, respec
+it as a `Spline` and the pair screens as `ti` — that is usually the right
+answer, and the mis-specification was the larger problem anyway. If the margin
+is genuinely linear, as `log1p(Density)` is in the example below, respeccing it
+would be over-fitting to dodge a deferral: leave it, and the pair waits.
+Reaching for the first remedy by reflex is how a deferral gets "fixed" by
+introducing a worse mains model. Both cases drop out of the default sweep
 rather than reporting a null result, and naming one in `candidates=` raises
 that deferral specifically, not a generic "unknown feature" error. Pairs the
 model already fits as an interaction — of any class, `FactorSmooth`
 included — are excluded too: the screen profiles only the parent mains, so it
 cannot re-screen a term already in the model.
 
-A mixed sweep comes back as one sorted table — here an 80,000-row sample of
-the freMTPL2 frequency book, fitted with two splines, a numeric and two
-factors, on the house exposure contract (`y` the claim *rate*
-`ClaimNb / Exposure`, `sample_weight` the exposure, `phi` estimated at 2.52):
+A mixed sweep comes back as one sorted table. The example below screens an
+80,000-row sample of the freMTPL2 frequency book on the house exposure
+contract (`y` the claim *rate* `ClaimNb / Exposure`, `sample_weight` the
+exposure, `phi` estimated at 2.55).
+
+The specification is spelled out rather than assumed, because the screen is
+defined *against the fitted mains*. A margin mis-specified there does not
+merely go unscreened — it changes which pairs are screenable at all:
+
+```python
+df["LogDensity"] = np.log1p(df["Density"])
+
+features = {
+    "DrivAge":    Spline(kind="ps", n_knots=8),
+    "VehAge":     Spline(kind="ps", n_knots=12),
+    # Bonus-Malus is strongly curved, and its mass piles at the scale
+    # minimum; tempered-quantile knots are this library's stated default
+    # for exactly that shape (see Feature Types).
+    "BonusMalus": Spline(kind="ps", n_knots=12,
+                         knot_strategy="quantile_tempered", knot_alpha=0.2),
+    # log1p(Density) is the one margin here that genuinely is linear: give
+    # it a spline and the smooth collapses to edf 1.4 of rank 11, buying
+    # 1.0 deviance. Raw Density is not linear at all -- straightening it
+    # is what the log is for.
+    "LogDensity": Numeric(),
+    "VehBrand":   Categorical(),
+    "Region":     Categorical(),
+}
+```
 
 ```python
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
-#  feature_a feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge  VehBrand  spline_cat  43.579430  4.875400  16.000000 6.820539e-01      627   False
-# BonusMalus  VehBrand numeric_cat  18.139171  1.819974  10.000000 0.000000e+00       11   False
-#    DrivAge    VehAge          ti   0.733057 -0.633471   2.000000 1.611914e+01     4560   False
-#    DrivAge    Region  spline_cat  13.267251 -1.193182  20.999944 6.861393e+09     1760   False
-# BonusMalus    Region numeric_cat  11.890018 -1.405701  21.000000 0.000000e+00       22   False
-#    DrivAge  VehBrand  spline_cat   3.632010 -1.423923   9.999981 1.300382e+10      880   False
-#     VehAge    Region  spline_cat   3.889631 -2.640197  21.000112 2.053060e+09     1254   False
-#   VehBrand    Region     cat_cat  76.234205 -6.460350 208.000000 0.000000e+00      242   False
+#  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
+#     VehAge BonusMalus          ti  10.808079  4.404039   2.000000 1.015252e+02     5244   False
+# BonusMalus   VehBrand  spline_cat  22.694719  2.838625  10.000002 7.795736e+09     1012   False
+#     VehAge   VehBrand  spline_cat  24.953074  1.582695  16.000001 7.157880e+00      627   False
+#    DrivAge BonusMalus          ti   6.843804  1.005437   4.000000 5.438702e+01     7360   False
+#    DrivAge     VehAge          ti   1.035635 -0.482183   2.000001 5.044407e+01     4560   False
+# BonusMalus     Region  spline_cat  13.204863 -1.202813  20.999975 4.187772e+09     2024   False
+#    DrivAge     Region  spline_cat  12.741508 -1.274315  21.000018 6.858873e+09     1760   False
+#    DrivAge   VehBrand  spline_cat   3.697832 -1.409210  10.000019 1.301011e+10      880   False
+# LogDensity     Region numeric_cat   9.940738 -1.706481  21.000000 0.000000e+00       22   False
+# LogDensity   VehBrand numeric_cat   2.051610 -1.777314  10.000000 0.000000e+00       11   False
+#     VehAge     Region  spline_cat   3.792551 -2.655057  20.998793 2.449225e+09     1254   False
+#   VehBrand     Region     cat_cat  75.254940 -6.508362 208.000000 0.000000e+00      242   False
 ```
 
-Every eligible pair, four kinds, one ranking by `z` alone — the sweep's only
-spline x spline pair (`DrivAge x VehAge`, the `ti` row) places third of eight,
-on a rung-2 win worth less than its own noise floor. Eight rows, not ten: the
-two spline x numeric pairs are deferred, so they never enter the sweep. The
-queue this produces is one pair long: `VehAge x VehBrand` is three noise units
-clear of the next row, and refitting it as a `SplineCategorical` — the gate,
-not the score — buys 327.5 deviance on this sample.
+Every eligible pair, four kinds, one ranking by `z` alone. Twelve rows, not
+fifteen: the three spline x numeric pairs are deferred, so they never enter
+the sweep.
 
-`statistic` is not comparable down that column: the `cat_cat` row's 76 is a
-208-dimensional block and the `numeric_cat` row's 18 a 10-dimensional one. The
+Read the top two rows together, because they show what `z` actually ranks.
+Confirming each by refit — the gate, not the score:
+
+| row | kind | `z` | probe df | refit gain |
+|---|---|---:|---:|---:|
+| `VehAge x BonusMalus` | `ti` | 4.40 | 2 | 43.9 |
+| `BonusMalus x VehBrand` | `spline_cat` | 2.84 | 10 | 73.3 |
+
+The second pair buys *more* deviance and ranks *below* the first. That is the
+design rather than a defect: 43.9 on 2 df is 22.0 per df against 7.3, and `z`
+normalizes each block against its own noise scale instead of reporting raw
+gain. A screen that ranked by gain would put the wider block first and spend
+the refit budget there. An independent holdout study of this ranking, against
+confirmatory refits on a 200,000-row split, is in
+[Screening Evaluation](screening-evaluation.md).
+
+`statistic` is not comparable down that column: the `cat_cat` row's 75 is a
+208-dimensional block and the `numeric_cat` row's 2.0 a 10-dimensional one. The
 large `lambda0` values are bracket edges at clamped rungs, not fitted smoothing
-parameters. Six of the eight rows carry a negative `z`, which is ordinary: a
+parameters. Eight of the twelve rows carry a negative `z`, which is ordinary: a
 statistic can land below its rung's noise floor, and on this book most pairs
-do. The `cat_cat` row's -6.46 is the extreme case — a 208-df block whose
-statistic, scaled by the *whole model's* dispersion, lands at 76, so the global
+do. The `cat_cat` row's -6.51 is the extreme case — a 208-df block whose
+statistic, scaled by the *whole model's* dispersion, lands at 75, so the global
 `phi` is conservative for that block. A large negative `z` only pushes a pair
 down the queue; it never promotes one. Nothing here was binned or refused
 (`approx` is False throughout, no NaN rows).
 
-Read the top row against its own kind's measured noise maximum below (5.53 for
-`spline_cat`): 4.88 does not clear it — and the refit bought 327.5 deviance
-anyway. That is the screen working as described rather than a contradiction:
-the floor is the largest value a wide null battery produced, not a threshold a
-real pair must beat, and the confirmatory refit is what settles the question.
+Read the top row against its own kind's measured noise maximum below (7.31 for
+`ti`): 4.40 does not clear it — and the refit bought 43.9 deviance anyway. That
+is the screen working as described rather than a contradiction: the floor is
+the largest value a wide null battery produced, not a threshold a real pair
+must beat, and the confirmatory refit is what settles the question.
 
 ## Reading the output
 
@@ -406,3 +455,12 @@ normalized against each rung's own null mean and scale. No precedent was found
 for that second device. The cell-collapsed assembly and the ranking-only
 stance are not new — FAST has both — and the null floors quoted above are
 measured here, not inherited from any of this work.
+
+The two have been run head to head on freMTPL2, against confirmatory refits of
+every candidate pair on a held-out split, including a condition where FAST is
+given a stronger baseline than the one this screen is anchored to. The short
+version: against out-of-sample refit gain PSST ranks the queue better
+(Spearman +0.83 against FAST's best +0.66), against in-sample gain FAST ranks
+it better, and the disagreement between those two verdicts is itself the most
+useful result. FAST is also 26-43x faster. Full method, per-pair tables,
+mechanism and caveats: [Screening Evaluation](screening-evaluation.md).
