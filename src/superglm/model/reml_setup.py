@@ -163,11 +163,57 @@ def strip_qp_constraints(groups: list[GroupSlice]) -> list[tuple[int, Any, Any]]
     return saved_state
 
 
-def restore_qp_constraints(
-    groups: list[GroupSlice],
-    saved_state: list[tuple[int, Any, Any]],
-) -> None:
-    """Restore QP fit-time constraints after passthrough REML."""
+def restore_qp_constraints(model, saved_state: list[tuple[int, Any, Any]]) -> None:
+    """Restore QP constraints in the model's current solver coordinates.
+
+    QP passthrough strips constraints before REML changes the SSP
+    reparameterization. The saved matrix is therefore composed with the old
+    ``R_inv`` and cannot be installed unchanged after the design is rebuilt.
+    Rebuild spline constraints from their raw coefficient rows and compose
+    them with the current group matrix instead.
+    """
+    groups = model._groups
+    dm = getattr(model, "_dm", None)
     for group_index, monotone_engine, constraints in saved_state:
-        groups[group_index].monotone_engine = monotone_engine
-        groups[group_index].constraints = constraints
+        group = groups[group_index]
+        group.monotone_engine = monotone_engine
+
+        # A successful retain_fit_state=False path has already restored the
+        # current constraint matrix before releasing the design. Preserve it
+        # rather than falling back to the stale saved coordinates in finally.
+        if dm is None:
+            if group.constraints is None:
+                raise RuntimeError(
+                    f"cannot restore QP constraints for group {group.name!r}: "
+                    "its fitted design was released before current-coordinate "
+                    "constraints were restored"
+                )
+            continue
+
+        spec = model._specs.get(group.feature_name)
+        if spec is None:
+            spec = model._interaction_specs.get(group.feature_name)
+        if spec is None:
+            raise RuntimeError(
+                f"cannot restore QP constraints for group {group.name!r}: "
+                "its fitted spline specification is unavailable"
+            )
+        raw_builder = getattr(spec, "_build_monotone_constraints_raw", None)
+        if raw_builder is None:
+            raise RuntimeError(
+                f"cannot restore QP constraints for group {group.name!r}: "
+                "its raw constraint geometry is unavailable"
+            )
+        current_map = getattr(dm.group_matrices[group_index], "R_inv", None)
+        if current_map is None:
+            raise RuntimeError(
+                f"cannot restore QP constraints for group {group.name!r}: "
+                "its current solver-coordinate map is unavailable"
+            )
+
+        current_constraints = raw_builder().compose(current_map)
+        if current_constraints.n_params != group.size:
+            raise RuntimeError(
+                "restored QP constraint width does not match its current coefficient group"
+            )
+        group.constraints = current_constraints

@@ -317,6 +317,48 @@ def test_aliased_spline_blocks_preserve_certified_rank_and_products() -> None:
     np.testing.assert_allclose(actual.rhs, expected_rhs, rtol=2e-12, atol=2e-11)
 
 
+def test_psd_cleanup_preserves_structurally_zero_rows_and_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PSD projection must not give an empty-support coordinate numerical mass."""
+    import superglm.solvers.centered_system as centered_system
+
+    # The declared-PSD cleanup should retain this block's one positive mode.
+    # With the structural zero coordinate included in the eigensolve, LAPACK
+    # scatters reconstruction noise into its empty row and reports rank two.
+    raw_hessian = np.array(
+        [
+            [-1.5569582453259823e-08, 0.0, -3.5450204197036575e-08],
+            [0.0, 0.0, 0.0],
+            [-3.5450204197036575e-08, 0.0, -7.923109584302772e-08],
+        ]
+    )
+    assert np.linalg.eigvalsh(raw_hessian)[0] < -1e-12
+    dm = DesignMatrix([DenseGroupMatrix(np.zeros((2, 3)))], n=2, p=3)
+
+    monkeypatch.setattr(
+        centered_system,
+        "packed_centered_gram_rhs",
+        lambda **_kwargs: (np.zeros(3), raw_hessian, np.zeros(3)),
+    )
+    system = centered_system.build_centered_system(
+        dm=dm,
+        W=np.ones(2),
+        z_off=np.zeros(2),
+        penalty=np.zeros((3, 3)),
+    )
+
+    np.testing.assert_array_equal(system.hessian[1, :], np.zeros(3))
+    np.testing.assert_array_equal(system.hessian[:, 1], np.zeros(3))
+    assert np.linalg.eigvalsh(system.hessian)[0] >= -1e-15
+    assert np.linalg.matrix_rank(system.hessian) == 1
+
+    decomposition = decompose_gram(system.hessian)
+    assert decomposition.rank == 1
+    assert decomposition.column_scale[1] == 0.0
+    assert np.count_nonzero(decomposition.column_scale) == 2
+
+
 def test_rectangular_spline_transforms_match_solver_coordinate_reference() -> None:
     rng = np.random.default_rng(1704)
     n = 8_000

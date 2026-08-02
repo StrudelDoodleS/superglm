@@ -1177,6 +1177,8 @@ def _fit_reml_in_workspace(
 
     reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
     _has_monotone, _has_qp_monotone, _has_scop_monotone = constraint_engine_flags(model._groups)
+    if _has_qp_monotone and _has_scop_monotone:
+        raise NotImplementedError("SCOP + QP monotone terms in the same model are not supported.")
     debug_recorder = _make_reml_debug_recorder(
         model,
         y=y,
@@ -1436,4 +1438,4 @@ def _fit_reml_in_workspace(
     finally:
         # Always restore QP constraints if stripped
         if _qp_stripped:
-            restore_qp_constraints(model._groups, _qp_saved_state)
+            restore_qp_constraints(model, _qp_saved_state)
