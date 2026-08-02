@@ -653,9 +653,12 @@ only, which is a separate simulated study.
     **No wall-clock figure is quoted anywhere in this guide as a property of
     this section's results.** Wall-clock does appear, and every occurrence is
     evidence about something else: the three figures below are evidence about
-    measurement conditions, and the 668.55 s and 9.27 s above and in the
-    Reproducing section are evidence about a fixed defect. None of them is
-    offered as what this section's tables cost or as a finding of the study.
+    measurement conditions, the 668.55 s and 9.27 s above and in the
+    Reproducing section are evidence about a fixed defect, and the
+    complete-fit table in the Reproducing section is evidence about that fix's
+    live benchmark, quoted beside the load every run of it was taken under.
+    None of them is offered as what this section's tables cost or as a finding
+    of the study.
 
     The reason is worth recording as evidence rather than as a preference.
     Three consecutive runs of `--tables 4` — identical work, identical output —
@@ -706,14 +709,34 @@ twelve wide fits between tables 3 and 4, nine plain refits and three
 stopwatch is structural: on the code before the alias-representative fix in
 this branch one of the nine refits was measured at **668.55 s**, against
 **9.27 s** after it (both figures from that commit, not from this benchmark).
-Those two now have a live producer that disagrees with them:
-`benchmarks/rank_deficient_complete_fit.py` measures the same shape of fit at
-**264.58 s** against **8.48 s**, a 31.2x ratio where the pair above reads 72x.
-Neither is wrong for the other's conditions -- the older pair came from a
-profiling session at settings this branch cannot now reconstruct, and the newer
-is one fit per side on a machine whose load average was in the teens -- but the
-disagreement is 2.3x on the slower side and belongs in the open rather than
-between two documents that each look self-consistent.
+Those two now have a live producer:
+`benchmarks/rank_deficient_complete_fit.py` measures the same shape of fit,
+and it has been run five times. The measured ratio moved with the machine
+rather than the code, so every run is listed beside the 1-minute load average
+it ran under instead of any one of them being quoted alone:
+
+| run | baseline | branch | ratio | 1-min load average |
+|---|---:|---:|---:|---|
+| 1 | 262.62 s | 5.97 s | 44.0x | not recorded per side |
+| 2 | 266.96 s | 7.87 s | 33.9x | 18-21 |
+| 3 | 285.19 s | 6.58 s | 43.3x | in the teens |
+| 4 | 264.58 s | 8.48 s | 31.2x | 18.92 |
+| 5 | 271.27 s | 6.09 s | 44.5x | quiet box -- branch: 0.05 before, 2.04 after; baseline: 1.46 before, 21.76 after |
+
+Run 5 is the committed artifact: one fit per side with the CPU lock held on an
+otherwise idle box, the load read immediately before and after each timed side
+(the after reading of a multi-minute 16-thread fit contains the fit's own
+threads; the before readings are the contention evidence). Run 1's branch time
+was the min of 3 fits in one process; every later run is one fit per side.
+Runs 1--4 stay readable in the artifact's git history, and their spread is
+what a contended wall clock is worth. The claim the five runs support is that
+the fix makes this refit **tens of times faster**; no single multiplier
+survives them, so none is quoted. Where the pair above reads 72x, the live
+producer reads tens. Neither is wrong for the other's conditions -- the older
+pair came from a profiling session at settings this branch cannot now
+reconstruct -- but the disagreement is about 2.5x on the slower side and
+belongs in the open rather than between two documents that each look
+self-consistent.
 That is the difference between a run nobody repeats and a run anyone can.
 
 `--tables` exists so that a partial rerun is a quotable command rather than a
