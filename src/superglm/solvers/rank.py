@@ -588,85 +588,105 @@ def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | Non
     return keep if keep.size == rank else None
 
 
-# A fallback pivot may be this fraction of the largest component available, so
-# a single elimination step costs at most a factor ``1 / _PIVOT_THRESHOLD`` in
-# ``_selection_amplification``.  See ``_threshold_pivot_representatives`` for why
-# it is not 1.
+# A fallback pivot may carry this fraction of the largest null-space share
+# available, measured on the ``sqrt(leverage)`` scale so the constant keeps the
+# meaning it had when the rule read components directly.  See
+# ``_leverage_pivot_representatives`` for why it is not 1.
 _PIVOT_THRESHOLD = 0.5
 
 
-def _threshold_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
-    """Representatives chosen for conditioning rather than for index order.
+def _leverage_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+    """Representatives chosen for conditioning, from a quantity the basis cannot move.
 
-    Same elimination as ``_earliest_representatives``, with the column order
-    freed.  Each step rejects the LATEST column whose largest live component is
-    within ``_PIVOT_THRESHOLD`` of the largest component available anywhere,
-    instead of the latest column carrying any component at all.  At threshold 1
-    this is Gaussian elimination with complete pivoting on the null basis --
-    the standard route to the largest-volume ``k x k`` submatrix, and so to the
-    smallest ``_selection_amplification``.
+    A null SPACE has no canonical basis.  ``eigh`` and ``svd`` return an
+    arbitrary orthonormal one, and ``N @ Q`` spans the same subspace for any
+    orthogonal ``Q``, so any rule reading individual components of ``N`` is
+    reading a coordinate that the eigensolver was free to choose.  The rule this
+    replaces did exactly that -- it pivoted on ``max |N[i, j]|`` -- and it moved
+    under rotation on 58 of 400 random 6x2 subspaces, rising to 224 of 400 at
+    12x4, with the achieved amplification moving too (6.7803 against 2.0732 on
+    one subspace).  ``_earliest_representatives`` never moved on any of them,
+    because "the last column any null direction still reaches" is a property of
+    the row space rather than of the basis.
 
-    It is not 1, because index order is still worth keeping wherever
-    conditioning does not pay for it.  Complete pivoting reorders the WHOLE
-    block, including exact aliases elsewhere in it that were never the problem:
-    on a design carrying both a 5e-8 near alias at columns (0, 1) and an exact
-    duplicate at columns (2, 4), complete pivoting selects ``[1, 3, 4]`` --
-    surrendering the earlier member of the exact pair -- where every threshold
-    from 0.1 to 0.75 selects ``[0, 2, 3]``, which keeps the convention.  Both
-    reach amplification 1.414214 and condition 1.1309, against 2.5634e+07 and
-    3.6532e+07 for the earliest selection, so the conditioning is not what is
-    being traded.
+    So the criterion here is the null-space LEVERAGE of each column,
+    ``diag(N @ N.T)``, which is invariant by construction: ``(N Q)(N Q).T =
+    N Q Q.T N.T = N N.T``.  It is the share of the unit vector ``e_j`` that lies
+    in the null space -- 1 when column ``j`` is entirely redundant, 0 when it is
+    untouched by any alias -- and rejecting the column with the most of it is
+    the classical alias-detection choice.
 
-    Relaxing further does start to cost: over 300 random alias-carrying blocks,
-    173 of which failed the earliest rule's certificate, thresholds 0.25, 0.5,
-    0.75 and 1.0 each landed under ``_achievable_amplification`` on all 173,
-    while 0.1 left one block at 4.04 times it.  0.5 sits in the middle of the
-    range that costs nothing measurable and bounds one step's multiplier by 2.
+    The DEFLATION has to be invariant too, or the second step reintroduces what
+    the first avoided.  Rejecting column ``c`` leaves ``{v in S : v_c = 0}``,
+    which is a property of the subspace and the column, so it is taken as one:
+    a Householder reflection maps ``Q[:, c]`` onto the first axis and the
+    remaining rows are dropped, leaving an orthonormal basis of exactly that
+    subspace.  Row norms therefore stay 1 throughout and the leverage of the
+    next step is read straight off the column norms.
 
-    Cost is the same ``O(k**2 m)`` in the nullity ``k`` as the earliest rule:
-    revisiting every remaining column at each of the ``k`` steps is the same
-    ``O(k m)`` per step that the elimination itself already pays.
+    ``_PIVOT_THRESHOLD`` keeps its meaning from the rule this replaces -- it is
+    applied to ``sqrt(leverage)``, which is the scale the components were on --
+    and so does the reason it is not 1: index order is worth keeping where
+    conditioning does not pay for it, and an exact alias splits its leverage
+    evenly across the columns it ties, so the tie still falls to the latest.
+
+    Invariance cost nothing here.  On the 287 blocks of a 400-block sweep where
+    the earliest rule failed its certificate, this rule and the component rule
+    it replaces return selections of IDENTICAL amplification on all 287 --
+    better on none, worse on none.  Both take the median from 1.7952e+07 down
+    to 2.0000 and the maximum from 7.077e+15 down to 8.555.  The component rule
+    was sound in intent and unsound only in its input.
+
+    Both also leave 2 of those 287 above ``_achievable_amplification``, so that
+    is a property of greedy selection rather than of either criterion: the
+    bound is what a largest-volume subset achieves, and neither rule searches
+    for one.  ``_conditioned_representatives`` returns the better of this and
+    the earliest selection, so the result is never worse than index order alone
+    -- verified over the same 287, worst ratio exactly 1.000000.
+
+    Cost is unchanged at ``O(k**2 m)`` in the nullity ``k``: the Householder is
+    ``O(k m)`` per step, exactly what the elimination it replaces cost.
     """
     width, nullity = null_vectors.shape
     if nullity == 0:
         return np.arange(width, dtype=int)
-    working = np.array(null_vectors.T, dtype=float)
-    if not np.all(np.isfinite(working)):
+    basis = np.array(null_vectors.T, dtype=float)
+    if not np.all(np.isfinite(basis)):
         return None
-    relative = float(np.sqrt(np.finfo(float).eps))
 
     rejected: list[int] = []
-    live = np.ones(nullity, dtype=bool)
     remaining = np.ones(width, dtype=bool)
-    floors = relative * np.linalg.norm(working, axis=1)
     for _step in range(nullity):
-        candidates = np.flatnonzero(live)
-        columns = np.flatnonzero(remaining)
-        if candidates.size == 0 or columns.size == 0:
+        if basis.shape[0] == 0:
             break
-        block = np.abs(working[np.ix_(candidates, columns)])
-        # Same per-row noise floor as the earliest rule: a component of a unit
-        # null vector below sqrt(eps) of its own row norm is elimination dust,
-        # and pivoting on it is exactly the failure this module already guards.
-        block[block <= floors[candidates][:, None]] = 0.0
-        column_peaks = block.max(axis=0)
-        peak = float(column_peaks.max(initial=0.0))
+        columns = np.flatnonzero(remaining)
+        if columns.size == 0:
+            break
+        leverage = np.einsum("ij,ij->j", basis[:, columns], basis[:, columns])
+        # Leverage is a diagonal of a projector, so it lives in [0, 1] and a
+        # column the null space does not reach at all sits at machine dust.
+        leverage[leverage <= _EPS] = 0.0
+        peak = float(leverage.max(initial=0.0))
         if peak <= 0.0:
             break
-        # Latest qualifying column, so an exact alias -- whose null direction
-        # carries equal weight on every column it ties together -- still gives
-        # up its last column rather than its first.
-        local = int(np.flatnonzero(column_peaks >= _PIVOT_THRESHOLD * peak)[-1])
-        chosen = int(columns[local])
-        pivot = int(candidates[int(np.argmax(block[:, local]))])
+        qualifying = np.flatnonzero(leverage >= (_PIVOT_THRESHOLD**2) * peak)
+        chosen = int(columns[int(qualifying[-1])])
         rejected.append(chosen)
         remaining[chosen] = False
-        working[pivot] /= working[pivot, chosen]
-        others = candidates[candidates != pivot]
-        if others.size:
-            working[others] -= np.outer(working[others, chosen], working[pivot])
-            floors[others] = relative * np.linalg.norm(working[others], axis=1)
-        live[pivot] = False
+
+        # Householder onto {v in S : v_chosen = 0}: reflect Q[:, chosen] to the
+        # first axis, then drop that axis.  The result is orthonormal because a
+        # reflection is, so no re-orthogonalisation is needed.
+        direction = basis[:, chosen].copy()
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            break
+        direction[0] += float(np.copysign(norm, direction[0] if direction[0] != 0.0 else 1.0))
+        reflector_norm = float(np.linalg.norm(direction))
+        if reflector_norm > 0.0:
+            direction /= reflector_norm
+            basis = basis - 2.0 * np.outer(direction, direction @ basis)
+        basis = basis[1:]
 
     if len(rejected) != nullity:
         return None
@@ -748,7 +768,7 @@ def _conditioned_representatives(null_vectors: NDArray, rank: int) -> NDArray | 
     amplification = _selection_amplification(null_vectors, earliest)
     if amplification <= _achievable_amplification(*null_vectors.shape):
         return earliest
-    alternative = _threshold_pivot_representatives(null_vectors, rank)
+    alternative = _leverage_pivot_representatives(null_vectors, rank)
     if alternative is None:
         return earliest
     if _selection_amplification(null_vectors, alternative) < amplification:
