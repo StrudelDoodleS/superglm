@@ -305,6 +305,38 @@ def test_a_wholly_absorbed_probe_is_unscreenable_not_rank_deficient():
         assert np.isnan(row["edf0"]), (seed, row["edf0"])
 
 
+def test_a_weakly_identified_block_is_scored_not_discarded():
+    """Weak identification is a finding about the data, not about arithmetic.
+
+    ``M = C = I`` with ``V = (1 + 1e-4) I`` gives the Schur complement
+    ``V_eff = 1e-4 I`` -- full rank, entirely real, and carrying a genuine
+    score statistic of 1.0 on ``U = sqrt(1e-4) e_1``.  Every generalized
+    eigenvalue against the absorption metric is 5.0e-05, so an absorption
+    guard set by SMALLNESS rather than by round-off classifies the whole block
+    as absorbed and drops the pair.
+
+    Only arithmetic may discard a pair.  The threshold is ``10 * k^3 * eps``,
+    nine orders below this block's 5.0e-05 at ``k = 2``, so a merely weak
+    interaction keeps its degrees of freedom and its statistic; a pair that is
+    genuinely uninteresting is for ``z`` to rank down, not for the kernel to
+    delete.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    for k in (2, 4, 12):
+        eye = np.eye(k)
+        V = (1.0 + 1e-4) * eye
+        V_eff = V - eye @ np.linalg.solve(eye, eye)
+        assert np.linalg.matrix_rank(V_eff) == k, k
+        U = np.zeros(k)
+        U[0] = np.sqrt(1e-4)
+
+        got = penalized_score_statistic(U, V, eye, eye, None, U_nuisance=np.zeros(k))
+
+        assert got.edf0 == float(k), (k, got.edf0)
+        assert got.statistic == pytest.approx(float(U @ np.linalg.solve(V_eff, U)), rel=1e-9), k
+
+
 def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
     """A barely positive-definite block still reports its RANK, not ``k``.
 
