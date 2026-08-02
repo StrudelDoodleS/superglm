@@ -253,6 +253,42 @@ def _make(kind: str, magnitude: float, n_levels: int, n: int, seed: int) -> Pair
     )
 
 
+class UnseenLevelError(RuntimeError):
+    """A split whose test half carries a level its training half never saw."""
+
+
+def _require_training_covers_test(
+    data: PairData, train: NDArray, test: NDArray, label: str
+) -> None:
+    """Refuse a split before fitting it, not during `predict`.
+
+    `_validate_configuration`'s `n // 2 >= n_levels` is a NECESSARY condition
+    and nothing more: it is pigeonhole, so it clears any `n` large enough for
+    the levels to fit, whether or not the draw actually spread them that way.
+    At `--tables 1 --n 64` every width clears it and almost none of them
+    survive -- at 16 levels the first replicate leaves `G6` out of training, at
+    32 it leaves ten `g` levels and eight `h` levels out.
+
+    Nothing here is random at run time: `_make` and `_split` are both seeded, so
+    the levels that will be missing are knowable before the first fit rather
+    than discoverable from a `predict` traceback naming a category.  Two
+    `np.unique` calls per replicate is the whole cost.
+    """
+    left, right = data.joint // data.n_levels, data.joint % data.n_levels
+    missing: list[str] = []
+    for name, codes in (("g", left), ("h", right)):
+        unseen = np.setdiff1d(np.unique(codes[test]), np.unique(codes[train]))
+        missing += [f"{name.upper()}{int(code)}" for code in unseen]
+    if not missing:
+        return
+    raise UnseenLevelError(
+        f"{label}: {len(missing)} level(s) appear only in the test half "
+        f"({', '.join(missing[:8])}{', ...' if len(missing) > 8 else ''}), so predict would "
+        f"fail on them.  {data.n_levels} levels per factor against {train.size} training rows: "
+        "raise --n, or lower --wide-levels."
+    )
+
+
 class NonconvergedFitError(RuntimeError):
     """A fit that did not converge, refused before it can reach a table."""
 
@@ -335,6 +371,9 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
             for rep in range(reps):
                 data = _make("spike", effect, n_levels, n, 7000 + rep)
                 train, test = _split(n, 7000 + rep)
+                _require_training_covers_test(
+                    data, train, test, f"gate ladder L={n_levels} effect={effect} rep={rep}"
+                )
                 dtr, ytr = data.frame.iloc[train], data.y[train]
                 dte, yte = data.frame.iloc[test], data.y[test]
 
@@ -452,6 +491,7 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
         for rep in range(reps):
             data = _make(kind, magnitude, n_levels, n, 31337 + rep)
             train, test = _split(n, 31337 + rep)
+            _require_training_covers_test(data, train, test, f"sparse payoff {kind} rep={rep}")
             dtr, ytr, jtr = data.frame.iloc[train], data.y[train], data.joint[train]
             dte, yte, jte = data.frame.iloc[test], data.y[test], data.joint[test]
 
@@ -566,6 +606,7 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, obj
         frame = data.frame.copy()
         frame["gh"] = data.joint.astype(str)
         train, test = _split(n, 4242 + rep)
+        _require_training_covers_test(data, train, test, f"shrinkage rep={rep}")
         ytr, yte = data.y[train], data.y[test]
 
         for arm in SHRINKAGE_ARMS:

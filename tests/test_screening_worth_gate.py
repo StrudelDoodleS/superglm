@@ -28,6 +28,7 @@ from benchmarks.screening_worth_gate import (
     MIN_WIDE_LEVELS,
     SHRINKAGE_ARMS,
     NonconvergedFitError,
+    UnseenLevelError,
     _build_parser,
     _mains,
     _make,
@@ -259,7 +260,9 @@ def test_a_configuration_too_small_for_its_tables_is_refused_before_fitting() ->
     with pytest.raises(SystemExit, match="training rows"):
         _validate_configuration(too_small)
 
-    # table 1 sweeps LADDER's own widths, so its requirement is the widest rung
+    # table 1 sweeps LADDER's own widths, so its requirement is the widest rung.
+    # Clearing it is NECESSARY and not sufficient -- see the unseen-level test
+    # below, which is what actually rules `--n 64` out.
     just_enough = parser.parse_args(["--n", str(2 * max(LADDER)), "--tables", "1"])
     _validate_configuration(just_enough)
 
@@ -268,6 +271,36 @@ def test_a_configuration_too_small_for_its_tables_is_refused_before_fitting() ->
     with pytest.raises(SystemExit, match="table 4"):
         _validate_configuration(wide)
     _validate_configuration(parser.parse_args(["--n", "12000", "--tables", "1,2,3,4"]))
+
+
+def test_a_split_that_hides_a_level_from_training_is_refused_before_fitting() -> None:
+    """The pigeonhole bound clears configurations the actual draw does not.
+
+    `--tables 1 --n 64` passes `_validate_configuration` -- 32 training rows
+    against a widest rung of 32 levels -- and then the seeded draw leaves whole
+    levels out of the training half anyway: at 16 levels the first replicate
+    misses `G6`, and at 32 levels it misses ten `g` levels and eight `h` levels.
+    Before this, that surfaced from inside `predict` as a categorical error
+    naming a level rather than a flag.
+
+    Nothing here is random at run time, so the check is exact rather than a
+    bound: `_make` and `_split` are both seeded.
+    """
+    parser = _build_parser()
+    accepted = parser.parse_args(["--tables", "1", "--n", "64"])
+    _validate_configuration(accepted)  # the cheap bound still passes it
+
+    # the widest ladder rung at that n, which is what actually runs
+    levels = max(LADDER)
+    data = gate._make("spike", 1.0, levels, 64, 7000)
+    train, test = _split(64, 7000)
+    with pytest.raises(UnseenLevelError, match="only in the test half"):
+        gate._require_training_covers_test(data, train, test, "gate ladder")
+
+    # and the published configuration is not refused
+    data = gate._make("spike", 1.0, levels, 12_000, 7000)
+    train, test = _split(12_000, 7000)
+    gate._require_training_covers_test(data, train, test, "gate ladder")
 
 
 def test_a_fixed_cutoff_scored_per_replicate_is_the_mean_z_rule() -> None:
