@@ -471,7 +471,11 @@ def _straddling_subspace(scale: float, width: int, nullity: int) -> np.ndarray:
     return rows.T
 
 
-@pytest.mark.parametrize("factor", [0.5, 0.9, 1.0, 1.2, 1.35, 1.6, 2.0, 10.0])
+# 1.0 is deliberately absent: there the leverage lands on the comparison it is
+# tested against -- measured ratio 1.000000000 -- so which side it falls is
+# decided by rounding in the normalisation, not by the rule.  The nearest
+# cases kept, 0.9 and 1.2, sit at 0.81x and 1.44x the threshold.
+@pytest.mark.parametrize("factor", [0.5, 0.9, 1.2, 1.35, 1.6, 2.0, 10.0])
 def test_a_component_straddling_the_floor_does_not_decide_by_basis(factor: float) -> None:
     """The adversarial case for the floor, which a random sweep will not produce.
 
@@ -506,6 +510,9 @@ def test_a_component_straddling_the_floor_does_not_decide_by_basis(factor: float
         assert len(answers) == 1, f"{name} moved under rotation at {factor}x: {sorted(answers)}"
 
     # and the threshold sits where the leverage says, not where a basis says
+    # every kept factor is clear of the threshold, so the expected side is not
+    # itself a knife-edge call
+    assert abs(factor - 1.0) > 0.05
     expected_reached = factor > 1.0
     assert (seen["earliest"] == {(0, 2, 3)}) is expected_reached, seen["earliest"]
 

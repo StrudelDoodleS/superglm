@@ -450,6 +450,12 @@ def _run_concentration(reps: int, n: int, n_levels: int) -> list[dict[str, objec
             # P is scale-free, so phi cancels out of the reported ratio; passing
             # 1.0 keeps that visible rather than implying a calibrated scale
             t, occupied = cell_contributions(resid, data.joint, n_levels * n_levels, 1.0)
+            if occupied < MIN_NULL_CELLS:
+                raise SystemExit(
+                    f"table 2 {label!r} rep={rep} occupied {occupied} cells, below the "
+                    f"{MIN_NULL_CELLS} at which the k/3 null is worth reading -- the pinned "
+                    "finite-k bias is ~15% at 25 cells and ~39% at 8.  Raise --n."
+                )
             ratios.append(concentration(t, occupied))
             prs.append(participation_ratio(t))
             occs.append(occupied)
@@ -752,7 +758,7 @@ def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
 def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
     print(
         f"\n2. Concentration at matched z ({n_levels}x{n_levels}). Rows are paired so "
-        "spiky and\n   diffuse truths carry the SAME z -- any separation is "
+        "spiky and\n   diffuse truths carry a MATCHING z -- any separation is "
         "information z lacks.\n   Fitted on the FULL sample, unlike tables 1 and 3.\n"
     )
     print(
@@ -767,6 +773,21 @@ def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
             f"{row['concentration']:>9.3f}"
         )
     print("\n  ~1.0 = spread as noise spreads it;  << 1.0 = a few cells carry it")
+    # MATCHED's magnitudes are constants tuned at the default width, so the
+    # pairing they buy is a property of THIS run rather than of the table.  The
+    # achieved gap is printed so a non-default --n or --wide-levels cannot leave
+    # the "matching z" claim standing on figures that no longer match.
+    gaps = []
+    for spiky, diffuse in zip(rows[1::2], rows[2::2], strict=False):
+        larger = max(abs(float(spiky["z"])), abs(float(diffuse["z"])), 1e-12)
+        gaps.append(abs(float(spiky["z"]) - float(diffuse["z"])) / larger)
+    if gaps:
+        print(
+            f"  paired-z gap: max {max(gaps) * 100:.1f}%, "
+            f"median {sorted(gaps)[len(gaps) // 2] * 100:.1f}% "
+            "-- the magnitudes are tuned for the default width, so read this "
+            "before reading the separation"
+        )
 
 
 def _print_sparse_payoff(rows: list[dict[str, object]]) -> None:
@@ -999,6 +1020,16 @@ def _validate_configuration(args: argparse.Namespace) -> None:
     # be published at that width whatever the sample size.  A hundred cells is
     # where the pinned bias falls to a few per cent; the published width, 41,
     # has 1,681.
+    # Grid capacity is necessary and not sufficient: `concentration` divides by
+    # the OCCUPIED count, so `--tables 2 --n 20 --wide-levels 10` has 100 cells
+    # and can occupy at most 20 of them.  Both are checked -- capacity here,
+    # and the occupancy actually passed to `concentration` at run time.
+    if 2 in args.tables and args.n < MIN_NULL_CELLS:
+        raise SystemExit(
+            f"--n {args.n} cannot occupy {MIN_NULL_CELLS} cells, and table 2 reads P against a "
+            f"null of k/3 that is only valid for large k.  Needs at least {MIN_NULL_CELLS} rows "
+            "before the occupancy can reach the floor at all."
+        )
     if 2 in args.tables and args.wide_levels**2 < MIN_NULL_CELLS:
         raise SystemExit(
             f"--wide-levels {args.wide_levels} gives {args.wide_levels**2} cells, and table 2 "

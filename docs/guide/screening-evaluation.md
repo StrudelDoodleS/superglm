@@ -595,7 +595,7 @@ only, which is a separate simulated study.
     benchmark.
 
     **The library has moved since, and the tables moved with it.** The branch
-    now carries five changes to `src/superglm/solvers/rank.py` and its callers
+    now carries six changes to `src/superglm/solvers/rank.py` and its callers
     rather than one, and their claims are not equally strong — which matters
     here, because the rank-deficient path is exactly the path a wide `cat_cat`
     refit takes:
@@ -622,9 +622,16 @@ only, which is a separate simulated study.
       The selections it returns have identical conditioning to the rule it
       replaces on all 287 blocks where the two were compared, so this
       bought reproducibility rather than accuracy.
+    - `0c4fa16` applied the same correction to the PRIMARY selector, after
+      review asked whether `_earliest_representatives` was invariant and a
+      constructed near-cutoff case showed it was not: its `sqrt(eps)` floor
+      read a single component, which moved it on 455 of 4000 subspaces
+      built inside the band where that matters, and moved the composite on
+      21.  It now decides on leverage too.  This is the change that
+      reaches the labels on almost every deficient block.
 
     Tables 1 and 2 were first taken at `a2611cc` and have been re-taken with
-    `src/` at **`6430239`**, which is this branch's `src/` tree with all five
+    `src/` at **`0c4fa16`**, which is this branch's `src/` tree with all six
     changes in place: every published value is unchanged, to every digit
     printed. Tables 3 and 4 exist only on
     the fixed code and have not been re-taken since. The evidence that they are
