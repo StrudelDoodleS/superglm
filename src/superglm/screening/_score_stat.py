@@ -33,6 +33,58 @@ exists and why callers sweeping a ladder should prefer it.
 is singular but ``V_eff + lambda S`` is not, those directions still contribute
 to ``edf``, and whitening by ``V_eff`` alone silently drops them.  The common
 null space of both contributes nothing to either sum and is discarded.
+
+**THRESHOLD TYPES.  Read this before adding a constant to this module.**
+
+Every cut here answers one of two questions, and they have different standing.
+
+*Type 1 -- "is this arithmetic meaningless?"*  A statement about floating
+point, DERIVABLE from backward stability as a function of machine epsilon and
+dimension.  It holds for every input because the bound covers all of them, so
+there is no unmeasured regime waiting to break it.  :func:`_rank_floor` is of
+this kind: ``max(n, 1) * eps``, LAPACK's convention and ``matrix_rank``'s own
+tolerance.  So is ``_solve_floor`` in :mod:`superglm.screening._arrow`.
+
+*Type 2 -- "is this answer small?"*  A statement about DATA.  Not derivable;
+any constant is a claim about the datasets its author had seen, and there is
+always a legitimate dataset on the other side of it.
+
+**Only a Type 1 bound may justify DISCARDING a pair.**  Weak identification is
+a finding about the data and belongs to ``z``, which ranks such a pair down on
+its merits.  Needing a fitted constant to decide whether to discard is the
+signal that a data judgement is being made in the wrong place.
+
+That rule cost a guard.  A wholly absorbed block -- every probe column a
+multiple of its level's indicator, so the true profiled rank is 0 -- would be
+worth detecting, and the natural test is ``max(mu)`` over the pencil
+``(V_eff, V + C' M^-1 C)``, the largest share of curvature profiling leaves
+behind.  There is no Type 1 threshold for it.  Measured on EXACTLY absorbed
+blocks at FIXED ``k = 24``, varying only how unevenly the levels carry weight:
+``max(mu)`` ranges over 9.6e-16, 1.1e-15, 1.7e-12, 5.9e-12, 9.1e-15 and
+2.4e-05 -- eleven orders at one dimension, so no power of ``k`` governs it.
+``eps * cond(M)`` does not bound it usefully either, since the overlap block
+is near-singular by construction here (measured ``cond(M)`` ~ 1e20 throughout,
+which makes that bound vacuous).  A dimension-scaled cut therefore cannot
+separate absorption from weak identification, and the fitted one that was
+tried both deleted a legitimately weak block (``V = (1 + 1e-4) I``, whose
+``V_eff`` is ``1e-4 I`` and full rank) and failed to fire on a genuinely
+absorbed one at the same ``k``.
+
+So absorption is NOT detected and such a pair is NOT discarded.  It is scored:
+the rank comes from :func:`_rank_floor` like any other block, the statistic
+comes out at round-off, and ``z`` puts the pair near the bottom where it
+belongs.  Its ``edf0`` is not reproducible across seeds, which is the honest
+signature of a numerically indeterminate block rather than something to hide.
+
+There IS a Type 1 route to the same answer -- Guttman rank additivity,
+``rank([[V, C'], [C, M]]) - rank(M)``, where both ranks are of PSD matrices
+formed by ADDITION, so neither cancels and both are countable at
+:func:`_rank_floor`.  It is not taken here on cost: the overlap of a
+``numeric_cat`` pair is as wide as the probe, so the bordered system is ``2k``
+and its eigendecomposition is 8x the ``k`` one -- about 1.1 s to 2.3 s at the
+budget's own ceiling, against the ~1.5 s per-pair target the cubic constants
+were fitted to.  It is affordable for ``cat_cat``, where the overlap is small
+beside the probe.  Worth its own issue rather than this module's guesswork.
 """
 
 from __future__ import annotations
@@ -84,76 +136,11 @@ def _rank_floor(n: int) -> float:
     eigenvalue makes ``psd_ranks`` stricter than a singular-value count.
 
     It is only meaningful where the matrix's own largest eigenvalue is a real
-    scale.  On a PROFILED block that is not guaranteed, and
-    :func:`_fully_absorbed` handles that case instead.
+    scale.  On a wholly PROFILED-AWAY block that is not guaranteed -- see the
+    THRESHOLD TYPES note at the top of this module for what is and is not
+    decidable there.
     """
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
-
-
-def _fully_absorbed(V_eff: NDArray, metric: NDArray) -> bool:
-    """Is the WHOLE probe block absorbed by the span profiled out?
-
-    ``V_eff = V - C' M^-1 C`` is a difference, so a direction the overlap
-    absorbs exactly survives only as round-off.  Where EVERY direction is
-    absorbed -- a ``numeric_cat`` pair whose numeric is constant within each
-    level, so every probe column is a multiple of that level's indicator --
-    that round-off becomes the block's own largest eigenvalue, and a cut taken
-    relative to ``V_eff`` measures dust against dust.  Measured on a five-level
-    case of exactly that shape: ``max(||V||, ||C' M^-1 C||) / ||V_eff||`` is
-    2.2e15, ``V_eff``'s own spectrum reads [0.08, 0.53, 0.56, 1.0] relative,
-    and ``matrix_rank`` and :func:`_rank_floor` both report 4 where the true
-    rank is 0.
-
-    The scale-free test is the generalized eigenvalue against the unprofiled
-    curvature -- ``mu`` of the pencil ``(V_eff, V + C' M^-1 C)``, the share of
-    a direction's own curvature that profiling leaves behind.  Rarity cancels
-    out of it: measured, the smallest real ``mu`` is 3.388e-02 at a weight
-    share of 1e-4, 1e-8 and 1e-12 alike, identical to three digits, where any
-    ABSOLUTE floor high enough to clear the dust would delete a rare level.
-
-    **Deliberately a whole-block guard rather than a per-direction cut.**  The
-    absorbed ceiling grows with width -- measured ``max(mu)`` of 5.8e-15,
-    2.5e-14, 2.1e-12, 3.0e-11, 1.1e-10, 1.6e-09 and 1.2e-08 at ``k`` = 4, 9,
-    24, 59, 99, 199 and 399 -- so a per-direction tolerance tracking it is
-    macroscopic on a wide block, and there it deletes directions that are
-    weakly identified rather than absorbed.  Measured: at ``k`` = 2299, two
-    observations per level, such a cut removed 62 real directions, which is
-    the very failure the whitening cut was fixed for.  All-or-nothing cannot
-    do that -- a block with any surviving direction has ``max(mu)`` of order 1,
-    six or more orders above the guard.
-
-    **The threshold is ROUND-OFF, not smallness.**  It was briefly a fixed
-    1e-3, which is macroscopic, and that rejected blocks that are merely
-    WEAKLY IDENTIFIED: with ``M = C = I`` and ``V = (1 + 1e-4) I`` the Schur
-    complement is ``1e-4 I``, full rank and entirely real -- a score statistic
-    of 1.0 on ``U = sqrt(1e-4) e_1`` -- yet every ``mu`` is 5.0e-05 and the
-    block was dropped as unscreenable.  Weak identification is a finding about
-    the data; absorption is a fact about arithmetic, and only the second may
-    discard a pair.  At ``10 * k^3 * eps`` that same block sits NINE orders
-    above the threshold (5.0e-05 against 1.8e-14 at ``k = 2``) while every
-    absorbed case measured still fires with 11x to 64x of margin.
-
-    The ``1e-6`` cap keeps the threshold from growing macroscopic on a very
-    wide block, where ``k^3 * eps`` would eventually reach the same 1e-05
-    territory.  It errs toward NOT firing -- a wide fully-absorbed block then
-    falls back to the ordinary rank rule rather than being discarded -- which
-    is the safe direction, since the cost of failing to fire is the old
-    behaviour and the cost of firing wrongly is deleting a real pair.
-
-    What this does NOT catch is PARTIAL absorption, where a block keeps a few
-    real directions and its absorbed ones are dust relative to those.  That
-    needs a per-direction rule this measurement does not support yet; see the
-    thread on PR #194.
-    """
-    k = V_eff.shape[0]
-    if k == 0:
-        return False
-    try:
-        mu = scipy.linalg.eigh(V_eff, metric, eigvals_only=True, check_finite=False)
-    except (scipy.linalg.LinAlgError, np.linalg.LinAlgError, ValueError):
-        return False
-    tol = min(10.0 * float(k) ** 3 * float(np.finfo(np.float64).eps), 1e-6)
-    return bool(np.max(np.asarray(mu)) <= tol)
 
 
 @dataclass(frozen=True)
@@ -186,9 +173,7 @@ def _solve_psd(A: NDArray, B: NDArray) -> NDArray:
         return np.linalg.pinv(A, hermitian=True) @ B
 
 
-def _edge(
-    V: NDArray, S: NDArray | None, lam: float, metric: NDArray | None = None
-) -> tuple[float, Callable[[NDArray], NDArray]]:
+def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[NDArray], NDArray]]:
     """Factor ``V + lam * S`` ONCE; return its edf and a solver against it.
 
     The bracket and the clamped rungs ask the same two matrices for both an
@@ -266,8 +251,6 @@ def _edge(
     except scipy.linalg.LinAlgError:
         apply = np.linalg.pinv(A, hermitian=True).__matmul__
     if S is None:
-        if metric is not None and _fully_absorbed(V, metric):
-            return 0.0, apply
         return float(psd_ranks(V, _rank_floor(V.shape[0]))), apply
     return float(np.trace(apply(V))), apply
 
@@ -387,18 +370,10 @@ def penalized_score_statistic_ladder(
 
     if (C is None) != (M is None):
         raise ValueError("C and M profile the overlap together; supply both or neither")
-    # The pre-profile curvature, kept so the unpenalized rank can be measured
-    # as a SHARE of it rather than against the difference's own scale; see
-    # _fully_absorbed.  None when nothing was profiled out, where V is not a
-    # difference and its own scale is the right reference.
-    metric = None
     if C is not None:
         C = np.asarray(C, dtype=np.float64)
         MinvC = _solve_psd(np.asarray(M, dtype=np.float64), C)
-        projected = C.T @ MinvC
-        metric = V + projected
-        metric = 0.5 * (metric + metric.T)
-        V = V - projected
+        V = V - C.T @ MinvC
         V = 0.5 * (V + V.T)
         if U_nuisance is not None:
             U = U - MinvC.T @ np.asarray(U_nuisance, dtype=np.float64)
@@ -408,7 +383,7 @@ def penalized_score_statistic_ladder(
         # statistic, and the achieved rank is COUNTED beside it rather than
         # read off that factorization -- see _edge on why the trace cannot
         # answer it.
-        rank, apply = _edge(V, None, 0.0, metric=metric)
+        rank, apply = _edge(V, None, 0.0)
         T = float(U @ apply(U))
         return [ScreenedPair(statistic=T, edf0=rank, lambda0=0.0) for _ in budgets]
 
