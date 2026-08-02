@@ -422,30 +422,54 @@ def test_the_selection_does_not_move_when_the_null_basis_is_rotated(
     12x4 it moved on 224 of 400.  One fixture would have passed against the
     broken rule at every one of these shapes.
 
-    ALL THREE selectors are covered, not just the fallback.  The fallback fires
-    only above ``_achievable_amplification``; ``_earliest_representatives``
-    labels almost every deficient block, and ``_conditioned_representatives`` is
-    what the solver actually calls.  Guarding only the fallback would pin the
-    minority path.
+    ALL THREE selectors are covered, not just the fallback, and the composite
+    is swept in BOTH of its call forms.  Since ``c78edd7`` the solver calls
+    ``_conditioned_representatives`` with a ``block_condition`` scorer -- both
+    production sites pass ``_principal_block_condition`` over the equilibrated
+    Gram -- so the production form is exercised here with a scorer over a Gram
+    built behind the subspace, fixed while the basis rotates, exactly as
+    production's Gram is.  The bare form stays swept too: it is the
+    documented-weaker fallback for callers that cannot supply a scorer.
+    Guarding only the fallback would pin the minority path.
     """
     rng = np.random.default_rng(20260802 + width * 100 + nullity)
     rank = width - nullity
     checked = 0
     for _ in range(60):
         basis, _ = np.linalg.qr(rng.normal(size=(width, nullity)))
-        answers: dict[str, set] = {"leverage": set(), "earliest": set(), "conditioned": set()}
+        # A fixed anisotropic Gram BEHIND the subspace: its null space is
+        # exactly ``span(basis)``, so the production scorer judges a real
+        # principal block, and it does not move when the basis does -- in
+        # production LAPACK re-picks the basis while the Gram stays what the
+        # design says.
+        full, _ = np.linalg.qr(np.hstack([basis, rng.normal(size=(width, rank))]))
+        complement = full[:, nullity:]
+        gram = complement @ np.diag(10.0 ** rng.uniform(-3.0, 3.0, size=rank)) @ complement.T
+        answers: dict[str, set] = {
+            "leverage": set(),
+            "earliest": set(),
+            "conditioned_bare": set(),
+            "conditioned_production": set(),
+        }
         amplifications = set()
         for _rotation in range(5):
             rotation, _ = np.linalg.qr(rng.normal(size=(nullity, nullity)))
             rotated = basis @ rotation
             # same subspace, different basis
             assert np.allclose(rotated.T @ rotated, np.eye(nullity), atol=1e-11)
-            for name, selector in (
-                ("leverage", _leverage_pivot_representatives),
-                ("earliest", _earliest_representatives),
-                ("conditioned", _conditioned_representatives),
+            for name, selected in (
+                ("leverage", _leverage_pivot_representatives(rotated, rank)),
+                ("earliest", _earliest_representatives(rotated, rank)),
+                ("conditioned_bare", _conditioned_representatives(rotated, rank)),
+                (
+                    "conditioned_production",
+                    _conditioned_representatives(
+                        rotated,
+                        rank,
+                        block_condition=lambda keep: _principal_block_condition(gram, keep),
+                    ),
+                ),
             ):
-                selected = selector(rotated, rank)
                 answers[name].add(None if selected is None else tuple(selected.tolist()))
                 if name == "leverage" and selected is not None:
                     amplifications.add(round(_selection_amplification(rotated, selected), 9))
@@ -497,15 +521,34 @@ def test_a_component_straddling_the_floor_does_not_decide_by_basis(factor: float
     null = _straddling_subspace(factor * floor, width, nullity)
     assert np.allclose(null.T @ null, np.eye(nullity), atol=1e-12)
 
-    seen: dict[str, set] = {"earliest": set(), "conditioned": set()}
+    # A fixed Gram behind the subspace, so the composite is exercised in the
+    # production call form (with a principal-block scorer) as well as the bare
+    # fallback form -- the adversarial basis must decide neither.
+    rng = np.random.default_rng(20260802)
+    full, _ = np.linalg.qr(np.hstack([null, rng.normal(size=(width, width - nullity))]))
+    complement = full[:, nullity:]
+    gram = complement @ np.diag(10.0 ** rng.uniform(-2.0, 2.0, size=width - nullity)) @ complement.T
+
+    seen: dict[str, set] = {
+        "earliest": set(),
+        "conditioned_bare": set(),
+        "conditioned_production": set(),
+    }
     for angle in np.linspace(0.0, np.pi / 2, 9):
         cos, sin = np.cos(angle), np.sin(angle)
         rotated = null @ np.array([[cos, -sin], [sin, cos]])
-        for name, selector in (
-            ("earliest", _earliest_representatives),
-            ("conditioned", _conditioned_representatives),
+        for name, selected in (
+            ("earliest", _earliest_representatives(rotated, width - nullity)),
+            ("conditioned_bare", _conditioned_representatives(rotated, width - nullity)),
+            (
+                "conditioned_production",
+                _conditioned_representatives(
+                    rotated,
+                    width - nullity,
+                    block_condition=lambda keep: _principal_block_condition(gram, keep),
+                ),
+            ),
         ):
-            selected = selector(rotated, width - nullity)
             seen[name].add(None if selected is None else tuple(selected.tolist()))
     for name, answers in seen.items():
         assert len(answers) == 1, f"{name} moved under rotation at {factor}x: {sorted(answers)}"
