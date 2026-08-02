@@ -383,7 +383,7 @@ def test_reselection_leaves_an_exact_alias_convention_where_it_was() -> None:
     duplicate pair.  Index order alone selects ``[0, 1, 2]`` at condition
     3.6532e+07.  Re-selecting by complete pivoting would answer ``[1, 3, 4]``,
     which fixes the conditioning but surrenders the EARLIER member of the exact
-    pair for no reason.  The threshold pivot answers ``[0, 2, 3]``: the near
+    pair for no reason.  The leverage pivot answers ``[0, 2, 3]``: the near
     alias gives up its second column, the exact pair still gives up its later
     one, and the condition is 1.1309 either way.
     """
@@ -420,27 +420,94 @@ def test_the_selection_does_not_move_when_the_null_basis_is_rotated(
     was invariant on the first 6x2 subspace tried and moved on 58 of 400; at
     12x4 it moved on 224 of 400.  One fixture would have passed against the
     broken rule at every one of these shapes.
+
+    ALL THREE selectors are covered, not just the fallback.  The fallback fires
+    only above ``_achievable_amplification``; ``_earliest_representatives``
+    labels almost every deficient block, and ``_conditioned_representatives`` is
+    what the solver actually calls.  Guarding only the fallback would pin the
+    minority path.
     """
     rng = np.random.default_rng(20260802 + width * 100 + nullity)
     rank = width - nullity
     checked = 0
     for _ in range(60):
         basis, _ = np.linalg.qr(rng.normal(size=(width, nullity)))
-        answers = set()
+        answers: dict[str, set] = {"leverage": set(), "earliest": set(), "conditioned": set()}
         amplifications = set()
         for _rotation in range(5):
             rotation, _ = np.linalg.qr(rng.normal(size=(nullity, nullity)))
             rotated = basis @ rotation
             # same subspace, different basis
             assert np.allclose(rotated.T @ rotated, np.eye(nullity), atol=1e-11)
-            selected = _leverage_pivot_representatives(rotated, rank)
-            answers.add(None if selected is None else tuple(selected.tolist()))
-            if selected is not None:
-                amplifications.add(round(_selection_amplification(rotated, selected), 9))
-        assert len(answers) == 1, f"selection moved under rotation: {sorted(answers)}"
+            for name, selector in (
+                ("leverage", _leverage_pivot_representatives),
+                ("earliest", _earliest_representatives),
+                ("conditioned", _conditioned_representatives),
+            ):
+                selected = selector(rotated, rank)
+                answers[name].add(None if selected is None else tuple(selected.tolist()))
+                if name == "leverage" and selected is not None:
+                    amplifications.add(round(_selection_amplification(rotated, selected), 9))
+        for name, seen in answers.items():
+            assert len(seen) == 1, f"{name} moved under rotation: {sorted(seen)}"
         assert len(amplifications) <= 1, f"amplification moved: {sorted(amplifications)}"
         checked += 1
     assert checked == 60
+
+
+def _straddling_subspace(scale: float, width: int, nullity: int) -> np.ndarray:
+    """A null basis whose LAST column carries leverage ``scale**2``, split evenly.
+
+    Split evenly is the point: for leverage ``s**2`` the largest single
+    component lies in ``[s / sqrt(k), s]`` depending on the basis, so a rule
+    reading components sees ``s / sqrt(k)`` here and ``s`` after a rotation that
+    concentrates it on one row.
+    """
+    rows = np.zeros((nullity, width))
+    for index in range(nullity):
+        rows[index, index] = 1.0
+        rows[index, width - 1] = scale / np.sqrt(nullity)
+    rows /= np.linalg.norm(rows, axis=1, keepdims=True)
+    return rows.T
+
+
+@pytest.mark.parametrize("factor", [0.5, 0.9, 1.0, 1.2, 1.35, 1.6, 2.0, 10.0])
+def test_a_component_straddling_the_floor_does_not_decide_by_basis(factor: float) -> None:
+    """The adversarial case for the floor, which a random sweep will not produce.
+
+    ``_earliest_representatives`` used to ask ``max |N[i, j]| > sqrt(eps)``.  For
+    a column of leverage ``s**2`` that maximum ranges over ``[s / sqrt(k), s]``
+    across bases, so every ``s`` in ``(sqrt(eps), sqrt(k) * sqrt(eps))`` was
+    dust for one basis and a dependency for another.  Constructed rather than
+    sampled: the component form moved on 455 of 4000 subspaces built inside that
+    band and carried ``_conditioned_representatives`` with it on 21, while a
+    uniform sweep of 400 random subspaces per shape never produced one.
+
+    Leverage is a property of the subspace, so the answer is now decided at
+    ``s == sqrt(eps)`` regardless of basis -- and the decision is still the
+    earliest-column convention, just made on a quantity a rotation cannot move.
+    """
+    floor = float(np.sqrt(np.finfo(float).eps))
+    width, nullity = 5, 2
+    null = _straddling_subspace(factor * floor, width, nullity)
+    assert np.allclose(null.T @ null, np.eye(nullity), atol=1e-12)
+
+    seen: dict[str, set] = {"earliest": set(), "conditioned": set()}
+    for angle in np.linspace(0.0, np.pi / 2, 9):
+        cos, sin = np.cos(angle), np.sin(angle)
+        rotated = null @ np.array([[cos, -sin], [sin, cos]])
+        for name, selector in (
+            ("earliest", _earliest_representatives),
+            ("conditioned", _conditioned_representatives),
+        ):
+            selected = selector(rotated, width - nullity)
+            seen[name].add(None if selected is None else tuple(selected.tolist()))
+    for name, answers in seen.items():
+        assert len(answers) == 1, f"{name} moved under rotation at {factor}x: {sorted(answers)}"
+
+    # and the threshold sits where the leverage says, not where a basis says
+    expected_reached = factor > 1.0
+    assert (seen["earliest"] == {(0, 2, 3)}) is expected_reached, seen["earliest"]
 
 
 def test_the_certificate_is_the_condition_the_selection_itself_adds() -> None:

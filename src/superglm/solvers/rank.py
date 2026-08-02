@@ -538,49 +538,70 @@ def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | Non
     of the same width.  This is ``O(k**2 m)`` in the NULLITY ``k``, so a block
     that is a few columns short of full rank is nearly free.
 
-    The pivot threshold is relative to each ROW's own norm, not to the matrix
-    maximum.  These vectors come out of an eigendecomposition of a singular
-    system, so a component that is mathematically zero arrives as noise many
-    orders above machine epsilon -- measured at 1e-12 against a 1e-14 absolute
-    threshold on an 8-column block, which pivoted on dust and returned a
-    rank-deficient selection.  ``sqrt(eps)`` is the floor below which a
-    component of a unit-norm null vector carries no information here.
+    "Still reaches column ``j``" is decided by the null space's LEVERAGE there,
+    ``||P_S e_j||**2``, not by any single vector's component.  Those vectors come
+    out of an eigendecomposition of a singular system, so a component that is
+    mathematically zero arrives as noise many orders above machine epsilon --
+    measured at 1e-12 against a 1e-14 absolute threshold on an 8-column block,
+    which pivoted on dust and returned a rank-deficient selection.  ``sqrt(eps)``
+    is the floor below which a unit-norm null direction carries no information
+    here, and leverage is the basis-free way to ask the question.
 
-    Returns ``None`` when elimination cannot place all ``k`` pivots.  The caller
+    It has to be basis-free.  A null SPACE has no canonical basis, and reading
+    ``max |N[i, j]|`` instead makes the answer depend on the one ``eigh`` chose:
+    for leverage ``s**2`` that maximum lies anywhere in ``[s / sqrt(k), s]``
+    depending on the rotation, so any ``s`` in ``(sqrt(eps), sqrt(k) sqrt(eps))``
+    is dust for one basis and a dependency for another.  That is not
+    hypothetical -- the component form moved on 455 of 4000 subspaces built
+    inside that band, and carried ``_conditioned_representatives`` with it on
+    21 of them.  Leverage cannot move: ``(N Q)(N Q).T = N N.T``.
+
+    The deflation is basis-free for the same reason.  Rejecting column ``c``
+    leaves ``{v in S : v_c = 0}``, a property of the subspace and the column, so
+    a Householder maps ``Q[:, c]`` onto the first axis and that axis is dropped.
+    Rows stay orthonormal, so the next leverage is read straight off the column
+    norms and the cost stays ``O(k**2 m)``.
+
+    Returns ``None`` when the scan cannot reject all ``k`` columns.  The caller
     then keeps whatever exact path it already had rather than proceeding on a
     selection this could not certify.
     """
     width, nullity = null_vectors.shape
     if nullity == 0:
         return np.arange(width, dtype=int)
-    working = np.array(null_vectors.T, dtype=float)
-    if not np.all(np.isfinite(working)):
+    basis = np.array(null_vectors.T, dtype=float)
+    if not np.all(np.isfinite(basis)):
         return None
-    relative = float(np.sqrt(np.finfo(float).eps))
+    floor = float(np.sqrt(np.finfo(float).eps)) ** 2
 
     rejected: list[int] = []
-    live = np.ones(nullity, dtype=bool)
-    # Row norms only move when a pivot eliminates into them, which happens k
-    # times, not once per column -- recomputing per column would put an m**2
-    # term back into a routine whose whole point is not having one.
-    floors = relative * np.linalg.norm(working, axis=1)
-    for column in range(width - 1, -1, -1):
-        candidates = np.flatnonzero(live)
-        if candidates.size == 0:
+    remaining = np.ones(width, dtype=bool)
+    for _step in range(nullity):
+        if basis.shape[0] == 0:
             break
-        entries = np.abs(working[candidates, column])
-        significant = np.flatnonzero(entries > floors[candidates])
-        if significant.size == 0:
-            continue
-        best = int(significant[np.argmax(entries[significant])])
-        pivot = int(candidates[best])
-        rejected.append(column)
-        working[pivot] /= working[pivot, column]
-        others = candidates[candidates != pivot]
-        if others.size:
-            working[others] -= np.outer(working[others, column], working[pivot])
-            floors[others] = relative * np.linalg.norm(working[others], axis=1)
-        live[pivot] = False
+        columns = np.flatnonzero(remaining)
+        if columns.size == 0:
+            break
+        leverage = np.einsum("ij,ij->j", basis[:, columns], basis[:, columns])
+        reachable = np.flatnonzero(leverage > floor)
+        if reachable.size == 0:
+            break
+        # the LATEST column the null space still reaches: the earliest-column
+        # convention, decided on a quantity the basis cannot move
+        chosen = int(columns[int(reachable[-1])])
+        rejected.append(chosen)
+        remaining[chosen] = False
+
+        direction = basis[:, chosen].copy()
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            break
+        direction[0] += float(np.copysign(norm, direction[0] if direction[0] != 0.0 else 1.0))
+        reflector_norm = float(np.linalg.norm(direction))
+        if reflector_norm > 0.0:
+            direction /= reflector_norm
+            basis = basis - 2.0 * np.outer(direction, direction @ basis)
+        basis = basis[1:]
 
     if len(rejected) != nullity:
         return None
