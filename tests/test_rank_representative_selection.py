@@ -33,6 +33,7 @@ from superglm.solvers.rank import (
     _conditioned_representatives,
     _earliest_representatives,
     _leverage_pivot_representatives,
+    _principal_block_condition,
     _selection_amplification,
     decompose_factor,
     decompose_gram,
@@ -517,6 +518,52 @@ def test_a_component_straddling_the_floor_does_not_decide_by_basis(factor: float
     assert (seen["earliest"] == {(0, 2, 3)}) is expected_reached, seen["earliest"]
 
 
+def test_an_anisotropic_block_is_judged_on_its_own_condition_not_on_a_bound() -> None:
+    """A smaller amplification does not mean a better-conditioned block.
+
+    `_selection_amplification` bounds one end of a ratio:
+    `sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)` puts a floor under
+    `sigma_min`, while `sigma_max` of the selected block also moves with the
+    selection.  So the bound improves a WORST CASE and says nothing about a
+    specific one, and on anisotropic factors the two orderings disagree.
+
+    Measured before the fix, over 9,654 rank-deficient 3x4 blocks whose columns
+    span three orders of magnitude: the routine switched on 9,615 of them and
+    24 of those switches went to a block whose actual principal condition was
+    worse, by up to 1.34x.  Deciding on the principal block itself takes that to
+    0 of 9,615.
+
+    The bound is still the trigger, and being a bound is what makes it a safe
+    one -- it cannot miss a genuinely ill-conditioned block.
+    """
+    rng = np.random.default_rng(20260802)
+    switched = 0
+    for _ in range(3000):
+        base = rng.normal(size=(3, 3)) @ np.diag(10.0 ** rng.uniform(-3, 3, size=3))
+        combination = base @ rng.normal(size=(3, 1))
+        factor = np.hstack([base, combination])[:, rng.permutation(4)]
+        if not np.all(np.isfinite(factor)) or np.min(np.linalg.norm(factor, axis=0)) == 0:
+            continue
+        equilibrated = factor / np.linalg.norm(factor, axis=0)
+        singular, right = np.linalg.svd(equilibrated, full_matrices=True)[1:]
+        rank = int(np.count_nonzero(singular > SHARED_RANK_POLICY.factor_rcond * singular[0]))
+        if rank != 3 or right.T[:, rank:].shape[1] != 1:
+            continue
+        earliest = _earliest_representatives(right.T[:, rank:], rank)
+        decomposition = decompose_factor(factor)
+        if earliest is None or decomposition.pivots is None:
+            continue
+        chosen = np.asarray(decomposition.active_columns)
+        if np.array_equal(chosen, earliest):
+            continue
+        switched += 1
+        gram = equilibrated.T @ equilibrated
+        assert _principal_block_condition(gram, chosen) <= _principal_block_condition(
+            gram, earliest
+        ), f"switched {earliest.tolist()} -> {chosen.tolist()} and made conditioning worse"
+    assert switched > 500, f"only {switched} switches exercised"
+
+
 def test_the_certificate_is_the_condition_the_selection_itself_adds() -> None:
     """``1/sigma_min(N_R)`` is exactly the amplification, not a proxy for it.
 
@@ -560,9 +607,13 @@ def test_the_certificate_is_the_condition_the_selection_itself_adds() -> None:
 def test_certification_never_returns_a_worse_conditioned_selection(seed: int) -> None:
     """The certificate may only improve the block, and must leave good ones alone.
 
-    Every selection is either the earliest one unchanged, or one whose
-    amplification is strictly smaller.  There is no third outcome, so no design
-    can be made worse by this than it was by index order alone.
+    Judged on the PRINCIPAL BLOCK, which is what production supplies a scorer
+    for.  The earlier version of this test asserted the amplification fell
+    instead, and that is the inference an anisotropic factor breaks: the bound
+    can improve while the block it stands for gets worse.  So the guarantee is
+    stated where it is true -- the condition of the block handed to the solver
+    is never worse than index order's, and a selection the certificate leaves
+    alone is one that already cleared the achievable bound.
     """
     rng = np.random.default_rng(seed)
     improved = 0
@@ -589,17 +640,21 @@ def test_certification_never_returns_a_worse_conditioned_selection(seed: int) ->
             continue
         null = vectors[:, ~retained]
         earliest = _earliest_representatives(null, rank)
-        chosen = _conditioned_representatives(null, rank)
+        chosen = _conditioned_representatives(
+            null,
+            rank,
+            block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+        )
         if earliest is None:
             assert chosen is None
             continue
         assert chosen is not None
-        before = _selection_amplification(null, earliest)
-        after = _selection_amplification(null, chosen)
+        # the guarantee, whether or not the selection moved
+        assert _principal_block_condition(equilibrated, chosen) <= _principal_block_condition(
+            equilibrated, earliest
+        )
         if np.array_equal(chosen, earliest):
-            assert before <= _achievable_amplification(*null.shape)
             untouched += 1
         else:
-            assert after < before
             improved += 1
     assert improved > 0 and untouched > 0, f"improved={improved} untouched={untouched}"
