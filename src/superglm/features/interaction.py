@@ -158,6 +158,13 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
 
     Returns ``None`` when the gate declines, leaving CSR in place.
     """
+    # Function-local ON PURPOSE, not merely to dodge a circular import: these
+    # two are read fresh on every call, so a test that lowers the module global
+    # reaches the pre-gate below.  Hoisting this to module scope would bind them
+    # once at import and silently re-freeze that gate while the one inside
+    # plan_verified_row_support kept resolving -- the two disagreeing again, in
+    # the opposite direction.  The pass-through below is what keeps them equal;
+    # this comment is what stops the import being "tidied" upward.
     from superglm._group_matrix._group_matrix_support import (
         DEFAULT_MAX_SUPPORT_BYTES,
         DEFAULT_MIN_SPEEDUP,

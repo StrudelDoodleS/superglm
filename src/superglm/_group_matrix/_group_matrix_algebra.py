@@ -683,6 +683,37 @@ def _chunked_support_bincount_2d(
     return out
 
 
+def _support_csr_raw_cross(
+    B_unique: NDArray,
+    support_idx: NDArray,
+    B_csr,
+    W_rows: NDArray,
+) -> NDArray:
+    """``B_support.T @ diag(W) @ B_csr`` with NO observation-level temporary.
+
+    The mixed pairing -- one ``spline_cat`` block compressed, the other still
+    CSR -- is created by the compression gate itself, so it is a regression
+    rather than a pre-existing path: before, two exact blocks contracted sparse
+    against sparse.  Expanding the compressed side and densifying the weighted
+    CSR side made BOTH sides worse than they had been.
+
+    Aggregating the CSR side onto the support bins first avoids the choice.
+    The only dense array is ``(n_support, p_csr)``, bounded by the same support
+    gate that bounds ``B_unique``; the CSR side is never densified and the
+    observation rows are never materialised, so no chunking is needed.
+    """
+    csr = B_csr.tocsr()
+    return B_unique.T @ _csr_weighted_bincount(
+        np.asarray(csr.data, dtype=np.float64),
+        csr.indices,
+        csr.indptr,
+        int(csr.shape[1]),
+        np.asarray(support_idx, dtype=np.intp),
+        np.asarray(W_rows, dtype=np.float64),
+        int(B_unique.shape[0]),
+    )
+
+
 def _support_support_raw_cross(
     B_unique_i: NDArray,
     bin_idx_i: NDArray,
@@ -803,12 +834,10 @@ def _cross_gram_spline_categorical_spline_categorical(
                 )
             return gm_i.R_inv.T @ raw @ gm_j.R_inv
         if i_discrete:
-            B_i = gm_i.B_unique[gm_i.bin_idx_level]
-            raw = B_i.T @ np.asarray(gm_j.B_level.multiply(W[rows][:, None]).toarray())
-            return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+            raw = _support_csr_raw_cross(gm_i.B_unique, gm_i.bin_idx_level, gm_j.B_level, W[rows])
+            return gm_i.R_inv.T @ raw @ gm_j.R_inv
         if j_discrete:
-            B_j = gm_j.B_unique[gm_j.bin_idx_level]
-            raw = np.asarray((gm_i.B_level.multiply(W[rows][:, None]).T @ B_j), dtype=np.float64)
+            raw = _support_csr_raw_cross(gm_j.B_unique, gm_j.bin_idx_level, gm_i.B_level, W[rows]).T
             return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
         raw = gm_i.B_level.T @ gm_j.B_level.multiply(W[rows][:, None])
@@ -848,15 +877,15 @@ def _cross_gram_spline_categorical_spline_categorical(
         return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     if i_discrete:
-        B_i = gm_i.B_unique[gm_i.bin_idx_level[pos_i]]
-        B_j = gm_j.B_level[pos_j]
-        raw = B_i.T @ np.asarray(B_j.multiply(W[common_rows][:, None]).toarray())
-        return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+        raw = _support_csr_raw_cross(
+            gm_i.B_unique, gm_i.bin_idx_level[pos_i], gm_j.B_level[pos_j], W[common_rows]
+        )
+        return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     if j_discrete:
-        B_i = gm_i.B_level[pos_i]
-        B_j = gm_j.B_unique[gm_j.bin_idx_level[pos_j]]
-        raw = np.asarray((B_i.multiply(W[common_rows][:, None]).T @ B_j), dtype=np.float64)
+        raw = _support_csr_raw_cross(
+            gm_j.B_unique, gm_j.bin_idx_level[pos_j], gm_i.B_level[pos_i], W[common_rows]
+        ).T
         return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     B_i = gm_i.B_level[pos_i]
