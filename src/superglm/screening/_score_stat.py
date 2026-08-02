@@ -196,6 +196,16 @@ def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
     positive-only cancellation makes the certificate silent), and a weak but
     real ``V_eff = 1e-4 I`` at k = 2, 4 and 12 (true rank k).
 
+    **Precondition: the working weights are non-negative.**  Guttman rank
+    additivity as used here needs the joint ``[[V, C'], [C, M]]`` to be PSD,
+    which needs ``working_weights >= 0``.  Satisfied on the reachable path --
+    ``screening_ops`` builds them as ``weights * dmu_deta**2 / var_mu`` with
+    ``var_mu`` floored, from weights already validated finite and
+    non-negative, so it rests on Fisher scoring plus that validation.  Worth
+    stating because a negative weight would not merely degrade the count: the
+    joint would stop being PSD, the additivity would no longer hold, and the
+    rank could come out either side of the truth.
+
     **The cost is real and is the reason this was not done sooner.**  The
     bordered system is ``k + q``, and for ``numeric_cat`` the overlap is as
     wide as the probe, so the eigendecomposition is of ``2k`` where a direct
