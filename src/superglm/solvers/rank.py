@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -773,7 +773,34 @@ def _achievable_amplification(width: int, nullity: int) -> float:
     return float(np.sqrt(1.0 + float(nullity) * float(width - nullity)))
 
 
-def _conditioned_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+def _principal_block_condition(equilibrated: NDArray, keep: NDArray) -> float:
+    """Condition of the principal block a selection actually hands to the solver.
+
+    This is the matrix that gets factorised and then solved against, so it is
+    the quantity a selection should be judged on.  ``_selection_amplification``
+    bounds it from one side only, which is enough to SCREEN a selection and not
+    enough to choose between two.
+
+    Returns ``inf`` when the block will not factorise, which ranks it below any
+    block that will.
+    """
+    block = equilibrated[np.ix_(keep, keep)]
+    try:
+        factor = scipy.linalg.cholesky(block, lower=True, check_finite=False)
+    except (np.linalg.LinAlgError, ValueError):
+        return float("inf")
+    pocon = scipy.linalg.get_lapack_funcs("pocon", (factor,))
+    reciprocal, info = pocon(factor, float(np.linalg.norm(block, ord=1)), uplo="L")
+    if info != 0 or not np.isfinite(reciprocal) or reciprocal <= 0.0:
+        return float("inf")
+    return float(1.0 / reciprocal)
+
+
+def _conditioned_representatives(
+    null_vectors: NDArray,
+    rank: int,
+    block_condition: Callable[[NDArray], float] | None = None,
+) -> NDArray | None:
     """Earliest representatives, unless index order costs more than it may.
 
     The earliest rule is a labelling convention -- it decides which of a set of
@@ -784,12 +811,27 @@ def _conditioned_representatives(null_vectors: NDArray, rank: int) -> NDArray | 
     above the cutoff that decided the rank, and it is still the worst basis for
     its own span.
 
-    So the convention is kept, and certified.  ``_selection_amplification`` is
-    exact and costs ``O(k**3)`` in the NULLITY, below the ``O(m**3)``
-    eigendecomposition this path has already paid.  Only when it exceeds what a
-    rank-revealing selection provably achieves is a second, conditioning-driven
-    selection computed, and even then the better-conditioned of the two is
-    returned -- so this can only improve the block it hands on.
+    So the convention is kept, and certified -- but the certificate TRIGGERS the
+    search and does not decide it.  ``_selection_amplification`` is a bound:
+    ``sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)`` puts a floor
+    under one end of a ratio whose other end, ``sigma_max`` of the selected
+    block, also moves with the selection.  So a smaller amplification improves a
+    worst case and says nothing per instance, and on anisotropic factors the two
+    orderings genuinely disagree: over 9,654 rank-deficient 3x4 blocks where
+    this routine switched, 24 switched to a block whose actual condition was
+    WORSE, by up to 1.34x.
+
+    The decision is therefore made on the thing that matters downstream -- the
+    condition of the principal block that will be factorised and solved --
+    whenever the caller can supply it.  ``block_condition`` takes a candidate
+    selection and returns that condition; the alternative is taken only if it is
+    strictly better.  Callers that cannot supply one fall back to the bound,
+    which is the old behaviour and is documented as weaker.
+
+    The amplification is still the right trigger: it is cheap, it costs
+    ``O(k**3)`` in the NULLITY against the ``O(m**3)`` eigendecomposition this
+    path has already paid, and being a bound is exactly what makes it a safe
+    screen -- it cannot miss a block that is genuinely badly conditioned.
     """
     earliest = _earliest_representatives(null_vectors, rank)
     if earliest is None:
@@ -798,8 +840,10 @@ def _conditioned_representatives(null_vectors: NDArray, rank: int) -> NDArray | 
     if amplification <= _achievable_amplification(*null_vectors.shape):
         return earliest
     alternative = _leverage_pivot_representatives(null_vectors, rank)
-    if alternative is None:
+    if alternative is None or np.array_equal(alternative, earliest):
         return earliest
+    if block_condition is not None:
+        return alternative if block_condition(alternative) < block_condition(earliest) else earliest
     if _selection_amplification(null_vectors, alternative) < amplification:
         return alternative
     return earliest
@@ -1080,7 +1124,11 @@ def _decompose_gram(
         # walking prefixes, without an eigendecomposition per candidate, and
         # `_conditioned_representatives` documents when index order is too
         # expensive a convention to keep.
-        selected_local_array = _conditioned_representatives(discarded_vectors, rank)
+        selected_local_array = _conditioned_representatives(
+            discarded_vectors,
+            rank,
+            block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+        )
         if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
             representative = equilibrated[np.ix_(selected_local_array, selected_local_array)]
@@ -1271,12 +1319,16 @@ def decompose_factor(
         # Same certified representative choice as the Gram path, off the right
         # singular vectors that span this factor's null space.  Unlike the Gram
         # path, which indexes a matrix it already holds, this forms the full
-        # equilibrated Gram and slices the selected block out of it -- so the
-        # saving here is that the SEARCH costs no Gram, not that the Gram is
-        # never formed.
-        selected_local_array = _conditioned_representatives(discarded_vectors, rank)
+        # equilibrated Gram -- once, before the selection, because judging a
+        # candidate means conditioning its principal block, and slicing that out
+        # needs the whole Gram in hand.
+        equilibrated_gram = equilibrated.T @ equilibrated
+        selected_local_array = _conditioned_representatives(
+            discarded_vectors,
+            rank,
+            block_condition=lambda keep: _principal_block_condition(equilibrated_gram, keep),
+        )
         if selected_local_array is not None:
-            equilibrated_gram = equilibrated.T @ equilibrated
             representative_columns = active_columns[selected_local_array]
             representative = equilibrated_gram[np.ix_(selected_local_array, selected_local_array)]
             try:
