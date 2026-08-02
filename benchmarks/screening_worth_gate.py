@@ -136,6 +136,9 @@ MATCHED: tuple[tuple[str, str, float], ...] = (
 )
 TOP_M: tuple[int, ...] = (5, 10, 25, 50)
 HOT_CELLS = 5
+# Fewest cells at which table 2's `k/3` null is worth reading: the finite-k
+# bias pinned in the tests is ~4% here and ~15% at 25 cells.
+MIN_NULL_CELLS = 100
 # the three model classes table 4 compares.  `pooled` is load-bearing: it is the
 # only arm that shows the pair is worth HAVING once it stops being 1681 free
 # cells, and the guide quotes its holdout gain.
@@ -688,7 +691,7 @@ def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
     print("\n1. Does z > sqrt(edf0/2) predict the sign of the holdout change?\n")
     print(
         f"{'levels':>7} {'edf0':>7} {'nominal':>8} {'effect':>7} {'z':>8} {'thresh':>7} "
-        f"{'ratio':>9} {'above':>6} {'gate':>8} {'holdout':>9}"
+        f"{'mean rat':>9} {'above':>6} {'gate':>8} {'holdout':>9}"
     )
     for row in rows:
         gate = "INCLUDE" if row["ratio"] > 1.0 else "exclude"
@@ -988,6 +991,22 @@ def _validate_configuration(args: argparse.Namespace) -> None:
     # model's parameters.  Either constant moving -- a 70/30 split, or a mains
     # model with another term -- separates them, and the messages already say
     # which is which.
+    # Table 2's whole legend is that `P / (k/3)` sits near 1 under the null, and
+    # `concentration` documents that `k/3` is the LARGE-k limit: the same tests
+    # pin the null ratio at ~1.39 for k=8, ~1.15 for k=25, ~1.04 for k=100 and
+    # ~1.003 for k=1600.  Below a hundred cells the bias is not a rounding
+    # difference, it is a fifth of the quantity being read, so the table cannot
+    # be published at that width whatever the sample size.  A hundred cells is
+    # where the pinned bias falls to a few per cent; the published width, 41,
+    # has 1,681.
+    if 2 in args.tables and args.wide_levels**2 < MIN_NULL_CELLS:
+        raise SystemExit(
+            f"--wide-levels {args.wide_levels} gives {args.wide_levels**2} cells, and table 2 "
+            f"reads P against a null of k/3 that is only valid for large k -- measured at "
+            f"{MIN_NULL_CELLS} cells the bias is already a few per cent, and it grows fast below "
+            f"that.  Needs at least {int(np.ceil(np.sqrt(MIN_NULL_CELLS)))} levels."
+        )
+
     if 2 in args.tables and args.n < 2 * args.wide_levels:
         raise SystemExit(
             f"--n {args.n} is not enough for table 2 at --wide-levels {args.wide_levels}: "
