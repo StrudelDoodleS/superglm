@@ -141,45 +141,79 @@ def _rank_floor(n: int) -> float:
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
 
 
-def _resolved_rank(A: NDArray) -> float:
-    """Rank of a PROFILED block, with its own noise floor MEASURED not assumed.
-
-    ``V_eff = V - C' M^-1 C`` is a Schur complement of a PSD matrix, so in
-    exact arithmetic it is PSD.  Every NEGATIVE eigenvalue is therefore pure
-    arithmetic error -- and its magnitude is a measurement of this block's own
-    noise floor, taken from the block itself.  No constant, no conditioning
-    estimate, no claim about data: it is Type 1 in the sense of the note at the
-    top of this module, resting only on a mathematical fact about the operand
-    and an observation of how far the computed matrix violates it.
-
-    A direction counts when it exceeds BOTH the ordinary round-off floor
-    relative to the largest eigenvalue AND that observed violation.  Where the
-    profiling is exact the negative side is empty and this reduces to
-    :func:`_rank_floor`, which is why every previously measured block is
-    unchanged by it.
-
-    Why it is needed.  Counting relative to the block's own largest eigenvalue
-    presumes that eigenvalue is real curvature.  On a block the overlap has
-    almost entirely absorbed it is not -- measured on a 25-level
-    ``numeric_cat`` pair whose numeric varies by 1e-08 within each level, with
-    one level carrying two rows: ``||V_eff|| = 1.49e-08`` against a ``V`` of
-    order 1e+04, and the block's DOMINANT eigenvalue is negative, the positive
-    ones reaching only 0.23 of it.  A matrix whose largest movement is in a
-    direction curvature cannot go is noise throughout.  Dividing the profiled
-    score by those directions gave ``statistic 145.508`` at ``edf0 10.0``, so
-    ``z = 30.3`` -- top of the table, from a pair carrying nothing.  Here the
-    observed violation is the largest magnitude present, so no direction clears
-    it and the block resolves nothing.
-    """
-    w = np.linalg.eigvalsh(A)
+def _psd_rank(A: NDArray) -> float:
+    """Numerical rank of a symmetric PSD matrix at the round-off floor."""
+    w = np.linalg.eigvalsh(0.5 * (A + A.T))
     if w.size == 0:
         return 0.0
     top = float(w[-1])
     if top <= 0.0:
         return 0.0
-    observed_noise = max(-float(w[0]), 0.0)
-    tol = max(_rank_floor(w.size) * top, observed_noise)
-    return float(np.sum(w > tol))
+    return float(np.sum(w > _rank_floor(w.size) * top))
+
+
+def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
+    """Rank of the profiled block, decided where NOTHING cancels.
+
+    ``rank(V_eff)`` is the unpenalized rung's edf, and no cut taken on
+    ``V_eff`` itself is safe.  ``V_eff = V - C' M^-1 C`` is a difference, so an
+    absorbed direction survives only as round-off -- and on a block the overlap
+    has largely absorbed, that round-off IS the largest eigenvalue, so a
+    relative cut is taken against the very noise it must reject.  Three rules
+    were tried against the block itself and all three fail on the REACHABLE
+    path, 5-level wholly absorbed pairs screened end to end, 20 seeds:
+
+    * relative to ``V_eff``'s own top: nonzero rank on 37 of 40 replicates;
+    * plus ``max(-lambda_min, 0)``, a certificate that ``V_eff >= 0`` is
+      violated: 12 of 40.  It is silent whenever the perturbation lands
+      positive-definite, which for a symmetric perturbation on an exactly null
+      subspace is a coin flip at EVERY width;
+    * plus an a-priori ``k * eps * tr(V)`` bound on the difference: 9 of 20.
+      It is short because the dominant error is not the subtraction at all --
+      ``cond(M)`` measured 5.8e+14 to 5.8e+15 on every failing seed, so the
+      overlap is numerically singular and the error comes from inverting it.
+      No bound written in terms of ``||V||`` can see that.
+
+    Getting an edf too HIGH is not a neutral failure here.  ``z = (T - e) /
+    sqrt(2 e)`` DECREASES in ``e``, so a partly-rejected block scores higher
+    than an unrejected one: on a measured ``statistic = 145.508`` an edf of 10
+    gives ``z = 30.3`` where an edf of 1 gives ``z = 102.2``.  Only rank 0 is
+    safe, which is why a rule that reaches it most of the time is not a rule.
+
+    So the rank is taken where nothing has cancelled.  Guttman rank additivity
+    on the JOINT moment matrix,
+
+        rank([[V, C'], [C, M]]) = rank(M) + rank(V - C' M^-1 C),
+
+    holds for a PSD joint, and both ranks on the left are of matrices assembled
+    by ADDITION.  Neither hides a cancellation, so each is countable at
+    :func:`_rank_floor` -- the round-off floor that is derivable from eps and
+    dimension -- and the difference is exact integer arithmetic.  No inverse is
+    formed, no conditioning enters, and there is no threshold on a cancelled
+    quantity anywhere.  Measured 0 of 20 on the same reachable path that
+    defeats all three rules above, and it is right on the other corners too: a
+    three-direction block whose probe is exactly nested (true rank 2, where a
+    positive-only cancellation makes the certificate silent), and a weak but
+    real ``V_eff = 1e-4 I`` at k = 2, 4 and 12 (true rank k).
+
+    **The cost is real and is the reason this was not done sooner.**  The
+    bordered system is ``k + q``, and for ``numeric_cat`` the overlap is as
+    wide as the probe, so the eigendecomposition is of ``2k`` where a direct
+    count is of ``k`` -- roughly 8x that one step.  It is paid on ONE rung of
+    the one ladder with no bandwidth to scan, and only where an overlap was
+    profiled out at all.  Whether ``_CUBIC_BUDGET_FACTOR`` should move for it
+    is a separate question, filed rather than answered here.
+    """
+    if joint is None:
+        return _psd_rank(V_eff)
+    V, C, M = joint
+    k, q = V.shape[0], M.shape[0]
+    K = np.empty((k + q, k + q), dtype=np.float64)
+    K[:k, :k] = V
+    K[:k, k:] = C.T
+    K[k:, :k] = C
+    K[k:, k:] = M
+    return max(_psd_rank(K) - _psd_rank(M), 0.0)
 
 
 @dataclass(frozen=True)
@@ -195,11 +229,15 @@ class ScreenedPair:
 class _Pencil:
     """Simultaneous diagonalization of ``(V_eff, S)`` with ``U_eff`` rotated in.
 
-    ``a`` holds ``V_eff``'s eigenvalues in the ``G``-whitened basis and ``1 - a``
-    holds ``S``'s, since the two sum to the identity there by construction.
+    ``v`` and ``s`` are the two transformed diagonal terms, held SEPARATELY
+    rather than one derived from the other: ``edf(lam) = sum v / (v + lam s)``
+    and ``T(lam) = sum u^2 / (v + lam s)``.  Deriving ``s`` as ``1 - v`` loses
+    it whenever ``v`` rounds to 1, which is exactly what happens when the
+    curvature dwarfs the penalty -- see :func:`_build_pencil`.
     """
 
-    a: NDArray
+    v: NDArray
+    s: NDArray
     u: NDArray
 
 
@@ -212,7 +250,9 @@ def _solve_psd(A: NDArray, B: NDArray) -> NDArray:
         return np.linalg.pinv(A, hermitian=True) @ B
 
 
-def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[NDArray], NDArray]]:
+def _edge(
+    V: NDArray, S: NDArray | None, lam: float, joint: tuple | None = None
+) -> tuple[float, Callable[[NDArray], NDArray]]:
     """Factor ``V + lam * S`` ONCE; return its edf and a solver against it.
 
     The bracket and the clamped rungs ask the same two matrices for both an
@@ -290,7 +330,7 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     except scipy.linalg.LinAlgError:
         apply = np.linalg.pinv(A, hermitian=True).__matmul__
     if S is None:
-        return _resolved_rank(V), apply
+        return _profiled_rank(V, joint), apply
     return float(np.trace(apply(V))), apply
 
 
@@ -325,33 +365,47 @@ def _build_pencil(V: NDArray, S: NDArray, U: NDArray) -> _Pencil:
     a noise direction costs at most one spurious degree of freedom in ``edf``,
     where dropping a real one zeroes the statistic outright.
     """
-    G = 0.5 * (V + S + (V + S).T)
+    # BALANCE before summing.  ``G = V + S`` is formed in floating point, so
+    # if the two terms live on far-apart scales the smaller is simply lost:
+    # with ``V = 1e20 I`` and ``S = I``, ``V + S`` rounds to ``V`` exactly,
+    # every share comes back 1, and the ladder reports the full dimension as
+    # its edf at every lambda -- the answer then depends on the units the
+    # curvature is carried in, or on a frequency-weight scale, which is the
+    # same defect a relative whitening cut was introduced to remove.
+    # Scaling S to V's trace makes the sum lossless; the scaling is undone
+    # exactly below, so nothing depends on the balance point itself.
+    tr_v = abs(float(np.trace(V)))
+    tr_s = abs(float(np.trace(S)))
+    balance = tr_v / tr_s if tr_v > 0.0 and tr_s > 0.0 else 1.0
+    Sb = balance * S
+    G = 0.5 * (V + Sb + (V + Sb).T)
     try:
-        a, basis = scipy.linalg.eigh(V, G, check_finite=False)
+        share, basis = scipy.linalg.eigh(V, G, check_finite=False)
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
         w, Q = np.linalg.eigh(G)
         top = float(w.max()) if w.size else 0.0
         keep = w > _rank_floor(w.size) * max(top, np.finfo(np.float64).tiny)
         if not np.any(keep):
-            return _Pencil(a=np.zeros(0), u=np.zeros(0))
+            return _Pencil(v=np.zeros(0), s=np.zeros(0), u=np.zeros(0))
         whiten = Q[:, keep] / np.sqrt(w[keep])
         Vt = whiten.T @ V @ whiten
-        a, R = np.linalg.eigh(0.5 * (Vt + Vt.T))
+        share, R = np.linalg.eigh(0.5 * (Vt + Vt.T))
         basis = whiten @ R
-    # a and 1 - a are both variance shares in G-space, so they live in [0, 1];
-    # the clip only absorbs round-off at the ends.
-    a = np.clip(a, 0.0, 1.0)
-    return _Pencil(a=a, u=basis.T @ U)
+    # In the balanced G-metric the two shares sum to one by construction, so
+    # both are recovered directly rather than one by subtracting from the
+    # other -- which is what kept the smaller term representable.
+    share = np.clip(share, 0.0, 1.0)
+    return _Pencil(v=share, s=(1.0 - share) / balance, u=basis.T @ U)
 
 
 def _pencil_edf(p: _Pencil, lam: float) -> float:
-    den = p.a + lam * (1.0 - p.a)
+    den = p.v + lam * p.s
     ok = den > 0.0
-    return float(np.sum(p.a[ok] / den[ok]))
+    return float(np.sum(p.v[ok] / den[ok]))
 
 
 def _pencil_stat(p: _Pencil, lam: float) -> float:
-    den = p.a + lam * (1.0 - p.a)
+    den = p.v + lam * p.s
     ok = den > 0.0
     return float(np.sum(p.u[ok] ** 2 / den[ok]))
 
@@ -409,9 +463,16 @@ def penalized_score_statistic_ladder(
 
     if (C is None) != (M is None):
         raise ValueError("C and M profile the overlap together; supply both or neither")
+    # The JOINT moment matrix, kept so the unpenalized rank can be counted
+    # where nothing has cancelled; see _profiled_rank.  None when nothing was
+    # profiled out, where V is not a difference and its own scale is already
+    # the right reference.
+    joint = None
     if C is not None:
         C = np.asarray(C, dtype=np.float64)
-        MinvC = _solve_psd(np.asarray(M, dtype=np.float64), C)
+        M = np.asarray(M, dtype=np.float64)
+        joint = (V, C, M)
+        MinvC = _solve_psd(M, C)
         V = V - C.T @ MinvC
         V = 0.5 * (V + V.T)
         if U_nuisance is not None:
@@ -422,7 +483,7 @@ def penalized_score_statistic_ladder(
         # statistic, and the achieved rank is COUNTED beside it rather than
         # read off that factorization -- see _edge on why the trace cannot
         # answer it.
-        rank, apply = _edge(V, None, 0.0)
+        rank, apply = _edge(V, None, 0.0, joint)
         T = float(U @ apply(U))
         return [ScreenedPair(statistic=T, edf0=rank, lambda0=0.0) for _ in budgets]
 

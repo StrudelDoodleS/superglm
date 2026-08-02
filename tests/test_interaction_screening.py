@@ -314,46 +314,122 @@ def test_a_wholly_absorbed_probe_is_scored_rather_than_discarded():
 
 
 def test_a_block_of_pure_cancellation_cannot_score_competitively():
-    """The noise floor is MEASURED from the block, not assumed.
+    """Swept, because the property was decided by the sign of a round-off eigenvalue.
 
-    ``V_eff = V - C' M^-1 C`` is a Schur complement of a PSD matrix, so in
-    exact arithmetic it is PSD.  Any NEGATIVE eigenvalue is arithmetic error,
-    and its magnitude is a measurement of this block's own noise floor -- taken
-    from the block itself, with no constant and no conditioning estimate.
+    ``V_eff = V - C' M^-1 C`` is a difference, so on a block the overlap has
+    absorbed there is nothing left but round-off -- and every cut taken on
+    ``V_eff`` itself is relative to a scale that IS that round-off.
 
-    Counting relative to the block's largest eigenvalue presumes that
-    eigenvalue is real curvature.  Here it is not: the numeric varies by 1e-08
-    within each level against a curvature of order 1e+04, so ``V_eff`` is
-    entirely cancellation and its DOMINANT eigenvalue is negative -- the
-    positive ones reach 0.23 of it.  Dividing the profiled score by those
-    directions gave ``statistic 145.508`` at ``edf0 10.0``, hence ``z = 30.3``:
-    top of the table, from a pair carrying nothing.
+    Getting the edf too high is not a neutral failure.  ``z = (T - e)/sqrt(2e)``
+    DECREASES in ``e``, so a partly-rejected block outranks an unrejected one:
+    at the measured ``statistic = 145.508`` an edf of 10 gives ``z = 30.3``
+    where an edf of 1 gives ``z = 102.2``.  Only rank 0 is safe.
 
-    Found by sweeping ``z`` over absorbed blocks rather than by reasoning about
-    them, which is the only reason it was found at all.
+    An earlier version of this test pinned a single seed and asserted
+    ``not (z > 0)``.  Both were wrong.  The seed mattered because the rule it
+    certified fired only when the largest-MAGNITUDE eigenvalue happened to be
+    negative -- a coin flip per seed, not a property -- and ``not (z > 0)``
+    passes both when the block is rejected and when its statistic merely
+    happened to be small, which is the conflation the sweep exists to break.
+    So: sweep, and assert the block is REJECTED.
     """
     import pandas as pd
 
     from superglm import Categorical, SuperGLM
     from superglm.features.numeric import Numeric
 
-    L, n, seed = 25, 8000, 7
-    rng = np.random.default_rng(seed)
-    g = rng.integers(0, L, n)
-    g[g == 1] = 0
-    g[:2] = 1  # one level with two rows
-    x = np.linspace(0.5, L - 0.5, L)[g] + 1e-8 * rng.normal(size=n)
-    df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
-    y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
-    w = np.ones(n)
-    model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
-    model.fit_reml(df, y, sample_weight=w)
+    L, n = 25, 8000
+    bad = []
+    for seed in range(40):
+        rng = np.random.default_rng(seed)
+        g = rng.integers(0, L, n)
+        g[g == 1] = 0
+        g[:2] = 1  # one level with two rows
+        x = np.linspace(0.5, L - 0.5, L)[g] + 1e-8 * rng.normal(size=n)
+        df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+        w = np.ones(n)
+        model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+        model.fit_reml(df, y, sample_weight=w)
+        row = model.screen_interactions(df, y, candidates=[("x", "g")], sample_weight=w).iloc[0]
+        if not np.isnan(row["edf0"]):
+            bad.append((seed, row["edf0"], row["statistic"], row["z"]))
+    assert bad == [], bad
 
-    row = model.screen_interactions(df, y, candidates=[("x", "g")], sample_weight=w).iloc[0]
 
-    # Either refused outright, or scored so low it cannot be promoted.  What it
-    # must never do is rank like a signal.
-    assert not (np.isfinite(row["z"]) and row["z"] > 0.0), (row["z"], row["edf0"])
+def test_a_wholly_absorbed_probe_is_rejected_on_every_seed():
+    """The absorbed case, swept, asserting rejection rather than a sign.
+
+    A numeric constant within each level makes every probe column a multiple of
+    that level's indicator, so the true profiled rank is 0.  Counting that on
+    ``V_eff`` cannot see it; counting it on the joint moment matrix, where
+    nothing has cancelled, can.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+
+    values = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
+    bad = []
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        g = rng.integers(0, 5, 4000)
+        x = values[g]
+        df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+        model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+        model.fit_reml(df, y)
+        row = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
+        if not np.isnan(row["edf0"]):
+            bad.append((seed, row["edf0"], row["z"]))
+    assert bad == [], bad
+
+
+def test_a_probe_exactly_nested_in_the_overlap_reports_only_its_free_directions():
+    """Positive-only cancellation: nothing observable in V_eff betrays it.
+
+    The probe's first direction is exactly a multiple of the overlap's, so the
+    true profiled rank is 2 of 3.  The computed eigenvalues come out
+    1.7347e-18, 1e-12, 2e-12 -- all NONNEGATIVE, so no PSD violation is visible
+    and any rule that needs one counts three.
+    """
+    from superglm.screening import penalized_score_statistic
+    from superglm.screening._score_stat import _solve_psd
+
+    M = np.array([[float.fromhex("0x1.c60ae65c20699p-2")]])
+    C = np.array([[float.fromhex("0x1.7d086fd7cd3a2p-5"), 0.0, 0.0]])
+    V = np.diag([float.fromhex("0x1.3fc36202de5dap-8"), 1e-12, 2e-12])
+
+    V_eff = V - C.T @ _solve_psd(M, C)
+    assert (np.linalg.eigvalsh(0.5 * (V_eff + V_eff.T)) >= 0).all()
+
+    got = penalized_score_statistic(np.zeros(3), V, C, M, None, U_nuisance=np.zeros(1))
+    assert got.edf0 == 2.0, got.edf0
+
+
+def test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty():
+    """``G = V + S`` must not round the smaller term away.
+
+    With ``V = 1e20 I`` and ``S = I`` the sum IS ``V`` in float64, so a pencil
+    that derives the penalty share as ``1 - v`` loses it entirely and reports
+    the full dimension as its edf at every lambda.  The answer would then
+    depend on the units the curvature is carried in, or on a frequency-weight
+    scale.  The direct problem reaches edf 2 at ``lambda = 1e20`` with
+    statistic 0.5.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    V = 1e20 * np.eye(4)
+    S = np.eye(4)
+    U = np.zeros(4)
+    U[0] = 1e10
+    assert np.array_equal(V + S, V), "the premise: the sum loses S"
+
+    got = penalized_score_statistic(U, V, S_ti=S, edf0=2.0)
+
+    assert got.edf0 == pytest.approx(2.0, abs=1e-6)
+    assert got.statistic == pytest.approx(0.5, rel=1e-6)
 
 
 def test_a_weakly_identified_block_is_scored_not_discarded():
