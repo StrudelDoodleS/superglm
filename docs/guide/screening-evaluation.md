@@ -580,9 +580,10 @@ only, which is a separate simulated study.
     - `e80b440` records that the deficient answer can differ, in
       `SHARED_RANK_POLICY.version`, now 2.
 
-    Tables 1 and 2 were first taken at `a2611cc` and have been re-taken on the
-    branch as it now stands, with all four changes in place: every published
-    value is unchanged, to every digit printed. Tables 3 and 4 exist only on
+    Tables 1 and 2 were first taken at `a2611cc` and have been re-taken with
+    `src/` at **`88290a2`**, which is this branch's `src/` tree with all four
+    changes in place: every published value is unchanged, to every digit
+    printed. Tables 3 and 4 exist only on
     the fixed code and have not been re-taken since. The evidence that they are
     unaffected is indirect but specific: the 41×41 `cat_cat` refit they are
     built from was checked directly for #196 and produces bitwise-identical
