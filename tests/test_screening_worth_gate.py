@@ -346,6 +346,45 @@ def test_table_two_has_a_floor_of_its_own_now_it_is_exempt_from_the_split_rule()
     _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
 
 
+def test_table_two_needs_enough_cells_for_its_own_null_to_mean_anything() -> None:
+    """`P / (k/3)` reads against a LARGE-k null, and narrow grids are not large.
+
+    `concentration`'s own docstring says `k/3` is the limit, and the calibration
+    test above pins the null ratio at ~1.39 for k=8, ~1.15 for k=25 and ~1.04
+    for k=100 -- so at nine cells the legend "~1.0 means spread as noise spreads
+    it" is wrong by nearly 40%, which is a fifth of the range the column is read
+    over.  Before this, `--tables 2 --wide-levels 3` printed that column anyway.
+
+    The floor is the calibration, not a taste: 100 cells is where the pinned
+    bias falls to a few per cent.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="large k"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "60", "--wide-levels", "3"])
+        )
+    # 10 levels is exactly 100 cells, and the published width is far above it
+    _validate_configuration(
+        parser.parse_args(["--tables", "2", "--n", "600", "--wide-levels", "10"])
+    )
+    _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
+    # and the floor is table 2's alone
+    _validate_configuration(
+        parser.parse_args(["--tables", "3", "--n", "600", "--wide-levels", "3"])
+    )
+
+
+def test_a_zero_worth_bar_is_refused_rather_than_divided_by() -> None:
+    """`worth_threshold(0)` is 0, and a published ratio column cannot carry inf.
+
+    A replicate reporting `edf0 = 0` means the screen found no interaction rank
+    at all, so it is a broken replicate rather than a small one.
+    """
+    assert gate._gate_ratios([1.0, 2.0], [4.0, 8.0]) == pytest.approx([0.70710678, 1.0])
+    with pytest.raises(ValueError, match="no interaction rank"):
+        gate._gate_ratios([1.0, 2.0], [4.0, 0.0])
+
+
 def test_a_top_m_arm_wider_than_the_grid_is_not_printed_as_a_distinct_selection() -> None:
     """At nine cells, top-10/25/50 are all "every cell" under three names.
 

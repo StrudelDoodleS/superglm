@@ -309,7 +309,16 @@ The bar **grows with the block's df**: z > 4.95 at 8×8, z > 28.27 at 41×41
 screen). Sweeping table width against effect size, taking the screen's own z
 and the holdout change from actually refitting:
 
-| levels | edf0 | nominal | threshold | z | z/threshold | holdout Δ |
+The **mean ratio** column is not the quotient of the two columns beside it.
+The Cp identity is a statement about one fit, so the gate is aggregated on
+its own scale -- `z_i / sqrt(edf0_i / 2)` formed per replicate and then
+averaged -- while `z` and `threshold` are shown as `mean(z_i)` and
+`sqrt(mean(edf0_i) / 2)`. Where the achieved rank is the same on every
+replicate the two agree, which is why the 8x8, 16x16 and 25x25 rows divide
+exactly; only 32x32 has a varying rank, and there the printed quotient is
+close to but not identical with the ratio the gate actually reads.
+
+| levels | edf0 | nominal | threshold | z | mean ratio | holdout Δ |
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 49.0 | 49 | 4.95 | 0.80 | 0.16 | +0.8% |
 | 8 | 49.0 | 49 | 4.95 | 2.04 | 0.41 | +0.6% |
