@@ -577,11 +577,25 @@ def _cross_gram_tensor_spline_categorical(
                 result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
             return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
-        B_cat_rows = gm_spline_cat.B_unique[bin_cat]
+        # Over the cell cap.  Chunk the row expansion rather than materialising
+        # the whole level: the cap bounds CELLS, and a lossless support leaves
+        # the row count unbounded underneath it.  The chunk loop is outermost so
+        # each row is still expanded exactly once across all K2 passes.
+        n_level = int(W_rows.shape[0])
+        agg = np.zeros((K2, gm_tensor.n_bins1, K_cat), dtype=np.float64)
+        chunk = min(
+            max(n_level, 1),
+            _cross_expansion_chunk_rows(K_cat, 0, _MAX_CROSS_EXPANSION_BYTES),
+        )
+        for start in range(0, n_level, chunk):
+            stop = min(start + chunk, n_level)
+            block = _expand_support_rows(gm_spline_cat.B_unique, bin_cat[start:stop])
+            idx1_chunk = idx1[start:stop]
+            for j2 in range(K2):
+                w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
+                agg[j2] += _weighted_bincount_2d(idx1_chunk, w_col, block, gm_tensor.n_bins1)
         for j2 in range(K2):
-            w_col = W_rows * B2[idx2, j2]
-            B_cat_agg = _weighted_bincount_2d(idx1, w_col, B_cat_rows, gm_tensor.n_bins1)
-            result_raw[j2::K2, :] = B1.T @ B_cat_agg
+            result_raw[j2::K2, :] = B1.T @ agg[j2]
         return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
     for j2 in range(K2):
@@ -613,9 +627,46 @@ def _cross_expansion_chunk_rows(p_i: int, p_j: int, max_bytes: int) -> int:
     """Rows per chunk of the expanded cross-gram, sized in BYTES.
 
     Two expanded blocks are live at once and the right one is scaled in place,
-    so a chunk costs ``rows * (p_i + p_j) * 8``.
+    so a chunk costs ``rows * (p_i + p_j) * 8``.  Pass ``p_j=0`` where only one
+    block is expanded.
     """
     return max(1, int(max_bytes // max((p_i + p_j) * 8, 1)))
+
+
+def _chunked_support_bincount_2d(
+    bin_idx: NDArray,
+    weights: NDArray,
+    B_unique: NDArray,
+    support_idx: NDArray,
+    n_bins: int,
+    max_bytes: int | None = None,
+) -> NDArray:
+    """``_weighted_bincount_2d`` over support-indexed rows, expanded in chunks.
+
+    The aggregation is a sum over rows, so partitioning the rows partitions the
+    sum.  Chunking matters here for the same reason it does in
+    :func:`_support_support_raw_cross`: a lossless support bounds the number of
+    DISTINCT rows, not the number of observation rows the level owns, so
+    materialising the level in one go is unbounded in ``n``.
+
+    Below the threshold the loop runs once and the result is bit-identical to
+    the unchunked form, so ordinary fits are unaffected.
+    """
+    # Resolved at call time, not bound as a default: the budget is a module
+    # global so that it can be lowered in a test, and a default argument would
+    # freeze it at import.
+    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
+    p_b = int(B_unique.shape[1])
+    out = np.zeros((int(n_bins), p_b), dtype=np.float64)
+    n_rows = int(np.size(support_idx))
+    if n_rows == 0:
+        return out
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_b, 0, budget))
+    for start in range(0, n_rows, chunk):
+        stop = min(start + chunk, n_rows)
+        block = _expand_support_rows(B_unique, support_idx[start:stop])
+        out += _weighted_bincount_2d(bin_idx[start:stop], weights[start:stop], block, int(n_bins))
+    return out
 
 
 def _support_support_raw_cross(
@@ -624,7 +675,7 @@ def _support_support_raw_cross(
     B_unique_j: NDArray,
     bin_idx_j: NDArray,
     W_rows: NDArray,
-    max_bytes: int = _MAX_CROSS_EXPANSION_BYTES,
+    max_bytes: int | None = None,
 ) -> NDArray:
     """``B_i.T @ diag(W) @ B_j`` for two support-indexed blocks over shared rows.
 
@@ -642,13 +693,14 @@ def _support_support_raw_cross(
     ``max_bytes`` regardless of row count, and the contraction is a sum over
     rows so partitioning it changes nothing but summation order.
     """
+    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
     p_i = int(B_unique_i.shape[1])
     p_j = int(B_unique_j.shape[1])
     out = np.zeros((p_i, p_j), dtype=np.float64)
     n_rows = int(W_rows.shape[0])
     if n_rows == 0:
         return out
-    chunk = min(n_rows, _cross_expansion_chunk_rows(p_i, p_j, max_bytes))
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_i, p_j, budget))
     for start in range(0, n_rows, chunk):
         stop = min(start + chunk, n_rows)
         left = _expand_support_rows(B_unique_i, bin_idx_i[start:stop])
@@ -668,10 +720,16 @@ def _cross_gram_categorical_spline_categorical(
     """Cross-gram X_cat.T W X_spline_cat via one categorical aggregation."""
     if hasattr(gm_spline_cat, "B_unique"):
         rows = gm_spline_cat.row_idx
-        B_agg = _weighted_bincount_2d(
+        # Chunked: this expands the level to observation rows, which no cap
+        # above it bounds.  Pre-dates support compression -- the binned path
+        # reaches it too -- but compression puts it on the hot path of every
+        # model pairing a Categorical main effect with a spline_cat term,
+        # which is every model this compression targets.
+        B_agg = _chunked_support_bincount_2d(
             gm_cat.codes[rows],
             W[rows],
-            gm_spline_cat.B_unique[gm_spline_cat.bin_idx_level],
+            gm_spline_cat.B_unique,
+            gm_spline_cat.bin_idx_level,
             gm_cat.n_levels + 1,
         )
         return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
