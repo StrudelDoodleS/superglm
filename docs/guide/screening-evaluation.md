@@ -415,6 +415,15 @@ The df each arm buys over the mains model is 5, 10, 25, 50 and **1,552** — the
 last being the achieved rank of the interaction block on this split, not the
 nominal 1,600.
 
+The **full refit** column is the same model on the same configuration as the
+worked example's fixed arm — `spike` at 6.0, 41×41, `n` = 12,000, half-sample
+split — differing only in seed, `31337 + rep` here against `4242 + rep` there.
+So **+24.0%** and the worked example's **+22.5%** are two independent
+three-replicate estimates of one quantity, 1.5 points apart. That gap is well
+inside the worked example's own replicate spread of +20.3% to +27.0%, which is
+the cheapest calibration this section has of what a three-replicate holdout
+mean is worth at this width ([caveat 9](#caveats)).
+
 **Five extra parameters beat 1,552 by 33.2 points of holdout MSE**, and the
 optimum sits exactly at the true number of live cells. On the diffuse truth the
 identical procedure degrades monotonically — there is nothing localised to find,
@@ -428,9 +437,15 @@ Together the two readings give a decision rather than a score:
 | **z above threshold** | refit the pair as a fixed interaction | fit the few cells that carry it, and check the full refit against it |
 | **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
 
-The lower-right cell is the one the tables above measure end to end: the worked
-example opens at z = 8.40 against a bar of 27.86 with `P/(k/3)` = 0.149, and
-its five best cells beat both alternatives. The other three are weaker —
+The lower-right cell is the only one measured on both axes — but not by one
+run, and the seam is worth naming. The worked example puts z = 8.40 against a
+bar of 27.86 (table 4, seeded `4242 + rep`); the same configuration on a
+different seed reads `P/(k/3)` = 0.149 and has its five best cells beat both
+alternatives (table 3, seeded `31337 + rep`). Neither run spans the pair:
+table 4 runs the screen but never computes `P` and has no sparse arm, and
+table 3 has the sparse arm and `P` but no screen. So the chain screen → `P` →
+sparse fit → full fit is walked by no single run, and the cell is measured on
+two axes across two seeds rather than end to end. The other three are weaker —
 see [caveat 11](#caveats) for exactly which parts are inference. The reasoning
 behind the right-hand column is worth recording either way: it stays
 the same above and below the bar because the two readings answer different
@@ -501,6 +516,15 @@ only, which is a separate simulated study.
    that selection rather than of the data; a grid drawn from some plausible
    distribution over (width, effect) would give a different one. The margin is
    one row in sixteen, which is not a result.
+
+   There is one directly measured statement of what three replicates buy at
+   this width, and it is worth reading beside that margin. The same plain fixed
+   `cat_cat` refit appears twice on two seeds — **+24.0%** in the sparse-payoff
+   table and **+22.5%** in the worked example — and the worked example's own
+   three replicates span **+20.3% to +27.0%**. So a 1.5-point gap between two
+   three-replicate means of one quantity is comfortably inside the spread of a
+   single such mean, and differences of that size between arms should not be
+   read as separating them.
 10. **The gate is for a plain fixed refit.** A shrunk term spends less edf, so
     its bar is lower, and the threshold answers "gate this into
     `interactions=[...]`", not "is this pair ever usable". Measured on the
@@ -600,8 +624,14 @@ only, which is a separate simulated study.
     published numbers quietly stop being re-run, and the remedy is to make the
     rerun cheap and to name the command beside the figure.
 
-    **No wall-clock figure for this section is quoted anywhere in this guide**,
-    and the reason is worth recording as evidence rather than as a preference.
+    **No wall-clock figure is quoted anywhere in this guide as a property of
+    this section's results.** Wall-clock does appear, and every occurrence is
+    evidence about something else: the three figures below are evidence about
+    measurement conditions, and the 668.55 s and 9.27 s above and in the
+    Reproducing section are evidence about a fixed defect. None of them is
+    offered as what this section's tables cost or as a finding of the study.
+
+    The reason is worth recording as evidence rather than as a preference.
     Three consecutive runs of `--tables 4` — identical work, identical output —
     took **67 s, 100 s and 542 s** on a shared machine whose load average moved
     from 21 to 37 across them. An eight-fold spread on a fixed workload is what
@@ -639,8 +669,8 @@ Each was taken from its own run of that command. The tables are deterministic
 given the seeds: three consecutive runs of `--tables 3` and of `--tables 4`
 produced byte-identical output apart from the wall-clock columns.
 
-**No runtime figure is quoted here**, and [caveat 15](#caveats) records the
-measurement that is the reason. The wide `cat_cat` refits dominate the cost —
+**No runtime estimate for these commands is quoted here**, and
+[caveat 15](#caveats) records the measurement that is the reason. The wide `cat_cat` refits dominate the cost —
 twelve wide fits between tables 3 and 4, nine plain refits and three
 `RandomEffect` fits on the 1,681-level cell. What can be said without a
 stopwatch is structural: on the code before the alias-representative fix in
