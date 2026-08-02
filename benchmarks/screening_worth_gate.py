@@ -482,7 +482,7 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
     fits the full sample and its value is a different quantity.
     """
     n_cells = n_levels * n_levels
-    arms: tuple[int, ...] = (*TOP_M, n_cells)
+    arms: tuple[int, ...] = _sparse_arms(n_cells)
     rows: list[dict[str, object]] = []
     for kind, magnitude in (("spike", 6.0), ("diffuse", 0.30)):
         acc: dict[int, list[float]] = {m: [] for m in arms}
@@ -505,6 +505,21 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
             live = np.flatnonzero(np.bincount(jtr, minlength=n_cells) > 0)
             ranked = np.argsort(t)[::-1]
             mains_edf = float(mains.result.effective_df)
+            # Every top-m arm pools the cells it did not pick into one "other"
+            # level.  If m reaches the number of cells the TRAINING half
+            # occupies, nothing is left to pool: `a["hot"]` never takes the
+            # value, so the fitted vocabulary lacks it, and the first test row
+            # in an unpicked cell is an unseen level at predict time rather
+            # than a pooled one.  That is a property of the draw, not of the
+            # flags, so it is checked here rather than at parse time.
+            widest = max(m for m in arms if m != n_cells) if len(arms) > 1 else 0
+            if widest >= live.size:
+                raise UnseenLevelError(
+                    f"sparse payoff {kind} rep={rep}: the top-{widest} arm covers every one of "
+                    f"the {live.size} cells occupied in training, so its 'other' level is empty "
+                    "and predict fails on any test row outside them.  Raise --n, or lower "
+                    "--wide-levels."
+                )
 
             for m in arms:
                 if m == n_cells:
@@ -870,6 +885,40 @@ def _at_least(minimum: int, what: str):
     return parse
 
 
+def _sparse_arms(n_cells: int) -> tuple[int, ...]:
+    """The top-m sizes worth fitting on a grid of ``n_cells``, plus the full refit.
+
+    A top-m arm only means something while ``m`` is smaller than the number of
+    cells there are.  At ``--wide-levels 3`` the grid has 9, so top-10, top-25
+    and top-50 all select every cell and print the full refit's numbers three
+    more times under three different names -- measured as four consecutive rows
+    reading -82.2%.  Sizes at or above the cell count are dropped rather than
+    clipped, because clipping would collapse them onto one another instead.
+    """
+    return (*(m for m in TOP_M if m < n_cells), n_cells)
+
+
+def _finite_seconds(value: str) -> float:
+    """A watchdog interval, which must be a real number of seconds.
+
+    `float` accepts `nan` and `inf`, and neither is caught by `arm_watchdog`'s
+    `seconds <= 0` -- `nan <= 0` is False -- so both reach
+    `faulthandler.dump_traceback_later`, which rejects them with
+    `ValueError: Invalid value NaN`, naming a C-level API rather than the flag
+    that caused it.  Zero stays the documented way to disable the watchdog,
+    which is why this is not `_at_least`.
+    """
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number of seconds, got {value!r}") from None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError(
+            f"the watchdog interval must be finite and >= 0 (0 disables), got {value!r}"
+        )
+    return parsed
+
+
 def _validate_configuration(args: argparse.Namespace) -> None:
     """Reject a table configuration that provably cannot run.
 
@@ -892,6 +941,32 @@ def _validate_configuration(args: argparse.Namespace) -> None:
     run perfectly well, such as `--tables 2 --n 50 --wide-levels 41`.  The
     three runners that DO split are tables 1, 3 and 4.
     """
+    # Table 2 is exempt from the half-sample rule but not from having a floor.
+    # It fits `g + h` mains on all `n` rows -- `2 * n_levels - 1` parameters --
+    # and screens the interaction off those residuals.  Once `n` reaches that
+    # count the fit is saturated, the residuals are numerical dust, the
+    # interaction block has no achieved rank and `edf0` is 0; `worth_threshold`
+    # then returns 0 and `participation_ratio` divides by 0.  Measured at
+    # `--tables 2 --n 3 --wide-levels 3`: a complete seven-row table with every
+    # `z`, `edf0` and threshold `nan`, exit code 0 -- the exact artefact
+    # `_at_least` was introduced to stop.
+    #
+    # `n >= 2 * n_levels` happens to accept exactly what the half-sample rule
+    # would (`n // 2 >= n_levels` is the same predicate for every integer pair,
+    # swept and confirmed).  They are kept apart anyway because they are
+    # different requirements that coincide numerically today: one counts
+    # training rows against levels, the other counts rows against the mains
+    # model's parameters.  Either constant moving -- a 70/30 split, or a mains
+    # model with another term -- separates them, and the messages already say
+    # which is which.
+    if 2 in args.tables and args.n < 2 * args.wide_levels:
+        raise SystemExit(
+            f"--n {args.n} is not enough for table 2 at --wide-levels {args.wide_levels}: "
+            f"its mains model alone has {2 * args.wide_levels - 1} parameters, so the fit is "
+            f"saturated and the screen has no residuals to work from.  Needs at least "
+            f"{2 * args.wide_levels}."
+        )
+
     train_rows = args.n // 2
     required: list[tuple[str, int]] = []
     if 1 in args.tables:
@@ -928,7 +1003,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tables", type=_tables, default=(1, 2, 3, 4))
     parser.add_argument(
         "--watchdog",
-        type=float,
+        type=_finite_seconds,
         default=300.0,
         help="seconds between stack dumps to stderr; 0 disables (default: 300)",
     )
