@@ -313,6 +313,92 @@ def test_a_wholly_absorbed_probe_is_scored_rather_than_discarded():
             assert row["z"] < 0.0, (seed, row["z"])
 
 
+def test_screening_is_invariant_to_the_units_of_a_numeric_margin():
+    """Rescaling a covariate is a change of UNITS and nothing else.
+
+    Multiplying a numeric margin by a constant scales its probe columns and its
+    moments by fixed powers of that constant, and the profiled statistic is a
+    ratio in which they cancel exactly.  The mains fit is the same fit with a
+    rescaled coefficient, so ``phi`` is unchanged too.  Every reported field
+    must therefore come back identical.
+
+    **This enforces the equilibration in ``_psd_rank``, which is the module's
+    only relative-rank threshold** -- see the SCALE DISCIPLINE note in
+    :mod:`superglm.screening._score_stat`.  It is deliberately a property of
+    the whole public screen rather than a unit check on one block, so any
+    future relative threshold that reaches a reported field is covered by it.
+
+    What it does NOT cover, measured rather than assumed: reverting the
+    balancing in ``_build_pencil`` leaves this test PASSING, because rescaling
+    a spline's covariate rescales its penalty with it and never reaches the
+    ``V >> S`` regime.  That site has its own regression,
+    ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``.
+
+    The reviewer's case: on the balanced four-point design
+    ``z1, z2 = +-10000`` with ``C = 0``, so the true profiled rank is
+    unambiguously 1, rescaling from ``+-1`` turned ``statistic=397, edf0=1``
+    into an all-NaN row.  1e4 is kept below because a moment matrix carries the
+    square of the covariate's scale, so it is already 1e16 in the joint.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    base = pd.DataFrame(
+        {
+            "z1": rng.choice([-1.0, 1.0], n),
+            "z2": rng.choice([-1.0, 1.0], n),
+            "g": pd.Categorical(rng.choice([f"L{i}" for i in range(4)], n)),
+            "x": rng.uniform(0.0, 1.0, n),
+        }
+    )
+    y = rng.poisson(np.exp(-1.0 + 0.4 * base["z1"] * base["z2"])).astype(np.float64)
+
+    def screen(scale):
+        df = base.copy()
+        df["z1"] = df["z1"] * scale
+        df["z2"] = df["z2"] * scale
+        df["x"] = df["x"] * scale
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "z1": Numeric(),
+                "z2": Numeric(),
+                "g": Categorical(),
+                "x": Spline(kind="ps", n_knots=6),
+            },
+        )
+        model.fit_reml(df, y)
+        table = model.screen_interactions(df, y)
+        return {
+            (a, b): (kind, e, z)
+            for a, b, kind, e, z in zip(
+                table["feature_a"],
+                table["feature_b"],
+                table["kind"],
+                table["edf0"],
+                table["z"],
+            )
+        }
+
+    unit = screen(1.0)
+    assert unit, "the sweep must produce rows or this proves nothing"
+    for scale in (1e2, 1e4):
+        got = screen(scale)
+        assert set(got) == set(unit), scale
+        for pair, (kind, e, z) in unit.items():
+            k2, e2, z2 = got[pair]
+            assert k2 == kind, (pair, scale)
+            assert np.isnan(e) == np.isnan(e2), (pair, scale, e, e2)
+            if not np.isnan(e):
+                assert e2 == pytest.approx(e, rel=1e-6), (pair, scale, e, e2)
+                assert z2 == pytest.approx(z, rel=1e-6, abs=1e-9), (pair, scale, z, z2)
+
+
 def test_a_block_of_pure_cancellation_cannot_score_competitively():
     """Swept, because the property was decided by the sign of a round-off eigenvalue.
 
