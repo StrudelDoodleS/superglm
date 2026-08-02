@@ -395,8 +395,9 @@ sample size, so `k/3` predicts 559.9, and the noise row measures 574.1 — 2.5%
 high, in the direction the finite-k bias goes ([caveat 14](#caveats)).
 
 Note also what the `z` column does *not* contain: no diffuse truth here clears
-the 28.27 bar, the widest reaching 26.15. That gap is why two cells of the
-decision table below are inference rather than measurement.
+the 28.27 bar, the widest reaching 26.15. That gap is why the decision table
+below is only partly measured: one cell end to end, one half, and the two
+above-threshold cells not at all ([caveat 11](#caveats)).
 
 It pays off in the fitting decision. Ranking cells on **training residuals
 only** — ranking on the full sample is the target leakage that makes supervised
@@ -424,8 +425,8 @@ Together the two readings give a decision rather than a score:
 
 | | `P/(k/3)` ≈ 1 | `P/(k/3)` ≪ 1 |
 |---|---|---|
-| **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
 | **z above threshold** | refit the pair as a fixed interaction | fit the few cells that carry it, and check the full refit against it |
+| **z below threshold** | skip, or pool the cell | fit the few cells that carry it |
 
 The lower-right cell is the one the tables above measure end to end: the worked
 example opens at z = 8.40 against a bar of 27.86 with `P/(k/3)` = 0.149, and
@@ -557,13 +558,38 @@ only, which is a separate simulated study.
     row either. The figures were simply never produced by the committed
     benchmark.
 
-    **The library has moved since, and the tables moved with it.** This branch
-    carries a fix to `src/superglm/solvers/rank.py` — alias-representative
-    selection on the rank-deficient path, which is exactly the path a wide
-    `cat_cat` refit takes. Tables 1 and 2 were first taken at `a2611cc` and
-    re-taken after that fix; every published value is unchanged, which is what
-    the fix's own equivalence claim predicts. Tables 3 and 4 exist only on the
-    fixed code.
+    **The library has moved since, and the tables moved with it.** The branch
+    now carries four changes to `src/superglm/solvers/rank.py` and its callers
+    rather than one, and their claims are not equally strong — which matters
+    here, because the rank-deficient path is exactly the path a wide `cat_cat`
+    refit takes:
+
+    - `b2de09d` replaced the alias-representative walk. Wherever the old walk
+      resolved a block, the two choose the same columns — measured across 958
+      deficient blocks with no disagreement — but on 126 of those the walk
+      resolved nothing at all, and on 42 the new path retains a representative
+      basis where the old one fell back to a spectral one.
+    - `0fbef7e` ([#196](https://github.com/StrudelDoodleS/superglm/issues/196))
+      certifies that choice on conditioning, and this one **does move which
+      columns are selected**, on blocks whose earliest independent columns are
+      near-duplicates.
+    - `44e167a`, `4d2f321` and `18b06c3` stop building a Gram subspace that a
+      certification is about to discard. Their claim is **byte-identical fitted
+      output**, which is a stronger claim than equivalence and should not be
+      read as the same one.
+    - `e80b440` records that the deficient answer can differ, in
+      `SHARED_RANK_POLICY.version`, now 2.
+
+    Tables 1 and 2 were first taken at `a2611cc` and have been re-taken on the
+    branch as it now stands, with all four changes in place: every published
+    value is unchanged, to every digit printed. Tables 3 and 4 exist only on
+    the fixed code and have not been re-taken since. The evidence that they are
+    unaffected is indirect but specific: the 41×41 `cat_cat` refit they are
+    built from was checked directly for #196 and produces bitwise-identical
+    coefficients, predictions, edf and deviance across the conditioning
+    certificate, because on that route every decomposition whose selection
+    changes is superseded by a factor certification before the selection is
+    used.
 
     That fix is also why the last two tables exist at all. On the old code one
     41×41 refit was measured at 668.55 s and the pair of tables needed twelve
