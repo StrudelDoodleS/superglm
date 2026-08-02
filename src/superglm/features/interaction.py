@@ -126,7 +126,7 @@ def _varying_coefficient_spline_spec(spec, x: NDArray):
     return resolved
 
 
-def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, *, n_levels: int):
+def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_levels: int):
     """Lossless row-support compression for a shared ``spline_cat`` basis.
 
     A varying-coefficient term stores one CSR basis shared by its levels plus a
@@ -136,23 +136,65 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, *, n_levels: int):
     dense block of distinct rows serves every level.
 
     This is the same deduplication ``_build_ssp_group`` applies to a main
-    effect, and the same gate decides it, with two differences.  The levels
-    partition the rows between them but each reads the whole shared support, so
-    the cost model is told how many grams that is.  And the grouping is offered
-    rather than detected: the basis is a function of *x* alone, so equal *x*
-    should give equal rows, which makes the decline a scan of one column
-    instead of the whole basis.  ``plan_verified_row_support`` still checks
-    that grouping against the basis before using it, so the saving is on the
-    detection scan and not on exactness.
+    effect, and the same gate decides it, with three differences.
+
+    The levels partition the rows between them but each reads the whole shared
+    support, so the cost model is told how many grams that is.
+
+    The grouping is offered rather than detected: the basis is a function of
+    *x* alone, so equal *x* should give equal rows, which makes the decline a
+    scan of one column instead of the whole basis.
+    ``plan_verified_row_support`` still checks that grouping against the basis
+    before using it, so the saving is on the detection scan and not exactness.
+
+    And only ``active`` rows count.  The base level of the categorical parent
+    is absorbed into the main effect, so its rows appear in NO emitted block --
+    and with the default ``base="most_exposed"`` that is the level carrying the
+    most exposure, routinely the majority of the book.  Charging the CSR side
+    for work it will never do overstates the win, and keeping support rows that
+    only a base-level observation ever reaches makes every level's dense gram
+    scan a support wider than it can use.  Both errors point the same way, so
+    the gate is derived from the union of the non-base masks.
 
     Returns ``None`` when the gate declines, leaving CSR in place.
     """
-    from superglm._group_matrix._group_matrix_support import plan_verified_row_support
+    from superglm._group_matrix._group_matrix_support import (
+        DEFAULT_MAX_SUPPORT_BYTES,
+        DEFAULT_MIN_SPEEDUP,
+        _passes_support_gates,
+        plan_verified_row_support,
+    )
 
-    if n_levels <= 0:
+    active = np.asarray(active, dtype=np.intp).ravel()
+    if n_levels <= 0 or active.size == 0:
         return None
-    row_index = np.unique(np.asarray(x, dtype=np.float64).ravel(), return_inverse=True)[1]
-    return plan_verified_row_support(sp.csr_matrix(B), np.ravel(row_index), gram_repeats=n_levels)
+
+    codes = np.unique(np.asarray(x, dtype=np.float64).ravel()[active], return_inverse=True)[1]
+    codes = np.ravel(codes).astype(np.intp, copy=False)
+    # Active nnz off the indptr rather than off a slice: the gate has to be
+    # cheap on the DECLINED path, which is every continuous covariate, and
+    # slicing the basis there would cost a copy of most of it.
+    nnz_active = int(np.diff(B.indptr)[active].sum())
+    if not _passes_support_gates(
+        int(active.size),
+        int(codes.max()) + 1,
+        int(B.shape[1]),
+        nnz_active,
+        DEFAULT_MIN_SPEEDUP,
+        DEFAULT_MAX_SUPPORT_BYTES,
+        n_levels,
+    ):
+        return None
+
+    planned = plan_verified_row_support(sp.csr_matrix(B)[active], codes, gram_repeats=n_levels)
+    if planned is None:
+        return None
+    b_unique, active_codes = planned
+    # Full-length, because the builder indexes it by each level's own row ids.
+    # Base-level entries are never read; zero is simply a valid index.
+    row_index = np.zeros(B.shape[0], dtype=np.intp)
+    row_index[active] = active_codes
+    return b_unique, row_index
 
 
 # ── SplineCategorical ──────────────────────────────────────────
@@ -218,7 +260,11 @@ class SplineCategorical:
         self._projection = getattr(spline_spec, "_interaction_projection", None)
 
         B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
-        compressed = _plan_spline_cat_support(B, x_spline, n_levels=len(cat_spec._non_base))
+        # Union of the non-base masks: exactly the rows some emitted block owns.
+        active_rows = np.flatnonzero(np.isin(x_cat, self._non_base))
+        compressed = _plan_spline_cat_support(
+            B, x_spline, active_rows, n_levels=len(self._non_base)
+        )
 
         omega = spline_spec._build_penalty()
 
