@@ -31,6 +31,11 @@ else:
 _MAX_DISC_DISC_HIST_CELLS = 5_000_000
 _MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
 
+# Transient ceiling for the row-expanded cross-gram fallback, matching the byte
+# budgets used elsewhere in this package.  The histogram cap above bounds CELLS;
+# this bounds the ROWS the fallback expands, which the cell cap cannot.
+_MAX_CROSS_EXPANSION_BYTES = 64 << 20
+
 
 def _profile_add(profile: dict[str, Any] | None, key: str, value: float) -> None:
     if profile is not None:
@@ -595,25 +600,64 @@ def _cross_gram_tensor_spline_categorical(
     return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
 
+def _expand_support_rows(B_unique: NDArray, bin_idx: NDArray) -> NDArray:
+    """Materialise a support block on its observation rows.
+
+    Named so the chunking above it can be pinned by row count in a test rather
+    than asserted about.
+    """
+    return B_unique[bin_idx]
+
+
+def _cross_expansion_chunk_rows(p_i: int, p_j: int, max_bytes: int) -> int:
+    """Rows per chunk of the expanded cross-gram, sized in BYTES.
+
+    Two expanded blocks are live at once and the right one is scaled in place,
+    so a chunk costs ``rows * (p_i + p_j) * 8``.
+    """
+    return max(1, int(max_bytes // max((p_i + p_j) * 8, 1)))
+
+
 def _support_support_raw_cross(
     B_unique_i: NDArray,
     bin_idx_i: NDArray,
     B_unique_j: NDArray,
     bin_idx_j: NDArray,
     W_rows: NDArray,
+    max_bytes: int = _MAX_CROSS_EXPANSION_BYTES,
 ) -> NDArray:
     """``B_i.T @ diag(W) @ B_j`` for two support-indexed blocks over shared rows.
 
     The 2-D weight histogram both callers prefer costs ``n_bins_i * n_bins_j``
     cells, which is bounded only when the supports are bins.  A lossless
     support is bounded by the row count instead, so on wide supports this
-    expands both sides to the shared rows and lets BLAS do the contraction:
-    ``O(n_rows * (p_i + p_j))`` working memory, no dependence on the product of
-    the support sizes.
+    contracts over the shared rows and lets BLAS do the work.
+
+    Chunked over rows, because the row count is exactly what a lossless support
+    does NOT bound: expanding both sides in one go costs
+    ``n_rows * (p_i + p_j) * 8`` bytes, which for a dominant level on a large
+    book runs to hundreds of MB per call, inside solver iterations.  The cap
+    that routes here bounds cells; without this it would only move the memory
+    rather than bound it.  Accumulating in chunks keeps the transient at
+    ``max_bytes`` regardless of row count, and the contraction is a sum over
+    rows so partitioning it changes nothing but summation order.
     """
-    left = B_unique_i[bin_idx_i]
-    right = B_unique_j[bin_idx_j]
-    return left.T @ (right * W_rows[:, None])
+    p_i = int(B_unique_i.shape[1])
+    p_j = int(B_unique_j.shape[1])
+    out = np.zeros((p_i, p_j), dtype=np.float64)
+    n_rows = int(W_rows.shape[0])
+    if n_rows == 0:
+        return out
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_i, p_j, max_bytes))
+    for start in range(0, n_rows, chunk):
+        stop = min(start + chunk, n_rows)
+        left = _expand_support_rows(B_unique_i, bin_idx_i[start:stop])
+        right = _expand_support_rows(B_unique_j, bin_idx_j[start:stop])
+        # Fancy indexing already returned a fresh array, so scaling it in place
+        # keeps the live count at two blocks rather than three.
+        right *= W_rows[start:stop, None]
+        out += left.T @ right
+    return out
 
 
 def _cross_gram_categorical_spline_categorical(

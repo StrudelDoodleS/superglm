@@ -810,17 +810,43 @@ def test_design_summary_does_not_label_lossless_spline_cat_as_binned():
     assert metadata.compressed is True
 
 
-def test_spline_cat_compressed_class_is_publicly_reachable():
-    """Pickled models must not carry a private module path."""
+def test_spline_cat_compressed_class_sits_where_its_siblings_do():
+    """Reachable from ``superglm.group_matrix``, and deliberately NOT from the root.
+
+    Reviewer question on #193: the package root neither imports this class nor
+    lists it, so ``from superglm import ...`` fails.  That is the convention,
+    not an omission -- no group-matrix class is a root export, and this one is
+    not special.  It is rewritten onto ``superglm.group_matrix`` for the same
+    reason ``SupportCompressedSSPGroupMatrix`` is: a pickled model must not
+    carry a private module path.  Reachability for pickle and a root export are
+    different things, and only the first is claimed.
+
+    Pinned in both directions so that adding this one to the root without
+    adding its twelve siblings fails here.
+    """
     import pickle
 
+    import superglm
     from superglm import group_matrix as public
     from superglm._group_matrix._group_matrix_discretized import (
         SupportCompressedSplineCategoricalGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
     )
 
     assert hasattr(public, "SupportCompressedSplineCategoricalGroupMatrix")
     assert SupportCompressedSplineCategoricalGroupMatrix.__module__ == "superglm.group_matrix"
+
+    # Same treatment as the SSP twin, in both directions.
+    assert SupportCompressedSSPGroupMatrix.__module__ == "superglm.group_matrix"
+    for name in (
+        "SupportCompressedSplineCategoricalGroupMatrix",
+        "SupportCompressedSSPGroupMatrix",
+    ):
+        assert not hasattr(superglm, name), (
+            f"{name} became a package-root export; no group-matrix class is one, so "
+            "either this class is special (say why) or the whole family moved"
+        )
+        assert name not in getattr(superglm, "__all__", ())
 
     gen = np.random.default_rng(16)
     original = SupportCompressedSplineCategoricalGroupMatrix(
@@ -832,6 +858,166 @@ def test_spline_cat_compressed_class_is_publicly_reachable():
     restored = pickle.loads(pickle.dumps(original))
     assert type(restored) is SupportCompressedSplineCategoricalGroupMatrix
     np.testing.assert_allclose(restored.toarray(), original.toarray())
+
+
+def _build_spline_cat_groups(x_spline, x_cat, kind="cr", k=10):
+    """Run ``SplineCategorical.build`` the way the design-matrix builder does."""
+    from superglm.features.categorical import Categorical
+    from superglm.features.interaction import SplineCategorical
+    from superglm.features.spline import Spline
+
+    spline_spec = Spline(kind=kind, k=k)
+    spline_spec.build_knots_and_penalty(np.asarray(x_spline, dtype=np.float64))
+    cat_spec = Categorical()
+    cat_spec.build(np.asarray(x_cat))
+
+    term = SplineCategorical("x", "f")
+    return term.build(
+        np.asarray(x_spline, dtype=np.float64),
+        np.asarray(x_cat),
+        {"x": spline_spec, "f": cat_spec},
+    )
+
+
+def test_dominant_reference_level_rows_do_not_buy_compression():
+    """Reviewer finding on #193: the base level is absorbed into the main
+    effect, so its rows appear in NO emitted block.  Charging the CSR side for
+    work that will never run lets the gate accept on the strength of a majority
+    level that cannot benefit.
+
+    The shipped benchmark samples levels uniformly and cannot see this, which
+    is the whole point of pinning it here.
+    """
+    gen = np.random.default_rng(40)
+    n, n_active = 200_000, 2_000
+    x = np.empty(n, dtype=np.float64)
+    x_cat = np.empty(n, dtype="<U1")
+
+    # The base level repeats heavily, so the basis looks compressible overall.
+    base_pool = np.linspace(18.0, 90.0, 72)
+    x[n_active:] = base_pool[gen.integers(0, base_pool.size, n - n_active)]
+    x_cat[n_active:] = "0"
+    # The one non-base level is continuous: nothing repeats, so there is
+    # nothing for deduplication to buy on the rows that actually reach a block.
+    x[:n_active] = gen.uniform(18.0, 90.0, n_active)
+    x_cat[:n_active] = "1"
+
+    groups = _build_spline_cat_groups(x, x_cat)
+
+    assert groups, "expected one block for the single non-base level"
+    for info in groups:
+        assert info.spline_cat_basis_unique is None, (
+            f"compression was accepted on {n:,} rows of CSR work when only "
+            f"{n_active:,} rows are in any emitted block, and those repeat nothing"
+        )
+        assert info.spline_cat_basis is not None
+        assert info.spline_cat_support_lossless is False
+
+
+def test_support_holds_only_rows_a_non_base_level_can_reach():
+    """The support is shared across levels, so a row only the base level ever
+    visits still widens every level's dense gram.  It must not be retained."""
+    gen = np.random.default_rng(41)
+    n = 60_000
+    active_values = np.arange(20, dtype=np.float64)
+    base_only_values = np.arange(100, 140, dtype=np.float64)
+
+    x = np.empty(n, dtype=np.float64)
+    x_cat = np.empty(n, dtype="<U1")
+    half = n // 2
+    # Base level sits on 40 x-values nothing else reaches.
+    x[:half] = base_only_values[gen.integers(0, base_only_values.size, half)]
+    x_cat[:half] = "0"
+    # Two non-base levels share 20 x-values between them.
+    x[half:] = active_values[gen.integers(0, active_values.size, n - half)]
+    x_cat[half:] = np.where(gen.integers(0, 2, n - half) == 0, "1", "2")
+
+    groups = _build_spline_cat_groups(x, x_cat)
+
+    assert groups
+    for info in groups:
+        assert info.spline_cat_basis_unique is not None, "expected this shape to compress"
+        assert info.spline_cat_support_lossless is True
+        assert info.spline_cat_basis_unique.shape[0] == active_values.size, (
+            "support retained rows only a base-level observation reaches: "
+            f"{info.spline_cat_basis_unique.shape[0]} rows for "
+            f"{active_values.size} reachable x values"
+        )
+
+
+def test_balanced_levels_still_compress():
+    """Control beside the two above: the fix must decline the skewed case
+    without declining the case compression exists for."""
+    gen = np.random.default_rng(42)
+    n = 60_000
+    pool = np.linspace(18.0, 90.0, 72)
+    x = pool[gen.integers(0, pool.size, n)]
+    x_cat = gen.integers(0, 3, n).astype(str)
+
+    groups = _build_spline_cat_groups(x, x_cat)
+
+    assert groups
+    for info in groups:
+        assert info.spline_cat_basis_unique is not None
+        assert info.spline_cat_support_lossless is True
+
+
+def test_expanded_cross_gram_is_chunked_by_bytes(monkeypatch):
+    """Reviewer finding on #193: the cell cap routes here, and this path then
+    expanded every shared row at once -- so the cap moved the memory instead of
+    bounding it.  A lossless support does not bound the row count."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(43)
+    n_rows, p_i, p_j = 50_000, 20, 20
+    b_i = gen.normal(size=(400, p_i))
+    b_j = gen.normal(size=(350, p_j))
+    idx_i = gen.integers(0, 400, n_rows).astype(np.intp)
+    idx_j = gen.integers(0, 350, n_rows).astype(np.intp)
+    weights = np.abs(gen.normal(1.0, 0.2, n_rows))
+
+    expanded_rows = []
+    original = algebra._expand_support_rows
+
+    def spy(B_unique, bin_idx):
+        expanded_rows.append(int(np.size(bin_idx)))
+        return original(B_unique, bin_idx)
+
+    monkeypatch.setattr(algebra, "_expand_support_rows", spy)
+
+    budget = 1 << 20  # 1 MiB
+    actual = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=budget)
+
+    expected = (b_i[idx_i]).T @ (b_j[idx_j] * weights[:, None])
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+
+    assert expanded_rows, "expected the fallback to expand support rows"
+    allowed = algebra._cross_expansion_chunk_rows(p_i, p_j, budget)
+    assert max(expanded_rows) <= allowed, (
+        f"expanded {max(expanded_rows)} rows at once against a {allowed}-row budget"
+    )
+    assert max(expanded_rows) * (p_i + p_j) * 8 <= budget
+    assert sum(expanded_rows) == 2 * n_rows  # both sides, every row, exactly once
+
+
+def test_expanded_cross_gram_chunking_matches_the_unchunked_contraction():
+    """Chunking is a partition of a sum over rows; only the order changes."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(44)
+    n_rows = 9_000
+    b_i = gen.normal(size=(60, 5))
+    b_j = gen.normal(size=(40, 7))
+    idx_i = gen.integers(0, 60, n_rows).astype(np.intp)
+    idx_j = gen.integers(0, 40, n_rows).astype(np.intp)
+    weights = gen.normal(0.0, 1.0, n_rows)  # signed, as REML passes
+
+    one_shot = algebra._support_support_raw_cross(
+        b_i, idx_i, b_j, idx_j, weights, max_bytes=1 << 30
+    )
+    chunked = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=512)
+
+    np.testing.assert_allclose(chunked, one_shot, rtol=1e-11, atol=1e-11)
 
 
 def _forbid_2d_histogram(monkeypatch, pair_name):
