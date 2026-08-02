@@ -82,8 +82,59 @@ def _rank_floor(n: int) -> float:
     exceed ``matrix_rank`` -- the contract the unpenalized rung rests on holds
     by construction rather than by luck, and only tightens where a negative
     eigenvalue makes ``psd_ranks`` stricter than a singular-value count.
+
+    It is only meaningful where the matrix's own largest eigenvalue is a real
+    scale.  On a PROFILED block that is not guaranteed, and
+    :func:`_fully_absorbed` handles that case instead.
     """
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
+
+
+def _fully_absorbed(V_eff: NDArray, metric: NDArray) -> bool:
+    """Is the WHOLE probe block absorbed by the span profiled out?
+
+    ``V_eff = V - C' M^-1 C`` is a difference, so a direction the overlap
+    absorbs exactly survives only as round-off.  Where EVERY direction is
+    absorbed -- a ``numeric_cat`` pair whose numeric is constant within each
+    level, so every probe column is a multiple of that level's indicator --
+    that round-off becomes the block's own largest eigenvalue, and a cut taken
+    relative to ``V_eff`` measures dust against dust.  Measured on a five-level
+    case of exactly that shape: ``max(||V||, ||C' M^-1 C||) / ||V_eff||`` is
+    2.2e15, ``V_eff``'s own spectrum reads [0.08, 0.53, 0.56, 1.0] relative,
+    and ``matrix_rank`` and :func:`_rank_floor` both report 4 where the true
+    rank is 0.
+
+    The scale-free test is the generalized eigenvalue against the unprofiled
+    curvature -- ``mu`` of the pencil ``(V_eff, V + C' M^-1 C)``, the share of
+    a direction's own curvature that profiling leaves behind.  Rarity cancels
+    out of it: measured, the smallest real ``mu`` is 3.388e-02 at a weight
+    share of 1e-4, 1e-8 and 1e-12 alike, identical to three digits, where any
+    ABSOLUTE floor high enough to clear the dust would delete a rare level.
+
+    **Deliberately a whole-block guard rather than a per-direction cut.**  The
+    absorbed ceiling grows with width -- measured ``max(mu)`` of 5.8e-15,
+    2.5e-14, 2.1e-12, 3.0e-11, 1.1e-10, 1.6e-09 and 1.2e-08 at ``k`` = 4, 9,
+    24, 59, 99, 199 and 399 -- so a per-direction tolerance tracking it is
+    macroscopic on a wide block, and there it deletes directions that are
+    weakly identified rather than absorbed.  Measured: at ``k`` = 2299, two
+    observations per level, such a cut removed 62 real directions, which is
+    the very failure the whitening cut was fixed for.  All-or-nothing cannot
+    do that -- a block with any surviving direction has ``max(mu)`` of order 1,
+    six or more orders above the guard.
+
+    What this does NOT catch is PARTIAL absorption, where a block keeps a few
+    real directions and its absorbed ones are dust relative to those.  That
+    needs a per-direction rule this measurement does not support yet; see the
+    thread on PR #194.
+    """
+    k = V_eff.shape[0]
+    if k == 0:
+        return False
+    try:
+        mu = scipy.linalg.eigh(V_eff, metric, eigvals_only=True, check_finite=False)
+    except (scipy.linalg.LinAlgError, np.linalg.LinAlgError, ValueError):
+        return False
+    return bool(np.max(np.asarray(mu)) <= 1e-3)
 
 
 @dataclass(frozen=True)
@@ -116,7 +167,9 @@ def _solve_psd(A: NDArray, B: NDArray) -> NDArray:
         return np.linalg.pinv(A, hermitian=True) @ B
 
 
-def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[NDArray], NDArray]]:
+def _edge(
+    V: NDArray, S: NDArray | None, lam: float, metric: NDArray | None = None
+) -> tuple[float, Callable[[NDArray], NDArray]]:
     """Factor ``V + lam * S`` ONCE; return its edf and a solver against it.
 
     The bracket and the clamped rungs ask the same two matrices for both an
@@ -194,6 +247,8 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     except scipy.linalg.LinAlgError:
         apply = np.linalg.pinv(A, hermitian=True).__matmul__
     if S is None:
+        if metric is not None and _fully_absorbed(V, metric):
+            return 0.0, apply
         return float(psd_ranks(V, _rank_floor(V.shape[0]))), apply
     return float(np.trace(apply(V))), apply
 
@@ -313,10 +368,18 @@ def penalized_score_statistic_ladder(
 
     if (C is None) != (M is None):
         raise ValueError("C and M profile the overlap together; supply both or neither")
+    # The pre-profile curvature, kept so the unpenalized rank can be measured
+    # as a SHARE of it rather than against the difference's own scale; see
+    # _fully_absorbed.  None when nothing was profiled out, where V is not a
+    # difference and its own scale is the right reference.
+    metric = None
     if C is not None:
         C = np.asarray(C, dtype=np.float64)
         MinvC = _solve_psd(np.asarray(M, dtype=np.float64), C)
-        V = V - C.T @ MinvC
+        projected = C.T @ MinvC
+        metric = V + projected
+        metric = 0.5 * (metric + metric.T)
+        V = V - projected
         V = 0.5 * (V + V.T)
         if U_nuisance is not None:
             U = U - MinvC.T @ np.asarray(U_nuisance, dtype=np.float64)
@@ -326,7 +389,7 @@ def penalized_score_statistic_ladder(
         # statistic, and the achieved rank is COUNTED beside it rather than
         # read off that factorization -- see _edge on why the trace cannot
         # answer it.
-        rank, apply = _edge(V, None, 0.0)
+        rank, apply = _edge(V, None, 0.0, metric=metric)
         T = float(U @ apply(U))
         return [ScreenedPair(statistic=T, edf0=rank, lambda0=0.0) for _ in budgets]
 

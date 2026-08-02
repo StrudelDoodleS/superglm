@@ -253,6 +253,58 @@ def test_screening_kernels_are_internal_and_the_root_api_is_self_consistent():
     assert hasattr(superglm.SuperGLM, "screen_interactions")
 
 
+def test_a_wholly_absorbed_probe_is_unscreenable_not_rank_deficient():
+    """A numeric constant within each level adds NOTHING beyond the mains.
+
+    Every ``numeric_cat`` probe column is then a multiple of that level's own
+    indicator, so the categorical main absorbs the whole block and the true
+    profiled rank is 0.  ``V_eff = V - C' M^-1 C`` is a difference, so what
+    survives is round-off -- and being the only thing left, that round-off
+    becomes the block's own largest eigenvalue.  A cut taken relative to
+    ``V_eff`` then measures dust against dust: ``matrix_rank`` reports 4 here,
+    and so did this screen, with a seed-dependent ``edf0`` and a confident
+    ``z`` for a pair carrying no information at all.
+
+    Two things are asserted.  The block IS pure cancellation -- the pre-profile
+    scale is ~1e15 times ``||V_eff||``, which is what makes ``V_eff`` useless
+    as its own reference.  And the pair comes back unscreenable rather than
+    scored, because ``z`` divides by ``sqrt(2 * edf0)`` and a rank-0 block
+    would otherwise report ``z = inf`` and sort to the TOP of the table.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+    from superglm.screening._numeric_margin import numeric_pair_moments
+    from superglm.screening._score_stat import _solve_psd
+
+    L, n = 5, 4000
+    values = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
+    menu = np.eye(L)[:, 1:]
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        g = rng.integers(0, L, n)
+        x = values[g]
+
+        # the block really is cancellation, not merely small
+        U, V, C, M, u_m = numeric_pair_moments(
+            g, L, menu, x, rng.normal(size=n), rng.uniform(0.5, 1.5, n)
+        )
+        P = C.T @ _solve_psd(M, C)
+        V_eff = 0.5 * ((V - P) + (V - P).T)
+        assert max(np.linalg.norm(V, 2), np.linalg.norm(P, 2)) / np.linalg.norm(V_eff, 2) > 1e12, (
+            seed
+        )
+
+        df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+        model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+        model.fit_reml(df, y)
+        row = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
+        assert np.isnan(row["z"]), (seed, row["edf0"], row["z"])
+        assert np.isnan(row["edf0"]), (seed, row["edf0"])
+
+
 def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
     """A barely positive-definite block still reports its RANK, not ``k``.
 

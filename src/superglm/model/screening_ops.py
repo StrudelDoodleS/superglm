@@ -1272,6 +1272,16 @@ def screen_interactions(
             )
         best_z, best = -np.inf, None
         for result in results:
+            if not result.edf0 > 0.0:
+                # The probe adds NO identifiable direction beyond the mains --
+                # every one of its columns is absorbed by the span already
+                # fitted, which is what a numeric constant within each level
+                # does to a numeric_cat pair.  There is no test to run: the
+                # normalization divides by sqrt(2 * edf0), so scoring it would
+                # report z = inf and sort a pair carrying no information to
+                # the TOP of the table.  Skipped, and if no rung survives the
+                # pair falls through to the NaN row every other refusal takes.
+                continue
             statistic = result.statistic / phi_hat
             z = (statistic - result.edf0) / np.sqrt(2.0 * result.edf0)
             if z > best_z:
