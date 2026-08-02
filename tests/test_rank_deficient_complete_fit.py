@@ -20,6 +20,7 @@ import json
 import resource
 import subprocess
 import sys
+import time
 
 import pytest
 from benchmarks import rank_deficient_complete_fit as bench
@@ -32,6 +33,65 @@ TINY = {"levels": 4, "rows": 200, "repeats": 1, "seed": 31337}
 @pytest.fixture(scope="module")
 def payload() -> dict:
     return bench.measure(**TINY)
+
+
+def test_the_sampler_records_every_fit_not_just_the_first() -> None:
+    """`--repeats` defaults to 3 and the sampler is entered once per fit.
+
+    A stop flag set in `__exit__` and never cleared in `__enter__` makes the
+    second and third fits record nothing, silently -- the payload still reports
+    a sample count, just one from the first fit only.
+    """
+    sampler = bench._DispatchSampler(interval=0.001)
+    counts = []
+    for _ in range(3):
+        with sampler:
+            time.sleep(0.05)
+        counts.append(sampler.samples)
+    assert counts[0] > 0
+    # each re-entry must add samples, not sit at the first fit's total
+    assert counts[1] > counts[0], f"second fit recorded nothing: {counts}"
+    assert counts[2] > counts[1], f"third fit recorded nothing: {counts}"
+
+
+def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
+    """Its own retention lands in the peak RSS this benchmark reports.
+
+    Keeping a snapshot per tick makes the sampler's memory proportional to the
+    RUNTIME of the side being measured, so the slower side carries a larger
+    term -- an asymmetry biased toward whichever side is faster, in the one
+    figure the comparison publishes as a memory result.
+    """
+    short = bench._DispatchSampler(interval=0.001)
+    with short:
+        time.sleep(0.05)
+    long = bench._DispatchSampler(interval=0.001)
+    with long:
+        time.sleep(0.5)
+
+    assert long.samples > short.samples * 3, "fixture did not produce a longer run"
+    # the store is keyed by configuration, so a 10x longer run must not make it
+    # meaningfully bigger
+    assert len(long._dwell) <= len(short._dwell) + 2
+    assert len(long._dwell) < 20
+
+
+def test_the_sampler_reports_dwell_not_just_presence() -> None:
+    """Seen once in twelve thousand samples and seen throughout are not the same claim.
+
+    Discarding the count cannot tell a brief startup window from a
+    configuration that held for the whole fit, which is exactly the
+    distinction this benchmark got wrong once.
+    """
+    sampler = bench._DispatchSampler(interval=0.001)
+    with sampler:
+        time.sleep(0.1)
+    observed = sampler.observed()
+    assert observed
+    for pool in observed:
+        assert pool["samples_seen_in"] >= 1
+        assert 0.0 < pool["fraction_of_samples"] <= 1.0
+        assert pool["samples_seen_in"] <= sampler.samples
 
 
 def test_peak_memory_records_how_many_fits_it_covers(payload: dict) -> None:
@@ -173,5 +233,9 @@ def test_the_artifact_on_disk_still_satisfies_its_own_invariants() -> None:
         assert side["memory"]["ru_maxrss_unit"] in {"bytes", "kib"}
         assert side["backend_dispatch"]["blas"]["sampled_during_fit"] is True
         assert side["backend_dispatch"]["blas"]["pools_during_fit"]
+        for pool in side["backend_dispatch"]["blas"]["pools_during_fit"]:
+            # dwell is what separates a startup window from a phase that held
+            assert pool["samples_seen_in"] >= 1
+            assert 0.0 < pool["fraction_of_samples"] <= 1.0
     assert set(baseline["numerical_outputs"]) == set(branch["numerical_outputs"])
     assert record["summary"]["numerical_outputs_identical"] is True
