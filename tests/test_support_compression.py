@@ -1033,6 +1033,101 @@ def _spy_on_row_expansion(monkeypatch):
     return seen
 
 
+def _mixed_spline_cat_pair(n, rows, seed):
+    """One compressed block and one CSR block over the SAME rows.
+
+    This is the pairing the compression gate creates: two ``spline_cat`` terms
+    on one factor where one covariate repeats and the other does not.
+    """
+    from superglm._group_matrix._group_matrix_core import SplineCategoricalGroupMatrix
+
+    gen = np.random.default_rng(seed)
+    compressed = _spline_cat_support_block(n, 400, 5, 3, rows, seed=seed + 1)
+
+    base = np.zeros((n, 6))
+    for row in range(n):
+        cols = gen.choice(6, size=2, replace=False)
+        base[row, cols] = gen.normal(size=2)
+    csr = SplineCategoricalGroupMatrix(sp.csr_matrix(base), gen.normal(size=(6, 2)), rows)
+    csr.spline_cat_feature = "f"
+    csr.spline_cat_level = "1"
+    return compressed, csr
+
+
+def test_mixed_compressed_and_csr_pair_never_densifies_an_observation_block(monkeypatch):
+    """Reviewer P1 on 29f8e34, and a regression this PR introduced rather than
+    exposed: before the class choice, two exact blocks contracted sparse
+    against sparse.  Compressing one of them sent the pair down a branch that
+    expanded the compressed side AND densified the weighted CSR side, making
+    both worse than they had been.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    n = 30_000
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    compressed, csr = _mixed_spline_cat_pair(n, rows, seed=110)
+    weights = np.abs(np.random.default_rng(111).normal(1.0, 0.2, n))
+
+    # Reference: the all-CSR pairing this used to be, which is what the mixed
+    # branch has to reproduce.
+    dense_i = compressed.toarray()
+    dense_j = csr.toarray()
+    expected = dense_i.T @ (dense_j * weights[:, None])
+
+    seen = _spy_on_row_expansion(monkeypatch)
+    forbid_dense = _forbid_csr_densify(monkeypatch)
+
+    actual = algebra._cross_gram_spline_categorical_spline_categorical(compressed, csr, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+    assert not seen, f"expanded {seen} support rows; the CSR side should be aggregated"
+    assert not forbid_dense, f"densified a CSR block of {forbid_dense} rows"
+
+    # And the transposed orientation, which takes the other branch.
+    actual_t = algebra._cross_gram_spline_categorical_spline_categorical(csr, compressed, weights)
+    np.testing.assert_allclose(actual_t, expected.T, rtol=1e-9, atol=1e-9)
+    assert not seen and not forbid_dense
+
+
+def test_mixed_pair_on_partial_row_overlap_never_densifies(monkeypatch):
+    """Same, on the branch that intersects two different row sets."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    n = 30_000
+    compressed, _ = _mixed_spline_cat_pair(n, np.arange(0, n, 2, dtype=np.intp), seed=112)
+    _, csr = _mixed_spline_cat_pair(n, np.arange(0, n, 3, dtype=np.intp), seed=114)
+    csr.spline_cat_feature = "g"
+    weights = np.abs(np.random.default_rng(115).normal(1.0, 0.2, n))
+
+    dense_i = compressed.toarray()
+    dense_j = csr.toarray()
+    expected = dense_i.T @ (dense_j * weights[:, None])
+
+    seen = _spy_on_row_expansion(monkeypatch)
+    forbid_dense = _forbid_csr_densify(monkeypatch)
+
+    actual = algebra._cross_gram_spline_categorical_spline_categorical(compressed, csr, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+    assert not seen, f"expanded {seen} support rows"
+    assert not forbid_dense, f"densified a CSR block of {forbid_dense} rows"
+
+
+def _forbid_csr_densify(monkeypatch):
+    """Record the row count of any CSR block densified to observation rows."""
+    densified: list[int] = []
+    for name in ("toarray", "todense"):
+        original = getattr(sp.csr_matrix, name)
+
+        def spy(self, *args, _orig=original, **kwargs):
+            if self.shape[0] > 1_000:  # a (p_i, p_j) result is not the concern
+                densified.append(self.shape[0])
+            return _orig(self, *args, **kwargs)
+
+        monkeypatch.setattr(sp.csr_matrix, name, spy)
+    return densified
+
+
 def test_agg_by_bin_expands_the_spline_cat_level_in_chunks(monkeypatch):
     """Reviewer finding on d2c4863, and the site my own sweep missed.
 
