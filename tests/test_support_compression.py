@@ -1033,6 +1033,124 @@ def _spy_on_row_expansion(monkeypatch):
     return seen
 
 
+# Every cross-shaped aggregate goes through one of these, and each is
+# responsible for keeping ``n_bins * n_cols`` inside _MAX_AGGREGATE_CELLS.
+# A new call site anywhere else is the ninth instance of the bug that took
+# five review rounds to stop finding, so it fails this file instead.
+_BOUNDED_AGGREGATE_HELPERS = frozenset(
+    {
+        "_chunked_support_bincount_2d",
+        "_support_csr_raw_cross",
+    }
+)
+
+# Call sites whose output is bounded by something other than a paired block's
+# width, with the reason. Anything not here and not in a helper above is new.
+_AGGREGATE_CALLS_BOUNDED_BY_CONSTRUCTION = {
+    # (function, kernel): why n_bins * n_cols cannot run away
+    ("_agg_by_bin", "_csr_weighted_bincount"): (
+        "n_cols is the block's own basis width and n_bins is the caller's bin "
+        "count; both sides are the SAME block, so no cross shape arises"
+    ),
+    ("_aggregate_group_matrix_columns", "_weighted_bincount_2d"): (
+        "column-at-a-time by construction"
+    ),
+    ("_cross_gram_tensor_spline_categorical", "_csr_weighted_bincount"): (
+        "CSR spline_cat has no support; n_cols is its own basis width"
+    ),
+    ("_cross_gram_categorical_spline_categorical", "_csr_weighted_bincount"): (
+        "n_bins is n_levels+1 of the categorical, bounded by the factor"
+    ),
+    # Both of these were surfaced by this test on its first run, and both turned
+    # out to be sound -- but only checkably so once the reason was written down.
+    ("_agg_by_bin", "_weighted_bincount_2d"): (
+        "the generic tail, which has just materialised gm.toarray() at (n, p). "
+        "n_bins counts distinct rows so it is <= n, making the aggregate no "
+        "larger than the dense block already resident beside it"
+    ),
+    ("_cross_gram_tensor_spline_categorical", "_weighted_bincount_2d"): (
+        "(n_bins1, K_cat) is bin count x basis width, neither of which scales "
+        "with n, so a lossless support cannot inflate it. It is not free -- the "
+        "K2-deep accumulator reaches the byte budget at n_bins1 ~ 20,000 -- but "
+        "n_bins is user-set per feature rather than data-driven"
+    ),
+}
+
+
+def _aggregate_call_sites():
+    """Every call to a cross-shaped aggregation kernel, with its function."""
+    import ast
+    import pathlib
+
+    import superglm._group_matrix._group_matrix_algebra as algebra
+
+    source = pathlib.Path(algebra.__file__).read_text()
+    tree = ast.parse(source)
+    kernels = {"_weighted_bincount_2d", "_csr_weighted_bincount"}
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id in kernels
+            ):
+                sites.append((node.name, inner.func.id, inner.lineno))
+    return sites
+
+
+def test_every_cross_shaped_aggregate_is_bounded():
+    """The invariant, not another site-specific test.
+
+    Eight instances of one bug were found across five review rounds, each fix
+    revealing the next, and the eighth was inside the helper written to fix the
+    seventh.  They are all the same sentence: an aggregate whose output shape
+    takes its row count from one block and its column count from the other,
+    while every gate in the subsystem bounds a block against its OWN width.
+
+    The 2-D histogram kernel never produced one of these, because every one of
+    its call sites is guarded by a cell cap.  The two bincount kernels produced
+    all eight, because none of theirs was.  So the rule is enforced here: a
+    cross-shaped aggregate lives in a bounded helper, or it is listed with the
+    reason it cannot grow.
+    """
+    unaccounted = []
+    for function, kernel, lineno in _aggregate_call_sites():
+        if function in _BOUNDED_AGGREGATE_HELPERS:
+            continue
+        if (function, kernel) in _AGGREGATE_CALLS_BOUNDED_BY_CONSTRUCTION:
+            continue
+        unaccounted.append(f"{function}:{lineno} calls {kernel}")
+
+    assert not unaccounted, (
+        "cross-shaped aggregate with no bound:\n  "
+        + "\n  ".join(unaccounted)
+        + "\n\nThis kernel allocates (n_bins, n_cols). If those two dimensions "
+        "come from DIFFERENT blocks, no gate in this subsystem bounds their "
+        "product -- the support gate bounds n_support against its own block's "
+        "width, and the histogram caps bound bin counts against each other. "
+        "Route the call through a helper in _BOUNDED_AGGREGATE_HELPERS, or add "
+        "it to _AGGREGATE_CALLS_BOUNDED_BY_CONSTRUCTION with the reason its "
+        "output cannot grow."
+    )
+
+
+def test_the_invariant_test_can_actually_fail():
+    """A guard that passes because it looks at nothing is worse than no guard."""
+    sites = _aggregate_call_sites()
+
+    assert sites, "the AST scan found no aggregation calls at all"
+    assert any(fn in _BOUNDED_AGGREGATE_HELPERS for fn, _, _ in sites), (
+        "no call site is inside a bounded helper, so the allow-list is doing "
+        "all the work and a new site would land in neither category"
+    )
+    assert {fn for fn, _, _ in sites} - _BOUNDED_AGGREGATE_HELPERS, (
+        "every site is in a helper, so the by-construction list is untested"
+    )
+
+
 def _mixed_spline_cat_pair(n, rows, seed):
     """One compressed block and one CSR block over the SAME rows.
 
@@ -1126,6 +1244,93 @@ def _forbid_csr_densify(monkeypatch):
 
         monkeypatch.setattr(sp.csr_matrix, name, spy)
     return densified
+
+
+def test_narrow_support_beside_a_wide_csr_term_bounds_the_aggregate(monkeypatch):
+    """Reviewer P1 on 259fce2, inside the helper written to fix the previous
+    P1: the compression gate bounds ``n_support`` against the COMPRESSED
+    block's width, never against the paired CSR block's.  A narrow compressed
+    term beside a wide CSR term passes both gates and still allocates without
+    limit.  The shipped tests used widths 5 and 6 and could not see it."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(120)
+    n, n_support, p_narrow, p_wide = 4_000, 40, 3, 700
+    b_unique = gen.normal(size=(n_support, p_narrow))
+    support_idx = gen.integers(0, n_support, n).astype(np.intp)
+    wide = sp.csr_matrix(gen.normal(size=(n, p_wide)) * (gen.random((n, p_wide)) < 0.02))
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = b_unique[support_idx].T @ (wide.toarray() * weights[:, None])
+
+    # Lowered so a small fixture exercises the multi-pass path; the real budget
+    # would need an n_support in the tens of thousands to trip on p_wide=700.
+    budget = 4_000
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget)
+
+    # Spy on the KERNEL, not on the arithmetic around it: the first version of
+    # this test checked the chunk size and the result, and passed against the
+    # unchunked code because neither observes what is actually allocated.
+    allocated = []
+    original = algebra._csr_weighted_bincount
+
+    def spy(data, indices, indptr, n_cols, bin_idx, W, n_bins):
+        allocated.append(int(n_bins) * int(n_cols))
+        return original(data, indices, indptr, n_cols, bin_idx, W, n_bins)
+
+    monkeypatch.setattr(algebra, "_csr_weighted_bincount", spy)
+
+    actual = algebra._support_csr_raw_cross(b_unique, support_idx, wide, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+    assert allocated, "expected the aggregate kernel to run"
+    assert max(allocated) <= budget, (
+        f"allocated a {max(allocated)}-cell aggregate against a {budget}-cell budget"
+    )
+    assert len(allocated) > 1, "this fixture is supposed to require more than one pass"
+
+
+def test_two_large_supports_never_build_a_cross_shaped_aggregate(monkeypatch):
+    """Reviewer P1 on 259fce2: a compressed main effect beside a compressed
+    ``spline_cat`` whose joint support exceeds the histogram cap used to fall
+    through to ``_agg_by_bin``, whose output is ``(n_bins_main, p_spline_cat)``
+    -- a row count from one block against a width from the other, bounded by
+    neither support gate."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(121)
+    n, n_bins_main, p_main = 20_000, 300, 4
+    main = SupportCompressedSSPGroupMatrix(
+        gen.normal(size=(n_bins_main, p_main)),
+        gen.normal(size=(p_main, 3)),
+        gen.integers(0, n_bins_main, n).astype(np.intp),
+    )
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    spline_cat = _spline_cat_support_block(n, 250, 5, 3, rows, seed=122)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = algebra._cross_gram(main, spline_cat, weights)
+
+    # Force the histogram cap to decline, which is what a large joint support does.
+    monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1)
+    called = []
+    original = algebra._agg_by_bin
+    monkeypatch.setattr(
+        algebra,
+        "_agg_by_bin",
+        lambda *a, **k: called.append(1) or original(*a, **k),
+    )
+
+    actual = algebra._cross_gram(main, spline_cat, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+    assert not called, (
+        "declining at the cell cap fell through to _agg_by_bin, whose output "
+        "is cross-shaped and bounded by neither support gate"
+    )
 
 
 def test_agg_by_bin_expands_the_spline_cat_level_in_chunks(monkeypatch):
