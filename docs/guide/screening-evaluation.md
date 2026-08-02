@@ -586,7 +586,7 @@ only, which is a separate simulated study.
     benchmark.
 
     **The library has moved since, and the tables moved with it.** The branch
-    now carries four changes to `src/superglm/solvers/rank.py` and its callers
+    now carries five changes to `src/superglm/solvers/rank.py` and its callers
     rather than one, and their claims are not equally strong — which matters
     here, because the rank-deficient path is exactly the path a wide `cat_cat`
     refit takes:
@@ -606,9 +606,16 @@ only, which is a separate simulated study.
       read as the same one.
     - `e80b440` records that the deficient answer can differ, in
       `SHARED_RANK_POLICY.version`, now 2.
+    - `6430239` replaced the conditioning fallback's criterion again, after
+      review found it read individual components of a null basis that
+      `eigh`/`svd` choose arbitrarily. It now selects on null-space
+      leverage, `diag(N N.T)`, which no rotation of that basis can move.
+      The selections it returns have identical conditioning to the rule it
+      replaces on all 287 blocks where the two were compared, so this
+      bought reproducibility rather than accuracy.
 
     Tables 1 and 2 were first taken at `a2611cc` and have been re-taken with
-    `src/` at **`88290a2`**, which is this branch's `src/` tree with all four
+    `src/` at **`6430239`**, which is this branch's `src/` tree with all five
     changes in place: every published value is unchanged, to every digit
     printed. Tables 3 and 4 exist only on
     the fixed code and have not been re-taken since. The evidence that they are
@@ -657,7 +664,11 @@ uv run python benchmarks/screening_worth_gate.py
 ```
 
 That prints all four tables at the defaults — three replicates, n = 12,000,
-41×41 for the wide ones — and every figure in this section comes from it.
+41×41 for the wide ones. No figure here came from that bare command,
+though: each table was taken from its own `--tables` run, and they were not
+all taken at the same `src/` state ([caveat 15](#caveats)). The values are
+unaffected, because each runner opens its own generators on per-table seeds,
+so a subset run and the full run produce identical rows.
 `--tables` runs a subset when only one table needs refreshing, and which
 command produced which table is:
 
