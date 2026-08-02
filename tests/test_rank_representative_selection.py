@@ -32,6 +32,7 @@ from superglm.solvers.rank import (
     _achievable_amplification,
     _conditioned_representatives,
     _earliest_representatives,
+    _leverage_pivot_representatives,
     _selection_amplification,
     decompose_factor,
     decompose_gram,
@@ -399,6 +400,48 @@ def test_reselection_leaves_an_exact_alias_convention_where_it_was() -> None:
     for decomposition in (from_gram, from_factor):
         assert decomposition.active_columns.tolist() == [0, 2, 3]
         assert np.linalg.cond(design[:, decomposition.active_columns]) < 2.0
+
+
+@pytest.mark.parametrize(
+    ("width", "nullity"), [(6, 2), (8, 2), (8, 3), (12, 3), (12, 4), (16, 5)]
+)
+def test_the_selection_does_not_move_when_the_null_basis_is_rotated(
+    width: int, nullity: int,
+) -> None:
+    """A null SPACE has no canonical basis, so no rule may read one.
+
+    ``eigh`` and ``svd`` return an arbitrary orthonormal basis of the null
+    space; ``N @ Q`` spans the same subspace for any orthogonal ``Q``.  A rule
+    that reads individual components of ``N`` is therefore reading a coordinate
+    the eigensolver was free to choose, and can answer differently for the same
+    design on a different LAPACK build -- which is the class of defect that
+    already cost this branch a CI failure once.
+
+    This is a SWEEP rather than a fixture on purpose.  The rule this replaces
+    was invariant on the first 6x2 subspace tried and moved on 58 of 400; at
+    12x4 it moved on 224 of 400.  One fixture would have passed against the
+    broken rule at every one of these shapes.
+    """
+    rng = np.random.default_rng(20260802 + width * 100 + nullity)
+    rank = width - nullity
+    checked = 0
+    for _ in range(60):
+        basis, _ = np.linalg.qr(rng.normal(size=(width, nullity)))
+        answers = set()
+        amplifications = set()
+        for _rotation in range(5):
+            rotation, _ = np.linalg.qr(rng.normal(size=(nullity, nullity)))
+            rotated = basis @ rotation
+            # same subspace, different basis
+            assert np.allclose(rotated.T @ rotated, np.eye(nullity), atol=1e-11)
+            selected = _leverage_pivot_representatives(rotated, rank)
+            answers.add(None if selected is None else tuple(selected.tolist()))
+            if selected is not None:
+                amplifications.add(round(_selection_amplification(rotated, selected), 9))
+        assert len(answers) == 1, f"selection moved under rotation: {sorted(answers)}"
+        assert len(amplifications) <= 1, f"amplification moved: {sorted(amplifications)}"
+        checked += 1
+    assert checked == 60
 
 
 def test_the_certificate_is_the_condition_the_selection_itself_adds() -> None:
