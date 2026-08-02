@@ -54,15 +54,21 @@ from superglm.solvers.centered_system import (
     grouped_weighted_factor,
     refresh_centered_rhs,
 )
-from superglm.solvers.constrained_qp import solve_constrained_qp
+from superglm.solvers.constrained_qp import (
+    _feasibility_slack,
+    _is_feasible,
+    solve_constrained_qp,
+)
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
     _IRLSState,
+    _IRLSStepDecision,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
+    _state_is_finite,
 )
 from superglm.solvers.pirls import (
     IterationDiagnostics,
@@ -112,6 +118,8 @@ from superglm.solvers.working_rows import (
 from superglm.types import GroupSlice, PenaltyComponent
 
 logger = logging.getLogger(__name__)
+
+_QP_FEASIBILITY_TOL = 1e-12
 
 
 @dataclass(frozen=True)
@@ -1022,7 +1030,9 @@ def _fit_irls_direct_once(
     elif _use_qr:
         _tabmat_split = None
     elif has_constraints:
-        # The constrained raw-moment path uses the cached execution plan.
+        # Constrained QP uses the shared stable centered-system builder, while
+        # retaining the execution-plan route instead of materializing a
+        # separate tabmat copy of the design.
         _tabmat_split = None
     else:
         # Ordinary intercept profiling currently benefits only when the split
@@ -1052,7 +1062,6 @@ def _fit_irls_direct_once(
         profile["centered_spline_tabmat_cold_policy_rejections"] = (
             profile.get("centered_spline_tabmat_cold_policy_rejections", 0) + 1
         )
-    _constant_w_gram_cache: tuple[NDArray, NDArray, float] | None = None
     _constant_centered_cache: CenteredSystem | None = None
     _constant_centered_z: NDArray | None = None
     _centered_factor_certification: _CenteredFactorCertification | None = None
@@ -1260,7 +1269,7 @@ def _fit_irls_direct_once(
 
     max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
-    _warned_qp_nonconvergence = False  # fire-once latch, as for the SVD warning
+    _reported_qp_nonconvergence = False  # emit once; final feasibility is separate
 
     for it in range(max_iter):
         beta_prev = committed.beta
@@ -1293,7 +1302,6 @@ def _fit_irls_direct_once(
             _can_reuse_weighted_gram = (
                 _has_constant_irls_weights(family, link) and not _use_structured
             )
-            _constant_w_gram_cache = None
             _constant_centered_cache = None
             _constant_centered_z = None
             if profile is not None:
@@ -1560,68 +1568,34 @@ def _fit_irls_direct_once(
                 rank_truncated = iteration_rank.rank_truncated
                 _t_solve += time.perf_counter() - _t0
             else:
-                Wz = W * z_off
-                sum_W, sum_Wz = _working_sums(W, Wz)
-
-                if _can_reuse_weighted_gram and _constant_w_gram_cache is not None:
-                    XtWX, XtW1, sum_W = _constant_w_gram_cache
-                    XtWz = dm.rmatvec(Wz)
-                else:
-                    # Combined gram + rmatvec: shares O(n) bincount for discretized groups
-                    moments = dm.execution_plan._moments_prevalidated(
-                        W,
-                        rhs=(Wz,),
-                        include_xtw=True,
-                        profile=profile,
-                    )
-                    if moments.xtw is None:  # pragma: no cover - requested above
-                        raise RuntimeError("execution plan did not return X'W")
-                    XtWX = moments.gram
-                    XtW1 = moments.xtw
-                    XtWz = moments.xt_rhs[0]
-                    if _can_reuse_weighted_gram:
-                        _constant_w_gram_cache = (XtWX, XtW1, sum_W)
-
-                # Build augmented system (p+1, p+1)
-                M_aug = np.empty((p + 1, p + 1))
-                M_aug[0, 0] = sum_W
-                M_aug[0, 1:] = XtW1
-                M_aug[1:, 0] = XtW1
-                M_aug[1:, 1:] = XtWX + S
-
-                # RHS: X_aug' W (z - offset)
-                rhs = np.empty(p + 1)
-                rhs[0] = sum_Wz
-                rhs[1:] = XtWz
+                centered = get_centered_system(W, z_off)
+                _last_working_centered = centered
                 _t_gram += time.perf_counter() - _t0
 
                 # Solve the constrained system in its existing coordinate space.
                 _t0 = time.perf_counter()
-                # Profile out intercept (unconstrained):
-                # intercept = (rhs[0] - XtW1 @ beta) / sum_W
-                H = M_aug[1:, 1:]  # XtWX + S
-                g_vec = rhs[1:] - rhs[0] * M_aug[0, 1:] / M_aug[0, 0]
-
                 qp_result = solve_constrained_qp(
-                    H,
-                    g_vec,
+                    centered.hessian,
+                    centered.rhs,
                     A_all,
                     b_all,
                     active_set_init=prev_active_set,
                 )
                 beta = qp_result.beta
-                intercept = float((rhs[0] - XtW1 @ beta) / sum_W)
+                intercept = centered.mean_z - float(centered.mean_x @ beta)
                 prev_active_set = qp_result.active_set
                 # Non-convergence usually persists for the rest of the fit, so
                 # latch the report to the first occurrence rather than emitting
-                # one identical line per IRLS iteration.
-                if not qp_result.converged and not _warned_qp_nonconvergence:
-                    _warned_qp_nonconvergence = True
-                    logger.warning(
+                # one identical line per IRLS iteration. This reports the QP's
+                # KKT certificate only; final primal feasibility is checked
+                # independently on the retained IRLS state below.
+                if not qp_result.converged and not _reported_qp_nonconvergence:
+                    _reported_qp_nonconvergence = True
+                    logger.info(
                         "fit_irls_direct: constrained QP did not converge at "
-                        "iteration %d; monotone constraints may be only "
-                        "approximately satisfied. Later iterations of this fit "
-                        "are not reported.",
+                        "iteration %d; its KKT certificate is incomplete. "
+                        "Final hard-constraint feasibility is checked separately. "
+                        "Later KKT-certificate failures in this fit are not reported.",
                         it + 1,
                     )
                 _used_svd = False
@@ -1807,10 +1781,38 @@ def _fit_irls_direct_once(
                 trial_cache[alpha] = candidate
                 return candidate
 
+            committed_constraints_feasible = True
+            proposal_constraints_feasible = True
+            constraint_trial_is_invalid = None
+            if has_constraints:
+                if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+                    raise RuntimeError("constrained fit omitted its aggregate constraint system")
+                committed_constraints_feasible = _is_feasible(
+                    A_all,
+                    committed.beta,
+                    b_all,
+                    _QP_FEASIBILITY_TOL,
+                )
+                proposal_constraints_feasible = _is_feasible(
+                    A_all,
+                    proposal.beta,
+                    b_all,
+                    _QP_FEASIBILITY_TOL,
+                )
+
+                def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
+                    return not _is_feasible(
+                        A_all,
+                        candidate.beta,
+                        b_all,
+                        _QP_FEASIBILITY_TOL,
+                    )
+
             decision = _select_irls_trial(
                 committed=committed,
                 proposal=proposal,
                 evaluate_state=evaluate_trial,
+                invalid_state=constraint_trial_is_invalid,
                 max_halving=max_halving,
                 merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
                     candidate,
@@ -1818,6 +1820,29 @@ def _fit_irls_direct_once(
                     penalty_matvec,
                 ),
             )
+            if (
+                has_constraints
+                and decision.step_rejected
+                and not committed_constraints_feasible
+                and proposal_constraints_feasible
+                and _state_is_finite(proposal)
+            ):
+                # The objective comparison is not allowed to prefer an
+                # inadmissible state over a finite feasible QP proposal. Once
+                # this proposal is committed, convexity of A beta >= b and the
+                # invalid-state predicate above preserve feasibility on every
+                # subsequent accepted line-search segment.
+                decision = _IRLSStepDecision(
+                    alpha=1.0,
+                    step_halvings=0,
+                    step_rejected=False,
+                    trials_attempted=decision.trials_attempted,
+                )
+                logger.info(
+                    "  irls_direct iter=%d: accepted finite feasible constrained "
+                    "proposal after objective line search found no admissible trial",
+                    it + 1,
+                )
             retained = committed if decision.step_rejected else trial_cache[decision.alpha]
             evaluation_elapsed = time.perf_counter() - _t0
             _t_deviance += evaluation_elapsed
@@ -1887,6 +1912,23 @@ def _fit_irls_direct_once(
         if step_rejected:
             converged_this_iter = False
 
+        constraints_feasible_this_iter = True
+        if has_constraints:
+            if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("constrained fit omitted its aggregate constraint system")
+            constraints_feasible_this_iter = _is_feasible(
+                A_all,
+                beta,
+                b_all,
+                _QP_FEASIBILITY_TOL,
+            )
+            # Objective or coefficient stagnation cannot certify a constrained
+            # mode whose retained coefficients are outside the feasible set.
+            # Keep iterating while budget remains: a later QP/line-search step
+            # may still repair an infeasible warm start.
+            if not constraints_feasible_this_iter:
+                converged_this_iter = False
+
         curvature_rescue_activated = bool(
             step_rejected
             and _observed_newton_available
@@ -1896,11 +1938,17 @@ def _fit_irls_direct_once(
         fisher_fallback_activated = bool(
             step_rejected and _observed_newton_active and it + 1 < max_iter
         )
+        terminal_constraint_infeasible = bool(
+            not constraints_feasible_this_iter
+            and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
+        )
 
         if fisher_fallback_activated:
             termination_reason = "curvature_fallback"
         elif curvature_rescue_activated:
             termination_reason = "curvature_rescue"
+        elif terminal_constraint_infeasible:
+            termination_reason = "constraint_infeasible"
         elif step_rejected:
             termination_reason = "step_rejected"
         elif not np.isfinite(dev):
@@ -2085,7 +2133,6 @@ def _fit_irls_direct_once(
         if curvature_rescue_activated:
             _observed_newton_active = True
             _can_reuse_weighted_gram = False
-            _constant_w_gram_cache = None
             _constant_centered_cache = None
             _constant_centered_z = None
             if profile is not None:
@@ -2101,7 +2148,6 @@ def _fit_irls_direct_once(
             _observed_newton_active = False
             _observed_newton_available = False
             _can_reuse_weighted_gram = _has_constant_irls_weights(family, link)
-            _constant_w_gram_cache = None
             _constant_centered_cache = None
             _constant_centered_z = None
             if profile is not None:
@@ -2129,6 +2175,20 @@ def _fit_irls_direct_once(
 
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
+
+    if has_constraints:
+        if A_all is None or b_all is None:  # pragma: no cover - construction invariant
+            raise RuntimeError("constrained fit omitted its aggregate constraint system")
+        if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL):
+            minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
+            converged = False
+            termination_reason = "constraint_infeasible"
+            logger.warning(
+                "fit_irls_direct: retained coefficient mode violates hard constraints "
+                "(minimum scaled slack %.3e, tolerance %.1e); fit is not converged.",
+                minimum_scaled_slack,
+                _QP_FEASIBILITY_TOL,
+            )
 
     if _has_scop:
         # Final Gram and SCOP Hessian caches must describe the retained model,
