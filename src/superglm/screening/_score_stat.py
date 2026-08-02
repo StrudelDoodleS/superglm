@@ -34,6 +34,53 @@ is singular but ``V_eff + lambda S`` is not, those directions still contribute
 to ``edf``, and whitening by ``V_eff`` alone silently drops them.  The common
 null space of both contributes nothing to either sum and is discarded.
 
+**SCALE DISCIPLINE.  Read this before combining two matrices.**
+
+Four defects on this branch were one mistake: *two quantities combined as
+though they were on one scale when they are not*.  By adding, by subtracting,
+or by thresholding separately and differencing.
+
+* the original units lesson (e9f7227): an ABSOLUTE whitening cut made the
+  statistic depend on the units the curvature was carried in;
+* ``G = V + S`` formed in floating point, which loses ``S`` entirely when the
+  curvature dwarfs it -- and then deriving ``s`` as ``1 - a``, which loses it
+  again;
+* the same ``1 - a`` parameterisation in the test oracle, where it disagreed
+  with two algebraically equivalent forms by 2.3e-03 at the ladder's high edge;
+* two ranks thresholded independently and then DIFFERENCED, where a probe
+  block in large units dominates the joint enough to drop a nuisance direction
+  from one count but not the other.
+
+The rule, and it is enforceable rather than advisory:
+
+  1. **A relative threshold is only meaningful on an equilibrated operand.**
+     Scale symmetrically by the diagonal first -- a congruence, so rank is
+     preserved -- and only then ask whether a direction is small.
+  2. **Two quantities may only be added, subtracted or differenced once they
+     share a scale.**  Balance before summing (:func:`_build_pencil`); carry
+     both transformed terms rather than deriving one from the other
+     (:class:`_Pencil`); equilibrate before counting (:func:`_psd_rank`).
+
+**There are exactly two such sites**, which is what makes this a chokepoint
+rather than a habit: :func:`_psd_rank` is the module's only relative-rank
+threshold, and the ``G`` of :func:`_build_pencil` is its only sum of two
+independently scaled matrices.  Equilibration and balancing live at those two
+places rather than at their call sites, so a new caller cannot omit them.
+
+Each has its own enforcing test, and each was verified to fail when its
+site is reverted -- stated separately because they do NOT cover each other:
+
+* :func:`_psd_rank` --
+  ``test_screening_is_invariant_to_the_units_of_a_numeric_margin``.  Rescaling
+  a numeric covariate is a change of units and nothing else, so the whole
+  table must come back identical.  Reverting the equilibration turns a
+  ``numeric_numeric`` pair from ``edf0 = 1`` into a NaN row at a scale of 1e4.
+* ``G`` and the ``(v, s)`` parameterisation --
+  ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``.  Reverting
+  the balancing fails it while the units test still PASSES, which is measured
+  rather than assumed: rescaling a spline's covariate rescales its penalty
+  with it, so that route never reaches the ``V >> S`` regime.
+
 **THRESHOLD TYPES.  Read this before adding a constant to this module.**
 
 Every cut here answers one of two questions, and they have different standing.
@@ -141,9 +188,19 @@ def _rank_floor(n: int) -> float:
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
 
 
-def _psd_rank(A: NDArray) -> float:
-    """Numerical rank of a symmetric PSD matrix at the round-off floor."""
-    w = np.linalg.eigvalsh(0.5 * (A + A.T))
+def _psd_rank(A: NDArray, inv_scale: NDArray | None = None) -> float:
+    """Numerical rank of a symmetric PSD matrix at the round-off floor.
+
+    ``inv_scale`` applies a symmetric congruence ``diag(s) A diag(s)`` first,
+    which preserves rank.  It exists to BALANCE two blocks against each other,
+    not to equilibrate every direction: scaling by a matrix's own full diagonal
+    makes every direction O(1) by construction, which is exactly what a rank
+    count must not do -- on ``diag(3, 2, 1e-18)`` it turns a rank of 2 into 3.
+    """
+    A = 0.5 * (A + A.T)
+    if inv_scale is not None:
+        A = A * inv_scale[:, None] * inv_scale[None, :]
+    w = np.linalg.eigvalsh(A)
     if w.size == 0:
         return 0.0
     top = float(w[-1])
@@ -235,7 +292,25 @@ def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
     K[:k, k:] = C.T
     K[k:, :k] = C
     K[k:, k:] = M
-    return max(_psd_rank(K) - _psd_rank(M), 0.0)
+    # BALANCE the two blocks before counting either.  The counts are about to
+    # be DIFFERENCED, so their thresholds have to be commensurable -- and each
+    # threshold is relative to its own block's largest eigenvalue.  The probe
+    # block carries the numeric margin's scale SQUARED, so at 1e4 units its
+    # moments are 1e8 and it sets the threshold for the whole joint: a nuisance
+    # direction then falls below the cut in K while surviving in M, and the
+    # difference collapses to zero on a pair whose true rank is 1.
+    #
+    # Scaling the probe block to the overlap's trace is a congruence, so rank
+    # is preserved exactly, and it leaves the two blocks' INTERNAL structure
+    # untouched -- which a full diagonal equilibration would not, and which the
+    # absorbed-block detection depends on.  Same rule as _build_pencil's G:
+    # balance, then combine.
+    tr_v = abs(float(np.trace(V)))
+    tr_m = abs(float(np.trace(M)))
+    inv = np.ones(k + q, dtype=np.float64)
+    if tr_v > 0.0 and tr_m > 0.0:
+        inv[:k] = np.sqrt(tr_m / tr_v)
+    return max(_psd_rank(K, inv) - _psd_rank(M), 0.0)
 
 
 @dataclass(frozen=True)

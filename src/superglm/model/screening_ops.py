@@ -1097,6 +1097,12 @@ def screen_interactions(
             # pair outside the arrow budgets, the dense path gets its binning
             # fallback back rather than the pair becoming a NaN row.
             arrow_lookahead = False
+            # Latched once the LADDER itself refuses, as opposed to a gate.
+            # Without it the restore below and the speculation further down
+            # chase each other: the dense path fails its budget, speculates,
+            # the ladder refuses, the dense track is handed back, and the same
+            # speculation is taken again.
+            arrow_refused = False
             while True:
                 codes_l, n_l = _margin_support(left, bin_flag[left])
                 codes_r, n_r = _margin_support(right, bin_flag[right])
@@ -1147,6 +1153,34 @@ def screen_interactions(
                         if (menu_l.shape[1], level_rows.size) != (k_l, k_r):
                             k_l, k_r = menu_l.shape[1], int(level_rows.size)
                             continue
+                        # The ladder is run HERE, inside the routing loop,
+                        # because whether the arrow path can score this pair is
+                        # a routing question and not merely a scoring one.  Its
+                        # cost turns on the penalty's null space rather than on
+                        # any dimension, so no gate above can predict it and it
+                        # can only refuse once tried -- and a speculative
+                        # handoff that is refused must hand the dense track
+                        # back, exactly as the width and support exits already
+                        # do, rather than deleting a pair the dense path could
+                        # still score.
+                        S_cell, W_cell = pair_cell_moments(
+                            codes_l,
+                            codes_r,
+                            n_l,
+                            n_r,
+                            score,
+                            working_weights,
+                            max_cells=max_cells,
+                        )
+                        structured_results = structured_ladder(
+                            spline_cat_moments(menu_l, S_l, S_cell, W_cell, level_rows),
+                            budgets=budgets,
+                            max_evaluations=arrow_budget,
+                        )
+                        if structured_results is None and arrow_lookahead:
+                            allow_dense, arrow_lookahead = True, False
+                            arrow_refused = True
+                            continue
                         margins = ((menu_l, S_l), (level_rows, None))
                         break
                     _, _, menu_r, S_r = _margin(right, bin_flag[right])
@@ -1188,7 +1222,12 @@ def screen_interactions(
                     # by design, so a pair whose true dimension would have
                     # routed it structurally can reach here still believing
                     # it was dense-affordable.
-                    if allow_dense and not structured and kind == "spline_cat":
+                    if (
+                        allow_dense
+                        and not structured
+                        and kind == "spline_cat"
+                        and not arrow_refused
+                    ):
                         allow_dense = False
                         continue
                     break
@@ -1202,7 +1241,8 @@ def screen_interactions(
                     # try it before binning rather than after.  `left` is the
                     # spline margin for spline_cat, by the swap above.
                     if (
-                        _within_structured_budget(k_l, n_r)
+                        not arrow_refused
+                        and _within_structured_budget(k_l, n_r)
                         and _structured_evaluation_budget(k_l, n_r) >= 2
                         and _within_structured_cells(n_l, n_r, k_l)
                     ):
@@ -1218,29 +1258,24 @@ def screen_interactions(
                 continue
 
             (menu_l, S_l), (menu_r, S_r) = margins
-            S_cell, W_cell = pair_cell_moments(
-                codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
-            )
             if structured:
-                # menu_r holds the contrast ROWS here, not a menu.  The whole
-                # ladder is resolved structurally; no dense block is formed.
-                structured_results = structured_ladder(
-                    spline_cat_moments(menu_l, S_l, S_cell, W_cell, menu_r),
-                    budgets=budgets,
-                    max_evaluations=arrow_budget,
-                )
                 if structured_results is None:
                     # A rung landed inside the bracket and had to bisect, at
                     # one arrow factorization per step.  That is the one part
                     # of the cost no gate can see in advance — it turns on
                     # the penalty's null space, not on any dimension — so it
-                    # is refused here rather than predicted, and refused the
-                    # way an unaffordable dense block is: a NaN row.
+                    # is refused rather than predicted, and refused the way an
+                    # unaffordable dense block is: a NaN row.  Reaching here
+                    # means the dense track was already exhausted, since a
+                    # SPECULATIVE handoff hands it back above instead.
                     rows.append(
                         (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
                     )
                     continue
             else:
+                S_cell, W_cell = pair_cell_moments(
+                    codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
+                )
                 U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
                 M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
                 S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])

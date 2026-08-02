@@ -596,6 +596,47 @@ def test_a_failed_arrow_speculation_hands_the_dense_track_back():
     assert bool(row["approx"]), "the surviving route is the binned dense one"
 
 
+def test_a_late_arrow_refusal_hands_the_dense_track_back():
+    """A speculative handoff refused by the LADDER, not by a gate.
+
+    The gates can see allocations and dimensions.  What they cannot see is
+    whether a rung lands inside the bracket and has to bisect, because that
+    turns on the penalty's null space -- an ``ns`` margin's penalty is full
+    rank, so ``edf`` at maximum penalty is 0 and every rung searches, where a
+    ``ps`` margin clamps.  So the arrow path can pass every gate and still
+    refuse once tried.
+
+    When the handoff was SPECULATIVE, that refusal must not delete the pair:
+    the whole point of trying the arrow path first was to get an exact score
+    instead of an approximate one, and giving up the approximate one as well
+    trades a scored row for a NaN.  The dense track goes back, exactly as it
+    does at the width and support exits.
+    """
+    L, support, n = 30, 2_000, 12_000
+    rng = np.random.default_rng(5)
+    grid = np.linspace(0.0, 1.0, support)
+    df = pd.DataFrame(
+        {
+            "x": grid[np.arange(n) % support],
+            "g": np.array([f"L{i}" for i in range(L)])[rng.integers(0, L, n)],
+        }
+    )
+    y = rng.normal(size=n)
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": Spline(kind="ns", n_knots=8), "g": Categorical()},
+    )
+    model.fit_reml(df, y)
+
+    row = model.screen_interactions(
+        df, y, candidates=[("x", "g")], edf0=BUDGETS, max_cells=100_000, screen_bins=256
+    ).iloc[0]
+
+    assert np.isfinite(row["z"]), "a pair the dense path can score must not be a NaN row"
+    assert np.isfinite(row["statistic"])
+    assert bool(row["approx"]), "the surviving route is the binned dense one"
+
+
 def test_a_full_rank_penalty_makes_every_rung_search():
     """The kernel's cost is not a function of the pair's dimensions.
 
