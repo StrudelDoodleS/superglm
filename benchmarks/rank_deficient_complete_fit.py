@@ -14,10 +14,14 @@ Run it on each side of the change and diff the JSON::
     uv run python benchmarks/rank_deficient_complete_fit.py --out baseline.json
 
 The fit is the deficient one the change exists for: a 41-level `cat_cat` pair
-on 6,000 training rows, 1,680 parameters, 54 of them unidentifiable.  Wall clock
-is min-of-N because a shared machine's median is not reproducible; peak RSS is
-`ru_maxrss`, which is a high-water mark for the whole process and so is only
-meaningful as the first fit in a fresh interpreter.
+on 6,000 training rows, 1,680 parameters, 54 of them unidentifiable.
+
+Two measurement caveats the reader has to carry.  Wall clock is min-of-N,
+because a shared machine's median is not reproducible.  Peak RSS is
+`ru_maxrss`, a high-water mark for the WHOLE process, so it compares across
+runs only when both took the same number of fits -- the artifact records
+`peak_rss_measures_fits` so that can be checked rather than assumed, and the
+published comparison uses `--repeats 1` on both sides for exactly that reason.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import time
 
 import numpy as np
 import pandas as pd
+from threadpoolctl import threadpool_info
 
 from superglm import SuperGLM
 from superglm.features import Categorical
@@ -51,18 +56,27 @@ def _design(levels: int, rows: int, seed: int):
 
 
 def _blas_backend() -> dict[str, object]:
-    """Which BLAS actually runs, not which one is installed."""
-    try:
-        config = np.show_config(mode="dicts")
-    except TypeError:  # older numpy
-        return {"numpy": np.__version__, "detail": "unavailable"}
-    build = config.get("Build Dependencies", {}).get("blas", {})
-    return {
-        "numpy": np.__version__,
-        "name": build.get("name"),
-        "version": build.get("version"),
-        "detection": build.get("detection method"),
-    }
+    """Which BLAS is LOADED IN THIS PROCESS, not which one numpy was built against.
+
+    `np.show_config()` reports build dependencies, so it answers "what was this
+    wheel compiled with" and would report the same string on a machine where a
+    different library is actually dispatched to.  AGENTS.md asks for actual
+    backend dispatch, so this reads the loaded shared objects instead --
+    including the threading layer and thread count, which are the part that
+    moves between runs on one machine.
+    """
+    loaded = [
+        {
+            "user_api": pool.get("user_api"),
+            "internal_api": pool.get("internal_api"),
+            "prefix": pool.get("prefix"),
+            "version": pool.get("version"),
+            "threading_layer": pool.get("threading_layer"),
+            "num_threads": pool.get("num_threads"),
+        }
+        for pool in threadpool_info()
+    ]
+    return {"numpy": np.__version__, "loaded": sorted(loaded, key=lambda p: str(p["prefix"]))}
 
 
 def main() -> None:
@@ -73,6 +87,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=31337)
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
+    for name, value, minimum in (
+        ("--levels", args.levels, 2),
+        ("--rows", args.rows, 2),
+        ("--repeats", args.repeats, 1),
+    ):
+        if value < minimum:
+            raise SystemExit(f"{name} must be >= {minimum}, got {value}")
 
     frame, response = _design(args.levels, args.rows, args.seed)
     walls: list[float] = []
@@ -106,7 +127,11 @@ def main() -> None:
             "all": [round(w, 4) for w in walls],
         },
         "memory": {
-            "peak_rss_mib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1)
+            # ru_maxrss is a high-water mark for the WHOLE process, so it only
+            # compares across runs when both took the same number of fits.  At
+            # --repeats 1 it is the mark for exactly one complete fit.
+            "peak_rss_measures_fits": args.repeats,
+            "peak_rss_mib": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1),
         },
         "numerical_outputs": {
             "effective_df": round(float(result.effective_df), 9),
