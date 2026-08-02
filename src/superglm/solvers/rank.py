@@ -45,10 +45,13 @@ SHARED_RANK_POLICY = RankPolicy(
     # returned a set and the sets differed -- but the walk tests each prefix
     # against the WHOLE matrix's cutoff, so on a small prefix it can mis-reject
     # a column, run out of candidates and return nothing.  That happened on 126
-    # of those 958, and on 42 of them the branch goes on to retain a
-    # `pivoted_cholesky` representative basis where the walk's failure left
-    # `gram_eigh` and no retained coefficient representation.  So it is not a
-    # cost difference.
+    # of those 958.  Reading the selection from the null basis makes a
+    # representative candidate available where the walk left `gram_eigh`, but
+    # the candidate is retained only when its principal condition stays below
+    # `severe_condition`; the walk fails at the numerical boundary, so most of
+    # those candidates deliberately remain spectral.  Safe candidates still
+    # recover a coefficient representation, so this is not only a cost
+    # difference.
     #
     # Which blocks those are is NOT reproducible across machines: the walk only
     # fails when a prefix eigenvalue lands near `eps * ||A||`, which is below
@@ -800,6 +803,8 @@ def _conditioned_representatives(
     null_vectors: NDArray,
     rank: int,
     block_condition: Callable[[NDArray], float] | None = None,
+    *,
+    maximum_condition: float | None = None,
 ) -> NDArray | None:
     """Earliest representatives, unless index order costs more than it may.
 
@@ -832,21 +837,44 @@ def _conditioned_representatives(
     ``O(k**3)`` in the NULLITY against the ``O(m**3)`` eigendecomposition this
     path has already paid, and being a bound is exactly what makes it a safe
     screen -- it cannot miss a block that is genuinely badly conditioned.
+
+    ``maximum_condition`` is the absolute backstop after that relative choice.
+    Picking the better of two representative blocks does not make either one
+    usable: where the retained subspace itself sits near the rank boundary,
+    both may be catastrophically conditioned even though Cholesky accepts
+    them.  In that case ``None`` tells the caller to keep the spectral
+    decomposition rather than replace it with an unstable coefficient basis.
+    A maximum requires ``block_condition`` because the null-space
+    amplification alone cannot certify an individual principal block.
     """
+    if maximum_condition is not None and block_condition is None:
+        raise ValueError("maximum_condition requires a block_condition scorer")
+
+    conditions: dict[tuple[int, ...], float] = {}
+
+    def condition(keep: NDArray) -> float:
+        key = tuple(int(index) for index in keep)
+        if key not in conditions:
+            assert block_condition is not None
+            conditions[key] = float(block_condition(keep))
+        return conditions[key]
+
     earliest = _earliest_representatives(null_vectors, rank)
     if earliest is None:
         return None
     amplification = _selection_amplification(null_vectors, earliest)
-    if amplification <= _achievable_amplification(*null_vectors.shape):
-        return earliest
-    alternative = _leverage_pivot_representatives(null_vectors, rank)
-    if alternative is None or np.array_equal(alternative, earliest):
-        return earliest
-    if block_condition is not None:
-        return alternative if block_condition(alternative) < block_condition(earliest) else earliest
-    if _selection_amplification(null_vectors, alternative) < amplification:
-        return alternative
-    return earliest
+    selected = earliest
+    if amplification > _achievable_amplification(*null_vectors.shape):
+        alternative = _leverage_pivot_representatives(null_vectors, rank)
+        if alternative is not None and not np.array_equal(alternative, earliest):
+            if block_condition is not None:
+                selected = alternative if condition(alternative) < condition(earliest) else earliest
+            elif _selection_amplification(null_vectors, alternative) < amplification:
+                selected = alternative
+
+    if maximum_condition is not None and not condition(selected) <= maximum_condition:
+        return None
+    return selected
 
 
 def _scaled_subspace_logdet(coordinates: NDArray) -> float:
@@ -1128,6 +1156,7 @@ def _decompose_gram(
             discarded_vectors,
             rank,
             block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+            maximum_condition=policy.severe_condition,
         )
         if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
@@ -1327,6 +1356,7 @@ def decompose_factor(
             discarded_vectors,
             rank,
             block_condition=lambda keep: _principal_block_condition(equilibrated_gram, keep),
+            maximum_condition=policy.severe_condition,
         )
         if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
