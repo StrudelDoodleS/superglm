@@ -706,6 +706,14 @@ twelve wide fits between tables 3 and 4, nine plain refits and three
 stopwatch is structural: on the code before the alias-representative fix in
 this branch one of the nine refits was measured at **668.55 s**, against
 **9.27 s** after it (both figures from that commit, not from this benchmark).
+Those two now have a live producer that disagrees with them:
+`benchmarks/rank_deficient_complete_fit.py` measures the same shape of fit at
+**264.58 s** against **8.48 s**, a 31.2x ratio where the pair above reads 72x.
+Neither is wrong for the other's conditions -- the older pair came from a
+profiling session at settings this branch cannot now reconstruct, and the newer
+is one fit per side on a machine whose load average was in the teens -- but the
+disagreement is 2.3x on the slower side and belongs in the open rather than
+between two documents that each look self-consistent.
 That is the difference between a run nobody repeats and a run anyone can.
 
 `--tables` exists so that a partial rerun is a quotable command rather than a

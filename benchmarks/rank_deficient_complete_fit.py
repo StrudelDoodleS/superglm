@@ -245,6 +245,14 @@ def main() -> None:
     ):
         if value < minimum:
             raise SystemExit(f"{name} must be >= {minimum}, got {value}")
+    # `_design` keeps half the rows, and a Categorical needs every level to
+    # appear in them: below one training row per level the fit cannot be built
+    # at all, and `--rows 2` died inside the feature rather than at the flag.
+    if args.rows // 2 < args.levels:
+        raise SystemExit(
+            f"--rows {args.rows} keeps {args.rows // 2} training rows for {args.levels} levels "
+            f"per factor; needs at least {2 * args.levels} so every level can appear."
+        )
 
     payload = measure(args.levels, args.rows, args.repeats, args.seed)
     text = json.dumps(payload, indent=1, sort_keys=True)

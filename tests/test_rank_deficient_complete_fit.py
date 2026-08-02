@@ -200,7 +200,16 @@ def test_two_runs_of_the_same_configuration_are_comparable(payload: dict) -> Non
 
 @pytest.mark.parametrize(
     ("flag", "value"),
-    [("--repeats", "0"), ("--repeats", "-1"), ("--levels", "1"), ("--rows", "1")],
+    [
+        ("--repeats", "0"),
+        ("--repeats", "-1"),
+        ("--levels", "1"),
+        ("--rows", "1"),
+        # clears the >= 2 floor and still cannot build the design: half of 2
+        # rows is one, against 41 levels per factor
+        ("--rows", "2"),
+        ("--rows", "80"),
+    ],
 )
 def test_a_dimension_that_cannot_run_is_refused_at_the_flag(flag: str, value: str) -> None:
     """`--repeats 0` skipped the loop and died on `assert model is not None`."""

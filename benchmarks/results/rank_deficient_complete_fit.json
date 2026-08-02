@@ -174,8 +174,9 @@
    "min": 8.4797
   }
  },
- "branch_commit": "7bfcdd3",
+ "branch_src_commit": "7bfcdd3",
  "fit": "41-level cat_cat pair, 6000 training rows, 1680 parameters, 54 unidentifiable",
+ "harness": "the revision of benchmarks/rank_deficient_complete_fit.py committed alongside this file -- naming a SHA here would name a tree that does not yet contain the file, and the sampler this payload came from does not exist in any earlier one",
  "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  SYMMETRIC: one complete fit per side, fresh interpreter each, so the ru_maxrss high-water mark covers the same work on both -- `peak_rss_measures_fits` and `ru_maxrss_unit` record that rather than leaving it to be inferred.  BLAS pools are sampled from a background thread WHILE the fit runs, with a dwell count per configuration, because presence alone cannot distinguish a brief startup window from a phase that held.  Taken on one shared machine with the CPU lock held and the load average in the teens, so the wall clock is a floor.",
  "summary": {
   "blas_note": "An earlier revision of this file claimed the baseline spent part of the fit single-threaded and the branch did not.  That is WITHDRAWN.  `num_threads` from threadpoolctl is the configured limit (openblas_get_num_threads), not the number of threads a kernel elects to use, so it cannot show OpenBLAS running a small decomposition on one thread -- the reading only moves when something calls threadpool_limits, and in this package that is `solver_blas_threads()` capping to 1 on fit entry and `allow_wide_design(p)` releasing the cap once p >= 1500.  With p = 1680 the cap is released mid-fit by design.  Dwell counting shows exactly that: the capped configuration accounts for 2 of 296 samples on one side and 0 of 11947 on the other, and which side catches the window is sampling luck rather than a property of either algorithm.  Both sides run at the 16-thread limit for at least 99.3% of samples.",
