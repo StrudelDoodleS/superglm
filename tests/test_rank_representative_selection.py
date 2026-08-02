@@ -402,11 +402,10 @@ def test_reselection_leaves_an_exact_alias_convention_where_it_was() -> None:
         assert np.linalg.cond(design[:, decomposition.active_columns]) < 2.0
 
 
-@pytest.mark.parametrize(
-    ("width", "nullity"), [(6, 2), (8, 2), (8, 3), (12, 3), (12, 4), (16, 5)]
-)
+@pytest.mark.parametrize(("width", "nullity"), [(6, 2), (8, 2), (8, 3), (12, 3), (12, 4), (16, 5)])
 def test_the_selection_does_not_move_when_the_null_basis_is_rotated(
-    width: int, nullity: int,
+    width: int,
+    nullity: int,
 ) -> None:
     """A null SPACE has no canonical basis, so no rule may read one.
 
