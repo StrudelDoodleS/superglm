@@ -398,7 +398,7 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
             # built from mean(edf0) is a different statement whenever the
             # achieved rank varies between replicates, and it is not the
             # identity this section sells as exact.
-            ratios = [z_i / worth_threshold(e_i) for z_i, e_i in zip(zs, edfs, strict=True)]
+            ratios = _gate_ratios(zs, edfs)
             ratio = float(np.mean(ratios))
             edf0 = float(np.mean(edfs))
             z = float(np.mean(zs))
@@ -670,7 +670,7 @@ def _run_shrinkage(reps: int, n: int, n_levels: int) -> tuple[list[dict[str, obj
         row["delta_reps"] = paired_deltas(row["holdout_reps"], mains_reps)
     # same rule as the ladder: the Cp ratio is per fit, so aggregate it on its
     # own scale rather than dividing a mean z by a mean threshold
-    ratios = [z_i / worth_threshold(e_i) for z_i, e_i in zip(zs, edfs, strict=True)]
+    ratios = _gate_ratios(zs, edfs)
     edf0 = float(np.mean(edfs))
     screen = {
         "z": float(np.mean(zs)),
@@ -759,7 +759,7 @@ def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
     for row in rows:
         print(
             f"{row['label']:>22} {row['z']:>8.2f} {row['edf0']:>8.1f} "
-            f"{row['threshold']:>7.2f} {row['occupied']:>9.0f} "
+            f"{row['threshold']:>7.2f} {row['occupied']:>9.1f} "
             f"{row['occupied'] / 3.0:>8.1f} {row['participation']:>9.1f} "
             f"{row['concentration']:>9.3f}"
         )
@@ -883,6 +883,29 @@ def _at_least(minimum: int, what: str):
         return parsed
 
     return parse
+
+
+def _gate_ratios(zs: Sequence[float], edfs: Sequence[float]) -> list[float]:
+    """Per-replicate ``z / sqrt(edf0 / 2)``, refusing a bar of zero.
+
+    `worth_threshold(0.0)` is 0.0, so a replicate reporting `edf0 = 0` would
+    divide by it and put `inf` or `nan` into a published column.  The floors and
+    the coverage check make that hard to reach, but this is the file that added
+    `_finite_seconds` for a strictly smaller hazard, and a zero bar means the
+    screen found no interaction rank at all -- which is a broken replicate
+    rather than a small one.
+    """
+    ratios: list[float] = []
+    for z_i, edf_i in zip(zs, edfs, strict=True):
+        bar = worth_threshold(edf_i)
+        if not math.isfinite(bar) or bar <= 0.0:
+            raise ValueError(
+                f"a replicate reported edf0={edf_i!r}, so its worth bar is {bar!r}: the screen "
+                "found no interaction rank, and averaging that into the table would publish a "
+                "non-finite ratio.  Raise --n."
+            )
+        ratios.append(z_i / bar)
+    return ratios
 
 
 def _sparse_arms(n_cells: int) -> tuple[int, ...]:

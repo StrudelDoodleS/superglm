@@ -398,9 +398,13 @@ def test_table_two_is_exempt_from_the_half_sample_requirement() -> None:
 
     `_run_concentration` fits the mains model on all `n` rows and takes
     residuals on those same rows -- no holdout, so no level can appear only at
-    predict time.  Requiring `n // 2 >= n_levels` there rejected configurations
-    that run perfectly well.  The three runners that call `_split` are tables
-    1, 3 and 4.
+    predict time.  The three runners that call `_split` are tables 1, 3 and 4.
+
+    The exemption changes WHICH requirement table 2 is held to, not what it
+    accepts: its own floor and the half-sample bound are the same predicate
+    over the integers, as the sweep below asserts.  What changes is what a
+    refusal says -- too few rows for its parameters, rather than a training
+    half it never takes.
     """
     parser = _build_parser()
     lopsided = ["--n", "50", "--wide-levels", "41"]
