@@ -626,9 +626,17 @@ def _leverage_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray
     replaces did exactly that -- it pivoted on ``max |N[i, j]|`` -- and it moved
     under rotation on 58 of 400 random 6x2 subspaces, rising to 224 of 400 at
     12x4, with the achieved amplification moving too (6.7803 against 2.0732 on
-    one subspace).  ``_earliest_representatives`` never moved on any of them,
-    because "the last column any null direction still reaches" is a property of
-    the row space rather than of the basis.
+    one subspace).
+
+    ``_earliest_representatives`` did not move on those 400, and that was NOT
+    because its question is basis-free.  "The last column any null direction
+    still reaches" is a property of the row space, but the ``sqrt(eps)`` floor
+    it used to answer that question with was not: it read a single component,
+    and for leverage ``s**2`` the largest component ranges over
+    ``[s / sqrt(k), s]`` across bases.  Subspaces constructed inside the
+    resulting band moved it on 455 of 4000.  The uniform sweep simply never
+    produced one -- so it decides on leverage now too, and the two selectors
+    share this criterion rather than one of them being safe by nature.
 
     So the criterion here is the null-space LEVERAGE of each column,
     ``diag(N @ N.T)``, which is invariant by construction: ``(N Q)(N Q).T =

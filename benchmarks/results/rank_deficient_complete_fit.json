@@ -5,7 +5,8 @@
    "augmented_rank": 1626,
    "augmented_representative": true,
    "blas": {
-    "loaded": [
+    "numpy": "2.4.2",
+    "pools_during_fit": [
      {
       "internal_api": "openmp",
       "num_threads": 16,
@@ -16,7 +17,23 @@
      },
      {
       "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+     },
+     {
+      "internal_api": "openblas",
       "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+     },
+     {
+      "internal_api": "openblas",
+      "num_threads": 1,
       "prefix": "libscipy_openblas",
       "threading_layer": "pthreads",
       "user_api": "blas",
@@ -28,10 +45,11 @@
       "prefix": "libscipy_openblas",
       "threading_layer": "pthreads",
       "user_api": "blas",
-      "version": "0.3.30"
+      "version": "0.3.31.dev"
      }
     ],
-    "numpy": "2.4.2"
+    "sampled_during_fit": true,
+    "samples": 12813
    },
    "coefficient_method": "qr_svd",
    "data_method": "gram_eigh",
@@ -44,11 +62,13 @@
    "parameters": 1680,
    "repeats": 1,
    "rows": 12000,
+   "seed": 31337,
    "train_rows": 6000
   },
   "memory": {
    "peak_rss_measures_fits": 1,
-   "peak_rss_mib": 1045.2
+   "peak_rss_mib": 1080.3,
+   "ru_maxrss_unit": "kib"
   },
   "numerical_outputs": {
    "beta_l2": 39.473487178,
@@ -60,10 +80,10 @@
   },
   "timing_seconds": {
    "all": [
-    266.957
+    285.1914
    ],
-   "median": 266.957,
-   "min": 266.957
+   "median": 285.1914,
+   "min": 285.1914
   }
  },
  "baseline_commit": "a2611cc",
@@ -73,7 +93,8 @@
    "augmented_rank": 1626,
    "augmented_representative": true,
    "blas": {
-    "loaded": [
+    "numpy": "2.4.2",
+    "pools_during_fit": [
      {
       "internal_api": "openmp",
       "num_threads": 16,
@@ -88,7 +109,7 @@
       "prefix": "libscipy_openblas",
       "threading_layer": "pthreads",
       "user_api": "blas",
-      "version": "0.3.31.dev"
+      "version": "0.3.30"
      },
      {
       "internal_api": "openblas",
@@ -96,10 +117,11 @@
       "prefix": "libscipy_openblas",
       "threading_layer": "pthreads",
       "user_api": "blas",
-      "version": "0.3.30"
+      "version": "0.3.31.dev"
      }
     ],
-    "numpy": "2.4.2"
+    "sampled_during_fit": true,
+    "samples": 244
    },
    "coefficient_method": "qr_svd",
    "data_method": "gram_eigh",
@@ -112,11 +134,13 @@
    "parameters": 1680,
    "repeats": 1,
    "rows": 12000,
+   "seed": 31337,
    "train_rows": 6000
   },
   "memory": {
    "peak_rss_measures_fits": 1,
-   "peak_rss_mib": 980.3
+   "peak_rss_mib": 981.2,
+   "ru_maxrss_unit": "kib"
   },
   "numerical_outputs": {
    "beta_l2": 39.473487178,
@@ -128,19 +152,21 @@
   },
   "timing_seconds": {
    "all": [
-    7.8733
+    6.5811
    ],
-   "median": 7.8733,
-   "min": 7.8733
+   "median": 6.5811,
+   "min": 6.5811
   }
  },
- "branch_commit": "6e3780c",
+ "branch_commit": "a23fe74",
  "fit": "41-level cat_cat pair, 6000 training rows, 1680 parameters, 54 unidentifiable",
- "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  SYMMETRIC: one complete fit per side, fresh interpreter each, so the ru_maxrss high-water mark covers the same work on both -- `peak_rss_measures_fits` records that rather than leaving it to be assumed.  Taken on one shared machine with the CPU lock held; the 1-minute load average sat between 18 and 21 across the two runs, so the wall clock is a floor rather than a benchmark.  `backend_dispatch.blas.loaded` is what threadpoolctl reports as LOADED IN THE PROCESS, not what numpy was built against.",
+ "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  SYMMETRIC: one complete fit per side, fresh interpreter each, so the ru_maxrss high-water mark covers the same work on both -- `peak_rss_measures_fits` and `ru_maxrss_unit` record that rather than leaving it to be inferred.  BLAS pools are sampled from a background thread WHILE the fit runs, not around it: superglm sets solver thread counts on entry and restores them on exit, so a reading taken afterwards describes the process between fits.  Taken on one shared machine with the CPU lock held and the load average in the teens, so the wall clock is a floor rather than a benchmark.",
  "summary": {
-  "backend_dispatch_identical": true,
+  "blas_pools_identical": false,
+  "blas_pools_note": "The baseline is observed running OpenBLAS at BOTH 1 and 16 threads during the fit; the branch only at 16.  That is a consequence of the algorithm rather than a difference in environment: the prefix walk issues thousands of small eigendecompositions, which drop to a single thread, where the replacement issues few large ones.  Sampling after the fit reported 16 on both sides and hid it, which is why the earlier revisions of this file claimed identical dispatch.",
+  "decomposition_route_identical": true,
   "numerical_outputs_identical": true,
-  "peak_rss_delta_mib": -64.9,
-  "speedup_one_fit_each": 33.9
+  "peak_rss_delta_mib": -99.1,
+  "speedup_one_fit_each": 43.3
  }
 }
