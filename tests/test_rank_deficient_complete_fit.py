@@ -226,8 +226,12 @@ def test_a_dimension_that_cannot_run_is_refused_at_the_flag(flag: str, value: st
 def test_the_artifact_on_disk_still_satisfies_its_own_invariants() -> None:
     """The committed comparison is the thing the PR cites, so check the file.
 
-    Values are deliberately not asserted -- they are measurements and will move
-    with the machine.  What must hold is that the two sides remain comparable.
+    Measurements are deliberately not pinned -- they move with the machine.
+    What must hold is that the two sides remain comparable, and that every
+    claim the summary and the history make ABOUT the measurements re-derives
+    from the measurements themselves.  A flag the record asserts about itself
+    is the shape of check this file's docstring exists to warn against: the
+    record may move, but it may not disagree with itself.
     """
     path = "benchmarks/results/rank_deficient_complete_fit.json"
     with open(path) as handle:
@@ -246,5 +250,32 @@ def test_the_artifact_on_disk_still_satisfies_its_own_invariants() -> None:
             # dwell is what separates a startup window from a phase that held
             assert pool["samples_seen_in"] >= 1
             assert 0.0 < pool["fraction_of_samples"] <= 1.0
-    assert set(baseline["numerical_outputs"]) == set(branch["numerical_outputs"])
+    # The summary's claims, re-derived from the two sides rather than read back
+    # from the summary: `numerical_outputs_identical` is the flag that turns
+    # the timing difference into "same answer, less work", so it is checked
+    # against the values, not against its own say-so.
+    assert baseline["numerical_outputs"] == branch["numerical_outputs"]
     assert record["summary"]["numerical_outputs_identical"] is True
+    baseline_route = {k: v for k, v in baseline["backend_dispatch"].items() if k != "blas"}
+    branch_route = {k: v for k, v in branch["backend_dispatch"].items() if k != "blas"}
+    assert (baseline_route == branch_route) is record["summary"]["decomposition_route_identical"]
+    assert record["summary"]["peak_rss_delta_mib"] == pytest.approx(
+        round(branch["memory"]["peak_rss_mib"] - baseline["memory"]["peak_rss_mib"], 1)
+    )
+
+    # The history is the artifact's most-quoted content, so it may not disagree
+    # with its own rows or with the payloads committed beside it: every row
+    # carries its load context, every ratio re-derives from its own seconds,
+    # and the newest row IS the two payloads above.
+    history = record["history"]
+    assert [row["run"] for row in history] == [1, 2, 3, 4, 5]
+    for row in history:
+        assert row["one_minute_loadavg"], f"run {row['run']} carries no load context"
+        assert row["ratio"] == pytest.approx(
+            round(row["baseline_seconds"] / row["branch_seconds"], 1)
+        ), f"run {row['run']}'s ratio does not derive from its own seconds"
+    assert history[-1]["baseline_seconds"] == baseline["timing_seconds"]["min"]
+    assert history[-1]["branch_seconds"] == branch["timing_seconds"]["min"]
+    # the published claim names no single multiplier; the rows carry those
+    assert record["summary"]["speedup_claim"] == "tens of times faster"
+    assert record["summary"]["speedup_note"]

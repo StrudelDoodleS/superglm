@@ -595,7 +595,7 @@ only, which is a separate simulated study.
     benchmark.
 
     **The library has moved since, and the tables moved with it.** The branch
-    now carries six changes to `src/superglm/solvers/rank.py` and its callers
+    now carries seven changes to `src/superglm/solvers/rank.py` and its callers
     rather than one, and their claims are not equally strong — which matters
     here, because the rank-deficient path is exactly the path a wide `cat_cat`
     refit takes:
@@ -629,11 +629,25 @@ only, which is a separate simulated study.
       built inside the band where that matters, and moved the composite on
       21.  It now decides on leverage too.  This is the change that
       reaches the labels on almost every deficient block.
+    - `c78edd7` added the judgement that decision still lacked:
+      `_principal_block_condition` conditions the actual principal block a
+      candidate selection hands the solver, and `_conditioned_representatives`
+      now decides between its two candidates on that rather than on the
+      amplification bound.  Under the bound, 24 of the switches measured over
+      9,654 anisotropic 3×4 blocks went to a block whose actual condition was
+      **worse**, by up to 1.34× — so "the certificate never hands on a
+      worse-conditioned block" is a guarantee this commit created, not a
+      property the design always had.
 
     Tables 1 and 2 were first taken at `a2611cc` and have been re-taken with
-    `src/` at **`0c4fa16`**, which is this branch's `src/` tree with all six
-    changes in place: every published value is unchanged, to every digit
-    printed. Tables 3 and 4 exist only on
+    `src/` at **`0c4fa16`**, the tree with the first six changes in place:
+    every published value is unchanged, to every digit printed. The branch's
+    final `src/` tree is **`c78edd7`**, the seventh change, which landed after
+    that re-take and cannot reach these tables: on a `cat_cat` null direction
+    the aliases are exact, so the amplification is √2 against an achievable
+    bound of √(1+k(m−k)) — the trigger never fires and the new decision is
+    never consulted. `c78edd7` is the tree the complete-fit artifact in this
+    branch measures directly (its `branch_src_commit`). Tables 3 and 4 exist only on
     the fixed code and have not been re-taken since. The evidence that they are
     unaffected is indirect but specific: the 41×41 `cat_cat` refit they are
     built from was checked directly for #196 and produces bitwise-identical
