@@ -253,13 +253,18 @@ def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
 
     The RATE is stable, because it is a property of the algorithm rather than
     of one rounding decision.  Measured over 958 deficient blocks across 16
-    seeds: the walk returned nothing on 126 of them (13.2%), the branch
-    recovers a `pivoted_cholesky` representative basis on 42, and per-seed
-    failures ranged from 5 to 11 out of ~60.  Identical at 1 and at 16 threads.
+    seeds, the walk returned nothing on 126 of them (13.2%), with per-seed
+    failures from 5 to 11 out of about 60.  Reading the null basis produces a
+    candidate in those cases; the absolute conditioning backstop now keeps it
+    only when its principal block is usable.  On this eight-seed regression
+    battery 58 of 60 candidates stay spectral and two are safe to recover.
 
     So the thresholds below are set far under what was measured -- roughly a
     sixth of the expected count -- to survive a platform where the rate moves,
-    while still failing outright if the walk stops failing.
+    while still failing outright if the walk stops failing.  The acceptance
+    count is not itself pinned: these are precisely the boundary cases whose
+    identity changes across eigensolvers, and the stable recovered case has its
+    own direct regression above.
 
     The exactness assertion is the one that carries no margin at all: across
     all 958 blocks there was NOT ONE where both filled a set and the sets
@@ -268,7 +273,9 @@ def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
     """
     agreed = 0
     walk_failed = 0
+    candidate_recovered = 0
     recovered = 0
+    kept_spectral = 0
     for seed in (4, 11, 2029, 77_003, 5, 6, 7, 8):
         rng = np.random.default_rng(seed)
         for _ in range(60):
@@ -281,8 +288,12 @@ def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
             read_off = _earliest_representatives(null, rank)
             if walked is None:
                 walk_failed += 1
-                if read_off is not None and decompose_gram(gram).method == "pivoted_cholesky":
-                    recovered += 1
+                if read_off is not None:
+                    candidate_recovered += 1
+                    if decompose_gram(gram).method == "pivoted_cholesky":
+                        recovered += 1
+                    else:
+                        kept_spectral += 1
                 continue
             assert read_off is not None
             # no margin: the conventions are identical wherever both resolve
@@ -291,7 +302,11 @@ def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
 
     assert agreed > 200, f"only {agreed} blocks resolved by both"
     assert walk_failed >= 10, f"the walk failed on only {walk_failed} blocks"
-    assert recovered >= 3, f"the branch recovered a basis on only {recovered}"
+    assert candidate_recovered >= 10, (
+        f"the null basis recovered only {candidate_recovered} candidates"
+    )
+    assert recovered + kept_spectral == candidate_recovered
+    assert kept_spectral >= 10, f"only {kept_spectral} catastrophic candidates stayed spectral"
 
 
 def _near_alias(eps: float, rows: int = 200, seed: int = 7) -> np.ndarray:
@@ -605,6 +620,120 @@ def test_an_anisotropic_block_is_judged_on_its_own_condition_not_on_a_bound() ->
             gram, earliest
         ), f"switched {earliest.tolist()} -> {chosen.tolist()} and made conditioning worse"
     assert switched > 500, f"only {switched} switches exercised"
+
+
+def test_a_catastrophic_representative_keeps_the_spectral_decomposition() -> None:
+    """The better representative may still be too ill-conditioned to use.
+
+    This deterministic factor has five resolvable directions in ten columns.
+    Its smallest retained equilibrated eigenvalue is over nine times the rank
+    cutoff, so the rank decision is not the finding.  The best representative
+    recovered from that subspace nevertheless has a principal condition over
+    twice ``severe_condition``.  Cholesky accepts it, but using its inverse
+    degrades ``||G G+ G - G|| / ||G||`` from about 0.004 on the spectral route
+    to 0.14.
+
+    Both Gram and factor entry points must therefore keep their spectral solve
+    when every representative crosses the existing policy boundary.  Before
+    the guard the Gram route returned ``pivoted_cholesky`` and the factor route
+    retained a representative Cholesky.
+    """
+    factor = np.array(
+        [
+            [
+                -1.4204301211290749e-01,
+                -2.5873822242371208e-01,
+                1.5740498006169482e-01,
+                -3.2443078518196217e-01,
+                3.4305646778417126e-01,
+                3.0590973081712630e-01,
+                3.3430221916331854e-01,
+                -4.4277422710063674e-01,
+                3.9605603593480526e-01,
+                -3.2697213310199175e-01,
+            ],
+            [
+                -1.4034348780716716e-03,
+                -3.9863698585931411e-03,
+                8.5455453261010193e-03,
+                5.4316892080185407e-03,
+                5.6656444296932741e-03,
+                -1.9447946708481215e-03,
+                3.5368614362713398e-04,
+                -3.0066715031898941e-03,
+                -4.4835270016177261e-03,
+                5.6156764250026156e-03,
+            ],
+            [
+                6.9319678575304608e-05,
+                -6.0991039198378666e-05,
+                -1.1675888718037742e-04,
+                8.4194381828303351e-05,
+                3.2176165170890973e-06,
+                -1.4392784464196176e-05,
+                -2.7530888866140620e-05,
+                -1.0632775056803482e-04,
+                5.4963770666537858e-05,
+                5.0725644573084028e-05,
+            ],
+            [
+                2.3968048307093101e-07,
+                -2.4095324875802135e-06,
+                4.8462225601029339e-07,
+                3.7813479919608278e-08,
+                -4.5914829320947197e-07,
+                -2.3358925374420366e-07,
+                -1.1222695801511232e-06,
+                1.2516255206841181e-06,
+                5.8810904031770385e-07,
+                -8.3188832876315809e-07,
+            ],
+            [
+                -5.9721165754639350e-09,
+                1.2439191372448542e-08,
+                2.0532201416823470e-08,
+                1.6836840331938923e-08,
+                -2.2371985141641281e-08,
+                -5.4180803721079223e-09,
+                -2.8869823907668855e-10,
+                -6.4023463289349279e-09,
+                2.7442053176671418e-08,
+                -9.9745758716737190e-10,
+            ],
+        ]
+    )
+    gram = factor.T @ factor
+    scale = np.sqrt(np.diag(gram))
+    equilibrated = gram / np.outer(scale, scale)
+    equilibrated = 0.5 * (equilibrated + equilibrated.T)
+    values, vectors = np.linalg.eigh(equilibrated)
+    cutoff = SHARED_RANK_POLICY.gram_rcond * float(values[-1])
+    retained = values > cutoff
+    assert int(retained.sum()) == 5
+    assert float(values[retained][0]) > 8.0 * cutoff
+
+    selected = _conditioned_representatives(
+        vectors[:, ~retained],
+        5,
+        block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+    )
+    assert selected is not None
+    assert (
+        _principal_block_condition(equilibrated, selected)
+        > 2.0 * SHARED_RANK_POLICY.severe_condition
+    )
+
+    gram_decomposition = decompose_gram(gram)
+    factor_decomposition = decompose_factor(factor)
+
+    assert gram_decomposition.method == "gram_eigh"
+    assert gram_decomposition.cholesky_factor is None
+    assert factor_decomposition.method == "qr_svd"
+    assert factor_decomposition.cholesky_factor is None
+    for decomposition in (gram_decomposition, factor_decomposition):
+        residual = np.linalg.norm(gram @ decomposition.pseudo_inverse() @ gram - gram)
+        residual /= np.linalg.norm(gram)
+        assert residual < 0.02
 
 
 def test_the_certificate_is_the_condition_the_selection_itself_adds() -> None:

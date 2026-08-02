@@ -9,9 +9,9 @@ timing.
 
 Run it on each side of the change and diff the JSON::
 
-    uv run python benchmarks/rank_deficient_complete_fit.py --out branch.json
+    uv run python benchmarks/rank_deficient_complete_fit.py --repeats 1 --out branch.json
     # check out the baseline's src/, then
-    uv run python benchmarks/rank_deficient_complete_fit.py --out baseline.json
+    uv run python benchmarks/rank_deficient_complete_fit.py --repeats 1 --out baseline.json
 
 The fit is the deficient one the change exists for: a 41-level `cat_cat` pair
 on 6,000 training rows, 1,680 parameters, 54 of them unidentifiable.

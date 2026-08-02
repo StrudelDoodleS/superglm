@@ -595,7 +595,7 @@ only, which is a separate simulated study.
     benchmark.
 
     **The library has moved since, and the tables moved with it.** The branch
-    now carries seven changes to `src/superglm/solvers/rank.py` and its callers
+    now carries eight changes to `src/superglm/solvers/rank.py` and its callers
     rather than one, and their claims are not equally strong — which matters
     here, because the rank-deficient path is exactly the path a wide `cat_cat`
     refit takes:
@@ -603,8 +603,9 @@ only, which is a separate simulated study.
     - `b2de09d` replaced the alias-representative walk. Wherever the old walk
       resolved a block, the two choose the same columns — measured across 958
       deficient blocks with no disagreement — but on 126 of those the walk
-      resolved nothing at all, and on 42 the new path retains a representative
-      basis where the old one fell back to a spectral one.
+      resolved nothing at all. Reading the null basis makes a representative
+      candidate available there; the final severe-condition guard retains only
+      usable candidates and leaves the rest on the spectral path.
     - `0fbef7e` ([#196](https://github.com/StrudelDoodleS/superglm/issues/196))
       certifies that choice on conditioning, and this one **does move which
       columns are selected**, on blocks whose earliest independent columns are
@@ -638,16 +639,25 @@ only, which is a separate simulated study.
       **worse**, by up to 1.34× — so "the certificate never hands on a
       worse-conditioned block" is a guarantee this commit created, not a
       property the design always had.
+    - The final severe-condition guard closes the remaining absolute gap:
+      choosing the better of two representative blocks does not make either
+      usable. A deterministic walk-failure case produced a best principal
+      condition over twice `RankPolicy.severe_condition`; Cholesky accepted it
+      while the pseudo-inverse identity residual moved from about 0.004 on the
+      spectral route to 0.14. Both Gram and factor entry points now keep their
+      spectral solve when every representative crosses that existing policy
+      boundary.
 
     Tables 1 and 2 were first taken at `a2611cc` and have been re-taken with
     `src/` at **`0c4fa16`**, the tree with the first six changes in place:
-    every published value is unchanged, to every digit printed. The branch's
-    final `src/` tree is **`c78edd7`**, the seventh change, which landed after
-    that re-take and cannot reach these tables: on a `cat_cat` null direction
-    the aliases are exact, so the amplification is √2 against an achievable
-    bound of √(1+k(m−k)) — the trigger never fires and the new decision is
-    never consulted. `c78edd7` is the tree the complete-fit artifact in this
-    branch measures directly (its `branch_src_commit`). Tables 3 and 4 exist only on
+    every published value is unchanged, to every digit printed. The committed
+    complete-fit artifact measures `src/` at **`c78edd7`**, the seventh change.
+    Neither later decision reaches its `cat_cat` fixture: on an exact alias the
+    amplification is √2 against an achievable bound of √(1+k(m−k)), so
+    candidate selection never changes, and its principal block remains below
+    the severe boundary. A fresh one-repeat run against the eighth change is
+    reported with the PR validation rather than silently rewriting the
+    historical artifact. Tables 3 and 4 exist only on
     the fixed code and have not been re-taken since. The evidence that they are
     unaffected is indirect but specific: the 41×41 `cat_cat` refit they are
     built from was checked directly for #196 and produces bitwise-identical
