@@ -154,6 +154,41 @@ def _runtime_group_matrix_types():
     )
 
 
+def _agg_by_bin_fits(gm: GroupMatrix, n_bins: int) -> bool:
+    """Whether ``_agg_by_bin``'s output is small enough to materialise.
+
+    Its result is ``(n_bins, gm.shape[1])`` -- the row count from the block
+    supplying the bins, the width from the block being aggregated.  Those are
+    DIFFERENT blocks at every caller, so this is the cross shape, and no gate in
+    the subsystem bounds the product.  An earlier version of the invariant test
+    exempted these calls on the stated ground that both dimensions came from the
+    same block; that was simply wrong, and a narrow million-row support beside a
+    wide sparse term is the counterexample.
+    """
+    return int(n_bins) * _agg_by_bin_width(gm) <= _MAX_AGGREGATE_CELLS
+
+
+def _agg_by_bin_width(gm: GroupMatrix) -> int:
+    """The width ``_agg_by_bin`` actually ALLOCATES at, not the width it returns.
+
+    The SSP branches aggregate in basis space and only then apply ``R_inv``, so
+    the intermediate is ``_p_b`` wide while ``shape[1]`` is the post-transform
+    width -- 600 against 4 on the pairing that exposed this.  Budgeting against
+    the returned width silently permits the allocation it is meant to stop.
+    """
+    for attribute in ("_p_b",):
+        width = getattr(gm, attribute, None)
+        if width is not None:
+            return int(width)
+    matrix = getattr(gm, "M", None)
+    if matrix is not None:
+        return int(matrix.shape[1])
+    unique = getattr(gm, "B_unique", None)
+    if unique is not None:
+        return max(int(unique.shape[1]), int(gm.shape[1]))
+    return int(gm.shape[1])
+
+
 def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:
     """Aggregate W * gm's columns by bin index → (n_bins, p_g) dense array.
 
@@ -605,21 +640,40 @@ def _cross_gram_tensor_spline_categorical(
         # the row count unbounded underneath it.  The chunk loop is outermost so
         # each row is still expanded exactly once across all K2 passes.
         n_level = int(W_rows.shape[0])
-        agg = np.zeros((K2, gm_tensor.n_bins1, K_cat), dtype=np.float64)
         chunk = min(
             max(n_level, 1),
             _cross_expansion_chunk_rows(K_cat, 0, _MAX_CROSS_EXPANSION_BYTES),
         )
-        for start in range(0, n_level, chunk):
-            stop = min(start + chunk, n_level)
-            block = _expand_support_rows(gm_spline_cat.B_unique, bin_cat[start:stop])
-            idx1_chunk = idx1[start:stop]
+        # Holding every channel at once lets each row be expanded exactly once,
+        # but the accumulator is (K2, n_bins1, K_cat) -- itself cross-shaped, and
+        # n_bins1 follows a per-feature n_bins that nothing caps.  So the fast
+        # nesting is used only while that buffer fits, and otherwise the loops
+        # invert: one channel at a time, one (n_bins1, K_cat) accumulator, at the
+        # cost of re-expanding the rows per channel.  Bounded memory bought with
+        # time, declared rather than assumed.
+        if K2 * gm_tensor.n_bins1 * K_cat <= _MAX_AGGREGATE_CELLS:
+            agg = np.zeros((K2, gm_tensor.n_bins1, K_cat), dtype=np.float64)
+            for start in range(0, n_level, chunk):
+                stop = min(start + chunk, n_level)
+                block = _expand_support_rows(gm_spline_cat.B_unique, bin_cat[start:stop])
+                idx1_chunk = idx1[start:stop]
+                for j2 in range(K2):
+                    w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
+                    agg[j2] += _weighted_bincount_2d(idx1_chunk, w_col, block, gm_tensor.n_bins1)
+                del block  # next expansion is evaluated before the rebind
             for j2 in range(K2):
-                w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
-                agg[j2] += _weighted_bincount_2d(idx1_chunk, w_col, block, gm_tensor.n_bins1)
-            del block  # next expansion is evaluated before the rebind
+                result_raw[j2::K2, :] = B1.T @ agg[j2]
+            return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
         for j2 in range(K2):
-            result_raw[j2::K2, :] = B1.T @ agg[j2]
+            channel = np.zeros((gm_tensor.n_bins1, K_cat), dtype=np.float64)
+            for start in range(0, n_level, chunk):
+                stop = min(start + chunk, n_level)
+                block = _expand_support_rows(gm_spline_cat.B_unique, bin_cat[start:stop])
+                w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
+                channel += _weighted_bincount_2d(idx1[start:stop], w_col, block, gm_tensor.n_bins1)
+                del block
+            result_raw[j2::K2, :] = B1.T @ channel
         return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
     for j2 in range(K2):
@@ -715,30 +769,31 @@ def _support_csr_raw_cross(
     gate that bounds ``B_unique``; the CSR side is never densified and the
     observation rows are never materialised, so no chunking is needed.
     """
+    # Row-chunked, in ONE pass over the data.  Column chunking bounded the
+    # memory but made every pass re-walk all n row pointers -- measured at 88
+    # passes for n_support=1e6 against a 700-column term, and the CSC rewrite
+    # that removes the slicing cost still leaves that traversal, so it bought
+    # 1.10x rather than fixing it.  Contracting over row chunks instead touches
+    # each nonzero once, keeps the CSR side sparse throughout, and never forms
+    # the (n_support, p_csr) aggregate at all -- so the cross-shaped array this
+    # helper existed to bound is simply not built.
     csr = B_csr.tocsr()
-    n_support = int(B_unique.shape[0])
+    p_b = int(B_unique.shape[1])
     p_csr = int(csr.shape[1])
     support_idx = np.asarray(support_idx, dtype=np.intp)
     W_rows = np.asarray(W_rows, dtype=np.float64)
-    out = np.empty((int(B_unique.shape[1]), p_csr), dtype=np.float64)
-    # Chunked over the CSR side's COLUMNS.  The aggregate is (n_support, p_csr)
-    # -- cross-shaped: the compression gate bounds n_support against THIS
-    # block's width, never against the paired block's.  A narrow compressed
-    # term beside a wide CSR term therefore passes both gates and still
-    # allocates without limit.  The contracted result is small, so the
-    # aggregate is only ever needed a column-block at a time.
-    for start in range(0, p_csr, _aggregate_column_chunk(n_support, p_csr)):
-        stop = min(start + _aggregate_column_chunk(n_support, p_csr), p_csr)
-        block = csr[:, start:stop].tocsr()
-        out[:, start:stop] = B_unique.T @ _csr_weighted_bincount(
-            np.asarray(block.data, dtype=np.float64),
-            block.indices,
-            block.indptr,
-            int(block.shape[1]),
-            support_idx,
-            W_rows,
-            n_support,
-        )
+    out = np.zeros((p_b, p_csr), dtype=np.float64)
+    n_rows = int(W_rows.shape[0])
+    if n_rows == 0:
+        return out
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_b, 0, _MAX_CROSS_EXPANSION_BYTES))
+    for start_row in range(0, n_rows, chunk):
+        stop_row = min(start_row + chunk, n_rows)
+        left = _expand_support_rows(B_unique, support_idx[start_row:stop_row])
+        right = csr[start_row:stop_row].multiply(W_rows[start_row:stop_row, None])
+        # sparse.T @ dense keeps the CSR side sparse; the product is (p_csr, p_b).
+        out += np.asarray(right.T @ left, dtype=np.float64).T
+        del left, right
     return out
 
 
@@ -1191,6 +1246,10 @@ def _cross_gram(
 
     if isinstance(gm_i, DiscretizedSCOPGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_j, gm_i.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
         result = gm_i.B_scop_unique.T @ WX_agg
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
@@ -1198,6 +1257,10 @@ def _cross_gram(
 
     if isinstance(gm_j, DiscretizedSCOPGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_i, gm_j.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
         result = (gm_j.B_scop_unique.T @ WX_agg).T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
@@ -1210,6 +1273,10 @@ def _cross_gram(
         gm_j, DiscretizedSSPGroupMatrix
     ):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_j, gm_i.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
         result = gm_i.R_inv.T @ (gm_i.B_unique.T @ WX_agg)
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
@@ -1219,6 +1286,10 @@ def _cross_gram(
         gm_i, DiscretizedSSPGroupMatrix
     ):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_i, gm_j.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
         result = (gm_j.R_inv.T @ (gm_j.B_unique.T @ WX_agg)).T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)

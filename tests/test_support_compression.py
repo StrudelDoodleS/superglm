@@ -1044,36 +1044,48 @@ _BOUNDED_AGGREGATE_HELPERS = frozenset(
     }
 )
 
-# Call sites whose output is bounded by something other than a paired block's
-# width, with the reason. Anything not here and not in a helper above is new.
+# Call sites whose output cannot run away, each with the reason. Every entry
+# here is a claim that has to survive the pairing test below -- an allow-list
+# with a wrong justification is worse than no invariant test, because it turns
+# an unbounded site into a documented "we checked this". One of the original
+# four said the two dimensions came from the same block; they did not, on the
+# `DiscretizedSSP x SparseSSP` pairing, and that is why every entry now names
+# the caller that supplies `n_bins` rather than reasoning about the callee.
 _AGGREGATE_CALLS_BOUNDED_BY_CONSTRUCTION = {
-    # (function, kernel): why n_bins * n_cols cannot run away
-    ("_agg_by_bin", "_csr_weighted_bincount"): (
-        "n_cols is the block's own basis width and n_bins is the caller's bin "
-        "count; both sides are the SAME block, so no cross shape arises"
-    ),
     ("_aggregate_group_matrix_columns", "_weighted_bincount_2d"): (
-        "column-at-a-time by construction"
-    ),
-    ("_cross_gram_tensor_spline_categorical", "_csr_weighted_bincount"): (
-        "CSR spline_cat has no support; n_cols is its own basis width"
+        "no cross shape: this aggregates ONE generated column at a time, so the "
+        "output is (n_bins, 1) per pass regardless of either block's width"
     ),
     ("_cross_gram_categorical_spline_categorical", "_csr_weighted_bincount"): (
-        "n_bins is n_levels+1 of the categorical, bounded by the factor"
+        "n_bins is n_levels+1 of the categorical parent, which is a factor "
+        "cardinality and not a support size, so it cannot scale with n"
     ),
-    # Both of these were surfaced by this test on its first run, and both turned
-    # out to be sound -- but only checkably so once the reason was written down.
-    ("_agg_by_bin", "_weighted_bincount_2d"): (
-        "the generic tail, which has just materialised gm.toarray() at (n, p). "
-        "n_bins counts distinct rows so it is <= n, making the aggregate no "
-        "larger than the dense block already resident beside it"
+    ("_cross_gram_tensor_spline_categorical", "_csr_weighted_bincount"): (
+        "the CSR spline_cat branch: n_bins is the tensor's marginal bin count "
+        "and n_cols its own basis width, both bin/width quantities that a "
+        "lossless support cannot inflate"
     ),
     ("_cross_gram_tensor_spline_categorical", "_weighted_bincount_2d"): (
-        "(n_bins1, K_cat) is bin count x basis width, neither of which scales "
-        "with n, so a lossless support cannot inflate it. It is not free -- the "
-        "K2-deep accumulator reaches the byte budget at n_bins1 ~ 20,000 -- but "
-        "n_bins is user-set per feature rather than data-driven"
+        "(n_bins1, K_cat), same reasoning; and the K2-deep accumulator built "
+        "from it is now explicitly budgeted, inverting the loop nesting rather "
+        "than growing past _MAX_AGGREGATE_CELLS"
     ),
+    ("_agg_by_bin", "_csr_weighted_bincount"): (
+        "IS cross-shaped and is NOT exempt on its own account: every caller "
+        "checks _agg_by_bin_fits first and routes to the column-at-a-time "
+        "_cross_gram_by_columns when the output would not fit"
+    ),
+    ("_agg_by_bin", "_weighted_bincount_2d"): (
+        "same: guarded by _agg_by_bin_fits at every caller. The generic tail "
+        "has also already materialised gm.toarray() at (n, p), so the "
+        "aggregate is never the dominant allocation on that branch"
+    ),
+}
+
+# Entries above that are guarded rather than structurally impossible: these
+# name a guard that must exist, so the pairing test can check the guard is real.
+_AGGREGATE_CALLS_GUARDED_AT_CALLER = {
+    "_agg_by_bin": "_agg_by_bin_fits",
 }
 
 
@@ -1137,6 +1149,52 @@ def test_every_cross_shaped_aggregate_is_bounded():
     )
 
 
+def test_guarded_allow_list_entries_name_a_guard_that_exists():
+    """An allow-list entry claiming "the caller checks first" must be checkable.
+
+    The entry that broke said the two dimensions came from the same block. They
+    did not, and nothing in the test could tell -- the justification was prose.
+    Where an entry rests on a caller-side guard, the guard is named, and this
+    asserts every call reached from `_cross_gram` really is preceded by it.
+    """
+    import ast
+    import pathlib
+
+    import superglm._group_matrix._group_matrix_algebra as algebra
+
+    tree = ast.parse(pathlib.Path(algebra.__file__).read_text())
+    for guarded, guard in _AGGREGATE_CALLS_GUARDED_AT_CALLER.items():
+        assert hasattr(algebra, guard), f"{guarded} claims a guard {guard} that does not exist"
+
+        callers = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name != "_cross_gram":
+                continue
+            for inner in ast.walk(node):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Name)
+                    and inner.func.id == guarded
+                ):
+                    callers.append(inner.lineno)
+        assert callers, f"expected _cross_gram to call {guarded}"
+
+        guard_lines = [
+            inner.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_cross_gram"
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == guard
+        ]
+        assert len(guard_lines) >= len(callers), (
+            f"{len(callers)} call(s) to {guarded} in _cross_gram but only "
+            f"{len(guard_lines)} call(s) to its guard {guard}: at least one "
+            "cross-shaped aggregate is unguarded"
+        )
+
+
 def test_the_invariant_test_can_actually_fail():
     """A guard that passes because it looks at nothing is worse than no guard."""
     sites = _aggregate_call_sites()
@@ -1198,13 +1256,14 @@ def test_mixed_compressed_and_csr_pair_never_densifies_an_observation_block(monk
     actual = algebra._cross_gram_spline_categorical_spline_categorical(compressed, csr, weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
-    assert not seen, f"expanded {seen} support rows; the CSR side should be aggregated"
+    _assert_expansion_bounded(seen)
     assert not forbid_dense, f"densified a CSR block of {forbid_dense} rows"
 
     # And the transposed orientation, which takes the other branch.
     actual_t = algebra._cross_gram_spline_categorical_spline_categorical(csr, compressed, weights)
     np.testing.assert_allclose(actual_t, expected.T, rtol=1e-9, atol=1e-9)
-    assert not seen and not forbid_dense
+    _assert_expansion_bounded(seen)
+    assert not forbid_dense
 
 
 def test_mixed_pair_on_partial_row_overlap_never_densifies(monkeypatch):
@@ -1227,8 +1286,25 @@ def test_mixed_pair_on_partial_row_overlap_never_densifies(monkeypatch):
     actual = algebra._cross_gram_spline_categorical_spline_categorical(compressed, csr, weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
-    assert not seen, f"expanded {seen} support rows"
+    _assert_expansion_bounded(seen)
     assert not forbid_dense, f"densified a CSR block of {forbid_dense} rows"
+
+
+def _assert_expansion_bounded(seen):
+    """The property is that expansion is BOUNDED, not that it never happens.
+
+    Asserting "no expansion" pinned one implementation: when the mixed helper
+    moved from aggregating the CSR side to contracting over bounded row chunks,
+    three tests broke without anything getting worse. Bounded is the requirement.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    if not seen:
+        return
+    allowed = algebra._cross_expansion_chunk_rows(0, 0, algebra._MAX_CROSS_EXPANSION_BYTES)
+    assert max(seen) <= allowed, (
+        f"expanded {max(seen)} rows at once against a {allowed}-row ceiling"
+    )
 
 
 def _forbid_csr_densify(monkeypatch):
@@ -1244,6 +1320,105 @@ def _forbid_csr_densify(monkeypatch):
 
         monkeypatch.setattr(sp.csr_matrix, name, spy)
     return densified
+
+
+def test_tensor_fallback_bounds_its_channel_accumulator(monkeypatch):
+    """Reviewer P1 on 8084eb7: row chunking bounded ``block`` but not ``agg``,
+    which is ``(K2, n_bins1, K_cat)`` and follows a per-feature ``n_bins`` that
+    nothing caps.
+
+    Observable without measuring memory: holding every channel lets each row be
+    expanded once, one channel at a time expands them K2 times. So the
+    expansion count says which nesting ran.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedTensorGroupMatrix,
+    )
+
+    gen = np.random.default_rng(131)
+    n, n_bins1, n_bins2 = 20_000, 40, 9
+    k1, k2 = 3, 2
+    b1 = gen.normal(size=(n_bins1, k1))
+    b2 = gen.normal(size=(n_bins2, k2))
+    idx1 = gen.integers(0, n_bins1, n).astype(np.intp)
+    idx2 = gen.integers(0, n_bins2, n).astype(np.intp)
+    joint = np.einsum("ij,ik->ijk", b1[idx1], b2[idx2]).reshape(n, k1 * k2)
+    tensor = DiscretizedTensorGroupMatrix(
+        b1,
+        b2,
+        idx1,
+        idx2,
+        joint,
+        gen.normal(size=(k1 * k2, 4)),
+        np.arange(n, dtype=np.intp),
+        0,
+    )
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    spline_cat = _spline_cat_support_block(n, 300, 5, 3, rows, seed=132)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1)  # force the fallback
+    expected = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+
+    # Budget below K2 * n_bins1 * K_cat, so the loops must invert.
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", 10)
+    seen = _spy_on_row_expansion(monkeypatch)
+    actual = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+    _assert_expansion_bounded(seen)
+    assert sum(seen) == k2 * rows.size, (
+        "the K2-deep accumulator was still built: expected one pass per channel "
+        f"({k2} x {rows.size} expanded rows), saw {sum(seen)}"
+    )
+
+
+def test_compressed_ssp_beside_a_wide_sparse_term_bounds_the_aggregate(monkeypatch):
+    """Reviewer P1 on 8084eb7, against the ALLOW-LIST rather than the source.
+
+    A support-compressed `DiscretizedSSPGroupMatrix` crossed with a sparse term
+    sends `_agg_by_bin` the discrete block's `n_bins` and the sparse block's
+    width. Different blocks, so the exemption's stated reason -- that both came
+    from the same block -- was false, and a narrow large support beside a wide
+    sparse term still allocated without limit.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_core import SparseSSPGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(130)
+    n, n_bins, p_narrow, p_wide = 4_000, 900, 3, 600
+    compressed = SupportCompressedSSPGroupMatrix(
+        gen.normal(size=(n_bins, p_narrow)),
+        gen.normal(size=(p_narrow, 2)),
+        gen.integers(0, n_bins, n).astype(np.intp),
+    )
+    wide_basis = sp.csr_matrix(gen.normal(size=(n, p_wide)) * (gen.random((n, p_wide)) < 0.02))
+    wide = SparseSSPGroupMatrix(wide_basis, gen.normal(size=(p_wide, 4)))
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = compressed.toarray().T @ (wide.toarray() * weights[:, None])
+
+    budget = 10_000  # n_bins * p_wide = 540,000, far over
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget)
+    allocated = []
+    original = algebra._csr_weighted_bincount
+
+    def spy(data, indices, indptr, n_cols, bin_idx, W, n_bins_arg):
+        allocated.append(int(n_bins_arg) * int(n_cols))
+        return original(data, indices, indptr, n_cols, bin_idx, W, n_bins_arg)
+
+    monkeypatch.setattr(algebra, "_csr_weighted_bincount", spy)
+
+    actual = algebra._cross_gram(compressed, wide, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+    assert all(cells <= budget for cells in allocated), (
+        f"allocated {max(allocated)} cells against a {budget}-cell budget"
+    )
 
 
 def test_narrow_support_beside_a_wide_csr_term_bounds_the_aggregate(monkeypatch):
@@ -1268,26 +1443,20 @@ def test_narrow_support_beside_a_wide_csr_term_bounds_the_aggregate(monkeypatch)
     budget = 4_000
     monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget)
 
-    # Spy on the KERNEL, not on the arithmetic around it: the first version of
-    # this test checked the chunk size and the result, and passed against the
-    # unchunked code because neither observes what is actually allocated.
-    allocated = []
-    original = algebra._csr_weighted_bincount
-
-    def spy(data, indices, indptr, n_cols, bin_idx, W, n_bins):
-        allocated.append(int(n_bins) * int(n_cols))
-        return original(data, indices, indptr, n_cols, bin_idx, W, n_bins)
-
-    monkeypatch.setattr(algebra, "_csr_weighted_bincount", spy)
+    # Observe the PROPERTY -- nothing observation-shaped and nothing
+    # cross-shaped gets built -- rather than one implementation's mechanism.
+    # An earlier version spied on the bincount kernel and broke when the helper
+    # stopped using one, which is a test encoding the fix instead of the
+    # requirement.
+    seen = _spy_on_row_expansion(monkeypatch)
+    forbid_dense = _forbid_csr_densify(monkeypatch)
 
     actual = algebra._support_csr_raw_cross(b_unique, support_idx, wide, weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
-    assert allocated, "expected the aggregate kernel to run"
-    assert max(allocated) <= budget, (
-        f"allocated a {max(allocated)}-cell aggregate against a {budget}-cell budget"
-    )
-    assert len(allocated) > 1, "this fixture is supposed to require more than one pass"
+    _assert_expansion_bounded(seen)
+    assert not forbid_dense, f"densified the wide CSR term ({forbid_dense} rows)"
+    assert sum(seen) == n, "each row should be expanded exactly once, in one pass"
 
 
 def test_two_large_supports_never_build_a_cross_shaped_aggregate(monkeypatch):
