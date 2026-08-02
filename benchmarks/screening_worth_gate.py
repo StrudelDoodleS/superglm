@@ -66,12 +66,19 @@ Four tables come out, because the threshold alone answers only half of it:
      gate says what NOT to do with a wide pair; this says whether the pair is
      worth having at all in some other class.
 
-Tables 3 and 4 are NOT reported in the evaluation guide.  Figures that used to
-stand in their place were not reproducible from this file and were removed
-rather than corrected; each 41x41 refit is a tens-of-minutes job and the pair of
-tables is a multi-hour one, which is the likeliest reason they went stale.  The
-arms are kept, and fixed, so the numbers can be produced properly -- run them
-with `--tables 3` / `--tables 4` and publish the command beside the figure.
+All four tables are reported in the evaluation guide, each from its own run of
+its own command: the sparse payoff comes from `--tables 3` and the three
+model-class comparison from `--tables 4`, and the guide's "Reproducing" section
+names both beside the figures they produced.
+
+This paragraph used to say the opposite -- that tables 3 and 4 were unpublished
+because a 41x41 refit was a tens-of-minutes job and the pair a multi-hour one.
+Both halves were true when written and are not now.  The figures that stood
+here were removed rather than corrected because they could not be reproduced
+from this file, and the refit really was that slow: 668.55 s for one of the
+nine, which was the `O(m**4)` alias walk `b2de09d` removed.  What the full
+default run now costs has not been re-timed, and the note below declines to
+guess rather than replacing one stale number with another.
 
 These are measurements of a simulated Gaussian book, not calibrated quantiles
 and not p-values.  `2*edf` is a Gaussian-family argument; the constant has not
@@ -370,6 +377,9 @@ def _run_gate_ladder(reps: int, n: int) -> list[dict[str, object]]:
                     # so a cell where they disagree cannot hide behind the mean
                     "reps_above": sum(1 for r in ratios if r > 1.0),
                     "reps": len(ratios),
+                    # the per-replicate z's, so a FIXED cutoff can be scored on
+                    # the same scale as the gate rather than off the mean
+                    "zs": list(zs),
                     "delta_pct": delta,
                     "agrees": (ratio > 1.0) == (delta < 0.0),
                 }
@@ -636,11 +646,17 @@ def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
         )
     agree = sum(1 for r in rows if r["agrees"])
     print(f"\n  sqrt(edf0/2) agrees with the holdout sign in {agree}/{len(rows)}")
-    # a fixed cutoff fails in BOTH directions; counting only one understates it
+    # Scored on the gate's own scale: the per-replicate ratio z_i / bar,
+    # averaged, thresholded at 1.  For a FIXED bar that is arithmetically
+    # mean(z) > c, since the bar does not vary between replicates -- but it is
+    # written in the same shape as the gate so the two rules are visibly being
+    # compared as rules, not as aggregation schemes.  A fixed cutoff fails in
+    # BOTH directions; counting only one understates it.
     for fixed in (2.0, 3.0, 5.0):
-        hit = sum(1 for r in rows if (r["z"] > fixed) == (r["delta_pct"] < 0.0))
-        admitted = [r for r in rows if r["z"] > fixed and r["delta_pct"] >= 0.0]
-        rejected = [r for r in rows if r["z"] <= fixed and r["delta_pct"] < 0.0]
+        scored = [(float(np.mean([z_i / fixed for z_i in r["zs"]])) > 1.0, r) for r in rows]
+        hit = sum(1 for call, r in scored if call == (r["delta_pct"] < 0.0))
+        admitted = [r for call, r in scored if call and r["delta_pct"] >= 0.0]
+        rejected = [r for call, r in scored if not call and r["delta_pct"] < 0.0]
         print(
             f"    a fixed z > {fixed}: {hit}/{len(rows)}"
             f"   admits harmful z=[{', '.join(f'{r["z"]:.2f}' for r in admitted)}]"
@@ -648,6 +664,30 @@ def _print_gate_ladder(rows: list[dict[str, object]]) -> None:
         )
     missed = [r for r in rows if not r["agrees"]]
     print(f"    sqrt(edf0/2) misses: {[f'z={r["z"]:.2f} {r["delta_pct"]:+.1f}%' for r in missed]}")
+
+    # Both rules under a per-replicate MAJORITY instead, which is the other
+    # reading of "aggregate the same way".  Printed rather than adopted: it is
+    # a different rule, not a fix to this one, and the section quotes the
+    # mean-ratio counts.  It is here so the comparison can be seen not to
+    # depend on the choice.
+    # `reps_above` is already the gate's per-replicate count: a replicate
+    # clears its own bar exactly when its ratio exceeds 1.
+    gate_major = sum(1 for r in rows if (r["reps_above"] * 2 > r["reps"]) == (r["delta_pct"] < 0.0))
+    parts = [f"sqrt(edf0/2) {gate_major}/{len(rows)}"]
+    moved: list[str] = []
+    for fixed in (2.0, 3.0, 5.0):
+        hits = 0
+        for r in rows:
+            by_majority = sum(1 for z_i in r["zs"] if z_i > fixed) * 2 > r["reps"]
+            hits += by_majority == (r["delta_pct"] < 0.0)
+            if by_majority != (float(np.mean(r["zs"])) > fixed):
+                moved.append(
+                    f"z>{fixed:g} at {r['n_levels']}x{r['n_levels']} effect {r['effect']:g} "
+                    f"(mean z {r['z']:.2f}, reps {[round(z_i, 2) for z_i in r['zs']]})"
+                )
+        parts.append(f"z>{fixed:g} {hits}/{len(rows)}")
+    print(f"    under a per-replicate majority instead: {', '.join(parts)}")
+    print(f"      rows whose call moves: {'; '.join(moved) if moved else 'none'}")
 
 
 def _print_concentration(rows: list[dict[str, object]], n_levels: int) -> None:
@@ -722,9 +762,10 @@ def _tables(value: str) -> tuple[int, ...]:
     """Parse `--tables 3,4` into a validated tuple.
 
     A subset has to be a first-class option rather than an ad-hoc edit: the
-    wide refits run for tens of minutes each, so a guide figure will sometimes
-    be refreshed one table at a time, and the command that produced it has to
-    be quotable.
+    wide refits still dominate the run, so a guide figure will sometimes be
+    refreshed one table at a time, and the command that produced it has to be
+    quotable.  Every table in the guide is cited by the `--tables` command that
+    produced it, which is only possible because a subset is a flag.
     """
     wanted = tuple(int(part) for part in value.replace(",", " ").split())
     if not wanted or any(t not in (1, 2, 3, 4) for t in wanted):
