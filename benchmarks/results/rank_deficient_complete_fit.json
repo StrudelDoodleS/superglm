@@ -1,0 +1,100 @@
+{
+ "baseline": {
+  "backend_dispatch": {
+   "augmented_method": "qr_svd",
+   "augmented_rank": 1626,
+   "augmented_representative": true,
+   "blas": {
+    "detection": "pkgconfig",
+    "name": "scipy-openblas",
+    "numpy": "2.4.2",
+    "version": "0.3.31.dev"
+   },
+   "coefficient_method": "qr_svd",
+   "data_method": "gram_eigh",
+   "data_rank": 1627,
+   "data_representative": false,
+   "python": "3.14.6"
+  },
+  "configuration": {
+   "levels": 41,
+   "parameters": 1680,
+   "repeats": 1,
+   "rows": 12000,
+   "train_rows": 6000
+  },
+  "memory": {
+   "peak_rss_mib": 1045.8
+  },
+  "numerical_outputs": {
+   "beta_l2": 39.473487178,
+   "deviance": 4347.030089931,
+   "effective_df": 1627.0,
+   "n_iter": 2,
+   "n_zero": 54,
+   "zero_index_sum": 44145
+  },
+  "timing_seconds": {
+   "all": [
+    262.6198
+   ],
+   "median": 262.6198,
+   "min": 262.6198
+  }
+ },
+ "baseline_commit": "a2611cc",
+ "branch": {
+  "backend_dispatch": {
+   "augmented_method": "qr_svd",
+   "augmented_rank": 1626,
+   "augmented_representative": true,
+   "blas": {
+    "detection": "pkgconfig",
+    "name": "scipy-openblas",
+    "numpy": "2.4.2",
+    "version": "0.3.31.dev"
+   },
+   "coefficient_method": "qr_svd",
+   "data_method": "gram_eigh",
+   "data_rank": 1627,
+   "data_representative": false,
+   "python": "3.14.6"
+  },
+  "configuration": {
+   "levels": 41,
+   "parameters": 1680,
+   "repeats": 3,
+   "rows": 12000,
+   "train_rows": 6000
+  },
+  "memory": {
+   "peak_rss_mib": 1002.4
+  },
+  "numerical_outputs": {
+   "beta_l2": 39.473487178,
+   "deviance": 4347.030089931,
+   "effective_df": 1627.0,
+   "n_iter": 2,
+   "n_zero": 54,
+   "zero_index_sum": 44145
+  },
+  "timing_seconds": {
+   "all": [
+    6.6787,
+    5.9719,
+    6.0937
+   ],
+   "median": 6.0937,
+   "min": 5.9719
+  }
+ },
+ "branch_commit": "404a6af",
+ "fit": "41-level cat_cat pair, 6000 training rows, 1680 parameters, 54 unidentifiable",
+ "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  Taken on one shared machine with the CPU lock held; the 1-minute load average sat between 12 and 21 across the two runs, so the wall clock is a floor rather than a benchmark.  Peak RSS is ru_maxrss for the whole process, so each side is the first fit in a fresh interpreter.",
+ "summary": {
+  "backend_dispatch_identical": true,
+  "numerical_outputs_identical": true,
+  "peak_rss_delta_mib": -43.4,
+  "speedup_min_of_n": 44.0
+ }
+}
