@@ -309,6 +309,13 @@ def _random_effect_cross_gram(
     W: NDArray,
 ) -> NDArray:
     """Return ``X_re.T @ diag(W) @ X_other`` by direct level aggregation."""
+    # Guarded like every other _agg_by_bin caller.  The output is
+    # (n_levels, width-of-other) -- cross-shaped, and a high-cardinality random
+    # effect beside a wide raw-basis SSP term is the case that reaches it.  An
+    # earlier audit only inspected functions named _cross_gram, so this call sat
+    # outside its scope entirely.
+    if not _agg_by_bin_fits(other, random_effect.n_levels):
+        return _cross_gram_by_columns(random_effect, other, W)
     return _agg_by_bin(
         other,
         random_effect.codes,
@@ -665,15 +672,27 @@ def _cross_gram_tensor_spline_categorical(
                 result_raw[j2::K2, :] = B1.T @ agg[j2]
             return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
+        # One channel at a time is still not enough: a single (n_bins1, K_cat)
+        # channel is itself cross-shaped, and n_bins1 follows a configured
+        # n_bins.  So the basis dimension is tiled inside the channel as well,
+        # and only the columns of that tile are ever expanded.  What is left at
+        # the smallest tile is (n_bins1, 1), which is the least an aggregate
+        # over n_bins1 bins can occupy.
+        tile = _aggregate_column_chunk(gm_tensor.n_bins1, K_cat)
         for j2 in range(K2):
-            channel = np.zeros((gm_tensor.n_bins1, K_cat), dtype=np.float64)
-            for start in range(0, n_level, chunk):
-                stop = min(start + chunk, n_level)
-                block = _expand_support_rows(gm_spline_cat.B_unique, bin_cat[start:stop])
-                w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
-                channel += _weighted_bincount_2d(idx1[start:stop], w_col, block, gm_tensor.n_bins1)
-                del block
-            result_raw[j2::K2, :] = B1.T @ channel
+            for first in range(0, K_cat, tile):
+                last = min(first + tile, K_cat)
+                columns = gm_spline_cat.B_unique[:, first:last]
+                channel = np.zeros((gm_tensor.n_bins1, last - first), dtype=np.float64)
+                for start in range(0, n_level, chunk):
+                    stop = min(start + chunk, n_level)
+                    block = _expand_support_rows(columns, bin_cat[start:stop])
+                    w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
+                    channel += _weighted_bincount_2d(
+                        idx1[start:stop], w_col, block, gm_tensor.n_bins1
+                    )
+                    del block
+                result_raw[j2::K2, first:last] = B1.T @ channel
         return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
     for j2 in range(K2):
