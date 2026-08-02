@@ -329,18 +329,20 @@ def test_table_two_has_a_floor_of_its_own_now_it_is_exempt_from_the_split_rule()
     file exists to prevent, reached through the one table with no floor.
     """
     parser = _build_parser()
-    with pytest.raises(SystemExit, match="table 2"):
+    # too few rows to occupy the null's cells at all -- checked first
+    with pytest.raises(SystemExit, match="cannot occupy"):
         _validate_configuration(
             parser.parse_args(["--tables", "2", "--n", "3", "--wide-levels", "3"])
         )
 
-    # the floor is the parameter count, so it tracks --wide-levels
+    # enough rows for the null, but the mains model is saturated: the floor is
+    # the parameter count, so it tracks --wide-levels
     with pytest.raises(SystemExit, match="saturated"):
         _validate_configuration(
-            parser.parse_args(["--tables", "2", "--n", "81", "--wide-levels", "41"])
+            parser.parse_args(["--tables", "2", "--n", "100", "--wide-levels", "60"])
         )
     _validate_configuration(
-        parser.parse_args(["--tables", "2", "--n", "82", "--wide-levels", "41"])
+        parser.parse_args(["--tables", "2", "--n", "120", "--wide-levels", "60"])
     )
     # and the published run is untouched
     _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
@@ -372,6 +374,27 @@ def test_table_two_needs_enough_cells_for_its_own_null_to_mean_anything() -> Non
     _validate_configuration(
         parser.parse_args(["--tables", "3", "--n", "600", "--wide-levels", "3"])
     )
+
+
+def test_table_two_needs_rows_to_occupy_cells_with_not_just_a_grid_to_hold_them() -> None:
+    """Grid capacity is necessary and not sufficient.
+
+    `concentration` divides by the OCCUPIED count, so a run can clear the
+    100-cell width floor and still occupy 20 cells: `--tables 2 --n 20
+    --wide-levels 10` has the grid but not the rows.  Both are checked -- the
+    capacity at parse time, and the occupancy actually passed to
+    `concentration` at run time, where the real number is known.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="cannot occupy"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "20", "--wide-levels", "10"])
+        )
+    # enough rows and enough grid
+    _validate_configuration(
+        parser.parse_args(["--tables", "2", "--n", "600", "--wide-levels", "10"])
+    )
+    _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
 
 
 def test_a_zero_worth_bar_is_refused_rather_than_divided_by() -> None:
@@ -451,7 +474,7 @@ def test_table_two_is_exempt_from_the_half_sample_requirement() -> None:
     # Table 2 is refused here too, but for ITS OWN reason -- its mains model is
     # saturated at 50 rows -- not because a training half it never takes would
     # be short of levels.  The messages are what keep the two rules apart.
-    with pytest.raises(SystemExit, match="saturated"):
+    with pytest.raises(SystemExit, match="cannot occupy|saturated"):
         _validate_configuration(parser.parse_args([*lopsided, "--tables", "2"]))
     for table in ("3", "4"):
         with pytest.raises(SystemExit, match="training rows"):
@@ -764,7 +787,10 @@ def test_shrinkage_table_reproduces_its_arms_and_pooling_spends_less_df() -> Non
 
 @pytest.mark.slow
 def test_concentration_table_runs_end_to_end_and_ranks_spiky_below_diffuse() -> None:
-    rows = _run_concentration(reps=1, n=2_400, n_levels=7)
+    # 10 levels is 100 cells, the floor at which the k/3 null is worth
+    # reading; the previous 7 levels gave 49 and the verdict this test
+    # asserts on was one the guard now refuses to print.
+    rows = _run_concentration(reps=1, n=2_400, n_levels=10)
     assert len(rows) == len(MATCHED)
     by_label = {row["label"]: row for row in rows}
     assert all(np.isfinite(row["concentration"]) for row in rows)
