@@ -769,6 +769,30 @@ def _chunked_support_bincount_2d(
     return out
 
 
+def _mixed_chunk_stop(
+    indptr: NDArray, start_row: int, n_rows: int, dense_rows: int, max_nnz: int
+) -> int:
+    """End of a mixed-pair row chunk, budgeting the SPARSE payload as well.
+
+    Sizing by the dense expansion alone budgets only ``rows * p_b * 8``.  The
+    weighted CSR slice beside it costs ``nnz-in-range * 12`` (float64 plus a
+    32-bit index), and ``nnz`` per row is a property of the OTHER block -- for a
+    cardinal-CR basis the rows are structurally dense.  A narrow compressed side
+    therefore permits a huge row count, and the sparse payload follows it: five
+    compressed columns admit ~1.68M rows, which against a 20-column dense CSR is
+    tens of millions of stored entries.  Boundaries come off ``indptr``, so the
+    bound is the range's ACTUAL nonzeros rather than an average that a skewed
+    row density would defeat.
+    """
+    stop_row = min(start_row + dense_rows, n_rows)
+    limit = int(indptr[start_row]) + max_nnz
+    # Largest row boundary whose cumulative nnz is still inside the budget.
+    by_payload = int(np.searchsorted(indptr, limit, side="right")) - 1
+    stop_row = min(stop_row, by_payload)
+    # One row can never be split, so always make progress.
+    return max(stop_row, start_row + 1)
+
+
 def _support_csr_raw_cross(
     B_unique: NDArray,
     support_idx: NDArray,
@@ -805,14 +829,18 @@ def _support_csr_raw_cross(
     n_rows = int(W_rows.shape[0])
     if n_rows == 0:
         return out
-    chunk = min(n_rows, _cross_expansion_chunk_rows(p_b, 0, _MAX_CROSS_EXPANSION_BYTES))
-    for start_row in range(0, n_rows, chunk):
-        stop_row = min(start_row + chunk, n_rows)
+    dense_rows = min(n_rows, _cross_expansion_chunk_rows(p_b, 0, _MAX_CROSS_EXPANSION_BYTES))
+    # float64 payload plus a 32-bit column index per stored entry.
+    max_nnz = max(1, _MAX_CROSS_EXPANSION_BYTES // 12)
+    start_row = 0
+    while start_row < n_rows:
+        stop_row = _mixed_chunk_stop(csr.indptr, start_row, n_rows, dense_rows, max_nnz)
         left = _expand_support_rows(B_unique, support_idx[start_row:stop_row])
         right = csr[start_row:stop_row].multiply(W_rows[start_row:stop_row, None])
         # sparse.T @ dense keeps the CSR side sparse; the product is (p_csr, p_b).
         out += np.asarray(right.T @ left, dtype=np.float64).T
         del left, right
+        start_row = stop_row
     return out
 
 

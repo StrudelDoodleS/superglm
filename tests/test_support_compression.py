@@ -1563,6 +1563,50 @@ def test_compressed_ssp_beside_a_wide_sparse_term_bounds_the_aggregate(monkeypat
     )
 
 
+def test_mixed_chunk_bounds_the_sparse_payload_not_just_the_expansion(monkeypatch):
+    """Reviewer P1 on 2e3af3e: the chunk budgeted the dense expansion only.
+
+    ``nnz`` per row belongs to the OTHER block -- a cardinal-CR basis is
+    structurally dense -- so a narrow compressed side permits a huge row count
+    and the weighted CSR slice follows it. Five compressed columns admit ~1.68M
+    rows, which against a 20-column dense CSR is tens of millions of entries.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(160)
+    n, n_support, p_b, p_csr = 6_000, 40, 5, 20
+    b_unique = gen.normal(size=(n_support, p_b))
+    support_idx = gen.integers(0, n_support, n).astype(np.intp)
+    # Structurally dense, as a cardinal-CR interaction basis is.
+    dense_csr = sp.csr_matrix(gen.normal(size=(n, p_csr)))
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = b_unique[support_idx].T @ (dense_csr.toarray() * weights[:, None])
+
+    budget = 4_000  # bytes
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    seen = _spy_on_row_expansion(monkeypatch)
+
+    actual = algebra._support_csr_raw_cross(b_unique, support_idx, dense_csr, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+    assert seen, "expected the helper to run"
+
+    # Rebuild each chunk's row range from the expansion sizes and check the
+    # sparse payload it implied, which is what the old sizing ignored.
+    indptr = dense_csr.indptr
+    max_nnz = max(1, budget // 12)
+    offset = 0
+    for rows_in_chunk in seen:
+        nnz = int(indptr[offset + rows_in_chunk]) - int(indptr[offset])
+        assert nnz <= max_nnz or rows_in_chunk == 1, (
+            f"chunk of {rows_in_chunk} rows carried {nnz} stored entries against "
+            f"a {max_nnz}-entry budget"
+        )
+        offset += rows_in_chunk
+    assert offset == n, "the chunks must cover every row exactly once"
+
+
 def test_narrow_support_beside_a_wide_csr_term_bounds_the_aggregate(monkeypatch):
     """Reviewer P1 on 259fce2, inside the helper written to fix the previous
     P1: the compression gate bounds ``n_support`` against the COMPRESSED
