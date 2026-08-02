@@ -42,6 +42,34 @@ from numpy.typing import NDArray
 _RCOND = 1e-12
 
 
+def _solve_floor(n: int) -> float:
+    """Relative cut for what an inverse may RESOLVE, as opposed to count.
+
+    ``max(n, 1) * eps`` -- round-off, and deliberately far below
+    :data:`_RCOND`.  A cut chosen to make a RANK robust is the wrong cut for
+    an INVERSE: dropping a direction there does not round the answer, it
+    deletes the direction's whole contribution.
+
+    ``edf`` is ``rank - lambda * tr(A^-1 S)``, so a direction the rank COUNTS
+    and the inverse DROPS contributes ``1 - 0`` -- a whole degree of freedom
+    with no penalty offset -- and contributes nothing to the statistic either.
+    Both symptoms are the same mismatch.  Measured on a 20-level pair with one
+    level at 1/1000th the weight, block size 12: at 1e-12 the inverse resolves
+    227 directions where ``block_ranks`` and ``numpy.linalg.matrix_rank`` both
+    read 228, and the reported ``edf`` at the ladder's low edge is 208.9999
+    against a stable closed-form reference of 207.9999 -- exactly one degree
+    of freedom.  At this floor the inverse resolves 228 at every bracket edge
+    and every weight tried, so the count and the inverse agree by construction
+    and that error falls to 8.1e-09.
+
+    The price is at the HIGH edge, where resolving directions the penalty has
+    flattened amplifies ``1/w`` inside ``tr(A^-1 S)``: that edf's error moves
+    from 1.2e-05 to 1.1e-03 against the same reference.  Three orders smaller
+    than the error it removes, and on a 19-df block 6e-05 relative.
+    """
+    return max(int(n), 1) * float(np.finfo(np.float64).eps)
+
+
 def psd_ranks(A: NDArray, rcond: float = _RCOND) -> NDArray:
     """Per-matrix ranks of a batch of symmetric PSD matrices, no inverse.
 
@@ -55,7 +83,7 @@ def psd_ranks(A: NDArray, rcond: float = _RCOND) -> NDArray:
     return (w > rcond * scale).sum(axis=-1)
 
 
-def _psd_pinv(A: NDArray, rcond: float) -> tuple[NDArray, NDArray]:
+def _psd_pinv(A: NDArray, rcond: float | None = None) -> tuple[NDArray, NDArray]:
     """Batched PSD (pseudo-)inverse and per-matrix rank.
 
     ``A`` is ``(..., n, n)`` and symmetric.  Directions below the cut are
@@ -82,6 +110,8 @@ def _psd_pinv(A: NDArray, rcond: float) -> tuple[NDArray, NDArray]:
     :func:`factor_arrow`.
     """
     w, Q = np.linalg.eigh(A)
+    if rcond is None:
+        rcond = _solve_floor(A.shape[-1])
     scale = np.maximum(w[..., -1:], np.finfo(np.float64).tiny)
     keep = w > rcond * scale
     inv = np.where(keep, 1.0 / np.where(keep, w, 1.0), 0.0)
@@ -124,7 +154,7 @@ def factor_arrow(
     G: NDArray,
     E: NDArray,
     border: NDArray,
-    rcond: float = _RCOND,
+    rcond: float | None = None,
     block_ranks: NDArray | None = None,
 ) -> ArrowFactor:
     """Factor the arrow matrix with blocks ``G`` (L, g, g), coupling ``E``

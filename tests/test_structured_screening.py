@@ -312,25 +312,104 @@ def _thin_level_pair(low_weight):
     return grab
 
 
+def _reference_edf(U, V, C, M, S_ti, lam):
+    """``edf(lambda)`` from a form that cannot cancel, for use as an ORACLE.
+
+    ``sum_j a_j / (a_j + lambda (1 - a_j))`` over the simultaneously
+    diagonalized dense pencil.  Every term is a ratio of positive quantities
+    in ``[0, 1]``, so unlike ``rank - lambda tr(A^-1 S)`` there is nothing to
+    subtract and no cancellation to amplify.  That is what makes it usable as
+    a reference for the two paths that DO subtract.
+    """
+    eps = np.finfo(np.float64).eps
+    MinvC = np.linalg.solve(M, C)
+    V_eff = V - C.T @ MinvC
+    V_eff = 0.5 * (V_eff + V_eff.T)
+    S = 0.5 * (S_ti + S_ti.T)
+    G = 0.5 * ((V_eff + S) + (V_eff + S).T)
+    w, Q = np.linalg.eigh(G)
+    keep = w > w.size * eps * w.max()
+    whiten = Q[:, keep] / np.sqrt(w[keep])
+    Vt = whiten.T @ V_eff @ whiten
+    a = np.clip(np.linalg.eigvalsh(0.5 * (Vt + Vt.T)), 0.0, 1.0)
+    den = a + lam * (1.0 - a)
+    ok = den > 0.0
+    return float(np.sum(a[ok] / den[ok]))
+
+
+# One budget above edf at the LOW bracket edge (~208) and four below edf at the
+# HIGH edge (~19), so both clamping regimes are reported.  The old budgets were
+# all below 19, so every rung clamped HIGH and the low edge was never asserted
+# on -- which is how a whole-degree-of-freedom error lived there uncovered.
+_EDGE_BUDGETS = (1.0, 2.0, 4.0, 8.0, 400.0)
+
+
 @pytest.mark.parametrize("low_weight", [1.0, 0.01, 0.001])
 def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
-    """Cross-path agreement on a system the rank cut has to resolve.
+    """Both paths are checked against a REFERENCE, not against each other.
 
     ``edf`` is ``rank(A) - lambda tr(A^-1 S)`` and the rank is an INTEGER, so
-    a mis-counted one moves the answer by a whole degree of freedom -- which
-    is a different ``z``, not a rounding difference.  Counting it at the
-    bracket edge did exactly that: measured 17.99995 against the dense path's
-    18.99991 with one level of twenty carried at 1/100th the weight.
+    a mis-counted one moves the answer by a whole degree of freedom -- a
+    different ``z``, not a rounding difference.
+
+    This used to assert only that the two paths agreed with each other, which
+    is weak in both directions: it passes when both are wrong together, and it
+    fails when one moves TOWARD the truth.  Both happened.  It passed while
+    the structured path was a full degree of freedom out at the low bracket
+    edge, because every budget it used clamped at the HIGH edge and the low
+    one was never reported.  ``_reference_edf`` is a form that cannot cancel,
+    so it can arbitrate.
+
+    Neither path dominates, which is the other reason agreement proves
+    nothing: measured against the reference, at ``low_weight`` 0.01 the
+    structured path is closer (4.20e-04 against dense 5.26e-04) and at 0.001
+    the dense one is (2.07e-05 against structured 1.10e-03).
+
+    Tolerances are set from measurement, not from what passes.  Worst observed
+    over all three weights and all five budgets: structured-vs-reference
+    1.0965e-03, dense-vs-reference 5.2616e-04, structured-vs-dense 1.0780e-03,
+    statistic 1.5641e-06 relative.  The bound is 3e-3 -- about 2.7x the worst
+    of those, headroom for the BLAS-dependence these traces demonstrably have,
+    and still 333x tighter than the one degree of freedom this test exists to
+    catch.
+
+    The structured path is knowingly the less accurate at the high edge: it
+    resolves directions the penalty has flattened, which amplifies ``1/w``
+    inside ``tr(A^-1 S)``.  That is the deliberate price of resolving them at
+    all -- see ``_solve_floor`` in :mod:`superglm.screening._arrow` -- and it
+    buys the low edge, where the same change takes the error from 1.0 to
+    8.1e-09.
     """
     from superglm.screening._structured import structured_ladder
 
     grab = _thin_level_pair(low_weight)
     U, V, C, M, S_ti, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(U, V, C, M, S_ti, budgets=BUDGETS, U_nuisance=u_m)
-    struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=BUDGETS)
-    for d, s in zip(dense, struct, strict=True):
-        assert s.edf0 == pytest.approx(d.edf0, abs=1e-3)
+    dense = penalized_score_statistic_ladder(
+        U, V, C, M, S_ti, budgets=_EDGE_BUDGETS, U_nuisance=u_m
+    )
+    struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
+    saw_low_edge = False
+    for budget, d, s in zip(_EDGE_BUDGETS, dense, struct, strict=True):
+        # Each path is judged at ITS OWN lambda: the two brackets are scaled
+        # differently on purpose (tr(V_eff) against tr(V)), so a shared lambda
+        # would compare them at different points of the same curve.
+        assert s.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, s.lambda0), abs=3e-3), (
+            "structured",
+            budget,
+            s.edf0,
+        )
+        assert d.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, d.lambda0), abs=3e-3), (
+            "dense",
+            budget,
+            d.edf0,
+        )
+        # Retained deliberately: a truth check alone cannot see the two paths
+        # drifting together, and this can.
+        assert s.edf0 == pytest.approx(d.edf0, abs=3e-3), ("parity", budget)
         assert s.statistic == pytest.approx(d.statistic, rel=1e-3)
+        if budget > 100.0:
+            saw_low_edge = True
+    assert saw_low_edge, "a rung must clamp at the LOW edge or this proves nothing"
 
 
 def test_the_block_rank_is_the_one_a_dense_rank_call_reports():
