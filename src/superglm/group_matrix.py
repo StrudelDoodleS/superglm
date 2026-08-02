@@ -88,8 +88,10 @@ GroupMatrix = (
     | DiscretizedTensorGroupMatrix
 )
 
-_MAX_DISC_DISC_HIST_CELLS = 5_000_000
-_MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
+# The histogram cell caps live in _group_matrix_algebra, which is where they are
+# read.  Duplicating them here was dead weight of an actively misleading kind:
+# they are the names a reviewer greps first, and patching them did nothing --
+# the same failure mode as a threshold frozen into a default argument.
 
 
 def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:

@@ -230,18 +230,27 @@ def plan_row_support(
     B_csr: sp.spmatrix,
     row_index: NDArray,
     *,
-    min_speedup: float = DEFAULT_MIN_SPEEDUP,
-    max_support_bytes: int = DEFAULT_MAX_SUPPORT_BYTES,
+    min_speedup: float | None = None,
+    max_support_bytes: int | None = None,
     gram_repeats: int = 1,
 ) -> tuple[NDArray, NDArray] | None:
     """Return ``(B_unique, row_index)`` when compression pays, else ``None``.
 
     ``row_index`` maps each observation to its distinct-row group and must
     satisfy ``B_unique[row_index] == B``; callers derive it from the covariate
-    that generated the basis, which is an O(n) scan of a one-dimensional array.
+    that generated the basis, which is an O(n log n) sort of one column rather
+    than a pass over the basis.
     Only the first occurrence of each group is materialised, so the full basis
     is never densified.
     """
+    # Resolved at call time, never bound as a default: these are module globals
+    # so a test can lower them, and a default argument would freeze them at
+    # import -- the shape that made a lowered budget silently do nothing in the
+    # algebra module, and that here would split two gates documented as agreeing.
+    min_speedup = DEFAULT_MIN_SPEEDUP if min_speedup is None else min_speedup
+    max_support_bytes = (
+        DEFAULT_MAX_SUPPORT_BYTES if max_support_bytes is None else max_support_bytes
+    )
     n_rows, p_b = B_csr.shape
     row_index = np.asarray(row_index, dtype=np.intp).ravel()
     if n_rows == 0 or row_index.shape[0] != n_rows:
@@ -263,14 +272,15 @@ def plan_verified_row_support(
     B_csr: sp.spmatrix,
     row_index: NDArray,
     *,
-    min_speedup: float = DEFAULT_MIN_SPEEDUP,
-    max_support_bytes: int = DEFAULT_MAX_SUPPORT_BYTES,
+    min_speedup: float | None = None,
+    max_support_bytes: int | None = None,
     gram_repeats: int = 1,
 ) -> tuple[NDArray, NDArray] | None:
     """``plan_row_support`` with the caller's grouping checked against the basis.
 
     The gates run on ``row_index`` alone, so a declined block costs one scan of
-    a one-dimensional array and never densifies anything.  On accept the basis
+    one column -- a sort, not a linear scan -- and never densifies anything.
+    On accept the basis
     is densified once, in bounded chunks, and every row is compared bitwise
     against its group representative -- the same check ``detect_row_support``
     makes, so this is exact for non-finite values on the same terms.
@@ -279,6 +289,14 @@ def plan_verified_row_support(
     values did not produce identical rows, and the fallback derives the
     grouping from the basis instead.
     """
+    # Resolved at call time, never bound as a default: these are module globals
+    # so a test can lower them, and a default argument would freeze them at
+    # import -- the shape that made a lowered budget silently do nothing in the
+    # algebra module, and that here would split two gates documented as agreeing.
+    min_speedup = DEFAULT_MIN_SPEEDUP if min_speedup is None else min_speedup
+    max_support_bytes = (
+        DEFAULT_MAX_SUPPORT_BYTES if max_support_bytes is None else max_support_bytes
+    )
     n_rows, p_b = B_csr.shape
     row_index = np.asarray(row_index, dtype=np.intp).ravel()
     if n_rows == 0 or row_index.shape[0] != n_rows:
@@ -308,8 +326,8 @@ def plan_verified_row_support(
 def detect_row_support(
     B_csr: sp.spmatrix,
     *,
-    min_speedup: float = DEFAULT_MIN_SPEEDUP,
-    max_support_bytes: int = DEFAULT_MAX_SUPPORT_BYTES,
+    min_speedup: float | None = None,
+    max_support_bytes: int | None = None,
     gram_repeats: int = 1,
 ) -> tuple[NDArray, NDArray] | None:
     """Derive the row grouping from the basis itself, then plan compression.
@@ -332,6 +350,14 @@ def detect_row_support(
     (Explicitly stored ``-0.0`` entries densify to ``+0.0`` before grouping,
     identically for grouping and reconstruction, so exactness is unaffected.)
     """
+    # Resolved at call time, never bound as a default: these are module globals
+    # so a test can lower them, and a default argument would freeze them at
+    # import -- the shape that made a lowered budget silently do nothing in the
+    # algebra module, and that here would split two gates documented as agreeing.
+    min_speedup = DEFAULT_MIN_SPEEDUP if min_speedup is None else min_speedup
+    max_support_bytes = (
+        DEFAULT_MAX_SUPPORT_BYTES if max_support_bytes is None else max_support_bytes
+    )
     n_rows, p_b = B_csr.shape
     if n_rows == 0:
         return None
