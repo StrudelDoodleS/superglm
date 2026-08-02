@@ -933,13 +933,19 @@ def _validate_configuration(args: argparse.Namespace) -> None:
     holds -- and that residue is left to fail loudly at fit time, where the
     message names the actual level.
 
-    TABLE 2 IS EXEMPT, and deliberately so.  The requirement comes from the
-    half-sample split, and `_run_concentration` never calls `_split`: it fits
-    the mains model on all `n` rows and takes residuals on those same rows, so
-    it has no holdout and therefore no level that can appear only at predict
-    time.  Applying the half-sample bound there rejected configurations that
-    run perfectly well, such as `--tables 2 --n 50 --wide-levels 41`.  The
-    three runners that DO split are tables 1, 3 and 4.
+    TABLE 2 IS EXEMPT FROM THIS RULE, and has its own instead.  The half-sample
+    requirement comes from the split, and `_run_concentration` never calls
+    `_split`: it fits the mains model on all `n` rows and takes residuals on
+    those same rows, so it has no holdout and no level that can appear only at
+    predict time.  The three runners that DO split are tables 1, 3 and 4.
+
+    The exemption is about the REASON rather than the number.  Table 2's own
+    floor -- its mains model must not be saturated -- accepts exactly the same
+    configurations the half-sample bound would, as the comment below records,
+    so nothing became runnable that was not runnable before.  What changed is
+    which requirement each table is held to, and therefore what its refusal
+    says: a table 2 configuration is now refused for having too few rows for
+    its parameters, not for a training half it never takes.
     """
     # Table 2 is exempt from the half-sample rule but not from having a floor.
     # It fits `g + h` mains on all `n` rows -- `2 * n_levels - 1` parameters --
