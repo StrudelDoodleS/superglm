@@ -313,6 +313,49 @@ def test_a_wholly_absorbed_probe_is_scored_rather_than_discarded():
             assert row["z"] < 0.0, (seed, row["z"])
 
 
+def test_a_block_of_pure_cancellation_cannot_score_competitively():
+    """The noise floor is MEASURED from the block, not assumed.
+
+    ``V_eff = V - C' M^-1 C`` is a Schur complement of a PSD matrix, so in
+    exact arithmetic it is PSD.  Any NEGATIVE eigenvalue is arithmetic error,
+    and its magnitude is a measurement of this block's own noise floor -- taken
+    from the block itself, with no constant and no conditioning estimate.
+
+    Counting relative to the block's largest eigenvalue presumes that
+    eigenvalue is real curvature.  Here it is not: the numeric varies by 1e-08
+    within each level against a curvature of order 1e+04, so ``V_eff`` is
+    entirely cancellation and its DOMINANT eigenvalue is negative -- the
+    positive ones reach 0.23 of it.  Dividing the profiled score by those
+    directions gave ``statistic 145.508`` at ``edf0 10.0``, hence ``z = 30.3``:
+    top of the table, from a pair carrying nothing.
+
+    Found by sweeping ``z`` over absorbed blocks rather than by reasoning about
+    them, which is the only reason it was found at all.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+
+    L, n, seed = 25, 8000, 7
+    rng = np.random.default_rng(seed)
+    g = rng.integers(0, L, n)
+    g[g == 1] = 0
+    g[:2] = 1  # one level with two rows
+    x = np.linspace(0.5, L - 0.5, L)[g] + 1e-8 * rng.normal(size=n)
+    df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+    y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+    w = np.ones(n)
+    model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+    model.fit_reml(df, y, sample_weight=w)
+
+    row = model.screen_interactions(df, y, candidates=[("x", "g")], sample_weight=w).iloc[0]
+
+    # Either refused outright, or scored so low it cannot be promoted.  What it
+    # must never do is rank like a signal.
+    assert not (np.isfinite(row["z"]) and row["z"] > 0.0), (row["z"], row["edf0"])
+
+
 def test_a_weakly_identified_block_is_scored_not_discarded():
     """Weak identification is a finding about the data, not about arithmetic.
 
