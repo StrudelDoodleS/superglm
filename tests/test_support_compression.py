@@ -1020,6 +1020,111 @@ def test_expanded_cross_gram_chunking_matches_the_unchunked_contraction():
     np.testing.assert_allclose(chunked, one_shot, rtol=1e-11, atol=1e-11)
 
 
+def _spy_on_row_expansion(monkeypatch):
+    """Record the row count of every support expansion, so a chunk bound can be
+    asserted rather than described."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    seen: list[int] = []
+    original = algebra._expand_support_rows
+
+    def spy(B_unique, bin_idx):
+        seen.append(int(np.size(bin_idx)))
+        return original(B_unique, bin_idx)
+
+    monkeypatch.setattr(algebra, "_expand_support_rows", spy)
+    return seen
+
+
+def test_tensor_by_spline_cat_fallback_expands_rows_in_chunks(monkeypatch):
+    """Reviewer finding on 814a0e0, the sibling of the bounded support-support
+    fallback: over the cell cap this branch materialised the whole level."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedTensorGroupMatrix,
+    )
+
+    gen = np.random.default_rng(70)
+    n, n_bins1, n_bins2 = 40_000, 12, 9
+    b1 = gen.normal(size=(n_bins1, 3))
+    b2 = gen.normal(size=(n_bins2, 2))
+    idx1 = gen.integers(0, n_bins1, n).astype(np.intp)
+    idx2 = gen.integers(0, n_bins2, n).astype(np.intp)
+    joint = np.einsum("ij,ik->ijk", b1[idx1], b2[idx2]).reshape(n, 6)
+    tensor = DiscretizedTensorGroupMatrix(
+        b1, b2, idx1, idx2, joint, gen.normal(size=(6, 4)), np.arange(n, dtype=np.intp), 0
+    )
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    spline_cat = _spline_cat_support_block(n, 400, 5, 3, rows, seed=71)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+
+    # Force the over-cap branch, then hold it to the expansion budget.
+    monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1)
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", 1 << 13)
+    seen = _spy_on_row_expansion(monkeypatch)
+
+    actual = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+    assert seen, "expected the over-cap branch to expand support rows"
+    allowed = algebra._cross_expansion_chunk_rows(5, 0, 1 << 13)
+    assert max(seen) <= allowed, f"expanded {max(seen)} rows at once against a {allowed}-row budget"
+    # Each row expanded exactly once across all K2 passes, not once per pass.
+    assert sum(seen) == rows.size
+
+
+def test_categorical_by_spline_cat_expands_rows_in_chunks(monkeypatch):
+    """Found by sweeping for the same class rather than reported.
+
+    Pre-dates support compression, but compression makes it hot: a Categorical
+    main effect beside a spline_cat term is every model this targets.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_core import CategoricalGroupMatrix
+
+    gen = np.random.default_rng(72)
+    n = 40_000
+    codes = gen.integers(0, 4, n).astype(np.int32)
+    gm_cat = CategoricalGroupMatrix(codes, 4)
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    spline_cat = _spline_cat_support_block(n, 300, 6, 3, rows, seed=73)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = algebra._cross_gram_categorical_spline_categorical(gm_cat, spline_cat, weights)
+
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", 1 << 13)
+    seen = _spy_on_row_expansion(monkeypatch)
+
+    actual = algebra._cross_gram_categorical_spline_categorical(gm_cat, spline_cat, weights)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+    assert seen, "expected the aggregation to expand support rows"
+    allowed = algebra._cross_expansion_chunk_rows(6, 0, 1 << 13)
+    assert max(seen) <= allowed, f"expanded {max(seen)} rows at once against a {allowed}-row budget"
+    assert sum(seen) == rows.size
+
+
+def test_row_chunking_below_the_threshold_is_bit_identical():
+    """Chunking reorders a sum, so it must not engage on ordinary fits."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_kernels import _weighted_bincount_2d
+
+    gen = np.random.default_rng(74)
+    n, n_bins, p_b = 5_000, 7, 6
+    b_unique = gen.normal(size=(50, p_b))
+    support_idx = gen.integers(0, 50, n).astype(np.intp)
+    bin_idx = gen.integers(0, n_bins, n).astype(np.intp)
+    weights = gen.normal(0.0, 1.0, n)
+
+    one_shot = _weighted_bincount_2d(bin_idx, weights, b_unique[support_idx], n_bins)
+    chunked = algebra._chunked_support_bincount_2d(bin_idx, weights, b_unique, support_idx, n_bins)
+
+    # Default budget dwarfs this block, so the loop runs once: bit-identical.
+    np.testing.assert_array_equal(chunked, one_shot)
+
+
 def _forbid_2d_histogram(monkeypatch, pair_name):
     """Make the joint histogram fatal so a cap test cannot pass by taking it."""
     from superglm._group_matrix import _group_matrix_algebra as algebra
