@@ -206,13 +206,25 @@ def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
     joint would stop being PSD, the additivity would no longer hold, and the
     rank could come out either side of the truth.
 
-    **The cost is real and is the reason this was not done sooner.**  The
-    bordered system is ``k + q``, and for ``numeric_cat`` the overlap is as
-    wide as the probe, so the eigendecomposition is of ``2k`` where a direct
-    count is of ``k`` -- roughly 8x that one step.  It is paid on ONE rung of
-    the one ladder with no bandwidth to scan, and only where an overlap was
-    profiled out at all.  Whether ``_CUBIC_BUDGET_FACTOR`` should move for it
-    is a separate question, filed rather than answered here.
+    **The cost is real, and measured rather than filed.**  The bordered system
+    is ``k + q``, and for ``numeric_cat`` the overlap is as wide as the probe,
+    so the eigendecomposition is of ``2k`` where a direct count is of ``k``.
+    Interleaved A/B in one process at one BLAS thread, whole pair end to end:
+
+        k =  209   0.046 s -> 0.052 s   (1.12x)
+        k = 1709   1.134 s -> 3.408 s   (3.01x)
+
+    So it is nearly free at ordinary widths and 3x at the cubic budget's own
+    ceiling.  It is paid on ONE rung of the one ladder with no bandwidth to
+    scan, and only where an overlap was profiled out.
+
+    **No pair changes whether it is screened at all.**  ``_within_cubic_budget``
+    is ``k**3 <= _CUBIC_BUDGET_FACTOR * max_cells``, a DIMENSIONAL gate
+    evaluated on ``k`` alone, so admission is identical before and after and
+    nothing silently becomes a NaN row.  What does move is that constant's
+    calibration: it was fitted against a ~1.5 s per-pair target, and the widest
+    unpenalized pair it admits now takes 3.4 s.  Re-fitting it is a separate
+    decision and is not taken here.
     """
     if joint is None:
         return _psd_rank(V_eff)
