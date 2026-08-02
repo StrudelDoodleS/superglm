@@ -122,6 +122,24 @@ def _fully_absorbed(V_eff: NDArray, metric: NDArray) -> bool:
     do that -- a block with any surviving direction has ``max(mu)`` of order 1,
     six or more orders above the guard.
 
+    **The threshold is ROUND-OFF, not smallness.**  It was briefly a fixed
+    1e-3, which is macroscopic, and that rejected blocks that are merely
+    WEAKLY IDENTIFIED: with ``M = C = I`` and ``V = (1 + 1e-4) I`` the Schur
+    complement is ``1e-4 I``, full rank and entirely real -- a score statistic
+    of 1.0 on ``U = sqrt(1e-4) e_1`` -- yet every ``mu`` is 5.0e-05 and the
+    block was dropped as unscreenable.  Weak identification is a finding about
+    the data; absorption is a fact about arithmetic, and only the second may
+    discard a pair.  At ``10 * k^3 * eps`` that same block sits NINE orders
+    above the threshold (5.0e-05 against 1.8e-14 at ``k = 2``) while every
+    absorbed case measured still fires with 11x to 64x of margin.
+
+    The ``1e-6`` cap keeps the threshold from growing macroscopic on a very
+    wide block, where ``k^3 * eps`` would eventually reach the same 1e-05
+    territory.  It errs toward NOT firing -- a wide fully-absorbed block then
+    falls back to the ordinary rank rule rather than being discarded -- which
+    is the safe direction, since the cost of failing to fire is the old
+    behaviour and the cost of firing wrongly is deleting a real pair.
+
     What this does NOT catch is PARTIAL absorption, where a block keeps a few
     real directions and its absorbed ones are dust relative to those.  That
     needs a per-direction rule this measurement does not support yet; see the
@@ -134,7 +152,8 @@ def _fully_absorbed(V_eff: NDArray, metric: NDArray) -> bool:
         mu = scipy.linalg.eigh(V_eff, metric, eigvals_only=True, check_finite=False)
     except (scipy.linalg.LinAlgError, np.linalg.LinAlgError, ValueError):
         return False
-    return bool(np.max(np.asarray(mu)) <= 1e-3)
+    tol = min(10.0 * float(k) ** 3 * float(np.finfo(np.float64).eps), 1e-6)
+    return bool(np.max(np.asarray(mu)) <= tol)
 
 
 @dataclass(frozen=True)
