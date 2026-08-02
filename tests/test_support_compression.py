@@ -976,14 +976,7 @@ def test_expanded_cross_gram_is_chunked_by_bytes(monkeypatch):
     idx_j = gen.integers(0, 350, n_rows).astype(np.intp)
     weights = np.abs(gen.normal(1.0, 0.2, n_rows))
 
-    expanded_rows = []
-    original = algebra._expand_support_rows
-
-    def spy(B_unique, bin_idx):
-        expanded_rows.append(int(np.size(bin_idx)))
-        return original(B_unique, bin_idx)
-
-    monkeypatch.setattr(algebra, "_expand_support_rows", spy)
+    expanded_rows = _spy_on_row_expansion(monkeypatch)
 
     budget = 1 << 20  # 1 MiB
     actual = algebra._support_support_raw_cross(b_i, idx_i, b_j, idx_j, weights, max_bytes=budget)
@@ -1022,7 +1015,11 @@ def test_expanded_cross_gram_chunking_matches_the_unchunked_contraction():
 
 def _spy_on_row_expansion(monkeypatch):
     """Record the row count of every support expansion, so a chunk bound can be
-    asserted rather than described."""
+    asserted rather than described.
+
+    One definition, used by every chunking test, so that a site added later
+    inherits every assertion the others make rather than a subset.
+    """
     from superglm._group_matrix import _group_matrix_algebra as algebra
 
     seen: list[int] = []
@@ -1034,6 +1031,89 @@ def _spy_on_row_expansion(monkeypatch):
 
     monkeypatch.setattr(algebra, "_expand_support_rows", spy)
     return seen
+
+
+def test_agg_by_bin_expands_the_spline_cat_level_in_chunks(monkeypatch):
+    """Reviewer finding on d2c4863, and the site my own sweep missed.
+
+    Reached when ``_cross_gram_discrete_spline_categorical`` declines at its
+    cell cap and dispatch falls through to the disc-x-non-disc branch.  That
+    fall-through is newly reachable because a lossless support makes ``n_bins``
+    large on both sides -- binned at the 256 default the cell product is 65,536,
+    three orders under the cap.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(90)
+    n, n_bins, p_g = 40_000, 16, 4
+    rows = np.arange(0, n, 2, dtype=np.intp)
+    spline_cat = _spline_cat_support_block(n, 600, 5, p_g, rows, seed=91)
+    bin_idx = gen.integers(0, n_bins, n).astype(np.intp)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+
+    expected = algebra._agg_by_bin(spline_cat, bin_idx, weights, n_bins)
+
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", 1 << 12)
+    seen = _spy_on_row_expansion(monkeypatch)
+
+    actual = algebra._agg_by_bin(spline_cat, bin_idx, weights, n_bins)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+    assert seen, "expected the aggregation to expand support rows"
+    allowed = algebra._cross_expansion_chunk_rows(p_g, 0, 1 << 12)
+    assert max(seen) <= allowed, f"expanded {max(seen)} rows at once against a {allowed}-row budget"
+    assert sum(seen) == rows.size
+
+
+def test_support_gate_thresholds_are_not_frozen_at_import(monkeypatch):
+    """A threshold bound as a default argument cannot be lowered by a test, so
+    a test written to force a decision silently observes the default instead.
+
+    This is the defect that already produced one false pass in this branch; it
+    survived on all three support entry points.
+    """
+    from superglm._group_matrix import _group_matrix_support as support
+
+    basis, _, row_index = _repeated_basis()  # a known accept-shape
+
+    assert support.detect_row_support(basis) is not None
+    assert support.plan_row_support(basis, row_index) is not None
+    assert support.plan_verified_row_support(basis, row_index) is not None
+
+    # An unreachable speedup must turn every one of them down.
+    monkeypatch.setattr(support, "DEFAULT_MIN_SPEEDUP", 1e12)
+
+    assert support.detect_row_support(basis) is None
+    assert support.plan_row_support(basis, row_index) is None
+    assert support.plan_verified_row_support(basis, row_index) is None
+
+
+def test_spline_cat_pre_gate_and_inner_gate_cannot_disagree(monkeypatch):
+    """``_plan_spline_cat_support`` runs a cheap gate and then calls one that
+    re-runs it.  They must resolve the SAME threshold: the outer read its value
+    at call time while the inner used a frozen default, so a patch made the two
+    disagree and the block fell back to CSR while the test believed it had
+    forced acceptance."""
+    from superglm._group_matrix import _group_matrix_support as support
+    from superglm.features.interaction import _plan_spline_cat_support
+
+    n = 20_000
+    # A shape the default threshold turns down: 40% distinct rows on a sparse
+    # basis costs more than it saves.  x is the grouping itself, so the offered
+    # grouping matches the basis and verification cannot be what declines.
+    basis, _, row_index = _repeated_basis(n=n, n_support=n * 4 // 10, seed=93)
+    x = row_index.astype(np.float64)
+    active = np.arange(n, dtype=np.intp)
+
+    assert _plan_spline_cat_support(basis, x, active, n_levels=2) is None
+
+    # Patch the threshold DOWN, which is the direction a test forcing
+    # acceptance would use.  With the inner gate frozen at the default, the
+    # outer accepts on the patched value and the inner declines on the old one,
+    # so this returns None and reads as "the gate declined" -- believable and
+    # wrong.  Both gates must now resolve the same number.
+    monkeypatch.setattr(support, "DEFAULT_MIN_SPEEDUP", 0.5)
+    assert _plan_spline_cat_support(basis, x, active, n_levels=2) is not None
 
 
 def test_tensor_by_spline_cat_fallback_expands_rows_in_chunks(monkeypatch):

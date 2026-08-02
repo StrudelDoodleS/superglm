@@ -180,8 +180,18 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
         return B_agg @ gm.R_inv
     if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
         rows = gm.row_idx
-        X_level = (gm.B_unique @ gm.R_inv)[gm.bin_idx_level]
-        return _weighted_bincount_2d(bin_idx[rows], W[rows], X_level, n_bins)
+        # Chunked, and it is the only branch here that needed saying so: the
+        # SCOP, SSP and factor-smooth branches all decline into
+        # ``_aggregate_group_matrix_columns``, which is column-at-a-time and
+        # bounded, while this one expanded the level per observation row.
+        # Reached when ``_cross_gram_discrete_spline_categorical`` declines at
+        # its cell cap and dispatch falls through to the disc-x-non-disc branch,
+        # which is newly reachable because a lossless support makes ``n_bins``
+        # large on both sides.  ``B_unique @ R_inv`` is ``(n_support, p_g)``,
+        # bounded by the support gate; the gather off it was not.
+        return _chunked_support_bincount_2d(
+            bin_idx[rows], W[rows], gm.B_unique @ gm.R_inv, gm.bin_idx_level, n_bins
+        )
     if isinstance(gm, SplineCategoricalGroupMatrix):
         rows = gm.row_idx
         B_agg = _csr_weighted_bincount(
@@ -594,6 +604,7 @@ def _cross_gram_tensor_spline_categorical(
             for j2 in range(K2):
                 w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
                 agg[j2] += _weighted_bincount_2d(idx1_chunk, w_col, block, gm_tensor.n_bins1)
+            del block  # next expansion is evaluated before the rebind
         for j2 in range(K2):
             result_raw[j2::K2, :] = B1.T @ agg[j2]
         return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
@@ -666,6 +677,9 @@ def _chunked_support_bincount_2d(
         stop = min(start + chunk, n_rows)
         block = _expand_support_rows(B_unique, support_idx[start:stop])
         out += _weighted_bincount_2d(bin_idx[start:stop], weights[start:stop], block, int(n_bins))
+        # See _support_support_raw_cross: the next expansion is evaluated before
+        # the name is rebound, so without this the ceiling is 2x the budget.
+        del block
     return out
 
 
@@ -709,6 +723,11 @@ def _support_support_raw_cross(
         # keeps the live count at two blocks rather than three.
         right *= W_rows[start:stop, None]
         out += left.T @ right
+        # Released explicitly: the next iteration's expansion is evaluated
+        # BEFORE its name is rebound, so without this the previous pair is
+        # still referenced at the allocation instant and the real ceiling is
+        # 1.5x the budget rather than 1x.
+        del left, right
     return out
 
 

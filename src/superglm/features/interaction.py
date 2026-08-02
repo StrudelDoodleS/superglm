@@ -143,7 +143,7 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
 
     The grouping is offered rather than detected: the basis is a function of
     *x* alone, so equal *x* should give equal rows, which makes the decline a
-    scan of one column instead of the whole basis.
+    sort of one column instead of a scan of the whole basis.
     ``plan_verified_row_support`` still checks that grouping against the basis
     before using it, so the saving is on the detection scan and not exactness.
 
@@ -175,18 +175,31 @@ def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_l
     # cheap on the DECLINED path, which is every continuous covariate, and
     # slicing the basis there would cost a copy of most of it.
     nnz_active = int(np.diff(B.indptr)[active].sum())
+    # One resolution feeds BOTH gates.  These are read here at call time, so
+    # without passing them through, the pre-gate below would see a patched
+    # threshold while the gate inside plan_verified_row_support saw the frozen
+    # default -- two gates documented as agreeing, disagreeing under a patch,
+    # with the block silently falling back to CSR and a test believing it.
+    min_speedup = DEFAULT_MIN_SPEEDUP
+    max_support_bytes = DEFAULT_MAX_SUPPORT_BYTES
     if not _passes_support_gates(
         int(active.size),
         int(codes.max()) + 1,
         int(B.shape[1]),
         nnz_active,
-        DEFAULT_MIN_SPEEDUP,
-        DEFAULT_MAX_SUPPORT_BYTES,
+        min_speedup,
+        max_support_bytes,
         n_levels,
     ):
         return None
 
-    planned = plan_verified_row_support(sp.csr_matrix(B)[active], codes, gram_repeats=n_levels)
+    planned = plan_verified_row_support(
+        sp.csr_matrix(B)[active],
+        codes,
+        min_speedup=min_speedup,
+        max_support_bytes=max_support_bytes,
+        gram_repeats=n_levels,
+    )
     if planned is None:
         return None
     b_unique, active_codes = planned
