@@ -303,6 +303,67 @@ def test_a_split_that_hides_a_level_from_training_is_refused_before_fitting() ->
     gate._require_training_covers_test(data, train, test, "gate ladder")
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1"])
+def test_the_watchdog_interval_must_be_a_real_number_of_seconds(bad: str) -> None:
+    """The one numeric flag that was still a bare `float`.
+
+    `float("nan")` parses, and `arm_watchdog`'s `seconds <= 0` does not catch it
+    because `nan <= 0` is False, so it reached
+    `faulthandler.dump_traceback_later` and died with `ValueError: Invalid value
+    NaN` -- naming a C-level API rather than the flag. Zero stays the documented
+    disable, which is why this is not `_at_least`.
+    """
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--watchdog", bad])
+
+
+def test_table_two_has_a_floor_of_its_own_now_it_is_exempt_from_the_split_rule() -> None:
+    """Exempting table 2 removed a bound; it needed replacing, not deleting.
+
+    `_run_concentration` fits `g + h` on all `n` rows -- `2*n_levels - 1`
+    parameters -- and screens the interaction off those residuals. Once `n`
+    reaches that count the fit is saturated, `edf0` is 0, `worth_threshold(0)`
+    is 0 and `participation_ratio` divides by zero. Measured before this:
+    `--tables 2 --n 3 --wide-levels 3` printed a complete seven-row table with
+    every `z`, `edf0` and threshold `nan` and **exited 0** -- the artefact this
+    file exists to prevent, reached through the one table with no floor.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="table 2"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "3", "--wide-levels", "3"])
+        )
+
+    # the floor is the parameter count, so it tracks --wide-levels
+    with pytest.raises(SystemExit, match="saturated"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "81", "--wide-levels", "41"])
+        )
+    _validate_configuration(
+        parser.parse_args(["--tables", "2", "--n", "82", "--wide-levels", "41"])
+    )
+    # and the published run is untouched
+    _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
+
+
+def test_a_top_m_arm_wider_than_the_grid_is_not_printed_as_a_distinct_selection() -> None:
+    """At nine cells, top-10/25/50 are all "every cell" under three names.
+
+    Measured before this at `--tables 3 --wide-levels 3`: four consecutive rows
+    reading -82.2%, the top-10, top-25, top-50 and full-refit arms being the
+    same model. Sizes at or above the cell count are dropped rather than
+    clipped, since clipping would collapse them onto each other instead.
+    """
+    for levels, expected in ((3, (5,)), (5, (5, 10)), (41, gate.TOP_M)):
+        n_cells = levels * levels
+        assert gate._sparse_arms(n_cells) == (*expected, n_cells), f"{levels} levels"
+    # every arm is distinct, which is the property the filter exists for
+    for levels in (3, 4, 5, 6, 8, 41):
+        arms = gate._sparse_arms(levels * levels)
+        assert len(set(arms)) == len(arms)
+        assert all(m < levels * levels for m in arms[:-1])
+
+
 def test_a_fixed_cutoff_scored_per_replicate_is_the_mean_z_rule() -> None:
     """The gate and the fixed cutoffs are already on one scale.
 
@@ -344,17 +405,22 @@ def test_table_two_is_exempt_from_the_half_sample_requirement() -> None:
     parser = _build_parser()
     lopsided = ["--n", "50", "--wide-levels", "41"]
 
-    # accepted: no split, so the half-sample bound does not apply
-    _validate_configuration(parser.parse_args([*lopsided, "--tables", "2"]))
-
-    # the same shape IS rejected for the tables that do split
+    # Table 2 is refused here too, but for ITS OWN reason -- its mains model is
+    # saturated at 50 rows -- not because a training half it never takes would
+    # be short of levels.  The messages are what keep the two rules apart.
+    with pytest.raises(SystemExit, match="saturated"):
+        _validate_configuration(parser.parse_args([*lopsided, "--tables", "2"]))
     for table in ("3", "4"):
-        with pytest.raises(SystemExit, match=f"table {table}"):
+        with pytest.raises(SystemExit, match="training rows"):
             _validate_configuration(parser.parse_args([*lopsided, "--tables", table]))
 
-    # and selecting table 2 alongside one of them still fails on that one
-    with pytest.raises(SystemExit, match="table 3"):
-        _validate_configuration(parser.parse_args([*lopsided, "--tables", "2,3"]))
+    # The two bounds accept exactly the same configurations today: `n // 2 >= L`
+    # and `n >= 2 * L` are the same predicate over the integers. That is a
+    # coincidence of the current constants, not a reason to merge them, and it
+    # is pinned so a future divergence is visible rather than surprising.
+    for levels in (3, 5, 10, 41, 100):
+        for n in range(1, 4 * levels + 2):
+            assert ((n // 2) >= levels) == (n >= 2 * levels)
 
     # the exemption is not a claim that _run_concentration splits secretly
     source = inspect.getsource(gate._run_concentration)
@@ -422,6 +488,7 @@ def test_watchdog_is_armed_by_default_so_a_stuck_fit_names_itself() -> None:
     """
     assert _build_parser().parse_args([]).watchdog == 300.0
     assert _build_parser().parse_args(["--watchdog", "0"]).watchdog == 0.0
+    assert _build_parser().parse_args(["--watchdog", "0.5"]).watchdog == 0.5
 
     try:
         assert arm_watchdog(600.0) is True

@@ -396,8 +396,9 @@ high, in the direction the finite-k bias goes ([caveat 14](#caveats)).
 
 Note also what the `z` column does *not* contain: no diffuse truth here clears
 the 28.27 bar, the widest reaching 26.15. That gap is why the decision table
-below is only partly measured: one cell end to end, one half, and the two
-above-threshold cells not at all ([caveat 11](#caveats)).
+below is only partly measured: one cell on both axes but across two seeds
+rather than by a single run, one half, and the two above-threshold cells not at
+all ([caveat 11](#caveats)).
 
 It pays off in the fitting decision. Ranking cells on **training residuals
 only** — ranking on the full sample is the target leakage that makes supervised
@@ -532,9 +533,11 @@ only, which is a separate simulated study.
     fit's 1,633.3 and improves holdout by 3.7% where the fixed fit costs 22.5%.
     So a pair the gate excludes can still be worth having — in another class.
     What is *not* measured is where the shrunk term's own bar sits.
-11. **Only one cell of the decision table is measured end to end.** The
-    lower-right — z below threshold, `P` ≪ 1, fit the few cells — is the worked
-    example and the spiky row of the sparse-payoff table. The lower-left is
+11. **No cell of the decision table is measured by a single run.** The
+    lower-right — z below threshold, `P` ≪ 1, fit the few cells — comes
+    closest, and even it is two runs on two seeds: the worked example supplies
+    the screen, and the spiky row of the sparse-payoff table supplies `P` and
+    the sparse arms. Neither computes the other's half. The lower-left is
     half measured: "skip" is backed by the diffuse row, where every top-m arm
     degrades, but **pooling on a diffuse truth was never run**. Neither
     upper cell is measured at all, and not by accident: *no* diffuse truth here
