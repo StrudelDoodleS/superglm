@@ -97,8 +97,6 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.screening._arrow import psd_ranks
-
 _EDF_TOL = 1e-6
 _MAX_BISECT = 200
 
@@ -141,6 +139,47 @@ def _rank_floor(n: int) -> float:
     decidable there.
     """
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
+
+
+def _resolved_rank(A: NDArray) -> float:
+    """Rank of a PROFILED block, with its own noise floor MEASURED not assumed.
+
+    ``V_eff = V - C' M^-1 C`` is a Schur complement of a PSD matrix, so in
+    exact arithmetic it is PSD.  Every NEGATIVE eigenvalue is therefore pure
+    arithmetic error -- and its magnitude is a measurement of this block's own
+    noise floor, taken from the block itself.  No constant, no conditioning
+    estimate, no claim about data: it is Type 1 in the sense of the note at the
+    top of this module, resting only on a mathematical fact about the operand
+    and an observation of how far the computed matrix violates it.
+
+    A direction counts when it exceeds BOTH the ordinary round-off floor
+    relative to the largest eigenvalue AND that observed violation.  Where the
+    profiling is exact the negative side is empty and this reduces to
+    :func:`_rank_floor`, which is why every previously measured block is
+    unchanged by it.
+
+    Why it is needed.  Counting relative to the block's own largest eigenvalue
+    presumes that eigenvalue is real curvature.  On a block the overlap has
+    almost entirely absorbed it is not -- measured on a 25-level
+    ``numeric_cat`` pair whose numeric varies by 1e-08 within each level, with
+    one level carrying two rows: ``||V_eff|| = 1.49e-08`` against a ``V`` of
+    order 1e+04, and the block's DOMINANT eigenvalue is negative, the positive
+    ones reaching only 0.23 of it.  A matrix whose largest movement is in a
+    direction curvature cannot go is noise throughout.  Dividing the profiled
+    score by those directions gave ``statistic 145.508`` at ``edf0 10.0``, so
+    ``z = 30.3`` -- top of the table, from a pair carrying nothing.  Here the
+    observed violation is the largest magnitude present, so no direction clears
+    it and the block resolves nothing.
+    """
+    w = np.linalg.eigvalsh(A)
+    if w.size == 0:
+        return 0.0
+    top = float(w[-1])
+    if top <= 0.0:
+        return 0.0
+    observed_noise = max(-float(w[0]), 0.0)
+    tol = max(_rank_floor(w.size) * top, observed_noise)
+    return float(np.sum(w > tol))
 
 
 @dataclass(frozen=True)
@@ -251,7 +290,7 @@ def _edge(V: NDArray, S: NDArray | None, lam: float) -> tuple[float, Callable[[N
     except scipy.linalg.LinAlgError:
         apply = np.linalg.pinv(A, hermitian=True).__matmul__
     if S is None:
-        return float(psd_ranks(V, _rank_floor(V.shape[0]))), apply
+        return _resolved_rank(V), apply
     return float(np.trace(apply(V))), apply
 
 
