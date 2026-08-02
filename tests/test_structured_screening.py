@@ -316,10 +316,28 @@ def _reference_edf(U, V, C, M, S_ti, lam):
     """``edf(lambda)`` from a form that cannot cancel, for use as an ORACLE.
 
     ``sum_j a_j / (a_j + lambda (1 - a_j))`` over the simultaneously
-    diagonalized dense pencil.  Every term is a ratio of positive quantities
-    in ``[0, 1]``, so unlike ``rank - lambda tr(A^-1 S)`` there is nothing to
-    subtract and no cancellation to amplify.  That is what makes it usable as
-    a reference for the two paths that DO subtract.
+    diagonalized dense pencil.  There is no ``rank - lambda tr(A^-1 S)``
+    subtraction here, which is what makes it independent of the two paths it
+    arbitrates.
+
+    **It is not usable at the ladder's HIGH edge, and that is a property of
+    float64 rather than of this implementation.**  ``1 - a`` cancels whenever
+    ``a`` approaches 1, which is exactly what the penalty's null space
+    produces: on the pair below, 19 of 209 directions carry ``a`` within 1e-12
+    of 1, so ``1 - a`` is pure round-off there -- and the high edge multiplies
+    it by ``lambda = 2.2e+09``, turning 1e-13 of noise into 1e-04 per
+    direction.
+
+    Three algebraically EQUIVALENT ways of writing the same oracle then
+    disagree, on one machine in one process, at ``lambda = 2.16e+09``::
+
+        via a                     18.999976474337
+        via (v, s), balanced      18.997645230554
+        both terms diagonalized   18.999417915384
+
+    -- a spread of 2.3e-03.  At the low edge, ``lambda = 2.16e-11``, all three
+    agree to 3.4e-09.  The oracle is therefore sound at one end of the bracket
+    and beyond float64 at the other, and is used only where it is sound.
     """
     eps = np.finfo(np.float64).eps
     MinvC = np.linalg.solve(M, C)
@@ -365,13 +383,14 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     structured path is closer (4.20e-04 against dense 5.26e-04) and at 0.001
     the dense one is (2.07e-05 against structured 1.10e-03).
 
-    Tolerances are set from measurement, not from what passes.  Worst observed
-    over all three weights and all five budgets: structured-vs-reference
-    1.0965e-03, dense-vs-reference 5.2616e-04, structured-vs-dense 1.0780e-03,
-    statistic 1.5641e-06 relative.  The bound is 3e-3 -- about 2.7x the worst
-    of those, headroom for the BLAS-dependence these traces demonstrably have,
-    and still 333x tighter than the one degree of freedom this test exists to
-    catch.
+    Tolerances are set from measurement.  At the LOW edge the oracle is exact
+    and the assertion is 1e-5 against a worst observed 1.991e-06 over the three
+    weights -- three hundred times tighter than this test carried before, at
+    the edge where the degree-of-freedom error lived.  At the HIGH edge the oracle is not usable
+    at all (see ``_reference_edf``), so only path parity is asserted there, at
+    3e-3 against a worst observed structured-vs-dense of 1.0780e-03 and a
+    statistic gap of 1.5641e-06 relative.  That 3e-3 is unchanged, and is still
+    333x tighter than the one degree of freedom this test exists to catch.
 
     The structured path is knowingly the less accurate at the high edge: it
     resolves directions the penalty has flattened, which amplifies ``1/w``
@@ -393,22 +412,31 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
         # Each path is judged at ITS OWN lambda: the two brackets are scaled
         # differently on purpose (tr(V_eff) against tr(V)), so a shared lambda
         # would compare them at different points of the same curve.
-        assert s.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, s.lambda0), abs=3e-3), (
-            "structured",
-            budget,
-            s.edf0,
-        )
-        assert d.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, d.lambda0), abs=3e-3), (
-            "dense",
-            budget,
-            d.edf0,
-        )
-        # Retained deliberately: a truth check alone cannot see the two paths
-        # drifting together, and this can.
+        if budget > 100.0:
+            # LOW edge.  The oracle is sound here -- three equivalent forms of
+            # it agree to 3.4e-09 -- so this is asserted tightly, and it is the
+            # regime that matters: the whole-degree-of-freedom error this test
+            # exists for lived at this edge, at 1.0 against the reference.
+            # 1e-5 is set from the worst observed over the three weights,
+            # 1.991e-06, and is 100,000x below the error it guards against.
+            assert s.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, s.lambda0), abs=1e-5), (
+                "structured",
+                budget,
+                s.edf0,
+            )
+            assert d.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, d.lambda0), abs=1e-5), (
+                "dense",
+                budget,
+                d.edf0,
+            )
+            saw_low_edge = True
+        # Parity holds at BOTH edges, and at the high edge it is all there is:
+        # the oracle is beyond float64 there (see _reference_edf), so the two
+        # paths arbitrate each other.  They are independent implementations --
+        # a dense factorization against an arrow one -- so agreement is
+        # evidence even if it is not proof.
         assert s.edf0 == pytest.approx(d.edf0, abs=3e-3), ("parity", budget)
         assert s.statistic == pytest.approx(d.statistic, rel=1e-3)
-        if budget > 100.0:
-            saw_low_edge = True
     assert saw_low_edge, "a rung must clamp at the LOW edge or this proves nothing"
 
 
