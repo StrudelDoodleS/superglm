@@ -91,27 +91,47 @@ class _DispatchSampler:
     """Read the loaded BLAS pools WHILE a fit runs, not after it.
 
     `np.show_config()` answers "what was this wheel built against", which is the
-    same string on a machine dispatching elsewhere.  Reading
-    `threadpool_info()` fixes that, but reading it after the fit still reports
-    the ambient process: superglm sets solver thread counts on entry and
-    restores them on exit, so the number that serviced the decomposition is
-    only visible from inside.  A background sampler is the least invasive way
-    to see it -- the alternative is monkeypatching production code from a
-    benchmark.
+    same string on a machine dispatching elsewhere.  Reading `threadpool_info()`
+    fixes that, but reading it after the fit reports the ambient process:
+    superglm caps BLAS to one thread on fit entry and releases the cap again for
+    a wide design, so what was configured during the fit is only visible from
+    inside.
+
+    Three properties this has to have, each of which it once lacked:
+
+    * REUSABLE.  `--repeats` defaults to 3, and a sampler whose stop flag is
+      never cleared samples the first fit and silently records nothing for the
+      rest.  `__enter__` clears it.
+    * BOUNDED.  Retaining a snapshot per tick makes the sampler's own footprint
+      proportional to the RUNTIME of the side being measured, which lands in the
+      peak RSS this benchmark reports and biases it toward the faster side.
+      Configurations are folded in as they arrive, so the store is
+      O(distinct configurations) -- three or four -- rather than O(duration).
+    * DWELL-COUNTING.  A configuration seen once in twelve thousand samples and
+      one seen throughout are completely different claims, and discarding the
+      count cannot tell them apart.  Each distinct configuration carries the
+      number of samples that saw it.
     """
 
     def __init__(self, interval: float = 0.02) -> None:
         self._interval = interval
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self.samples: list[list[dict[str, object]]] = []
+        # configuration -> samples that saw it; folded in as they arrive so the
+        # store cannot grow with the duration of the fit
+        self._dwell: dict[tuple, int] = {}
+        self.samples = 0
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.samples.append(_pool_snapshot())
+            for pool in _pool_snapshot():
+                key = tuple(sorted(pool.items(), key=lambda item: item[0]))
+                self._dwell[key] = self._dwell.get(key, 0) + 1
+            self.samples += 1
             self._stop.wait(self._interval)
 
     def __enter__(self) -> _DispatchSampler:
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
@@ -122,13 +142,18 @@ class _DispatchSampler:
             self._thread.join(timeout=5.0)
 
     def observed(self) -> list[dict[str, object]]:
-        """Every distinct pool configuration seen while the fit was running."""
-        seen: list[dict[str, object]] = []
-        for snapshot in self.samples:
-            for pool in snapshot:
-                if pool not in seen:
-                    seen.append(pool)
-        return sorted(seen, key=lambda pool: (str(pool["prefix"]), str(pool["version"])))
+        """Distinct pool configurations seen during the fits, with their dwell.
+
+        `samples_seen_in` is what distinguishes a configuration that held for
+        the whole fit from one caught during a brief setup window.
+        """
+        rows = []
+        for key, count in self._dwell.items():
+            row = dict(key)
+            row["samples_seen_in"] = count
+            row["fraction_of_samples"] = round(count / max(self.samples, 1), 4)
+            rows.append(row)
+        return sorted(rows, key=lambda pool: (str(pool["prefix"]), str(pool["version"])))
 
 
 def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object]:
@@ -196,8 +221,8 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
             "augmented_representative": info.augmented.pivots is not None,
             "blas": {
                 "numpy": np.__version__,
-                "sampled_during_fit": bool(sampler.samples),
-                "samples": len(sampler.samples),
+                "sampled_during_fit": sampler.samples > 0,
+                "samples": sampler.samples,
                 "pools_during_fit": sampler.observed(),
             },
             "python": platform.python_version(),

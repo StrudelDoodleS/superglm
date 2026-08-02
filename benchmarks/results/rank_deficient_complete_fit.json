@@ -8,48 +8,38 @@
     "numpy": "2.4.2",
     "pools_during_fit": [
      {
+      "fraction_of_samples": 1.0,
       "internal_api": "openmp",
       "num_threads": 16,
       "prefix": "libgomp",
+      "samples_seen_in": 11947,
       "threading_layer": null,
       "user_api": "openmp",
       "version": null
      },
      {
+      "fraction_of_samples": 1.0,
       "internal_api": "openblas",
-      "num_threads": 1,
+      "num_threads": 16,
       "prefix": "libscipy_openblas",
+      "samples_seen_in": 11947,
       "threading_layer": "pthreads",
       "user_api": "blas",
       "version": "0.3.30"
      },
      {
+      "fraction_of_samples": 1.0,
       "internal_api": "openblas",
       "num_threads": 16,
       "prefix": "libscipy_openblas",
-      "threading_layer": "pthreads",
-      "user_api": "blas",
-      "version": "0.3.30"
-     },
-     {
-      "internal_api": "openblas",
-      "num_threads": 1,
-      "prefix": "libscipy_openblas",
-      "threading_layer": "pthreads",
-      "user_api": "blas",
-      "version": "0.3.31.dev"
-     },
-     {
-      "internal_api": "openblas",
-      "num_threads": 16,
-      "prefix": "libscipy_openblas",
+      "samples_seen_in": 11947,
       "threading_layer": "pthreads",
       "user_api": "blas",
       "version": "0.3.31.dev"
      }
     ],
     "sampled_during_fit": true,
-    "samples": 12813
+    "samples": 11947
    },
    "coefficient_method": "qr_svd",
    "data_method": "gram_eigh",
@@ -67,7 +57,7 @@
   },
   "memory": {
    "peak_rss_measures_fits": 1,
-   "peak_rss_mib": 1080.3,
+   "peak_rss_mib": 1046.7,
    "ru_maxrss_unit": "kib"
   },
   "numerical_outputs": {
@@ -80,10 +70,10 @@
   },
   "timing_seconds": {
    "all": [
-    285.1914
+    264.5752
    ],
-   "median": 285.1914,
-   "min": 285.1914
+   "median": 264.5752,
+   "min": 264.5752
   }
  },
  "baseline_commit": "a2611cc",
@@ -96,32 +86,58 @@
     "numpy": "2.4.2",
     "pools_during_fit": [
      {
+      "fraction_of_samples": 1.0,
       "internal_api": "openmp",
       "num_threads": 16,
       "prefix": "libgomp",
+      "samples_seen_in": 296,
       "threading_layer": null,
       "user_api": "openmp",
       "version": null
      },
      {
+      "fraction_of_samples": 0.0068,
       "internal_api": "openblas",
-      "num_threads": 16,
+      "num_threads": 1,
       "prefix": "libscipy_openblas",
+      "samples_seen_in": 2,
       "threading_layer": "pthreads",
       "user_api": "blas",
       "version": "0.3.30"
      },
      {
+      "fraction_of_samples": 0.9932,
       "internal_api": "openblas",
       "num_threads": 16,
       "prefix": "libscipy_openblas",
+      "samples_seen_in": 294,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+     },
+     {
+      "fraction_of_samples": 0.0068,
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 2,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.31.dev"
+     },
+     {
+      "fraction_of_samples": 0.9932,
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 294,
       "threading_layer": "pthreads",
       "user_api": "blas",
       "version": "0.3.31.dev"
      }
     ],
     "sampled_during_fit": true,
-    "samples": 244
+    "samples": 296
    },
    "coefficient_method": "qr_svd",
    "data_method": "gram_eigh",
@@ -139,7 +155,7 @@
   },
   "memory": {
    "peak_rss_measures_fits": 1,
-   "peak_rss_mib": 981.2,
+   "peak_rss_mib": 981.5,
    "ru_maxrss_unit": "kib"
   },
   "numerical_outputs": {
@@ -152,21 +168,28 @@
   },
   "timing_seconds": {
    "all": [
-    6.5811
+    8.4797
    ],
-   "median": 6.5811,
-   "min": 6.5811
+   "median": 8.4797,
+   "min": 8.4797
   }
  },
- "branch_commit": "a23fe74",
+ "branch_commit": "7bfcdd3",
  "fit": "41-level cat_cat pair, 6000 training rows, 1680 parameters, 54 unidentifiable",
- "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  SYMMETRIC: one complete fit per side, fresh interpreter each, so the ru_maxrss high-water mark covers the same work on both -- `peak_rss_measures_fits` and `ru_maxrss_unit` record that rather than leaving it to be inferred.  BLAS pools are sampled from a background thread WHILE the fit runs, not around it: superglm sets solver thread counts on entry and restores them on exit, so a reading taken afterwards describes the process between fits.  Taken on one shared machine with the CPU lock held and the load average in the teens, so the wall clock is a floor rather than a benchmark.",
+ "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  SYMMETRIC: one complete fit per side, fresh interpreter each, so the ru_maxrss high-water mark covers the same work on both -- `peak_rss_measures_fits` and `ru_maxrss_unit` record that rather than leaving it to be inferred.  BLAS pools are sampled from a background thread WHILE the fit runs, with a dwell count per configuration, because presence alone cannot distinguish a brief startup window from a phase that held.  Taken on one shared machine with the CPU lock held and the load average in the teens, so the wall clock is a floor.",
  "summary": {
-  "blas_pools_identical": false,
-  "blas_pools_note": "The baseline is observed running OpenBLAS at BOTH 1 and 16 threads during the fit; the branch only at 16.  That is a consequence of the algorithm rather than a difference in environment: the prefix walk issues thousands of small eigendecompositions, which drop to a single thread, where the replacement issues few large ones.  Sampling after the fit reported 16 on both sides and hid it, which is why the earlier revisions of this file claimed identical dispatch.",
+  "blas_note": "An earlier revision of this file claimed the baseline spent part of the fit single-threaded and the branch did not.  That is WITHDRAWN.  `num_threads` from threadpoolctl is the configured limit (openblas_get_num_threads), not the number of threads a kernel elects to use, so it cannot show OpenBLAS running a small decomposition on one thread -- the reading only moves when something calls threadpool_limits, and in this package that is `solver_blas_threads()` capping to 1 on fit entry and `allow_wide_design(p)` releasing the cap once p >= 1500.  With p = 1680 the cap is released mid-fit by design.  Dwell counting shows exactly that: the capped configuration accounts for 2 of 296 samples on one side and 0 of 11947 on the other, and which side catches the window is sampling luck rather than a property of either algorithm.  Both sides run at the 16-thread limit for at least 99.3% of samples.",
+  "blas_thread_limit_16_for_fraction_of_samples": {
+   "baseline": 1.0,
+   "branch": 0.9932
+  },
+  "capped_samples": {
+   "baseline": 0,
+   "branch": 4
+  },
   "decomposition_route_identical": true,
   "numerical_outputs_identical": true,
-  "peak_rss_delta_mib": -99.1,
-  "speedup_one_fit_each": 43.3
+  "peak_rss_delta_mib": -65.2,
+  "speedup_one_fit_each": 31.2
  }
 }
