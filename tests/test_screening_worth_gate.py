@@ -270,6 +270,35 @@ def test_a_configuration_too_small_for_its_tables_is_refused_before_fitting() ->
     _validate_configuration(parser.parse_args(["--n", "12000", "--tables", "1,2,3,4"]))
 
 
+def test_a_fixed_cutoff_scored_per_replicate_is_the_mean_z_rule() -> None:
+    """The gate and the fixed cutoffs are already on one scale.
+
+    The gate aggregates as `mean(z_i / bar_i) > 1`, and that mattered because
+    `bar_i = sqrt(edf0_i / 2)` varies between replicates.  A FIXED cutoff `c`
+    does not vary, so `mean(z_i / c) = mean(z_i) / c` and thresholding at 1 is
+    `mean(z) > c` exactly -- the two forms are the same statement, not two
+    aggregation schemes.
+
+    Pinned because it has been read as an asymmetry twice, and reading it off
+    the arithmetic is cheaper than re-deriving it each time.
+    """
+    rng = np.random.default_rng(11)
+    for _ in range(200):
+        zs = rng.uniform(0.0, 12.0, size=int(rng.integers(2, 8))).tolist()
+        cutoff = float(rng.uniform(0.5, 10.0))
+        per_replicate = float(np.mean([z_i / cutoff for z_i in zs])) > 1.0
+        off_the_mean = float(np.mean(zs)) > cutoff
+        assert per_replicate == off_the_mean
+
+    # and the same identity does NOT hold once the bar varies, which is the
+    # asymmetry `10c753f` really did fix
+    zs = [1.0, 9.0]
+    bars = [10.0, 2.0]
+    varying = float(np.mean([z_i / b for z_i, b in zip(zs, bars, strict=True)])) > 1.0
+    off_means = float(np.mean(zs)) > float(np.mean(bars))
+    assert varying is True and off_means is False
+
+
 def test_table_two_is_exempt_from_the_half_sample_requirement() -> None:
     """The bound comes from the split, and table 2 does not split.
 
@@ -372,9 +401,9 @@ def test_watchdog_is_armed_by_default_so_a_stuck_fit_names_itself() -> None:
 def test_table_subsets_are_a_supported_flag_rather_than_an_edit() -> None:
     """A guide figure refreshed one table at a time needs a quotable command.
 
-    The wide refits run for tens of minutes each, so partial reruns happen; if
-    the only way to do one is to comment out a call, the command that produced
-    a published number cannot be cited.
+    The wide refits still dominate the run, so partial reruns happen; if the
+    only way to do one is to comment out a call, the command that produced a
+    published number cannot be cited.
     """
     assert _build_parser().parse_args(["--tables", "3,4"]).tables == (3, 4)
     assert _build_parser().parse_args(["--tables", "2"]).tables == (2,)
