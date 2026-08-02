@@ -1149,50 +1149,183 @@ def test_every_cross_shaped_aggregate_is_bounded():
     )
 
 
-def test_guarded_allow_list_entries_name_a_guard_that_exists():
-    """An allow-list entry claiming "the caller checks first" must be checkable.
+def test_every_agg_by_bin_caller_is_guarded():
+    """Every caller of ``_agg_by_bin``, whatever its enclosing function is named.
 
-    The entry that broke said the two dimensions came from the same block. They
-    did not, and nothing in the test could tell -- the justification was prose.
-    Where an entry rests on a caller-side guard, the guard is named, and this
-    asserts every call reached from `_cross_gram` really is preceded by it.
+    The first version of this audit walked only functions named ``_cross_gram``.
+    ``_random_effect_cross_gram`` calls ``_agg_by_bin`` directly, so a
+    high-cardinality random effect beside a wide raw-basis SSP term allocated
+    ``n_levels x p_b`` with the audit green -- the scope hole was pre-declared as
+    "syntactic and single-module" and found inside the hour. Scope is now every
+    function in the module.
     """
     import ast
     import pathlib
 
     import superglm._group_matrix._group_matrix_algebra as algebra
 
+    guard = _AGGREGATE_CALLS_GUARDED_AT_CALLER["_agg_by_bin"]
+    assert hasattr(algebra, guard), f"the named guard {guard} does not exist"
+
     tree = ast.parse(pathlib.Path(algebra.__file__).read_text())
-    for guarded, guard in _AGGREGATE_CALLS_GUARDED_AT_CALLER.items():
-        assert hasattr(algebra, guard), f"{guarded} claims a guard {guard} that does not exist"
-
-        callers = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or node.name != "_cross_gram":
-                continue
-            for inner in ast.walk(node):
-                if (
-                    isinstance(inner, ast.Call)
-                    and isinstance(inner.func, ast.Name)
-                    and inner.func.id == guarded
-                ):
-                    callers.append(inner.lineno)
-        assert callers, f"expected _cross_gram to call {guarded}"
-
-        guard_lines = [
-            inner.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "_cross_gram"
+    unguarded = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        calls = [
+            inner
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "_agg_by_bin"
+        ]
+        if not calls:
+            continue
+        guards = [
+            inner
             for inner in ast.walk(node)
             if isinstance(inner, ast.Call)
             and isinstance(inner.func, ast.Name)
             and inner.func.id == guard
         ]
-        assert len(guard_lines) >= len(callers), (
-            f"{len(callers)} call(s) to {guarded} in _cross_gram but only "
-            f"{len(guard_lines)} call(s) to its guard {guard}: at least one "
-            "cross-shaped aggregate is unguarded"
+        if len(guards) < len(calls):
+            unguarded.append(
+                f"{node.name}: {len(calls)} call(s) to _agg_by_bin, "
+                f"{len(guards)} call(s) to {guard} (line {calls[0].lineno})"
+            )
+
+    assert not unguarded, (
+        "unguarded cross-shaped aggregate:\n  "
+        + "\n  ".join(unguarded)
+        + f"\n\n_agg_by_bin returns (n_bins, width-of-gm) with the two "
+        "dimensions from different blocks. Every caller must check "
+        f"{guard} first and fall back to _cross_gram_by_columns."
+    )
+
+
+def test_agg_by_bin_width_never_under_reports_the_allocated_width():
+    """The load-bearing line of the guard, tested rather than left to review.
+
+    ``_agg_by_bin_width`` infers the width the aggregate is ALLOCATED at by
+    sniffing attributes, because it differs from ``shape[1]``: the SSP branches
+    aggregate in basis space and apply ``R_inv`` afterwards, which is how the
+    guard's first draft came to budget 4 where 600 was allocated. Under-report
+    for any type and the guard permits exactly what it exists to stop, so this
+    runs the real aggregation and compares against what the kernels were asked
+    for.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_core import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+        SparseGroupMatrix,
+        SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+
+    gen = np.random.default_rng(150)
+    n, n_bins = 2_000, 8
+    bin_idx = gen.integers(0, n_bins, n).astype(np.intp)
+    weights = np.abs(gen.normal(1.0, 0.2, n))
+    basis = sp.csr_matrix(gen.normal(size=(n, 9)) * (gen.random((n, 9)) < 0.4))
+
+    blocks = {
+        # shape[1] is R_inv's width (4), the allocation is at _p_b (9).
+        "SparseSSPGroupMatrix": SparseSSPGroupMatrix(basis, gen.normal(size=(9, 4))),
+        "SparseGroupMatrix": SparseGroupMatrix(basis),
+        "DenseGroupMatrix": DenseGroupMatrix(gen.normal(size=(n, 5))),
+        "CategoricalGroupMatrix": CategoricalGroupMatrix(gen.integers(0, 4, n).astype(np.intp), 4),
+        "SupportCompressedSSPGroupMatrix": SupportCompressedSSPGroupMatrix(
+            gen.normal(size=(30, 6)),
+            gen.normal(size=(6, 3)),
+            gen.integers(0, 30, n).astype(np.intp),
+        ),
+        "SplineCategoricalGroupMatrix": SplineCategoricalGroupMatrix(
+            basis, gen.normal(size=(9, 4)), np.arange(0, n, 2, dtype=np.intp)
+        ),
+    }
+
+    for name, gm in blocks.items():
+        widths: list[int] = []
+        original_csr = algebra._csr_weighted_bincount
+        original_2d = algebra._weighted_bincount_2d
+        try:
+            algebra._csr_weighted_bincount = lambda d, i, p, n_cols, b, w, nb, _o=original_csr: (
+                widths.append(int(n_cols)) or _o(d, i, p, n_cols, b, w, nb)
+            )
+            algebra._weighted_bincount_2d = lambda b, w, M, nb, _o=original_2d: (
+                widths.append(int(np.shape(M)[1])) or _o(b, w, M, nb)
+            )
+            result = algebra._agg_by_bin(gm, bin_idx, weights, n_bins)
+        finally:
+            algebra._csr_weighted_bincount = original_csr
+            algebra._weighted_bincount_2d = original_2d
+
+        claimed = algebra._agg_by_bin_width(gm)
+        observed = max([*widths, int(result.shape[1])])
+        assert claimed >= observed, (
+            f"{name}: guard budgets against width {claimed} but the aggregation "
+            f"allocated at width {observed}, so the guard under-counts by "
+            f"{observed / max(claimed, 1):.1f}x"
         )
+
+
+def test_bin_and_width_bounded_aggregates_do_not_grow_with_n(monkeypatch):
+    """Measure the two allow-list entries that still rest on an argument.
+
+    They claim `(n_bins1, K_cat)` is a bin count by a basis width, so a lossless
+    support cannot inflate it. That is checkable: hold the bins and widths fixed,
+    grow n tenfold, and the largest aggregate must not move.
+    """
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedTensorGroupMatrix,
+    )
+
+    largest: dict[int, int] = {}
+    for n in (5_000, 50_000):
+        gen = np.random.default_rng(151)
+        n_bins1, n_bins2, k1, k2 = 11, 7, 3, 2
+        b1 = gen.normal(size=(n_bins1, k1))
+        b2 = gen.normal(size=(n_bins2, k2))
+        idx1 = gen.integers(0, n_bins1, n).astype(np.intp)
+        idx2 = gen.integers(0, n_bins2, n).astype(np.intp)
+        joint = np.einsum("ij,ik->ijk", b1[idx1], b2[idx2]).reshape(n, k1 * k2)
+        tensor = DiscretizedTensorGroupMatrix(
+            b1,
+            b2,
+            idx1,
+            idx2,
+            joint,
+            gen.normal(size=(k1 * k2, 4)),
+            np.arange(n, dtype=np.intp),
+            0,
+        )
+        rows = np.arange(0, n, 2, dtype=np.intp)
+        # n grows tenfold; the support and the widths deliberately do not.
+        spline_cat = _spline_cat_support_block(n, 300, 5, 3, rows, seed=152)
+        weights = np.abs(gen.normal(1.0, 0.2, n))
+
+        # Force the over-cap fallback; the histogram path does not use this
+        # kernel at all, so without this the spy records nothing.
+        monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1)
+        cells: list[int] = []
+        original = algebra._weighted_bincount_2d
+        try:
+            algebra._weighted_bincount_2d = lambda b, w, M, nb, _o=original: (
+                cells.append(int(nb) * int(np.shape(M)[1])) or _o(b, w, M, nb)
+            )
+            algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
+        finally:
+            algebra._weighted_bincount_2d = original
+        largest[n] = max(cells)
+
+    assert largest[5_000] == largest[50_000], (
+        f"the aggregate grew with n, so it is not bin-count x basis-width after all: {largest}"
+    )
 
 
 def test_the_invariant_test_can_actually_fail():
@@ -1361,16 +1494,25 @@ def test_tensor_fallback_bounds_its_channel_accumulator(monkeypatch):
     monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1)  # force the fallback
     expected = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
 
-    # Budget below K2 * n_bins1 * K_cat, so the loops must invert.
-    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", 10)
+    # Below K2 * n_bins1 * K_cat (400) so the loops invert, but above n_bins1
+    # (40) so tiling is meaningful rather than pinned at the irreducible floor.
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", 100)
     seen = _spy_on_row_expansion(monkeypatch)
     actual = algebra._cross_gram_tensor_spline_categorical(tensor, spline_cat, weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
     _assert_expansion_bounded(seen)
-    assert sum(seen) == k2 * rows.size, (
-        "the K2-deep accumulator was still built: expected one pass per channel "
-        f"({k2} x {rows.size} expanded rows), saw {sum(seen)}"
+    # One pass per (channel, basis tile). The tile count is derived, not
+    # assumed, so this still pins the inversion when the tiling changes.
+    k_cat = spline_cat.B_unique.shape[1]
+    tile = algebra._aggregate_column_chunk(n_bins1, k_cat)
+    n_tiles = -(-k_cat // tile)
+    assert sum(seen) == k2 * n_tiles * rows.size, (
+        f"expected {k2} channels x {n_tiles} tiles x {rows.size} rows, saw {sum(seen)}"
+    )
+    assert sum(seen) > rows.size, "the all-channel accumulator was still built"
+    assert n_bins1 * tile <= algebra._MAX_AGGREGATE_CELLS, (
+        "a single channel tile still exceeds the aggregate budget"
     )
 
 
