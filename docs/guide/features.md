@@ -110,7 +110,9 @@ area = Categorical(base="most_exposed", grouping=grouping)
 ```
 
 This is useful when a tariff factor has many thin levels but you still want a
-single grouped factor inside the model.
+single grouped factor inside the model. Interaction terms and interaction
+screening use the same mapping: pass original labels at fit and predict time,
+and each grouped interaction is built in the collapsed level geometry.
 
 ## RandomEffect
 

@@ -22,9 +22,26 @@ import scipy.sparse as sp
 from numpy.polynomial.legendre import legvander
 from numpy.typing import NDArray
 
-from superglm.features.categorical import _validate_categorical_levels
+from superglm.features.categorical import _resolve_categorical_labels
 from superglm.group_matrix import _discretize_column
 from superglm.types import DiscreteTensorBuildResult, GroupInfo, TensorMarginalInfo
+
+
+def _categorical_build_labels(x: NDArray, cat_spec, *, context: str) -> NDArray:
+    """Resolve fit labels only when the categorical parent is grouped.
+
+    An ungrouped parent has already validated and learned this same fit column,
+    so its interaction build preserves the original normalization-only path.
+    Grouped parents still need the raw -> collapsed -> fitted-domain contract.
+    """
+    if cat_spec._grouping is None:
+        return np.asarray(x).ravel()
+    return _resolve_categorical_labels(
+        x,
+        cat_spec._grouping,
+        known_levels=set(cat_spec._levels),
+        context=context,
+    )
 
 
 def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = None):
@@ -241,6 +258,7 @@ class SplineCategorical:
         self._base_level: str = ""
         self._R_inv_dict: dict[str, NDArray] | NDArray = {}
         self._projection: NDArray | None = None
+        self._cat_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -264,7 +282,6 @@ class SplineCategorical:
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
         # Interaction marginals use the cardinal cr basis; store the resolved
         # spec so transform()/score() rebuild the SAME basis at predict time.
         spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
@@ -278,6 +295,12 @@ class SplineCategorical:
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
         self._projection = getattr(spline_spec, "_interaction_projection", None)
+        self._cat_grouping = cat_spec._grouping
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
 
         B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
         # Union of the non-base masks: exactly the rows some emitted block owns.
@@ -345,7 +368,6 @@ class SplineCategorical:
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
         # Same resolution as build(); see _varying_coefficient_spline_spec.
         spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
 
@@ -358,6 +380,12 @@ class SplineCategorical:
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
         self._projection = getattr(spline_spec, "_interaction_projection", None)
+        self._cat_grouping = cat_spec._grouping
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
 
         support, bin_idx = _discretize_column(x_spline, int(n_bins))
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
@@ -408,9 +436,11 @@ class SplineCategorical:
 
     def transform(self, x_spline: NDArray, x_cat: NDArray) -> NDArray:
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         B = self._spline_spec._raw_basis_matrix(x_spline)
 
@@ -430,11 +460,21 @@ class SplineCategorical:
     def score(self, x_spline: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         """Score the interaction directly from its public runtime blocks."""
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
+        return self._score_resolved(x_spline, x_cat, beta)
 
+    def _score_resolved(
+        self,
+        x_spline: NDArray,
+        x_cat: NDArray,
+        beta: NDArray,
+    ) -> NDArray:
+        """Score labels that are already in the fitted grouped-level domain."""
         B = sp.csr_matrix(self._spline_spec._raw_basis_matrix(x_spline))
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_spline), dtype=np.float64)
@@ -464,7 +504,7 @@ class SplineCategorical:
         per_level: dict[str, dict[str, Any]] = {}
         for level in self._non_base:
             level_codes = np.full(n_points, level, dtype=object)
-            log_rels = self.score(x_grid, level_codes, beta)
+            log_rels = self._score_resolved(x_grid, level_codes, beta)
             per_level[level] = {
                 "log_relativity": log_rels,
                 "relativity": np.exp(log_rels),
@@ -498,6 +538,7 @@ class PolynomialCategorical:
         self._hi: float = 1.0
         self._non_base: list[str] = []
         self._base_level: str = ""
+        self._cat_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -534,9 +575,14 @@ class PolynomialCategorical:
         self._hi = poly_spec._hi
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
+        self._cat_grouping = cat_spec._grouping
 
         x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
         P = self._basis(self._scale(x_poly))
 
         groups: list[GroupInfo] = []
@@ -548,9 +594,11 @@ class PolynomialCategorical:
 
     def transform(self, x_poly: NDArray, x_cat: NDArray) -> NDArray:
         x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         P = self._basis(self._scale(x_poly))
 
@@ -562,9 +610,11 @@ class PolynomialCategorical:
 
     def score(self, x_poly: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         P = self._basis(self._scale(x_poly))
         beta = np.asarray(beta, dtype=np.float64).ravel()
@@ -618,6 +668,7 @@ class NumericCategorical:
 
         self._non_base: list[str] = []
         self._base_level: str = ""
+        self._cat_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -642,9 +693,14 @@ class NumericCategorical:
 
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
+        self._cat_grouping = cat_spec._grouping
 
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
 
         cols = []
         for level in self._non_base:
@@ -656,9 +712,11 @@ class NumericCategorical:
 
     def transform(self, x_num: NDArray, x_cat: NDArray) -> NDArray:
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
 
         cols = []
@@ -669,9 +727,11 @@ class NumericCategorical:
 
     def score(self, x_num: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_num), dtype=np.float64)
@@ -716,6 +776,8 @@ class CategoricalInteraction:
         self._base1: str = ""
         self._base2: str = ""
         self._pairs: list[tuple[str, str]] = []
+        self._cat1_grouping = None
+        self._cat2_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -741,9 +803,19 @@ class CategoricalInteraction:
         self._non_base2 = list(cat2_spec._non_base)
         self._base1 = cat1_spec._base_level
         self._base2 = cat2_spec._base_level
+        self._cat1_grouping = cat1_spec._grouping
+        self._cat2_grouping = cat2_spec._grouping
 
-        x_cat1 = np.asarray(x_cat1).ravel()
-        x_cat2 = np.asarray(x_cat2).ravel()
+        x_cat1 = _categorical_build_labels(
+            x_cat1,
+            cat1_spec,
+            context=self.cat1_name,
+        )
+        x_cat2 = _categorical_build_labels(
+            x_cat2,
+            cat2_spec,
+            context=self.cat2_name,
+        )
         n = len(x_cat1)
 
         self._pairs = []
@@ -773,13 +845,17 @@ class CategoricalInteraction:
         return GroupInfo(columns=columns, n_cols=n_pairs)
 
     def transform(self, x_cat1: NDArray, x_cat2: NDArray) -> NDArray:
-        x_cat1 = np.asarray(x_cat1).ravel()
-        x_cat2 = np.asarray(x_cat2).ravel()
-        _validate_categorical_levels(
-            x_cat1, set(self._non_base1) | {self._base1}, context=self.cat1_name
+        x_cat1 = _resolve_categorical_labels(
+            x_cat1,
+            self._cat1_grouping,
+            known_levels=set(self._non_base1) | {self._base1},
+            context=self.cat1_name,
         )
-        _validate_categorical_levels(
-            x_cat2, set(self._non_base2) | {self._base2}, context=self.cat2_name
+        x_cat2 = _resolve_categorical_labels(
+            x_cat2,
+            self._cat2_grouping,
+            known_levels=set(self._non_base2) | {self._base2},
+            context=self.cat2_name,
         )
         n = len(x_cat1)
         cols = []
@@ -788,13 +864,17 @@ class CategoricalInteraction:
         return np.column_stack(cols) if cols else np.empty((n, 0))
 
     def score(self, x_cat1: NDArray, x_cat2: NDArray, beta: NDArray) -> NDArray:
-        x_cat1 = np.asarray(x_cat1).ravel()
-        x_cat2 = np.asarray(x_cat2).ravel()
-        _validate_categorical_levels(
-            x_cat1, set(self._non_base1) | {self._base1}, context=self.cat1_name
+        x_cat1 = _resolve_categorical_labels(
+            x_cat1,
+            self._cat1_grouping,
+            known_levels=set(self._non_base1) | {self._base1},
+            context=self.cat1_name,
         )
-        _validate_categorical_levels(
-            x_cat2, set(self._non_base2) | {self._base2}, context=self.cat2_name
+        x_cat2 = _resolve_categorical_labels(
+            x_cat2,
+            self._cat2_grouping,
+            known_levels=set(self._non_base2) | {self._base2},
+            context=self.cat2_name,
         )
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_cat1), dtype=np.float64)

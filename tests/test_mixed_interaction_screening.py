@@ -687,17 +687,8 @@ def test_fremtpl_example_specification_is_not_mis_specified():
     assert splined - smoothed < 10.0
 
 
-def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
-    """A grouped factor is excluded: its confirmatory refit cannot be built.
-
-    `Categorical(grouping=...)` fits fine as a main effect, and the screen's own
-    `_categorical_codes` collapses it correctly — but no interaction builder maps
-    the raw column through the grouping, so a confirmatory refit validates
-    original labels against grouped levels and raises.  Screening such a pair
-    would hand the caller a refit that cannot run, so the margin is excluded.
-    The `pytest.raises` below pins the underlying defect: when it starts passing,
-    the exclusion in `_margin_kind` can go.
-    """
+def test_grouped_categorical_margins_screen_and_confirm_by_refit():
+    """A grouped factor's screen and confirmatory refit share raw labels."""
     from superglm.features.grouping import collapse_levels
 
     rng = np.random.default_rng(4321)
@@ -717,16 +708,17 @@ def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
     model.fit_reml(df, y)
 
     table = model.screen_interactions(df, y)
-    assert "region" not in set(table["feature_a"]) | set(table["feature_b"])
+    explicit = model.screen_interactions(df, y, candidates=[("age", "region")])
+    pd.testing.assert_frame_equal(table, explicit)
+    assert len(table) == 1
+    assert table.iloc[0]["kind"] == "spline_cat"
 
-    with pytest.raises(ValueError, match="deferred|screenable"):
-        model.screen_interactions(df, y, candidates=[("age", "region")])
-
-    # The defect the exclusion protects against: the refit itself cannot be built.
-    with pytest.raises(ValueError, match="unseen categorical levels"):
-        SuperGLM(family="poisson", features=feats(), interactions=[("age", "region")]).fit_reml(
-            df, y
-        )
+    confirm = SuperGLM(
+        family="poisson",
+        features=feats(),
+        interactions=[("age", "region")],
+    ).fit_reml(df, y)
+    assert np.isfinite(confirm.predict(df)).all()
 
 
 def test_clamped_ladder_costs_no_decomposition_and_agrees_with_every_rung(monkeypatch):

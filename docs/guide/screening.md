@@ -83,12 +83,10 @@ penalized level curves; see [Interactions](interactions.md).
 splines, spline-mode `OrderedCategorical`, `Categorical` and `Numeric`.
 `Polynomial`, `RandomEffect` and
 step-mode `OrderedCategorical` have no screenable
-margin. A `Categorical` carrying a `grouping=` is excluded for a different
-reason: it screens perfectly well, but no interaction builder yet maps its raw
-column through the grouping, so the confirmatory refit of such a pair cannot be
-built — screening it would hand you a refit that raises. Spline x numeric has
-both margins but no refit target yet, and is
-deferred until a varying-coefficient term exists.
+margin. A `Categorical` carrying a `grouping=` is eligible too: screening and
+the confirmatory interaction refit both validate original labels and apply the
+same grouping once. Spline x numeric has both margins but no refit target yet,
+and is deferred until a varying-coefficient term exists.
 
 The deferral has two remedies, and which one applies is a modelling question
 rather than a screening one. If the `Numeric` margin is really curved, respec
