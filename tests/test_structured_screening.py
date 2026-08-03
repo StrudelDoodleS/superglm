@@ -439,9 +439,13 @@ def test_evaluate_clips_absorption_dust_but_signals_material_negative(monkeypatc
     with pytest.raises(st._UnstableStructuredEDFError, match="numerically inconsistent"):
         st._evaluate(pair, U_eff, 0, 1.0, np.array([0]))
 
+    monkeypatch.setattr(st, "_pair_arrow", lambda *a, **k: FakeFactor(1, -1.25))
+    with pytest.raises(st._UnstableStructuredEDFError, match="penalty trace"):
+        st._evaluate(pair, U_eff, 0, 1.0, np.array([0]))
 
-def test_material_negative_edf_refuses_the_whole_ladder(monkeypatch):
-    """No plausible row may escape after an unstable intermediate EDF."""
+
+def test_material_negative_edf_refuses_an_only_search_rung(monkeypatch):
+    """No plausible row may escape when the ladder has no certified rung."""
     import superglm.screening._structured as st
 
     pair = spline_cat_moments(*_near_absorbed_cells(1.0))
@@ -461,86 +465,27 @@ def test_material_negative_edf_refuses_the_whole_ladder(monkeypatch):
     assert calls == 3
 
 
-def test_negative_penalty_trace_refuses_the_nonmonotone_edf_curve(monkeypatch):
-    """PSD inverse action requires both ``penalty >= 0`` and ``edf <= rank``."""
+def test_an_unstable_search_rung_preserves_certified_edge_clamps(monkeypatch):
+    """One broken target must not discard independent endpoint results."""
     import superglm.screening._structured as st
 
-    rng = np.random.default_rng(14)
-    n_rows, k_a, n_levels = 7, 4, 6
-    B_a = rng.normal(size=(n_rows, k_a))
-    delta = 10 ** rng.uniform(-9.0, -4.0)
-    B_a[:, -1] = B_a[:, 0] + delta * rng.normal(size=n_rows)
-    W_cell = 10 ** rng.uniform(-6.0, 6.0, size=(n_rows, n_levels))
-    W_cell[rng.random(W_cell.shape) < 0.15] = 0.0
-    penalty_vector = rng.normal(size=k_a)
-    S_a = np.outer(penalty_vector, penalty_vector)
-    level_rows = np.arange(1, n_levels, dtype=np.intp)
-    pair = spline_cat_moments(
-        B_a,
-        S_a,
-        np.zeros_like(W_cell),
-        W_cell,
-        level_rows,
-    )
-    U_eff, rank_m = st._profile(pair)
-    ranks = st.block_ranks(pair)
-    scale = pair.profiled_trace / (np.trace(S_a) * level_rows.size)
-    lam = 1e8 * scale
-    factor = st._pair_arrow(pair, lam, ranks)
-    blocks = factor.diag_blocks()[:, :k_a, :k_a]
-    penalty_term = lam * float(np.einsum("lpr,rp->", blocks, S_a, optimize=True))
-    assert pair.profiled_trace == pytest.approx(239_102.68907761583, rel=2e-13)
-    assert factor.rank - rank_m == 19
-    assert penalty_term == pytest.approx(-58.45079964351394, rel=2e-12)
-
-    with pytest.raises(st._UnstableStructuredEDFError, match="penalty trace"):
-        st._evaluate(pair, U_eff, rank_m, lam, ranks)
-
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
     calls = 0
-    real_evaluate = st._evaluate
 
-    def counted(*args, **kwargs):
+    def unstable_on_search(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return real_evaluate(*args, **kwargs)
+        if calls == 1:
+            return 0.0, 2.0
+        if calls == 2:
+            return 0.0, 0.5
+        raise st._UnstableStructuredEDFError("injected material negative EDF")
 
-    monkeypatch.setattr(st, "_evaluate", counted)
-    assert st.structured_ladder(pair, budgets=(13.0,)) is None
-    assert calls > 2
-
-
-def test_increasing_endpoint_edf_is_refused_even_when_each_value_is_bounded():
-    """More penalty cannot increase EDF; bounded endpoints are not sufficient."""
-    import superglm.screening._structured as st
-
-    rng = np.random.default_rng(2)
-    n_rows, k_a, n_levels = 8, 4, 6
-    B_a = rng.normal(size=(n_rows, k_a))
-    delta = 10 ** rng.uniform(-9.0, -4.0)
-    B_a[:, -1] = B_a[:, 0] + delta * rng.normal(size=n_rows)
-    W_cell = 10 ** rng.uniform(-6.0, 6.0, size=(n_rows, n_levels))
-    W_cell[rng.random(W_cell.shape) < 0.15] = 0.0
-    penalty_vector = rng.normal(size=k_a)
-    S_a = np.outer(penalty_vector, penalty_vector)
-    level_rows = np.arange(1, n_levels, dtype=np.intp)
-    pair = spline_cat_moments(
-        B_a,
-        S_a,
-        np.zeros_like(W_cell),
-        W_cell,
-        level_rows,
-    )
-    U_eff, rank_m = st._profile(pair)
-    ranks = st.block_ranks(pair)
-    scale = pair.profiled_trace / (np.trace(S_a) * level_rows.size)
-    _, edf_lo = st._evaluate(pair, U_eff, rank_m, 1e-10 * scale, ranks)
-    _, edf_hi = st._evaluate(pair, U_eff, rank_m, 1e10 * scale, ranks)
-
-    assert pair.profiled_trace == pytest.approx(28_223.33962068437, rel=2e-13)
-    assert edf_lo == pytest.approx(13.999660397988439, rel=2e-13)
-    assert edf_hi == pytest.approx(14.030428796673123, rel=2e-13)
-    assert edf_hi > edf_lo
-    assert st.structured_ladder(pair, budgets=(14.0,)) is None
+    monkeypatch.setattr(st, "_evaluate", unstable_on_search)
+    result = st.structured_ladder(pair, budgets=(3.0, 1.0, 0.25), max_evaluations=100)
+    assert result is not None
+    assert [r.edf0 for r in result] == [2.0, 0.5]
+    assert calls == 3
 
 
 def test_endpoint_monotonicity_mutation_is_refused_after_the_bracket(monkeypatch):
@@ -556,6 +501,24 @@ def test_endpoint_monotonicity_mutation_is_refused_after_the_bracket(monkeypatch
 
     monkeypatch.setattr(st, "_evaluate", increasing_endpoints)
     assert st.structured_ladder(pair, budgets=(0.5,)) is None
+    assert calls == 2
+
+
+def test_sub_tolerance_endpoint_ordering_noise_is_not_refused(monkeypatch):
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
+    calls = 0
+
+    def noisy_endpoints(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return (0.0, 1.0) if calls == 1 else (0.0, 1.0 + 0.5 * st._EDF_TOL)
+
+    monkeypatch.setattr(st, "_evaluate", noisy_endpoints)
+    result = st.structured_ladder(pair, budgets=(2.0,))
+    assert result is not None
+    assert result[0].edf0 == 1.0
     assert calls == 2
 
 
@@ -577,6 +540,30 @@ def test_interior_edf_outside_its_monotone_bracket_is_refused(monkeypatch):
     monkeypatch.setattr(st, "_evaluate", broken_interior)
     assert st.structured_ladder(pair, budgets=(1.0,), max_evaluations=100) is None
     assert calls == 3
+
+
+def test_sub_tolerance_interior_ordering_noise_is_clipped_not_refused(monkeypatch):
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
+    calls = 0
+
+    def noisy_interior(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0.0, 2.0
+        if calls == 2:
+            return 0.0, 0.0
+        if calls == 3:
+            return 0.0, 2.0 + 0.5 * st._EDF_TOL
+        return 0.0, 1.0
+
+    monkeypatch.setattr(st, "_evaluate", noisy_interior)
+    result = st.structured_ladder(pair, budgets=(1.0,), max_evaluations=100)
+    assert result is not None
+    assert result[0].edf0 == 1.0
+    assert calls == 4
 
 
 def test_search_width_exhaustion_without_target_convergence_is_refused(monkeypatch):
@@ -1273,6 +1260,23 @@ def test_structured_allowance_charges_both_qr_passes_and_seven_factor_units():
         )
         == expected
     )
+
+
+def test_large_exact_support_is_refused_when_profile_setup_exhausts_the_budget():
+    assert ops._structured_evaluation_allowance(5_000_000, 256, 11, 200) >= 2
+    assert ops._structured_evaluation_allowance(5_000_000, 20_000, 11, 200) == 0
+
+
+@pytest.mark.parametrize("low_weight", [0.01, 0.001])
+def test_an_ill_conditioned_thin_level_reaches_an_interior_edf_target(low_weight):
+    from superglm.screening._structured import structured_ladder
+
+    pair = spline_cat_moments(*_structured_inputs(_thin_level_pair(low_weight)))
+    result = structured_ladder(pair, budgets=(24.0,), max_evaluations=200)
+    assert result is not None
+    assert len(result) == 1
+    assert np.isfinite([result[0].statistic, result[0].edf0, result[0].lambda0]).all()
+    assert result[0].edf0 == pytest.approx(24.0, abs=1e-6)
 
 
 def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable(monkeypatch):
