@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -39,7 +40,12 @@ from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.centered_system import grouped_augmented_factor
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
-from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    decompose_factor,
+    decompose_gram,
+    needs_factor_certification,
+)
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -327,6 +333,133 @@ def _result(beta: np.ndarray, intercept: float, *, phi: float = 1.0) -> PIRLSRes
     )
 
 
+def _roundoff_gamma(operation_count: int) -> float:
+    eps = np.finfo(np.float64).eps
+    return operation_count * eps / (1.0 - operation_count * eps)
+
+
+def _assert_observed_cutoff_geometry(
+    inverse: np.ndarray,
+    slope_log_pdet: float,
+    certificate,
+    factor: np.ndarray,
+) -> None:
+    """Check only resolved rank, support, projector, and log-pdet at the cutoff."""
+    factor = np.asarray(factor, dtype=np.float64)
+    inverse = np.asarray(inverse, dtype=np.float64)
+    width = factor.shape[1]
+    column_scale = np.linalg.norm(factor, axis=0)
+    active = np.flatnonzero(column_scale > 0.0)
+    assert len(active) == width
+    equilibrated = factor / column_scale
+    equilibrated_singular_values = np.linalg.svd(equilibrated, compute_uv=False)
+    cutoff = SHARED_RANK_POLICY.factor_rcond * equilibrated_singular_values[0]
+    rank = int(np.count_nonzero(equilibrated_singular_values > cutoff))
+    assert rank == width
+    gap = float(equilibrated_singular_values[rank - 1] - cutoff)
+    eta_factor = (
+        64.0 * _roundoff_gamma(max(factor.shape)) * float(np.linalg.norm(equilibrated, ord=2))
+    )
+    assert gap > 2.0 * eta_factor
+    assert equilibrated_singular_values[rank - 1] - eta_factor > (
+        SHARED_RANK_POLICY.factor_rcond * (equilibrated_singular_values[0] + eta_factor)
+    )
+    projector_bound = 2.0 * eta_factor / (gap - 2.0 * eta_factor)
+
+    assert certificate.rank == rank
+    assert certificate.method == "qr_svd"
+    null = np.asarray(certificate.parameter_null_basis, dtype=np.float64)
+    null_projector = null @ np.linalg.pinv(null)
+    assert np.linalg.norm(null_projector, ord=2) <= projector_bound
+
+    selected = np.asarray(certificate.active_columns, dtype=np.intp)
+    inactive = np.setdiff1d(np.arange(width), selected, assume_unique=True)
+    assert inverse.shape == (width, width)
+    assert np.all(np.isfinite(inverse))
+    assert not np.any(inverse[inactive, :])
+    assert not np.any(inverse[:, inactive])
+
+    singular_values = np.linalg.svd(factor, compute_uv=False)[:rank]
+    factor_error = eta_factor * float(np.max(column_scale))
+    smallest = float(singular_values[-1])
+    assert smallest > factor_error
+
+    expected_log_pdet = 2.0 * float(np.sum(np.log(singular_values)))
+    log_summation_error = (
+        2.0 * _roundoff_gamma(rank) * float(np.sum(np.abs(np.log(singular_values))))
+    )
+    log_bound = 2.0 * rank * factor_error / (smallest - factor_error) + log_summation_error
+    assert abs(slope_log_pdet - expected_log_pdet) <= log_bound
+
+
+def _assert_well_conditioned_observed_inverse(
+    inverse: np.ndarray,
+    factor: np.ndarray,
+) -> SimpleNamespace:
+    """Bound public covariance and fitted prediction from an independent QR."""
+    factor = np.asarray(factor, dtype=np.float64)
+    inverse = np.asarray(inverse, dtype=np.float64)
+    width = factor.shape[1]
+    orthogonal, triangular = np.linalg.qr(factor, mode="reduced")
+    triangular_inverse = np.linalg.solve(triangular, np.eye(width))
+    reference_inverse = triangular_inverse @ triangular_inverse.T
+    gram = factor.T @ factor
+    gram_norm = float(np.linalg.norm(gram, ord=2))
+    inverse_norm = float(np.linalg.norm(inverse, ord=2))
+    backward = np.linalg.norm(np.eye(width) - gram @ inverse, ord=2) / (
+        gram_norm * inverse_norm + 1.0
+    )
+    operation_count = factor.shape[0] + 8 * width
+    beta = 64.0 * _roundoff_gamma(operation_count)
+    assert backward <= beta
+    condition = float(np.linalg.cond(gram, p=2))
+    conditioned_beta = condition * beta
+    assert conditioned_beta < 1.0
+    forward_bound = 2.0 * conditioned_beta / (1.0 - conditioned_beta)
+    relative_inverse_error = np.linalg.norm(inverse - reference_inverse, ord=2) / np.linalg.norm(
+        reference_inverse,
+        ord=2,
+    )
+    assert relative_inverse_error <= forward_bound
+
+    actual_action = factor @ inverse @ factor.T
+    reference_action = orthogonal @ orthogonal.T
+    action_roundoff = (
+        8.0
+        * _roundoff_gamma(operation_count)
+        * (
+            np.linalg.norm(factor, ord=2) ** 2
+            * (inverse_norm + np.linalg.norm(reference_inverse, ord=2))
+            + 1.0
+        )
+    )
+    action_bound = (
+        np.linalg.norm(factor, ord=2) ** 2
+        * np.linalg.norm(reference_inverse, ord=2)
+        * forward_bound
+        + action_roundoff
+    )
+    action_error = float(np.linalg.norm(actual_action - reference_action, ord=2))
+    assert action_error <= action_bound
+
+    probe = np.linspace(-1.0, 1.0, factor.shape[0])
+    prediction_error = float(np.linalg.norm((actual_action - reference_action) @ probe))
+    prediction_bound = action_bound * float(np.linalg.norm(probe))
+    assert prediction_error <= prediction_bound
+    return SimpleNamespace(
+        backward=backward,
+        beta=beta,
+        condition=condition,
+        conditioned_beta=conditioned_beta,
+        forward_bound=forward_bound,
+        relative_inverse_error=relative_inverse_error,
+        action_error=action_error,
+        action_bound=action_bound,
+        prediction_error=prediction_error,
+        prediction_bound=prediction_bound,
+    )
+
+
 class _ExponentialVarianceGaussian(Gaussian):
     """Identity-link test family with controllable signed observed rows."""
 
@@ -587,50 +720,110 @@ def test_observed_geometry_retains_exact_alias_rank() -> None:
     )
 
 
-def test_observed_geometry_uses_factor_certification_above_rank_boundary() -> None:
+def test_observed_geometry_uses_factor_certification_at_rank_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm.reml.observed_geometry as observed_geometry
+
     rows = np.arange(128)
     primary = np.where(rows % 2, 1.0, -1.0)
     orthogonal = np.where(rows % 4 < 2, 1.0, -1.0)
     X = np.column_stack((primary, primary + 3.03e-8 * orthogonal))
+    weights = np.ones(len(rows))
     dm = DesignMatrix([DenseGroupMatrix(X)], n=len(rows), p=2)
-
-    preliminary = decompose_gram(X.T @ X)
-    certified = decompose_factor(
-        grouped_augmented_factor(
-            dm,
-            np.ones(len(rows)),
-            np.zeros((2, 2)),
-            center=np.zeros(2),
-        )
+    factor = grouped_augmented_factor(
+        dm,
+        weights,
+        np.zeros((2, 2)),
+        center=np.zeros(2),
     )
-    assert preliminary.rank == 1
-    assert preliminary.resolution_limited
+    preliminary = decompose_gram(X.T @ X)
     assert needs_factor_certification(preliminary)
-    assert certified.rank == 2
+    original_factor = observed_geometry.decompose_factor
+    factor_calls = 0
+    factor_certificates = []
 
-    geometry = build_observed_reml_geometry(
+    def counted_factor(factor, *args, **kwargs):
+        nonlocal factor_calls
+        factor_calls += 1
+        certificate = original_factor(factor, *args, **kwargs)
+        factor_certificates.append(certificate)
+        return certificate
+
+    monkeypatch.setattr(observed_geometry, "decompose_factor", counted_factor)
+    geometry = observed_geometry.build_observed_reml_geometry(
         dm=dm,
         distribution=Gamma(),
         link=LogLink(),
         y=np.ones(len(rows)),
-        sample_weight=np.ones(len(rows)),
+        sample_weight=weights,
+        offset_arr=np.zeros(len(rows)),
+        result=_result(np.zeros(2), 0.0),
+        penalty=np.zeros((2, 2)),
+    )
+    assert factor_calls == 1
+    assert geometry.hessian_rank == 3
+    _assert_observed_cutoff_geometry(
+        geometry.hessian_inverse,
+        geometry.log_det_H - float(np.log(len(rows))),
+        factor_certificates[0],
+        factor,
+    )
+
+
+def test_observed_well_conditioned_inverse_rejects_scale_mutations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced factor branch has resolvable covariance and fitted action."""
+    import superglm.reml.observed_geometry as observed_geometry
+
+    rows = np.arange(8)
+    primary = np.where(rows % 2, 1.0, -1.0)
+    orthogonal = np.where(rows % 4 < 2, 1.0, -1.0)
+    X = np.column_stack((1.5 * primary, 0.75 * orthogonal))
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=len(rows), p=2)
+    weights = np.ones(len(rows))
+    eps = SHARED_RANK_POLICY.gram_rcond
+    injected = decompose_gram(np.array([[1.0, 1.0 - 8.0 * eps], [1.0 - 8.0 * eps, 1.0]]))
+    assert injected.rank == injected.width
+    assert needs_factor_certification(injected)
+    original_gram = observed_geometry.decompose_gram
+    original_factor = observed_geometry.decompose_factor
+    factor_calls = 0
+
+    def injected_gram(matrix, *args, **kwargs):
+        if np.asarray(matrix).shape == (2, 2) and np.any(matrix):
+            return injected
+        return original_gram(matrix, *args, **kwargs)
+
+    def counted_factor(factor, *args, **kwargs):
+        nonlocal factor_calls
+        factor_calls += 1
+        return original_factor(factor, *args, **kwargs)
+
+    monkeypatch.setattr(observed_geometry, "decompose_gram", injected_gram)
+    monkeypatch.setattr(observed_geometry, "decompose_factor", counted_factor)
+    geometry = observed_geometry.build_observed_reml_geometry(
+        dm=dm,
+        distribution=Gamma(),
+        link=LogLink(),
+        y=np.ones(len(rows)),
+        sample_weight=weights,
         offset_arr=np.zeros(len(rows)),
         result=_result(np.zeros(2), 0.0),
         penalty=np.zeros((2, 2)),
     )
 
+    assert factor_calls == 1
     assert geometry.hessian_rank == 3
-    np.testing.assert_allclose(
-        geometry.hessian_inverse,
-        certified.pseudo_inverse(),
-        rtol=2e-15,
-        atol=0.0,
-    )
-    assert geometry.log_det_H == pytest.approx(
-        float(np.log(len(rows)) + certified.log_pdet),
-        rel=2e-15,
-        abs=0.0,
-    )
+    metrics = _assert_well_conditioned_observed_inverse(geometry.hessian_inverse, X)
+    assert metrics.conditioned_beta < 1.0
+    for scale in (0.5, 2.0):
+        with pytest.raises(AssertionError):
+            _assert_well_conditioned_observed_inverse(
+                scale * geometry.hessian_inverse,
+                X,
+            )
 
 
 @pytest.mark.parametrize("translation", [0.0, 1e10])

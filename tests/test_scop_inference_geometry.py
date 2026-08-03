@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm.solvers.rank import decompose_factor, decompose_gram, needs_factor_certification
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    decompose_factor,
+    decompose_gram,
+    needs_factor_certification,
+)
 from superglm.types import GroupSlice
 
 
@@ -415,8 +420,8 @@ def _mapped_factor_inverses(
         penalty_factor = np.sqrt(eigenvalues[positive])[:, None] * eigenvectors[:, positive].T
         centered_factor = np.vstack((centered_factor, penalty_factor))
         raw_factor = np.vstack((raw_factor, penalty_factor))
-    centered_inverse = decompose_factor(centered_factor).pseudo_inverse()
-    coefficient_inverse = decompose_factor(raw_factor).pseudo_inverse()
+    centered_inverse = _independent_factor_inverse(centered_factor)
+    coefficient_inverse = _independent_factor_inverse(raw_factor)
     latent_mean = mean_x * jacobian
     inverse_mean = centered_inverse @ latent_mean
     augmented = np.empty((len(jacobian) + 1, len(jacobian) + 1))
@@ -429,6 +434,86 @@ def _mapped_factor_inverses(
         coefficient_inverse * jacobian[:, None] * jacobian[None, :],
         augmented * augmented_jacobian[:, None] * augmented_jacobian[None, :],
     )
+
+
+def _roundoff_gamma(operation_count: int) -> float:
+    eps = np.finfo(np.float64).eps
+    return operation_count * eps / (1.0 - operation_count * eps)
+
+
+def _independent_factor_inverse(factor: np.ndarray) -> np.ndarray:
+    """Direct factor-SVD rank policy with an independent QR representative solve."""
+    factor = np.asarray(factor, dtype=np.float64)
+    width = factor.shape[1]
+    column_scale = np.linalg.norm(factor, axis=0)
+    active = np.flatnonzero(column_scale > 0.0)
+    if not active.size:
+        return np.zeros((width, width))
+
+    equilibrated = factor[:, active] / column_scale[active]
+    singular_values = np.linalg.svd(equilibrated, compute_uv=False)
+    cutoff = np.sqrt(np.finfo(np.float64).eps) * singular_values[0]
+    rank = int(np.count_nonzero(singular_values > cutoff))
+    lower_gap = singular_values[rank - 1] - cutoff if rank else np.inf
+    upper_gap = cutoff - singular_values[rank] if rank < len(singular_values) else np.inf
+    gap = min(lower_gap, upper_gap)
+    eta_factor = (
+        64.0 * _roundoff_gamma(max(factor.shape)) * float(np.linalg.norm(equilibrated, ord=2))
+    )
+    assert gap > 2.0 * eta_factor
+
+    selected_local: list[int] = []
+    for candidate in range(len(active)):
+        trial = selected_local + [candidate]
+        trial_values = np.linalg.svd(equilibrated[:, trial], compute_uv=False)
+        trial_rank = int(np.count_nonzero(trial_values > cutoff))
+        if trial_rank > len(selected_local):
+            selected_local.append(candidate)
+        if len(selected_local) == rank:
+            break
+    assert len(selected_local) == rank
+    selected = active[np.asarray(selected_local, dtype=np.intp)]
+    _orthogonal, triangular = np.linalg.qr(factor[:, selected], mode="reduced")
+    triangular_inverse = np.linalg.solve(triangular, np.eye(rank))
+    inverse = np.zeros((width, width))
+    inverse[np.ix_(selected, selected)] = triangular_inverse @ triangular_inverse.T
+    return inverse
+
+
+def _assert_covariance_factor_geometry(
+    actual: np.ndarray,
+    expected: np.ndarray,
+    factor: np.ndarray,
+) -> None:
+    """Check covariance size, fitted action, and reflexive Penrose residuals."""
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    factor = np.asarray(factor, dtype=np.float64)
+    gram = factor.T @ factor
+    actual_norm = float(np.linalg.norm(actual, ord=2))
+    expected_norm = float(np.linalg.norm(expected, ord=2))
+    gram_norm = float(np.linalg.norm(gram, ord=2))
+    tiny = np.finfo(np.float64).tiny
+    gamma = _roundoff_gamma(factor.shape[0] + 4 * factor.shape[1])
+
+    assert np.all(np.isfinite(actual))
+    assert np.linalg.norm(actual - actual.T, ord=2) <= gamma * max(actual_norm, tiny)
+    assert actual_norm <= expected_norm + gamma * max(expected_norm, tiny)
+
+    action = factor @ actual @ factor.T
+    expected_action = factor @ expected @ factor.T
+    action_scale = np.linalg.norm(factor, ord=2) ** 2 * (actual_norm + expected_norm)
+    assert np.linalg.norm(action - expected_action, ord=2) <= gamma * action_scale
+
+    first_scale = gram_norm * gram_norm * actual_norm + gram_norm
+    second_scale = actual_norm * actual_norm * gram_norm + actual_norm
+    first = np.linalg.norm(gram @ actual @ gram - gram, ord=2) / max(first_scale, tiny)
+    second = np.linalg.norm(actual @ gram @ actual - actual, ord=2) / max(
+        second_scale,
+        tiny,
+    )
+    assert first <= gamma
+    assert second <= gamma
 
 
 def _rank_boundary_inputs(jacobian: np.ndarray):
@@ -485,7 +570,7 @@ def _rank_boundary_inputs(jacobian: np.ndarray):
     )
 
 
-def test_scop_postfit_covariance_certifies_near_aliases_from_weighted_design_factor():
+def test_scop_postfit_covariance_certifies_near_aliases_from_factor():
     """Normal-equation round-off cannot publish a spurious 1e12 covariance."""
     from superglm.reml.scop_geometry import build_scop_postfit_inference
 
@@ -503,11 +588,8 @@ def test_scop_postfit_covariance_certifies_near_aliases_from_weighted_design_fac
         groups,
         observed,
     ) = _rank_boundary_inputs(jacobian)
-    assert preliminary.rank == 2
     assert certified.rank == 1
     assert needs_factor_certification(preliminary)
-    assert np.max(np.abs(preliminary.pseudo_inverse())) > 1.0e12
-
     actual = build_scop_postfit_inference(
         raw_fisher_gram=raw_gram,
         centered_fisher_gram=centered_gram,
@@ -528,9 +610,93 @@ def test_scop_postfit_covariance_certifies_near_aliases_from_weighted_design_fac
         jacobian,
         np.zeros((2, 2)),
     )
-    np.testing.assert_allclose(actual.coefficient_inverse, expected_coefficient, rtol=3e-15)
-    np.testing.assert_allclose(actual.augmented_inverse, expected_augmented, rtol=3e-15)
-    assert np.max(np.abs(actual.augmented_inverse[1:, 1:])) < 0.01
+    raw_factor = np.sqrt(weights)[:, None] * design
+    augmented_factor = np.column_stack((np.sqrt(weights), raw_factor))
+    _assert_covariance_factor_geometry(
+        actual.coefficient_inverse,
+        expected_coefficient,
+        raw_factor,
+    )
+    _assert_covariance_factor_geometry(
+        actual.augmented_inverse,
+        expected_augmented,
+        augmented_factor,
+    )
+
+
+def test_scop_postfit_full_rank_preliminary_dispatches_factor_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact dispatch coverage does not depend on a positive roundoff eigenvalue."""
+    import superglm.reml.scop_geometry as scop_geometry
+
+    jacobian = np.ones(2)
+    (
+        design,
+        dm,
+        weights,
+        mean_x,
+        centered_gram,
+        raw_gram,
+        _preliminary,
+        _certified,
+        states,
+        groups,
+        observed,
+    ) = _rank_boundary_inputs(jacobian)
+    eps = SHARED_RANK_POLICY.gram_rcond
+    injected = decompose_gram(np.array([[1.0, 1.0 - 8.0 * eps], [1.0 - 8.0 * eps, 1.0]]))
+    assert injected.rank == injected.width
+    assert needs_factor_certification(injected)
+    factor_calls = 0
+    original_factor = scop_geometry.decompose_factor
+
+    def counted_factor(factor):
+        nonlocal factor_calls
+        factor_calls += 1
+        return original_factor(factor)
+
+    monkeypatch.setattr(scop_geometry, "decompose_gram", lambda _matrix: injected)
+    monkeypatch.setattr(scop_geometry, "decompose_factor", counted_factor)
+    actual = scop_geometry.build_scop_postfit_inference(
+        raw_fisher_gram=raw_gram,
+        centered_fisher_gram=centered_gram,
+        fisher_xtw=float(len(weights)) * mean_x,
+        fisher_mean_x=mean_x,
+        fisher_sum_w=float(len(weights)),
+        latent_penalty=np.zeros((2, 2)),
+        scop_states=states,
+        groups=groups,
+        observed_geometry=observed,
+        dm=dm,
+        fisher_weights=weights,
+    )
+
+    assert factor_calls == 2
+    expected_coefficient, expected_augmented = _mapped_factor_inverses(
+        design,
+        weights,
+        jacobian,
+        np.zeros((2, 2)),
+    )
+    raw_factor = np.sqrt(weights)[:, None] * design
+    augmented_factor = np.column_stack((np.sqrt(weights), raw_factor))
+    _assert_covariance_factor_geometry(
+        actual.coefficient_inverse,
+        expected_coefficient,
+        raw_factor,
+    )
+    _assert_covariance_factor_geometry(
+        actual.augmented_inverse,
+        expected_augmented,
+        augmented_factor,
+    )
+    with pytest.raises(AssertionError):
+        _assert_covariance_factor_geometry(
+            injected.pseudo_inverse(),
+            expected_coefficient,
+            raw_factor,
+        )
 
 
 def test_scop_postfit_covariance_preserves_exact_alias_rank_convention():
