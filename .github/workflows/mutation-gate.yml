@@ -1,0 +1,65 @@
+name: Mutation gate
+
+# Enforces the AGENTS.md rule that "adversarial regressions include a mutation
+# check or a demonstration against the unfixed implementation". The tests a
+# change adds must pass at the head revision and fail when src/ is rolled back
+# to the merge base; anything else is reported as no-evidence or inconclusive.
+#
+# Runs on pull_request so it evaluates the merge result rather than the branch
+# head. It is deliberately NOT in the required status checks — enable it in the
+# ruleset once a few pull requests have shown its outcome distribution. Until
+# then a red result is informational and does not block.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/mutation_gate.py"
+      - ".github/workflows/mutation-gate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  mutation-gate:
+    name: Added tests must fail against the unfixed code
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          # The gate diffs against the merge base and builds worktrees at two
+          # revisions, so it needs real history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v6
+
+      # 3.12 is the declared floor and the version ci.yml evaluates pull
+      # requests on. Running the mutant on a different version can skip a
+      # version-specific regression test and report a false result.
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --extra dev
+
+      - name: Build the mutant and run the added tests
+        env:
+          # Reviewed, per-pull-request, and visible in the PR's own metadata.
+          # The justification belongs in the PR body.
+          MUTATION_GATE_EXEMPT: >-
+            ${{ contains(github.event.pull_request.labels.*.name, 'mutation-gate-exempt')
+                && 'mutation-gate-exempt label' || '' }}
+        run: |
+          uv run python scripts/mutation_gate.py \
+            --base-ref "origin/${{ github.base_ref }}" \
+            --head-ref HEAD
