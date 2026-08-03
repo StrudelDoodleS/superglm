@@ -42,6 +42,24 @@ from superglm.solvers.rank import (
 )
 
 
+def _roundoff_gamma(operations: int) -> float:
+    """Standard ``gamma_k`` bound for ``operations`` binary64 roundings."""
+    accumulated = float(operations) * np.finfo(float).eps
+    if not 0.0 <= accumulated < 1.0:
+        raise ValueError("roundoff bound requires operations * eps < 1")
+    return accumulated / (1.0 - accumulated)
+
+
+def _symmetric_boundary_allowance(block: np.ndarray, cutoff: float) -> float:
+    """Width-scaled backward-error band for a smallest-eigenvalue comparison."""
+    scale = max(
+        float(np.linalg.norm(block, ord=np.inf)),
+        abs(cutoff),
+        np.finfo(float).tiny,
+    )
+    return _roundoff_gamma(64 * max(1, len(block))) * scale
+
+
 def _prefix_walk(gram: np.ndarray, rank: int, cutoff: float) -> np.ndarray | None:
     """The selection as it was made before: one spectrum per candidate column."""
     selected: list[int] = []
@@ -351,15 +369,13 @@ def _near_alias(eps: float, rows: int = 200, seed: int = 7) -> np.ndarray:
 def test_the_rank_cutoff_cannot_see_a_near_alias_but_the_certificate_can() -> None:
     """The measurement that rules out certifying against the decomposition cutoff.
 
-    At ``eps=5e-8`` the earliest selection ``[0, 1]`` has a smallest
-    equilibrated eigenvalue of 1.3323e-15 against a decomposition cutoff of
-    4.4447e-16.  It is ABOVE the cutoff: not rank deficient by the standard
-    that chose the rank, and Cholesky factorises it without complaint.  Its
-    condition is nonetheless 3.6267e+07 in design terms and 1.5012e+15 on the
-    equilibrated Gram.  Neither policy constant separates that from an ordinary
-    block: the Gram figure falls between `warning_condition` (6.7109e+07) and
-    `severe_condition` (4.5036e+15), while the design figure is below the
-    warning threshold outright.
+    At ``eps=5e-8`` the earliest selection ``[0, 1]`` genuinely clears the
+    decomposition cutoff in factor space.  Its factor condition is nonetheless
+    about ``3.6e7``.  That is below ``warning_condition``, so neither policy
+    constant separates it from an ordinary block.  Characterise that fact with
+    its singular values: the equivalent smallest eigenvalue of a formed Gram
+    lies at cancellation scale, and its reported sign relative to the cutoff
+    is not portable evidence.
 
     What does separate it is that this is a property of the SELECTION.  The
     amplification the choice adds is 2.5634e+07 where a rank-revealing choice
@@ -380,10 +396,9 @@ def test_the_rank_cutoff_cannot_see_a_near_alias_but_the_certificate_can() -> No
     assert earliest is not None
     assert earliest.tolist() == [0, 1]
 
-    block = equilibrated[np.ix_(earliest, earliest)]
-    smallest = float(np.linalg.eigvalsh(block)[0])
-    assert smallest > cutoff, "the rank cutoff accepts this block, which is the whole problem"
-    scipy.linalg.cholesky(block, lower=True)  # and so does Cholesky
+    candidate_singular = scipy.linalg.svdvals(design[:, earliest])
+    assert candidate_singular[-1] ** 2 > cutoff
+    assert candidate_singular[0] / candidate_singular[-1] < SHARED_RANK_POLICY.warning_condition
 
     amplification = _selection_amplification(null, earliest)
     achievable = _achievable_amplification(*null.shape)
@@ -780,8 +795,9 @@ def test_a_representative_must_clear_the_full_gram_rank_cutoff() -> None:
     Both entry points must therefore preserve their spectral solve.
     """
     eps = np.finfo(float).eps
-    sin = np.sqrt(16.0 * eps)
-    cos = np.sqrt(1.0 - sin**2)
+    sin_squared = 16.0 * eps
+    sin = np.sqrt(sin_squared)
+    cos = np.sqrt(1.0 - sin_squared)
     factor = np.column_stack(
         [
             np.tile(np.array([[1.0], [0.0]]), 10),
@@ -789,14 +805,23 @@ def test_a_representative_must_clear_the_full_gram_rank_cutoff() -> None:
         ]
     )
     gram = factor.T @ factor
-    values = np.linalg.eigvalsh(gram)
-    cutoff = SHARED_RANK_POLICY.gram_rcond * float(values[-1])
-    candidate = np.array([0, 10])
-    candidate_values = np.linalg.eigvalsh(gram[np.ix_(candidate, candidate)])
+    # Use the nonzero 2x2 row geometry and determinant/large-root identities.
+    # They avoid asking a width-11 Gram eigensolver to choose the sign of
+    # cancellation-scale differences.
+    full_trace = 11.0
+    full_discriminant = np.hypot(
+        10.0 + cos**2 - sin_squared,
+        2.0 * cos * sin,
+    )
+    full_maximum = 0.5 * (full_trace + full_discriminant)
+    full_minimum = 10.0 * sin_squared / full_maximum
+    cutoff = SHARED_RANK_POLICY.gram_rcond * full_maximum
+    candidate_maximum = 1.0 + cos
+    candidate_minimum = sin_squared / candidate_maximum
 
-    assert values[-2] > cutoff
-    assert candidate_values[0] < cutoff
-    assert _principal_block_condition(gram, candidate) < SHARED_RANK_POLICY.severe_condition
+    assert full_minimum > cutoff
+    assert candidate_minimum < cutoff
+    assert candidate_maximum / candidate_minimum < SHARED_RANK_POLICY.severe_condition
 
     gram_decomposition = decompose_gram(gram)
     factor_decomposition = decompose_factor(factor)
@@ -822,11 +847,11 @@ def test_the_full_cutoff_certificate_has_a_conservative_floating_boundary(
     equality_rcond: float,
     relation: str,
 ) -> None:
-    """Equality and roundoff below the cutoff must remain spectral.
+    """Equality and an indistinguishable one-ULP tightening remain spectral.
 
     A bare Cholesky of ``B - cutoff*I`` accepted both public-path equality
     fixtures: its final diagonal was about ``1e-8`` even though the shifted
-    block was semidefinite.  The just-below Gram fixture was accepted too.
+    block was semidefinite.  The one-ULP stricter Gram fixture was accepted too.
     This pins the numerical postcondition on both coordinate systems:
 
     * Gram rank compares principal eigenvalues directly with ``cutoff``;
@@ -860,14 +885,14 @@ def test_the_full_cutoff_certificate_has_a_conservative_floating_boundary(
         candidate_cutoff = decomposition.cutoff**2
 
     equilibrated = factor / np.linalg.norm(factor, axis=0)
-    candidate_minimum = float(np.linalg.eigvalsh((equilibrated.T @ equilibrated)[:2, :2])[0])
+    candidate_block = (equilibrated.T @ equilibrated)[:2, :2]
+    candidate_minimum = float(np.linalg.eigvalsh(candidate_block)[0])
+    boundary_allowance = _symmetric_boundary_allowance(candidate_block, candidate_cutoff)
     assert decomposition.rank == 2
-    if relation == "exactly_equal":
-        assert candidate_minimum == candidate_cutoff
-    elif relation == "just_below":
-        assert candidate_minimum < candidate_cutoff
+    if relation == "clearly_above":
+        assert candidate_minimum > candidate_cutoff + boundary_allowance
     else:
-        assert candidate_minimum > candidate_cutoff
+        assert abs(candidate_minimum - candidate_cutoff) <= boundary_allowance
 
     if relation == "clearly_above":
         assert decomposition.active_columns.tolist() == [0, 1]
@@ -878,7 +903,7 @@ def test_the_full_cutoff_certificate_has_a_conservative_floating_boundary(
 
 
 def test_the_factor_cutoff_squared_public_repro_stays_spectral() -> None:
-    """Pin the reported just-below factor boundary, not only a synthetic ULP."""
+    """Pin the reported factor boundary as an unresolved numerical band."""
     rho = 0.7991251286200829
     factor = np.array(
         [
@@ -889,9 +914,14 @@ def test_the_factor_cutoff_squared_public_repro_stays_spectral() -> None:
     policy = replace(SHARED_RANK_POLICY, factor_rcond=0.27096963325022605)
     decomposition = decompose_factor(factor, policy=policy)
     equilibrated = factor / np.linalg.norm(factor, axis=0)
-    candidate_minimum = float(np.linalg.eigvalsh((equilibrated.T @ equilibrated)[:2, :2])[0])
+    candidate_block = (equilibrated.T @ equilibrated)[:2, :2]
+    candidate_minimum = float(np.linalg.eigvalsh(candidate_block)[0])
+    boundary_allowance = _symmetric_boundary_allowance(
+        candidate_block,
+        decomposition.cutoff**2,
+    )
 
-    assert candidate_minimum < decomposition.cutoff**2
+    assert abs(candidate_minimum - decomposition.cutoff**2) <= boundary_allowance
     assert decomposition.rank == 2
     assert decomposition.active_columns.tolist() == [0, 1, 2]
     assert decomposition.cholesky_factor is None
@@ -904,17 +934,19 @@ def test_a_tall_valid_representative_stores_its_compact_factor_geometry(
     """A valid factor representative must not solve a tall-accumulated Gram.
 
     The selected normalized columns genuinely clear the factor cutoff by
-    about 1.61x.  On this deterministic 500,000-row fixture, however, the
-    directly formed Gram reports only about 0.87x the cutoff on the reviewer's
-    BLAS (and lands inside 1% of it on this build), while its condition estimate
-    still slips below ``severe_condition``.  The previous factor-space
-    admissibility fix therefore selected ``[0, 1]`` correctly but stored the
-    Cholesky of a different, below-cutoff matrix.  Its pseudo-inverse differed
-    from the selected factor's SVD reference by more than its own norm.
+    about 1.61x.  Their directly formed tall Gram lies at cancellation scale:
+    different BLAS implementations report different signs and magnitudes for
+    its smallest eigenvalue.  The previous factor-space admissibility fix
+    selected ``[0, 1]`` correctly but then stored that non-authoritative
+    Gram's Cholesky.  Where it factorised, its pseudo-inverse differed from the
+    selected factor's SVD reference by more than its own norm.
 
     The representative's condition, solve factor, and optional factor-RHS
-    solve must all come from the compact SVD coordinates.  The only
-    observation-sized decomposition remains the SVD that decided rank.
+    solve must all come from the compact SVD coordinates.  Coefficients are
+    intentionally ill-conditioned here, so reconstruction, prediction, and
+    normwise backward error are the solve oracles.  The SVD spy retains the
+    authoritative production coordinates; every reference built from them is
+    width-bounded.
     """
     n = 500_000
     delta = np.sqrt(9.66 * np.finfo(float).eps)
@@ -928,10 +960,16 @@ def test_a_tall_valid_representative_stores_its_compact_factor_geometry(
     original_svd = np.linalg.svd
     original_numpy_qr = np.linalg.qr
     original_scipy_qr = scipy.linalg.qr
+    authoritative_svd: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
     def recording_svd(matrix, *args, **kwargs):
+        nonlocal authoritative_svd
         svd_shapes.append(matrix.shape)
-        return original_svd(matrix, *args, **kwargs)
+        result = original_svd(matrix, *args, **kwargs)
+        if matrix.shape == factor.shape:
+            assert authoritative_svd is None
+            authoritative_svd = result
+        return result
 
     def recording_numpy_qr(matrix, *args, **kwargs):
         qr_shapes.append(matrix.shape)
@@ -951,79 +989,55 @@ def test_a_tall_valid_representative_stores_its_compact_factor_geometry(
     assert decomposition.cholesky_factor is not None
     selected = factor[:, decomposition.active_columns]
     selected_scale = decomposition.column_scale[decomposition.active_columns]
-    equilibrated_selected = selected / selected_scale
-    formed_gram = equilibrated_selected.T @ equilibrated_selected
-    formed_minimum = float(np.linalg.eigvalsh(formed_gram)[0])
-    assert formed_minimum < 1.01 * decomposition.cutoff**2
-    assert np.linalg.cond(formed_gram) < SHARED_RANK_POLICY.severe_condition
+    assert authoritative_svd is not None
+    _, authoritative_singular, authoritative_right = authoritative_svd
+    spectral_factor = authoritative_singular[:, None] * authoritative_right
+    compact_selected = spectral_factor[:, decomposition.active_columns]
+    _, reference_upper = original_scipy_qr(
+        compact_selected,
+        mode="economic",
+        check_finite=False,
+    )
+    row_signs = np.where(np.diag(reference_upper) < 0.0, -1.0, 1.0)
+    reference_upper = row_signs[:, None] * reference_upper
+    compact_rows = compact_selected.shape[0]
+    width = selected.shape[1]
+    compact_bound = _roundoff_gamma(64 * compact_rows)
+    reconstruction_bound = _roundoff_gamma(n * width + 32 * (compact_rows + width))
+    backward_bound = _roundoff_gamma(3 * n + 32 * (compact_rows + width))
+    assert max(compact_bound, reconstruction_bound, backward_bound) < 1.0
 
     lower = decomposition.cholesky_factor
     assert np.array_equal(lower, np.tril(lower))
     assert np.all(np.diag(lower) > 0.0)
-    reference_left, reference_singular, reference_right = original_svd(
-        equilibrated_selected,
-        full_matrices=False,
-    )
-    stored_singular = original_svd(lower, compute_uv=False)
+    geometry_error = np.linalg.norm(lower - reference_upper.T)
+    assert geometry_error / np.linalg.norm(compact_selected) <= compact_bound
+    reference_singular = scipy.linalg.svdvals(compact_selected)
     assert reference_singular[-1] ** 2 > decomposition.cutoff**2
-    assert stored_singular[-1] ** 2 > decomposition.cutoff**2
-    np.testing.assert_allclose(stored_singular, reference_singular, rtol=5e-8)
-    reference_gram = (reference_right.T * reference_singular**2) @ reference_right
-    np.testing.assert_allclose(lower @ lower.T, reference_gram, rtol=5e-13)
-
-    reference_active_inverse = (reference_right.T / reference_singular**2) @ reference_right
-    reference_active_inverse /= np.outer(selected_scale, selected_scale)
-    reference_inverse = np.zeros((3, 3))
-    reference_inverse[np.ix_(decomposition.active_columns, decomposition.active_columns)] = (
-        reference_active_inverse
-    )
-    actual_inverse = decomposition.pseudo_inverse()
-    inverse_error = np.linalg.norm(actual_inverse - reference_inverse)
-    assert inverse_error / np.linalg.norm(reference_inverse) < 1e-7
-
-    rhs = np.array([0.75, -0.4, 1.25])
-    expected_solution = reference_inverse @ rhs
-    actual_solution = decomposition.solve(rhs)
-    solve_error = np.linalg.norm(actual_solution - expected_solution)
-    assert solve_error / np.linalg.norm(expected_solution) < 1e-7
 
     response = selected @ np.array([0.75, -0.4])
-    reference_active_beta = reference_right.T @ ((reference_left.T @ response) / reference_singular)
-    reference_active_beta /= selected_scale
-    reference_beta = np.zeros(3)
-    reference_beta[decomposition.active_columns] = reference_active_beta
     actual_beta = decomposition.solve_factor_rhs(response)
-    beta_error = np.linalg.norm(actual_beta - reference_beta)
-    assert beta_error / np.linalg.norm(reference_beta) < 1e-5
-    np.testing.assert_allclose(factor @ actual_beta, factor @ reference_beta, rtol=1e-12)
+    actual_prediction = selected @ actual_beta[decomposition.active_columns]
+    residual_norm = np.linalg.norm(actual_prediction - response)
+    response_norm = np.linalg.norm(response)
+    assert residual_norm / response_norm <= backward_bound
+    backward_scale = np.linalg.norm(selected_scale) * np.linalg.norm(
+        actual_beta[decomposition.active_columns]
+    )
+    backward_scale += response_norm
+    assert residual_norm / backward_scale <= backward_bound
     assert decomposition.factor_rhs_left_basis is not None
     assert decomposition.factor_rhs_triangular is not None
     np.testing.assert_allclose(
-        decomposition.factor_rhs_left_basis.T @ decomposition.factor_rhs_left_basis,
-        np.eye(2),
-        atol=1e-12,
-    )
-    np.testing.assert_allclose(
         decomposition.factor_rhs_triangular,
         lower.T * selected_scale[None, :],
-        rtol=1e-14,
+        rtol=_roundoff_gamma(16 * width),
+        atol=0.0,
     )
-    np.testing.assert_allclose(
-        decomposition.factor_rhs_left_basis @ decomposition.factor_rhs_triangular,
-        selected,
-        rtol=2e-11,
-        atol=2e-11,
+    reconstruction_error = np.linalg.norm(
+        decomposition.factor_rhs_left_basis @ decomposition.factor_rhs_triangular - selected
     )
-
-    compact_original_factor = np.sqrt(n) * np.array(
-        [
-            [1.0, 1.0, 1.0],
-            [0.0, delta, 0.0],
-        ]
-    )
-    compact_original_singular = scipy.linalg.svdvals(compact_original_factor)
-    expected_log_pdet = 2.0 * float(np.sum(np.log(compact_original_singular)))
-    assert decomposition.log_pdet == pytest.approx(expected_log_pdet, abs=2e-8)
+    assert reconstruction_error / np.linalg.norm(selected_scale) <= reconstruction_bound
 
     assert svd_shapes.count((n, 3)) == 1
     assert all(shape == (n, 3) or max(shape) <= 3 for shape in svd_shapes), svd_shapes
@@ -1037,16 +1051,17 @@ def test_a_tall_factor_certificate_does_not_trust_its_formed_gram(
 ) -> None:
     """Observation-row accumulation cannot certify factor-space rank.
 
-    This is the smallest practical version of the reviewer's three-million-row
-    public repro that takes the broken route on this BLAS build.  The selected
-    factor's exact geometry is below the factor cutoff, but forming its 2x2
-    Gram over one million rows inflates the reported smallest eigenvalue to
-    over one hundred times that cutoff.  The old width-only Gram allowance
-    therefore returned representative Cholesky columns ``[0, 1]``.
+    This is the practical version of the reviewer's three-million-row public
+    repro.  The selected factor's analytic geometry is below the factor cutoff,
+    but the smallest eigenvalue of its formed tall Gram is cancellation-scale:
+    BLAS implementations have reported both a large positive inflation and a
+    negative value.  Neither direction is authoritative.
 
     Factor rank is authoritative in the SVD coordinates already computed by
-    ``decompose_factor``.  Certification must stay there and retain the
-    spectral result regardless of what the accumulated raw Gram reports.
+    ``decompose_factor``.  Certification must stay there, never form the
+    observation-row Gram, and retain the spectral result.  A production-local
+    NumPy proxy and tracked ndarray reject operator, ``matmul``, ``dot`` and
+    ``einsum`` equivalents while allowing width-bounded compact products.
     """
     n = 1_000_000
     delta = np.sqrt(5.0 * np.finfo(float).eps)
@@ -1056,25 +1071,139 @@ def test_a_tall_factor_certificate_does_not_trust_its_formed_gram(
     factor = np.column_stack([first, first + delta * contrast, first])
 
     svd_shapes: list[tuple[int, ...]] = []
-    original_svd = np.linalg.svd
+    width = factor.shape[1]
+    wrapped_input = False
+    rejected_routes: list[str] = []
 
-    def recording_svd(matrix, *args, **kwargs):
-        svd_shapes.append(matrix.shape)
-        return original_svd(matrix, *args, **kwargs)
+    def reject_matrix_product(left, right, route: str) -> None:
+        left_shape = getattr(left, "shape", ())
+        right_shape = getattr(right, "shape", ())
+        tracked = isinstance(left, RejectObservationGram) or isinstance(
+            right, RejectObservationGram
+        )
+        if (
+            tracked
+            and len(left_shape) == len(right_shape) == 2
+            and left_shape[1] == n
+            and right_shape[0] == n
+        ):
+            rejected_routes.append(route)
+            raise AssertionError(f"{route} formed an observation-row Gram")
 
-    monkeypatch.setattr(rank_module.np.linalg, "svd", recording_svd)
-    decomposition = decompose_factor(factor)
-    selected = factor[:, :2] / np.linalg.norm(factor[:, :2], axis=0)
-    formed_minimum = float(np.linalg.eigvalsh(selected.T @ selected)[0])
-    # The two normalized columns have correlation
-    # ``1 / sqrt(1 + delta**2)`` because `first` and `contrast` are exactly
-    # orthogonal.  Their smaller Gram eigenvalue is therefore `1 - rho`,
-    # without paying for a second tall SVD in the regression.
-    candidate_minimum = float(1.0 - 1.0 / np.sqrt(1.0 + delta**2))
+    class RejectObservationGram(np.ndarray):
+        def __matmul__(self, other):
+            reject_matrix_product(self, other, "operator @")
+            return super().__matmul__(other)
+
+        def __rmatmul__(self, other):
+            reject_matrix_product(other, self, "operator @")
+            return super().__rmatmul__(other)
+
+        def dot(self, other, out=None):
+            reject_matrix_product(self, other, "ndarray.dot")
+            return super().dot(other, out=out)
+
+    class LinalgProxy:
+        def __getattr__(self, name):
+            return getattr(np.linalg, name)
+
+        def svd(self, matrix, *args, **kwargs):
+            svd_shapes.append(matrix.shape)
+            return np.linalg.svd(matrix, *args, **kwargs)
+
+    class NumpyProxy:
+        linalg = LinalgProxy()
+
+        def __getattr__(self, name):
+            return getattr(np, name)
+
+        def asarray(self, values, *args, **kwargs):
+            nonlocal wrapped_input
+            result = np.asarray(values, *args, **kwargs)
+            if isinstance(values, RejectObservationGram):
+                wrapped_input = wrapped_input or values is tracked_factor
+                return result.view(RejectObservationGram)
+            return result
+
+        def matmul(self, left, right, *args, **kwargs):
+            reject_matrix_product(left, right, "np.matmul")
+            return np.matmul(left, right, *args, **kwargs)
+
+        def dot(self, left, right, *args, **kwargs):
+            reject_matrix_product(left, right, "np.dot")
+            return np.dot(left, right, *args, **kwargs)
+
+        def einsum(self, subscripts, *operands, **kwargs):
+            normalized = subscripts.replace(" ", "")
+            if (
+                normalized == "ni,nj->ij"
+                and len(operands) == 2
+                and all(
+                    isinstance(operand, RejectObservationGram)
+                    and operand.ndim == 2
+                    and operand.shape[0] == n
+                    for operand in operands
+                )
+            ):
+                rejected_routes.append("np.einsum")
+                raise AssertionError("np.einsum formed an observation-row Gram")
+            return np.einsum(subscripts, *operands, **kwargs)
+
+    tracked_factor = factor.view(RejectObservationGram)
+    numpy_proxy = NumpyProxy()
+    monkeypatch.setattr(rank_module, "np", numpy_proxy)
+    decomposition = decompose_factor(tracked_factor)
+
+    assert wrapped_input
+    assert rejected_routes == []
+    assert isinstance(
+        numpy_proxy.asarray(tracked_factor, dtype=float),
+        RejectObservationGram,
+    )
+    tracked_equilibrated = (factor / np.linalg.norm(factor, axis=0)).view(RejectObservationGram)
+    forbidden_products = [
+        lambda: tracked_equilibrated.T @ tracked_equilibrated,
+        lambda: numpy_proxy.matmul(tracked_equilibrated.T, tracked_equilibrated),
+        lambda: numpy_proxy.dot(tracked_equilibrated.T, tracked_equilibrated),
+        lambda: tracked_equilibrated.T.dot(tracked_equilibrated),
+        lambda: numpy_proxy.einsum(
+            "ni,nj->ij",
+            tracked_equilibrated,
+            tracked_equilibrated,
+        ),
+    ]
+    for product in forbidden_products:
+        with pytest.raises(AssertionError, match="observation-row Gram"):
+            product()
+    assert rejected_routes == [
+        "operator @",
+        "np.matmul",
+        "np.dot",
+        "ndarray.dot",
+        "np.einsum",
+    ]
+
+    compact = np.arange(1.0, 1.0 + 2 * width).reshape(width, 2)
+    tracked_compact = compact.view(RejectObservationGram)
+    expected_compact_gram = compact.T @ compact
+    allowed_products = [
+        tracked_compact.T @ tracked_compact,
+        numpy_proxy.matmul(tracked_compact.T, tracked_compact),
+        numpy_proxy.dot(tracked_compact.T, tracked_compact),
+        tracked_compact.T.dot(tracked_compact),
+        numpy_proxy.einsum("ni,nj->ij", tracked_compact, tracked_compact),
+    ]
+    for product in allowed_products:
+        np.testing.assert_array_equal(product, expected_compact_gram)
+    assert len(rejected_routes) == len(forbidden_products)
+
+    root = np.sqrt(1.0 + delta**2)
+    # ``1 - 1/root`` is itself a cancellation-scale subtraction.  This
+    # algebraically identical form retains the analytic positive numerator.
+    candidate_minimum = float(delta**2 / (root * (1.0 + root)))
 
     assert decomposition.rank == 2
     assert candidate_minimum < decomposition.cutoff**2
-    assert formed_minimum > 100.0 * decomposition.cutoff**2
     assert decomposition.active_columns.tolist() == [0, 1, 2]
     assert decomposition.cholesky_factor is None
     assert svd_shapes.count((n, 3)) == 1

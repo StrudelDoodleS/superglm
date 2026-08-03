@@ -2,8 +2,6 @@
 
 ## Commands and isolation
 
-Prefix shell commands with `rtk`; prefix every segment in a command chain. Use
-`rtk proxy <command>` only when unfiltered output is required for debugging.
 Use `rg` or `rg --files` for searches. Create isolated feature work under the
 ignored `.worktrees/` directory and preserve unrelated user changes.
 
@@ -33,6 +31,20 @@ New solver, REML, family, input-boundary, or feature behaviour requires focused
 regression tests. Performance-sensitive work must compare complete-fit timing,
 memory, numerical outputs, and actual backend dispatch against the relevant
 baseline.
+
+## Numerical test policy
+
+- Boundary tests assert mathematical or certified invariants such as rank,
+  subspace, residual, reconstruction, prediction, or backward error—not the
+  sign or magnitude of BLAS/LAPACK roundoff.
+- Numerical tolerances derive from dimensions, dtype epsilon, norms, and
+  conditioning or error bounds.
+- Coefficient-forward accuracy uses well-conditioned fixtures. Near-rank or
+  cancellation fixtures test certification, refusal, and stable observables.
+- Performance and backend-dispatch behaviour are tested separately from
+  numerical correctness.
+- Adversarial regressions include a mutation check or a demonstration against
+  the unfixed implementation.
 
 ## Release impact and publishing
 
