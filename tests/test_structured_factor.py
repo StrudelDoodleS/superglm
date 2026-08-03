@@ -560,7 +560,7 @@ def test_compact_centered_and_low_rank_operator_products_match_dense():
         )
 
 
-def test_centered_independent_blocks_certify_formed_full_rank_local_moments(
+def test_centered_independent_blocks_certify_local_factor_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     n_levels = 129
@@ -580,15 +580,6 @@ def test_centered_independent_blocks_certify_formed_full_rank_local_moments(
             for level in range(n_levels)
         ]
     )
-    operator, public_design = _independent_centered_operator(local_factors, small)
-    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
-    local_gram = local_factor.T @ local_factor
-    local_decomposition = decompose_gram(local_gram)
-
-    assert decompose_factor(local_factor).rank == 3
-    assert local_decomposition.rank == block_size
-    assert needs_factor_certification(local_decomposition)
-    assert np.count_nonzero(expected.coefficient_estimable()) == small.shape[1]
 
     def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
         raise AssertionError("wide certification-limited FS inference must remain compact")
@@ -598,6 +589,13 @@ def test_centered_independent_blocks_certify_formed_full_rank_local_moments(
         reject_dense_fallback,
     )
 
+    operator, public_design = _independent_centered_operator(local_factors, small)
+    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
+    preliminary = decompose_gram(operator.raw.D[0])
+
+    assert decompose_factor(local_factor).rank == 3
+    assert needs_factor_certification(preliminary)
+    assert np.count_nonzero(expected.coefficient_estimable()) == small.shape[1]
     np.testing.assert_array_equal(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
