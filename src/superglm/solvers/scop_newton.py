@@ -1022,14 +1022,17 @@ def _safe_joint_trial_objective_delta(
     slices: list[slice],
     lambdas_list: list[float],
     gammas_current: list[NDArray],
+    projected_residuals: list[NDArray],
     cache: _JointObjectiveCache,
 ) -> float:
     """Return the exact joint objective change without subtracting full objectives.
 
     The cached gamma-space products retain discretization's ``n``-independent
-    trial cost.  Expanding the data and penalty quadratics around the current
-    coefficients also preserves a final Newton descent that is below one ulp of
-    the complete objective.
+    trial cost.  The linear term uses the already computed projected residuals
+    rather than reconstructing them by subtracting large fitted products.
+    Expanding the remaining data and penalty quadratics around the current
+    coefficients preserves a final Newton descent that is below one ulp of the
+    complete objective.
     """
     if cache.diag_btwb is None or cache.cross_btwb is None:
         raise ValueError("quadratic objective cache missing BtWB blocks")
@@ -1039,8 +1042,15 @@ def _safe_joint_trial_objective_delta(
         data_delta = 0.0
         penalty_delta = 0.0
 
-        for idx, ((_, state), group_slice, lam, gamma_current) in enumerate(
-            zip(scop_items, slices, lambdas_list, gammas_current, strict=True)
+        for idx, ((_, state), group_slice, lam, gamma_current, projected_residual) in enumerate(
+            zip(
+                scop_items,
+                slices,
+                lambdas_list,
+                gammas_current,
+                projected_residuals,
+                strict=True,
+            )
         ):
             beta_current = state["beta_scop"]
             beta_next = beta_trial[group_slice]
@@ -1051,12 +1061,8 @@ def _safe_joint_trial_objective_delta(
             gamma_delta = gamma_next - gamma_current
             gamma_deltas.append(gamma_delta)
             gram = cache.diag_btwb[idx]
-            data_delta -= float(gamma_delta @ cache.btwz[idx])
-            data_delta += 0.5 * float(
-                gamma_delta @ gram @ gamma_current
-                + gamma_current @ gram @ gamma_delta
-                + gamma_delta @ gram @ gamma_delta
-            )
+            data_delta -= float(gamma_delta @ projected_residual)
+            data_delta += 0.5 * float(gamma_delta @ gram @ gamma_delta)
 
             beta_delta = beta_next - beta_current
             penalty_delta += lam * _quadratic_form_delta(
@@ -1070,8 +1076,6 @@ def _safe_joint_trial_objective_delta(
                 cross = cache.cross_btwb[(left, right)]
                 delta_left = gamma_deltas[left]
                 delta_right = gamma_deltas[right]
-                data_delta += float(delta_left @ cross @ gammas_current[right])
-                data_delta += float(gammas_current[left] @ cross @ delta_right)
                 data_delta += float(delta_left @ cross @ delta_right)
 
         objective_delta = data_delta + penalty_delta
@@ -1392,6 +1396,7 @@ def scop_joint_newton_step(
             joint_slices,
             lambdas_list,
             j_diags,
+            r_effs,
             objective_cache,
         )
         if np.isfinite(objective_delta) and objective_delta <= 1e-14:
