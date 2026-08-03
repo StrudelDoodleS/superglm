@@ -370,10 +370,67 @@ def test_table_two_needs_enough_cells_for_its_own_null_to_mean_anything() -> Non
         parser.parse_args(["--tables", "2", "--n", "600", "--wide-levels", "10"])
     )
     _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
-    # and the floor is table 2's alone
+
+
+def test_every_table_reporting_the_large_k_reading_obeys_its_floor() -> None:
+    """Table 3 cannot attach a biased ``P/(k/3)`` label to its payoff rows.
+
+    Table 2 established the 100-cell calibration boundary, but table 3 reports
+    the same reading from its TRAINING residuals.  Before this guard,
+    ``--tables 3 --n 12000 --wide-levels 3`` was accepted and reported the
+    large-k reading from only nine occupied cells.
+
+    The row-capacity boundary differs honestly: table 2 sees all ``n`` rows,
+    while table 3 can occupy at most ``n // 2`` cells in its training half.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="table 3.*large k"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "3", "--n", "12000", "--wide-levels", "3"])
+        )
+    with pytest.raises(SystemExit, match="table 3.*cannot occupy"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "3", "--n", "199", "--wide-levels", "10"])
+        )
     _validate_configuration(
-        parser.parse_args(["--tables", "3", "--n", "600", "--wide-levels", "3"])
+        parser.parse_args(["--tables", "3", "--n", "200", "--wide-levels", "10"])
     )
+
+
+def test_table_three_checks_realised_training_occupancy_before_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity is only an upper bound, and checking it must not require a fit."""
+
+    n = 200
+    joint = np.zeros(n, dtype=int)
+    joint[:99] = np.arange(99)
+    data = gate.PairData(
+        frame=pd.DataFrame({"g": ["G0"] * n, "h": ["H0"] * n}),
+        y=np.zeros(n),
+        joint=joint,
+        n_levels=10,
+        cell=np.zeros((10, 10)),
+    )
+    mains_calls = 0
+
+    def forbidden_mains(*args, **kwargs):
+        nonlocal mains_calls
+        mains_calls += 1
+        raise AssertionError("_mains must not run before the occupancy floor")
+
+    monkeypatch.setattr(gate, "_make", lambda *args, **kwargs: data)
+    monkeypatch.setattr(
+        gate,
+        "_split",
+        lambda *args, **kwargs: (np.arange(n // 2), np.arange(n // 2, n)),
+    )
+    monkeypatch.setattr(gate, "_require_training_covers_test", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gate, "_mains", forbidden_mains)
+
+    with pytest.raises(SystemExit, match=r"table 3 .* occupied 99 cells"):
+        _run_sparse_payoff(reps=1, n=n, n_levels=10)
+    assert mains_calls == 0
 
 
 def test_table_two_needs_rows_to_occupy_cells_with_not_just_a_grid_to_hold_them() -> None:
@@ -730,7 +787,10 @@ def test_sparse_payoff_measures_its_own_full_refit_arm() -> None:
     here is the same model class -- a plain fixed `cat_cat` interaction -- on
     this row's own seed and split.
     """
-    n_levels, n = 6, 1_200
+    # Ten levels is the smallest grid at the shared large-k floor; the seeded
+    # training split occupies all 100 cells, so this end-to-end producer test
+    # exercises the honest table-3 boundary as well as the full-refit arm.
+    n_levels, n = 10, 1_200
     rows = _run_sparse_payoff(reps=1, n=n, n_levels=n_levels)
     widest = [row for row in rows if row["top_m"] == n_levels**2]
     assert {row["kind"] for row in widest} == {"spike", "diffuse"}
