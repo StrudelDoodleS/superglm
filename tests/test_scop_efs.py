@@ -3770,6 +3770,159 @@ class TestSCOPNewtonLineSearchSafety:
         assert result.step_norm == 0.0
         assert result.objective_after == result.objective_before
 
+    def test_objective_delta_preserves_sub_ulp_descent(self):
+        """Single and joint line searches retain descent hidden by full objectives."""
+        from superglm.solvers.scop import build_scop_solver_reparam
+        from superglm.solvers.scop_newton import (
+            _build_joint_objective_cache,
+            _joint_objective_from_gammas,
+            _safe_joint_trial_objective_delta,
+            _safe_trial_objective,
+            _safe_trial_objective_delta,
+        )
+
+        reparam = build_scop_solver_reparam(2, direction="increasing")
+        basis = np.ones((2, 1))
+        weights = np.ones(2)
+        beta = np.zeros(1)
+        gamma = reparam.forward(beta)
+        residual = np.array([1.0e8, -1.0e8 + 1.0e-6])
+        response = basis @ gamma + residual
+        penalty = np.zeros((1, 1))
+        beta_trial = np.array([5.0e-7])
+        gram = basis.T @ (basis * weights[:, None])
+        projected_residual = basis.T @ (weights * residual)
+
+        objective_before = _safe_trial_objective(
+            basis,
+            weights,
+            response,
+            beta,
+            reparam,
+            penalty,
+            0.0,
+            None,
+        )
+        objective_trial = _safe_trial_objective(
+            basis,
+            weights,
+            response,
+            beta_trial,
+            reparam,
+            penalty,
+            0.0,
+            None,
+        )
+        single_delta = _safe_trial_objective_delta(
+            beta,
+            beta_trial,
+            gamma,
+            reparam,
+            penalty,
+            0.0,
+            projected_residual,
+            gram,
+        )
+
+        state = {
+            "B_scop": basis,
+            "S_scop": penalty,
+            "beta_scop": beta,
+            "reparam": reparam,
+            "bin_idx": None,
+        }
+        scop_items = [(0, state)]
+        slices = [slice(0, 1)]
+        cache = _build_joint_objective_cache(scop_items, weights, response)
+        cache.diag_btwb = [gram]
+        cache.cross_btwb = {}
+        joint_delta = _safe_joint_trial_objective_delta(
+            scop_items,
+            beta_trial,
+            slices,
+            [0.0],
+            [gamma],
+            cache,
+        )
+        joint_objective_before = _joint_objective_from_gammas(
+            [gamma],
+            beta,
+            slices,
+            [0.0],
+            scop_items,
+            cache,
+        )
+        joint_objective_trial = _joint_objective_from_gammas(
+            [reparam.forward(beta_trial)],
+            beta_trial,
+            slices,
+            [0.0],
+            scop_items,
+            cache,
+        )
+
+        assert objective_trial == objective_before
+        assert joint_objective_trial == joint_objective_before
+        assert single_delta < 0.0
+        assert joint_delta == pytest.approx(single_delta, rel=1.0e-12, abs=1.0e-18)
+
+    def test_single_and_joint_line_searches_use_stable_delta(self, monkeypatch):
+        """Both public Newton paths route trial acceptance through delta algebra."""
+        from superglm.solvers import scop_newton as scop_newton_module
+
+        B_scop, W, z, beta_scop, reparam, S_scop = self._make_scop_inputs()
+        calls = {"single": 0, "joint": 0}
+        single_delta = scop_newton_module._safe_trial_objective_delta
+        joint_delta = scop_newton_module._safe_joint_trial_objective_delta
+
+        def record_single(*args, **kwargs):
+            calls["single"] += 1
+            return single_delta(*args, **kwargs)
+
+        def record_joint(*args, **kwargs):
+            calls["joint"] += 1
+            return joint_delta(*args, **kwargs)
+
+        monkeypatch.setattr(
+            scop_newton_module,
+            "_safe_trial_objective_delta",
+            record_single,
+        )
+        monkeypatch.setattr(
+            scop_newton_module,
+            "_safe_joint_trial_objective_delta",
+            record_joint,
+        )
+
+        scop_newton_module.scop_newton_step(
+            B_scop,
+            W,
+            z,
+            beta_scop,
+            reparam,
+            S_scop,
+            lambda2=1.0,
+        )
+        state = {
+            "B_scop": B_scop,
+            "S_scop": S_scop,
+            "beta_scop": beta_scop,
+            "reparam": reparam,
+            "bin_idx": None,
+            "group_sl": slice(0, beta_scop.size),
+            "group_name": "x",
+        }
+        scop_newton_module.scop_joint_newton_step(
+            {0: state},
+            W,
+            z,
+            {"x": 1.0},
+            [SimpleNamespace(name="x", sl=state["group_sl"])],
+        )
+
+        assert calls["single"] > 0
+        assert calls["joint"] > 0
+
     @pytest.mark.slow
     def test_mixed_model_no_overflow_warning(self):
         """Mixed SCOP + unconstrained model produces no RuntimeWarning."""
@@ -3794,6 +3947,7 @@ class TestSCOPNewtonLineSearchSafety:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             model.fit_reml(df[["x1", "x2"]], y)
+        assert model._result.converged is True
 
 
 # ---------------------------------------------------------------------------
@@ -4582,6 +4736,7 @@ class TestJointSCOPNewton:
             _build_joint_objective_cache,
             _joint_objective_from_gammas,
             _safe_joint_objective,
+            _safe_joint_trial_objective_delta,
         )
 
         scop_states, W, z = self._build_two_group_inputs(discretized=True)
@@ -4628,6 +4783,41 @@ class TestJointSCOPNewton:
         obj_oracle = _safe_joint_objective(scop_items, W, z, beta_joint, slices, lambdas_list)
 
         np.testing.assert_allclose(obj_cached, obj_oracle, rtol=1e-10, atol=1e-12)
+
+        # The expansion remains an identity if a cached Gram carries the tiny
+        # asymmetry that finite-precision matrix products can leave behind.
+        cache.diag_btwb[0] = cache.diag_btwb[0].copy()
+        cache.diag_btwb[0][0, 1] += 1.0e-3
+        obj_cached = _joint_objective_from_gammas(
+            gammas,
+            beta_joint,
+            slices,
+            lambdas_list,
+            scop_items,
+            cache,
+        )
+        beta_trial = beta_joint + np.linspace(-0.03, 0.02, beta_joint.size)
+        gammas_trial = [
+            state["reparam"].forward(beta_trial[group_slice])
+            for (_, state), group_slice in zip(scop_items, slices, strict=True)
+        ]
+        obj_trial = _joint_objective_from_gammas(
+            gammas_trial,
+            beta_trial,
+            slices,
+            lambdas_list,
+            scop_items,
+            cache,
+        )
+        stable_delta = _safe_joint_trial_objective_delta(
+            scop_items,
+            beta_trial,
+            slices,
+            lambdas_list,
+            gammas,
+            cache,
+        )
+        assert stable_delta == pytest.approx(obj_trial - obj_cached, rel=1e-10, abs=1e-11)
 
     def test_cross_gram_dense_dense(self):
         """Cross-gram for two dense groups matches naive matmul."""

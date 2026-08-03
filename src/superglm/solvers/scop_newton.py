@@ -241,6 +241,45 @@ def _safe_trial_objective(
     return float(obj)
 
 
+def _quadratic_form_delta(
+    beta: NDArray,
+    beta_delta: NDArray,
+    matrix: NDArray,
+) -> float:
+    """Evaluate ``0.5 * ((beta + delta)' M (beta + delta) - beta' M beta)``.
+
+    Expanding around the retained coefficients preserves changes that are much
+    smaller than either complete quadratic form.  Keep both cross terms so the
+    identity also holds for a matrix with roundoff-level asymmetry.
+    """
+    matrix_beta = matrix @ beta
+    matrix_delta = matrix @ beta_delta
+    return 0.5 * float(beta @ matrix_delta + beta_delta @ matrix_beta + beta_delta @ matrix_delta)
+
+
+def _safe_trial_objective_delta(
+    beta: NDArray,
+    beta_trial: NDArray,
+    gamma: NDArray,
+    reparam: SCOPSolverReparam,
+    S_scop: NDArray,
+    lambda2: float,
+    r_eff: NDArray,
+    BtWB: NDArray,
+) -> float:
+    """Return a cancellation-resistant single-group objective change."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        gamma_trial = reparam.forward(beta_trial)
+        if not np.all(np.isfinite(gamma_trial)):
+            return np.inf
+        gamma_delta = gamma_trial - gamma
+        beta_delta = beta_trial - beta
+        data_delta = -float(gamma_delta @ r_eff) + 0.5 * float(gamma_delta @ BtWB @ gamma_delta)
+        penalty_delta = lambda2 * _quadratic_form_delta(beta, beta_delta, S_scop)
+        objective_delta = data_delta + penalty_delta
+    return float(objective_delta) if np.isfinite(objective_delta) else np.inf
+
+
 def scop_newton_step(
     B_scop: NDArray,
     W: NDArray,
@@ -374,17 +413,24 @@ def scop_newton_step(
 
     for _ in range(max_halving + 1):  # +1 for the initial full step
         beta_trial = beta - alpha * step
-        obj_trial = _safe_trial_objective(
-            B_scop, W, z, beta_trial, reparam, S_scop, lambda2, bin_idx
+        objective_delta = _safe_trial_objective_delta(
+            beta,
+            beta_trial,
+            gamma_eff,
+            reparam,
+            S_scop,
+            lambda2,
+            r_eff,
+            BtWB,
         )
-        if np.isfinite(obj_trial) and obj_trial <= obj_before + 1e-14:
+        if np.isfinite(objective_delta) and objective_delta <= 1e-14:
             accepted = True
             break
         alpha *= 0.5
 
     if accepted:
         beta_new = beta_trial
-        obj_new = obj_trial
+        obj_new = obj_before + objective_delta
         step_norm = float(np.linalg.norm(alpha * step))
     else:
         # All halvings failed — reject the step entirely
@@ -970,6 +1016,68 @@ def _safe_joint_trial_objective(
     return float(obj) if np.isfinite(obj) else np.inf
 
 
+def _safe_joint_trial_objective_delta(
+    scop_items: list[tuple[int, dict]],
+    beta_trial: NDArray,
+    slices: list[slice],
+    lambdas_list: list[float],
+    gammas_current: list[NDArray],
+    cache: _JointObjectiveCache,
+) -> float:
+    """Return the exact joint objective change without subtracting full objectives.
+
+    The cached gamma-space products retain discretization's ``n``-independent
+    trial cost.  Expanding the data and penalty quadratics around the current
+    coefficients also preserves a final Newton descent that is below one ulp of
+    the complete objective.
+    """
+    if cache.diag_btwb is None or cache.cross_btwb is None:
+        raise ValueError("quadratic objective cache missing BtWB blocks")
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        gamma_deltas: list[NDArray] = []
+        data_delta = 0.0
+        penalty_delta = 0.0
+
+        for idx, ((_, state), group_slice, lam, gamma_current) in enumerate(
+            zip(scop_items, slices, lambdas_list, gammas_current, strict=True)
+        ):
+            beta_current = state["beta_scop"]
+            beta_next = beta_trial[group_slice]
+            gamma_next = state["reparam"].forward(beta_next)
+            if not np.all(np.isfinite(gamma_next)):
+                return np.inf
+
+            gamma_delta = gamma_next - gamma_current
+            gamma_deltas.append(gamma_delta)
+            gram = cache.diag_btwb[idx]
+            data_delta -= float(gamma_delta @ cache.btwz[idx])
+            data_delta += 0.5 * float(
+                gamma_delta @ gram @ gamma_current
+                + gamma_current @ gram @ gamma_delta
+                + gamma_delta @ gram @ gamma_delta
+            )
+
+            beta_delta = beta_next - beta_current
+            penalty_delta += lam * _quadratic_form_delta(
+                beta_current,
+                beta_delta,
+                state["S_scop"],
+            )
+
+        for left in range(len(gamma_deltas)):
+            for right in range(left + 1, len(gamma_deltas)):
+                cross = cache.cross_btwb[(left, right)]
+                delta_left = gamma_deltas[left]
+                delta_right = gamma_deltas[right]
+                data_delta += float(delta_left @ cross @ gammas_current[right])
+                data_delta += float(gammas_current[left] @ cross @ delta_right)
+                data_delta += float(delta_left @ cross @ delta_right)
+
+        objective_delta = data_delta + penalty_delta
+    return float(objective_delta) if np.isfinite(objective_delta) else np.inf
+
+
 def _compute_cross_gram(
     st_i: dict,
     st_j: dict,
@@ -1278,25 +1386,22 @@ def scop_joint_newton_step(
 
     for _ in range(max_halving + 1):
         beta_trial = beta_joint - alpha * step
-        obj_trial = _safe_joint_trial_objective(
+        objective_delta = _safe_joint_trial_objective_delta(
             scop_items,
-            W,
-            z_scop,
             beta_trial,
             joint_slices,
             lambdas_list,
-            total_scop_eta,
             j_diags,
             objective_cache,
         )
-        if np.isfinite(obj_trial) and obj_trial <= obj_before + 1e-14:
+        if np.isfinite(objective_delta) and objective_delta <= 1e-14:
             accepted = True
             break
         alpha *= 0.5
 
     if accepted:
         beta_new_joint = beta_trial
-        obj_new = obj_trial
+        obj_new = obj_before + objective_delta
     else:
         beta_new_joint = beta_joint
         obj_new = obj_before
