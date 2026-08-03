@@ -84,8 +84,7 @@ from superglm._frame import as_eager_frame
 from superglm.distributions import _VARIANCE_FLOOR, validate_response
 from superglm.features.categorical import (
     Categorical,
-    _grouping_labels,
-    _validate_categorical_levels,
+    _resolve_categorical_labels,
 )
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import (
@@ -219,9 +218,8 @@ def _validated_budgets(edf0) -> tuple[float, ...]:
 _DEFERRED_KIND_HINT = (
     "spline x numeric screening is deferred until a varying-coefficient "
     "interaction term exists; respec the Numeric parent as a Spline to screen "
-    "the pair as ti(), or see the screening guide. Polynomial margins and "
-    "grouped Categorical margins (whose interaction refits cannot yet map "
-    "original labels through the grouping) are likewise deferred."
+    "the pair as ti(), or see the screening guide. Polynomial margins are "
+    "likewise deferred."
 )
 
 
@@ -236,15 +234,6 @@ def _margin_kind(spec) -> str | None:
             return "spline"
         return None
     if isinstance(spec, Categorical):
-        if spec._grouping is not None:
-            # A grouped factor screens fine — _categorical_codes collapses to
-            # the fitted level set — but no interaction builder maps its raw
-            # column through the grouping, so every confirmatory refit of such
-            # a pair validates original labels against grouped levels and
-            # raises.  Screening a pair whose refit cannot be built would break
-            # the confirm-by-refit contract, so the margin is excluded until
-            # the builders learn the grouping.
-            return None
         # KEPT as a guard, not a live case: Categorical.build raises below two
         # levels, so a FITTED spec always clears this and the None branch is
         # unreachable from screen_interactions.  Left in place because the
@@ -288,9 +277,9 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, fitted_names):
         pair = tuple(raw)
         if len(pair) == 2 and pair[0] != pair[1]:
             # A name the model DID fit but cannot screen (Polynomial, step-mode
-            # OrderedCategorical, a grouped Categorical) is deferred, not a
-            # typo; listing the screenable features would send the caller
-            # hunting for a misspelling that isn't there.
+            # OrderedCategorical) is deferred, not a typo; listing the
+            # screenable features would send the caller hunting for a
+            # misspelling that isn't there.
             deferred_names = sorted(
                 name for name in pair if name not in margin_kinds and name in fitted_names
             )
@@ -329,13 +318,11 @@ def _categorical_codes(spec, x_raw) -> tuple[np.ndarray, int]:
     geometry — including the BASE level, which the main effect absorbs into
     the intercept but the screen needs a grid row for.
     """
-    x = np.asarray(x_raw).ravel()
-    if spec._grouping is not None:
-        x = _grouping_labels(x)
-        _validate_categorical_levels(x, set(spec._grouping.all_original_levels))
-        x = pd.Series(x).map(spec._grouping.original_to_group).to_numpy()
-    else:
-        _validate_categorical_levels(x, set(spec._levels))
+    x = _resolve_categorical_labels(
+        x_raw,
+        spec._grouping,
+        known_levels=set(spec._levels),
+    )
     codes = pd.Categorical(x, categories=spec._levels).codes.astype(np.intp)
     if codes.size and codes.min() < 0:
         # Reachable through a grouping whose collapsed label was absent from
