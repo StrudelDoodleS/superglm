@@ -332,9 +332,6 @@ def test_well_conditioned_factor_inverse_action_rejects_scale_mutations(
             [0.4, -0.5, 0.3],
         ]
     )
-    boundary, _ = _paired_boundary_design()
-    injected = decompose_gram(boundary.T @ boundary)
-    assert needs_factor_certification(injected)
     factor_calls = 0
 
     def factor_factory() -> np.ndarray:
@@ -342,7 +339,11 @@ def test_well_conditioned_factor_inverse_action_rejects_scale_mutations(
         factor_calls += 1
         return factor
 
-    monkeypatch.setattr(scop_efs, "decompose_gram", lambda _matrix: injected)
+    monkeypatch.setattr(
+        scop_efs,
+        "decompose_gram_if_authoritative",
+        lambda _matrix: None,
+    )
     certificate = scop_efs._certified_terminal_rank(factor.T @ factor, factor_factory)
     assert factor_calls == 1
     _assert_factor_certificate(certificate, factor)
@@ -660,6 +661,8 @@ def test_scop_observed_geometry_uses_factor_certified_range() -> None:
         atol=0.0,
     )
     assert geometry.log_det_H == pytest.approx(expected_log_det, rel=2e-14, abs=0.0)
+
+
 def test_pirls_rank_metadata_uses_factor_certified_subspaces() -> None:
     design, right = _paired_boundary_design()
     dm = _grouped_design(design)
