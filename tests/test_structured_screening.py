@@ -20,6 +20,8 @@ from superglm import SuperGLM
 from superglm.features import Categorical, Spline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
+from superglm.screening._overlap import pair_overlap_moments
+from superglm.screening._pair_moments import pair_score_curvature
 from superglm.screening._score_stat import penalized_score_statistic_ladder
 from superglm.screening._structured import _evaluate, _profile, spline_cat_moments
 
@@ -141,6 +143,126 @@ def _structured_inputs(grab):
     return B_a, S_a, S_cell, W_cell, np.argmax(B_b, axis=0)
 
 
+def _dense_cell_inputs(B_a, S_a, S_cell, W_cell, level_rows):
+    """Dense moments for the same treatment-coded cell geometry."""
+    level_rows = np.asarray(level_rows, dtype=np.intp)
+    B_b = np.zeros((W_cell.shape[1], level_rows.size), dtype=np.float64)
+    B_b[level_rows, np.arange(level_rows.size)] = 1.0
+    U, V = pair_score_curvature(B_a, B_b, S_cell, W_cell)
+    M, C, u_m = pair_overlap_moments(B_a, B_b, S_cell, W_cell)
+    S_ti = np.kron(S_a, np.eye(level_rows.size))
+    return U, V, C, M, S_ti, u_m
+
+
+def _near_absorbed_cells(base_energy=1e-12):
+    """One emitted mode with unit raw curvature and a tiny profiled residual."""
+    B_a = np.array([[-1.0], [1.0]])
+    S_a = np.array([[1.0]])
+    W_cell = np.array(
+        [
+            [0.5 * base_energy, 0.5],
+            [0.5 * base_energy, 0.5],
+        ]
+    )
+    S_cell = np.array([[0.0, 0.25], [0.0, -0.25]])
+    return B_a, S_a, S_cell, W_cell, np.array([1], dtype=np.intp)
+
+
+def _mixed_rank_cells(scale=1.0, *, permute=False):
+    """One retained H direction and one positive direction below its rank cut."""
+    d = 1e-8
+    B_a = np.array(
+        [
+            [0.0, -d],
+            [0.0, d],
+            [-1.0, -d],
+            [-1.0, d],
+            [1.0, -d],
+            [1.0, d],
+        ]
+    )
+    W_cell = np.zeros((6, 2))
+    W_cell[:2, 0] = 0.5 * scale
+    W_cell[2:, 1] = 0.25 * scale
+    S_cell = np.zeros_like(W_cell)
+    level_rows = np.array([1], dtype=np.intp)
+    if permute:
+        row_order = np.array([5, 1, 3, 0, 4, 2])
+        level_order = np.array([1, 0])
+        inverse_levels = np.empty_like(level_order)
+        inverse_levels[level_order] = np.arange(level_order.size)
+        B_a = B_a[row_order]
+        W_cell = W_cell[row_order][:, level_order]
+        S_cell = S_cell[row_order][:, level_order]
+        level_rows = inverse_levels[level_rows]
+    return B_a, np.eye(2), S_cell, W_cell, level_rows
+
+
+def _direct_centered_row_trace(B_a, W_cell, level_rows):
+    """Explicit dense-row QR oracle, independent of the O(L) factor algebra."""
+    B_a = np.asarray(B_a, dtype=np.float64)
+    W_cell = np.asarray(W_cell, dtype=np.float64)
+    level_rows = np.asarray(level_rows, dtype=np.intp)
+    n_rows, k_a = B_a.shape
+    shifted = B_a - B_a[0]
+    row_blocks = []
+    for level in range(W_cell.shape[1]):
+        weights = W_cell[:, level]
+        mass = weights.sum()
+        mean = weights @ shifted / mass if mass > 0.0 else np.zeros(k_a)
+        row_blocks.append(np.sqrt(weights)[:, None] * (shifted - mean))
+
+    stacked = np.vstack(row_blocks)
+    Q, R = np.linalg.qr(stacked, mode="reduced")
+    trace = 0.0
+    for level in level_rows:
+        target = np.zeros_like(stacked)
+        target[level * n_rows : (level + 1) * n_rows] = row_blocks[level]
+        coefficients = np.linalg.solve(
+            R,
+            Q[level * n_rows : (level + 1) * n_rows].T @ row_blocks[level],
+        )
+        trace += float(np.sum(np.square(target - stacked @ coefficients)))
+    return trace
+
+
+def _adversarial_trace_cells(seed, delta):
+    rng = np.random.default_rng(seed)
+    n_rows, k_a, n_levels = 9, 4, 7
+    B_a = rng.normal(size=(n_rows, k_a))
+    B_a[:, -1] = B_a[:, 0] + delta * rng.normal(size=n_rows)
+    W_cell = 10 ** rng.uniform(-15.0, 15.0, size=(n_rows, n_levels))
+    W_cell[rng.random(W_cell.shape) < 0.15] = 0.0
+    S_cell = np.zeros_like(W_cell)
+    return B_a, np.eye(k_a), S_cell, W_cell, np.arange(1, n_levels, dtype=np.intp)
+
+
+def _rank_boundary_trace_cells(order_seed):
+    rng = np.random.default_rng(6)
+    n_rows, n_levels = 8, 3
+    x = rng.normal(size=n_rows)
+    z = rng.normal(size=n_rows)
+    W_cell = 10 ** rng.uniform(-4.0, 4.0, size=(n_rows, n_levels))
+    W_cell[rng.random(W_cell.shape) < 0.1] = 0.0
+    delta = 2.1569414515817223e-8
+    B_a = np.column_stack((x, x + delta * z))
+
+    order_rng = np.random.default_rng(order_seed)
+    row_order = order_rng.permutation(n_rows)
+    level_order = order_rng.permutation(n_levels)
+    inverse_levels = np.empty_like(level_order)
+    inverse_levels[level_order] = np.arange(level_order.size)
+    level_rows = inverse_levels[np.arange(1, n_levels)]
+    penalty = 0.5 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    return (
+        B_a[row_order],
+        penalty,
+        np.zeros_like(W_cell)[row_order][:, level_order],
+        W_cell[row_order][:, level_order],
+        level_rows,
+    )
+
+
 @pytest.fixture(scope="module")
 def moderate_pair():
     """A spline_cat pair small enough that the dense path can score it too."""
@@ -172,6 +294,7 @@ def test_structured_statistic_matches_the_dense_one_to_machine_precision(moderat
 
     p = spline_cat_moments(B_a, S_a, S_cell, W_cell, level_rows)
     U_eff, rank_m = _profile(p)
+    assert p.profiled_trace == pytest.approx(float(np.trace(V_eff)), rel=1e-12)
 
     # dense column order is p*k_b + q; the kernel groups by level
     k_a, k_b = B_a.shape[1], len(level_rows)
@@ -201,6 +324,625 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     for d, s in zip(dense, struct, strict=True):
         assert s.statistic == pytest.approx(d.statistic, rel=1e-5)
         assert s.edf0 == pytest.approx(d.edf0, rel=1e-5)
+        assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12)
+
+
+def test_issue_204_reachable_half_df_uses_the_profiled_trace():
+    """A reachable 0.5 rung must search rather than clamp at the old low edge.
+
+    The raw trace is one while the stable profiled trace is 1e-12.  Scaling
+    from the raw trace puts the old low edge at 1e-10, where EDF is about
+    0.0099 and the reachable target is falsely classified as above the
+    bracket.  This assertion therefore kills the exact regression mutation,
+    not merely a change in a private trace value.
+    """
+    inputs = _near_absorbed_cells()
+    p = spline_cat_moments(*inputs)
+    U_eff, rank_m = _profile(p)
+    old_lo = 1e-10 * float(np.trace(p.V[0])) / float(np.trace(p.S_a))
+    _, old_edf = _evaluate(p, U_eff, rank_m, old_lo)
+    assert old_edf == pytest.approx(0.00990194, rel=2e-5)
+
+    from superglm.screening._structured import structured_ladder
+
+    result = structured_ladder(p, budgets=(0.5,))[0]
+    expected_trace = 1e-12 / (1.0 + 1e-12)
+    assert p.profiled_trace == pytest.approx(expected_trace, rel=2e-13, abs=0.0)
+    assert result.edf0 == pytest.approx(0.5, abs=2e-6)
+    assert result.lambda0 < old_lo / 10.0
+
+
+def test_near_absorbed_trace_and_ladder_match_the_dense_path():
+    """Dense and structured paths take the same SEARCH action near absorption."""
+    inputs = _near_absorbed_cells()
+    B_a, S_a, S_cell, W_cell, level_rows = inputs
+    U, V, C, M, S_ti, u_m = _dense_cell_inputs(*inputs)
+    dense_trace = float(np.trace(V - C.T @ np.linalg.solve(M, C)))
+    p = spline_cat_moments(*inputs)
+
+    dense = penalized_score_statistic_ladder(
+        U,
+        V,
+        C,
+        M,
+        S_ti,
+        budgets=(0.5,),
+        U_nuisance=u_m,
+    )[0]
+    from superglm.screening._structured import structured_ladder
+
+    structured = structured_ladder(p, budgets=(0.5,))[0]
+    # The dense subtraction retains about four significant digits here; the
+    # structured residual construction retains the full weak energy.
+    assert p.profiled_trace == pytest.approx(dense_trace, rel=2e-4, abs=0.0)
+    assert structured.lambda0 == pytest.approx(dense.lambda0, rel=3e-6)
+    assert structured.edf0 == pytest.approx(dense.edf0, abs=2e-6)
+    assert structured.statistic == pytest.approx(dense.statistic, rel=1e-12)
+
+
+@pytest.mark.parametrize("base_energy", (0.0, 1e-18, 1e-12, 1.0))
+def test_profiled_trace_keeps_exact_and_weak_complement_energy(base_energy):
+    """The base level participates in H but contributes no emitted tau term.
+
+    In this scalar geometry the exact residual is h0*h1/(h0+h1).  At 1e-18,
+    forming ``H - H_q`` rounds the complement to zero; additive prefix/suffix
+    geometry must still retain it.
+    """
+    p = spline_cat_moments(*_near_absorbed_cells(base_energy))
+    expected = base_energy / (1.0 + base_energy)
+    assert np.isfinite(p.profiled_trace)
+    assert p.profiled_trace >= 0.0
+    assert p.profiled_trace == pytest.approx(expected, rel=2e-13, abs=1e-300)
+
+
+def test_exact_absorption_returns_finite_nonnegative_ladder_values():
+    from superglm.screening._structured import structured_ladder
+
+    p = spline_cat_moments(*_near_absorbed_cells(0.0))
+    result = structured_ladder(p, budgets=(0.5,))[0]
+    assert p.profiled_trace == 0.0
+    assert np.isfinite([result.statistic, result.edf0, result.lambda0]).all()
+    assert result.statistic >= 0.0
+    assert result.edf0 >= 0.0
+    assert result.lambda0 >= 0.0
+
+
+def test_evaluate_clips_absorption_dust_but_signals_material_negative(monkeypatch):
+    """Only round-off may become zero; a rank/inverse mismatch must escape."""
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(0.0))
+    U_eff = np.zeros_like(pair.U)
+
+    class FakeFactor:
+        def __init__(self, rank, inverse_block):
+            self.rank = rank
+            self.inverse_block = inverse_block
+
+        def solve(self, block_rhs, border_rhs):
+            return np.zeros_like(block_rhs), np.zeros_like(border_rhs)
+
+        def diag_blocks(self):
+            blocks = np.zeros((1, 2, 2))
+            blocks[0, 0, 0] = self.inverse_block
+            return blocks
+
+    monkeypatch.setattr(st, "_pair_arrow", lambda *a, **k: FakeFactor(0, 1e-300))
+    _, dust_edf = st._evaluate(pair, U_eff, 0, 1.0, np.array([0]))
+    assert dust_edf == 0.0
+
+    monkeypatch.setattr(st, "_pair_arrow", lambda *a, **k: FakeFactor(0, -1e-300))
+    _, upper_dust_edf = st._evaluate(pair, U_eff, 0, 1.0, np.array([0]))
+    assert upper_dust_edf == 0.0
+
+    monkeypatch.setattr(st, "_pair_arrow", lambda *a, **k: FakeFactor(1, 1.25))
+    with pytest.raises(st._UnstableStructuredEDFError, match="numerically inconsistent"):
+        st._evaluate(pair, U_eff, 0, 1.0, np.array([0]))
+
+
+def test_material_negative_edf_refuses_the_whole_ladder(monkeypatch):
+    """No plausible row may escape after an unstable intermediate EDF."""
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
+    calls = 0
+
+    def unstable_on_search(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0.0, 1.0
+        if calls == 2:
+            return 0.0, 0.0
+        raise st._UnstableStructuredEDFError("injected material negative EDF")
+
+    monkeypatch.setattr(st, "_evaluate", unstable_on_search)
+    assert st.structured_ladder(pair, budgets=(0.5,), max_evaluations=100) is None
+    assert calls == 3
+
+
+def test_negative_penalty_trace_refuses_the_nonmonotone_edf_curve(monkeypatch):
+    """PSD inverse action requires both ``penalty >= 0`` and ``edf <= rank``."""
+    import superglm.screening._structured as st
+
+    rng = np.random.default_rng(14)
+    n_rows, k_a, n_levels = 7, 4, 6
+    B_a = rng.normal(size=(n_rows, k_a))
+    delta = 10 ** rng.uniform(-9.0, -4.0)
+    B_a[:, -1] = B_a[:, 0] + delta * rng.normal(size=n_rows)
+    W_cell = 10 ** rng.uniform(-6.0, 6.0, size=(n_rows, n_levels))
+    W_cell[rng.random(W_cell.shape) < 0.15] = 0.0
+    penalty_vector = rng.normal(size=k_a)
+    S_a = np.outer(penalty_vector, penalty_vector)
+    level_rows = np.arange(1, n_levels, dtype=np.intp)
+    pair = spline_cat_moments(
+        B_a,
+        S_a,
+        np.zeros_like(W_cell),
+        W_cell,
+        level_rows,
+    )
+    U_eff, rank_m = st._profile(pair)
+    ranks = st.block_ranks(pair)
+    scale = pair.profiled_trace / (np.trace(S_a) * level_rows.size)
+    lam = 1e8 * scale
+    factor = st._pair_arrow(pair, lam, ranks)
+    blocks = factor.diag_blocks()[:, :k_a, :k_a]
+    penalty_term = lam * float(np.einsum("lpr,rp->", blocks, S_a, optimize=True))
+    assert pair.profiled_trace == pytest.approx(239_102.68907761583, rel=2e-13)
+    assert factor.rank - rank_m == 19
+    assert penalty_term == pytest.approx(-58.45079964351394, rel=2e-12)
+
+    with pytest.raises(st._UnstableStructuredEDFError, match="penalty trace"):
+        st._evaluate(pair, U_eff, rank_m, lam, ranks)
+
+    calls = 0
+    real_evaluate = st._evaluate
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(st, "_evaluate", counted)
+    assert st.structured_ladder(pair, budgets=(13.0,)) is None
+    assert calls > 2
+
+
+def test_increasing_endpoint_edf_is_refused_even_when_each_value_is_bounded():
+    """More penalty cannot increase EDF; bounded endpoints are not sufficient."""
+    import superglm.screening._structured as st
+
+    rng = np.random.default_rng(2)
+    n_rows, k_a, n_levels = 8, 4, 6
+    B_a = rng.normal(size=(n_rows, k_a))
+    delta = 10 ** rng.uniform(-9.0, -4.0)
+    B_a[:, -1] = B_a[:, 0] + delta * rng.normal(size=n_rows)
+    W_cell = 10 ** rng.uniform(-6.0, 6.0, size=(n_rows, n_levels))
+    W_cell[rng.random(W_cell.shape) < 0.15] = 0.0
+    penalty_vector = rng.normal(size=k_a)
+    S_a = np.outer(penalty_vector, penalty_vector)
+    level_rows = np.arange(1, n_levels, dtype=np.intp)
+    pair = spline_cat_moments(
+        B_a,
+        S_a,
+        np.zeros_like(W_cell),
+        W_cell,
+        level_rows,
+    )
+    U_eff, rank_m = st._profile(pair)
+    ranks = st.block_ranks(pair)
+    scale = pair.profiled_trace / (np.trace(S_a) * level_rows.size)
+    _, edf_lo = st._evaluate(pair, U_eff, rank_m, 1e-10 * scale, ranks)
+    _, edf_hi = st._evaluate(pair, U_eff, rank_m, 1e10 * scale, ranks)
+
+    assert pair.profiled_trace == pytest.approx(28_223.33962068437, rel=2e-13)
+    assert edf_lo == pytest.approx(13.999660397988439, rel=2e-13)
+    assert edf_hi == pytest.approx(14.030428796673123, rel=2e-13)
+    assert edf_hi > edf_lo
+    assert st.structured_ladder(pair, budgets=(14.0,)) is None
+
+
+def test_endpoint_monotonicity_mutation_is_refused_after_the_bracket(monkeypatch):
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
+    calls = 0
+
+    def increasing_endpoints(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return (0.0, 1.0) if calls == 1 else (0.0, 1.1)
+
+    monkeypatch.setattr(st, "_evaluate", increasing_endpoints)
+    assert st.structured_ladder(pair, budgets=(0.5,)) is None
+    assert calls == 2
+
+
+def test_interior_edf_outside_its_monotone_bracket_is_refused(monkeypatch):
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
+    calls = 0
+
+    def broken_interior(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0.0, 2.0
+        if calls == 2:
+            return 0.0, 0.0
+        return 0.0, 2.1
+
+    monkeypatch.setattr(st, "_evaluate", broken_interior)
+    assert st.structured_ladder(pair, budgets=(1.0,), max_evaluations=100) is None
+    assert calls == 3
+
+
+def test_search_width_exhaustion_without_target_convergence_is_refused(monkeypatch):
+    """A bracket is not permission to publish a rung that missed its target."""
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_near_absorbed_cells(1.0))
+    calls = 0
+
+    def discontinuous_edf(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0.0, 2.0
+        if calls == 2:
+            return 0.0, 0.0
+        return 0.0, 0.5
+
+    monkeypatch.setattr(st, "_evaluate", discontinuous_edf)
+    assert st.structured_ladder(pair, budgets=(1.0,), max_evaluations=100) is None
+    assert calls > 3
+
+
+def test_constant_spline_support_has_exact_zero_profiled_energy():
+    B_a = np.full((4, 2), [3.0, -7.0])
+    W_cell = np.arange(1.0, 17.0).reshape(4, 4)
+    S_cell = np.zeros_like(W_cell)
+    p = spline_cat_moments(
+        B_a,
+        np.eye(2),
+        S_cell,
+        W_cell,
+        np.array([0, 2, 3], dtype=np.intp),
+    )
+    assert p.profiled_trace == 0.0
+
+
+@pytest.mark.parametrize("factor", (2.0**-30, 2.0**30))
+def test_profiled_trace_rescales_with_cell_weights(factor):
+    inputs = _near_absorbed_cells(0.25)
+    baseline = spline_cat_moments(*inputs).profiled_trace
+    B_a, S_a, S_cell, W_cell, level_rows = inputs
+    scaled = spline_cat_moments(
+        B_a,
+        S_a,
+        factor * S_cell,
+        factor * W_cell,
+        level_rows,
+    ).profiled_trace
+    assert scaled == pytest.approx(factor * baseline, rel=2e-13, abs=0.0)
+
+
+def test_profiled_trace_is_invariant_to_level_order():
+    rng = np.random.default_rng(91)
+    B_a = rng.normal(size=(7, 3))
+    W_cell = rng.uniform(0.05, 2.0, size=(7, 6))
+    S_cell = rng.normal(size=(7, 6))
+    S_a = np.eye(3)
+    level_rows = np.array([0, 2, 3, 5])
+    baseline = spline_cat_moments(B_a, S_a, S_cell, W_cell, level_rows).profiled_trace
+
+    permutation = np.array([4, 2, 0, 5, 1, 3])
+    inverse = np.empty_like(permutation)
+    inverse[permutation] = np.arange(permutation.size)
+    permuted = spline_cat_moments(
+        B_a,
+        S_a,
+        S_cell[:, permutation],
+        W_cell[:, permutation],
+        inverse[level_rows],
+    ).profiled_trace
+    assert permuted == pytest.approx(baseline, rel=2e-13, abs=0.0)
+
+
+@pytest.mark.parametrize(
+    ("seed", "delta", "decimal_oracle"),
+    (
+        (720, 1e-6, 2_124_788_244.3593912),
+        (239, 1e-7, 27_174_778_074.477875),
+    ),
+)
+def test_ill_conditioned_trace_matches_decimal_oracle_across_level_and_row_orders(
+    seed,
+    delta,
+    decimal_oracle,
+):
+    """Extreme weights and retained weak columns must not revive normal equations.
+
+    The constants were evaluated from the float inputs with 100-digit Decimal
+    arithmetic.  The explicit dense-row QR is a second oracle; the production
+    path has to agree with both and make the same absolute decision after
+    levels and rows are reordered, not merely agree with a same-order Gram.
+    """
+    B_a, S_a, S_cell, W_cell, level_rows = _adversarial_trace_cells(seed, delta)
+    rng = np.random.default_rng(seed + 10_000)
+    for _ in range(16):
+        row_order = rng.permutation(B_a.shape[0])
+        level_order = rng.permutation(W_cell.shape[1])
+        inverse_levels = np.empty_like(level_order)
+        inverse_levels[level_order] = np.arange(level_order.size)
+        B_ordered = B_a[row_order]
+        W_ordered = W_cell[row_order][:, level_order]
+        rows_ordered = inverse_levels[level_rows]
+
+        oracle = _direct_centered_row_trace(B_ordered, W_ordered, rows_ordered)
+        got = spline_cat_moments(
+            B_ordered,
+            S_a,
+            S_cell[row_order][:, level_order],
+            W_ordered,
+            rows_ordered,
+        ).profiled_trace
+        assert oracle == pytest.approx(decimal_oracle, rel=2e-7, abs=0.0)
+        assert got == pytest.approx(oracle, rel=2e-7, abs=0.0)
+        assert got == pytest.approx(decimal_oracle, rel=2e-7, abs=0.0)
+
+
+def test_rank_boundary_is_refused_for_both_permutation_actions():
+    """A QR pivot whose error interval crosses the rank cutoff is not guessed.
+
+    Without the ambiguity certificate these two mathematically identical
+    orders straddled the cutoff: one retained rank two and returned trace
+    110.92, the other dropped to rank one and returned 719.05.  Their budget-2
+    ladders then took different clamp/search actions.  Both must instead
+    refuse the structured route so routing can make one safe decision.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    for order_seed in (10_000, 10_001):
+        pair = spline_cat_moments(*_rank_boundary_trace_cells(order_seed))
+        assert pair.profiled_trace is None
+        assert structured_ladder(pair, budgets=(2.0,)) is None
+
+
+def test_aligned_row_qr_avoids_the_normal_equation_rhs_error():
+    """A compact deterministic mutation killer for the final squared solve.
+
+    The old ``R_active.T @ R_target`` followed by ``R^-T/R^-1`` gives
+    4.9138975014457805e-6 here, a 4.28e-4 relative error.  The oracle uses the
+    actual dense weighted rows, selects the same three representative columns
+    with an independent CPQR, and solves in their reduced QR coordinate.
+    """
+    rng = np.random.default_rng(1338)
+    n_rows, k_a, n_levels = 4, 6, 2
+    B_a = rng.normal(size=(n_rows, k_a))
+    B_a[:, -1] = B_a[:, 0]
+    W_cell = 10 ** rng.uniform(-8.0, 8.0, size=(n_rows, n_levels))
+    W_cell[rng.random(W_cell.shape) < 0.15] = 0.0
+
+    shifted = B_a - B_a[0]
+    row_blocks = []
+    for level in range(n_levels):
+        weights = W_cell[:, level]
+        centered = shifted - weights @ shifted / weights.sum()
+        row_blocks.append(np.sqrt(weights)[:, None] * centered)
+    stacked = np.vstack(row_blocks)
+
+    _, _, permutation = scipy.linalg.qr(stacked, mode="economic", pivoting=True)
+    active = permutation[:3]
+    assert set(active) == {1, 3, 4}
+    Q, R = np.linalg.qr(stacked[:, active], mode="reduced")
+    target = np.zeros_like(stacked)
+    target[n_rows:] = row_blocks[1]
+    coefficients = np.linalg.solve(R, Q.T @ target)
+    oracle = float(np.sum(np.square(target - stacked[:, active] @ coefficients)))
+    assert oracle == pytest.approx(4.915999377342993e-6, rel=2e-9, abs=0.0)
+
+    got = spline_cat_moments(
+        B_a,
+        np.eye(k_a),
+        np.zeros_like(W_cell),
+        W_cell,
+        np.array([1], dtype=np.intp),
+    ).profiled_trace
+    assert got == pytest.approx(oracle, rel=2e-8, abs=0.0)
+
+
+def test_profiled_trace_is_translation_and_row_order_invariant_against_row_oracle():
+    """Center rows before products; raw ``B'WB - cc'/m`` cannot pass this."""
+    rng = np.random.default_rng(118)
+    B_a = rng.normal(size=(11, 3))
+    W_cell = rng.uniform(0.2, 2.0, size=(11, 6))
+    S_cell = np.zeros_like(W_cell)
+    level_rows = np.array([1, 2, 4, 5], dtype=np.intp)
+    baseline = spline_cat_moments(
+        B_a,
+        np.eye(3),
+        S_cell,
+        W_cell,
+        level_rows,
+    ).profiled_trace
+
+    translated = B_a + np.array([1e12, -3e11, 7e11])
+    translated_baseline = spline_cat_moments(
+        translated,
+        np.eye(3),
+        S_cell,
+        W_cell,
+        level_rows,
+    ).profiled_trace
+    # Adding the offsets quantizes the float inputs at about 1e-4, so exact
+    # equality to the unshifted input is impossible; the mathematical action
+    # remains invariant to that representational floor.
+    assert translated_baseline == pytest.approx(baseline, rel=1e-5, abs=0.0)
+
+    for _ in range(12):
+        row_order = rng.permutation(B_a.shape[0])
+        got = spline_cat_moments(
+            translated[row_order],
+            np.eye(3),
+            S_cell[row_order],
+            W_cell[row_order],
+            level_rows,
+        ).profiled_trace
+        oracle = _direct_centered_row_trace(
+            translated[row_order],
+            W_cell[row_order],
+            level_rows,
+        )
+        assert got == pytest.approx(oracle, rel=2e-13, abs=0.0)
+        assert got == pytest.approx(translated_baseline, rel=2e-13, abs=0.0)
+
+
+def test_profiled_trace_uses_chunked_linear_geometry_without_svd(monkeypatch):
+    """Pin linear peak memory, bounded chunks, and the actual CPQR dispatch."""
+    import tracemalloc
+
+    import superglm.screening._structured as st
+
+    rng = np.random.default_rng(92)
+    n_rows, n_levels, k_a = 9, 73, 4
+    B_a = rng.normal(size=(n_rows, k_a))
+    W_cell = rng.uniform(0.1, 1.0, size=(n_rows, n_levels))
+    S_cell = rng.normal(size=(n_rows, n_levels))
+    level_rows = np.arange(1, n_levels, dtype=np.intp)
+
+    allocations = []
+    real_empty = st.np.empty
+    real_zeros = st.np.zeros
+    real_concatenate = st.np.concatenate
+    real_centered = st._centered_level_factors
+    real_numpy_qr = st.np.linalg.qr
+    real_scipy_qr = st.scipy.linalg.qr
+    real_triangular_solve = st.scipy.linalg.solve_triangular
+    chunk_widths = []
+    numpy_qr_calls = []
+    pivoted_qr_calls = []
+    triangular_solve_shapes = []
+
+    def watched_empty(shape, *args, **kwargs):
+        if isinstance(shape, tuple):
+            allocations.append(tuple(int(v) for v in shape))
+        return real_empty(shape, *args, **kwargs)
+
+    def watched_zeros(shape, *args, **kwargs):
+        if isinstance(shape, tuple):
+            allocations.append(tuple(int(v) for v in shape))
+        return real_zeros(shape, *args, **kwargs)
+
+    def watched_concatenate(arrays, *args, **kwargs):
+        result = real_concatenate(arrays, *args, **kwargs)
+        allocations.append(result.shape)
+        return result
+
+    def watched_centered(B, W):
+        chunk_widths.append(W.shape[1])
+        return real_centered(B, W)
+
+    def watched_scipy_qr(*args, **kwargs):
+        pivoted_qr_calls.append(bool(kwargs.get("pivoting", False)))
+        return real_scipy_qr(*args, **kwargs)
+
+    def watched_numpy_qr(a, *args, **kwargs):
+        numpy_qr_calls.append((a.shape, kwargs.get("mode", "reduced")))
+        return real_numpy_qr(a, *args, **kwargs)
+
+    def watched_triangular_solve(a, b, *args, **kwargs):
+        triangular_solve_shapes.append((a.shape, b.shape))
+        return real_triangular_solve(a, b, *args, **kwargs)
+
+    monkeypatch.setattr(st.np, "empty", watched_empty)
+    monkeypatch.setattr(st.np, "zeros", watched_zeros)
+    monkeypatch.setattr(st.np, "concatenate", watched_concatenate)
+    monkeypatch.setattr(st.np.linalg, "svd", lambda *a, **k: pytest.fail("SVD is forbidden"))
+    monkeypatch.setattr(
+        st.np.linalg, "eigh", lambda *a, **k: pytest.fail("normal eig is forbidden")
+    )
+    monkeypatch.setattr(st.np.linalg, "qr", watched_numpy_qr)
+    monkeypatch.setattr(st.scipy.linalg, "svd", lambda *a, **k: pytest.fail("SVD is forbidden"))
+    monkeypatch.setattr(
+        st.scipy.linalg, "eigh", lambda *a, **k: pytest.fail("normal eig is forbidden")
+    )
+    monkeypatch.setattr(st.scipy.linalg, "qr", watched_scipy_qr)
+    monkeypatch.setattr(st.scipy.linalg, "solve_triangular", watched_triangular_solve)
+    monkeypatch.setattr(st, "_centered_level_factors", watched_centered)
+
+    tracemalloc.start()
+    p = spline_cat_moments(B_a, np.eye(k_a), S_cell, W_cell, level_rows)
+    _, peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    tensor_width = k_a * level_rows.size
+    assert (tensor_width, tensor_width) not in allocations
+    assert (n_levels + 1, k_a, k_a) in allocations
+    assert max(chunk_widths) <= st._trace_chunk_width(n_rows, k_a, n_levels)
+    assert sum(chunk_widths) == 2 * n_levels
+    assert pivoted_qr_calls == [True]
+    aligned_qr = [shape for shape, mode in numpy_qr_calls if mode == "reduced"]
+    assert aligned_qr == [(2 * k_a, k_a)] * level_rows.size
+    # One combined aligned RHS solve per emitted level.  The old
+    # cross-product/R'R route needed four triangular solves per level.
+    assert triangular_solve_shapes == [((k_a, k_a), (k_a, 2 * k_a))] * level_rows.size
+    # Constructor-independent peak pin: even one dense tensor-width square is
+    # six times the whole measured trace peak on this case.
+    assert peak_bytes < (tensor_width * tensor_width * 8) // 2
+    assert np.isscalar(p.profiled_trace)
+
+
+def test_profiled_trace_does_not_form_identity_minus_projection(monkeypatch):
+    """The dropped direction is a structural null action, not ``I - A``."""
+    import superglm.screening._structured as st
+
+    representative = st._representative_projection(
+        np.diag([1.0, 1e-8]),
+        n_rows=6,
+        n_levels=2,
+    )
+    assert representative is not None
+    active, null_action = representative
+    assert np.array_equal(active, np.array([0]))
+    assert np.array_equal(null_action, np.diag([0.0, 1.0]))
+
+    p = spline_cat_moments(*_near_absorbed_cells(1e-18))
+    assert p.profiled_trace == pytest.approx(1e-18, rel=2e-13, abs=0.0)
+
+
+@pytest.mark.parametrize("scale", (2.0**-30, 1.0, 2.0**30))
+@pytest.mark.parametrize("permute", (False, True))
+def test_truncated_positive_direction_remains_residual_energy(scale, permute):
+    """A positive H direction below the inverse floor is not profiled away.
+
+    The full-rank weighted-design projection leaves ``scale*d^2/2``.  The
+    numerical rank policy deliberately drops that H direction, so the
+    matching dense Hermitian pseudo-inverse leaves all ``scale*d^2`` of the
+    emitted block.  Both are positive; returning only ``H^+`` previously
+    returned zero.  The constructed arrow EDF jumps across 0.5 at that rank
+    boundary, so the ladder must now refuse the unattainable rung rather than
+    publish the nearest side of the jump.
+    """
+    inputs = _mixed_rank_cells(scale, permute=permute)
+    p = spline_cat_moments(*inputs)
+    _, V, C, M, _, _ = _dense_cell_inputs(*inputs)
+    dense_trace = float(np.trace(V - C.T @ np.linalg.pinv(M, hermitian=True) @ C))
+    full_rank_oracle = 0.5 * scale * 1e-16
+
+    assert full_rank_oracle > 0.0
+    assert p.profiled_trace == pytest.approx(
+        2.0 * full_rank_oracle,
+        rel=3e-13,
+        abs=0.0,
+    )
+    assert p.profiled_trace == pytest.approx(dense_trace, rel=3e-13, abs=0.0)
+
+    from superglm.screening._structured import structured_ladder
+
+    assert structured_ladder(p, budgets=(0.5,)) is None
 
 
 def test_contrast_rows_are_the_menu_without_the_menu():
@@ -409,9 +1151,9 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
     saw_low_edge = False
     for budget, d, s in zip(_EDGE_BUDGETS, dense, struct, strict=True):
-        # Each path is judged at ITS OWN lambda: the two brackets are scaled
-        # differently on purpose (tr(V_eff) against tr(V)), so a shared lambda
-        # would compare them at different points of the same curve.
+        # Each path is judged at its reported lambda.  Both brackets now use
+        # tr(V_eff), though their endpoint solves remain independent and can
+        # differ at the ill-conditioned high edge.
         if budget > 100.0:
             # LOW edge.  The oracle is sound here -- three equivalent forms of
             # it agree to 3.4e-09 -- so this is asserted tightly, and it is the
@@ -484,24 +1226,56 @@ def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
             assert s.statistic == pytest.approx(d.statistic, rel=1e-6)
 
 
-def test_the_ladder_refuses_a_search_it_cannot_afford():
+def test_the_ladder_refuses_a_search_it_cannot_afford(monkeypatch):
     """``max_evaluations`` is checked BEFORE the first bisection step.
 
     A clamping ladder is two arrow factorizations; a searching one is tens.
     A caller that budgeted for the first must get a refusal rather than the
     second, and must pay only the bracket to find out.
     """
+    import superglm.screening._structured as st
     from superglm.screening._structured import structured_ladder
 
     p = spline_cat_moments(*_structured_inputs(_thin_level_pair(1.0)))
+    calls = 0
+    real = st._evaluate
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(st, "_evaluate", counted)
     # edf at maximum penalty is about L - 1 = 19 here, so 16 clamps and 24
     # has to search.
     assert structured_ladder(p, budgets=(16.0,), max_evaluations=2) is not None
+    assert calls == 2
+    calls = 0
     assert structured_ladder(p, budgets=(24.0,), max_evaluations=2) is None
+    assert calls == 2
+    calls = 0
     assert structured_ladder(p, budgets=(24.0,), max_evaluations=200) is not None
+    assert calls > 2
 
 
-def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable():
+def test_structured_allowance_charges_both_qr_passes_and_seven_factor_units():
+    max_cells, n_rows, k_a, n_levels = 20_000, 31, 6, 19
+    per_evaluation = n_levels * (k_a + 1) ** 3
+    setup = 2 * n_rows * n_levels * k_a**2 + 7 * per_evaluation
+    expected = max(ops._STRUCTURED_CUBIC_BUDGET_FACTOR * max_cells - setup, 0)
+    expected //= per_evaluation
+    assert (
+        ops._structured_evaluation_allowance(
+            max_cells,
+            n_rows,
+            k_a,
+            n_levels,
+        )
+        == expected
+    )
+
+
+def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable(monkeypatch):
     """The ladder is charged for distinct SEARCH TARGETS, not for rungs.
 
     ``edf0`` is allowed to repeat a budget, and every copy of one bisects to
@@ -509,20 +1283,55 @@ def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable():
     decide whether the pair got a score at all — the same pair came back
     finite at ``(24.0,)`` and a NaN row at ``(24.0, 24.0)``.
     """
+    import superglm.screening._structured as st
     from superglm.screening._structured import structured_ladder
 
     p = spline_cat_moments(*_structured_inputs(_thin_level_pair(1.0)))
+    calls = 0
+    real = st._evaluate
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(st, "_evaluate", counted)
     once = structured_ladder(p, budgets=(24.0,), max_evaluations=48)
     assert once is not None
+    once_calls = calls
     for repeats in (2, 3):
+        calls = 0
         many = structured_ladder(p, budgets=(24.0,) * repeats, max_evaluations=48)
         assert many is not None
+        assert calls == once_calls
         assert len(many) == repeats
         # ...and the repeats are the same answer, computed once
         for r in many:
             assert r.statistic == once[0].statistic
             assert r.edf0 == once[0].edf0
             assert r.lambda0 == once[0].lambda0
+
+
+def test_profiled_scale_preserves_the_lower_edge_clamp(monkeypatch, moderate_pair):
+    """An over-ceiling target still clamps low using only two evaluations."""
+    import superglm.screening._structured as st
+
+    p = spline_cat_moments(*_structured_inputs(moderate_pair))
+    calls = 0
+    real = st._evaluate
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(st, "_evaluate", counted)
+    result = st.structured_ladder(p, budgets=(1e6,), max_evaluations=2)[0]
+    expected_lo = 1e-10 * p.profiled_trace / (np.trace(p.S_a) * p.dims[0])
+    assert calls == 2
+    assert result.lambda0 == pytest.approx(expected_lo, rel=2e-15)
+    assert np.isfinite(result.statistic)
+    assert result.edf0 >= 0.0
 
 
 def test_an_exact_arrow_score_beats_an_approximate_dense_one(monkeypatch):
@@ -760,7 +1569,7 @@ def test_a_pair_whose_ladder_must_bisect_is_refused_when_it_cannot_afford_to(mon
     # ...and raising the budget lifts the refusal, as it lifts every other.
     # The pair is still over the dense ceiling at the higher budget, so it is
     # the structured path that scores it, not a fallback to the dense one.
-    lifted, lifted_seen = _routed_shapes(model, df, y, monkeypatch, max_cells=1_000_000)
+    lifted, lifted_seen = _routed_shapes(model, df, y, monkeypatch, max_cells=1_500_000)
     assert lifted_seen
     assert np.isfinite(lifted["z"])
 

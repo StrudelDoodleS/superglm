@@ -45,13 +45,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm.screening._arrow import factor_arrow, psd_ranks
 from superglm.screening._score_stat import ScreenedPair
 
 _EDF_TOL = 1e-6
+_EDF_ROUNDOFF_FACTOR = 64.0
+_EDF_ABSOLUTE_DUST = np.finfo(np.float64).eps ** 2
 _MAX_BISECT = 200
+_TRACE_CHUNK_DOUBLES = 262_144
 
 # The most steps one rung's bisection can take.  It halves the log of a
 # bracket spanning 1e20 and stops when the two ends are within 1e-12 of each
@@ -61,6 +65,20 @@ _MAX_BISECT = 200
 # ceiling is what lets a caller decide BEFORE the search whether to pay for
 # it rather than after.
 _MAX_STEPS_PER_RUNG = min(_MAX_BISECT, 46)
+
+
+class _UnstableStructuredEDFError(FloatingPointError):
+    """The arrow rank and inverse disagree by more than numerical dust."""
+
+
+def _edf_roundoff(*values: float) -> float:
+    """Scale-aware dust allowance for EDF identities and ordering."""
+    return max(
+        _EDF_ABSOLUTE_DUST,
+        _EDF_ROUNDOFF_FACTOR
+        * np.finfo(np.float64).eps
+        * sum(abs(float(value)) for value in values),
+    )
 
 
 @dataclass(frozen=True)
@@ -80,10 +98,271 @@ class SplineCatPair:
     border: NDArray  # (r, r)        border block of M, r = 1 + k_a
     u_border: NDArray  # (r,)
     u_cat: NDArray  # (L,)
+    # None means the global centered-row rank lies inside its certified
+    # numerical ambiguity band; the structured route must be refused.
+    profiled_trace: float | None
 
     @property
     def dims(self) -> tuple[int, int]:
         return self.U.shape  # (L, k_a)
+
+
+def _centered_level_factors(B: NDArray, W: NDArray) -> NDArray:
+    """Return QR factors of each level's centered weighted spline rows.
+
+    The raw-moment identity ``B' W B - (B' w)(B' w)' / sum(w)`` is unusable
+    here: the trace this module needs can be twelve or more orders below both
+    terms.  This two-pass form subtracts each level's mean from the basis
+    rows first.  It then returns a square ``R_l`` whose Gram is the centered
+    geometry, without forming that Gram:
+
+        R_l' R_l = (sqrt(W_l) D_l)' (sqrt(W_l) D_l).
+
+    Shifting every row by the first basis row before taking the mean makes the
+    centering invariant to a large common offset without subtracting that
+    offset twice.  Zero-mass levels contribute an exact zero matrix.
+    """
+    B = np.asarray(B, dtype=np.float64)
+    W = np.asarray(W, dtype=np.float64)
+    n, k = B.shape
+    n_levels = W.shape[1]
+    if n_levels == 0:
+        return np.empty((0, k, k), dtype=np.float64)
+    if n == 0 or k == 0:
+        return np.zeros((n_levels, k, k), dtype=np.float64)
+
+    shifted = B - B[0]
+    mass = W.sum(axis=0)
+    means = np.zeros((n_levels, k), dtype=np.float64)
+    np.divide(W.T @ shifted, mass[:, None], out=means, where=mass[:, None] > 0.0)
+    centered = shifted[:, None, :] - means[None, :, :]
+    centered *= np.sqrt(W)[:, :, None]
+    raw = np.linalg.qr(np.moveaxis(centered, 1, 0), mode="r")
+    if raw.shape[1] == k:
+        return raw
+    factors = np.zeros((n_levels, k, k), dtype=np.float64)
+    factors[:, : raw.shape[1], :] = raw
+    return factors
+
+
+def _combine_row_factors(left: NDArray, right: NDArray) -> NDArray:
+    """Compact two weighted-row factors without squaring either one."""
+    return np.linalg.qr(np.concatenate((left, right), axis=0), mode="r")
+
+
+def _representative_projection(
+    row_factor: NDArray,
+    *,
+    n_rows: int,
+    n_levels: int,
+) -> tuple[NDArray, NDArray] | None:
+    """Return a stable representative span and its structural null action.
+
+    Column-pivoted QR of the small global weighted-row factor chooses
+    representative basis columns ``active``.  In pivot order,
+
+        Z = Z_active [I, C],       R11 C = R12.
+
+    A coefficient action using only the active rows is therefore sufficient:
+    every other representative differs only by a null-space action and has
+    the same fitted rows and residual energies.  ``null_action`` is
+    ``I - P`` built structurally as active rows ``[0, -C]`` and inactive rows
+    ``[0, I]``.  No cancelling ``I - H^+ H`` is formed.
+
+    The cutoff is the square root of the Hermitian pseudo-inverse policy used
+    by the dense path.  Rank is refused, rather than guessed, when a pivot
+    intersects its QR backward-error interval.  Each Householder reduction
+    contributes an additive ``O(eps * leading_scale)`` perturbation; the
+    conservative operation depth below covers one ``n_rows x k`` local QR per
+    level, the sequential ``2k x k`` suffix merges, and the final ``k x k``
+    pivoted QR.  Relative to a ``sqrt(k*eps)`` cutoff that uncertainty is
+    ``O(sqrt(eps))`` — the scale on which row/level order can otherwise flip
+    a retained direction.  Refusal lets routing fall back instead of making
+    that platform-specific rank choice observable.
+    """
+    k = row_factor.shape[1]
+    _, pivoted, permutation = scipy.linalg.qr(
+        row_factor,
+        mode="economic",
+        pivoting=True,
+        check_finite=False,
+    )
+    diagonal = np.abs(np.diag(pivoted))
+    if diagonal.size == 0:
+        return (
+            np.empty(0, dtype=np.intp),
+            np.empty_like(row_factor),
+        )
+
+    eps = np.finfo(np.float64).eps
+    leading_scale = float(diagonal[0])
+    if leading_scale <= np.finfo(np.float64).tiny:
+        return (
+            np.empty(0, dtype=np.intp),
+            np.zeros_like(row_factor),
+        )
+    cutoff = np.sqrt(max(k, 1) * eps) * leading_scale
+    reduction_depth = (
+        max(int(n_rows), 1) * max(k, 1)
+        + 2 * max(int(n_levels), 1) * max(k, 1) ** 2
+        + max(k, 1) ** 2
+    )
+    uncertainty = 16.0 * eps * reduction_depth * leading_scale
+    if np.any(np.abs(diagonal - cutoff) <= uncertainty):
+        return None
+    rank = int(np.count_nonzero(diagonal > cutoff))
+    active = np.asarray(permutation[:rank], dtype=np.intp)
+    inactive = np.asarray(permutation[rank:], dtype=np.intp)
+
+    null_action = np.zeros((k, k), dtype=np.float64)
+    if rank and inactive.size:
+        relation = scipy.linalg.solve_triangular(
+            pivoted[:rank, :rank],
+            pivoted[:rank, rank:],
+            check_finite=False,
+        )
+        null_action[np.ix_(active, inactive)] = -relation
+    null_action[inactive, inactive] = 1.0
+    return active, null_action
+
+
+def _aligned_representative_actions(
+    active: NDArray,
+    local: NDArray,
+    other: NDArray,
+) -> tuple[NDArray, NDArray]:
+    """Project local and complementary rows in one aligned QR coordinate.
+
+    ``local`` and ``other`` are row factors for disjoint pieces of the same
+    global centered design.  Stacking their representative columns and
+    applying the resulting orthogonal coordinate to the aligned right-hand
+    sides gives both least-squares actions directly:
+
+        G = [local_active; other_active] = Q R
+        A_q(active)  = R^-1 Q_local' local
+        A_-q(active) = R^-1 Q_other' other.
+
+    This is algebraically the same representative fit as ``H^+ H_q`` and
+    ``H^+ H_-q``, but it never forms ``G'G`` or solves through ``R'R``.  The
+    two right-hand sides share one triangular solve.
+    """
+    k = local.shape[1]
+    projection = np.zeros((k, k), dtype=np.float64)
+    complement = np.zeros((k, k), dtype=np.float64)
+    if active.size == 0:
+        return projection, complement
+
+    aligned = np.concatenate((local[:, active], other[:, active]), axis=0)
+    Q, triangular = np.linalg.qr(aligned, mode="reduced")
+    right_hand_sides = np.concatenate(
+        (Q[:k].T @ local, Q[k:].T @ other),
+        axis=1,
+    )
+    actions = scipy.linalg.solve_triangular(
+        triangular,
+        right_hand_sides,
+        check_finite=False,
+    )
+    projection[active] = actions[:, :k]
+    complement[active] = actions[:, k:]
+    return projection, complement
+
+
+def _trace_chunk_width(n_rows: int, n_cols: int, n_levels: int) -> int:
+    """Bound centered-row and factor temporaries by a small fixed chunk."""
+    per_level = max(int(n_rows) * int(n_cols), int(n_cols) ** 2, 1)
+    return max(1, min(int(n_levels), _TRACE_CHUNK_DOUBLES // per_level or 1))
+
+
+def _profiled_curvature_trace(
+    B: NDArray,
+    W_cell: NDArray,
+    level_rows: NDArray,
+) -> float | None:
+    """Compute ``tr(V_eff)`` as an exact sum of squared residual norms.
+
+    Profiling the intercept and categorical main centers the spline geometry
+    separately inside every level.  Write that weighted centered design as
+    ``Z_l = sqrt(W_l) D_l``.  A QR factor ``R_l`` has the same action norm:
+    ``||Z_l A||_F = ||R_l A||_F`` for every coefficient action ``A``.
+
+    A column-pivoted QR of the global row factor chooses a stable
+    representative span without ever forming the ill-conditioned normal
+    matrix ``H = sum_l Z_l' Z_l``.  For emitted interaction block ``q``, let
+    ``A_q`` be its representative projection coefficients, ``A_-q`` the
+    coefficients for all other levels, and ``N`` the structural null action
+    returned by :func:`_representative_projection`.  The residual action is
+    assembled additively as ``N + A_-q``.  The diagonal Schur-complement trace
+    is the exact nonnegative factor norm
+
+        ||R_q (N + A_-q)||_F^2 + ||R_-q A_q||_F^2.
+
+    Summing those nonnegative terms over emitted levels is exactly
+    ``tr(V - C' M^+ C)``.  Unlike that difference, it remains representable
+    when the mains absorb all but round-off of the interaction.
+
+    ``R_-q`` is a QR compaction of a prefix and precomputed suffix of actual
+    row factors.  It is never obtained by subtracting level ``q`` from a
+    global Gram.  Only that suffix is a level-sized trace scratch stack; the
+    centered factors are recomputed in bounded chunks on the forward pass,
+    then all trace scratch is discarded before the arrow ladder.  Work and
+    memory remain linear in the level count; no SVD, normal-matrix inverse, or
+    dense ``V_eff`` is formed.
+    """
+    B = np.asarray(B, dtype=np.float64)
+    W_cell = np.asarray(W_cell, dtype=np.float64)
+    level_rows = np.asarray(level_rows, dtype=np.intp)
+    n_rows, k_a = B.shape
+    n_levels = W_cell.shape[1]
+    if level_rows.size == 0 or k_a == 0:
+        return 0.0
+
+    chunk = _trace_chunk_width(n_rows, k_a, n_levels)
+    suffix = np.empty((n_levels + 1, k_a, k_a), dtype=np.float64)
+    suffix[-1] = 0.0
+    for stop in range(n_levels, 0, -chunk):
+        start = max(0, stop - chunk)
+        factors = _centered_level_factors(B, W_cell[:, start:stop])
+        for level in range(stop - 1, start - 1, -1):
+            suffix[level] = _combine_row_factors(factors[level - start], suffix[level + 1])
+
+    representative = _representative_projection(
+        suffix[0],
+        n_rows=n_rows,
+        n_levels=n_levels,
+    )
+    if representative is None:
+        return None
+    active, null_action = representative
+    emitted = np.zeros(n_levels, dtype=bool)
+    emitted[level_rows] = True
+    prefix = np.zeros((k_a, k_a), dtype=np.float64)
+    trace = 0.0
+    correction = 0.0
+
+    for start in range(0, n_levels, chunk):
+        stop = min(n_levels, start + chunk)
+        factors = _centered_level_factors(B, W_cell[:, start:stop])
+        for level in range(start, stop):
+            local = factors[level - start]
+            if emitted[level]:
+                other = _combine_row_factors(prefix, suffix[level + 1])
+                projection, complement = _aligned_representative_actions(active, local, other)
+                residual = null_action + complement
+                term = float(
+                    np.sum(np.square(local @ residual)) + np.sum(np.square(other @ projection))
+                )
+                # Neumaier-style compensated accumulation keeps the final
+                # scalar independent of level order down to the factor error.
+                updated = trace + term
+                if abs(trace) >= abs(term):
+                    correction += (trace - updated) + term
+                else:
+                    correction += (term - updated) + trace
+                trace = updated
+            prefix = _combine_row_factors(prefix, local)
+
+    return trace + correction
 
 
 def spline_cat_moments(
@@ -119,6 +398,10 @@ def spline_cat_moments(
     # contracted against each level's weights.
     AA = (B_a[:, :, None] * B_a[:, None, :]).reshape(n_a, k_a * k_a)
     V = (Wq.T @ AA).reshape(-1, k_a, k_a)
+    del AA
+    # V persists into the ladder, but its n_a*k_a^2 construction scratch has
+    # been released before the one level-sized suffix stack below is formed.
+    profiled_trace = _profiled_curvature_trace(B_a, W_cell, level_rows)
 
     w_row = W_cell.sum(axis=1)
     s_row = S_cell.sum(axis=1)
@@ -142,6 +425,7 @@ def spline_cat_moments(
         border=border,
         u_border=u_border,
         u_cat=Sq.sum(axis=0),
+        profiled_trace=profiled_trace,
     )
 
 
@@ -260,7 +544,31 @@ def _evaluate(
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
     T = float(np.sum(U_eff * x[:, :k_a]))
     blocks = f.diag_blocks()[:, :k_a, :k_a]
-    edf = (f.rank - rank_m) - lam * float(np.einsum("lpr,rp->", blocks, p.S_a, optimize=True))
+    rank_term = float(f.rank - rank_m)
+    penalty_term = lam * float(np.einsum("lpr,rp->", blocks, p.S_a, optimize=True))
+    edf = rank_term - penalty_term
+    # A PSD penalty and inverse require both penalty_term >= 0 and
+    # 0 <= edf <= rank_term.  Violating either side means the factorization's
+    # numerical rank and inverse action disagree, and accepting it can make a
+    # ladder search converge to a plausible but wrong row.  Correct only
+    # round-off at an endpoint; signal anything material so the caller refuses
+    # this structured route.
+    roundoff = _edf_roundoff(rank_term, penalty_term)
+    if (
+        not np.isfinite(penalty_term)
+        or not np.isfinite(edf)
+        or penalty_term < -roundoff
+        or edf < -roundoff
+        or edf > rank_term + roundoff
+    ):
+        raise _UnstableStructuredEDFError(
+            f"structured EDF is numerically inconsistent: {edf} "
+            f"(rank={rank_term}, penalty trace={penalty_term})"
+        )
+    if penalty_term < 0.0 or edf > rank_term:
+        edf = rank_term
+    if edf < 0.0:
+        edf = 0.0
     return T, edf
 
 
@@ -293,44 +601,54 @@ def structured_ladder(
     pays only for the bracket and returns ``None`` — the caller's cue for the
     same NaN row an unaffordable dense pair gets.  ``None`` means unbounded.
     """
+    if p.profiled_trace is None:
+        return None
+
     U_eff, rank_m = _profile(p)
     ranks = block_ranks(p)
+
+    def evaluate(lam: float) -> tuple[float, float] | None:
+        try:
+            return _evaluate(p, U_eff, rank_m, lam, ranks)
+        except _UnstableStructuredEDFError:
+            return None
 
     if not np.any(p.S_a):
         # No penalty to scan, exactly the predicate the dense ladder applies:
         # one rung, at the block's own achieved rank, with lambda0 = 0.  A
         # zero penalty would otherwise make the bracket below infinite and
         # every rung NaN, since inf * 0 is not a number.
-        stat, rank = _evaluate(p, U_eff, rank_m, 0.0, ranks)
+        evaluated = evaluate(0.0)
+        if evaluated is None:
+            return None
+        stat, rank = evaluated
         return [ScreenedPair(statistic=stat, edf0=rank, lambda0=0.0) for _ in budgets]
 
-    # The dense path scales its bracket by tr(V_eff)/tr(S); the unprofiled
-    # tr(V) is used here because profiling the trace structurally would cost
-    # more than the bracket is worth.  That is a safe substitution only while
-    # the mains leave most of the pair's curvature unexplained, which is the
-    # ordinary case and where the two agree to a few percent -- ten orders
-    # outside the region where edf varies with lambda.  It is NOT safe when
-    # the mains nearly absorb the pair: measured on a spline whose support is
-    # near-constant within each level, tr(V_eff)/tr(V) is 1.9e-14 and the two
-    # bracket scales sit 5.4e13 apart, far enough that the brackets barely
-    # overlap and the two paths answer at different lambda.  That pair's
-    # overlap block is numerically indefinite, so neither path's answer is
-    # determined -- a relative 1e-15 perturbation of the moments moves the
-    # dense statistic by 21% -- but the ladder does not detect it and reports
-    # a confident z either way.  See issue tracking on PR #194.
+    # Use the curvature the pencil actually turns on.  ``profiled_trace`` is
+    # assembled from nonnegative centered residual energies in
+    # ``spline_cat_moments``; neither a dense V_eff nor the catastrophic
+    # ``tr(V) - tr(C' M^+ C)`` difference is formed.  This direct scale fixes
+    # the bracket itself, so the reachable-rank contract proposed in issue
+    # #204 is unnecessary: there are no speculative endpoint evaluations to
+    # classify, and evaluation counts, duplicate caching and genuine
+    # unreachable clamps retain their existing contract.
     #
     # The 1e+-10 edges are the dense ladder's, kept identical so a pair the
-    # two paths can both score gets the same lambda0.  Nothing in the arrow
-    # kernel's numerics is tied to their width any more: rank is counted from
-    # a balanced reference (see block_ranks) precisely so that widening them
-    # cannot move an edf by a whole degree of freedom.
+    # two paths can both score gets the same lambda0.
     tr_S = float(np.trace(p.S_a)) * p.dims[0]
-    tr_V = float(np.einsum("lpp->", p.V, optimize=True))
-    scale = max(tr_V, 1e-300) / max(tr_S, 1e-300)
+    scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
     lo, hi = 1e-10 * scale, 1e10 * scale
 
-    stat_lo, edf_lo = _evaluate(p, U_eff, rank_m, lo, ranks)
-    stat_hi, edf_hi = _evaluate(p, U_eff, rank_m, hi, ranks)
+    evaluated_lo = evaluate(lo)
+    evaluated_hi = evaluate(hi)
+    if evaluated_lo is None or evaluated_hi is None:
+        return None
+    stat_lo, edf_lo = evaluated_lo
+    stat_hi, edf_hi = evaluated_hi
+    # More penalty cannot add effective dimensions.  This is an ordering
+    # certificate with a round-off allowance, not the target-fit tolerance.
+    if edf_hi > edf_lo + _edf_roundoff(edf_lo, edf_hi):
+        return None
 
     # DISTINCT search targets, not rungs: the ladder's budgets are permitted to
     # repeat, every copy of one bisects to the same lambda, and charging each
@@ -352,18 +670,36 @@ def structured_ladder(
             continue
         if edf0 not in solved:
             a, b = lo, hi
+            edf_a, edf_b = edf_lo, edf_hi
             lam, stat, achieved = hi, stat_hi, edf_hi
             for _ in range(_MAX_BISECT):
                 if b <= a * (1.0 + 1e-12):
                     break
                 lam = float(np.sqrt(a * b))
-                stat, achieved = _evaluate(p, U_eff, rank_m, lam, ranks)
+                evaluated = evaluate(lam)
+                if evaluated is None:
+                    return None
+                stat, achieved = evaluated
+                # Preserve the same monotone certificate inside the shrinking
+                # bracket; a finite in-range EDF can still be on a broken
+                # numerical branch.
+                order_roundoff = _edf_roundoff(edf_a, achieved, edf_b)
+                if achieved > edf_a + order_roundoff or achieved < edf_b - order_roundoff:
+                    return None
+                achieved = min(max(achieved, edf_b), edf_a)
                 if abs(achieved - edf0) <= _EDF_TOL:
                     break
                 if achieved > edf0:
                     a = lam
+                    edf_a = achieved
                 else:
                     b = lam
+                    edf_b = achieved
+            # Width exhaustion is not convergence: a numerically discontinuous
+            # EDF curve can keep the target bracketed while never attaining it.
+            # Do not cache or publish a plausible nearest endpoint as the rung.
+            if abs(achieved - edf0) > _EDF_TOL:
+                return None
             solved[edf0] = ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam))
         out.append(solved[edf0])
     return out

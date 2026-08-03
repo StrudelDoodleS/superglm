@@ -182,13 +182,30 @@ _PENALIZED_LADDER_COST = 2
 # which grow as k_s^2, and _structured_evaluation_budget bounds solve time,
 # which grows as k_s^3 -- one batched eigendecomposition of (k_s + 1) blocks
 # per level per evaluation, and a ladder that has to bisect runs tens of them.
-# The cubic factor is set so a CLAMPING ladder still fits wherever the
-# allocation budget admits it at the narrow spline widths that reach high
-# cardinality, and so a searching one is refused where it would miss the same
-# ~1.5 s per-pair target the dense constants were fitted to; measured corners
-# are in the gate's own docstring.
-_STRUCTURED_BUDGET_FACTOR = 1
+# The cubic factor retains the original arrow-factorization calibration.  The
+# stable profiled-trace setup introduced for issue #204 is now deducted from
+# that same work ceiling before any endpoint evaluations are admitted.
+# Two level-sized stacks coexist while the stable profiled trace is assembled:
+# the pair's persistent curvature blocks and one additive suffix stack.  The
+# factor is written as two because _within_structured_budget charges both
+# explicitly; the resulting admission ceiling is the same one-stack ceiling
+# used before issue #204 rather than an unaccounted doubling.
+_STRUCTURED_BUDGET_FACTOR = 2
 _STRUCTURED_CUBIC_BUDGET_FACTOR = 50
+
+
+def _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels):
+    """Arrow evaluations left after the stable profiled-trace setup."""
+    max_cells, n_a, k_s, n_levels = (
+        int(max_cells),
+        int(n_a),
+        int(k_s),
+        int(n_levels),
+    )
+    per_evaluation = n_levels * (k_s + 1) ** 3
+    setup_work = 2 * n_a * n_levels * k_s**2 + 7 * per_evaluation
+    remaining = _STRUCTURED_CUBIC_BUDGET_FACTOR * max_cells - setup_work
+    return max(remaining, 0) // max(per_evaluation, 1)
 
 
 def _quantile_binned(x, bins):
@@ -881,16 +898,19 @@ def screen_interactions(
 
         Nothing here is cubic in the level count and nothing is quadratic in
         it either, so this gate is linear where every gate above is not.  The
-        pair allocates a handful of ``(n_levels, k_s + 1, k_s + 1)`` stacks —
-        the blocks, their inverses, the border coupling, the diagonal blocks
-        of the inverse — so the level count is held against
-        ``max_cells / (k_s + 1)^2``, which at the default and a width-11
-        spline admits 34,722 levels.  Measured there with one BLAS thread,
-        best of five: 1.22 s and 201 MB for the whole four-rung ladder,
-        against the ~1.5 s per-pair target the dense constants above were
-        fitted to.  Cost is LINEAR in the level count, so the two scale
-        together: 5,000 levels is 0.16 s and 29 MB, 20,000 is 0.63 s and
-        116 MB.
+        pair allocates a handful of ``(n_levels, k_s + 1, k_s + 1)`` stacks.
+        During issue #204's stable profiled-trace assembly, the persistent
+        curvature stack coexists with one additive suffix stack; both are
+        charged here.  The trace's centered-row temporaries are chunked and
+        remain under the support intermediate gate below.  The suffix is
+        discarded before the ladder allocates its blocks, inverses, border
+        coupling and inverse diagonal blocks, so the two phases do not add
+        their level stacks together.
+
+        Charging two padded stack units against a factor of two retains the
+        existing ``max_cells / (k_s + 1)^2`` level ceiling while making the
+        extra live stack explicit instead of silently invalidating the
+        advertised footprint.
 
         This bounds neither of the pair's other two costs.  The moment
         assembly's ``(n_a, k_s, k_s)`` intermediate is bounded by
@@ -899,7 +919,8 @@ def screen_interactions(
         ``_structured_evaluation_budget``, because it is cubic in ``k_s``
         where this gate is quadratic.
         """
-        return int(n_levels) * (int(k_s) + 1) ** 2 <= _STRUCTURED_BUDGET_FACTOR * max_cells
+        live_stack_cells = 2 * int(n_levels) * (int(k_s) + 1) ** 2
+        return live_stack_cells <= _STRUCTURED_BUDGET_FACTOR * max_cells
 
     def _within_structured_cells(n_a, n_levels, k_s):
         """Budget a structured pair's cell table and its curvature intermediate.
@@ -925,7 +946,7 @@ def screen_interactions(
         inter_ok = int(n_a) * int(k_s) ** 2 <= _INTERMEDIATE_BUDGET_FACTOR * max_cells
         return cells_ok and inter_ok
 
-    def _structured_evaluation_budget(k_s, n_levels):
+    def _structured_evaluation_budget(n_a, k_s, n_levels):
         """How many arrow factorizations a structured pair may spend.
 
         Budgets the pair's SOLVE TIME, which the allocation gates do not —
@@ -935,7 +956,18 @@ def screen_interactions(
         the gates above cost ``n_levels * k_s^2``.  A pair that cannot afford
         two of them cannot even bracket the ladder and is refused outright.
 
-        How many MORE it needs is not a function of its dimensions.  A rung
+        Issue #204 adds work before those factorizations: two stable
+        centered-row QR passes over the compressed cells, plus seven
+        conservative ``(k_s + 1)^3`` units per level for the suffix/prefix
+        QR merges, aligned representative QR, products and solve.  They cost
+        ``2*n_a*n_levels*k_s^2 + 7*n_levels*(k_s+1)^3`` work units here.
+        That setup is subtracted first, so a pair must still afford the two
+        real endpoint factorizations after paying for its profiled trace; the
+        count passed to ``structured_ladder`` continues to mean actual
+        ``_evaluate`` calls.
+
+        How many MORE evaluations it needs is not a function of its
+        dimensions.  A rung
         whose budget lands inside the bracket bisects, at one factorization
         per step, and whether one does turns on the penalty's null space
         rather than on any size: measured on a 400-level pair, a ``ps``
@@ -946,20 +978,12 @@ def screen_interactions(
         first, then checks the worst case for the rungs that genuinely have
         to search before spending anything on them.
 
-        Calibrated so the level ceiling stays where it stands: a clamping
-        ladder is two evaluations, and at a width-11 spline that leaves the
-        allocation gate binding at its own 34,722 levels.  This one binds as
-        ``k_s`` grows and as the ladder searches — width 45 admits 1,284
-        levels clamping where allocation alone would have taken 2,363, and a
-        full-rank penalty at width 9 admits 1,344.  Measured at those
-        corners, one BLAS thread, best of five: 1.22 s, 0.61 s and 1.16 s
-        against the ~1.5 s target.  Just outside them, width 243 on 6 levels
-        would have taken 1.73 s and width 483 on 4 levels 10.06 s; the second
-        cannot afford even the bracket, so it is refused before the pair
-        allocates anything at all.
+        The setup charge also depends on ``n_a``, so an exact support that
+        cannot afford it is allowed to reach spline binning and is retried on
+        the compressed support.  A pair is refused only when the compressed
+        setup plus two endpoints still exceeds the same work ceiling.
         """
-        per_evaluation = int(n_levels) * (int(k_s) + 1) ** 3
-        return (_STRUCTURED_CUBIC_BUDGET_FACTOR * max_cells) // max(per_evaluation, 1)
+        return _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels)
 
     rows = []
     from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
@@ -1107,26 +1131,32 @@ def screen_interactions(
                 # the level count.  So a pair the dense gates refuse gets
                 # retried against the structured gate instead of skipped.
                 structured = kind == "spline_cat" and not dense_ok
+                structured_setup_ok = True
                 if not (dense_ok or structured):
                     break
                 if structured:
-                    # Neither of these depends on the support, so binning
-                    # cannot rescue a pair they refuse and none is attempted:
-                    # the block stacks must fit, and the ladder must be able
-                    # to afford the two evaluations that bracket it.
-                    arrow_budget = _structured_evaluation_budget(k_l, n_r)
-                    if not _within_structured_budget(k_l, n_r) or arrow_budget < 2:
+                    # The block stacks do not depend on support, so binning
+                    # cannot rescue them.  The profiled-trace setup now DOES:
+                    # its two centered-geometry passes scale with n_l, so an
+                    # unaffordable exact support must reach the ordinary
+                    # spline-binning fallback below rather than terminate.
+                    arrow_budget = _structured_evaluation_budget(n_l, k_l, n_r)
+                    if not _within_structured_budget(k_l, n_r):
                         if arrow_lookahead:
                             # Speculation did not survive the true width; put
                             # the dense path back on the track it was on.
                             allow_dense, arrow_lookahead = True, False
                             continue
                         break
+                    structured_setup_ok = arrow_budget >= 2
+                    if not structured_setup_ok and arrow_lookahead:
+                        allow_dense, arrow_lookahead = True, False
+                        continue
                 # Both paths build the (n_l, n_r) cell tables and a curvature
                 # intermediate that scales with the support -- transposed
                 # between them, so each has its own second term.
                 fits = (
-                    _within_structured_cells(n_l, n_r, k_l)
+                    structured_setup_ok and _within_structured_cells(n_l, n_r, k_l)
                     if structured
                     else _within_budget(n_l, n_r, k_l, k_r)
                 )
@@ -1230,7 +1260,7 @@ def screen_interactions(
                     if (
                         not arrow_refused
                         and _within_structured_budget(k_l, n_r)
-                        and _structured_evaluation_budget(k_l, n_r) >= 2
+                        and _structured_evaluation_budget(n_l, k_l, n_r) >= 2
                         and _within_structured_cells(n_l, n_r, k_l)
                     ):
                         allow_dense, arrow_lookahead = False, True
@@ -1247,14 +1277,13 @@ def screen_interactions(
             (menu_l, S_l), (menu_r, S_r) = margins
             if structured:
                 if structured_results is None:
-                    # A rung landed inside the bracket and had to bisect, at
-                    # one arrow factorization per step.  That is the one part
-                    # of the cost no gate can see in advance — it turns on
-                    # the penalty's null space, not on any dimension — so it
-                    # is refused rather than predicted, and refused the way an
-                    # unaffordable dense block is: a NaN row.  Reaching here
-                    # means the dense track was already exhausted, since a
-                    # SPECULATIVE handoff hands it back above instead.
+                    # The ladder can refuse for a search that exceeds its
+                    # evaluation allowance, or for a numerical rank/EDF
+                    # certificate that is not trustworthy enough to publish.
+                    # Either is refused the way an unaffordable dense block
+                    # is: a NaN row.  Reaching here means the dense track was
+                    # already exhausted, since a SPECULATIVE handoff hands it
+                    # back above instead.
                     rows.append(
                         (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
                     )
