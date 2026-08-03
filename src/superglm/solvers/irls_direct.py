@@ -1271,12 +1271,7 @@ def _fit_irls_direct_once(
     _consecutive_svd = 0  # for auto-mode warning
     _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
     # A constrained fit-entry state has not been certified by the inner QP.
-    # The flag follows the retained coefficient state below: a rejected
-    # proposal must not erase a certificate already owned by ``committed``,
-    # while a damped interpolation is not itself the QP solution even when
-    # the full proposal was certified.
-    committed_qp_converged = not has_constraints
-    retained_qp_converged = committed_qp_converged
+    retained_qp_converged = not has_constraints
 
     for it in range(max_iter):
         beta_prev = committed.beta
@@ -1285,7 +1280,12 @@ def _fit_irls_direct_once(
         intercept = committed.intercept
         committed_active_set = None if prev_active_set is None else list(prev_active_set)
         proposal_qp_converged = not has_constraints
-        retained_qp_converged = committed_qp_converged
+        # W/z are rebuilt below from the committed coefficients.  Any
+        # constrained-QP certificate retained from the preceding iteration
+        # therefore belongs to different working weights and response, not to
+        # this iteration's H/g.  Only a certified full proposal from the
+        # current working problem can restore the flag.
+        retained_qp_converged = not has_constraints
         rank_truncated: bool | None = None
         used_rank_certification = False
         scop_proposal_eta_unclipped: NDArray | None = None
@@ -1855,15 +1855,13 @@ def _fit_irls_direct_once(
                 )
             retained = committed if decision.step_rejected else trial_cache[decision.alpha]
             if has_constraints:
-                if decision.step_rejected:
-                    retained_qp_converged = committed_qp_converged
-                elif decision.alpha == 1.0:
-                    retained_qp_converged = proposal_qp_converged
-                else:
-                    # A line-searched interpolation can be primal-feasible,
-                    # but it is not the coefficient vector whose inner QP
-                    # stationarity and dual feasibility were certified.
-                    retained_qp_converged = False
+                # Rejection retains coefficients from the preceding working
+                # problem, while damping retains an interpolation.  Neither
+                # state is the current H/g solution whose stationarity and
+                # dual feasibility the inner QP certified.
+                retained_qp_converged = bool(
+                    not decision.step_rejected and decision.alpha == 1.0 and proposal_qp_converged
+                )
             evaluation_elapsed = time.perf_counter() - _t0
             _t_deviance += evaluation_elapsed
             _t_deviance_eval += evaluation_elapsed
@@ -2194,7 +2192,6 @@ def _fit_irls_direct_once(
             )
 
         committed = retained
-        committed_qp_converged = retained_qp_converged
         if _has_scop:
             scop_committed = retained_scop
         if converged_this_iter:

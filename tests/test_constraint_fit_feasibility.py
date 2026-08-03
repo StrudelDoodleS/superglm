@@ -100,56 +100,84 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     assert terminal_warnings[0].levelno == logging.WARNING
 
 
-def test_rejected_uncertified_proposal_preserves_the_committed_qp_certificate(
+def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certificate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """QP authority follows the retained state, not the latest attempted solve."""
+    """A prior certificate does not describe newly rebuilt Poisson weights."""
     import superglm.solvers.irls_direct as irls_direct
-    from superglm.distributions import Gaussian
-    from superglm.links import IdentityLink
-    from superglm.solvers.constrained_qp import QPResult
+    from superglm.distributions import Poisson
+    from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+    from superglm.links import LogLink
     from superglm.solvers.irls_state import _IRLSStepDecision
+    from superglm.types import GroupSlice, LinearConstraintSet
 
-    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
-    qp_calls = [0]
-    decisions = [0]
+    x = np.arange(-2.0, 3.0)[:, None]
+    y = np.array([0.0, 0.0, 1.0, 3.0, 10.0])
+    weights = np.ones(len(y))
+    design = DesignMatrix([DenseGroupMatrix(x)], n=len(y), p=1)
+    constraint_set = LinearConstraintSet(A=np.ones((1, 1)), b=np.zeros(1))
+    groups = [
+        GroupSlice(
+            "x",
+            0,
+            1,
+            constraints=constraint_set,
+            monotone_engine="qp",
+        )
+    ]
+    real_solve_constrained_qp = irls_direct.solve_constrained_qp
+    qp_systems: list[tuple[np.ndarray, np.ndarray, np.ndarray, bool]] = []
+    decision_calls = [0]
 
-    def certified_then_uncertified(*_args, **_kwargs):
-        qp_calls[0] += 1
-        if qp_calls[0] == 1:
-            return QPResult(beta=np.array([1.0]), converged=True)
-        return QPResult(beta=np.array([0.0]), converged=False)
+    def record_real_qp(H, g, A, b, **kwargs):
+        qp_result = real_solve_constrained_qp(H, g, A, b, **kwargs)
+        qp_systems.append((H.copy(), g.copy(), qp_result.beta.copy(), qp_result.converged))
+        return qp_result
 
     def accept_then_reject(**_kwargs):
-        decisions[0] += 1
+        decision_calls[0] += 1
+        accepted = decision_calls[0] == 1
         return _IRLSStepDecision(
-            alpha=1.0 if decisions[0] == 1 else 0.0,
-            step_halvings=0 if decisions[0] == 1 else 20,
-            step_rejected=decisions[0] != 1,
-            trials_attempted=1 if decisions[0] == 1 else 20,
+            alpha=1.0 if accepted else 0.0,
+            step_halvings=0 if accepted else 20,
+            step_rejected=not accepted,
+            trials_attempted=1 if accepted else 20,
         )
 
-    monkeypatch.setattr(irls_direct, "solve_constrained_qp", certified_then_uncertified)
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", record_real_qp)
     monkeypatch.setattr(irls_direct, "_select_irls_trial", accept_then_reject)
     result, _ = irls_direct.fit_irls_direct(
         design,
         y,
         weights,
-        Gaussian(),
-        IdentityLink(),
+        Poisson(),
+        LogLink(),
         groups,
         lambda2=0.0,
-        beta_init=np.zeros(1),
-        intercept_init=0.0,
         max_iter=3,
         tol=1e-10,
         convergence="coefficients",
     )
 
-    assert qp_calls[0] == 2
-    np.testing.assert_array_equal(result.beta, np.ones(1))
+    assert len(qp_systems) == 2
+    first_H, first_g, first_qp_beta, first_qp_converged = qp_systems[0]
+    second_H, second_g, second_qp_beta, second_qp_converged = qp_systems[1]
+    assert first_qp_converged
+    assert second_qp_converged
+    np.testing.assert_allclose(first_H, [[28.0]], rtol=1e-14)
+    np.testing.assert_allclose(first_g, [23.0], rtol=1e-14)
+    np.testing.assert_allclose(first_qp_beta, [23.0 / 28.0], rtol=1e-14)
+    np.testing.assert_allclose(result.beta, first_qp_beta, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(second_qp_beta, [1.01570625], rtol=1e-8)
+    retained_slack = constraint_set.A @ result.beta - constraint_set.b
+    assert retained_slack[0] > 0.0
+    # The retained coefficient is strictly interior, so its constraint
+    # multiplier must be zero.  This nonzero current gradient therefore rules
+    # out stationarity for the second working problem.
+    current_gradient = second_H @ result.beta - second_g
+    np.testing.assert_allclose(current_gradient, [-4.82010409], rtol=1e-8)
     assert not result.converged
-    assert result.termination_reason == "step_rejected"
+    assert result.termination_reason == "constraint_kkt_incomplete"
 
 
 @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
