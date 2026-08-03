@@ -221,6 +221,16 @@ def concentration(t: NDArray, n_occupied: int) -> float:
     return participation_ratio(t) / (n_occupied / 3.0)
 
 
+def _require_large_k_occupancy(table: int, label: str, occupied: int) -> None:
+    """Refuse a ``P/(k/3)`` reading below its documented occupancy floor."""
+    if occupied < MIN_NULL_CELLS:
+        raise SystemExit(
+            f"table {table} {label} occupied {occupied} cells, below the {MIN_NULL_CELLS} at "
+            "which the k/3 null is worth reading -- the pinned finite-k bias is ~15% at 25 "
+            "cells and ~39% at 8.  Raise --n."
+        )
+
+
 @dataclass(frozen=True)
 class PairData:
     frame: pd.DataFrame
@@ -450,12 +460,7 @@ def _run_concentration(reps: int, n: int, n_levels: int) -> list[dict[str, objec
             # P is scale-free, so phi cancels out of the reported ratio; passing
             # 1.0 keeps that visible rather than implying a calibrated scale
             t, occupied = cell_contributions(resid, data.joint, n_levels * n_levels, 1.0)
-            if occupied < MIN_NULL_CELLS:
-                raise SystemExit(
-                    f"table 2 {label!r} rep={rep} occupied {occupied} cells, below the "
-                    f"{MIN_NULL_CELLS} at which the k/3 null is worth reading -- the pinned "
-                    "finite-k bias is ~15% at 25 cells and ~39% at 8.  Raise --n."
-                )
+            _require_large_k_occupancy(2, f"{label!r} rep={rep}", occupied)
             ratios.append(concentration(t, occupied))
             prs.append(participation_ratio(t))
             occs.append(occupied)
@@ -504,12 +509,24 @@ def _run_sparse_payoff(reps: int, n: int, n_levels: int) -> list[dict[str, objec
             dtr, ytr, jtr = data.frame.iloc[train], data.y[train], data.joint[train]
             dte, yte, jte = data.frame.iloc[test], data.y[test], data.joint[test]
 
+            # Occupancy is a property of the split, not of the fitted mains
+            # model.  Refuse an uncalibrated P/(k/3) reading before paying for
+            # any fit -- this benchmark's wide mains fit is not a validation
+            # primitive.
+            preflight_occupied = int(np.count_nonzero(np.bincount(jtr, minlength=n_cells) > 0))
+            _require_large_k_occupancy(3, f"{kind!r} rep={rep}", preflight_occupied)
+
             mains = _mains(dtr, ytr)
             base = float(np.mean((mains.predict(dte) - yte) ** 2))
             resid = ytr - mains.predict(dtr)
             # ranked on TRAINING residuals only -- ranking on the full sample
             # would leak the test rows into the cell choice
             t, occupied = cell_contributions(resid, jtr, n_cells, 1.0)
+            if occupied != preflight_occupied:
+                raise RuntimeError(
+                    f"table 3 occupancy changed from preflight {preflight_occupied} to "
+                    f"contribution count {occupied}"
+                )
             cons.append(concentration(t, occupied))
             live = np.flatnonzero(np.bincount(jtr, minlength=n_cells) > 0)
             ranked = np.argsort(t)[::-1]
@@ -966,6 +983,29 @@ def _finite_seconds(value: str) -> float:
     return parsed
 
 
+def _validate_large_k_capacity(table: int, available_rows: int, wide_levels: int) -> None:
+    """Cheap necessary bounds for a table that reports ``P/(k/3)``.
+
+    Capacity is not occupancy, so the runners still check the realised count.
+    Table 2 sees the full sample while table 3 sees only its training half;
+    making ``available_rows`` explicit keeps the same floor honest on both.
+    """
+    if available_rows < MIN_NULL_CELLS:
+        raise SystemExit(
+            f"table {table} sees at most {available_rows} rows and therefore cannot occupy "
+            f"{MIN_NULL_CELLS} cells; it reads P against a null of k/3 that is only valid for "
+            f"large k.  Needs at least {MIN_NULL_CELLS} rows in the sample used for that "
+            "reading."
+        )
+    if wide_levels**2 < MIN_NULL_CELLS:
+        raise SystemExit(
+            f"--wide-levels {wide_levels} gives {wide_levels**2} cells, and table {table} "
+            f"reads P against a null of k/3 that is only valid for large k -- measured at "
+            f"{MIN_NULL_CELLS} cells the bias is already a few per cent, and it grows fast "
+            f"below that.  Needs at least {int(np.ceil(np.sqrt(MIN_NULL_CELLS)))} levels."
+        )
+
+
 def _validate_configuration(args: argparse.Namespace) -> None:
     """Reject a table configuration that provably cannot run.
 
@@ -1012,31 +1052,13 @@ def _validate_configuration(args: argparse.Namespace) -> None:
     # model's parameters.  Either constant moving -- a 70/30 split, or a mains
     # model with another term -- separates them, and the messages already say
     # which is which.
-    # Table 2's whole legend is that `P / (k/3)` sits near 1 under the null, and
-    # `concentration` documents that `k/3` is the LARGE-k limit: the same tests
-    # pin the null ratio at ~1.39 for k=8, ~1.15 for k=25, ~1.04 for k=100 and
-    # ~1.003 for k=1600.  Below a hundred cells the bias is not a rounding
-    # difference, it is a fifth of the quantity being read, so the table cannot
-    # be published at that width whatever the sample size.  A hundred cells is
-    # where the pinned bias falls to a few per cent; the published width, 41,
-    # has 1,681.
-    # Grid capacity is necessary and not sufficient: `concentration` divides by
-    # the OCCUPIED count, so `--tables 2 --n 20 --wide-levels 10` has 100 cells
-    # and can occupy at most 20 of them.  Both are checked -- capacity here,
-    # and the occupancy actually passed to `concentration` at run time.
-    if 2 in args.tables and args.n < MIN_NULL_CELLS:
-        raise SystemExit(
-            f"--n {args.n} cannot occupy {MIN_NULL_CELLS} cells, and table 2 reads P against a "
-            f"null of k/3 that is only valid for large k.  Needs at least {MIN_NULL_CELLS} rows "
-            "before the occupancy can reach the floor at all."
-        )
-    if 2 in args.tables and args.wide_levels**2 < MIN_NULL_CELLS:
-        raise SystemExit(
-            f"--wide-levels {args.wide_levels} gives {args.wide_levels**2} cells, and table 2 "
-            f"reads P against a null of k/3 that is only valid for large k -- measured at "
-            f"{MIN_NULL_CELLS} cells the bias is already a few per cent, and it grows fast below "
-            f"that.  Needs at least {int(np.ceil(np.sqrt(MIN_NULL_CELLS)))} levels."
-        )
+    # Tables 2 and 3 both report `P / (k/3)`, whose null is a LARGE-k limit.
+    # The same tests pin it at ~1.39 for k=8, ~1.15 for k=25, ~1.04 for k=100
+    # and ~1.003 for k=1600.  Table 2 sees all rows; table 3 computes the value
+    # on its training half, so the shared capacity guard receives different row
+    # counts.  Realised occupancy is checked inside both runners.
+    if 2 in args.tables:
+        _validate_large_k_capacity(2, args.n, args.wide_levels)
 
     if 2 in args.tables and args.n < 2 * args.wide_levels:
         raise SystemExit(
@@ -1060,6 +1082,8 @@ def _validate_configuration(args: argparse.Namespace) -> None:
                 f"{levels} (one per level of each factor, or a level is certainly missing "
                 f"from the training half and predict fails on it)."
             )
+    if 3 in args.tables:
+        _validate_large_k_capacity(3, train_rows, args.wide_levels)
 
 
 def _build_parser() -> argparse.ArgumentParser:

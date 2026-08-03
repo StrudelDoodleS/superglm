@@ -660,8 +660,6 @@ def test_scop_observed_geometry_uses_factor_certified_range() -> None:
         atol=0.0,
     )
     assert geometry.log_det_H == pytest.approx(expected_log_det, rel=2e-14, abs=0.0)
-
-
 def test_pirls_rank_metadata_uses_factor_certified_subspaces() -> None:
     design, right = _paired_boundary_design()
     dm = _grouped_design(design)

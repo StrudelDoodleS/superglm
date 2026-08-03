@@ -48,10 +48,11 @@ SHARED_RANK_POLICY = RankPolicy(
     # of those 958.  Reading the selection from the null basis makes a
     # representative candidate available where the walk left `gram_eigh`, but
     # the candidate is retained only when its principal condition stays below
-    # `severe_condition`; the walk fails at the numerical boundary, so most of
-    # those candidates deliberately remain spectral.  Safe candidates still
-    # recover a coefficient representation, so this is not only a cost
-    # difference.
+    # `severe_condition` AND its smallest eigenvalue numerically clears the
+    # same full-matrix cutoff that certified the rank.  The walk fails at the
+    # numerical boundary, so most of those candidates deliberately remain
+    # spectral.  Safe candidates still recover a coefficient representation,
+    # so this is not only a cost difference.
     #
     # Which blocks those are is NOT reproducible across machines: the walk only
     # fails when a prefix eigenvalue lands near `eps * ||A||`, which is below
@@ -799,11 +800,192 @@ def _principal_block_condition(equilibrated: NDArray, keep: NDArray) -> float:
     return float(1.0 / reciprocal)
 
 
+def _principal_block_clears_cutoff(
+    equilibrated: NDArray,
+    keep: NDArray,
+    cutoff: float,
+) -> bool:
+    """Whether a representative numerically clears the full block's cutoff.
+
+    The decomposition decides ``rank`` against one matrix-wide cutoff
+    ``cutoff``.  A principal block may be locally well-conditioned and still
+    lose a direction against that ORIGINAL cutoff because its own spectral
+    scale is smaller.  Handing such a block to Cholesky would make the solve
+    rank deficient under the policy that selected it.
+
+    A bare Cholesky of ``B - cutoff * I`` is not a strict floating-point test:
+    DPOTRF is backward stable, so it may succeed when the shifted matrix is
+    semidefinite.  That happened at exact equality on a two-column public-path
+    fixture, with a spurious final diagonal around ``1e-8``.
+
+    Compute only the smallest symmetric eigenvalue and require it to clear the
+    cutoff by a backward-error allowance.  Symmetric eigensolvers are
+    backward stable to ``O(m * eps * ||B||)``; the factor 64 deliberately makes
+    the boundary band conservative and also covers forming and slicing the
+    principal block.  This is a NUMERICAL certificate, not a claim that the
+    returned eigenvalue is exact.  Equality, values below the cutoff, and
+    values too close to distinguish all keep the spectral representation.
+    """
+    if not np.isfinite(cutoff) or cutoff < 0.0:
+        return False
+    block = equilibrated[np.ix_(keep, keep)]
+    scale = max(
+        float(np.linalg.norm(block, ord=np.inf)),
+        abs(cutoff),
+        np.finfo(float).tiny,
+    )
+    allowance = 64.0 * max(1, len(keep)) * _EPS * scale
+    try:
+        smallest = float(
+            scipy.linalg.eigvalsh(
+                block,
+                subset_by_index=[0, 0],
+                check_finite=False,
+            )[0]
+        )
+    except (np.linalg.LinAlgError, ValueError):
+        return False
+    return bool(np.isfinite(smallest) and smallest > cutoff + allowance)
+
+
+def _compact_factor_qr(
+    spectral_factor: NDArray,
+    keep: NDArray,
+) -> tuple[NDArray, NDArray] | None:
+    """Return a canonical thin QR for one factor-space representative.
+
+    ``spectral_factor = diag(s) @ Vh`` is left-orthogonally equivalent to the
+    equilibrated observation factor but has at most ``width`` rows.  A QR of
+    its selected columns therefore recovers the representative geometry
+    without another decomposition whose error or cost scales with the
+    observation count.
+
+    QR leaves the signs of corresponding columns of ``Q`` and rows of ``R``
+    arbitrary.  Canonicalise them here so ``diag(R)`` is positive.  Then
+    ``R.T`` is a conventional lower Cholesky factor satisfying
+    ``R.T @ R == spectral_factor[:, keep].T @ spectral_factor[:, keep]`` up to
+    the backward error of this width-bounded QR.
+    """
+    compact = spectral_factor[:, keep]
+    try:
+        compact_left, upper = scipy.linalg.qr(
+            compact,
+            mode="economic",
+            check_finite=False,
+        )
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    diagonal = np.diag(upper)
+    if not np.all(np.isfinite(upper)) or np.any(diagonal == 0.0):
+        return None
+    row_signs = np.where(diagonal < 0.0, -1.0, 1.0)
+    compact_left = compact_left * row_signs
+    upper = row_signs[:, None] * upper
+    return compact_left, upper
+
+
+def _triangular_gram_condition(upper: NDArray) -> float:
+    """Condition of the Gram represented by a compact factor's upper ``R``.
+
+    The representative solve uses ``L = R.T``.  Estimate the condition from
+    that same factor rather than forming a Gram over all observation rows.
+    Only the matrix norm needs an explicit product, and its dot products have
+    length ``rank <= width``.
+    """
+    lower = upper.T
+    compact_gram = lower @ lower.T
+    matrix_norm = float(np.linalg.norm(compact_gram, ord=1))
+    if not np.isfinite(matrix_norm) or matrix_norm <= 0.0:
+        return float("inf")
+    pocon = scipy.linalg.get_lapack_funcs("pocon", (lower,))
+    reciprocal, info = pocon(lower, matrix_norm, uplo="L")
+    if info != 0 or not np.isfinite(reciprocal) or reciprocal <= 0.0:
+        return float("inf")
+    return float(1.0 / reciprocal)
+
+
+def _factor_representative_clears_cutoff(
+    spectral_factor: NDArray,
+    keep: NDArray,
+    *,
+    largest_singular_value: float,
+    smallest_retained_singular_value: float,
+    cutoff: float,
+    amplification: float,
+) -> bool:
+    """Certify a representative in the factor SVD's own coordinates.
+
+    Let the authoritative computed rank-``r`` factor be
+
+    ``F_r = U_r diag(s[:r]) Vh[:r]``
+
+    and let ``N = Vh[r:].T`` be its null basis.  Splitting ``N`` into rows for
+    the kept and rejected columns gives the identity documented by
+    :func:`_selection_amplification`, hence
+
+    ``sigma_min(F[:, keep]) >= s[r - 1] / amplification``.
+
+    The full factor can only improve that bound: its discarded left-singular
+    coordinates add a positive-semidefinite term to the selected Gram.  The
+    first test below therefore stays entirely on the singular scale already
+    used to compute ``cutoff`` and needs no Gram formation.
+
+    When that bound is inconclusive, assess the candidate in a COMPACT spectral
+    factor ``diag(s) @ Vh``.  It has at most ``width`` rows regardless of the
+    observation count, so it cannot inherit the ``O(n * eps)`` accumulation of
+    ``F.T @ F``.  The compact product is not exact either: a length-``q`` dot
+    product has componentwise error bounded by ``gamma_q``.  ``q + 4`` covers
+    scaling the right vectors as well as the multiply/accumulate, and the
+    positive absolute product turns that into a spectral-norm formation bound.
+    The ordinary principal-block certificate then adds its own eigensolver
+    backward-error allowance.
+
+    No SVD is performed here.  ``spectral_factor``, the singular values and the
+    null-space amplification all come from work the deficient factor path
+    already performed.
+    """
+    if (
+        not np.isfinite(cutoff)
+        or cutoff < 0.0
+        or not np.isfinite(amplification)
+        or amplification <= 0.0
+    ):
+        return False
+
+    singular_scale = max(
+        abs(largest_singular_value),
+        abs(cutoff),
+        np.finfo(float).tiny,
+    )
+    singular_allowance = 64.0 * spectral_factor.shape[1] * _EPS * singular_scale
+    lower_bound = smallest_retained_singular_value / amplification
+    if np.isfinite(lower_bound) and lower_bound > cutoff + singular_allowance:
+        return True
+
+    compact = spectral_factor[:, keep]
+    compact_gram = compact.T @ compact
+    absolute_gram = np.abs(compact).T @ np.abs(compact)
+    operations = compact.shape[0] + 4
+    operation_error = operations * _EPS
+    if operation_error >= 0.5:
+        return False
+    gamma = operation_error / (1.0 - operation_error)
+    formation_allowance = (gamma / (1.0 - gamma)) * float(np.linalg.norm(absolute_gram, ord=np.inf))
+    if not np.isfinite(formation_allowance):
+        return False
+    return _principal_block_clears_cutoff(
+        compact_gram,
+        np.arange(len(keep), dtype=int),
+        cutoff**2 + formation_allowance,
+    )
+
+
 def _conditioned_representatives(
     null_vectors: NDArray,
     rank: int,
     block_condition: Callable[[NDArray], float] | None = None,
     *,
+    block_admissible: Callable[[NDArray, float], bool] | None = None,
     maximum_condition: float | None = None,
 ) -> NDArray | None:
     """Earliest representatives, unless index order costs more than it may.
@@ -846,11 +1028,29 @@ def _conditioned_representatives(
     decomposition rather than replace it with an unstable coefficient basis.
     A maximum requires ``block_condition`` because the null-space
     amplification alone cannot certify an individual principal block.
+
+    ``block_admissible`` is a stricter postcondition owned by the caller's
+    decomposition policy.  Production uses it to require the ORIGINAL
+    full-matrix rank cutoff, which a local condition cannot encode.  It
+    receives the candidate and its cached null-space amplification so the
+    factor path can stay in the SVD coordinates that decided its rank.  An
+    inadmissible earliest candidate triggers the same existing alternative
+    search; condition then chooses only among admissible candidates, so a safe
+    representative is not discarded merely because an unsafe one had the
+    lower local condition.
     """
     if maximum_condition is not None and block_condition is None:
         raise ValueError("maximum_condition requires a block_condition scorer")
 
+    amplifications: dict[tuple[int, ...], float] = {}
     conditions: dict[tuple[int, ...], float] = {}
+    admissibility: dict[tuple[int, ...], bool] = {}
+
+    def amplification(keep: NDArray) -> float:
+        key = tuple(int(index) for index in keep)
+        if key not in amplifications:
+            amplifications[key] = _selection_amplification(null_vectors, keep)
+        return amplifications[key]
 
     def condition(keep: NDArray) -> float:
         key = tuple(int(index) for index in keep)
@@ -859,19 +1059,42 @@ def _conditioned_representatives(
             conditions[key] = float(block_condition(keep))
         return conditions[key]
 
+    def admissible(keep: NDArray) -> bool:
+        key = tuple(int(index) for index in keep)
+        if key not in admissibility:
+            admissibility[key] = (
+                True
+                if block_admissible is None
+                else bool(block_admissible(keep, amplification(keep)))
+            )
+        return admissibility[key]
+
     earliest = _earliest_representatives(null_vectors, rank)
     if earliest is None:
         return None
-    amplification = _selection_amplification(null_vectors, earliest)
+    earliest_amplification = amplification(earliest)
     selected = earliest
-    if amplification > _achievable_amplification(*null_vectors.shape):
+    if not admissible(earliest) or earliest_amplification > _achievable_amplification(
+        *null_vectors.shape
+    ):
         alternative = _leverage_pivot_representatives(null_vectors, rank)
         if alternative is not None and not np.array_equal(alternative, earliest):
-            if block_condition is not None:
-                selected = alternative if condition(alternative) < condition(earliest) else earliest
-            elif _selection_amplification(null_vectors, alternative) < amplification:
-                selected = alternative
+            candidates = [
+                candidate for candidate in (earliest, alternative) if admissible(candidate)
+            ]
+            if not candidates:
+                return None
+            selected = candidates[0]
+            if len(candidates) == 2:
+                if block_condition is not None:
+                    selected = (
+                        alternative if condition(alternative) < condition(earliest) else earliest
+                    )
+                elif amplification(alternative) < earliest_amplification:
+                    selected = alternative
 
+    if not admissible(selected):
+        return None
     if maximum_condition is not None and not condition(selected) <= maximum_condition:
         return None
     return selected
@@ -1156,6 +1379,11 @@ def _decompose_gram(
             discarded_vectors,
             rank,
             block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+            block_admissible=lambda keep, _amplification: _principal_block_clears_cutoff(
+                equilibrated,
+                keep,
+                cutoff,
+            ),
             maximum_condition=policy.severe_condition,
         )
         if selected_local_array is not None:
@@ -1346,25 +1574,46 @@ def decompose_factor(
     )
     if 0 < rank < len(active_columns):
         # Same certified representative choice as the Gram path, off the right
-        # singular vectors that span this factor's null space.  Unlike the Gram
-        # path, which indexes a matrix it already holds, this forms the full
-        # equilibrated Gram -- once, before the selection, because judging a
-        # candidate means conditioning its principal block, and slicing that out
-        # needs the whole Gram in hand.
-        equilibrated_gram = equilibrated.T @ equilibrated
+        # singular vectors that span this factor's null space.  Rank
+        # admissibility, condition scoring and the stored solve MUST all stay
+        # in these spectral coordinates.  Forming
+        # ``equilibrated.T @ equilibrated`` accumulates over the observation
+        # count: it can move a direction across the cutoff, corrupt the
+        # condition comparison, and leave the result solving a different
+        # matrix from the factor whose SVD certified it.
+        spectral_factor = singular_values[:, None] * Vh[: len(singular_values), :]
+        candidate_qr: dict[tuple[int, ...], tuple[NDArray, NDArray] | None] = {}
+
+        def compact_qr(keep: NDArray) -> tuple[NDArray, NDArray] | None:
+            key = tuple(int(index) for index in keep)
+            if key not in candidate_qr:
+                candidate_qr[key] = _compact_factor_qr(spectral_factor, keep)
+            return candidate_qr[key]
+
+        def compact_condition(keep: NDArray) -> float:
+            geometry = compact_qr(keep)
+            return float("inf") if geometry is None else _triangular_gram_condition(geometry[1])
+
         selected_local_array = _conditioned_representatives(
             discarded_vectors,
             rank,
-            block_condition=lambda keep: _principal_block_condition(equilibrated_gram, keep),
+            block_condition=compact_condition,
+            block_admissible=lambda keep, amplification: _factor_representative_clears_cutoff(
+                spectral_factor,
+                keep,
+                largest_singular_value=float(singular_values[0]),
+                smallest_retained_singular_value=float(singular_values[rank - 1]),
+                cutoff=float(cutoff),
+                amplification=amplification,
+            ),
             maximum_condition=policy.severe_condition,
         )
         if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
-            representative = equilibrated_gram[np.ix_(selected_local_array, selected_local_array)]
-            try:
-                representative_factor = scipy.linalg.cholesky(
-                    representative, lower=True, check_finite=False
-                )
+            representative_geometry = compact_qr(selected_local_array)
+            if representative_geometry is not None:
+                compact_left, representative_upper = representative_geometry
+                representative_factor = representative_upper.T
                 representative_basis = np.zeros((width, rank))
                 representative_basis[representative_columns, np.arange(rank)] = (
                     1.0 / column_scale[representative_columns]
@@ -1374,10 +1623,11 @@ def decompose_factor(
                 representative_rhs_left_basis = None
                 representative_rhs_triangular = None
                 if retain_factor_solve:
-                    selected_factor = factor[:, representative_columns]
-                    representative_rhs_left_basis, representative_rhs_triangular = np.linalg.qr(
-                        selected_factor,
-                        mode="reduced",
+                    representative_rhs_left_basis = (
+                        left_vectors[:, : len(singular_values)] @ compact_left
+                    )
+                    representative_rhs_triangular = (
+                        representative_upper * column_scale[representative_columns][None, :]
                     )
                 return RankDecomposition(
                     policy_version=policy.version,
@@ -1409,8 +1659,6 @@ def decompose_factor(
                         else _freeze(representative_rhs_triangular)
                     ),
                 )
-            except (np.linalg.LinAlgError, ValueError):
-                pass
     return RankDecomposition(
         policy_version=policy.version,
         method="qr_svd",
