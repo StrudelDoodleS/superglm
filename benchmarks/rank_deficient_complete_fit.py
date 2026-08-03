@@ -124,8 +124,14 @@ class _DispatchSampler:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            for pool in _pool_snapshot():
-                key = tuple(sorted(pool.items(), key=lambda item: item[0]))
+            # NumPy and SciPy wheels may load separate BLAS libraries carrying
+            # identical reported configuration.  One sampling tick saw one
+            # configuration, however many library records describe it; counting
+            # duplicate keys twice can make dwell exceed the number of samples.
+            keys = {
+                tuple(sorted(pool.items(), key=lambda item: item[0])) for pool in _pool_snapshot()
+            }
+            for key in keys:
                 self._dwell[key] = self._dwell.get(key, 0) + 1
             self.samples += 1
             self._stop.wait(self._interval)
