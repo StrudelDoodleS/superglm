@@ -1,0 +1,85 @@
+{
+  "recorded": "2026-07-29",
+  "machine_profile_id": "superglm-reference-box-2026-07-29",
+  "certification_enabled": false,
+  "certification_disabled_reason": "Historical calibration-box and software-environment identity is insufficient to establish a certifying profile. Preserve these numbers as provenance only; freshly calibrate a deliberately established local profile before enabling certification.",
+  "machine_profile_policy": "Historical operator label only. This ID is not a hardware fingerprint, and typing it cannot authenticate the calibration environment.",
+  "commit": "91eef58 (v0.16.0 + RFC-8 bug-half fix), recalibrated with warmup exclusion after round-1 review",
+  "profile_description": "Non-certifying historical record: 16-core reference box from the 2026-07-28 audit; benchmark commands set OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, and MKL_NUM_THREADS to 1. Tensor references are medians of 5 steady reps with 1 warmup excluded. The record does not identify a reproducible current machine/software profile.",
+  "notes": "All wall-time thresholds and within-run ratios below are historical provenance and are disabled. Hosted CI and unknown workstations cannot certify them. Certification becomes available only after fresh same-profile calibration on a deliberately established stable local machine, software, data, and thread environment.",
+  "artifact_provenance": "The benchmark JSON files retain complete-fit repetition timings, numerical outputs, direct backend dispatch, row/design dimensions, and whole-process peak RSS when available. RSS remains recorded provenance and is not a threshold.",
+  "historical_hosted_ci_observation": "Non-certifying history only: ubuntu-latest runs on 2026-07-29 reported tensor medians 0.328/0.216/1.192/0.590 seconds, tensor ratios 3.63/2.73, and flagship medians 1.02-1.04 seconds. Hosted-runner observations do not calibrate or certify this local profile.",
+  "tensor_cost": {
+    "n": 30000,
+    "reps": 5,
+    "reference_seconds": {
+      "tensor_cost_base_exact": 0.249,
+      "tensor_cost_base_discrete": 0.165,
+      "tensor_cost_ti_exact": 0.888,
+      "tensor_cost_ti_discrete": 0.435
+    },
+    "reference_summary": {
+      "tensor_multiplier_exact": 3.57,
+      "tensor_multiplier_discrete": 2.64
+    },
+    "checks": {
+      "tensor_multiplier_exact": {
+        "max": 6.0,
+        "note": "Disabled historical threshold. Reference was 3.57 and the measured pre-arc reversion was 7.2x."
+      },
+      "tensor_multiplier_discrete": {
+        "max": 5.0,
+        "note": "Disabled historical threshold. Reference was 2.64."
+      },
+      "absolute_multiple": {
+        "max": 5.0,
+        "note": "Disabled historical threshold: per-case complete-fit median versus the historical reference median."
+      }
+    },
+    "expected_p": {
+      "tensor_cost_base_exact": 41,
+      "tensor_cost_base_discrete": 41,
+      "tensor_cost_ti_exact": 122,
+      "tensor_cost_ti_discrete": 122
+    },
+    "output_rtol": 0.0001,
+    "expected_outputs": {
+      "tensor_cost_base_exact": {
+        "deviance": 9837.59091523446,
+        "effective_df": 21.115117589110554
+      },
+      "tensor_cost_base_discrete": {
+        "deviance": 9838.177435384518,
+        "effective_df": 20.940431150557057
+      },
+      "tensor_cost_ti_exact": {
+        "deviance": 9811.75314918881,
+        "effective_df": 24.820117313400882
+      },
+      "tensor_cost_ti_discrete": {
+        "deviance": 9812.003387570843,
+        "effective_df": 24.779003843352648
+      }
+    },
+    "expected_backend": "gram",
+    "output_rtol_note": "Historical, non-certifying provenance: three hosted runs measured max rel dev 2.1e-5, and that residual was dominated by the former baselines rounding effective_df to 2-3 decimals."
+  },
+  "flagship": {
+    "n": 678013,
+    "reps": 30,
+    "reference_median_s": 0.8048,
+    "checks": {
+      "absolute_multiple": {
+        "max": 2.0,
+        "note": "Disabled historical threshold. Its former limit was about 1.61 seconds and the measured pre-arc reversion was about 2.0 seconds on the historical box."
+      }
+    },
+    "expected": {
+      "deviance": 212055.38987876667,
+      "effective_df": 43.32930127122941,
+      "rtol": 0.0001,
+      "note": "Historical, non-certifying fit outputs from superglm_30rep.json regenerated 2026-07-29; the artifact retained direct_backend and peak_rss_mb provenance.",
+      "backend": "gram"
+    }
+  }
+}

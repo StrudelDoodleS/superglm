@@ -1,8 +1,8 @@
 """Fetch freMTPL2freq (OpenML dataset 41214) into data/freMTPL2freq.parquet.
 
-Used by the CI performance gate, where the git-ignored data directory is
-populated on demand (and cached between runs). Skips the download when the
-parquet already exists unless ``--force`` is given.
+Used by the local performance workflow to populate the git-ignored data
+directory on demand. Skips the download when the parquet already exists
+unless ``--force`` is given.
 
 Usage::
 
@@ -32,7 +32,7 @@ NOMINAL_COLUMNS = ("Area", "VehBrand", "VehGas", "Region")
 
 
 def _download(url: str, attempts: int = 3) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "superglm-ci-perf-gate"})
+    request = urllib.request.Request(url, headers={"User-Agent": "superglm-local-perf"})
     for attempt in range(1, attempts + 1):
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
