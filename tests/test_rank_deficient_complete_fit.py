@@ -94,6 +94,34 @@ def test_the_sampler_reports_dwell_not_just_presence() -> None:
         assert pool["samples_seen_in"] <= sampler.samples
 
 
+def test_the_sampler_counts_duplicate_pool_metadata_once_per_tick(monkeypatch) -> None:
+    """Two loaded libraries may report one identical BLAS configuration.
+
+    SciPy 1.18 and NumPy can each load an OpenBLAS library whose selected
+    threadpool metadata is identical.  The sampler reports configuration dwell,
+    not library-instance dwell, so one tick must not count that key twice and
+    produce a fraction greater than one.
+    """
+    pool = {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "prefix": "libscipy_openblas",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "num_threads": 1,
+    }
+    monkeypatch.setattr(bench, "_pool_snapshot", lambda: [pool.copy(), pool.copy()])
+    sampler = bench._DispatchSampler(interval=0.001)
+    with sampler:
+        time.sleep(0.02)
+
+    observed = sampler.observed()
+    assert sampler.samples > 0
+    assert len(observed) == 1
+    assert observed[0]["samples_seen_in"] == sampler.samples
+    assert observed[0]["fraction_of_samples"] == 1.0
+
+
 def test_peak_memory_records_how_many_fits_it_covers(payload: dict) -> None:
     """`ru_maxrss` is a process high-water mark, so it only compares like for like.
 
