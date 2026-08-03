@@ -3842,6 +3842,7 @@ class TestSCOPNewtonLineSearchSafety:
             slices,
             [0.0],
             [gamma],
+            [projected_residual],
             cache,
         )
         joint_objective_before = _joint_objective_from_gammas(
@@ -3865,6 +3866,59 @@ class TestSCOPNewtonLineSearchSafety:
         assert joint_objective_trial == joint_objective_before
         assert single_delta < 0.0
         assert joint_delta == pytest.approx(single_delta, rel=1.0e-12, abs=1.0e-18)
+
+    def test_joint_delta_keeps_projected_residual_for_near_collinear_fit(self):
+        """Large fitted components cannot cancel the joint linear delta term."""
+        from superglm.solvers.scop import build_scop_solver_reparam
+        from superglm.solvers.scop_newton import (
+            _build_joint_objective_cache,
+            _safe_joint_trial_objective_delta,
+        )
+
+        rng = np.random.default_rng(1)
+        u = rng.normal(size=100)
+        v = rng.normal(size=100)
+        v -= u * float(u @ v) / float(u @ u)
+        basis = np.column_stack([u, u + 1.0e-9 * v])
+        weights = np.ones(100)
+        reparam = build_scop_solver_reparam(3, direction="increasing")
+        beta = np.log(np.full(2, 1.0e8))
+        gamma = reparam.forward(beta)
+        response = basis @ gamma - v
+        penalty = np.zeros((2, 2))
+        state = {
+            "B_scop": basis,
+            "S_scop": penalty,
+            "beta_scop": beta,
+            "reparam": reparam,
+            "bin_idx": None,
+        }
+        scop_items = [(0, state)]
+        slices = [slice(0, 2)]
+        gram = basis.T @ basis
+        cache = _build_joint_objective_cache(scop_items, weights, response)
+        cache.diag_btwb = [gram]
+        cache.cross_btwb = {}
+
+        beta_trial = np.log(gamma + np.array([1.0, -1.0]))
+        gamma_delta = reparam.forward(beta_trial) - gamma
+        residual = response - basis @ gamma
+        projected_residual = basis.T @ (weights * residual)
+        expected_delta = -float(gamma_delta @ projected_residual) + 0.5 * float(
+            gamma_delta @ gram @ gamma_delta
+        )
+        reported_delta = _safe_joint_trial_objective_delta(
+            scop_items,
+            beta_trial,
+            slices,
+            [0.0],
+            [gamma],
+            [projected_residual],
+            cache,
+        )
+
+        assert expected_delta < 0.0
+        assert reported_delta == pytest.approx(expected_delta, rel=1.0e-10, abs=1.0e-14)
 
     def test_single_and_joint_line_searches_use_stable_delta(self, monkeypatch):
         """Both public Newton paths route trial acceptance through delta algebra."""
@@ -4784,18 +4838,20 @@ class TestJointSCOPNewton:
 
         np.testing.assert_allclose(obj_cached, obj_oracle, rtol=1e-10, atol=1e-12)
 
-        # The expansion remains an identity if a cached Gram carries the tiny
-        # asymmetry that finite-precision matrix products can leave behind.
-        cache.diag_btwb[0] = cache.diag_btwb[0].copy()
-        cache.diag_btwb[0][0, 1] += 1.0e-3
-        obj_cached = _joint_objective_from_gammas(
-            gammas,
-            beta_joint,
-            slices,
-            lambdas_list,
-            scop_items,
-            cache,
-        )
+        total_eta = np.zeros_like(z)
+        for gamma, (_, state) in zip(gammas, scop_items, strict=True):
+            eta = state["B_scop"] @ gamma
+            total_eta += eta[state["bin_idx"]]
+        residual = z - total_eta
+        projected_residuals = []
+        for _, state in scop_items:
+            weighted_residual = np.bincount(
+                state["bin_idx"],
+                weights=W * residual,
+                minlength=state["B_scop"].shape[0],
+            )
+            projected_residuals.append(state["B_scop"].T @ weighted_residual)
+
         beta_trial = beta_joint + np.linspace(-0.03, 0.02, beta_joint.size)
         gammas_trial = [
             state["reparam"].forward(beta_trial[group_slice])
@@ -4815,6 +4871,7 @@ class TestJointSCOPNewton:
             slices,
             lambdas_list,
             gammas,
+            projected_residuals,
             cache,
         )
         assert stable_delta == pytest.approx(obj_trial - obj_cached, rel=1e-10, abs=1e-11)
