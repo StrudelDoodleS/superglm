@@ -93,7 +93,7 @@ def build(with_tensor: bool, discrete: bool, k: int = 10) -> SuperGLM:
 
 
 def _peak_rss_mb() -> float | None:
-    """Whole-run high-water RSS in MB (recorded for CI history, not gated:
+    """Whole-run high-water RSS in MB (recorded as artifact history, not gated:
     the value is dominated by the full-frame load and not per-case
     attributable without subprocess isolation). None where unavailable."""
     try:
