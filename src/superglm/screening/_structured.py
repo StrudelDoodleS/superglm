@@ -599,7 +599,14 @@ def structured_ladder(
     search, and the worst case for those is checked against the ceiling
     BEFORE the first bisection step, so a pair that cannot afford its search
     pays only for the bracket and returns ``None`` — the caller's cue for the
-    same NaN row an unaffordable dense pair gets.  ``None`` means unbounded.
+    same NaN row an unaffordable dense pair gets.  ``max_evaluations=None``
+    means unbounded.
+
+    A numerical failure reached while bisecting one target refuses that target,
+    not independent targets or already certified edge clamps.  The returned
+    list may therefore contain fewer entries than ``budgets``.  If no rung
+    survives, ``None`` preserves the pair-refusal signal and lets a speculative
+    structured route hand the dense path back.
     """
     if p.profiled_trace is None:
         return None
@@ -645,9 +652,10 @@ def structured_ladder(
         return None
     stat_lo, edf_lo = evaluated_lo
     stat_hi, edf_hi = evaluated_hi
-    # More penalty cannot add effective dimensions.  This is an ordering
-    # certificate with a round-off allowance, not the target-fit tolerance.
-    if edf_hi > edf_lo + _edf_roundoff(edf_lo, edf_hi):
+    # More penalty cannot add effective dimensions.  The ladder itself only
+    # resolves EDF to ``_EDF_TOL``, so sub-tolerance ordering noise is not
+    # evidence of a different numerical branch.
+    if edf_hi > edf_lo + max(_EDF_TOL, _edf_roundoff(edf_lo, edf_hi)):
         return None
 
     # DISTINCT search targets, not rungs: the ladder's budgets are permitted to
@@ -659,7 +667,7 @@ def structured_ladder(
     if max_evaluations is not None and 2 + _MAX_STEPS_PER_RUNG * len(searchable) > max_evaluations:
         return None
 
-    solved: dict[float, ScreenedPair] = {}
+    solved: dict[float, ScreenedPair | None] = {}
     out: list[ScreenedPair] = []
     for budget in budgets:
         edf0 = float(budget)
@@ -672,20 +680,24 @@ def structured_ladder(
             a, b = lo, hi
             edf_a, edf_b = edf_lo, edf_hi
             lam, stat, achieved = hi, stat_hi, edf_hi
+            refused = False
             for _ in range(_MAX_BISECT):
                 if b <= a * (1.0 + 1e-12):
                     break
                 lam = float(np.sqrt(a * b))
                 evaluated = evaluate(lam)
                 if evaluated is None:
-                    return None
+                    refused = True
+                    break
                 stat, achieved = evaluated
                 # Preserve the same monotone certificate inside the shrinking
                 # bracket; a finite in-range EDF can still be on a broken
-                # numerical branch.
-                order_roundoff = _edf_roundoff(edf_a, achieved, edf_b)
-                if achieved > edf_a + order_roundoff or achieved < edf_b - order_roundoff:
-                    return None
+                # numerical branch.  As at the endpoints, noise below the
+                # ladder's own target tolerance is not a refusal.
+                ordering_tolerance = max(_EDF_TOL, _edf_roundoff(edf_a, achieved, edf_b))
+                if achieved > edf_a + ordering_tolerance or achieved < edf_b - ordering_tolerance:
+                    refused = True
+                    break
                 achieved = min(max(achieved, edf_b), edf_a)
                 if abs(achieved - edf0) <= _EDF_TOL:
                     break
@@ -698,8 +710,19 @@ def structured_ladder(
             # Width exhaustion is not convergence: a numerically discontinuous
             # EDF curve can keep the target bracketed while never attaining it.
             # Do not cache or publish a plausible nearest endpoint as the rung.
-            if abs(achieved - edf0) > _EDF_TOL:
-                return None
-            solved[edf0] = ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam))
-        out.append(solved[edf0])
-    return out
+            if refused or abs(achieved - edf0) > _EDF_TOL:
+                solved[edf0] = None
+            else:
+                solved[edf0] = ScreenedPair(
+                    statistic=stat,
+                    edf0=achieved,
+                    lambda0=float(lam),
+                )
+        result = solved[edf0]
+        if result is not None:
+            out.append(result)
+    # A failure while searching one target says nothing about already certified
+    # edge clamps or independent targets.  Preserve those rungs; if none
+    # survive, retain the existing pair-refusal signal so a speculative
+    # structured route can hand the dense path back.
+    return out or None
