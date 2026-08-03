@@ -8,6 +8,7 @@ assembly exactly, so these tolerances must not be loosened.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
@@ -191,6 +192,466 @@ def test_statistic_reduces_to_unpenalized_without_penalty():
 
     np.testing.assert_allclose(result.statistic, U @ np.linalg.solve(V, U), rtol=1e-11)
     assert result.lambda0 == 0.0
+
+
+def test_whitening_keeps_an_identifiable_mode_that_is_merely_small():
+    """The singular-pencil whitening may discard the common null space, no more.
+
+    ``G = V + S`` here is ``diag(2, 2e-13, 0)``.  The third direction is the
+    genuine shared null space; the second is NOT -- it carries ``a = 0.5``, an
+    honest half-share of the curvature, and all of ``U``'s mass.  A cut set by
+    smallness relative to the largest eigenvalue rather than by round-off
+    deletes it, and the ladder then reports a statistic of 0 for a pair whose
+    score is entirely in that direction.
+
+    The direct pseudo-inverse ladder is the reference: solving
+    ``(V + lam S)`` at ``lam = 1`` gives edf 1.0 and T 0.5.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    V = np.diag([1.0, 1e-13, 0.0])
+    S = np.diag([1.0, 1e-13, 0.0])
+    U = np.array([0.0, np.sqrt(1e-13), 0.0])
+
+    got = penalized_score_statistic(U, V, S_ti=S, edf0=1.0)
+
+    # what the direct solver resolves, recomputed here rather than asserted
+    A = V + 1.0 * S
+    Ainv = np.linalg.pinv(A, hermitian=True)
+    assert float(np.trace(Ainv @ V)) == pytest.approx(1.0, abs=1e-9)
+    assert float(U @ (Ainv @ U)) == pytest.approx(0.5, rel=1e-9)
+
+    assert got.edf0 == pytest.approx(1.0, abs=1e-6)
+    assert got.statistic == pytest.approx(0.5, rel=1e-6)
+    assert got.lambda0 == pytest.approx(1.0, rel=1e-6)
+
+
+def test_screening_kernels_are_internal_and_the_root_api_is_self_consistent():
+    """The screening package is a kernel, not public API — pinned deliberately.
+
+    ``superglm.screening.__all__`` reads like a public claim, and a reviewer
+    took it as one: ``from superglm import penalized_score_statistic_ladder``
+    raises.  So it does for all eight names there, every one of which predates
+    the ladder, and the resolution is that none of them belongs at the root
+    rather than that the ladder does -- they take raw assembled moment
+    matrices, so they are unusable without the internals that build them.
+
+    This test pins that decision so it is not silently reversed, and guards the
+    class of defect the reviewer was actually pointing at: a name advertised
+    somewhere it cannot be imported from.
+    """
+    import superglm
+    import superglm.screening as screening
+
+    # The root advertises nothing it cannot supply.
+    assert [n for n in superglm.__all__ if not hasattr(superglm, n)] == []
+    # Each kernel name resolves from its OWN package, which is where it lives.
+    assert [n for n in screening.__all__ if not hasattr(screening, n)] == []
+    # And none of them is root API.
+    assert set(screening.__all__).isdisjoint(superglm.__all__)
+    # The supported entry point is the model method.
+    assert hasattr(superglm.SuperGLM, "screen_interactions")
+
+
+def test_a_wholly_absorbed_probe_is_scored_rather_than_discarded():
+    """An indeterminate block is REPORTED, not deleted.  Deliberately.
+
+    A numeric constant within each level makes every ``numeric_cat`` probe
+    column a multiple of that level's indicator, so the categorical main
+    absorbs the whole block and the true profiled rank is 0.  ``V_eff`` is a
+    difference, so what survives is round-off -- and being all that is left,
+    that round-off becomes the block's own largest eigenvalue.  This block IS
+    pure cancellation: asserted below at more than 1e12.
+
+    Detecting that would need a threshold on the share of curvature profiling
+    leaves behind, and no Type 1 bound for it exists -- see the THRESHOLD
+    TYPES note in :mod:`superglm.screening._score_stat`, which records eleven
+    orders of variation at fixed ``k``.  Since only arithmetic may discard a
+    pair, and this cannot be decided as arithmetic, the pair is scored.
+
+    What that buys is the property this test actually pins: the statistic
+    stays at round-off, so ``z`` ranks the pair down on its own merits rather
+    than the kernel deleting it.  What it costs is that ``edf0`` is not
+    reproducible across seeds, which is the honest signature of an
+    indeterminate block.  Both are asserted, so a future change to either is
+    visible.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+    from superglm.screening._numeric_margin import numeric_pair_moments
+    from superglm.screening._score_stat import _solve_psd
+
+    L, n = 5, 4000
+    values = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
+    menu = np.eye(L)[:, 1:]
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        g = rng.integers(0, L, n)
+        x = values[g]
+
+        U, V, C, M, u_m = numeric_pair_moments(
+            g, L, menu, x, rng.normal(size=n), rng.uniform(0.5, 1.5, n)
+        )
+        P = C.T @ _solve_psd(M, C)
+        V_eff = 0.5 * ((V - P) + (V - P).T)
+        assert max(np.linalg.norm(V, 2), np.linalg.norm(P, 2)) / np.linalg.norm(V_eff, 2) > 1e12, (
+            seed
+        )
+
+        df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+        model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+        model.fit_reml(df, y)
+        row = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
+
+        # The pair is kept, and what makes it uninteresting is its own
+        # statistic -- at round-off, so z cannot promote it.
+        if np.isfinite(row["statistic"]):
+            assert abs(row["statistic"]) < 1e-6, (seed, row["statistic"])
+            assert row["z"] < 0.0, (seed, row["z"])
+
+
+def test_screening_is_invariant_to_the_units_of_a_numeric_margin():
+    """Rescaling a covariate is a change of UNITS and nothing else.
+
+    Multiplying a numeric margin by a constant scales its probe columns and its
+    moments by fixed powers of that constant, and the profiled statistic is a
+    ratio in which they cancel exactly.  The mains fit is the same fit with a
+    rescaled coefficient, so ``phi`` is unchanged too.  Every reported field
+    must therefore come back identical.
+
+    **This enforces the equilibration in ``_psd_rank``, which is the module's
+    only relative-rank threshold** -- see the SCALE DISCIPLINE note in
+    :mod:`superglm.screening._score_stat`.  It is deliberately a property of
+    the whole public screen rather than a unit check on one block, so any
+    future relative threshold that reaches a reported field is covered by it.
+
+    What it does NOT cover, measured rather than assumed: reverting the
+    balancing in ``_build_pencil`` leaves this test PASSING, because rescaling
+    a spline's covariate rescales its penalty with it and never reaches the
+    ``V >> S`` regime.  That site has its own regression,
+    ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``.
+
+    The reviewer's case: on the balanced four-point design
+    ``z1, z2 = +-10000`` with ``C = 0``, so the true profiled rank is
+    unambiguously 1, rescaling from ``+-1`` turned ``statistic=397, edf0=1``
+    into an all-NaN row.  1e4 is kept below because a moment matrix carries the
+    square of the covariate's scale, so it is already 1e16 in the joint.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    base = pd.DataFrame(
+        {
+            "z1": rng.choice([-1.0, 1.0], n),
+            "z2": rng.choice([-1.0, 1.0], n),
+            "g": pd.Categorical(rng.choice([f"L{i}" for i in range(4)], n)),
+            "x": rng.uniform(0.0, 1.0, n),
+        }
+    )
+    y = rng.poisson(np.exp(-1.0 + 0.4 * base["z1"] * base["z2"])).astype(np.float64)
+
+    def screen(scale):
+        df = base.copy()
+        df["z1"] = df["z1"] * scale
+        df["z2"] = df["z2"] * scale
+        df["x"] = df["x"] * scale
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "z1": Numeric(),
+                "z2": Numeric(),
+                "g": Categorical(),
+                "x": Spline(kind="ps", n_knots=6),
+            },
+        )
+        model.fit_reml(df, y)
+        table = model.screen_interactions(df, y)
+        return {
+            (a, b): (kind, e, z)
+            for a, b, kind, e, z in zip(
+                table["feature_a"],
+                table["feature_b"],
+                table["kind"],
+                table["edf0"],
+                table["z"],
+            )
+        }
+
+    unit = screen(1.0)
+    assert unit, "the sweep must produce rows or this proves nothing"
+    for scale in (1e2, 1e4):
+        got = screen(scale)
+        assert set(got) == set(unit), scale
+        for pair, (kind, e, z) in unit.items():
+            k2, e2, z2 = got[pair]
+            assert k2 == kind, (pair, scale)
+            assert np.isnan(e) == np.isnan(e2), (pair, scale, e, e2)
+            if not np.isnan(e):
+                assert e2 == pytest.approx(e, rel=1e-6), (pair, scale, e, e2)
+                assert z2 == pytest.approx(z, rel=1e-6, abs=1e-9), (pair, scale, z, z2)
+
+
+def test_a_block_of_pure_cancellation_cannot_score_competitively():
+    """Swept, because the property was decided by the sign of a round-off eigenvalue.
+
+    ``V_eff = V - C' M^-1 C`` is a difference, so on a block the overlap has
+    absorbed there is nothing left but round-off -- and every cut taken on
+    ``V_eff`` itself is relative to a scale that IS that round-off.
+
+    Getting the edf too high is not a neutral failure.  ``z = (T - e)/sqrt(2e)``
+    DECREASES in ``e``, so a partly-rejected block outranks an unrejected one:
+    at the measured ``statistic = 145.508`` an edf of 10 gives ``z = 30.3``
+    where an edf of 1 gives ``z = 102.2``.  Only rank 0 is safe.
+
+    An earlier version of this test pinned a single seed and asserted
+    ``not (z > 0)``.  Both were wrong.  The seed mattered because the rule it
+    certified fired only when the largest-MAGNITUDE eigenvalue happened to be
+    negative -- a coin flip per seed, not a property -- and ``not (z > 0)``
+    passes both when the block is rejected and when its statistic merely
+    happened to be small, which is the conflation the sweep exists to break.
+    So: sweep, and assert the block is REJECTED.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+
+    L, n = 25, 8000
+    bad = []
+    for seed in range(40):
+        rng = np.random.default_rng(seed)
+        g = rng.integers(0, L, n)
+        g[g == 1] = 0
+        g[:2] = 1  # one level with two rows
+        x = np.linspace(0.5, L - 0.5, L)[g] + 1e-8 * rng.normal(size=n)
+        df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+        w = np.ones(n)
+        model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+        model.fit_reml(df, y, sample_weight=w)
+        row = model.screen_interactions(df, y, candidates=[("x", "g")], sample_weight=w).iloc[0]
+        if not np.isnan(row["edf0"]):
+            bad.append((seed, row["edf0"], row["statistic"], row["z"]))
+    assert bad == [], bad
+
+
+def test_a_wholly_absorbed_probe_is_rejected_on_every_seed():
+    """The absorbed case, swept, asserting rejection rather than a sign.
+
+    A numeric constant within each level makes every probe column a multiple of
+    that level's indicator, so the true profiled rank is 0.  Counting that on
+    ``V_eff`` cannot see it; counting it on the joint moment matrix, where
+    nothing has cancelled, can.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, SuperGLM
+    from superglm.features.numeric import Numeric
+
+    values = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
+    bad = []
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        g = rng.integers(0, 5, 4000)
+        x = values[g]
+        df = pd.DataFrame({"g": pd.Categorical([f"L{c}" for c in g]), "x": x})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * x)).astype(np.float64)
+        model = SuperGLM(family="poisson", features={"g": Categorical(), "x": Numeric()})
+        model.fit_reml(df, y)
+        row = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
+        if not np.isnan(row["edf0"]):
+            bad.append((seed, row["edf0"], row["z"]))
+    assert bad == [], bad
+
+
+def test_a_probe_exactly_nested_in_the_overlap_reports_only_its_free_directions():
+    """Positive-only cancellation: nothing observable in V_eff betrays it.
+
+    The probe's first direction is exactly a multiple of the overlap's, so the
+    true profiled rank is 2 of 3.  The computed eigenvalues come out
+    1.7347e-18, 1e-12, 2e-12 -- all NONNEGATIVE, so no PSD violation is visible
+    and any rule that needs one counts three.
+    """
+    from superglm.screening import penalized_score_statistic
+    from superglm.screening._score_stat import _solve_psd
+
+    M = np.array([[float.fromhex("0x1.c60ae65c20699p-2")]])
+    C = np.array([[float.fromhex("0x1.7d086fd7cd3a2p-5"), 0.0, 0.0]])
+    V = np.diag([float.fromhex("0x1.3fc36202de5dap-8"), 1e-12, 2e-12])
+
+    V_eff = V - C.T @ _solve_psd(M, C)
+    assert (np.linalg.eigvalsh(0.5 * (V_eff + V_eff.T)) >= 0).all()
+
+    got = penalized_score_statistic(np.zeros(3), V, C, M, None, U_nuisance=np.zeros(1))
+    assert got.edf0 == 2.0, got.edf0
+
+
+def test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty():
+    """``G = V + S`` must not round the smaller term away.
+
+    With ``V = 1e20 I`` and ``S = I`` the sum IS ``V`` in float64, so a pencil
+    that derives the penalty share as ``1 - v`` loses it entirely and reports
+    the full dimension as its edf at every lambda.  The answer would then
+    depend on the units the curvature is carried in, or on a frequency-weight
+    scale.  The direct problem reaches edf 2 at ``lambda = 1e20`` with
+    statistic 0.5.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    V = 1e20 * np.eye(4)
+    S = np.eye(4)
+    U = np.zeros(4)
+    U[0] = 1e10
+    assert np.array_equal(V + S, V), "the premise: the sum loses S"
+
+    got = penalized_score_statistic(U, V, S_ti=S, edf0=2.0)
+
+    assert got.edf0 == pytest.approx(2.0, abs=1e-6)
+    assert got.statistic == pytest.approx(0.5, rel=1e-6)
+
+
+def test_a_weakly_identified_block_is_scored_not_discarded():
+    """Weak identification is a finding about the data, not about arithmetic.
+
+    ``M = C = I`` with ``V = (1 + 1e-4) I`` gives the Schur complement
+    ``V_eff = 1e-4 I`` -- full rank, entirely real, and carrying a genuine
+    score statistic of 1.0 on ``U = sqrt(1e-4) e_1``.  Every generalized
+    eigenvalue against the absorption metric is 5.0e-05, so an absorption
+    guard set by SMALLNESS rather than by round-off classifies the whole block
+    as absorbed and drops the pair.
+
+    Only arithmetic may discard a pair.  The threshold is ``10 * k^3 * eps``,
+    nine orders below this block's 5.0e-05 at ``k = 2``, so a merely weak
+    interaction keeps its degrees of freedom and its statistic; a pair that is
+    genuinely uninteresting is for ``z`` to rank down, not for the kernel to
+    delete.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    for k in (2, 4, 12):
+        eye = np.eye(k)
+        V = (1.0 + 1e-4) * eye
+        V_eff = V - eye @ np.linalg.solve(eye, eye)
+        assert np.linalg.matrix_rank(V_eff) == k, k
+        U = np.zeros(k)
+        U[0] = np.sqrt(1e-4)
+
+        got = penalized_score_statistic(U, V, eye, eye, None, U_nuisance=np.zeros(k))
+
+        assert got.edf0 == float(k), (k, got.edf0)
+        assert got.statistic == pytest.approx(float(U @ np.linalg.solve(V_eff, U)), rel=1e-9), k
+
+
+def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
+    """A barely positive-definite block still reports its RANK, not ``k``.
+
+    The unpenalized rung's edf used to be ``tr(A^-1 V)``, which equals the rank
+    only when ``A^-1`` is a pseudo-inverse.  ``cho_factor`` is entitled to
+    accept a block like this one -- it IS positive definite, by 1e-18 -- and
+    the trace then reports ``k``.  Diagonal on purpose: this is the one
+    construction whose Cholesky cannot come out platform-dependent, since
+    every pivot is a stored entry rather than a round-off residue.
+    """
+    import scipy.linalg
+
+    from superglm.screening import penalized_score_statistic
+
+    V = np.diag([3.0, 2.0, 1e-18])
+    scipy.linalg.cho_factor(V, check_finite=False)  # accepts it; that is the trap
+    assert np.linalg.matrix_rank(V) == 2
+
+    result = penalized_score_statistic(np.array([1.0, 1.0, 1.0]), V, S_ti=None)
+    assert result.edf0 == 2.0
+    assert result.lambda0 == 0.0
+
+
+def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
+    """The reachable case: a factor level in which the numeric is constant.
+
+    ``numeric_cat`` profiles out ``[1 | menu | z]``, so a level carrying a
+    single row has its probe column exactly absorbed and the block's true rank
+    is ``k - 1``.  ``V_eff`` is formed by SUBTRACTION though, so that direction
+    lands at round-off rather than at zero and whether ``cho_factor`` accepts
+    the block is decided by rounding alone -- 10 of these 20 seeds are accepted
+    here.  The edf must not depend on which, so the reported values over
+    statistically identical replicates must be ONE value, and it must be the
+    rank.  A Cholesky trace reports ``k`` on the accepted seeds and ``k - 1``
+    on the rest, which is two.
+
+    ``matrix_rank`` is the contract, not a cross-check: the screen counts at
+    ``_rank_floor``, which IS ``matrix_rank``'s own tolerance, so the reported
+    edf can never exceed it.
+
+    **Swept wide on purpose.**  An earlier version of this test ran 20 seeds
+    and passed while CI failed, because the round-off eigenvalue this layout
+    leaves behind has a TAIL: measured over 400 replicates its median is
+    2.2e-16 but it reaches 1.2e-15, so a cut placed at 1e-15 misreports rank
+    on roughly one seed in two hundred and twenty seeds had a nine-in-ten
+    chance of missing it.  Locally that bit seeds 22 and 88; on CI's numpy it
+    bit seed 16.  Anything narrow enough to miss a 0.5% failure is not a
+    regression test for it.
+    """
+    from superglm.screening import penalized_score_statistic
+    from superglm.screening._numeric_margin import numeric_pair_moments
+    from superglm.screening._score_stat import _solve_psd
+
+    L, n = 40, 8000
+    menu = np.eye(L)[:, 1:]
+    reported = set()
+    for seed in range(200):
+        rng = np.random.default_rng(seed)
+        codes = rng.integers(0, L - 1, n)
+        codes[0] = L - 1  # the singleton level
+        z = rng.normal(size=n)
+        score = rng.normal(size=n)
+        w = rng.uniform(0.5, 1.5, n)
+        U, V, C, M, u_m = numeric_pair_moments(codes, L, menu, z, score, w)
+
+        V_eff = V - C.T @ _solve_psd(M, C)
+        V_eff = 0.5 * (V_eff + V_eff.T)
+        assert np.linalg.matrix_rank(V_eff) == L - 2, seed
+
+        result = penalized_score_statistic(U, V, C, M, None, U_nuisance=u_m)
+        # Never ABOVE the rank: that inequality is the defect itself, and it
+        # fires only on the seeds cho_factor accepts.
+        assert result.edf0 <= L - 2, (seed, result.edf0)
+        reported.add(result.edf0)
+    # An exact count, identical across replicates -- not a float trace.
+    assert reported == {float(L - 2)}
+
+
+def test_singular_pencil_answer_does_not_depend_on_the_units():
+    """The whitening fallback's rank cut has to be RELATIVE.
+
+    ``V`` and ``S`` share a null space here, so the generalized driver fails
+    and the explicit whitening runs.  The same problem is posed twice, once
+    at a scale a thousand times smaller; an absolute floor in that cut called
+    every identifiable direction null below 1e-12 and returned a zero
+    statistic at zero df, which makes the screening table depend on whether
+    a covariate is carried in metres or kilometres.
+    """
+    from superglm.screening import penalized_score_statistic
+
+    answers = []
+    for s in (1e-10, 1e-12, 1e-13, 1e-16):
+        V = s * np.diag([1.0, 2.0, 0.0])
+        S = s * np.diag([2.0, 1.0, 0.0])
+        U = np.sqrt(s) * np.array([1.0, 1.0, 0.0])
+        got = penalized_score_statistic(U, V, S_ti=S, edf0=1.0)
+        answers.append((got.statistic, got.edf0))
+    # lambda0 = 1 makes V + lambda S = 3s I on the identifiable block, so the
+    # statistic is U' (3s I)^-1 U = 2/3 and edf0 is 1 -- at every scale.
+    for statistic, edf0 in answers:
+        assert statistic == pytest.approx(2.0 / 3.0, rel=1e-9)
+        assert edf0 == pytest.approx(1.0, rel=1e-9)
 
 
 def test_edf_solver_hits_target():

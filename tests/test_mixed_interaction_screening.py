@@ -687,17 +687,8 @@ def test_fremtpl_example_specification_is_not_mis_specified():
     assert splined - smoothed < 10.0
 
 
-def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
-    """A grouped factor is excluded: its confirmatory refit cannot be built.
-
-    `Categorical(grouping=...)` fits fine as a main effect, and the screen's own
-    `_categorical_codes` collapses it correctly — but no interaction builder maps
-    the raw column through the grouping, so a confirmatory refit validates
-    original labels against grouped levels and raises.  Screening such a pair
-    would hand the caller a refit that cannot run, so the margin is excluded.
-    The `pytest.raises` below pins the underlying defect: when it starts passing,
-    the exclusion in `_margin_kind` can go.
-    """
+def test_grouped_categorical_margins_screen_and_confirm_by_refit():
+    """A grouped factor's screen and confirmatory refit share raw labels."""
     from superglm.features.grouping import collapse_levels
 
     rng = np.random.default_rng(4321)
@@ -717,24 +708,32 @@ def test_grouped_categorical_margins_are_excluded_until_refits_support_them():
     model.fit_reml(df, y)
 
     table = model.screen_interactions(df, y)
-    assert "region" not in set(table["feature_a"]) | set(table["feature_b"])
+    explicit = model.screen_interactions(df, y, candidates=[("age", "region")])
+    pd.testing.assert_frame_equal(table, explicit)
+    assert len(table) == 1
+    assert table.iloc[0]["kind"] == "spline_cat"
 
-    with pytest.raises(ValueError, match="deferred|screenable"):
-        model.screen_interactions(df, y, candidates=[("age", "region")])
-
-    # The defect the exclusion protects against: the refit itself cannot be built.
-    with pytest.raises(ValueError, match="unseen categorical levels"):
-        SuperGLM(family="poisson", features=feats(), interactions=[("age", "region")]).fit_reml(
-            df, y
-        )
+    confirm = SuperGLM(
+        family="poisson",
+        features=feats(),
+        interactions=[("age", "region")],
+    ).fit_reml(df, y)
+    assert np.isfinite(confirm.predict(df)).all()
 
 
-def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
-    """Review finding: for a spline_cat whose factor is wide, kron(S, I) has a
-    null space above every budget, so all four rungs clamp to the same achieved
-    edf and repeat the same O(k^3) solves for one answer.  The ladder skips
-    every budget strictly below an achieved clamp, and the row is unchanged."""
-    import superglm.model.screening_ops as screening_ops
+def test_clamped_ladder_costs_no_decomposition_and_agrees_with_every_rung(monkeypatch):
+    """For a spline_cat whose factor is wide, kron(S, I) has a null space above
+    every budget, so all four rungs clamp to the same achieved edf.
+
+    Two things must hold.  The whole ladder costs ZERO decompositions -- the
+    ladder brackets first with two ordinary solves, and a rung that clamps is
+    answered from that bracket, so the pencil is never built.  This is the
+    case that matters most for wide factors, where decomposing would be
+    strictly more expensive than the solves it would replace.  And running any
+    single budget on its own must reproduce the ladder's row exactly, which is
+    the property the old clamped-rung skip relied on for its correctness.
+    """
+    import superglm.screening._score_stat as score_stat
 
     L, reps = 40, 25
     rng = np.random.default_rng(77)
@@ -752,24 +751,23 @@ def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
     )
     model.fit_reml(df, y)
 
-    calls = []
-    real = screening_ops.penalized_score_statistic
+    builds = []
+    real = score_stat._build_pencil
 
     def counted(*args, **kwargs):
-        calls.append(kwargs["edf0"])
+        builds.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(screening_ops, "penalized_score_statistic", counted)
+    monkeypatch.setattr(score_stat, "_build_pencil", counted)
 
     ladder = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
-    # every rung clamps upward to the null-space dimension, so only the first
-    # budget is ever solved
-    assert calls == [2.0]
+    # four rungs, no decomposition at all -- every one of them clamps
+    assert builds == []
     assert ladder["kind"] == "spline_cat"
     assert ladder["edf0"] > 16.0  # the achieved clamp sits above every budget
 
-    # ... and the skipped rungs would have returned exactly this row
-    calls.clear()
+    # ... and each rung on its own returns exactly this row
+    builds.clear()
     for budget in (4.0, 8.0, 16.0):
         rung = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=budget).iloc[0]
         assert rung["statistic"] == ladder["statistic"]
@@ -778,10 +776,12 @@ def test_clamped_ladder_skips_the_rungs_below_the_achieved_edf(monkeypatch):
         assert rung["z"] == ladder["z"]
 
 
-def test_bisecting_ladder_still_evaluates_every_rung(monkeypatch):
-    """The skip is fenced to clamped rungs: a ti pair whose budget lands inside
-    the bracket resolves a different lambda0 per rung, so all four must run."""
-    import superglm.model.screening_ops as screening_ops
+def test_bisecting_ladder_resolves_every_rung_from_one_decomposition(monkeypatch):
+    """A ti pair whose budgets land inside the bracket resolves a DIFFERENT
+    lambda0 per rung, so every rung genuinely has to be evaluated -- and all
+    four come out of a single decomposition, since the pencil is independent
+    of both lambda and edf0."""
+    import superglm.screening._score_stat as score_stat
 
     rng = np.random.default_rng(5)
     n = 20000
@@ -798,16 +798,31 @@ def test_bisecting_ladder_still_evaluates_every_rung(monkeypatch):
     )
     model.fit_reml(df, y)
 
-    calls = []
-    real = screening_ops.penalized_score_statistic
+    builds = []
+    real_build = score_stat._build_pencil
+    lambdas = []
+    real_ladder = score_stat.penalized_score_statistic_ladder
 
-    def counted(*args, **kwargs):
-        calls.append(kwargs["edf0"])
-        return real(*args, **kwargs)
+    def counted_build(*args, **kwargs):
+        builds.append(1)
+        return real_build(*args, **kwargs)
 
-    monkeypatch.setattr(screening_ops, "penalized_score_statistic", counted)
+    def recording_ladder(*args, **kwargs):
+        out = real_ladder(*args, **kwargs)
+        lambdas.append([r.lambda0 for r in out])
+        return out
+
+    monkeypatch.setattr(score_stat, "_build_pencil", counted_build)
+    monkeypatch.setattr(
+        "superglm.model.screening_ops.penalized_score_statistic_ladder", recording_ladder
+    )
     row = model.screen_interactions(df, y, candidates=[("x1", "x2")]).iloc[0]
-    assert calls == [2.0, 4.0, 8.0, 16.0]
+
+    assert builds == [1], "one decomposition serves the whole ladder"
+    assert len(lambdas) == 1 and len(lambdas[0]) == 4, "all four rungs reported"
+    # The rungs are genuinely distinct -- this is the case the old
+    # clamped-rung skip had to be fenced away from.
+    assert len(set(lambdas[0])) == 4, f"expected four distinct lambda0, got {lambdas[0]}"
     assert row["edf0"] == pytest.approx(2.0, abs=1e-3)
 
 
@@ -894,39 +909,299 @@ def test_cubic_gate_leaves_ordinary_pairs_alone():
 
 
 def test_penalized_blocks_are_charged_the_ladder_they_run():
-    """A penalized block re-solves its system per rung, and its bisection
-    re-solves it ~27 times within a rung (measured 109 solves per pair against
-    2 for an unpenalized block), so the same dimension buys far less time.  The
-    gate charges it 16x the work: a spline_cat block is refused at a dimension
-    an unpenalized cat_cat block screens at in the same sweep."""
-    lg, lh, reps = 80, 22, 2
-    a = np.repeat(np.arange(lg), lh * reps)
-    b = np.tile(np.repeat(np.arange(lh), reps), lg)
+    """A penalized block runs a whole ladder where an unpenalized one returns a
+    single rung, so the same dimension buys less time, and the gate charges it
+    _PENALIZED_LADDER_COST times the work.
+
+    All three pairs below sit at exactly k = 144, which is deliberately
+    between the two ceilings the charge creates.  What separates them is what
+    each one has to solve:
+
+      * ``cat_cat`` is unpenalized, so k = 144 is inside its budget;
+      * ``ti`` is penalized and has no structure to exploit -- refused;
+      * ``spline_cat`` is penalized too, but its bordered system is an arrow
+        matrix, so being over the DENSE budget routes it to the structured
+        kernel rather than refusing it.
+
+    That last one is the whole point of the arrow path: the charge still
+    applies, it just no longer terminates the pair.
+    """
+    # k = 12 * 12 = 144 for every pair.  max_cells is chosen so 144 lands
+    # between the unpenalized ceiling (5.8e6^(1/3) = 179) and the penalized
+    # one (2.9e6^(1/3) = 142), and still clears the (k^2 <= 4*max_cells)
+    # intermediate gate at 20736 <= 23200.  The spline margins are carried on
+    # a 7-point grid so that every pair also clears the SUPPORT-scaled
+    # intermediate budgets (dense and structured alike), and the structured
+    # setup still has two endpoint evaluations left after its two QR passes
+    # and seven factor-work units.  The subject here is the cubic charge, and
+    # either an allocation or setup refusal would mask it.
+    max_cells = 5_800
+    n_levels, reps = 13, 14
     rng = np.random.default_rng(23)
+    n = n_levels * n_levels * reps
+    a = np.repeat(np.arange(n_levels), n_levels * reps)
+    b = np.tile(np.repeat(np.arange(n_levels), reps), n_levels)
+    grid = np.linspace(0.0, 1.0, 7)
     df = pd.DataFrame(
         {
-            "g": np.array([f"G{i}" for i in range(lg)])[a],
-            "h": np.array([f"H{i}" for i in range(lh)])[b],
-            "x": rng.uniform(0.0, 1.0, lg * lh * reps),
+            "g": np.array([f"G{i}" for i in range(n_levels)])[a],
+            "h": np.array([f"H{i}" for i in range(n_levels)])[b],
+            "x1": grid[rng.integers(0, grid.size, n)],
+            "x2": grid[rng.integers(0, grid.size, n)],
         }
     )
-    y = rng.normal(size=len(df))
+    y = rng.normal(size=n)
     model = SuperGLM(
         family="gaussian",
-        features={"g": Categorical(), "h": Categorical(), "x": Spline(kind="ps", n_knots=10)},
+        features={
+            "g": Categorical(),
+            "h": Categorical(),
+            "x1": Spline(kind="ps", n_knots=9),  # centered width 12
+            "x2": Spline(kind="ps", n_knots=9),
+        },
     )
     model.fit_reml(df, y)
+    # edf at maximum penalty is about L - 1 = 12 for the spline_cat pair, so
+    # the default ladder's top rung would bisect and be charged for it.  The
+    # subject here is the CUBIC charge; capping the ladder at 8 keeps every
+    # rung clamped so the structured evaluation budget stays out of the way.
+    table = model.screen_interactions(df, y, max_cells=max_cells, edf0=(2.0, 4.0, 8.0)).set_index(
+        ["feature_a", "feature_b"]
+    )
+    assert table.loc[("g", "h"), "kind"] == "cat_cat"
+    assert table.loc[("x1", "x2"), "kind"] == "ti"
+    assert table.loc[("g", "x1"), "kind"] == "spline_cat"
 
-    table = model.screen_interactions(df, y).set_index(["feature_a", "feature_b"])
-    # unpenalized, k = 79 * 21 = 1659, under the 1709 unpenalized ceiling
-    assert np.isfinite(table.loc[("g", "h"), "z"])
-    # penalized, k = 13 * 79 = 1027 -- well under 1709, and well over the 678
-    # a 16x work charge leaves a penalized block
-    assert np.isnan(table.loc[("g", "x"), "z"])
-    assert table.loc[("g", "x"), "n_cells"] > 0
-    # the narrow factor's spline_cat pair is inside the penalized budget
-    assert np.isfinite(table.loc[("h", "x"), "z"])
+    assert np.isfinite(table.loc[("g", "h"), "z"])  # unpenalized: inside budget
+    assert np.isnan(table.loc[("x1", "x2"), "z"])  # penalized, dense only
+    assert np.isfinite(table.loc[("g", "x1"), "z"])  # penalized, but structured
 
-    # raising max_cells lifts the penalized refusal, as it lifts every other
-    lifted = model.screen_interactions(df, y, candidates=[("x", "g")], max_cells=20_000_000)
+    # raising max_cells lifts the ti refusal, as it lifts every other budget
+    lifted = model.screen_interactions(df, y, candidates=[("x1", "x2")], max_cells=20_000_000)
     assert np.isfinite(lifted.iloc[0]["z"])
+
+
+def _span_cosine(probe, refit):
+    """Minimum principal cosine between two column spans of equal rank.
+
+    Both sides are identifiable deviation spaces -- the probe centered by
+    ``tensor_marginal_ingredients()``, the refit by the build of the spec it
+    resolved -- so they must have the same rank AND the same span.  Equal rank
+    is asserted here rather than left to the cosine because containment alone
+    is too weak: a refit that skipped centering carries one extra direction and
+    still reproduces every probe direction.
+    """
+
+    def orth(m):
+        m = np.asarray(m, dtype=np.float64)
+        q, r = np.linalg.qr(m)
+        diag = np.abs(np.diag(r))
+        return q[:, diag > 1e-10 * max(1.0, diag.max())]
+
+    qi, qo = orth(probe), orth(refit)
+    assert qi.shape[1] == qo.shape[1], f"probe rank {qi.shape[1]} != refit rank {qo.shape[1]}"
+    return float(np.linalg.svd(qo.T @ qi, compute_uv=False).min())
+
+
+@pytest.mark.parametrize("spline_kind", ["ps", "cr"])
+def test_spline_cat_probe_spans_the_basis_its_refit_builds(spline_kind):
+    """The screen's probe and the term it names as its refit must agree.
+
+    This is the invariant the whole confirm-by-refit contract rests on, so it
+    is pinned as an identity rather than as a value.  It held for ``ps`` and
+    failed for ``cr``, because cubic regression splines carry two bases: a
+    main effect uses the projected-B-spline ``CubicRegressionSpline`` while an
+    interaction marginal uses ``CardinalCRSpline``.  ``TensorInteraction`` had
+    that routing and ``SplineCategorical`` did not, so on the margin below the
+    ``cr`` probe and its own refit spanned different spaces -- minimum
+    principal cosine 0.9028, a 25.5 degree rotation.
+    """
+    import scipy.sparse as sp
+
+    from superglm.features.interaction import TensorInteraction
+
+    rng = np.random.default_rng(0)
+    n = 8000
+    # Skewed, so uniform and quantile knot placement genuinely disagree.
+    x = np.round(np.concatenate([rng.uniform(0, 1, 6400), rng.uniform(0, 10, 1600)]), 2)
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(np.exp(0.2 + 0.15 * np.log1p(x))).astype(np.float64)
+    features = {"x": Spline(kind=spline_kind, n_knots=10), "f": Categorical()}
+    support = np.unique(x)
+    counts = np.unique(x, return_counts=True)[1]
+
+    # The probe, exactly as screen_interactions assembles it from the mains fit.
+    mains = SuperGLM(family="poisson", features=features)
+    mains.fit_reml(df, y)
+    info = TensorInteraction._marginal_from_spec(
+        mains._specs["x"], x, None, support=support, counts=counts
+    )
+    basis = info.basis
+    probe = np.asarray(basis.todense() if sp.issparse(basis) else basis, dtype=np.float64)
+
+    # The refit, read back from the spec the fitted term actually stored --
+    # not from the parent spec, which is the thing that used to differ.
+    confirmed = SuperGLM(family="poisson", features=features, interactions=[("x", "f")])
+    confirmed.fit_reml(df, y)
+    ispec = confirmed._interaction_specs[next(iter(confirmed._interaction_specs))]
+    stored = ispec._spline_spec
+    raw = np.asarray(sp.csr_matrix(stored._raw_basis_matrix(support)).todense(), dtype=np.float64)
+    projection = getattr(stored, "_interaction_projection", None)
+    refit = raw if projection is None else raw @ np.asarray(projection, dtype=np.float64)
+
+    assert _span_cosine(probe, refit) == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("spline_kind", ["ps", "cr"])
+def test_spline_cat_design_keeps_full_rank_beside_its_mains(spline_kind, discrete):
+    """A masked interaction block must not rebuild its own level indicator.
+
+    An interaction marginal resolved but never built carries no identifiability
+    projection, and the cardinal cr basis reproduces the constant function
+    exactly -- its columns sum to 1 at every x.  Masking that uncentered block
+    to a level then duplicates the categorical main effect's indicator column
+    for that level: one lost rank per non-base level, in a design the solver
+    still has to invert.
+    """
+    rng = np.random.default_rng(3)
+    n = 4000
+    x = rng.uniform(0.0, 10.0, n)
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(2.0, n).astype(np.float64)
+
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind=spline_kind, n_knots=8), "f": Categorical()},
+        interactions=[("x", "f")],
+        discrete=discrete,
+        n_bins=64 if discrete else None,
+    )
+    model._build_design_matrix(df, y, np.ones(n), None)
+    design = model._dm.toarray()
+    singular = np.linalg.svd(design, compute_uv=False)
+    rank = int(np.sum(singular > singular.max() * 1e-10))
+    assert rank == design.shape[1], f"{design.shape[1] - rank} deficient column(s)"
+
+
+@pytest.mark.parametrize("spline_kind", ["ps", "cr"])
+def test_spline_cat_predicts_the_design_it_fitted(spline_kind):
+    """Storing a resolved parent spec is only safe if predict reads it back.
+
+    ``transform``/``score`` rebuild the basis from ``self._spline_spec``, so
+    substituting the interaction basis at build time without storing it would
+    silently score a different linear predictor than the fitted design.
+    """
+    rng = np.random.default_rng(1)
+    n = 8000
+    x = np.round(np.concatenate([rng.uniform(0, 1, 6400), rng.uniform(0, 10, 1600)]), 2)
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(np.exp(0.2 + 0.15 * np.log1p(x))).astype(np.float64)
+
+    model = SuperGLM(
+        family="poisson",
+        features={"x": Spline(kind=spline_kind, n_knots=10), "f": Categorical()},
+        interactions=[("x", "f")],
+    )
+    model.fit_reml(df, y)
+    mu = model.predict(df)
+    term = np.where(y > 0, y * np.log(np.maximum(y, 1e-300) / mu), 0.0)
+    assert 2.0 * float(np.sum(term - (y - mu))) == pytest.approx(
+        model._result.deviance, rel=1e-9, abs=1e-9
+    )
+
+
+def test_select_cr_parent_keeps_its_own_basis_in_an_interaction():
+    """The interaction cr routing must not touch a select=True parent.
+
+    The cardinal spec an interaction marginal resolves to is built with
+    ``select=False`` and one penalty order, so it cannot carry a select
+    parent's double-penalty geometry -- substituting drops the identifiability
+    projection that shrinks the block and leaves the design rank-deficient.
+    ``screen_interactions`` refuses select parents outright, so no probe goes
+    unmatched by leaving them alone.
+    """
+    from superglm.features.interaction import interaction_spline_spec
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    x = rng.uniform(0.0, 10.0, n)
+    spec = Spline(kind="cr", n_knots=8, select=True)
+    plain = Spline(kind="cr", n_knots=8)
+
+    df = pd.DataFrame({"x": x, "f": pd.Categorical(rng.integers(0, 4, n).astype(str))})
+    y = rng.poisson(1.5, n).astype(np.float64)
+    fitted_select = SuperGLM(family="poisson", features={"x": spec, "f": Categorical()})
+    fitted_select.fit_reml(df, y)
+    fitted_plain = SuperGLM(family="poisson", features={"x": plain, "f": Categorical()})
+    fitted_plain.fit_reml(df, y)
+
+    sel = fitted_select._specs["x"]
+    assert interaction_spline_spec(sel, x) is sel, "select parent must pass through"
+    # The control: an ordinary cr parent IS resolved, so the guard is specific
+    # rather than the routing being dead.
+    ordinary = fitted_plain._specs["x"]
+    assert interaction_spline_spec(ordinary, x) is not ordinary
+
+    # And screening refuses the select parent, so nothing is left unscreened
+    # that a probe would have needed to match.
+    with pytest.raises(ValueError, match="select=True"):
+        fitted_select.screen_interactions(df, y)
+
+
+@pytest.mark.parametrize("m_order", [1, 2, 3])
+def test_cr_interaction_keeps_the_penalty_order_it_was_asked_for(m_order):
+    """A cr parent's penalty order must survive the interaction routing.
+
+    ``CardinalCRSpline`` implements one penalty -- the integrated squared
+    second derivative -- and rejects ``m=3`` outright.  Routing every cr parent
+    through it would therefore raise for ``m=3`` and silently answer ``m=1``
+    with a second-derivative penalty.  The parent's own quadrature penalty
+    supports all three, so anything but ``m=2`` keeps it, in the varying
+    coefficient block and the tensor marginal alike.
+    """
+    from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+
+    rng = np.random.default_rng(4)
+    n = 4000
+    x = rng.uniform(0.0, 10.0, n)
+    df = pd.DataFrame(
+        {
+            "x": x,
+            "z": rng.uniform(0.0, 5.0, n),
+            "f": pd.Categorical(rng.integers(0, 4, n).astype(str)),
+        }
+    )
+    y = rng.poisson(2.0, n).astype(np.float64)
+    parent = Spline(kind="cr", n_knots=8, m=m_order)
+
+    varying = SuperGLM(
+        family="poisson",
+        features={"x": parent, "f": Categorical()},
+        interactions=[("x", "f")],
+    )
+    varying.fit_reml(df, y)
+    stored = varying._interaction_specs[next(iter(varying._interaction_specs))]._spline_spec
+    assert stored._m_orders == (m_order,)
+
+    if m_order == 2:
+        # The one order the cardinal basis implements, so the routing is live.
+        assert isinstance(stored, CardinalCRSpline)
+    else:
+        # Everything else keeps the parent, whose quadrature penalty is the
+        # only implementation that has the requested order at all.  The second
+        # assertion is the control: these orders build genuinely different
+        # penalties, so "kept the parent" is not vacuously true.
+        assert isinstance(stored, CubicRegressionSpline)
+        charged = stored._build_penalty()
+        assert np.allclose(charged, stored._build_penalty_for_order(m_order))
+        assert not np.allclose(charged, stored._build_penalty_for_order(2))
+
+    # The tensor path takes the same routing, so it must survive m=3 too.
+    tensor = SuperGLM(
+        family="poisson",
+        features={"x": parent, "z": Spline(kind="cr", n_knots=8)},
+        interactions=[("x", "z")],
+    )
+    tensor.fit_reml(df, y)
+    assert np.isfinite(tensor._result.deviance)

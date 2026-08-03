@@ -14,6 +14,24 @@ from numpy.typing import NDArray
 from superglm.types import GroupInfo
 
 
+def _validate_observed_categorical_levels(
+    observed: set,
+    known_levels: set,
+    *,
+    context: str = "",
+) -> None:
+    """Raise for observed levels outside a fitted categorical domain."""
+    unseen = observed - known_levels
+    if unseen:
+        msg = (
+            f"Encountered unseen categorical levels at predict time: {sorted(unseen)}. "
+            f"All levels must be among those seen during fit: {sorted(known_levels)}."
+        )
+        if context:
+            msg = f"[{context}] {msg}"
+        raise ValueError(msg)
+
+
 def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str = "") -> None:
     """Raise ValueError if x contains levels not seen during fit.
 
@@ -35,15 +53,11 @@ def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str 
         raise ValueError(msg)
 
     observed = set(np.unique(x).tolist())
-    unseen = observed - known_levels
-    if unseen:
-        msg = (
-            f"Encountered unseen categorical levels at predict time: {sorted(unseen)}. "
-            f"All levels must be among those seen during fit: {sorted(known_levels)}."
-        )
-        if context:
-            msg = f"[{context}] {msg}"
-        raise ValueError(msg)
+    _validate_observed_categorical_levels(
+        observed,
+        known_levels,
+        context=context,
+    )
 
 
 def _grouping_labels(x: NDArray) -> NDArray:
@@ -54,6 +68,46 @@ def _grouping_labels(x: NDArray) -> NDArray:
     if np.asarray(pd.isna(x)).any():
         raise ValueError("Categorical column contains missing values (NaN or None).")
     return pd.Series(x).astype(str).to_numpy()
+
+
+def _resolve_categorical_labels(
+    x: NDArray,
+    grouping,
+    *,
+    known_levels: set | None = None,
+    context: str = "",
+) -> NDArray:
+    """Resolve one categorical parent's raw labels into its fitted level domain.
+
+    A grouped categorical's public input contract is always the ORIGINAL
+    labels.  Group labels are not accepted as an alternative input domain:
+    they may themselves be original labels with a different mapping.  Validate
+    the raw domain first, apply the mapping exactly once, then (when fitted
+    levels are supplied) certify that the collapsed level was present at fit.
+    """
+    x = np.asarray(x).ravel()
+    if grouping is None:
+        if known_levels is not None:
+            _validate_categorical_levels(x, known_levels, context=context)
+        return x
+
+    import pandas as pd
+
+    labels = _grouping_labels(x)
+    _validate_observed_categorical_levels(
+        set(pd.unique(labels).tolist()),
+        set(grouping.all_original_levels),
+        context=context,
+    )
+    mapping = grouping.original_to_group
+    resolved = pd.Series(labels, copy=False).map(mapping).to_numpy()
+    if known_levels is not None:
+        _validate_observed_categorical_levels(
+            set(pd.unique(resolved).tolist()),
+            known_levels,
+            context=context,
+        )
+    return resolved
 
 
 class Categorical:
@@ -89,14 +143,7 @@ class Categorical:
         """Build sparse one-hot design columns, choosing the base level from *x*."""
         import pandas as pd
 
-        x = np.asarray(x).ravel()
-
-        # Apply grouping mapping before factorization
-        if self._grouping is not None:
-            # Validate against original levels
-            x = _grouping_labels(x)
-            _validate_categorical_levels(x, set(self._grouping.all_original_levels))
-            x = pd.Series(x).map(self._grouping.original_to_group).values
+        x = _resolve_categorical_labels(x, self._grouping)
 
         # Single-pass O(n) factorize — avoids O(n log n) sort + O(n * levels) loop
         codes, uniques = pd.factorize(x, sort=True)
@@ -149,28 +196,22 @@ class Categorical:
 
     def transform(self, x: NDArray) -> NDArray:
         """One-hot encode using levels learned during build()."""
-        import pandas as pd
-
-        x = np.asarray(x).ravel()
-        if self._grouping is not None:
-            x = _grouping_labels(x)
-            _validate_categorical_levels(x, set(self._grouping.all_original_levels))
-            x = pd.Series(x).map(self._grouping.original_to_group).values
-        else:
-            _validate_categorical_levels(x, set(self._levels))
+        x = _resolve_categorical_labels(
+            x,
+            self._grouping,
+            known_levels=set(self._levels),
+        )
         return np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted categorical contribution directly on new data."""
         import pandas as pd
 
-        x = np.asarray(x).ravel()
-        if self._grouping is not None:
-            x = _grouping_labels(x)
-            _validate_categorical_levels(x, set(self._grouping.all_original_levels))
-            x = pd.Series(x).map(self._grouping.original_to_group).values
-        else:
-            _validate_categorical_levels(x, set(self._levels))
+        x = _resolve_categorical_labels(
+            x,
+            self._grouping,
+            known_levels=set(self._levels),
+        )
 
         codes = pd.Categorical(x, categories=self._levels).codes
         level_effects = np.zeros(len(self._levels), dtype=np.float64)

@@ -312,15 +312,23 @@ class TestDirectSolverBasic:
             "return_xtwx": True,
         }
 
-        original = irls_direct.decompose_gram
         decomposition_calls = 0
 
-        def counted(matrix, *args, **kwargs):
-            nonlocal decomposition_calls
-            decomposition_calls += 1
-            return original(matrix, *args, **kwargs)
+        # Both entry points count: a terminal decomposition the candidate fit
+        # skips is skipped whether or not the retained fit would have had to
+        # certify it against the observation factor.
+        def _counting(name):
+            original = getattr(irls_direct, name)
 
-        monkeypatch.setattr(irls_direct, "decompose_gram", counted)
+            def counted(matrix, *args, **kwargs):
+                nonlocal decomposition_calls
+                decomposition_calls += 1
+                return original(matrix, *args, **kwargs)
+
+            return counted
+
+        for name in ("decompose_gram", "decompose_gram_if_authoritative"):
+            monkeypatch.setattr(irls_direct, name, _counting(name))
         retained, _, _ = irls_direct.fit_irls_direct(**common)
         retained_geometry_calls = decomposition_calls
         assert retained.rank_info is not None
@@ -910,14 +918,14 @@ class TestDirectSolverBasic:
         )
 
     def test_qp_constraints_are_assembled_once_across_iterations(self, monkeypatch):
-        """QP constraint blocks are fixed for a fit and should not be rebuilt per IRLS step."""
+        """Large constrained fits dispatch raw moments through their cached plan."""
         import superglm.solvers.irls_direct as irls_direct
         from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
         from superglm.distributions import Gaussian
         from superglm.links import IdentityLink
 
         rng = np.random.default_rng(457)
-        n = 80
+        n = 50_000
         X_raw = np.column_stack([rng.normal(size=n), rng.normal(size=n)])
         y = 0.3 + X_raw @ np.array([0.1, -0.2]) + rng.normal(scale=0.1, size=n)
         dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
@@ -947,8 +955,13 @@ class TestDirectSolverBasic:
             return original_moments(self, *args, **kwargs)
 
         monkeypatch.setattr(irls_direct, "solve_constrained_qp", recording_qp)
-        monkeypatch.setattr(MatrixExecutionPlan, "_moments_prevalidated", recording_moments)
+        monkeypatch.setattr(
+            MatrixExecutionPlan,
+            "_moments_prevalidated",
+            recording_moments,
+        )
 
+        profile = {}
         result, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
@@ -959,12 +972,48 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=3,
             tol=0.0,
+            profile=profile,
         )
 
+        assert dm.n * dm.p == 100_000
         assert result.n_iter == 3
         assert len({id(A) for A in constraint_matrices}) == 1
-        assert moment_plan_ids
-        assert set(moment_plan_ids) == {id(dm.execution_plan)}
+        assert moment_plan_ids == [id(dm.execution_plan)]
+        assert profile["centered_raw_moment_hits"] == 1
+
+        # Compare the dispatched path with the stable chunked baseline. The
+        # Gaussian working Gram is fit-invariant, so both paths build it once.
+        original_centered = irls_direct.build_centered_system
+
+        def force_chunked_centering(*args, **kwargs):
+            kwargs["_force_chunked"] = True
+            return original_centered(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "solve_constrained_qp", original_qp)
+        monkeypatch.setattr(
+            irls_direct,
+            "build_centered_system",
+            force_chunked_centering,
+        )
+        baseline_profile = {}
+        baseline, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=np.ones(n),
+            family=Gaussian(),
+            link=IdentityLink(),
+            groups=groups,
+            lambda2=0.0,
+            max_iter=3,
+            tol=0.0,
+            profile=baseline_profile,
+        )
+
+        assert moment_plan_ids == [id(dm.execution_plan)]
+        assert baseline_profile.get("centered_raw_moment_hits", 0) == 0
+        np.testing.assert_allclose(result.beta, baseline.beta, rtol=2e-12, atol=2e-13)
+        assert result.intercept == pytest.approx(baseline.intercept, rel=2e-12, abs=2e-13)
+        assert result.deviance == pytest.approx(baseline.deviance, rel=2e-12, abs=2e-13)
 
     def test_variable_weight_fit_rebuilds_weighted_gram(self, monkeypatch):
         """Poisson log fits do not reuse X'WX because W changes with mu."""

@@ -31,6 +31,24 @@ else:
 _MAX_DISC_DISC_HIST_CELLS = 5_000_000
 _MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
 
+# Transient ceiling for the row-expanded cross-gram fallback, matching the byte
+# budgets used elsewhere in this package.  The histogram cap above bounds CELLS;
+# this bounds the ROWS the fallback expands, which the cell cap cannot.
+_MAX_CROSS_EXPANSION_BYTES = 64 << 20
+
+# Ceiling on a CROSS-SHAPED aggregate: an array whose row count comes from one
+# block and whose column count comes from the other.  Every gate in this
+# subsystem bounds one block against its OWN width -- the support gate bounds
+# n_support * p_b, the histogram caps bound n_bins_i * n_bins_j -- and none of
+# them bounds a row count from one block against a width from the other.  That
+# product is what the aggregate allocates, so it needs its own ceiling.
+_MAX_AGGREGATE_CELLS = _MAX_CROSS_EXPANSION_BYTES // 8
+
+
+def _aggregate_column_chunk(n_bins: int, n_cols: int) -> int:
+    """Output columns per pass of a cross-shaped aggregate, sized in CELLS."""
+    return max(1, min(int(n_cols), int(_MAX_AGGREGATE_CELLS // max(int(n_bins), 1))))
+
 
 def _profile_add(profile: dict[str, Any] | None, key: str, value: float) -> None:
     if profile is not None:
@@ -136,6 +154,41 @@ def _runtime_group_matrix_types():
     )
 
 
+def _agg_by_bin_fits(gm: GroupMatrix, n_bins: int) -> bool:
+    """Whether ``_agg_by_bin``'s output is small enough to materialise.
+
+    Its result is ``(n_bins, gm.shape[1])`` -- the row count from the block
+    supplying the bins, the width from the block being aggregated.  Those are
+    DIFFERENT blocks at every caller, so this is the cross shape, and no gate in
+    the subsystem bounds the product.  An earlier version of the invariant test
+    exempted these calls on the stated ground that both dimensions came from the
+    same block; that was simply wrong, and a narrow million-row support beside a
+    wide sparse term is the counterexample.
+    """
+    return int(n_bins) * _agg_by_bin_width(gm) <= _MAX_AGGREGATE_CELLS
+
+
+def _agg_by_bin_width(gm: GroupMatrix) -> int:
+    """The width ``_agg_by_bin`` actually ALLOCATES at, not the width it returns.
+
+    The SSP branches aggregate in basis space and only then apply ``R_inv``, so
+    the intermediate is ``_p_b`` wide while ``shape[1]`` is the post-transform
+    width -- 600 against 4 on the pairing that exposed this.  Budgeting against
+    the returned width silently permits the allocation it is meant to stop.
+    """
+    for attribute in ("_p_b",):
+        width = getattr(gm, attribute, None)
+        if width is not None:
+            return int(width)
+    matrix = getattr(gm, "M", None)
+    if matrix is not None:
+        return int(matrix.shape[1])
+    unique = getattr(gm, "B_unique", None)
+    if unique is not None:
+        return max(int(unique.shape[1]), int(gm.shape[1]))
+    return int(gm.shape[1])
+
+
 def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:
     """Aggregate W * gm's columns by bin index → (n_bins, p_g) dense array.
 
@@ -175,8 +228,18 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
         return B_agg @ gm.R_inv
     if isinstance(gm, DiscretizedSplineCategoricalGroupMatrix):
         rows = gm.row_idx
-        X_level = (gm.B_unique @ gm.R_inv)[gm.bin_idx_level]
-        return _weighted_bincount_2d(bin_idx[rows], W[rows], X_level, n_bins)
+        # Chunked, and it is the only branch here that needed saying so: the
+        # SCOP, SSP and factor-smooth branches all decline into
+        # ``_aggregate_group_matrix_columns``, which is column-at-a-time and
+        # bounded, while this one expanded the level per observation row.
+        # Reached when ``_cross_gram_discrete_spline_categorical`` declines at
+        # its cell cap and dispatch falls through to the disc-x-non-disc branch,
+        # which is newly reachable because a lossless support makes ``n_bins``
+        # large on both sides.  ``B_unique @ R_inv`` is ``(n_support, p_g)``,
+        # bounded by the support gate; the gather off it was not.
+        return _chunked_support_bincount_2d(
+            bin_idx[rows], W[rows], gm.B_unique @ gm.R_inv, gm.bin_idx_level, n_bins
+        )
     if isinstance(gm, SplineCategoricalGroupMatrix):
         rows = gm.row_idx
         B_agg = _csr_weighted_bincount(
@@ -246,6 +309,13 @@ def _random_effect_cross_gram(
     W: NDArray,
 ) -> NDArray:
     """Return ``X_re.T @ diag(W) @ X_other`` by direct level aggregation."""
+    # Guarded like every other _agg_by_bin caller.  The output is
+    # (n_levels, width-of-other) -- cross-shaped, and a high-cardinality random
+    # effect beside a wide raw-basis SSP term is the case that reaches it.  An
+    # earlier audit only inspected functions named _cross_gram, so this call sat
+    # outside its scope entirely.
+    if not _agg_by_bin_fits(other, random_effect.n_levels):
+        return _cross_gram_by_columns(random_effect, other, W)
     return _agg_by_bin(
         other,
         random_effect.codes,
@@ -556,16 +626,73 @@ def _cross_gram_tensor_spline_categorical(
 
     if hasattr(gm_spline_cat, "B_unique"):
         bin_cat = gm_spline_cat.bin_idx_level
+        # A lossless spline_cat support is bounded by its row count, not by a
+        # bin count, so the joint histogram is not automatically small; expand
+        # the level's rows once and aggregate on them when it is not.
+        if gm_tensor.n_bins1 * gm_spline_cat.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
+            for j2 in range(K2):
+                w_col = W_rows * B2[idx2, j2]
+                H = _disc_disc_2d_hist(
+                    idx1,
+                    bin_cat,
+                    w_col,
+                    gm_tensor.n_bins1,
+                    gm_spline_cat.n_bins,
+                )
+                result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
+            return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
+        # Over the cell cap.  Chunk the row expansion rather than materialising
+        # the whole level: the cap bounds CELLS, and a lossless support leaves
+        # the row count unbounded underneath it.  The chunk loop is outermost so
+        # each row is still expanded exactly once across all K2 passes.
+        n_level = int(W_rows.shape[0])
+        chunk = min(
+            max(n_level, 1),
+            _cross_expansion_chunk_rows(K_cat, 0, _MAX_CROSS_EXPANSION_BYTES),
+        )
+        # Holding every channel at once lets each row be expanded exactly once,
+        # but the accumulator is (K2, n_bins1, K_cat) -- itself cross-shaped, and
+        # n_bins1 follows a per-feature n_bins that nothing caps.  So the fast
+        # nesting is used only while that buffer fits, and otherwise the loops
+        # invert: one channel at a time, one (n_bins1, K_cat) accumulator, at the
+        # cost of re-expanding the rows per channel.  Bounded memory bought with
+        # time, declared rather than assumed.
+        if K2 * gm_tensor.n_bins1 * K_cat <= _MAX_AGGREGATE_CELLS:
+            agg = np.zeros((K2, gm_tensor.n_bins1, K_cat), dtype=np.float64)
+            for start in range(0, n_level, chunk):
+                stop = min(start + chunk, n_level)
+                block = _expand_support_rows(gm_spline_cat.B_unique, bin_cat[start:stop])
+                idx1_chunk = idx1[start:stop]
+                for j2 in range(K2):
+                    w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
+                    agg[j2] += _weighted_bincount_2d(idx1_chunk, w_col, block, gm_tensor.n_bins1)
+                del block  # next expansion is evaluated before the rebind
+            for j2 in range(K2):
+                result_raw[j2::K2, :] = B1.T @ agg[j2]
+            return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
+
+        # One channel at a time is still not enough: a single (n_bins1, K_cat)
+        # channel is itself cross-shaped, and n_bins1 follows a configured
+        # n_bins.  So the basis dimension is tiled inside the channel as well,
+        # and only the columns of that tile are ever expanded.  What is left at
+        # the smallest tile is (n_bins1, 1), which is the least an aggregate
+        # over n_bins1 bins can occupy.
+        tile = _aggregate_column_chunk(gm_tensor.n_bins1, K_cat)
         for j2 in range(K2):
-            w_col = W_rows * B2[idx2, j2]
-            H = _disc_disc_2d_hist(
-                idx1,
-                bin_cat,
-                w_col,
-                gm_tensor.n_bins1,
-                gm_spline_cat.n_bins,
-            )
-            result_raw[j2::K2, :] = B1.T @ H @ gm_spline_cat.B_unique
+            for first in range(0, K_cat, tile):
+                last = min(first + tile, K_cat)
+                columns = gm_spline_cat.B_unique[:, first:last]
+                channel = np.zeros((gm_tensor.n_bins1, last - first), dtype=np.float64)
+                for start in range(0, n_level, chunk):
+                    stop = min(start + chunk, n_level)
+                    block = _expand_support_rows(columns, bin_cat[start:stop])
+                    w_col = W_rows[start:stop] * B2[idx2[start:stop], j2]
+                    channel += _weighted_bincount_2d(
+                        idx1[start:stop], w_col, block, gm_tensor.n_bins1
+                    )
+                    del block
+                result_raw[j2::K2, first:last] = B1.T @ channel
         return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
     for j2 in range(K2):
@@ -584,6 +711,187 @@ def _cross_gram_tensor_spline_categorical(
     return gm_tensor.R_inv.T @ result_raw @ gm_spline_cat.R_inv
 
 
+def _expand_support_rows(B_unique: NDArray, bin_idx: NDArray) -> NDArray:
+    """Materialise a support block on its observation rows.
+
+    Named so the chunking above it can be pinned by row count in a test rather
+    than asserted about.
+    """
+    return B_unique[bin_idx]
+
+
+def _cross_expansion_chunk_rows(p_i: int, p_j: int, max_bytes: int) -> int:
+    """Rows per chunk of the expanded cross-gram, sized in BYTES.
+
+    Two expanded blocks are live at once and the right one is scaled in place,
+    so a chunk costs ``rows * (p_i + p_j) * 8``.  Pass ``p_j=0`` where only one
+    block is expanded.
+    """
+    return max(1, int(max_bytes // max((p_i + p_j) * 8, 1)))
+
+
+def _chunked_support_bincount_2d(
+    bin_idx: NDArray,
+    weights: NDArray,
+    B_unique: NDArray,
+    support_idx: NDArray,
+    n_bins: int,
+    max_bytes: int | None = None,
+) -> NDArray:
+    """``_weighted_bincount_2d`` over support-indexed rows, expanded in chunks.
+
+    The aggregation is a sum over rows, so partitioning the rows partitions the
+    sum.  Chunking matters here for the same reason it does in
+    :func:`_support_support_raw_cross`: a lossless support bounds the number of
+    DISTINCT rows, not the number of observation rows the level owns, so
+    materialising the level in one go is unbounded in ``n``.
+
+    Below the threshold the loop runs once and the result is bit-identical to
+    the unchunked form, so ordinary fits are unaffected.
+    """
+    # Resolved at call time, not bound as a default: the budget is a module
+    # global so that it can be lowered in a test, and a default argument would
+    # freeze it at import.
+    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
+    p_b = int(B_unique.shape[1])
+    out = np.zeros((int(n_bins), p_b), dtype=np.float64)
+    n_rows = int(np.size(support_idx))
+    if n_rows == 0:
+        return out
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_b, 0, budget))
+    for start in range(0, n_rows, chunk):
+        stop = min(start + chunk, n_rows)
+        block = _expand_support_rows(B_unique, support_idx[start:stop])
+        out += _weighted_bincount_2d(bin_idx[start:stop], weights[start:stop], block, int(n_bins))
+        # See _support_support_raw_cross: the next expansion is evaluated before
+        # the name is rebound, so without this the ceiling is 2x the budget.
+        del block
+    return out
+
+
+def _mixed_chunk_stop(
+    indptr: NDArray, start_row: int, n_rows: int, dense_rows: int, max_nnz: int
+) -> int:
+    """End of a mixed-pair row chunk, budgeting the SPARSE payload as well.
+
+    Sizing by the dense expansion alone budgets only ``rows * p_b * 8``.  The
+    weighted CSR slice beside it costs ``nnz-in-range * 12`` (float64 plus a
+    32-bit index), and ``nnz`` per row is a property of the OTHER block -- for a
+    cardinal-CR basis the rows are structurally dense.  A narrow compressed side
+    therefore permits a huge row count, and the sparse payload follows it: five
+    compressed columns admit ~1.68M rows, which against a 20-column dense CSR is
+    tens of millions of stored entries.  Boundaries come off ``indptr``, so the
+    bound is the range's ACTUAL nonzeros rather than an average that a skewed
+    row density would defeat.
+    """
+    stop_row = min(start_row + dense_rows, n_rows)
+    limit = int(indptr[start_row]) + max_nnz
+    # Largest row boundary whose cumulative nnz is still inside the budget.
+    by_payload = int(np.searchsorted(indptr, limit, side="right")) - 1
+    stop_row = min(stop_row, by_payload)
+    # One row can never be split, so always make progress.
+    return max(stop_row, start_row + 1)
+
+
+def _support_csr_raw_cross(
+    B_unique: NDArray,
+    support_idx: NDArray,
+    B_csr,
+    W_rows: NDArray,
+) -> NDArray:
+    """``B_support.T @ diag(W) @ B_csr`` with NO observation-level temporary.
+
+    The mixed pairing -- one ``spline_cat`` block compressed, the other still
+    CSR -- is created by the compression gate itself, so it is a regression
+    rather than a pre-existing path: before, two exact blocks contracted sparse
+    against sparse.  Expanding the compressed side and densifying the weighted
+    CSR side made BOTH sides worse than they had been.
+
+    Aggregating the CSR side onto the support bins first avoids the choice.
+    The only dense array is ``(n_support, p_csr)``, bounded by the same support
+    gate that bounds ``B_unique``; the CSR side is never densified and the
+    observation rows are never materialised, so no chunking is needed.
+    """
+    # Row-chunked, in ONE pass over the data.  Column chunking bounded the
+    # memory but made every pass re-walk all n row pointers -- measured at 88
+    # passes for n_support=1e6 against a 700-column term, and the CSC rewrite
+    # that removes the slicing cost still leaves that traversal, so it bought
+    # 1.10x rather than fixing it.  Contracting over row chunks instead touches
+    # each nonzero once, keeps the CSR side sparse throughout, and never forms
+    # the (n_support, p_csr) aggregate at all -- so the cross-shaped array this
+    # helper existed to bound is simply not built.
+    csr = B_csr.tocsr()
+    p_b = int(B_unique.shape[1])
+    p_csr = int(csr.shape[1])
+    support_idx = np.asarray(support_idx, dtype=np.intp)
+    W_rows = np.asarray(W_rows, dtype=np.float64)
+    out = np.zeros((p_b, p_csr), dtype=np.float64)
+    n_rows = int(W_rows.shape[0])
+    if n_rows == 0:
+        return out
+    dense_rows = min(n_rows, _cross_expansion_chunk_rows(p_b, 0, _MAX_CROSS_EXPANSION_BYTES))
+    # float64 payload plus a 32-bit column index per stored entry.
+    max_nnz = max(1, _MAX_CROSS_EXPANSION_BYTES // 12)
+    start_row = 0
+    while start_row < n_rows:
+        stop_row = _mixed_chunk_stop(csr.indptr, start_row, n_rows, dense_rows, max_nnz)
+        left = _expand_support_rows(B_unique, support_idx[start_row:stop_row])
+        right = csr[start_row:stop_row].multiply(W_rows[start_row:stop_row, None])
+        # sparse.T @ dense keeps the CSR side sparse; the product is (p_csr, p_b).
+        out += np.asarray(right.T @ left, dtype=np.float64).T
+        del left, right
+        start_row = stop_row
+    return out
+
+
+def _support_support_raw_cross(
+    B_unique_i: NDArray,
+    bin_idx_i: NDArray,
+    B_unique_j: NDArray,
+    bin_idx_j: NDArray,
+    W_rows: NDArray,
+    max_bytes: int | None = None,
+) -> NDArray:
+    """``B_i.T @ diag(W) @ B_j`` for two support-indexed blocks over shared rows.
+
+    The 2-D weight histogram both callers prefer costs ``n_bins_i * n_bins_j``
+    cells, which is bounded only when the supports are bins.  A lossless
+    support is bounded by the row count instead, so on wide supports this
+    contracts over the shared rows and lets BLAS do the work.
+
+    Chunked over rows, because the row count is exactly what a lossless support
+    does NOT bound: expanding both sides in one go costs
+    ``n_rows * (p_i + p_j) * 8`` bytes, which for a dominant level on a large
+    book runs to hundreds of MB per call, inside solver iterations.  The cap
+    that routes here bounds cells; without this it would only move the memory
+    rather than bound it.  Accumulating in chunks keeps the transient at
+    ``max_bytes`` regardless of row count, and the contraction is a sum over
+    rows so partitioning it changes nothing but summation order.
+    """
+    budget = _MAX_CROSS_EXPANSION_BYTES if max_bytes is None else max_bytes
+    p_i = int(B_unique_i.shape[1])
+    p_j = int(B_unique_j.shape[1])
+    out = np.zeros((p_i, p_j), dtype=np.float64)
+    n_rows = int(W_rows.shape[0])
+    if n_rows == 0:
+        return out
+    chunk = min(n_rows, _cross_expansion_chunk_rows(p_i, p_j, budget))
+    for start in range(0, n_rows, chunk):
+        stop = min(start + chunk, n_rows)
+        left = _expand_support_rows(B_unique_i, bin_idx_i[start:stop])
+        right = _expand_support_rows(B_unique_j, bin_idx_j[start:stop])
+        # Fancy indexing already returned a fresh array, so scaling it in place
+        # keeps the live count at two blocks rather than three.
+        right *= W_rows[start:stop, None]
+        out += left.T @ right
+        # Released explicitly: the next iteration's expansion is evaluated
+        # BEFORE its name is rebound, so without this the previous pair is
+        # still referenced at the allocation instant and the real ceiling is
+        # 1.5x the budget rather than 1x.
+        del left, right
+    return out
+
+
 def _cross_gram_categorical_spline_categorical(
     gm_cat: GroupMatrix,
     gm_spline_cat: GroupMatrix,
@@ -592,10 +900,16 @@ def _cross_gram_categorical_spline_categorical(
     """Cross-gram X_cat.T W X_spline_cat via one categorical aggregation."""
     if hasattr(gm_spline_cat, "B_unique"):
         rows = gm_spline_cat.row_idx
-        B_agg = _weighted_bincount_2d(
+        # Chunked: this expands the level to observation rows, which no cap
+        # above it bounds.  Pre-dates support compression -- the binned path
+        # reaches it too -- but compression puts it on the hot path of every
+        # model pairing a Categorical main effect with a spline_cat term,
+        # which is every model this compression targets.
+        B_agg = _chunked_support_bincount_2d(
             gm_cat.codes[rows],
             W[rows],
-            gm_spline_cat.B_unique[gm_spline_cat.bin_idx_level],
+            gm_spline_cat.B_unique,
+            gm_spline_cat.bin_idx_level,
             gm_cat.n_levels + 1,
         )
         return B_agg[: gm_cat.n_levels] @ gm_spline_cat.R_inv
@@ -631,22 +945,29 @@ def _cross_gram_spline_categorical_spline_categorical(
         i_discrete = hasattr(gm_i, "B_unique")
         j_discrete = hasattr(gm_j, "B_unique")
         if i_discrete and j_discrete:
-            H = _disc_disc_2d_hist(
-                gm_i.bin_idx_level,
-                gm_j.bin_idx_level,
-                W[rows],
-                gm_i.n_bins,
-                gm_j.n_bins,
-            )
-            raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+            if gm_i.n_bins * gm_j.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
+                H = _disc_disc_2d_hist(
+                    gm_i.bin_idx_level,
+                    gm_j.bin_idx_level,
+                    W[rows],
+                    gm_i.n_bins,
+                    gm_j.n_bins,
+                )
+                raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+            else:
+                raw = _support_support_raw_cross(
+                    gm_i.B_unique,
+                    gm_i.bin_idx_level,
+                    gm_j.B_unique,
+                    gm_j.bin_idx_level,
+                    W[rows],
+                )
             return gm_i.R_inv.T @ raw @ gm_j.R_inv
         if i_discrete:
-            B_i = gm_i.B_unique[gm_i.bin_idx_level]
-            raw = B_i.T @ np.asarray(gm_j.B_level.multiply(W[rows][:, None]).toarray())
-            return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+            raw = _support_csr_raw_cross(gm_i.B_unique, gm_i.bin_idx_level, gm_j.B_level, W[rows])
+            return gm_i.R_inv.T @ raw @ gm_j.R_inv
         if j_discrete:
-            B_j = gm_j.B_unique[gm_j.bin_idx_level]
-            raw = np.asarray((gm_i.B_level.multiply(W[rows][:, None]).T @ B_j), dtype=np.float64)
+            raw = _support_csr_raw_cross(gm_j.B_unique, gm_j.bin_idx_level, gm_i.B_level, W[rows]).T
             return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
         raw = gm_i.B_level.T @ gm_j.B_level.multiply(W[rows][:, None])
@@ -666,26 +987,35 @@ def _cross_gram_spline_categorical_spline_categorical(
     i_discrete = hasattr(gm_i, "B_unique")
     j_discrete = hasattr(gm_j, "B_unique")
     if i_discrete and j_discrete:
-        H = _disc_disc_2d_hist(
-            gm_i.bin_idx_level[pos_i],
-            gm_j.bin_idx_level[pos_j],
-            W[common_rows],
-            gm_i.n_bins,
-            gm_j.n_bins,
-        )
-        raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+        if gm_i.n_bins * gm_j.n_bins <= _MAX_DISC_DISC_HIST_CELLS:
+            H = _disc_disc_2d_hist(
+                gm_i.bin_idx_level[pos_i],
+                gm_j.bin_idx_level[pos_j],
+                W[common_rows],
+                gm_i.n_bins,
+                gm_j.n_bins,
+            )
+            raw = gm_i.B_unique.T @ H @ gm_j.B_unique
+        else:
+            raw = _support_support_raw_cross(
+                gm_i.B_unique,
+                gm_i.bin_idx_level[pos_i],
+                gm_j.B_unique,
+                gm_j.bin_idx_level[pos_j],
+                W[common_rows],
+            )
         return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     if i_discrete:
-        B_i = gm_i.B_unique[gm_i.bin_idx_level[pos_i]]
-        B_j = gm_j.B_level[pos_j]
-        raw = B_i.T @ np.asarray(B_j.multiply(W[common_rows][:, None]).toarray())
-        return gm_i.R_inv.T @ np.asarray(raw, dtype=np.float64) @ gm_j.R_inv
+        raw = _support_csr_raw_cross(
+            gm_i.B_unique, gm_i.bin_idx_level[pos_i], gm_j.B_level[pos_j], W[common_rows]
+        )
+        return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     if j_discrete:
-        B_i = gm_i.B_level[pos_i]
-        B_j = gm_j.B_unique[gm_j.bin_idx_level[pos_j]]
-        raw = np.asarray((B_i.multiply(W[common_rows][:, None]).T @ B_j), dtype=np.float64)
+        raw = _support_csr_raw_cross(
+            gm_j.B_unique, gm_j.bin_idx_level[pos_j], gm_i.B_level[pos_i], W[common_rows]
+        ).T
         return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
     B_i = gm_i.B_level[pos_i]
@@ -716,6 +1046,32 @@ def _cross_gram_discrete_spline_categorical(
         gm_spline_cat.n_bins,
     )
     raw = gm_disc.B_unique.T @ H @ gm_spline_cat.B_unique
+    return gm_disc.R_inv.T @ raw @ gm_spline_cat.R_inv
+
+
+def _support_support_cross_gram(
+    gm_disc: DiscretizedSSPGroupMatrix,
+    gm_spline_cat: GroupMatrix,
+    W: NDArray,
+) -> NDArray:
+    """The same product as :func:`_cross_gram_discrete_spline_categorical`,
+    for the case that one declines.
+
+    Two lossless supports can make the joint histogram exceed the cell cap.
+    Falling through from there used to reach ``_agg_by_bin``, whose output is
+    ``(gm_disc.n_bins, p_spline_cat)`` -- cross-shaped, with the row count from
+    one block and the width from the other, so neither support gate bounds it.
+    Contracting over the shared rows instead reuses the row-chunked path, whose
+    transient is the byte budget regardless of either support size.
+    """
+    rows = gm_spline_cat.row_idx
+    raw = _support_support_raw_cross(
+        gm_disc.B_unique,
+        gm_disc.bin_idx[rows],
+        gm_spline_cat.B_unique,
+        gm_spline_cat.bin_idx_level,
+        W[rows],
+    )
     return gm_disc.R_inv.T @ raw @ gm_spline_cat.R_inv
 
 
@@ -828,9 +1184,15 @@ def _cross_gram(
     ):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_discrete_spline_categorical(gm_i, gm_j, W)
-        if result is not None:
-            _profile_elapsed(profile, "block_cross_disc_other_s", t0)
-            return result
+        if result is None:
+            # Declined at the cell cap.  Falling through would reach the
+            # disc-x-non-disc branch and _agg_by_bin, whose output is
+            # cross-shaped (gm_i.n_bins, p_j) and bounded by neither support
+            # gate.  Contract over rows instead: already chunked, already
+            # bounded, and it is the same product.
+            result = _support_support_cross_gram(gm_i, gm_j, W)
+        _profile_elapsed(profile, "block_cross_disc_other_s", t0)
+        return result
     if (
         isinstance(gm_j, DiscretizedSSPGroupMatrix)
         and not isinstance(gm_j, DiscretizedTensorGroupMatrix)
@@ -838,9 +1200,10 @@ def _cross_gram(
     ):
         t0 = perf_counter() if profile is not None else 0.0
         result = _cross_gram_discrete_spline_categorical(gm_j, gm_i, W)
-        if result is not None:
-            _profile_elapsed(profile, "block_cross_disc_other_s", t0)
-            return result.T
+        if result is None:
+            result = _support_support_cross_gram(gm_j, gm_i, W)
+        _profile_elapsed(profile, "block_cross_disc_other_s", t0)
+        return result.T
 
     # Tensor × discretized main-effect (not tensor × tensor with different ids)
     if (
@@ -930,6 +1293,10 @@ def _cross_gram(
 
     if isinstance(gm_i, DiscretizedSCOPGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_j, gm_i.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
         result = gm_i.B_scop_unique.T @ WX_agg
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
@@ -937,6 +1304,10 @@ def _cross_gram(
 
     if isinstance(gm_j, DiscretizedSCOPGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_i, gm_j.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
         result = (gm_j.B_scop_unique.T @ WX_agg).T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
@@ -949,6 +1320,10 @@ def _cross_gram(
         gm_j, DiscretizedSSPGroupMatrix
     ):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_j, gm_i.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
         result = gm_i.R_inv.T @ (gm_i.B_unique.T @ WX_agg)
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
@@ -958,6 +1333,10 @@ def _cross_gram(
         gm_i, DiscretizedSSPGroupMatrix
     ):
         t0 = perf_counter() if profile is not None else 0.0
+        if not _agg_by_bin_fits(gm_i, gm_j.n_bins):
+            result = _cross_gram_by_columns(gm_i, gm_j, W)
+            _profile_elapsed(profile, "block_cross_fallback_s", t0)
+            return result
         WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
         result = (gm_j.R_inv.T @ (gm_j.B_unique.T @ WX_agg)).T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)

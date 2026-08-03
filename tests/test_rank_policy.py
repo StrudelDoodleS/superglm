@@ -41,6 +41,7 @@ from superglm.solvers.rank import (
     _symmetric_part,
     decompose_factor,
     decompose_gram,
+    decompose_gram_if_authoritative,
     needs_factor_certification,
     selected_group_name_set,
 )
@@ -49,6 +50,11 @@ from superglm.types import GroupSlice
 
 def _dense_design_matrix(X: np.ndarray) -> DesignMatrix:
     return DesignMatrix([DenseGroupMatrix(X)], n=X.shape[0], p=X.shape[1])
+
+
+def _roundoff_gamma(operation_count: int) -> float:
+    eps = np.finfo(np.float64).eps
+    return operation_count * eps / (1.0 - operation_count * eps)
 
 
 def _publish_result_revision(model, **changes) -> None:
@@ -563,8 +569,8 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
     assert hybrid.deviance == pytest.approx(stable.deviance, rel=2e-12, abs=2e-11)
 
 
-def test_equal_rank_factor_certificate_controls_retained_subspace() -> None:
-    """Equal certified ranks can still retain different cutoff-boundary directions."""
+def test_factor_certificate_controls_cutoff_boundary_prediction() -> None:
+    """The certified factor controls the public fit at the cutoff boundary."""
     rng = np.random.default_rng(4274)
     right, _ = np.linalg.qr(rng.normal(size=(3, 3)))
     half_left, _ = np.linalg.qr(rng.normal(size=(8, 3)))
@@ -580,7 +586,6 @@ def test_equal_rank_factor_certificate_controls_retained_subspace() -> None:
         z_off=y,
         penalty=np.zeros((3, 3)),
     )
-    gram_rank = decompose_gram(centered.data_gram)
     factor, factor_rhs = grouped_augmented_factor_rhs(
         dm,
         weights,
@@ -588,23 +593,45 @@ def test_equal_rank_factor_certificate_controls_retained_subspace() -> None:
         response=y - centered.mean_z,
         center=centered.mean_x,
     )
-    factor_rank = decompose_factor(factor, retain_factor_solve=True)
-    assert gram_rank.rank == factor_rank.rank == 2
-    assert needs_factor_certification(gram_rank)
-    gram_null = gram_rank.null_basis()
-    factor_null = factor_rank.null_basis()
-    gram_null_projector = gram_null @ np.linalg.pinv(gram_null)
-    factor_null_projector = factor_null @ np.linalg.pinv(factor_null)
-    assert np.linalg.norm(gram_null_projector - factor_null_projector, ord=2) > 0.1
-    gram_beta = gram_rank.solve(centered.rhs)
-    factor_beta = factor_rank.solve_factor_rhs(factor_rhs)
-    gram_prediction = centered.mean_z + dm.matvec(gram_beta) - centered.mean_x @ gram_beta
-    factor_prediction = centered.mean_z + dm.matvec(factor_beta) - centered.mean_x @ factor_beta
-    assert (
-        np.linalg.norm(gram_prediction - factor_prediction)
-        / np.linalg.norm(factor_prediction - centered.mean_z)
-        > 0.1
+    preliminary = decompose_gram(centered.data_gram)
+    certified = decompose_factor(factor, retain_factor_solve=True)
+    assert needs_factor_certification(preliminary)
+
+    column_scale = np.linalg.norm(factor, axis=0)
+    active = np.flatnonzero(column_scale > 0.0)
+    equilibrated = factor[:, active] / column_scale[active]
+    _left, singular_values, _right_t = np.linalg.svd(equilibrated, full_matrices=False)
+    cutoff = SHARED_RANK_POLICY.factor_rcond * singular_values[0]
+    retained_rank = int(np.count_nonzero(singular_values > cutoff))
+    lower_gap = singular_values[retained_rank - 1] - cutoff
+    upper_gap = cutoff - singular_values[retained_rank]
+    gap = float(min(lower_gap, upper_gap))
+    eta_factor = (
+        64.0 * _roundoff_gamma(max(factor.shape)) * float(np.linalg.norm(equilibrated, ord=2))
     )
+    assert gap > 2.0 * eta_factor
+    projector_bound = 2.0 * eta_factor / (gap - 2.0 * eta_factor)
+
+    selected_local: list[int] = []
+    for candidate in range(len(active)):
+        trial = selected_local + [candidate]
+        trial_values = np.linalg.svd(equilibrated[:, trial], compute_uv=False)
+        if np.count_nonzero(trial_values > cutoff) > len(selected_local):
+            selected_local.append(candidate)
+        if len(selected_local) == retained_rank:
+            break
+    assert len(selected_local) == retained_rank
+    selected = active[np.asarray(selected_local, dtype=np.intp)]
+    representative = factor[:, selected]
+    retained_left, _triangular = np.linalg.qr(representative, mode="reduced")
+    independent_prediction = retained_left @ (retained_left.T @ factor_rhs)
+
+    beta_s = 64.0 * _roundoff_gamma(factor.shape[0] + 8 * factor.shape[1])
+    representative_condition = float(np.linalg.cond(representative, p=2))
+    conditioned_beta = representative_condition * beta_s
+    assert conditioned_beta < 1.0
+    solve_bound = 2.0 * conditioned_beta / (1.0 - conditioned_beta)
+    assert certified.rank == retained_rank == 2
 
     automatic, _ = fit_irls_direct(
         dm,
@@ -617,11 +644,55 @@ def test_equal_rank_factor_certificate_controls_retained_subspace() -> None:
         tol=1e-12,
         direct_solve="auto",
     )
-
     assert automatic.rank_info is not None
-    assert automatic.rank_info.data.rank == 2
+    assert automatic.rank_info.data.rank == certified.rank
     automatic_prediction = automatic.intercept + dm.matvec(automatic.beta)
-    np.testing.assert_allclose(automatic_prediction, factor_prediction, rtol=1e-10, atol=1e-10)
+    assert np.all(np.isfinite(automatic_prediction))
+
+    def fitted_action_error_bound(beta: np.ndarray) -> tuple[float, float]:
+        fitted_action = factor @ beta
+        multiplication_roundoff = (
+            64.0
+            * _roundoff_gamma(factor.shape[0] + 2 * factor.shape[1])
+            * (np.linalg.norm(factor, ord=2) * np.linalg.norm(beta) + np.linalg.norm(factor_rhs))
+        )
+        total_bound = (projector_bound + solve_bound) * np.linalg.norm(
+            factor_rhs
+        ) + multiplication_roundoff
+        return (
+            float(np.linalg.norm(fitted_action - independent_prediction)),
+            float(total_bound),
+        )
+
+    valid_error, valid_bound = fitted_action_error_bound(automatic.beta)
+    assert valid_error <= valid_bound
+
+    preliminary_beta = preliminary.solve(centered.rhs)
+    formed = decompose_gram(factor.T @ factor)
+    formed_beta = formed.solve(factor.T @ factor_rhs)
+    assert preliminary.rank == retained_rank
+    for mutated_beta in (preliminary_beta, formed_beta):
+        hybrid = SimpleNamespace(
+            beta=mutated_beta,
+            rank_info=automatic.rank_info,
+        )
+        assert hybrid.rank_info.data.rank == retained_rank
+        with pytest.raises(AssertionError):
+            mutation_error, mutation_bound = fitted_action_error_bound(hybrid.beta)
+            assert mutation_error <= mutation_bound
+
+    # Stationarity is secondary: it cannot distinguish the wrong retained
+    # subspace, but still protects the certified solve from gross regression.
+    normal_residual = factor.T @ (factor @ automatic.beta - factor_rhs)
+    normal_scale = np.linalg.norm(factor, ord=2) * (
+        np.linalg.norm(factor, ord=2) * np.linalg.norm(automatic.beta) + np.linalg.norm(factor_rhs)
+    )
+    backward = np.linalg.norm(normal_residual) / max(
+        normal_scale,
+        np.finfo(np.float64).tiny,
+    )
+    operation_count = factor.shape[0] + 2 * factor.shape[1]
+    assert backward <= 64.0 * _roundoff_gamma(operation_count)
 
 
 def test_exact_gaussian_alias_reuses_factor_certificate_across_iterations(
@@ -822,9 +893,9 @@ def test_retained_representative_factor_rhs_uses_one_rank_svd(
     original_svd = rank_module.np.linalg.svd
     svd_shapes: list[tuple[int, int]] = []
 
-    def counted_svd(values, *, full_matrices=True):
+    def counted_svd(values, *, full_matrices=True, compute_uv=True):
         svd_shapes.append(values.shape)
-        return original_svd(values, full_matrices=full_matrices)
+        return original_svd(values, full_matrices=full_matrices, compute_uv=compute_uv)
 
     monkeypatch.setattr(rank_module.np.linalg, "svd", counted_svd)
     decomposition = decompose_factor(factor, retain_factor_solve=True)
@@ -834,7 +905,12 @@ def test_retained_representative_factor_rhs_uses_one_rank_svd(
     np.testing.assert_array_equal(decomposition.active_columns, [0, 2])
     np.testing.assert_allclose(actual, [1.5, 0.0, -0.4], rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(factor @ actual, response, rtol=1e-12, atol=1e-12)
-    assert svd_shapes == [factor.shape]
+    # One decomposition of the design, and one certificate on the rejected rows
+    # of the null basis -- 1x1 here, because the block is a single column short
+    # of full rank.  What this guards is that nothing re-decomposes the DESIGN:
+    # the certificate is sized by the NULLITY, so it cannot reintroduce a cost
+    # that scales with the width.
+    assert svd_shapes == [factor.shape, (1, 1)]
 
 
 def test_packed_centering_avoids_materializing_discrete_and_categorical_rows(
@@ -1404,20 +1480,20 @@ def test_factor_and_gram_rules_agree_at_normal_equation_boundary() -> None:
     assert factor_decomposition.rank == gram_decomposition.rank == 1
 
 
-def test_resolution_limited_gram_truncation_requests_factor_certification() -> None:
+def test_cutoff_boundary_gram_requests_factor_certification() -> None:
     rng = np.random.default_rng(0)
     orthonormal, _ = np.linalg.qr(rng.normal(size=(120, 2)))
     u, v = orthonormal.T
     separation = 3.0508168366745935e-8
     factor = np.column_stack((u, u + separation * v))
 
-    gram_decomposition = decompose_gram(factor.T @ factor)
-    factor_decomposition = decompose_factor(factor)
+    preliminary = decompose_gram(factor.T @ factor)
+    certified = decompose_factor(factor)
 
-    assert gram_decomposition.rank == 1
-    assert gram_decomposition.resolution_limited
-    assert factor_decomposition.rank == 2
-    assert needs_factor_certification(gram_decomposition)
+    assert needs_factor_certification(preliminary)
+    assert certified.rank == 2
+    assert certified.method == "qr_svd"
+    assert not certified.resolution_limited
 
 
 def test_negative_roundoff_eigenvalue_requests_factor_certification() -> None:
@@ -1955,3 +2031,158 @@ def test_symmetric_part_is_finite_wherever_the_input_is() -> None:
         symmetrized = _symmetric_part(matrix)
         assert np.isfinite(symmetrized).all(), f"{matrix} symmetrized to {symmetrized}"
         np.testing.assert_allclose(symmetrized, 0.5 * (matrix / 2.0 + matrix.T / 2.0) * 2.0)
+
+
+def _gram(values: np.ndarray) -> np.ndarray:
+    return values.T @ values
+
+
+def _rank_geometry_battery() -> list[tuple[str, np.ndarray]]:
+    """Grams spanning both certification arms and both sides of each boundary."""
+    rng = np.random.default_rng(20260801)
+    cases: list[tuple[str, np.ndarray]] = [
+        ("empty", np.empty((0, 0))),
+        ("all-zero", np.zeros((4, 4))),
+    ]
+    for width in (3, 9, 30):
+        cases.append((f"full-rank-{width}", _gram(rng.standard_normal((5 * width, width)))))
+        for nullity in (1, max(2, width // 3)):
+            if nullity >= width:
+                continue
+            block = rng.standard_normal((5 * width, width - nullity))
+            aliased = np.hstack((block, block[:, :nullity]))
+            cases.append((f"exact-alias-{width}x{nullity}", _gram(aliased)))
+            perturbed = aliased.copy()
+            perturbed[:, -nullity:] += 1e-9 * rng.standard_normal((5 * width, nullity))
+            cases.append((f"near-alias-{width}x{nullity}", _gram(perturbed)))
+        dead = _gram(rng.standard_normal((5 * width, width)))
+        dead[0, :] = 0.0
+        dead[:, 0] = 0.0
+        cases.append((f"dead-column-{width}", dead))
+        rotation, _ = np.linalg.qr(rng.standard_normal((width, width)))
+        for condition in (1e6, 1e12, 1e14, 1e15, 1e16):
+            spectrum = np.logspace(0.0, -np.log10(condition), width)
+            cases.append(
+                (
+                    f"condition-{condition:.0e}-{width}",
+                    rotation @ np.diag(spectrum) @ rotation.T,
+                )
+            )
+    return cases
+
+
+_DECOMPOSITION_FIELDS = (
+    "policy_version",
+    "method",
+    "rank",
+    "pre_truncation_condition",
+    "cutoff",
+    "rank_truncated",
+    "used_svd_fallback",
+    "resolution_limited",
+    "log_pdet",
+)
+_DECOMPOSITION_ARRAYS = (
+    "column_scale",
+    "active_columns",
+    "cholesky_factor",
+    "pivots",
+    "solution_basis",
+    "parameter_null_basis",
+    "estimable_functional_basis",
+    "structural_aliases",
+    "retained_values",
+)
+
+
+@pytest.mark.parametrize("name,matrix", _rank_geometry_battery(), ids=lambda value: value)
+def test_authoritative_gram_is_the_eager_decomposition_or_nothing(
+    name: str, matrix: np.ndarray
+) -> None:
+    """Skipping the superseded subspace must not move a single retained field.
+
+    ``decompose_gram_if_authoritative`` returns ``None`` on exactly the geometry
+    ``needs_factor_certification`` rejects, and otherwise the same object the
+    eager path builds -- bitwise, arrays included.  Anything looser would make
+    this a semantic change wearing a performance change's clothes.
+    """
+    eager = decompose_gram(matrix)
+    spared = decompose_gram_if_authoritative(matrix)
+
+    assert (spared is None) == needs_factor_certification(eager), name
+    if spared is None:
+        return
+    for field in _DECOMPOSITION_FIELDS:
+        expected, actual = getattr(eager, field), getattr(spared, field)
+        if isinstance(expected, float) and np.isnan(expected):
+            assert np.isnan(actual), f"{name}.{field}"
+            continue
+        assert actual == expected, f"{name}.{field}"
+    for field in _DECOMPOSITION_ARRAYS:
+        expected, actual = getattr(eager, field), getattr(spared, field)
+        assert (expected is None) == (actual is None), f"{name}.{field}"
+        if expected is not None:
+            assert actual.tobytes() == expected.tobytes(), f"{name}.{field}"
+
+
+def test_uncertifiable_gram_skips_the_subspace_it_cannot_certify(monkeypatch) -> None:
+    """The guaranteed-discard arm must not build what only it could have read.
+
+    A PSD Gram whose rank falls below its active width is ``resolution_limited``
+    by construction, so ``needs_factor_certification`` fires and every caller in
+    this shape rebinds to the factor certificate.  The representative selection,
+    its Cholesky and the retained pseudo-determinant are reachable only through
+    the object that rebinding throws away.
+    """
+    from superglm.solvers import rank as rank_module
+
+    block = np.random.default_rng(0).standard_normal((120, 23))
+    aliased = _gram(np.hstack((block, block[:, :2])))
+    assert needs_factor_certification(decompose_gram(aliased)), "fixture is not superseded"
+
+    calls: list[str] = []
+    for name in ("_conditioned_representatives", "_retained_log_pdet"):
+        original = getattr(rank_module, name)
+
+        def spy(*args, _name=name, _original=original, **kwargs):
+            calls.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(rank_module, name, spy)
+
+    assert decompose_gram(aliased).method == "pivoted_cholesky"
+    assert sorted(set(calls)) == ["_conditioned_representatives", "_retained_log_pdet"]
+
+    calls.clear()
+    assert decompose_gram_if_authoritative(aliased) is None
+    assert calls == []
+
+
+def test_authoritative_gram_still_builds_the_subspace_it_certifies(monkeypatch) -> None:
+    """The certified arm keeps every basis: the skip is not allowed to widen.
+
+    A rank-truncated Gram whose truncation is purely structural is *not*
+    resolution limited, so it survives the predicate and its consumers read the
+    bases off it directly.  Sparing that geometry too would silently strip the
+    null space out of a decomposition that is still authoritative.
+    """
+    from superglm.solvers import rank as rank_module
+
+    structural = _gram(np.random.default_rng(5).standard_normal((90, 12)))
+    structural[3, :] = 0.0
+    structural[:, 3] = 0.0
+    eager = decompose_gram(structural)
+    assert eager.rank_truncated and not needs_factor_certification(eager), "fixture is superseded"
+
+    skipped: list[str] = []
+    monkeypatch.setattr(
+        rank_module,
+        "_null_basis",
+        lambda *a, _o=rank_module._null_basis, **k: (skipped.append("_null_basis"), _o(*a, **k))[1],
+    )
+    spared = decompose_gram_if_authoritative(structural)
+
+    assert spared is not None
+    assert skipped == ["_null_basis"]
+    assert spared.parameter_null_basis is not None
+    assert spared.parameter_null_basis.tobytes() == eager.parameter_null_basis.tobytes()

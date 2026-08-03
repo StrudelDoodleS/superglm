@@ -1,0 +1,864 @@
+"""Guards for the worth-gate benchmark's two derived readings.
+
+The benchmark itself is a measurement and is not run in CI.  What is guarded
+here is the arithmetic underneath it: the Cp identity that turns `T/phi >
+2*edf0` into a threshold on `z`, and the participation ratio that reads the
+shape of a score the total cannot see.  Both are cheap and deterministic; the
+tests that fit real models are marked `slow`.
+
+Two of those guards exist because the guide quoted numbers the harness could
+not produce -- a full-refit column assembled from a second simulation, and a
+headline z that no arm measured.  Each is now pinned to the run it belongs to.
+"""
+
+from __future__ import annotations
+
+import faulthandler
+import inspect
+
+import numpy as np
+import pandas as pd
+import pytest
+from benchmarks import screening_worth_gate as gate
+from benchmarks.screening_worth_gate import (
+    HOT_CELLS,
+    LADDER,
+    MATCHED,
+    MIN_ROWS,
+    MIN_WIDE_LEVELS,
+    SHRINKAGE_ARMS,
+    NonconvergedFitError,
+    UnseenLevelError,
+    _build_parser,
+    _mains,
+    _make,
+    _require_converged,
+    _run_concentration,
+    _run_gate_ladder,
+    _run_shrinkage,
+    _run_sparse_payoff,
+    _shrinkage_spec,
+    _split,
+    _validate_configuration,
+    arm_watchdog,
+    cell_contributions,
+    concentration,
+    paired_deltas,
+    participation_ratio,
+    worth_threshold,
+)
+
+from superglm.features.random_effect import RandomEffect
+
+
+@pytest.mark.parametrize("edf0", [1.0, 49.0, 225.0, 576.0, 1599.0])
+def test_threshold_is_exactly_where_the_cp_criterion_switches(edf0: float) -> None:
+    """`z > sqrt(edf0/2)` must be the same statement as `T/phi > 2*edf0`.
+
+    The screen reports z, not T, so the gate is only usable if the two agree
+    exactly rather than approximately.
+    """
+    at_criterion = 2.0 * edf0  # T/phi sitting exactly on Mallows' Cp
+    z_at = (at_criterion - edf0) / np.sqrt(2.0 * edf0)
+    assert z_at == pytest.approx(worth_threshold(edf0), rel=1e-12)
+
+    for scale, expected_above in ((1.01, True), (0.99, False)):
+        z = (scale * at_criterion - edf0) / np.sqrt(2.0 * edf0)
+        assert bool(z > worth_threshold(edf0)) is expected_above
+
+
+def test_threshold_grows_with_block_width_so_no_constant_can_replace_it() -> None:
+    """The point of the gate: 8x8 and 41x41 cannot share a cutoff."""
+    narrow, wide = worth_threshold(7**2), worth_threshold(40**2)
+    assert narrow == pytest.approx(4.95, abs=0.01)
+    assert wide == pytest.approx(28.28, abs=0.01)
+    # a z that is decisive at 8x8 is below the bar at 41x41
+    assert narrow < 12.0 < wide
+
+
+def test_participation_ratio_counts_effective_contributors() -> None:
+    assert participation_ratio(np.ones(40)) == pytest.approx(40.0)
+    assert participation_ratio(np.array([1.0, 0.0, 0.0, 0.0])) == pytest.approx(1.0)
+    # scale-free: doubling every contribution changes nothing
+    t = np.array([5.0, 1.0, 1.0, 0.5])
+    assert participation_ratio(2.0 * t) == pytest.approx(participation_ratio(t))
+
+
+def test_cell_contributions_ignore_empty_cells() -> None:
+    """Empty cells contribute nothing and must not inflate the null."""
+    joint = np.array([0, 0, 3, 3, 3])
+    resid = np.array([1.0, 1.0, 2.0, 2.0, 2.0])
+    t, occupied = cell_contributions(resid, joint, n_cells=8, phi=1.0)
+    assert occupied == 2
+    assert t[1] == 0.0 and t[2] == 0.0
+    # cell 0: n=2, mean=1 -> 2;  cell 3: n=3, mean=2 -> 12
+    assert t[0] == pytest.approx(2.0)
+    assert t[3] == pytest.approx(12.0)
+
+
+def test_concentration_null_sits_at_one_for_chi_square_contributions() -> None:
+    """k independent chi^2_1 contributions give P = k/3, so the ratio is 1.
+
+    This is what makes the reading comparable across block widths -- the same
+    property that makes PSST's z comparable across them.
+    """
+    rng = np.random.default_rng(4242)
+    k = 1600
+    ratios = [concentration(rng.chisquare(df=1, size=k), k) for _ in range(24)]
+    assert np.mean(ratios) == pytest.approx(1.0, abs=0.08)
+
+
+def test_concentration_separates_spiky_from_diffuse_at_equal_total() -> None:
+    """The claim the benchmark rests on, isolated from any model fitting.
+
+    Both vectors carry the same total score.  Every chi^2-family metric reads
+    only that total, so only a shape statistic can tell them apart.
+    """
+    rng = np.random.default_rng(99)
+    k = 1600
+    diffuse = rng.chisquare(df=1, size=k)
+    spiky = rng.chisquare(df=1, size=k)
+    spiky[:HOT_CELLS] += diffuse.sum() / HOT_CELLS  # same total, 5 cells carry it
+    spiky *= diffuse.sum() / spiky.sum()
+
+    assert spiky.sum() == pytest.approx(diffuse.sum())
+    assert concentration(diffuse, k) == pytest.approx(1.0, abs=0.15)
+    assert concentration(spiky, k) < 0.25
+
+
+def test_paired_deltas_price_each_replicate_against_its_own_mains_fit() -> None:
+    """Table 4's arms share a draw and a split, so the comparison is paired.
+
+    Dividing every replicate by the mains MEAN instead puts between-seed
+    baseline variation back into a number meant to isolate the model class.
+    The two do not merely differ in magnitude -- at three replicates the
+    unpaired form can report the wrong SIGN for an individual split, which is
+    the case constructed here.
+    """
+    mains = [1.0, 3.0]
+    arm = [1.5, 1.6]
+
+    paired = paired_deltas(arm, mains)
+    assert paired[0] == pytest.approx(50.0)  # worse on the replicate it shares
+    assert paired[1] == pytest.approx(-46.667, abs=1e-3)
+
+    # what the mains MEAN would have said: both replicates look like gains
+    unpaired = [(v / np.mean(mains) - 1.0) * 100.0 for v in arm]
+    assert all(u < 0 for u in unpaired)
+    assert paired[0] > 0 > unpaired[0]
+
+    # an arm identical to mains is exactly zero on every replicate, whatever
+    # the spread of the baseline
+    assert paired_deltas(mains, mains) == [0.0, 0.0]
+
+    with pytest.raises(ValueError, match="same length"):
+        paired_deltas([1.0], [1.0, 2.0])
+
+
+def test_concentration_null_is_a_large_k_limit_and_fails_at_small_k() -> None:
+    """`k/3` is the limit, not the finite-sample expectation.
+
+    The reading is only comparable across widths where the null is ~1, so the
+    width at which that stops being true is worth pinning rather than
+    discovering on a narrow block.  A single occupied cell is the extreme: `P`
+    is 1 by construction, `k/3` is 1/3, and the ratio reads 3 -- the value that
+    elsewhere means "as diffuse as noise" -- for the most concentrated block
+    there is.
+    """
+    assert concentration(np.array([4.0]), 1) == pytest.approx(3.0)
+
+    rng = np.random.default_rng(4242)
+    measured = {
+        k: float(np.mean([concentration(rng.chisquare(df=1, size=k), k) for _ in range(400)]))
+        for k in (8, 25, 100, 1600)
+    }
+    # the null mean sits ABOVE 1 and decays toward it; these are the widths at
+    # which the docstring says the reading becomes usable
+    assert measured[8] == pytest.approx(1.39, abs=0.06)
+    assert measured[25] == pytest.approx(1.15, abs=0.04)
+    assert measured[100] == pytest.approx(1.04, abs=0.02)
+    assert measured[1600] == pytest.approx(1.003, abs=0.01)
+    assert measured[8] > measured[25] > measured[100] > measured[1600]
+
+
+def test_concentration_is_nan_rather_than_a_crash_on_a_dead_block() -> None:
+    assert np.isnan(concentration(np.zeros(10), 10))
+    assert np.isnan(concentration(np.ones(3), 0))
+
+
+def test_parser_defaults_match_the_documented_run() -> None:
+    args = _build_parser().parse_args([])
+    assert (args.reps, args.n, args.wide_levels) == (3, 12_000, 41)
+    assert args.tables == (1, 2, 3, 4)
+
+
+@pytest.mark.parametrize("flag", ["--reps", "--n", "--wide-levels"])
+@pytest.mark.parametrize("bad", ["0", "-1", "1.5", "many"])
+def test_benchmark_dimensions_are_rejected_at_the_boundary(flag: str, bad: str) -> None:
+    """A run that cannot produce a number must fail, not print one.
+
+    `--reps 0` used to run every loop zero times, average empty lists into
+    `nan`, print a complete well-formatted table of them, and exit 0.  A report
+    that looks valid and is not is the exact failure this section documents.
+    """
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([flag, bad])
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--n", "1"), ("--wide-levels", "1"), ("--wide-levels", "2")],
+)
+def test_a_dimension_that_cannot_run_is_rejected_at_the_flag(flag: str, value: str) -> None:
+    """`>= 1` was the wrong floor for two of the three dimensions.
+
+    These values cleared the old check and then failed a long way from the flag
+    that caused them: `--wide-levels 1` and `2` reach `rng.choice` asking for
+    HOT_CELLS distinct cells out of 1 and 4, and `--n 1` hands the first fit a
+    training half of zero rows.  Each flag now carries the floor its own
+    generator or split is defined at.
+    """
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([flag, value])
+
+
+def test_the_structural_floors_are_the_smallest_values_that_are_defined() -> None:
+    """The floors are derived, not chosen, so they track their constants.
+
+    `HOT_CELLS` distinct cells need an `L x L` grid with `L*L >= HOT_CELLS`,
+    and a half-sample split needs two rows before both halves are non-empty.
+    Measured against the generator itself: at L = 2 `rng.choice` raises, at
+    L = 3 it does not; at n = 1 the training half is empty, at n = 2 it is not.
+    """
+    assert MIN_WIDE_LEVELS == 3
+    assert MIN_ROWS == 2
+
+    with pytest.raises(ValueError, match="larger sample than population"):
+        _make("spike", 6.0, MIN_WIDE_LEVELS - 1, 200, 1)
+    assert _make("spike", 6.0, MIN_WIDE_LEVELS, 200, 1).cell.size >= HOT_CELLS
+
+    assert _split(MIN_ROWS - 1, 1)[0].size == 0
+    assert _split(MIN_ROWS, 1)[0].size >= 1
+
+    # and the floors themselves parse
+    args = _build_parser().parse_args(["--n", str(MIN_ROWS), "--wide-levels", str(MIN_WIDE_LEVELS)])
+    assert (args.n, args.wide_levels) == (MIN_ROWS, MIN_WIDE_LEVELS)
+
+
+def test_a_configuration_too_small_for_its_tables_is_refused_before_fitting() -> None:
+    """Clearing the flag floors is necessary, not sufficient.
+
+    With `n // 2` training rows and L levels, `n // 2 < L` leaves a level out of
+    the training half by pigeonhole, and an unseen level is a predict-time
+    error.  Before this, such a configuration ran until superglm raised
+    `Encountered unseen categorical levels at predict time`, naming a category
+    rather than the flag that caused it.
+    """
+    parser = _build_parser()
+
+    too_small = parser.parse_args(["--n", "20", "--tables", "1"])
+    with pytest.raises(SystemExit, match="training rows"):
+        _validate_configuration(too_small)
+
+    # table 1 sweeps LADDER's own widths, so its requirement is the widest rung.
+    # Clearing it is NECESSARY and not sufficient -- see the unseen-level test
+    # below, which is what actually rules `--n 64` out.
+    just_enough = parser.parse_args(["--n", str(2 * max(LADDER)), "--tables", "1"])
+    _validate_configuration(just_enough)
+
+    # tables 3 and 4 are sized by --wide-levels instead
+    wide = parser.parse_args(["--n", "60", "--wide-levels", "41", "--tables", "4"])
+    with pytest.raises(SystemExit, match="table 4"):
+        _validate_configuration(wide)
+    _validate_configuration(parser.parse_args(["--n", "12000", "--tables", "1,2,3,4"]))
+
+
+def test_a_split_that_hides_a_level_from_training_is_refused_before_fitting() -> None:
+    """The pigeonhole bound clears configurations the actual draw does not.
+
+    `--tables 1 --n 64` passes `_validate_configuration` -- 32 training rows
+    against a widest rung of 32 levels -- and then the seeded draw leaves whole
+    levels out of the training half anyway: at 16 levels the first replicate
+    misses `G6`, and at 32 levels it misses ten `g` levels and eight `h` levels.
+    Before this, that surfaced from inside `predict` as a categorical error
+    naming a level rather than a flag.
+
+    Nothing here is random at run time, so the check is exact rather than a
+    bound: `_make` and `_split` are both seeded.
+    """
+    parser = _build_parser()
+    accepted = parser.parse_args(["--tables", "1", "--n", "64"])
+    _validate_configuration(accepted)  # the cheap bound still passes it
+
+    # the widest ladder rung at that n, which is what actually runs
+    levels = max(LADDER)
+    data = gate._make("spike", 1.0, levels, 64, 7000)
+    train, test = _split(64, 7000)
+    with pytest.raises(UnseenLevelError, match="only in the test half"):
+        gate._require_training_covers_test(data, train, test, "gate ladder")
+
+    # and the published configuration is not refused
+    data = gate._make("spike", 1.0, levels, 12_000, 7000)
+    train, test = _split(12_000, 7000)
+    gate._require_training_covers_test(data, train, test, "gate ladder")
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1"])
+def test_the_watchdog_interval_must_be_a_real_number_of_seconds(bad: str) -> None:
+    """The one numeric flag that was still a bare `float`.
+
+    `float("nan")` parses, and `arm_watchdog`'s `seconds <= 0` does not catch it
+    because `nan <= 0` is False, so it reached
+    `faulthandler.dump_traceback_later` and died with `ValueError: Invalid value
+    NaN` -- naming a C-level API rather than the flag. Zero stays the documented
+    disable, which is why this is not `_at_least`.
+    """
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--watchdog", bad])
+
+
+def test_table_two_has_a_floor_of_its_own_now_it_is_exempt_from_the_split_rule() -> None:
+    """Exempting table 2 removed a bound; it needed replacing, not deleting.
+
+    `_run_concentration` fits `g + h` on all `n` rows -- `2*n_levels - 1`
+    parameters -- and screens the interaction off those residuals. Once `n`
+    reaches that count the fit is saturated, `edf0` is 0, `worth_threshold(0)`
+    is 0 and `participation_ratio` divides by zero. Measured before this:
+    `--tables 2 --n 3 --wide-levels 3` printed a complete seven-row table with
+    every `z`, `edf0` and threshold `nan` and **exited 0** -- the artefact this
+    file exists to prevent, reached through the one table with no floor.
+    """
+    parser = _build_parser()
+    # too few rows to occupy the null's cells at all -- checked first
+    with pytest.raises(SystemExit, match="cannot occupy"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "3", "--wide-levels", "3"])
+        )
+
+    # enough rows for the null, but the mains model is saturated: the floor is
+    # the parameter count, so it tracks --wide-levels
+    with pytest.raises(SystemExit, match="saturated"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "100", "--wide-levels", "60"])
+        )
+    _validate_configuration(
+        parser.parse_args(["--tables", "2", "--n", "120", "--wide-levels", "60"])
+    )
+    # and the published run is untouched
+    _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
+
+
+def test_table_two_needs_enough_cells_for_its_own_null_to_mean_anything() -> None:
+    """`P / (k/3)` reads against a LARGE-k null, and narrow grids are not large.
+
+    `concentration`'s own docstring says `k/3` is the limit, and the calibration
+    test above pins the null ratio at ~1.39 for k=8, ~1.15 for k=25 and ~1.04
+    for k=100 -- so at nine cells the legend "~1.0 means spread as noise spreads
+    it" is wrong by nearly 40%, which is a fifth of the range the column is read
+    over.  Before this, `--tables 2 --wide-levels 3` printed that column anyway.
+
+    The floor is the calibration, not a taste: 100 cells is where the pinned
+    bias falls to a few per cent.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="large k"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "60", "--wide-levels", "3"])
+        )
+    # 10 levels is exactly 100 cells, and the published width is far above it
+    _validate_configuration(
+        parser.parse_args(["--tables", "2", "--n", "600", "--wide-levels", "10"])
+    )
+    _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
+
+
+def test_every_table_reporting_the_large_k_reading_obeys_its_floor() -> None:
+    """Table 3 cannot attach a biased ``P/(k/3)`` label to its payoff rows.
+
+    Table 2 established the 100-cell calibration boundary, but table 3 reports
+    the same reading from its TRAINING residuals.  Before this guard,
+    ``--tables 3 --n 12000 --wide-levels 3`` was accepted and reported the
+    large-k reading from only nine occupied cells.
+
+    The row-capacity boundary differs honestly: table 2 sees all ``n`` rows,
+    while table 3 can occupy at most ``n // 2`` cells in its training half.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="table 3.*large k"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "3", "--n", "12000", "--wide-levels", "3"])
+        )
+    with pytest.raises(SystemExit, match="table 3.*cannot occupy"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "3", "--n", "199", "--wide-levels", "10"])
+        )
+    _validate_configuration(
+        parser.parse_args(["--tables", "3", "--n", "200", "--wide-levels", "10"])
+    )
+
+
+def test_table_three_checks_realised_training_occupancy_before_reporting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity is only an upper bound, and checking it must not require a fit."""
+
+    n = 200
+    joint = np.zeros(n, dtype=int)
+    joint[:99] = np.arange(99)
+    data = gate.PairData(
+        frame=pd.DataFrame({"g": ["G0"] * n, "h": ["H0"] * n}),
+        y=np.zeros(n),
+        joint=joint,
+        n_levels=10,
+        cell=np.zeros((10, 10)),
+    )
+    mains_calls = 0
+
+    def forbidden_mains(*args, **kwargs):
+        nonlocal mains_calls
+        mains_calls += 1
+        raise AssertionError("_mains must not run before the occupancy floor")
+
+    monkeypatch.setattr(gate, "_make", lambda *args, **kwargs: data)
+    monkeypatch.setattr(
+        gate,
+        "_split",
+        lambda *args, **kwargs: (np.arange(n // 2), np.arange(n // 2, n)),
+    )
+    monkeypatch.setattr(gate, "_require_training_covers_test", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gate, "_mains", forbidden_mains)
+
+    with pytest.raises(SystemExit, match=r"table 3 .* occupied 99 cells"):
+        _run_sparse_payoff(reps=1, n=n, n_levels=10)
+    assert mains_calls == 0
+
+
+def test_table_two_needs_rows_to_occupy_cells_with_not_just_a_grid_to_hold_them() -> None:
+    """Grid capacity is necessary and not sufficient.
+
+    `concentration` divides by the OCCUPIED count, so a run can clear the
+    100-cell width floor and still occupy 20 cells: `--tables 2 --n 20
+    --wide-levels 10` has the grid but not the rows.  Both are checked -- the
+    capacity at parse time, and the occupancy actually passed to
+    `concentration` at run time, where the real number is known.
+    """
+    parser = _build_parser()
+    with pytest.raises(SystemExit, match="cannot occupy"):
+        _validate_configuration(
+            parser.parse_args(["--tables", "2", "--n", "20", "--wide-levels", "10"])
+        )
+    # enough rows and enough grid
+    _validate_configuration(
+        parser.parse_args(["--tables", "2", "--n", "600", "--wide-levels", "10"])
+    )
+    _validate_configuration(parser.parse_args(["--tables", "1,2,3,4", "--n", "12000"]))
+
+
+def test_a_zero_worth_bar_is_refused_rather_than_divided_by() -> None:
+    """`worth_threshold(0)` is 0, and a published ratio column cannot carry inf.
+
+    A replicate reporting `edf0 = 0` means the screen found no interaction rank
+    at all, so it is a broken replicate rather than a small one.
+    """
+    assert gate._gate_ratios([1.0, 2.0], [4.0, 8.0]) == pytest.approx([0.70710678, 1.0])
+    with pytest.raises(ValueError, match="no interaction rank"):
+        gate._gate_ratios([1.0, 2.0], [4.0, 0.0])
+
+
+def test_a_top_m_arm_wider_than_the_grid_is_not_printed_as_a_distinct_selection() -> None:
+    """At nine cells, top-10/25/50 are all "every cell" under three names.
+
+    Measured before this at `--tables 3 --wide-levels 3`: four consecutive rows
+    reading -82.2%, the top-10, top-25, top-50 and full-refit arms being the
+    same model. Sizes at or above the cell count are dropped rather than
+    clipped, since clipping would collapse them onto each other instead.
+    """
+    for levels, expected in ((3, (5,)), (5, (5, 10)), (41, gate.TOP_M)):
+        n_cells = levels * levels
+        assert gate._sparse_arms(n_cells) == (*expected, n_cells), f"{levels} levels"
+    # every arm is distinct, which is the property the filter exists for
+    for levels in (3, 4, 5, 6, 8, 41):
+        arms = gate._sparse_arms(levels * levels)
+        assert len(set(arms)) == len(arms)
+        assert all(m < levels * levels for m in arms[:-1])
+
+
+def test_a_fixed_cutoff_scored_per_replicate_is_the_mean_z_rule() -> None:
+    """The gate and the fixed cutoffs are already on one scale.
+
+    The gate aggregates as `mean(z_i / bar_i) > 1`, and that mattered because
+    `bar_i = sqrt(edf0_i / 2)` varies between replicates.  A FIXED cutoff `c`
+    does not vary, so `mean(z_i / c) = mean(z_i) / c` and thresholding at 1 is
+    `mean(z) > c` exactly -- the two forms are the same statement, not two
+    aggregation schemes.
+
+    Pinned because it has been read as an asymmetry twice, and reading it off
+    the arithmetic is cheaper than re-deriving it each time.
+    """
+    rng = np.random.default_rng(11)
+    for _ in range(200):
+        zs = rng.uniform(0.0, 12.0, size=int(rng.integers(2, 8))).tolist()
+        cutoff = float(rng.uniform(0.5, 10.0))
+        per_replicate = float(np.mean([z_i / cutoff for z_i in zs])) > 1.0
+        off_the_mean = float(np.mean(zs)) > cutoff
+        assert per_replicate == off_the_mean
+
+    # and the same identity does NOT hold once the bar varies, which is the
+    # asymmetry `10c753f` really did fix
+    zs = [1.0, 9.0]
+    bars = [10.0, 2.0]
+    varying = float(np.mean([z_i / b for z_i, b in zip(zs, bars, strict=True)])) > 1.0
+    off_means = float(np.mean(zs)) > float(np.mean(bars))
+    assert varying is True and off_means is False
+
+
+def test_table_two_is_exempt_from_the_half_sample_requirement() -> None:
+    """The bound comes from the split, and table 2 does not split.
+
+    `_run_concentration` fits the mains model on all `n` rows and takes
+    residuals on those same rows -- no holdout, so no level can appear only at
+    predict time.  The three runners that call `_split` are tables 1, 3 and 4.
+
+    The exemption changes WHICH requirement table 2 is held to, not what it
+    accepts: its own floor and the half-sample bound are the same predicate
+    over the integers, as the sweep below asserts.  What changes is what a
+    refusal says -- too few rows for its parameters, rather than a training
+    half it never takes.
+    """
+    parser = _build_parser()
+    lopsided = ["--n", "50", "--wide-levels", "41"]
+
+    # Table 2 is refused here too, but for ITS OWN reason -- its mains model is
+    # saturated at 50 rows -- not because a training half it never takes would
+    # be short of levels.  The messages are what keep the two rules apart.
+    with pytest.raises(SystemExit, match="cannot occupy|saturated"):
+        _validate_configuration(parser.parse_args([*lopsided, "--tables", "2"]))
+    for table in ("3", "4"):
+        with pytest.raises(SystemExit, match="training rows"):
+            _validate_configuration(parser.parse_args([*lopsided, "--tables", table]))
+
+    # The two bounds accept exactly the same configurations today: `n // 2 >= L`
+    # and `n >= 2 * L` are the same predicate over the integers. That is a
+    # coincidence of the current constants, not a reason to merge them, and it
+    # is pinned so a future divergence is visible rather than surprising.
+    for levels in (3, 5, 10, 41, 100):
+        for n in range(1, 4 * levels + 2):
+            assert ((n // 2) >= levels) == (n >= 2 * levels)
+
+    # the exemption is not a claim that _run_concentration splits secretly
+    source = inspect.getsource(gate._run_concentration)
+    assert "_split(" not in source, "table 2 now splits; the exemption must be revisited"
+
+
+def test_a_nonconverged_fit_is_refused_rather_than_averaged() -> None:
+    """A failed fit must not reach a table as an ordinary replicate.
+
+    Every published figure here is a mean over replicates, so one failed fit
+    moves a column silently.  `fit_reml` reports its outer convergence only at
+    INFO, so nothing in the run's own output would have said so.
+
+    Both flags matter: `mains` and `fixed` fall back to plain `fit()` and carry
+    no REML flag at all, so a check that read only the REML flag would exempt
+    them.
+    """
+
+    class _Result:
+        def __init__(self, converged: bool) -> None:
+            self.converged = converged
+            self.n_iter = 7
+
+    class _Model:
+        def __init__(self, solver: bool, reml: dict) -> None:
+            self.result = _Result(solver)
+            self._reml = reml
+
+        def reml_diagnostics(self) -> dict:
+            return self._reml
+
+    # The no-REML payload is taken from a REAL plain fit rather than written
+    # out here.  Inventing it is what hid a bug: the stub carried `converged`
+    # and `termination_reason`, production omits both keys entirely, and the
+    # error message subscripted them -- so a failed plain `fit()`, the exact
+    # case this guard exists for, raised KeyError instead.
+    real = _mains(
+        pd.DataFrame({"g": ["A", "B"] * 50, "h": ["X", "Y"] * 50}),
+        np.linspace(0.0, 1.0, 100),
+    ).reml_diagnostics()
+    assert real["enabled"] is False
+    assert "converged" not in real, "payload shape changed; the stub below must follow"
+
+    no_reml = dict(real)
+    reml_ok = {"enabled": True, "converged": True, "termination_reason": "tol"}
+    reml_bad = {"enabled": True, "converged": False, "termination_reason": "max_iter"}
+
+    assert _require_converged(_Model(True, no_reml), "ok") is not None
+    assert _require_converged(_Model(True, reml_ok), "ok") is not None
+
+    # solver failed, no REML flag to hide behind
+    with pytest.raises(NonconvergedFitError, match="solver converged=False"):
+        _require_converged(_Model(False, no_reml), "mains rep=0")
+    # REML outer loop failed while the inner solve reported success
+    with pytest.raises(NonconvergedFitError, match="max_iter"):
+        _require_converged(_Model(True, reml_bad), "pooled rep=0")
+
+
+def test_watchdog_is_armed_by_default_so_a_stuck_fit_names_itself() -> None:
+    """A long fit must be distinguishable from a pathological one.
+
+    This benchmark's wide refits run for seconds-to-minutes, and the failure
+    mode that cost real time was treating a pathological fit as merely big.
+    A periodic stack dump turns that into a named frame at no cost to the run.
+    """
+    assert _build_parser().parse_args([]).watchdog == 300.0
+    assert _build_parser().parse_args(["--watchdog", "0"]).watchdog == 0.0
+    assert _build_parser().parse_args(["--watchdog", "0.5"]).watchdog == 0.5
+
+    try:
+        assert arm_watchdog(600.0) is True
+        # 0 disables the periodic dump but still leaves the on-demand handler
+        assert arm_watchdog(0.0) is False
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def test_table_subsets_are_a_supported_flag_rather_than_an_edit() -> None:
+    """A guide figure refreshed one table at a time needs a quotable command.
+
+    The wide refits still dominate the run, so partial reruns happen; if the
+    only way to do one is to comment out a call, the command that produced a
+    published number cannot be cited.
+    """
+    assert _build_parser().parse_args(["--tables", "3,4"]).tables == (3, 4)
+    assert _build_parser().parse_args(["--tables", "2"]).tables == (2,)
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--tables", "5"])
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--tables", ""])
+
+
+def test_generator_plants_exactly_the_advertised_number_of_live_cells() -> None:
+    """A spiky truth with the wrong support would invalidate table 3.
+
+    The support is COUNTED off `PairData.cell`, not inferred from a difference
+    between two draws.  It cannot be inferred: the `spike` branch calls
+    `rng.choice` and the `none` branch does not, so the two share only their
+    parent draws and their noise terms diverge whatever the magnitude.  An
+    earlier version of this test asserted `y` differed between the two and
+    therefore passed at `magnitude=0.0` with nothing planted at all.
+    """
+    data = _make("spike", 6.0, n_levels=9, n=2_000, seed=5)
+    assert data.frame.shape == (2_000, 2)
+    assert data.joint.max() < 81
+
+    assert np.count_nonzero(data.cell) == HOT_CELLS
+    assert np.allclose(data.cell[data.cell != 0], 6.0)
+
+    # and the planted cells must reach `y` at the advertised size
+    live = np.isin(data.joint, np.flatnonzero(data.cell.ravel()))
+    assert live.sum() >= HOT_CELLS
+    assert data.y[live].mean() - data.y[~live].mean() == pytest.approx(6.0, abs=0.5)
+
+    noise = _make("none", 0.0, n_levels=9, n=2_000, seed=5)
+    assert np.count_nonzero(noise.cell) == 0
+    # same seed, same parents -- the cell assignment is drawn before the truth
+    assert (data.joint == noise.joint).all()
+
+
+def test_generator_plants_every_diffuse_cell() -> None:
+    """The diffuse arm is the contrast table 2 rests on: k live cells, not 5."""
+    data = _make("diffuse", 0.30, n_levels=9, n=2_000, seed=5)
+    assert np.count_nonzero(data.cell) == 81
+    assert data.cell.std() == pytest.approx(0.30, rel=0.35)
+
+
+def test_unknown_truth_kind_is_rejected_rather_than_planting_nothing() -> None:
+    """A typo must not produce a valid-looking null run."""
+    with pytest.raises(ValueError, match="unknown truth kind"):
+        _make("spikey", 6.0, n_levels=9, n=200, seed=5)
+
+
+def test_the_split_is_independent_of_the_levels_despite_the_shared_seed() -> None:
+    """Every runner opens `_make` and `_split` on the same seed.
+
+    Two fresh streams on one seed is the kind of thing that deserves a check
+    rather than an argument, since a fold whose membership tracked the cell
+    assignment would bias every holdout delta in the section.  Standardised
+    against the finite-population sd -- half of a fixed sample, so the t's
+    spread is sqrt(1 - 1/2), not 1.
+    """
+    n = 4_000
+    stats = []
+    for seed in range(7000, 7150):
+        data = _make("spike", 6.0, n_levels=12, n=n, seed=seed)
+        train, _ = _split(n, seed)
+        for column in (data.joint // 12, data.joint % 12):
+            se = column.std(ddof=1) / np.sqrt(train.size)
+            stats.append((column[train].mean() - column.mean()) / se)
+        hot = np.isin(data.joint, np.flatnonzero(data.cell.ravel()))
+        p = hot.mean()
+        stats.append((hot[train].mean() - p) / np.sqrt(p * (1 - p) / train.size))
+
+    t = np.asarray(stats)
+    assert abs(t.mean()) < 0.15
+    assert t.std(ddof=1) == pytest.approx(np.sqrt(0.5), abs=0.12)
+    assert np.abs(t).max() < 4.0
+
+
+def test_every_documented_shrinkage_arm_is_actually_built() -> None:
+    """The guide quotes a holdout figure per arm, so each must be reproducible.
+
+    The `pooled` arm is the one that went missing once already -- the guide
+    cited its holdout gain while the benchmark had no such arm, leaving a
+    documented number with no way to check it.
+    """
+    assert SHRINKAGE_ARMS == ("mains", "fixed", "pooled")
+
+    kwargs, cols = _shrinkage_spec("mains")
+    assert "interactions" not in kwargs and cols == ["g", "h"]
+
+    kwargs, cols = _shrinkage_spec("fixed")
+    assert kwargs["interactions"] == [("g", "h")]
+    assert "gh" not in kwargs["features"]
+
+    kwargs, cols = _shrinkage_spec("pooled")
+    assert "interactions" not in kwargs
+    assert cols == ["g", "h", "gh"]
+    # the cell must be a RandomEffect, not another fixed factor -- a plain
+    # Categorical here would silently make `pooled` a second `fixed`
+    assert isinstance(kwargs["features"]["gh"], RandomEffect)
+
+
+def test_unknown_shrinkage_arm_is_rejected_rather_than_silently_skipped() -> None:
+    with pytest.raises(ValueError, match="unknown shrinkage arm"):
+        _shrinkage_spec("credibility")
+
+
+@pytest.mark.slow
+def test_gate_ladder_aggregates_the_cp_ratio_per_replicate(monkeypatch) -> None:
+    """The Cp identity is a statement about ONE fit, so it aggregates per fit.
+
+    Averaging `z` and `edf0` separately and then thresholding the averages is a
+    different statement whenever the achieved rank varies between replicates --
+    and this section's whole claim is that the identity is exact, so the
+    aggregate has to be on the identity's own scale.
+    """
+    monkeypatch.setattr(gate, "LADDER", {10: (0.5,)})
+    rows = _run_gate_ladder(reps=3, n=600)
+    row = rows[0]
+
+    assert row["reps"] == 3
+    assert 0 <= row["reps_above"] <= 3
+    # the published ratio is the mean of per-replicate ratios, which is NOT
+    # mean(z) / worth_threshold(mean(edf0)) once the achieved rank varies
+    assert row["ratio"] != pytest.approx(row["z"] / row["threshold"], rel=1e-12)
+    # and the gate reads off that ratio, not off the mean-of-means comparison
+    assert row["agrees"] == ((row["ratio"] > 1.0) == (row["delta_pct"] < 0.0))
+
+
+@pytest.mark.slow
+def test_gate_ladder_thresholds_on_the_edf0_the_screen_reported(monkeypatch) -> None:
+    """The Cp identity needs the SAME edf0 on both sides.
+
+    For an unpenalized `cat_cat` the screen normalizes `z` by the block's
+    ACHIEVED rank, which drops below `(n_levels - 1)**2` as soon as a joint
+    cell is empty in the training split.  Re-deriving the nominal rank for the
+    threshold compares a z on one scale against a bar on another.  The width
+    here is deliberately sparse so the two values differ.
+    """
+    monkeypatch.setattr(gate, "LADDER", {10: (0.5,)})
+    rows = _run_gate_ladder(reps=1, n=600)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["nominal_edf0"] == 81.0
+    # the split leaves cells empty, so the achieved rank is strictly lower
+    assert row["edf0"] < row["nominal_edf0"]
+    # and the published threshold is the one that goes with the reported z
+    assert row["threshold"] == pytest.approx(worth_threshold(row["edf0"]))
+    assert row["threshold"] != pytest.approx(worth_threshold(row["nominal_edf0"]))
+
+
+@pytest.mark.slow
+def test_sparse_payoff_measures_its_own_full_refit_arm() -> None:
+    """The widest column must be measured, not imported from table 4.
+
+    Table 4 runs a different seed on a different split, so quoting its fixed
+    arm as the last cell of this row subtracts two simulations.  The widest arm
+    here is the same model class -- a plain fixed `cat_cat` interaction -- on
+    this row's own seed and split.
+    """
+    # Ten levels is the smallest grid at the shared large-k floor; the seeded
+    # training split occupies all 100 cells, so this end-to-end producer test
+    # exercises the honest table-3 boundary as well as the full-refit arm.
+    n_levels, n = 10, 1_200
+    rows = _run_sparse_payoff(reps=1, n=n, n_levels=n_levels)
+    widest = [row for row in rows if row["top_m"] == n_levels**2]
+    assert {row["kind"] for row in widest} == {"spike", "diffuse"}
+
+    by_arm = {(row["kind"], row["top_m"]): row for row in rows}
+    for kind in ("spike", "diffuse"):
+        full = by_arm[(kind, n_levels**2)]
+        assert np.isfinite(full["delta_pct"])
+        # the full refit must buy far more df than any sparse arm -- that is
+        # the whole point of the column, and an arm that quietly fell back to
+        # the top-50 model would not
+        assert full["extra_edf"] > by_arm[(kind, 5)]["extra_edf"] + 10
+        # the row label carries the concentration of the fit it labels
+        assert np.isfinite(full["concentration"])
+        assert full["concentration"] == by_arm[(kind, 5)]["concentration"]
+
+    # the sparse arms buy roughly one df per cell they name
+    assert by_arm[("spike", 5)]["extra_edf"] == pytest.approx(5.0, abs=1.0)
+
+
+@pytest.mark.slow
+def test_shrinkage_table_reproduces_its_arms_and_pooling_spends_less_df() -> None:
+    """Small-width end-to-end: the arms run and report a full row each.
+
+    Width is kept small so this stays a harness check. The ordering the guide
+    reports (pooled beats fixed on holdout) is a property of the WIDE case and
+    is not asserted here -- table 4 at the default width is where that lives.
+    """
+    rows, screen = _run_shrinkage(reps=1, n=2_000, n_levels=6)
+    assert [row["model"] for row in rows] == list(SHRINKAGE_ARMS)
+    for row in rows:
+        assert np.isfinite(row["holdout"]) and row["holdout"] > 0
+        assert row["params"] >= 1 and row["edf"] > 0
+        assert len(row["holdout_reps"]) == 1
+        # paired against this replicate's own mains fit, so mains is exactly 0
+        assert len(row["delta_reps"]) == 1
+    assert next(r for r in rows if r["model"] == "mains")["delta_reps"] == [0.0]
+
+    # the z the guide quotes beside this table's holdout cost must come from
+    # this table's own train split, not from table 2's full-sample fit on a
+    # different seed -- otherwise the sentence subtracts two simulations
+    assert np.isfinite(screen["z"])
+    assert screen["edf0"] > 0
+    assert screen["threshold"] == pytest.approx(worth_threshold(screen["edf0"]))
+    assert len(screen["z_reps"]) == 1
+
+    fixed = next(r for r in rows if r["model"] == "fixed")
+    pooled = next(r for r in rows if r["model"] == "pooled")
+    # whatever the holdout ordering at this width, pooling must spend strictly
+    # fewer effective df than the unshrunk interaction -- that is what makes it
+    # a different model class rather than a relabelling
+    assert pooled["edf"] < fixed["edf"]
+
+
+@pytest.mark.slow
+def test_concentration_table_runs_end_to_end_and_ranks_spiky_below_diffuse() -> None:
+    # 10 levels is 100 cells, the floor at which the k/3 null is worth
+    # reading; the previous 7 levels gave 49 and the verdict this test
+    # asserts on was one the guard now refuses to print.
+    rows = _run_concentration(reps=1, n=2_400, n_levels=10)
+    assert len(rows) == len(MATCHED)
+    by_label = {row["label"]: row for row in rows}
+    assert all(np.isfinite(row["concentration"]) for row in rows)
+
+    # Only the ORDERING is asserted here. P/(k/3) is calibrated to 1 under the
+    # null, but its variance is large at the small k this test uses to stay
+    # fast, so pinning the null value here would be flaky -- that calibration
+    # is covered at k=1600 by the pure-arithmetic test above.
+    spiky = by_label["spiky 5 cells @ 8.0"]["concentration"]
+    diffuse = by_label["diffuse sd=0.41"]["concentration"]
+    assert spiky < diffuse

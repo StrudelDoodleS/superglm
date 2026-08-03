@@ -47,8 +47,7 @@ from superglm.solvers.rank import (
     RankDecomposition,
     RankInfo,
     decompose_factor,
-    decompose_gram,
-    needs_factor_certification,
+    decompose_gram_if_authoritative,
 )
 from superglm.types import GroupSlice
 
@@ -1375,8 +1374,8 @@ def _fit_pirls_inner(
         z_off=z_final - offset,
         penalty=selected_penalty,
     )
-    data_rank = decompose_gram(centered.data_gram)
-    if needs_factor_certification(data_rank):
+    data_rank = decompose_gram_if_authoritative(centered.data_gram)
+    if data_rank is None:
         certified = decompose_factor(
             grouped_weighted_factor(
                 selected_dm,
@@ -1385,8 +1384,14 @@ def _fit_pirls_inner(
             )
         )
         data_rank = certified
-    augmented_rank = data_rank if not np.any(selected_penalty) else decompose_gram(centered.hessian)
-    if needs_factor_certification(augmented_rank):
+    # Reusing ``data_rank`` cannot need certifying: it is either a factor
+    # certificate or a Gram the predicate already accepted.
+    augmented_rank = (
+        data_rank
+        if not np.any(selected_penalty)
+        else decompose_gram_if_authoritative(centered.hessian)
+    )
+    if augmented_rank is None:
         certified = decompose_factor(
             grouped_augmented_factor(
                 selected_dm,
@@ -1397,8 +1402,8 @@ def _fit_pirls_inner(
         )
         augmented_rank = certified
     raw_gram, _, _, _ = centered.raw_weighted_moments()
-    coefficient_rank = decompose_gram(raw_gram + selected_penalty)
-    if needs_factor_certification(coefficient_rank):
+    coefficient_rank = decompose_gram_if_authoritative(raw_gram + selected_penalty)
+    if coefficient_rank is None:
         certified = decompose_factor(
             grouped_augmented_factor(selected_dm, W_final, selected_penalty)
         )

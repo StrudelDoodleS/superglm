@@ -16,6 +16,7 @@ from superglm._reporting_state import (
 from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
+from superglm.model.reml_setup import restore_qp_constraints
 from superglm.model.reml_state import update_reml_r_inv
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
@@ -196,9 +197,7 @@ def _build_reml_reporting_support_state(
 
 def restore_qp_group_state(model, qp_saved_state) -> None:
     """Restore monotone-engine/constraint state for QP passthrough groups."""
-    for gi, engine, constraints in qp_saved_state:
-        model._groups[gi].monotone_engine = engine
-        model._groups[gi].constraints = constraints
+    restore_qp_constraints(model, qp_saved_state)
 
 
 def compute_profiled_phi(
@@ -414,6 +413,14 @@ def finalize_reml_fit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
     )
+    if final_pirls.termination_reason == "constraint_infeasible":
+        raise RuntimeError(
+            "terminal constrained REML refit ended at an infeasible coefficient mode"
+        )
+    if final_pirls.termination_reason == "constraint_kkt_incomplete":
+        raise RuntimeError(
+            "terminal constrained REML refit ended without a complete inner-QP KKT certificate"
+        )
     structured_terminal = not qp_passthrough and isinstance(
         final_factor,
         (

@@ -1,0 +1,253 @@
+{
+ "baseline": {
+  "backend_dispatch": {
+   "augmented_method": "qr_svd",
+   "augmented_rank": 1626,
+   "augmented_representative": true,
+   "blas": {
+    "numpy": "2.4.2",
+    "pools_during_fit": [
+     {
+      "fraction_of_samples": 1.0,
+      "internal_api": "openmp",
+      "num_threads": 16,
+      "prefix": "libgomp",
+      "samples_seen_in": 12219,
+      "threading_layer": null,
+      "user_api": "openmp",
+      "version": null
+     },
+     {
+      "fraction_of_samples": 1.0,
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 12219,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+     },
+     {
+      "fraction_of_samples": 1.0,
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 12219,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.31.dev"
+     }
+    ],
+    "sampled_during_fit": true,
+    "samples": 12219
+   },
+   "coefficient_method": "qr_svd",
+   "data_method": "gram_eigh",
+   "data_rank": 1627,
+   "data_representative": false,
+   "python": "3.14.6"
+  },
+  "configuration": {
+   "levels": 41,
+   "parameters": 1680,
+   "repeats": 1,
+   "rows": 12000,
+   "seed": 31337,
+   "train_rows": 6000
+  },
+  "loadavg_one_minute": {
+   "after": "21.76 13.20 6.44",
+   "before": "1.46 0.67 1.29"
+  },
+  "memory": {
+   "peak_rss_measures_fits": 1,
+   "peak_rss_mib": 1046.4,
+   "ru_maxrss_unit": "kib"
+  },
+  "numerical_outputs": {
+   "beta_l2": 39.473487178,
+   "deviance": 4347.030089931,
+   "effective_df": 1627.0,
+   "n_iter": 2,
+   "n_zero": 54,
+   "zero_index_sum": 44145
+  },
+  "timing_seconds": {
+   "all": [
+    271.2748
+   ],
+   "median": 271.2748,
+   "min": 271.2748
+  }
+ },
+ "baseline_commit": "a2611cc",
+ "branch": {
+  "backend_dispatch": {
+   "augmented_method": "qr_svd",
+   "augmented_rank": 1626,
+   "augmented_representative": true,
+   "blas": {
+    "numpy": "2.4.2",
+    "pools_during_fit": [
+     {
+      "fraction_of_samples": 1.0,
+      "internal_api": "openmp",
+      "num_threads": 16,
+      "prefix": "libgomp",
+      "samples_seen_in": 224,
+      "threading_layer": null,
+      "user_api": "openmp",
+      "version": null
+     },
+     {
+      "fraction_of_samples": 0.0045,
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 1,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+     },
+     {
+      "fraction_of_samples": 0.9955,
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 223,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.30"
+     },
+     {
+      "fraction_of_samples": 0.0045,
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 1,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.31.dev"
+     },
+     {
+      "fraction_of_samples": 0.9955,
+      "internal_api": "openblas",
+      "num_threads": 16,
+      "prefix": "libscipy_openblas",
+      "samples_seen_in": 223,
+      "threading_layer": "pthreads",
+      "user_api": "blas",
+      "version": "0.3.31.dev"
+     }
+    ],
+    "sampled_during_fit": true,
+    "samples": 224
+   },
+   "coefficient_method": "qr_svd",
+   "data_method": "gram_eigh",
+   "data_rank": 1627,
+   "data_representative": false,
+   "python": "3.14.6"
+  },
+  "configuration": {
+   "levels": 41,
+   "parameters": 1680,
+   "repeats": 1,
+   "rows": 12000,
+   "seed": 31337,
+   "train_rows": 6000
+  },
+  "loadavg_one_minute": {
+   "after": "2.04 0.71 1.32",
+   "before": "0.05 0.28 1.19"
+  },
+  "memory": {
+   "peak_rss_measures_fits": 1,
+   "peak_rss_mib": 981.5,
+   "ru_maxrss_unit": "kib"
+  },
+  "numerical_outputs": {
+   "beta_l2": 39.473487178,
+   "deviance": 4347.030089931,
+   "effective_df": 1627.0,
+   "n_iter": 2,
+   "n_zero": 54,
+   "zero_index_sum": 44145
+  },
+  "timing_seconds": {
+   "all": [
+    6.0909
+   ],
+   "median": 6.0909,
+   "min": 6.0909
+  }
+ },
+ "branch_src_commit": "c78edd7",
+ "fit": "41-level cat_cat pair, 6000 training rows, 1680 parameters, 54 unidentifiable",
+ "harness": "the revision of benchmarks/rank_deficient_complete_fit.py committed alongside this file -- naming a SHA here would name a tree that does not yet contain the file, and the sampler this payload came from does not exist in any earlier one",
+ "history": [
+  {
+   "artifact_revision": "bb491ff",
+   "baseline_seconds": 262.6198,
+   "branch_seconds": 5.9719,
+   "caveat": "branch side was min of 3 fits in one process; every later run is one fit per side",
+   "committed_at": "2026-08-02T10:48+02:00",
+   "one_minute_loadavg": "not recorded per side; that revision's note said only that the 1-minute load sat between 12 and 21 across the two runs",
+   "ratio": 44.0,
+   "run": 1
+  },
+  {
+   "artifact_revision": "29fb270",
+   "baseline_seconds": 266.957,
+   "branch_seconds": 7.8733,
+   "committed_at": "2026-08-02T11:27+02:00",
+   "one_minute_loadavg": "18-21",
+   "ratio": 33.9,
+   "run": 2
+  },
+  {
+   "artifact_revision": "7bfcdd3",
+   "baseline_seconds": 285.1914,
+   "branch_seconds": 6.5811,
+   "committed_at": "2026-08-02T11:56+02:00",
+   "one_minute_loadavg": "in the teens",
+   "ratio": 43.3,
+   "run": 3
+  },
+  {
+   "artifact_revision": "63f5bb3",
+   "baseline_seconds": 264.5752,
+   "branch_seconds": 8.4797,
+   "committed_at": "2026-08-02T12:19+02:00",
+   "one_minute_loadavg": "18.92",
+   "ratio": 31.2,
+   "run": 4
+  },
+  {
+   "artifact_revision": "this revision",
+   "baseline_seconds": 271.2748,
+   "branch_seconds": 6.0909,
+   "committed_at": "2026-08-02",
+   "one_minute_loadavg": "quiet box, CPU lock held: branch 0.05 0.28 1.19 before, 2.04 0.71 1.32 after; baseline 1.46 0.67 1.29 before, 21.76 13.20 6.44 after (an after reading of a multi-minute 16-thread fit contains the fit's own threads; the before readings are the contention evidence)",
+   "ratio": 44.5,
+   "run": 5
+  }
+ ],
+ "note": "Complete-fit comparison for the alias-representative change, required by AGENTS.md for performance-sensitive work.  SYMMETRIC: one complete fit per side, fresh interpreter each, so the ru_maxrss high-water mark covers the same work on both -- `peak_rss_measures_fits` and `ru_maxrss_unit` record that rather than leaving it to be inferred.  BLAS pools are sampled from a background thread WHILE the fit runs, with a dwell count per configuration, because presence alone cannot distinguish a brief startup window from a phase that held.  Taken with the CPU lock held on an otherwise idle box: the 1-minute load average was read immediately before and after each timed side and sits in each side's `loadavg_one_minute` rather than in a footnote.  Every earlier revision of this file was taken under load averages in the teens or higher, and `history` lists all five measurements of this comparison beside the load each was taken under, because the spread between them tracks the machine, not the code.",
+ "summary": {
+  "blas_note": "An earlier revision of this file claimed the baseline spent part of the fit single-threaded and the branch did not.  That is WITHDRAWN.  `num_threads` from threadpoolctl is the configured limit (openblas_get_num_threads), not the number of threads a kernel elects to use, so it cannot show OpenBLAS running a small decomposition on one thread -- the reading only moves when something calls threadpool_limits, and in this package that is `solver_blas_threads()` capping to 1 on fit entry and `allow_wide_design(p)` releasing the cap once p >= 1500.  With p = 1680 the cap is released mid-fit by design.  Dwell counting shows exactly that: the capped configuration accounts for 2 of 224 samples on the branch side and 0 of 12219 on the baseline side, and which side catches the window is sampling luck rather than a property of either algorithm.",
+  "blas_thread_limit_16_for_fraction_of_samples": {
+   "baseline": 1.0,
+   "branch": 0.9955
+  },
+  "capped_samples": {
+   "baseline": 0,
+   "branch": 2
+  },
+  "decomposition_route_identical": true,
+  "numerical_outputs_identical": true,
+  "peak_rss_delta_mib": -64.9,
+  "speedup_claim": "tens of times faster",
+  "speedup_note": "No single multiplier is published.  Five runs of this comparison produced five ratios, and the spread tracks the 1-minute load average each was taken under, not the code -- the per-run ratios sit in `history` beside their load context, and only run 5 was taken on a quiet box with the load recorded immediately before and after each timed side.  The claim the runs support is that the fit is tens of times faster on this branch."
+ }
+}

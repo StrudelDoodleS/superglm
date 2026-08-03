@@ -22,9 +22,217 @@ import scipy.sparse as sp
 from numpy.polynomial.legendre import legvander
 from numpy.typing import NDArray
 
-from superglm.features.categorical import _validate_categorical_levels
+from superglm.features.categorical import _resolve_categorical_labels
 from superglm.group_matrix import _discretize_column
 from superglm.types import DiscreteTensorBuildResult, GroupInfo, TensorMarginalInfo
+
+
+def _categorical_build_labels(x: NDArray, cat_spec, *, context: str) -> NDArray:
+    """Resolve fit labels only when the categorical parent is grouped.
+
+    An ungrouped parent has already validated and learned this same fit column,
+    so its interaction build preserves the original normalization-only path.
+    Grouped parents still need the raw -> collapsed -> fitted-domain contract.
+    """
+    if cat_spec._grouping is None:
+        return np.asarray(x).ravel()
+    return _resolve_categorical_labels(
+        x,
+        cat_spec._grouping,
+        known_levels=set(cat_spec._levels),
+        context=context,
+    )
+
+
+def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = None):
+    """The spline spec an INTERACTION marginal is built from.
+
+    Cubic regression splines carry two implementations.  A main effect uses
+    ``CubicRegressionSpline`` -- a B-spline basis projected via Z.  Every
+    interaction marginal instead uses ``CardinalCRSpline``, which is much
+    closer to mgcv's ``bs="cr"`` geometry than the older projected path.
+
+    That routing belongs to *interactions as a class*, not to one interaction
+    type.  Applying it in ``TensorInteraction`` alone left ``SplineCategorical``
+    building a different basis from the ``ti`` beside it and, more sharply,
+    from the screening probe that names it as its refit target: the probe could
+    span directions the refit could not build at all.  How badly depends on the
+    margin -- containment of probe span in refit span measured 0.9996 on a
+    uniform margin but 0.675 on a skewed one at ``n_knots=16`` (issue #191).
+    Both go through here so the invariant holds by construction rather than by
+    coincidence.
+
+    The knots move too, not just the basis: a default ``knot_strategy="uniform"``
+    parent is re-placed on quantiles, because a cardinal basis on knots that
+    ignore the margin's density is the weaker half of the geometry this routing
+    exists to get right.  So a ``cr`` main effect and the interaction beside it
+    sit on DIFFERENT interior knots -- on a gamma margin at ``n_knots=8``, 1.92
+    to 15.22 for the main effect against 0.87 to 5.69 here.  That is the same
+    placement the screening probe uses, which is what keeps probe and refit
+    identical; an explicitly knotted or already-quantile parent is left alone.
+
+    Returns *spec* unchanged for every other spline kind, so ``ps`` -- the
+    default -- is untouched, and for the cr configurations the cardinal basis
+    cannot express (below).  The returned spec has its knots already placed on
+    *x*; callers must STORE it and read the basis back from the stored copy,
+    since a predict-time basis rebuilt from the original spec would disagree
+    with the design that was fitted.
+    """
+    from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
+
+    if not isinstance(spec, CubicRegressionSpline):
+        return spec
+
+    # A select=True parent's double-penalty shrinkage lives in its own
+    # identifiability projection.  The cardinal spec below is built with
+    # select=False, so substituting drops that shrinkage, widening the
+    # interaction block and leaving the design rank-deficient.
+    if getattr(spec, "select", False):
+        return spec
+    # ``CardinalCRSpline._build_penalty`` is the exact integrated squared
+    # SECOND derivative and nothing else -- the class advertises
+    # _penalty_semantics="fixed" and rejects m > 2 outright.  So any other
+    # requested order has to keep the parent's quadrature penalty: routing it
+    # here would raise for m=3 and silently swap m=1's first-derivative
+    # penalty for a second-derivative one.
+    if getattr(spec, "_m_orders", (2,)) != (2,):
+        return spec
+
+    knot_strategy = spec.knot_strategy
+    if knot_strategy == "uniform" and spec._explicit_knots is None:
+        knot_strategy = "quantile"
+    cardinal = CardinalCRSpline(
+        n_knots=n_knots_override if n_knots_override is not None else spec.n_knots,
+        knot_strategy=knot_strategy,
+        penalty=spec.penalty,
+        knots=spec._explicit_knots,
+        discrete=spec.discrete,
+        n_bins=spec.n_bins,
+        extrapolation=spec.extrapolation,
+        boundary=spec._explicit_boundary,
+        knot_alpha=spec.knot_alpha,
+        select=False,
+        constraint=None,
+        m=spec._m_orders[0],
+        lambda_policy=None,
+    )
+    cardinal._place_knots(np.asarray(x, dtype=np.float64).ravel())
+    return cardinal
+
+
+def _varying_coefficient_spline_spec(spec, x: NDArray):
+    """``interaction_spline_spec`` for a per-level masked block, centered.
+
+    A resolved spec is freshly constructed, so unlike a fitted parent it
+    carries no identifiability projection until something builds it.  A
+    varying-coefficient block cannot go without one: the cardinal basis
+    reproduces the constant function exactly -- its columns sum to 1 at every
+    x -- so masking the uncentered block to a level rebuilds that level's own
+    categorical main-effect indicator, and the combined design loses one rank
+    per non-base level.  ``build_knots_and_penalty()`` runs the same
+    constraint + identifiability steps a main effect runs and leaves the
+    projection on the spec.
+
+    ``tensor_marginal_ingredients()`` centers its own marginals over the
+    compressed support it is handed, so the tensor path resolves the spec
+    without paying for this one.
+    """
+    resolved = interaction_spline_spec(spec, x)
+    if resolved is not spec:
+        resolved.build_knots_and_penalty(x)
+    return resolved
+
+
+def _plan_spline_cat_support(B: sp.spmatrix, x: NDArray, active: NDArray, *, n_levels: int):
+    """Lossless row-support compression for a shared ``spline_cat`` basis.
+
+    A varying-coefficient term stores one CSR basis shared by its levels plus a
+    row subset per level, and every level runs its own weighted gram over its
+    rows.  When the spline covariate repeats -- a rating factor recorded in
+    whole years, the common insurance case -- those rows repeat too, and one
+    dense block of distinct rows serves every level.
+
+    This is the same deduplication ``_build_ssp_group`` applies to a main
+    effect, and the same gate decides it, with three differences.
+
+    The levels partition the rows between them but each reads the whole shared
+    support, so the cost model is told how many grams that is.
+
+    The grouping is offered rather than detected: the basis is a function of
+    *x* alone, so equal *x* should give equal rows, which makes the decline a
+    sort of one column instead of a scan of the whole basis.
+    ``plan_verified_row_support`` still checks that grouping against the basis
+    before using it, so the saving is on the detection scan and not exactness.
+
+    And only ``active`` rows count.  The base level of the categorical parent
+    is absorbed into the main effect, so its rows appear in NO emitted block --
+    and with the default ``base="most_exposed"`` that is the level carrying the
+    most exposure, routinely the majority of the book.  Charging the CSR side
+    for work it will never do overstates the win, and keeping support rows that
+    only a base-level observation ever reaches makes every level's dense gram
+    scan a support wider than it can use.  Both errors point the same way, so
+    the gate is derived from the union of the non-base masks.
+
+    Returns ``None`` when the gate declines, leaving CSR in place.
+    """
+    # Function-local ON PURPOSE, not merely to dodge a circular import: these
+    # two are read fresh on every call, so a test that lowers the module global
+    # reaches the pre-gate below.  Hoisting this to module scope would bind them
+    # once at import and silently re-freeze that gate while the one inside
+    # plan_verified_row_support kept resolving -- the two disagreeing again, in
+    # the opposite direction.  The pass-through below is what keeps them equal;
+    # this comment is what stops the import being "tidied" upward.
+    from superglm._group_matrix._group_matrix_support import (
+        DEFAULT_MAX_SUPPORT_BYTES,
+        DEFAULT_MIN_SPEEDUP,
+        _passes_support_gates,
+        plan_verified_row_support,
+    )
+
+    active = np.asarray(active, dtype=np.intp).ravel()
+    if n_levels <= 0 or active.size == 0:
+        return None
+
+    codes = np.unique(np.asarray(x, dtype=np.float64).ravel()[active], return_inverse=True)[1]
+    codes = np.ravel(codes).astype(np.intp, copy=False)
+    # Active nnz off the indptr rather than off a slice: the gate has to be
+    # cheap on the DECLINED path, which is every continuous covariate, and
+    # slicing the basis there would cost a copy of most of it.
+    nnz_active = int(np.diff(B.indptr)[active].sum())
+    # One resolution feeds BOTH gates.  These are read here at call time, so
+    # without passing them through, the pre-gate below would see a patched
+    # threshold while the gate inside plan_verified_row_support saw the frozen
+    # default -- two gates documented as agreeing, disagreeing under a patch,
+    # with the block silently falling back to CSR and a test believing it.
+    min_speedup = DEFAULT_MIN_SPEEDUP
+    max_support_bytes = DEFAULT_MAX_SUPPORT_BYTES
+    if not _passes_support_gates(
+        int(active.size),
+        int(codes.max()) + 1,
+        int(B.shape[1]),
+        nnz_active,
+        min_speedup,
+        max_support_bytes,
+        n_levels,
+    ):
+        return None
+
+    planned = plan_verified_row_support(
+        sp.csr_matrix(B)[active],
+        codes,
+        min_speedup=min_speedup,
+        max_support_bytes=max_support_bytes,
+        gram_repeats=n_levels,
+    )
+    if planned is None:
+        return None
+    b_unique, active_codes = planned
+    # Full-length, because the builder indexes it by each level's own row ids.
+    # Base-level entries are never read; zero is simply a valid index.
+    row_index = np.zeros(B.shape[0], dtype=np.intp)
+    row_index[active] = active_codes
+    return b_unique, row_index
+
 
 # ── SplineCategorical ──────────────────────────────────────────
 
@@ -50,6 +258,7 @@ class SplineCategorical:
         self._base_level: str = ""
         self._R_inv_dict: dict[str, NDArray] | NDArray = {}
         self._projection: NDArray | None = None
+        self._cat_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -72,6 +281,11 @@ class SplineCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
+        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
+        # Interaction marginals use the cardinal cr basis; store the resolved
+        # spec so transform()/score() rebuild the SAME basis at predict time.
+        spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
+
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
@@ -81,10 +295,19 @@ class SplineCategorical:
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
         self._projection = getattr(spline_spec, "_interaction_projection", None)
+        self._cat_grouping = cat_spec._grouping
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
 
-        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
         B = sp.csr_matrix(spline_spec._raw_basis_matrix(x_spline))
+        # Union of the non-base masks: exactly the rows some emitted block owns.
+        active_rows = np.flatnonzero(np.isin(x_cat, self._non_base))
+        compressed = _plan_spline_cat_support(
+            B, x_spline, active_rows, n_levels=len(self._non_base)
+        )
 
         omega = spline_spec._build_penalty()
 
@@ -101,19 +324,28 @@ class SplineCategorical:
         groups: list[GroupInfo] = []
         for level in self._non_base:
             mask = x_cat == level
-            groups.append(
-                GroupInfo(
-                    columns=None,
-                    n_cols=n_cols,
-                    penalty_matrix=omega,
-                    reparametrize=True,
-                    projection=self._projection,
-                    spline_cat_basis=B,
-                    spline_cat_mask=mask,
-                    spline_cat_level=str(level),
-                    spline_cat_feature=self.cat_name,
-                )
+            shared = dict(
+                columns=None,
+                n_cols=n_cols,
+                penalty_matrix=omega,
+                reparametrize=True,
+                projection=self._projection,
+                spline_cat_mask=mask,
+                spline_cat_level=str(level),
+                spline_cat_feature=self.cat_name,
             )
+            if compressed is None:
+                groups.append(GroupInfo(spline_cat_basis=B, **shared))
+            else:
+                b_unique, row_index = compressed
+                groups.append(
+                    GroupInfo(
+                        spline_cat_basis_unique=b_unique,
+                        spline_cat_bin_idx=row_index,
+                        spline_cat_support_lossless=True,
+                        **shared,
+                    )
+                )
         return groups
 
     def build_discrete(
@@ -135,6 +367,10 @@ class SplineCategorical:
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
 
+        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
+        # Same resolution as build(); see _varying_coefficient_spline_spec.
+        spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
+
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
         self._n_basis = spline_spec._n_basis
@@ -144,9 +380,13 @@ class SplineCategorical:
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
         self._projection = getattr(spline_spec, "_interaction_projection", None)
+        self._cat_grouping = cat_spec._grouping
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
 
-        x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
         support, bin_idx = _discretize_column(x_spline, int(n_bins))
         B_unique = np.asarray(spline_spec._raw_basis_matrix(support), dtype=np.float64)
 
@@ -196,9 +436,11 @@ class SplineCategorical:
 
     def transform(self, x_spline: NDArray, x_cat: NDArray) -> NDArray:
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         B = self._spline_spec._raw_basis_matrix(x_spline)
 
@@ -218,11 +460,21 @@ class SplineCategorical:
     def score(self, x_spline: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         """Score the interaction directly from its public runtime blocks."""
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
+        return self._score_resolved(x_spline, x_cat, beta)
 
+    def _score_resolved(
+        self,
+        x_spline: NDArray,
+        x_cat: NDArray,
+        beta: NDArray,
+    ) -> NDArray:
+        """Score labels that are already in the fitted grouped-level domain."""
         B = sp.csr_matrix(self._spline_spec._raw_basis_matrix(x_spline))
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_spline), dtype=np.float64)
@@ -252,7 +504,7 @@ class SplineCategorical:
         per_level: dict[str, dict[str, Any]] = {}
         for level in self._non_base:
             level_codes = np.full(n_points, level, dtype=object)
-            log_rels = self.score(x_grid, level_codes, beta)
+            log_rels = self._score_resolved(x_grid, level_codes, beta)
             per_level[level] = {
                 "log_relativity": log_rels,
                 "relativity": np.exp(log_rels),
@@ -286,6 +538,7 @@ class PolynomialCategorical:
         self._hi: float = 1.0
         self._non_base: list[str] = []
         self._base_level: str = ""
+        self._cat_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -322,9 +575,14 @@ class PolynomialCategorical:
         self._hi = poly_spec._hi
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
+        self._cat_grouping = cat_spec._grouping
 
         x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
         P = self._basis(self._scale(x_poly))
 
         groups: list[GroupInfo] = []
@@ -336,9 +594,11 @@ class PolynomialCategorical:
 
     def transform(self, x_poly: NDArray, x_cat: NDArray) -> NDArray:
         x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         P = self._basis(self._scale(x_poly))
 
@@ -350,9 +610,11 @@ class PolynomialCategorical:
 
     def score(self, x_poly: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         x_poly = np.asarray(x_poly, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         P = self._basis(self._scale(x_poly))
         beta = np.asarray(beta, dtype=np.float64).ravel()
@@ -406,6 +668,7 @@ class NumericCategorical:
 
         self._non_base: list[str] = []
         self._base_level: str = ""
+        self._cat_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -430,9 +693,14 @@ class NumericCategorical:
 
         self._non_base = list(cat_spec._non_base)
         self._base_level = cat_spec._base_level
+        self._cat_grouping = cat_spec._grouping
 
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
+        x_cat = _categorical_build_labels(
+            x_cat,
+            cat_spec,
+            context=self.cat_name,
+        )
 
         cols = []
         for level in self._non_base:
@@ -444,9 +712,11 @@ class NumericCategorical:
 
     def transform(self, x_num: NDArray, x_cat: NDArray) -> NDArray:
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
 
         cols = []
@@ -457,9 +727,11 @@ class NumericCategorical:
 
     def score(self, x_num: NDArray, x_cat: NDArray, beta: NDArray) -> NDArray:
         x_num = np.asarray(x_num, dtype=np.float64).ravel()
-        x_cat = np.asarray(x_cat).ravel()
-        _validate_categorical_levels(
-            x_cat, set(self._non_base) | {self._base_level}, context=self.cat_name
+        x_cat = _resolve_categorical_labels(
+            x_cat,
+            self._cat_grouping,
+            known_levels=set(self._non_base) | {self._base_level},
+            context=self.cat_name,
         )
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_num), dtype=np.float64)
@@ -504,6 +776,8 @@ class CategoricalInteraction:
         self._base1: str = ""
         self._base2: str = ""
         self._pairs: list[tuple[str, str]] = []
+        self._cat1_grouping = None
+        self._cat2_grouping = None
 
     @property
     def parent_names(self) -> tuple[str, str]:
@@ -529,9 +803,19 @@ class CategoricalInteraction:
         self._non_base2 = list(cat2_spec._non_base)
         self._base1 = cat1_spec._base_level
         self._base2 = cat2_spec._base_level
+        self._cat1_grouping = cat1_spec._grouping
+        self._cat2_grouping = cat2_spec._grouping
 
-        x_cat1 = np.asarray(x_cat1).ravel()
-        x_cat2 = np.asarray(x_cat2).ravel()
+        x_cat1 = _categorical_build_labels(
+            x_cat1,
+            cat1_spec,
+            context=self.cat1_name,
+        )
+        x_cat2 = _categorical_build_labels(
+            x_cat2,
+            cat2_spec,
+            context=self.cat2_name,
+        )
         n = len(x_cat1)
 
         self._pairs = []
@@ -561,13 +845,17 @@ class CategoricalInteraction:
         return GroupInfo(columns=columns, n_cols=n_pairs)
 
     def transform(self, x_cat1: NDArray, x_cat2: NDArray) -> NDArray:
-        x_cat1 = np.asarray(x_cat1).ravel()
-        x_cat2 = np.asarray(x_cat2).ravel()
-        _validate_categorical_levels(
-            x_cat1, set(self._non_base1) | {self._base1}, context=self.cat1_name
+        x_cat1 = _resolve_categorical_labels(
+            x_cat1,
+            self._cat1_grouping,
+            known_levels=set(self._non_base1) | {self._base1},
+            context=self.cat1_name,
         )
-        _validate_categorical_levels(
-            x_cat2, set(self._non_base2) | {self._base2}, context=self.cat2_name
+        x_cat2 = _resolve_categorical_labels(
+            x_cat2,
+            self._cat2_grouping,
+            known_levels=set(self._non_base2) | {self._base2},
+            context=self.cat2_name,
         )
         n = len(x_cat1)
         cols = []
@@ -576,13 +864,17 @@ class CategoricalInteraction:
         return np.column_stack(cols) if cols else np.empty((n, 0))
 
     def score(self, x_cat1: NDArray, x_cat2: NDArray, beta: NDArray) -> NDArray:
-        x_cat1 = np.asarray(x_cat1).ravel()
-        x_cat2 = np.asarray(x_cat2).ravel()
-        _validate_categorical_levels(
-            x_cat1, set(self._non_base1) | {self._base1}, context=self.cat1_name
+        x_cat1 = _resolve_categorical_labels(
+            x_cat1,
+            self._cat1_grouping,
+            known_levels=set(self._non_base1) | {self._base1},
+            context=self.cat1_name,
         )
-        _validate_categorical_levels(
-            x_cat2, set(self._non_base2) | {self._base2}, context=self.cat2_name
+        x_cat2 = _resolve_categorical_labels(
+            x_cat2,
+            self._cat2_grouping,
+            known_levels=set(self._non_base2) | {self._base2},
+            context=self.cat2_name,
         )
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_cat1), dtype=np.float64)
@@ -899,11 +1191,6 @@ class TensorInteraction:
                 "This matches the mgcv te()/ti() marginal-smooth contract."
             )
 
-        # For tensor marginals, route cubic regression splines through the
-        # cardinal CR implementation, which is much closer to mgcv's bs="cr"
-        # geometry than the older projected-B-spline CR path.
-        from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
-
         def marginal_ingredients(candidate) -> TensorMarginalInfo:
             method = candidate.tensor_marginal_ingredients
             if support is None:
@@ -935,26 +1222,13 @@ class TensorInteraction:
             # but retain only its evaluation on the discrete support.
             return compact_legacy(method(x))
 
-        if isinstance(spec, CubicRegressionSpline):
-            knot_strategy = spec.knot_strategy
-            if knot_strategy == "uniform" and spec._explicit_knots is None:
-                knot_strategy = "quantile"
-            cardinal = CardinalCRSpline(
-                n_knots=n_knots_override if n_knots_override is not None else spec.n_knots,
-                knot_strategy=knot_strategy,
-                penalty=spec.penalty,
-                knots=spec._explicit_knots,
-                discrete=spec.discrete,
-                n_bins=spec.n_bins,
-                extrapolation=spec.extrapolation,
-                boundary=spec._explicit_boundary,
-                knot_alpha=spec.knot_alpha,
-                select=False,
-                constraint=None,
-                m=spec._m_orders[0],
-                lambda_policy=None,
-            )
-            cardinal._place_knots(x)
+        # Route cubic regression splines through the cardinal CR
+        # implementation, which is much closer to mgcv's bs="cr" geometry than
+        # the older projected-B-spline CR path.  A cr parameterisation the
+        # cardinal basis cannot express comes back unchanged and takes the
+        # ordinary marginal path below, penalty order and all.
+        cardinal = interaction_spline_spec(spec, x, n_knots_override)
+        if cardinal is not spec:
             info = marginal_ingredients(cardinal)
             info.normalize_penalty = True
             return info
@@ -966,6 +1240,10 @@ class TensorInteraction:
                 penalty=spec.penalty,
                 boundary=(spec._lo, spec._hi),
                 knot_alpha=spec.knot_alpha,
+                # Single-penalty by the guard above, so the parent's order
+                # carries over intact; dropping it would rebuild a cr m=1 or
+                # m=3 margin on the default second-derivative penalty.
+                m=spec._m_orders[0],
             )
             # CubicRegressionSpline/CardinalCRSpline hardcode degree=3
             if "degree" in inspect.signature(type(spec).__init__).parameters:

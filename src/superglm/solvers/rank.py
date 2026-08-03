@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -13,6 +13,19 @@ from numpy.typing import NDArray
 
 @dataclass(frozen=True)
 class RankPolicy:
+    """Numerical-rank thresholds, and the version of the rule that applied them.
+
+    ``version`` does not track the threshold VALUES.  Those are constants of
+    the floating-point format, pinned in ``test_rank_policy.py``, and they have
+    not moved.  It tracks the RULE, because identical thresholds do not imply
+    an identical answer: the rank cutoff fixes how many directions are
+    retained, and leaves open which columns represent them and whether a
+    representative basis is recovered at all.
+
+    That is the one thing a stored ``RankDecomposition`` or ``RankInfo`` cannot
+    re-derive for itself, so it is the one thing the version has to carry.
+    """
+
     version: int
     factor_rcond: float
     gram_rcond: float
@@ -23,7 +36,39 @@ class RankPolicy:
 
 _EPS = np.finfo(float).eps
 SHARED_RANK_POLICY = RankPolicy(
-    version=1,
+    # Version 2 -- the deficient path answers differently under version 1's
+    # thresholds, in two independent ways.
+    #
+    # Choosing representatives by walking every prefix was replaced by reading
+    # the choice off the null basis.  Where the walk could fill its set the two
+    # agree exactly -- over 958 deficient blocks there was NOT ONE where both
+    # returned a set and the sets differed -- but the walk tests each prefix
+    # against the WHOLE matrix's cutoff, so on a small prefix it can mis-reject
+    # a column, run out of candidates and return nothing.  That happened on 126
+    # of those 958.  Reading the selection from the null basis makes a
+    # representative candidate available where the walk left `gram_eigh`, but
+    # the candidate is retained only when its principal condition stays below
+    # `severe_condition` AND its smallest eigenvalue numerically clears the
+    # same full-matrix cutoff that certified the rank.  The walk fails at the
+    # numerical boundary, so most of those candidates deliberately remain
+    # spectral.  Safe candidates still recover a coefficient representation,
+    # so this is not only a cost difference.
+    #
+    # Which blocks those are is NOT reproducible across machines: the walk only
+    # fails when a prefix eigenvalue lands near `eps * ||A||`, which is below
+    # what a symmetric eigensolver resolves.  The rate is stable, the identity
+    # of the blocks is not -- see the test of the same name for the measurement
+    # and for how that constrains what can be asserted.
+    #
+    # `_conditioned_representatives` then changed which columns are chosen when
+    # index order costs more conditioning than a rank-revealing choice may.  On
+    # the three-column near alias it selects [0, 2] where the walk selected
+    # [0, 1].
+    #
+    # Skipping the eager Gram subspace at certification sites is inside this
+    # version and contributes no reason for it: that path returns the same
+    # decomposition or none, and was accepted on byte-identical fitted output.
+    version=2,
     factor_rcond=float(np.sqrt(_EPS)),
     gram_rcond=float(_EPS),
     certification_band=32.0,
@@ -141,6 +186,37 @@ def streamed_weighted_factor_rhs(
     return np.asarray(joint_factor[:, :width]), np.asarray(joint_factor[:, width])
 
 
+def _certification_required(
+    *,
+    method: str,
+    width: int,
+    rank: int,
+    pre_truncation_condition: float,
+    resolution_limited: bool,
+    policy: RankPolicy,
+) -> bool:
+    """The certification predicate, over the five fields that decide it.
+
+    ``decompose_gram`` knows all five before it builds the retained subspace,
+    so the predicate is kept callable without a decomposition in hand --
+    otherwise the eager path and the deferring path would each carry their own
+    copy of the band, free to drift apart.
+    """
+    if method == "qr_svd":
+        # A factor decomposition is already the authoritative certificate;
+        # never stream and factor the same rows again merely because the
+        # factor policy itself truncated a nonzero singular value.
+        return False
+    certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
+    return bool(
+        width > 0
+        and (
+            (rank == width and pre_truncation_condition >= certification_condition)
+            or (rank < width and resolution_limited)
+        )
+    )
+
+
 def needs_factor_certification(
     decomposition: RankDecomposition,
     *,
@@ -152,21 +228,13 @@ def needs_factor_certification(
     Normal equations can erase a factor-scale direction at the numerical
     boundary, or retain a different direction while reporting the same rank.
     """
-    if decomposition.method == "qr_svd":
-        # A factor decomposition is already the authoritative certificate;
-        # never stream and factor the same rows again merely because the
-        # factor policy itself truncated a nonzero singular value.
-        return False
-    certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
-    return bool(
-        decomposition.width > 0
-        and (
-            (
-                decomposition.rank == decomposition.width
-                and decomposition.pre_truncation_condition >= certification_condition
-            )
-            or (decomposition.rank < decomposition.width and decomposition.resolution_limited)
-        )
+    return _certification_required(
+        method=decomposition.method,
+        width=decomposition.width,
+        rank=decomposition.rank,
+        pre_truncation_condition=decomposition.pre_truncation_condition,
+        resolution_limited=decomposition.resolution_limited,
+        policy=policy,
     )
 
 
@@ -459,6 +527,579 @@ def _null_basis(
     return np.column_stack(pieces) if pieces else np.zeros((width, 0))
 
 
+def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+    """Earliest independent representatives, read off a null basis already in hand.
+
+    Index-order greedy selection keeps column ``j`` unless it is a combination
+    of the columns before it -- equivalently, unless some null vector has its
+    LAST nonzero at ``j``.  Eliminating the null basis from the right-hand end
+    pivots on precisely those positions, so the pivots are the rejected columns
+    and the complement is the greedy selection, not an approximation of it.
+
+    Deciding the same question by testing each prefix's spectrum costs one
+    eigendecomposition per candidate, which is ``O(m**4)`` across the sweep and
+    is why a rank-deficient block used to cost hundreds of times a full-rank one
+    of the same width.  This is ``O(k**2 m)`` in the NULLITY ``k``, so a block
+    that is a few columns short of full rank is nearly free.
+
+    "Still reaches column ``j``" is decided by the null space's LEVERAGE there,
+    ``||P_S e_j||**2``, not by any single vector's component.  Those vectors come
+    out of an eigendecomposition of a singular system, so a component that is
+    mathematically zero arrives as noise many orders above machine epsilon --
+    measured at 1e-12 against a 1e-14 absolute threshold on an 8-column block,
+    which pivoted on dust and returned a rank-deficient selection.  ``sqrt(eps)``
+    is the floor below which a unit-norm null direction carries no information
+    here, and leverage is the basis-free way to ask the question.
+
+    It has to be basis-free.  A null SPACE has no canonical basis, and reading
+    ``max |N[i, j]|`` instead makes the answer depend on the one ``eigh`` chose:
+    for leverage ``s**2`` that maximum lies anywhere in ``[s / sqrt(k), s]``
+    depending on the rotation, so any ``s`` in ``(sqrt(eps), sqrt(k) sqrt(eps))``
+    is dust for one basis and a dependency for another.  That is not
+    hypothetical -- the component form moved on 455 of 4000 subspaces built
+    inside that band, and carried ``_conditioned_representatives`` with it on
+    21 of them.  Leverage cannot move: ``(N Q)(N Q).T = N N.T``.
+
+    The deflation is basis-free for the same reason.  Rejecting column ``c``
+    leaves ``{v in S : v_c = 0}``, a property of the subspace and the column, so
+    a Householder maps ``Q[:, c]`` onto the first axis and that axis is dropped.
+    Rows stay orthonormal, so the next leverage is read straight off the column
+    norms and the cost stays ``O(k**2 m)``.
+
+    Returns ``None`` when the scan cannot reject all ``k`` columns.  The caller
+    then keeps whatever exact path it already had rather than proceeding on a
+    selection this could not certify.
+    """
+    width, nullity = null_vectors.shape
+    if nullity == 0:
+        return np.arange(width, dtype=int)
+    basis = np.array(null_vectors.T, dtype=float)
+    if not np.all(np.isfinite(basis)):
+        return None
+    floor = float(np.sqrt(np.finfo(float).eps)) ** 2
+
+    rejected: list[int] = []
+    remaining = np.ones(width, dtype=bool)
+    for _step in range(nullity):
+        if basis.shape[0] == 0:
+            break
+        columns = np.flatnonzero(remaining)
+        if columns.size == 0:
+            break
+        leverage = np.einsum("ij,ij->j", basis[:, columns], basis[:, columns])
+        reachable = np.flatnonzero(leverage > floor)
+        if reachable.size == 0:
+            break
+        # the LATEST column the null space still reaches: the earliest-column
+        # convention, decided on a quantity the basis cannot move
+        chosen = int(columns[int(reachable[-1])])
+        rejected.append(chosen)
+        remaining[chosen] = False
+
+        direction = basis[:, chosen].copy()
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            break
+        direction[0] += float(np.copysign(norm, direction[0] if direction[0] != 0.0 else 1.0))
+        reflector_norm = float(np.linalg.norm(direction))
+        if reflector_norm > 0.0:
+            direction /= reflector_norm
+            basis = basis - 2.0 * np.outer(direction, direction @ basis)
+        basis = basis[1:]
+
+    if len(rejected) != nullity:
+        return None
+    keep = np.setdiff1d(np.arange(width), np.asarray(rejected, dtype=int))
+    return keep if keep.size == rank else None
+
+
+# A fallback pivot may carry this fraction of the largest null-space share
+# available, measured on the ``sqrt(leverage)`` scale so the constant keeps the
+# meaning it had when the rule read components directly.  See
+# ``_leverage_pivot_representatives`` for why it is not 1.
+_PIVOT_THRESHOLD = 0.5
+
+
+def _leverage_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
+    """Representatives chosen for conditioning, from a quantity the basis cannot move.
+
+    A null SPACE has no canonical basis.  ``eigh`` and ``svd`` return an
+    arbitrary orthonormal one, and ``N @ Q`` spans the same subspace for any
+    orthogonal ``Q``, so any rule reading individual components of ``N`` is
+    reading a coordinate that the eigensolver was free to choose.  The rule this
+    replaces did exactly that -- it pivoted on ``max |N[i, j]|`` -- and it moved
+    under rotation on 58 of 400 random 6x2 subspaces, rising to 224 of 400 at
+    12x4, with the achieved amplification moving too (6.7803 against 2.0732 on
+    one subspace).
+
+    ``_earliest_representatives`` did not move on those 400, and that was NOT
+    because its question is basis-free.  "The last column any null direction
+    still reaches" is a property of the row space, but the ``sqrt(eps)`` floor
+    it used to answer that question with was not: it read a single component,
+    and for leverage ``s**2`` the largest component ranges over
+    ``[s / sqrt(k), s]`` across bases.  Subspaces constructed inside the
+    resulting band moved it on 455 of 4000.  The uniform sweep simply never
+    produced one -- so it decides on leverage now too, and the two selectors
+    share this criterion rather than one of them being safe by nature.
+
+    So the criterion here is the null-space LEVERAGE of each column,
+    ``diag(N @ N.T)``, which is invariant by construction: ``(N Q)(N Q).T =
+    N Q Q.T N.T = N N.T``.  It is the share of the unit vector ``e_j`` that lies
+    in the null space -- 1 when column ``j`` is entirely redundant, 0 when it is
+    untouched by any alias -- and rejecting the column with the most of it is
+    the classical alias-detection choice.
+
+    The DEFLATION has to be invariant too, or the second step reintroduces what
+    the first avoided.  Rejecting column ``c`` leaves ``{v in S : v_c = 0}``,
+    which is a property of the subspace and the column, so it is taken as one:
+    a Householder reflection maps ``Q[:, c]`` onto the first axis and the
+    remaining rows are dropped, leaving an orthonormal basis of exactly that
+    subspace.  Row norms therefore stay 1 throughout and the leverage of the
+    next step is read straight off the column norms.
+
+    ``_PIVOT_THRESHOLD`` keeps its meaning from the rule this replaces -- it is
+    applied to ``sqrt(leverage)``, which is the scale the components were on --
+    and so does the reason it is not 1: index order is worth keeping where
+    conditioning does not pay for it, and an exact alias splits its leverage
+    evenly across the columns it ties, so the tie still falls to the latest.
+
+    Invariance cost nothing here.  On the 287 blocks of a 400-block sweep where
+    the earliest rule failed its certificate, this rule and the component rule
+    it replaces return selections of IDENTICAL amplification on all 287 --
+    better on none, worse on none.  Both take the median from 1.7952e+07 down
+    to 2.0000 and the maximum from 7.077e+15 down to 8.555.  The component rule
+    was sound in intent and unsound only in its input.
+
+    Both also leave 2 of those 287 above ``_achievable_amplification``, so that
+    is a property of greedy selection rather than of either criterion: the
+    bound is what a largest-volume subset achieves, and neither rule searches
+    for one.  ``_conditioned_representatives`` returns the better of this and
+    the earliest selection, so the result is never worse than index order alone
+    -- verified over the same 287, worst ratio exactly 1.000000.
+
+    Cost is unchanged at ``O(k**2 m)`` in the nullity ``k``: the Householder is
+    ``O(k m)`` per step, exactly what the elimination it replaces cost.
+    """
+    width, nullity = null_vectors.shape
+    if nullity == 0:
+        return np.arange(width, dtype=int)
+    basis = np.array(null_vectors.T, dtype=float)
+    if not np.all(np.isfinite(basis)):
+        return None
+
+    rejected: list[int] = []
+    remaining = np.ones(width, dtype=bool)
+    for _step in range(nullity):
+        if basis.shape[0] == 0:
+            break
+        columns = np.flatnonzero(remaining)
+        if columns.size == 0:
+            break
+        leverage = np.einsum("ij,ij->j", basis[:, columns], basis[:, columns])
+        # Leverage is a diagonal of a projector, so it lives in [0, 1] and a
+        # column the null space does not reach at all sits at machine dust.
+        leverage[leverage <= _EPS] = 0.0
+        peak = float(leverage.max(initial=0.0))
+        if peak <= 0.0:
+            break
+        qualifying = np.flatnonzero(leverage >= (_PIVOT_THRESHOLD**2) * peak)
+        chosen = int(columns[int(qualifying[-1])])
+        rejected.append(chosen)
+        remaining[chosen] = False
+
+        # Householder onto {v in S : v_chosen = 0}: reflect Q[:, chosen] to the
+        # first axis, then drop that axis.  The result is orthonormal because a
+        # reflection is, so no re-orthogonalisation is needed.
+        direction = basis[:, chosen].copy()
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            break
+        direction[0] += float(np.copysign(norm, direction[0] if direction[0] != 0.0 else 1.0))
+        reflector_norm = float(np.linalg.norm(direction))
+        if reflector_norm > 0.0:
+            direction /= reflector_norm
+            basis = basis - 2.0 * np.outer(direction, direction @ basis)
+        basis = basis[1:]
+
+    if len(rejected) != nullity:
+        return None
+    keep = np.setdiff1d(np.arange(width), np.asarray(rejected, dtype=int))
+    return keep if keep.size == rank else None
+
+
+def _selection_amplification(null_vectors: NDArray, keep: NDArray) -> float:
+    """How much worse than the retained subspace itself a selection is.
+
+    Split the rows of the null basis ``N`` -- orthonormal columns, so
+    ``N.T @ N = I`` -- into the REJECTED rows ``N_R`` and the KEPT rows ``N_K``.
+    Then ``N_R.T N_R = I - N_K.T N_K`` gives
+
+        (N_R.T N_R)^-1 - I = (N_K N_R^-1).T (N_K N_R^-1),
+
+    so ``1 / sigma_min(N_R)**2 == 1 + ||N_K N_R^-1||_2**2`` identically, and the
+    selected block inherits
+
+        sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R).
+
+    The returned ``1 / sigma_min(N_R)`` is therefore the factor by which the
+    CHOICE OF REPRESENTATIVES multiplies the condition number the retained
+    subspace already has.  It is a property of the selection alone, which is
+    why it sees what no test against the rank cutoff can: a block may sit
+    comfortably above the cutoff that decided the rank -- not deficient by that
+    standard, and accepted by Cholesky -- while still being the worst basis
+    available for the subspace it spans.
+
+    Verified over 400 random rank-deficient blocks: the identity holds to
+    2.37e-13 relative, and the tightest observed
+    ``sigma_min(X_keep) / (sigma_rank(X) * sigma_min(N_R))`` was 1.000002, so
+    the bound is attained rather than merely true.
+    """
+    width = null_vectors.shape[0]
+    rejected = np.setdiff1d(np.arange(width), keep)
+    if rejected.size == 0:
+        return 1.0
+    spectrum = np.linalg.svd(null_vectors[rejected, :], compute_uv=False)
+    smallest = float(np.min(spectrum)) if spectrum.size else 0.0
+    return float("inf") if smallest <= 0.0 else 1.0 / smallest
+
+
+def _achievable_amplification(width: int, nullity: int) -> float:
+    """``sqrt(1 + k*(m-k))``, the amplification a rank-revealing choice reaches.
+
+    The largest-volume ``k x k`` submatrix of a null basis with orthonormal
+    columns has ``|N_K N_R^-1|`` bounded entrywise by 1 -- otherwise a swap
+    would increase the volume -- so its spectral norm is at most
+    ``sqrt(k*(m-k))`` and, by the identity in ``_selection_amplification``, its
+    amplification is at most ``sqrt(1 + k*(m-k))``.  A selection worse than
+    that is worse than one that provably exists, which makes this the natural
+    place to stop trusting index order, rather than a tuned constant.
+    """
+    return float(np.sqrt(1.0 + float(nullity) * float(width - nullity)))
+
+
+def _principal_block_condition(equilibrated: NDArray, keep: NDArray) -> float:
+    """Condition of the principal block a selection actually hands to the solver.
+
+    This is the matrix that gets factorised and then solved against, so it is
+    the quantity a selection should be judged on.  ``_selection_amplification``
+    bounds it from one side only, which is enough to SCREEN a selection and not
+    enough to choose between two.
+
+    Returns ``inf`` when the block will not factorise, which ranks it below any
+    block that will.
+    """
+    block = equilibrated[np.ix_(keep, keep)]
+    try:
+        factor = scipy.linalg.cholesky(block, lower=True, check_finite=False)
+    except (np.linalg.LinAlgError, ValueError):
+        return float("inf")
+    pocon = scipy.linalg.get_lapack_funcs("pocon", (factor,))
+    reciprocal, info = pocon(factor, float(np.linalg.norm(block, ord=1)), uplo="L")
+    if info != 0 or not np.isfinite(reciprocal) or reciprocal <= 0.0:
+        return float("inf")
+    return float(1.0 / reciprocal)
+
+
+def _principal_block_clears_cutoff(
+    equilibrated: NDArray,
+    keep: NDArray,
+    cutoff: float,
+) -> bool:
+    """Whether a representative numerically clears the full block's cutoff.
+
+    The decomposition decides ``rank`` against one matrix-wide cutoff
+    ``cutoff``.  A principal block may be locally well-conditioned and still
+    lose a direction against that ORIGINAL cutoff because its own spectral
+    scale is smaller.  Handing such a block to Cholesky would make the solve
+    rank deficient under the policy that selected it.
+
+    A bare Cholesky of ``B - cutoff * I`` is not a strict floating-point test:
+    DPOTRF is backward stable, so it may succeed when the shifted matrix is
+    semidefinite.  That happened at exact equality on a two-column public-path
+    fixture, with a spurious final diagonal around ``1e-8``.
+
+    Compute only the smallest symmetric eigenvalue and require it to clear the
+    cutoff by a backward-error allowance.  Symmetric eigensolvers are
+    backward stable to ``O(m * eps * ||B||)``; the factor 64 deliberately makes
+    the boundary band conservative and also covers forming and slicing the
+    principal block.  This is a NUMERICAL certificate, not a claim that the
+    returned eigenvalue is exact.  Equality, values below the cutoff, and
+    values too close to distinguish all keep the spectral representation.
+    """
+    if not np.isfinite(cutoff) or cutoff < 0.0:
+        return False
+    block = equilibrated[np.ix_(keep, keep)]
+    scale = max(
+        float(np.linalg.norm(block, ord=np.inf)),
+        abs(cutoff),
+        np.finfo(float).tiny,
+    )
+    allowance = 64.0 * max(1, len(keep)) * _EPS * scale
+    try:
+        smallest = float(
+            scipy.linalg.eigvalsh(
+                block,
+                subset_by_index=[0, 0],
+                check_finite=False,
+            )[0]
+        )
+    except (np.linalg.LinAlgError, ValueError):
+        return False
+    return bool(np.isfinite(smallest) and smallest > cutoff + allowance)
+
+
+def _compact_factor_qr(
+    spectral_factor: NDArray,
+    keep: NDArray,
+) -> tuple[NDArray, NDArray] | None:
+    """Return a canonical thin QR for one factor-space representative.
+
+    ``spectral_factor = diag(s) @ Vh`` is left-orthogonally equivalent to the
+    equilibrated observation factor but has at most ``width`` rows.  A QR of
+    its selected columns therefore recovers the representative geometry
+    without another decomposition whose error or cost scales with the
+    observation count.
+
+    QR leaves the signs of corresponding columns of ``Q`` and rows of ``R``
+    arbitrary.  Canonicalise them here so ``diag(R)`` is positive.  Then
+    ``R.T`` is a conventional lower Cholesky factor satisfying
+    ``R.T @ R == spectral_factor[:, keep].T @ spectral_factor[:, keep]`` up to
+    the backward error of this width-bounded QR.
+    """
+    compact = spectral_factor[:, keep]
+    try:
+        compact_left, upper = scipy.linalg.qr(
+            compact,
+            mode="economic",
+            check_finite=False,
+        )
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    diagonal = np.diag(upper)
+    if not np.all(np.isfinite(upper)) or np.any(diagonal == 0.0):
+        return None
+    row_signs = np.where(diagonal < 0.0, -1.0, 1.0)
+    compact_left = compact_left * row_signs
+    upper = row_signs[:, None] * upper
+    return compact_left, upper
+
+
+def _triangular_gram_condition(upper: NDArray) -> float:
+    """Condition of the Gram represented by a compact factor's upper ``R``.
+
+    The representative solve uses ``L = R.T``.  Estimate the condition from
+    that same factor rather than forming a Gram over all observation rows.
+    Only the matrix norm needs an explicit product, and its dot products have
+    length ``rank <= width``.
+    """
+    lower = upper.T
+    compact_gram = lower @ lower.T
+    matrix_norm = float(np.linalg.norm(compact_gram, ord=1))
+    if not np.isfinite(matrix_norm) or matrix_norm <= 0.0:
+        return float("inf")
+    pocon = scipy.linalg.get_lapack_funcs("pocon", (lower,))
+    reciprocal, info = pocon(lower, matrix_norm, uplo="L")
+    if info != 0 or not np.isfinite(reciprocal) or reciprocal <= 0.0:
+        return float("inf")
+    return float(1.0 / reciprocal)
+
+
+def _factor_representative_clears_cutoff(
+    spectral_factor: NDArray,
+    keep: NDArray,
+    *,
+    largest_singular_value: float,
+    smallest_retained_singular_value: float,
+    cutoff: float,
+    amplification: float,
+) -> bool:
+    """Certify a representative in the factor SVD's own coordinates.
+
+    Let the authoritative computed rank-``r`` factor be
+
+    ``F_r = U_r diag(s[:r]) Vh[:r]``
+
+    and let ``N = Vh[r:].T`` be its null basis.  Splitting ``N`` into rows for
+    the kept and rejected columns gives the identity documented by
+    :func:`_selection_amplification`, hence
+
+    ``sigma_min(F[:, keep]) >= s[r - 1] / amplification``.
+
+    The full factor can only improve that bound: its discarded left-singular
+    coordinates add a positive-semidefinite term to the selected Gram.  The
+    first test below therefore stays entirely on the singular scale already
+    used to compute ``cutoff`` and needs no Gram formation.
+
+    When that bound is inconclusive, assess the candidate in a COMPACT spectral
+    factor ``diag(s) @ Vh``.  It has at most ``width`` rows regardless of the
+    observation count, so it cannot inherit the ``O(n * eps)`` accumulation of
+    ``F.T @ F``.  The compact product is not exact either: a length-``q`` dot
+    product has componentwise error bounded by ``gamma_q``.  ``q + 4`` covers
+    scaling the right vectors as well as the multiply/accumulate, and the
+    positive absolute product turns that into a spectral-norm formation bound.
+    The ordinary principal-block certificate then adds its own eigensolver
+    backward-error allowance.
+
+    No SVD is performed here.  ``spectral_factor``, the singular values and the
+    null-space amplification all come from work the deficient factor path
+    already performed.
+    """
+    if (
+        not np.isfinite(cutoff)
+        or cutoff < 0.0
+        or not np.isfinite(amplification)
+        or amplification <= 0.0
+    ):
+        return False
+
+    singular_scale = max(
+        abs(largest_singular_value),
+        abs(cutoff),
+        np.finfo(float).tiny,
+    )
+    singular_allowance = 64.0 * spectral_factor.shape[1] * _EPS * singular_scale
+    lower_bound = smallest_retained_singular_value / amplification
+    if np.isfinite(lower_bound) and lower_bound > cutoff + singular_allowance:
+        return True
+
+    compact = spectral_factor[:, keep]
+    compact_gram = compact.T @ compact
+    absolute_gram = np.abs(compact).T @ np.abs(compact)
+    operations = compact.shape[0] + 4
+    operation_error = operations * _EPS
+    if operation_error >= 0.5:
+        return False
+    gamma = operation_error / (1.0 - operation_error)
+    formation_allowance = (gamma / (1.0 - gamma)) * float(np.linalg.norm(absolute_gram, ord=np.inf))
+    if not np.isfinite(formation_allowance):
+        return False
+    return _principal_block_clears_cutoff(
+        compact_gram,
+        np.arange(len(keep), dtype=int),
+        cutoff**2 + formation_allowance,
+    )
+
+
+def _conditioned_representatives(
+    null_vectors: NDArray,
+    rank: int,
+    block_condition: Callable[[NDArray], float] | None = None,
+    *,
+    block_admissible: Callable[[NDArray, float], bool] | None = None,
+    maximum_condition: float | None = None,
+) -> NDArray | None:
+    """Earliest representatives, unless index order costs more than it may.
+
+    The earliest rule is a labelling convention -- it decides which of a set of
+    aliased columns carries the reproducible zero -- and it is chosen blind to
+    conditioning.  Where the earliest independent columns happen to be two
+    near-duplicates, that convention is paid for in every downstream solve: the
+    block is positive definite, Cholesky accepts it, its smallest eigenvalue is
+    above the cutoff that decided the rank, and it is still the worst basis for
+    its own span.
+
+    So the convention is kept, and certified -- but the certificate TRIGGERS the
+    search and does not decide it.  ``_selection_amplification`` is a bound:
+    ``sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)`` puts a floor
+    under one end of a ratio whose other end, ``sigma_max`` of the selected
+    block, also moves with the selection.  So a smaller amplification improves a
+    worst case and says nothing per instance, and on anisotropic factors the two
+    orderings genuinely disagree: over 9,654 rank-deficient 3x4 blocks where
+    this routine switched, 24 switched to a block whose actual condition was
+    WORSE, by up to 1.34x.
+
+    The decision is therefore made on the thing that matters downstream -- the
+    condition of the principal block that will be factorised and solved --
+    whenever the caller can supply it.  ``block_condition`` takes a candidate
+    selection and returns that condition; the alternative is taken only if it is
+    strictly better.  Callers that cannot supply one fall back to the bound,
+    which is the old behaviour and is documented as weaker.
+
+    The amplification is still the right trigger: it is cheap, it costs
+    ``O(k**3)`` in the NULLITY against the ``O(m**3)`` eigendecomposition this
+    path has already paid, and being a bound is exactly what makes it a safe
+    screen -- it cannot miss a block that is genuinely badly conditioned.
+
+    ``maximum_condition`` is the absolute backstop after that relative choice.
+    Picking the better of two representative blocks does not make either one
+    usable: where the retained subspace itself sits near the rank boundary,
+    both may be catastrophically conditioned even though Cholesky accepts
+    them.  In that case ``None`` tells the caller to keep the spectral
+    decomposition rather than replace it with an unstable coefficient basis.
+    A maximum requires ``block_condition`` because the null-space
+    amplification alone cannot certify an individual principal block.
+
+    ``block_admissible`` is a stricter postcondition owned by the caller's
+    decomposition policy.  Production uses it to require the ORIGINAL
+    full-matrix rank cutoff, which a local condition cannot encode.  It
+    receives the candidate and its cached null-space amplification so the
+    factor path can stay in the SVD coordinates that decided its rank.  An
+    inadmissible earliest candidate triggers the same existing alternative
+    search; condition then chooses only among admissible candidates, so a safe
+    representative is not discarded merely because an unsafe one had the
+    lower local condition.
+    """
+    if maximum_condition is not None and block_condition is None:
+        raise ValueError("maximum_condition requires a block_condition scorer")
+
+    amplifications: dict[tuple[int, ...], float] = {}
+    conditions: dict[tuple[int, ...], float] = {}
+    admissibility: dict[tuple[int, ...], bool] = {}
+
+    def amplification(keep: NDArray) -> float:
+        key = tuple(int(index) for index in keep)
+        if key not in amplifications:
+            amplifications[key] = _selection_amplification(null_vectors, keep)
+        return amplifications[key]
+
+    def condition(keep: NDArray) -> float:
+        key = tuple(int(index) for index in keep)
+        if key not in conditions:
+            assert block_condition is not None
+            conditions[key] = float(block_condition(keep))
+        return conditions[key]
+
+    def admissible(keep: NDArray) -> bool:
+        key = tuple(int(index) for index in keep)
+        if key not in admissibility:
+            admissibility[key] = (
+                True
+                if block_admissible is None
+                else bool(block_admissible(keep, amplification(keep)))
+            )
+        return admissibility[key]
+
+    earliest = _earliest_representatives(null_vectors, rank)
+    if earliest is None:
+        return None
+    earliest_amplification = amplification(earliest)
+    selected = earliest
+    if not admissible(earliest) or earliest_amplification > _achievable_amplification(
+        *null_vectors.shape
+    ):
+        alternative = _leverage_pivot_representatives(null_vectors, rank)
+        if alternative is not None and not np.array_equal(alternative, earliest):
+            candidates = [
+                candidate for candidate in (earliest, alternative) if admissible(candidate)
+            ]
+            if not candidates:
+                return None
+            selected = candidates[0]
+            if len(candidates) == 2:
+                if block_condition is not None:
+                    selected = (
+                        alternative if condition(alternative) < condition(earliest) else earliest
+                    )
+                elif amplification(alternative) < earliest_amplification:
+                    selected = alternative
+
+    if not admissible(selected):
+        return None
+    if maximum_condition is not None and not condition(selected) <= maximum_condition:
+        return None
+    return selected
+
+
 def _scaled_subspace_logdet(coordinates: NDArray) -> float:
     """Return ``log(det(coordinates.T @ coordinates))`` across extreme row scales."""
     width = coordinates.shape[1]
@@ -509,15 +1150,23 @@ def _retained_log_pdet(
     return coordinate_logdet + float(np.sum(np.log(np.abs(retained_values))))
 
 
-def decompose_gram(
+def _decompose_gram(
     matrix: NDArray,
     *,
     policy: RankPolicy = SHARED_RANK_POLICY,
     residual_tol: float = 1e-6,
     fallback_factor: NDArray | None = None,
     allow_indefinite: bool = False,
-) -> RankDecomposition:
-    """Equilibrate and decompose a symmetric positive-semidefinite matrix."""
+    omit_uncertifiable: bool = False,
+) -> RankDecomposition | None:
+    """Equilibrate and decompose a symmetric positive-semidefinite matrix.
+
+    ``omit_uncertifiable`` is a pure optimization hint, never a semantic one:
+    when it is set this may return ``None`` instead of a decomposition that
+    :func:`needs_factor_certification` would have rejected anyway.  It is
+    permitted to return a decomposition in that case too, so the caller still
+    owns the predicate -- see :func:`decompose_gram_if_authoritative`.
+    """
     equilibrated, column_scale, active_columns, _ = _equilibrate_gram(
         matrix, allow_indefinite=allow_indefinite
     )
@@ -668,6 +1317,35 @@ def decompose_gram(
         except (np.linalg.LinAlgError, ValueError):
             pass
 
+    # Normal equations cannot distinguish an exact active-column alias from a
+    # full-rank factor direction whose squared singular value rounded to zero.
+    # Structural zero columns were removed above; every other PSD truncation
+    # therefore needs observation-factor certification when one is available.
+    #
+    # Hoisted above the subspace construction on purpose: it reads only the
+    # spectrum, and it is the last field the certification predicate needs.
+    resolution_limited = bool(
+        (psd_semantics and rank < len(active_columns))
+        or np.any((np.abs(raw_eigenvalues) > 0.0) & ~retained_mask)
+        or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
+    )
+    # Everything past this point -- two width-by-rank bases, the null basis,
+    # the retained pseudo-determinant, the representative selection and its
+    # Cholesky -- exists only to be read off the returned decomposition.  Both
+    # returns below are reached with the ``rank``, ``width``,
+    # ``pre_truncation_condition`` and ``resolution_limited`` computed above,
+    # and neither reports ``qr_svd``, so the predicate settles here exactly as
+    # it would on the finished object.  When it says the caller must certify
+    # against the observation factor, none of that work can be read back.
+    if omit_uncertifiable and _certification_required(
+        method="gram_eigh",
+        width=width,
+        rank=rank,
+        pre_truncation_condition=condition,
+        resolution_limited=resolution_limited,
+        policy=policy,
+    ):
+        return None
     retained_vectors = eigenvectors[:, retained_mask]
     discarded_vectors = eigenvectors[:, ~retained_mask]
     solution_basis = np.zeros((width, rank))
@@ -677,15 +1355,6 @@ def decompose_gram(
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = eigenvalues[retained_mask]
-    # Normal equations cannot distinguish an exact active-column alias from a
-    # full-rank factor direction whose squared singular value rounded to zero.
-    # Structural zero columns were removed above; every other PSD truncation
-    # therefore needs observation-factor certification when one is available.
-    resolution_limited = bool(
-        (psd_semantics and rank < len(active_columns))
-        or np.any((np.abs(raw_eigenvalues) > 0.0) & ~retained_mask)
-        or (fallback_factor is not None and decompose_factor(fallback_factor).rank > rank)
-    )
     log_pdet = (
         2.0 * float(np.sum(np.log(active_scale))) + float(np.sum(np.log(np.abs(retained_values))))
         if rank == width
@@ -700,18 +1369,24 @@ def decompose_gram(
         # Choose the earliest original-coordinate representative whose
         # principal system has the certified rank. This gives exact aliases a
         # reproducible zero coefficient while estimability still uses the true
-        # spectral null space above.
-        selected_local: list[int] = []
-        for candidate in range(len(active_columns)):
-            trial = selected_local + [candidate]
-            principal = equilibrated[np.ix_(trial, trial)]
-            principal_rank = int(np.count_nonzero(np.linalg.eigvalsh(principal) > cutoff))
-            if principal_rank > len(selected_local):
-                selected_local.append(candidate)
-            if len(selected_local) == rank:
-                break
-        if len(selected_local) == rank:
-            selected_local_array = np.asarray(selected_local, dtype=int)
+        # spectral null space above.  The selection is read off the null basis
+        # this decomposition has already computed -- `_earliest_representatives`
+        # documents why eliminating it from the right gives the same columns as
+        # walking prefixes, without an eigendecomposition per candidate, and
+        # `_conditioned_representatives` documents when index order is too
+        # expensive a convention to keep.
+        selected_local_array = _conditioned_representatives(
+            discarded_vectors,
+            rank,
+            block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
+            block_admissible=lambda keep, _amplification: _principal_block_clears_cutoff(
+                equilibrated,
+                keep,
+                cutoff,
+            ),
+            maximum_condition=policy.severe_condition,
+        )
+        if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
             representative = equilibrated[np.ix_(selected_local_array, selected_local_array)]
             try:
@@ -764,6 +1439,61 @@ def decompose_gram(
         structural_aliases=_freeze(structural_aliases, dtype=bool),
         retained_values=_freeze(retained_values),
     )
+
+
+def decompose_gram(
+    matrix: NDArray,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+    residual_tol: float = 1e-6,
+    fallback_factor: NDArray | None = None,
+    allow_indefinite: bool = False,
+) -> RankDecomposition:
+    """Equilibrate and decompose a symmetric positive-semidefinite matrix."""
+    decomposition = _decompose_gram(
+        matrix,
+        policy=policy,
+        residual_tol=residual_tol,
+        fallback_factor=fallback_factor,
+        allow_indefinite=allow_indefinite,
+    )
+    if decomposition is None:  # pragma: no cover - omit_uncertifiable defaults off
+        raise RuntimeError("gram decomposition omitted its subspace without being asked to")
+    return decomposition
+
+
+def decompose_gram_if_authoritative(
+    matrix: NDArray,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+    residual_tol: float = 1e-6,
+    fallback_factor: NDArray | None = None,
+) -> RankDecomposition | None:
+    """The Gram decomposition when it is authoritative, else ``None``.
+
+    ``None`` means exactly what ``needs_factor_certification`` means on the
+    eager result: this Gram cannot certify its own retained subspace, and the
+    caller must go to the observation factor.  Callers that do nothing else in
+    that case should prefer this to ``decompose_gram`` plus the predicate,
+    because a Gram that is about to be superseded never builds the retained
+    subspace, the null basis, the representative Cholesky or the retained
+    pseudo-determinant that only the superseded object could have exposed.
+
+    The predicate below is the authority, so the contract holds whatever the
+    hint inside chooses to skip: the eager and deferring paths agree on every
+    field that decides it, and a spared decomposition is one no caller in this
+    shape could have read.
+    """
+    decomposition = _decompose_gram(
+        matrix,
+        policy=policy,
+        residual_tol=residual_tol,
+        fallback_factor=fallback_factor,
+        omit_uncertifiable=True,
+    )
+    if decomposition is None or needs_factor_certification(decomposition, policy=policy):
+        return None
+    return decomposition
 
 
 def decompose_symmetric(
@@ -843,25 +1573,47 @@ def decompose_factor(
         else float("inf")
     )
     if 0 < rank < len(active_columns):
-        equilibrated_gram = equilibrated.T @ equilibrated
-        selected_local: list[int] = []
-        gram_cutoff = cutoff**2
-        for candidate in range(len(active_columns)):
-            trial = selected_local + [candidate]
-            principal = equilibrated_gram[np.ix_(trial, trial)]
-            principal_rank = int(np.count_nonzero(np.linalg.eigvalsh(principal) > gram_cutoff))
-            if principal_rank > len(selected_local):
-                selected_local.append(candidate)
-            if len(selected_local) == rank:
-                break
-        if len(selected_local) == rank:
-            selected_local_array = np.asarray(selected_local, dtype=int)
+        # Same certified representative choice as the Gram path, off the right
+        # singular vectors that span this factor's null space.  Rank
+        # admissibility, condition scoring and the stored solve MUST all stay
+        # in these spectral coordinates.  Forming
+        # ``equilibrated.T @ equilibrated`` accumulates over the observation
+        # count: it can move a direction across the cutoff, corrupt the
+        # condition comparison, and leave the result solving a different
+        # matrix from the factor whose SVD certified it.
+        spectral_factor = singular_values[:, None] * Vh[: len(singular_values), :]
+        candidate_qr: dict[tuple[int, ...], tuple[NDArray, NDArray] | None] = {}
+
+        def compact_qr(keep: NDArray) -> tuple[NDArray, NDArray] | None:
+            key = tuple(int(index) for index in keep)
+            if key not in candidate_qr:
+                candidate_qr[key] = _compact_factor_qr(spectral_factor, keep)
+            return candidate_qr[key]
+
+        def compact_condition(keep: NDArray) -> float:
+            geometry = compact_qr(keep)
+            return float("inf") if geometry is None else _triangular_gram_condition(geometry[1])
+
+        selected_local_array = _conditioned_representatives(
+            discarded_vectors,
+            rank,
+            block_condition=compact_condition,
+            block_admissible=lambda keep, amplification: _factor_representative_clears_cutoff(
+                spectral_factor,
+                keep,
+                largest_singular_value=float(singular_values[0]),
+                smallest_retained_singular_value=float(singular_values[rank - 1]),
+                cutoff=float(cutoff),
+                amplification=amplification,
+            ),
+            maximum_condition=policy.severe_condition,
+        )
+        if selected_local_array is not None:
             representative_columns = active_columns[selected_local_array]
-            representative = equilibrated_gram[np.ix_(selected_local_array, selected_local_array)]
-            try:
-                representative_factor = scipy.linalg.cholesky(
-                    representative, lower=True, check_finite=False
-                )
+            representative_geometry = compact_qr(selected_local_array)
+            if representative_geometry is not None:
+                compact_left, representative_upper = representative_geometry
+                representative_factor = representative_upper.T
                 representative_basis = np.zeros((width, rank))
                 representative_basis[representative_columns, np.arange(rank)] = (
                     1.0 / column_scale[representative_columns]
@@ -871,10 +1623,11 @@ def decompose_factor(
                 representative_rhs_left_basis = None
                 representative_rhs_triangular = None
                 if retain_factor_solve:
-                    selected_factor = factor[:, representative_columns]
-                    representative_rhs_left_basis, representative_rhs_triangular = np.linalg.qr(
-                        selected_factor,
-                        mode="reduced",
+                    representative_rhs_left_basis = (
+                        left_vectors[:, : len(singular_values)] @ compact_left
+                    )
+                    representative_rhs_triangular = (
+                        representative_upper * column_scale[representative_columns][None, :]
                     )
                 return RankDecomposition(
                     policy_version=policy.version,
@@ -906,8 +1659,6 @@ def decompose_factor(
                         else _freeze(representative_rhs_triangular)
                     ),
                 )
-            except (np.linalg.LinAlgError, ValueError):
-                pass
     return RankDecomposition(
         policy_version=policy.version,
         method="qr_svd",

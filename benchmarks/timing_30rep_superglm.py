@@ -7,7 +7,7 @@ warmup and excluded from the steady-state stats).
 Usage:
     OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
         uv run python benchmarks/timing_30rep_superglm.py
-    # CI reduced run:
+    # Local reduced diagnostic run (not the certification protocol):
     ... timing_30rep_superglm.py --reps 6 --json-out /tmp/flagship.json
 """
 
@@ -43,7 +43,7 @@ def load_mtpl2():
 
 def _peak_rss_mb() -> float | None:
     """Whole-run high-water RSS in MB, or None where unavailable (non-Unix).
-    Recorded for CI history, not gated. ru_maxrss is kilobytes on Linux but
+    Recorded as local artifact history, not gated. ru_maxrss is kilobytes on Linux but
     bytes on macOS."""
     try:
         import resource

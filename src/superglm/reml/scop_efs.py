@@ -52,8 +52,7 @@ from superglm.solvers.rank import (
     RankDecomposition,
     RankInfo,
     decompose_factor,
-    decompose_gram,
-    needs_factor_certification,
+    decompose_gram_if_authoritative,
 )
 from superglm.types import GroupSlice, PenaltyComponent
 
@@ -1025,8 +1024,8 @@ def _certified_terminal_rank(
     factor_factory: Callable[[], NDArray],
 ) -> RankDecomposition:
     """Apply the shared Gram-first policy to one terminal-only rank claim."""
-    decomposition = decompose_gram(matrix)
-    if needs_factor_certification(decomposition):
+    decomposition = decompose_gram_if_authoritative(matrix)
+    if decomposition is None:
         decomposition = decompose_factor(factor_factory())
     return decomposition
 

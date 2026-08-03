@@ -1,7 +1,6 @@
 """Tests for _robust_solve(), _safe_decompose_H(), and QR solver path."""
 
 import logging
-from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -311,23 +310,14 @@ class TestQRSolverPath:
             direct_solve="auto",
         )
 
-        decompose_gram_original = irls_direct_module.decompose_gram
-
-        def force_factor_certification(*args, **kwargs):
-            decomposition = decompose_gram_original(*args, **kwargs)
-            if decomposition.rank == 0:
-                return decomposition
-            return replace(
-                decomposition,
-                rank=decomposition.rank - 1,
-                resolution_limited=True,
-            )
-
-        monkeypatch.setattr(irls_direct_module, "decompose_gram", force_factor_certification)
+        # ``None`` is how the shared policy says "this Gram cannot certify its
+        # own retained subspace", so refusing every one of them drives the loop
+        # through factor certification on every iteration.  Faking a truncated
+        # rank would also perturb ``_robust_solve``, which is not under test.
         monkeypatch.setattr(
             irls_direct_module,
-            "needs_factor_certification",
-            lambda _decomposition: True,
+            "decompose_gram_if_authoritative",
+            lambda *_args, **_kwargs: None,
         )
         with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
             model.fit(df, y)

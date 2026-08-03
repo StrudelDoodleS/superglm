@@ -56,13 +56,18 @@ indicator, and the per-level slope columns are exactly what a
 refit term's identifiable deviation space — the part the pair's own mains
 cannot absorb.
 
-One exception is known and is being fixed: a `spline_cat` row whose spline
-parent is a `Spline(kind="cr")` on the default `knot_strategy="uniform"`
-probes a *different* function space from the one its `SplineCategorical`
-refit builds — measured minimum principal cosine 0.885 between the two
-spans — because the marginal helper the probe shares with `ti` re-places
-that basis on quantile knots. `ps` parents, `cr` parents already on quantile
-knots, and every unpenalized kind are unaffected. See
+This holds for `cr` parents as well as `ps`, but only because both
+interaction types now resolve a cubic regression spline the same way.
+Cubic regression splines carry two bases — a main effect uses the
+projected-B-spline `CubicRegressionSpline`, while an interaction marginal
+uses `CardinalCRSpline`, which is closer to mgcv's `bs="cr"`.
+`TensorInteraction` had that routing and `SplineCategorical` did not, so a
+`spline_cat` probe could span directions its own refit could not build: on
+a skewed margin at `n_knots=16` the containment of probe span in refit span
+measured 0.675. Both now go through one shared resolution — including its
+fallbacks, so a `select=True` parent or a penalty order the cardinal basis
+does not implement keeps its own basis on *both* sides — and the identity
+holds by construction. See
 [issue #191](https://github.com/StrudelDoodleS/superglm/issues/191).
 
 `probe df` is the unpenalized block's dimension before the data
@@ -78,12 +83,10 @@ penalized level curves; see [Interactions](interactions.md).
 splines, spline-mode `OrderedCategorical`, `Categorical` and `Numeric`.
 `Polynomial`, `RandomEffect` and
 step-mode `OrderedCategorical` have no screenable
-margin. A `Categorical` carrying a `grouping=` is excluded for a different
-reason: it screens perfectly well, but no interaction builder yet maps its raw
-column through the grouping, so the confirmatory refit of such a pair cannot be
-built — screening it would hand you a refit that raises. Spline x numeric has
-both margins but no refit target yet, and is
-deferred until a varying-coefficient term exists.
+margin. A `Categorical` carrying a `grouping=` is eligible too: screening and
+the confirmatory interaction refit both validate original labels and apply the
+same grouping once. Spline x numeric has both margins but no refit target yet,
+and is deferred until a varying-coefficient term exists.
 
 The deferral has two remedies, and which one applies is a modelling question
 rather than a screening one. If the `Numeric` margin is really curved, respec
@@ -397,14 +400,83 @@ discretize at all, so OC pairs stay exact on both sides.
   with the overlap span; the `VehBrand x Region` row above reports
   `edf0 = 208` against a nominal 210 for exactly this reason). The same knob
   therefore bounds time: `k^3 <= 1000 * max_cells` for an unpenalized block,
-  and the same budget against 16x the work for a penalized one whose ladder
-  can bisect rather than clamp. At the default that admits `k <= 1709`
+  and the same budget against twice the work for a penalized one, whose
+  ladder can bisect rather than clamp. At the default that admits `k <= 1709`
   (`cat_cat` on two 42-level factors, `numeric_cat` on a 1710-level factor)
-  and `k <= 678` for `ti`/`spline_cat`, measured on the reference box at 1.3 s
-  and 1.9 s per pair. Wider blocks are refused with a NaN row, immediately —
-  binning cannot shrink a basis dimension — and raising `max_cells` lifts the
-  refusal. For scale, the block the old allocation-only ceiling admitted
-  (`k = 4290`, two 67-level factors) measured 24 s and 1.3 GB for one pair.
+  and `k <= 1357` for `ti`/`spline_cat`, measured on the reference box at
+  0.81 s and 0.67 s per pair — the unpenalized figure a few percent low since
+  that rung's rank became a count rather than a trace (measured 1.056x at that
+  corner, and it is what makes the reported `edf0` the rank rather than `k`).
+  Wider blocks are refused with a NaN row,
+  immediately — binning cannot shrink a basis dimension — and raising
+  `max_cells` lifts the refusal. For scale, the block the old
+  allocation-only ceiling admitted (`k = 4290`, two 67-level factors)
+  measured 24 s and 1.3 GB for one pair.
+- **...except `spline_cat`, which has no block-dimension ceiling.** Grouped by
+  level, a spline x categorical pair's bordered system is an *arrow* matrix:
+  its curvature is block-diagonal because levels have disjoint row support,
+  its penalty `kron(S_spline, I)` is block-diagonal on the same grouping, and
+  the only thing coupling the levels is the intercept and the spline main —
+  a border of `1 + k_spline` columns, independent of the level count. So a
+  pair the ceiling above refuses is retried through a kernel that factorizes
+  that arrow in time and memory *linear* in the level count, rather than
+  cubic and quadratic. The dense path still scores every pair it can,
+  unchanged; the structured path only extends where it stops. Measured end to
+  end, best of three, one BLAS thread: 200 levels 0.013 s, 1,000 levels
+  0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124* levels the
+  dense path tops out at. Above roughly five thousand levels the binding cost
+  is no longer screening but fitting the mains model the screen runs against,
+  whose factor contributes one column per level and which no `discrete=`
+  setting compresses — discretization is support compression for *continuous*
+  covariates, and a factor is already on its own grid.
+
+  Three things bound the structured path, and `max_cells` scales all three.
+  The level blocks are `L x (k_spline + 1)^2`, which at the default and a
+  width-11 spline admits 34,722 levels — the kernel alone measured there at
+  1.22 s and 201 MB for a four-rung ladder, and linear below it at 0.16 s for
+  5,000 and 0.63 s for 20,000. The cell table is `support x L`, and beside it
+  the spline menu's outer products are `support x k_spline^2`; a pair over
+  either is quantile-binned on its spline margin and flagged `approx`, the
+  same degradation the dense path applies to its own intermediate. And the
+  ladder itself is budgeted in *arrow factorizations*: a clamped ladder is
+  two, but a rung whose budget lands inside the bracket bisects and costs
+  tens, so a pair that cannot afford the search is refused with a NaN row.
+  Which of those a pair hits depends on its shape — a narrow spline against a
+  huge factor is bounded by the block stacks, a wide spline against a small
+  one by the ladder, since one evaluation is cubic in `k_spline` where every
+  allocation is quadratic.
+- **A wide factor's `z` is an omnibus statistic, and it is diluted. Read the
+  `edf0` column before comparing a wide `spline_cat` row against a narrow
+  one.** `kron(S_spline, I)` leaves the constant and the linear direction
+  unpenalized *per level*, so its null space is `2(L-1)`; the mains absorb
+  the constants and roughly `L-1` degrees of freedom survive at any penalty.
+  Every rung of the ladder therefore clamps to the same edge, and the pair is
+  only ever tested at `edf0 ~ L-1` — the ladder's whole point, scanning
+  budgets for the one that best matches the signal, is unavailable to it.
+  This is a property of the *penalty*, not of the level count: it holds for
+  `ps`, `bs` and `cr` margins, whose penalties have a null space, and not for
+  `ns`, whose penalty is full rank. A `spline_cat` pair on an `ns` margin has
+  `edf0 = 0` at maximum penalty, so every rung genuinely searches and the
+  ladder costs tens of arrow factorizations rather than two — measured 106
+  against 2 on the same 400-level pair. That is the cost the evaluation
+  budget above exists to bound.
+  Calibration is unharmed: `z` is standardized against its own `edf0`, and
+  measured `mean 0.13, sd 1.12` at `edf0 = 499` — closer to normal than the
+  low-df rows, not further, since the chi-square skew is `sqrt(8/edf0)`.
+  Power is what suffers, at `E[z] = lambda / sqrt(2*edf0)`, measured decaying
+  as `1/sqrt(edf0)` to within 1.5% over a 125-fold range of df. Two
+  consequences, both worth stating plainly. A wide row and a narrow row are
+  not on the same footing — the wide one needs `sqrt(edf0_wide /
+  edf0_narrow)` times the signal to tie. And a CONCENTRATED interaction, a
+  few unusual levels against a quiet background, can vanish outright:
+  measured at 500 levels, three levels carrying a large slope scored
+  `z = 2.68` against a null maximum of `2.79`, while the same total signal
+  spread across every level scored `26.8`. **A near-zero `z` on a wide factor
+  is evidence about diffuse structure only. It is not evidence that no
+  interaction is present.** If a few deviating levels is the hypothesis, the
+  model class to reach for is `FactorSmooth(basis="fs")`, which penalizes
+  every direction (nullity 0) and so shrinks level curves toward a common
+  one rather than leaving each free.
 - **Factor and numeric margins have no such cardinality limit.** A factor
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the
@@ -458,9 +530,8 @@ surrogates — gradient-boosting H-statistics or neural interaction detection �
 which report no null behaviour at all.
 
 What is new here is therefore narrow and specific. First, the probe is the
-exact basis the confirmatory refit builds — for every pair kind, with the one
-`cr`-parent exception noted above — rather than a binned or single-column
-surrogate for it. Second, candidates are compared at a
+exact basis the confirmatory refit builds, for every pair kind, rather than a
+binned or single-column surrogate for it. Second, candidates are compared at a
 solved-for common complexity: `lambda0` is chosen so
 `tr((V + lambda0 * S)^-1 V) = edf0`, scanned over a ladder of budgets and
 normalized against each rung's own null mean and scale. No precedent was found

@@ -340,7 +340,7 @@ class TestConvergenceFlag:
 
 
 class TestCallSiteWarnings:
-    """The three call sites surface ``converged`` instead of discarding it."""
+    """QP call sites distinguish KKT uncertainty from primal infeasibility."""
 
     @staticmethod
     def _non_converging(calls):
@@ -401,7 +401,11 @@ class TestCallSiteWarnings:
         assert "solver-space" in caplog.text
         assert "raw-space" not in caplog.text
 
-    def test_irls_direct_warns_when_the_constrained_qp_does_not_converge(self, caplog, monkeypatch):
+    def test_irls_direct_reports_incomplete_kkt_as_terminal_nonconvergence(
+        self,
+        caplog,
+        monkeypatch,
+    ):
         import logging
 
         import pandas as pd
@@ -424,18 +428,39 @@ class TestCallSiteWarnings:
             features={"x": BSplineSmooth(n_knots=6, constraint=Constraint.fit.increasing)},
         )
 
-        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
-            model.fit(df[["x"]], df["y"])
+        with caplog.at_level(logging.INFO, logger="superglm.solvers.irls_direct"):
+            model.fit(df[["x"]], df["y"], max_iter=3)
 
-        assert calls, "the patched solver was never called"
-        assert "constrained QP did not converge" in caplog.text
+        assert len(calls) == 3
+        assert not model.result.converged
+        assert model.result.termination_reason == "constraint_kkt_incomplete"
 
-    def test_irls_direct_qp_warning_is_latched_to_one_per_fit(self, caplog, monkeypatch):
-        """The warning lives inside the IRLS loop; it must not repeat per iteration.
+        x_grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 200)})
+        assert np.min(np.diff(model.predict(x_grid))) >= -1e-10
 
-        ``irls_direct`` warns fire-once by convention -- the neighbouring SVD
-        warning uses an ``== 3`` equality latch. Without a latch here, a fit
-        whose QP never converges emits one identical WARNING per IRLS
+        qp_records = [
+            record
+            for record in caplog.records
+            if "constrained QP did not converge" in record.getMessage()
+        ]
+        assert len(qp_records) == 1
+        assert qp_records[0].levelno == logging.INFO
+        assert "KKT certificate is incomplete" in qp_records[0].getMessage()
+        terminal_records = [
+            record
+            for record in caplog.records
+            if "no complete constrained-QP KKT certificate" in record.getMessage()
+        ]
+        assert len(terminal_records) == 1
+        assert terminal_records[0].levelno == logging.WARNING
+        assert "approximately satisfied" not in caplog.text
+        assert "violates hard constraints" not in caplog.text
+
+    def test_irls_direct_qp_kkt_info_is_latched_to_one_per_fit(self, caplog, monkeypatch):
+        """The KKT note lives inside the IRLS loop; it must not repeat per iteration.
+
+        Without a latch, a fit whose QP never obtains a complete certificate
+        emits one identical INFO record per IRLS
         iteration, up to ``max_iter`` (default 200).
         """
         import logging
@@ -451,7 +476,7 @@ class TestCallSiteWarnings:
         monkeypatch.setattr(irls_direct, "solve_constrained_qp", self._non_converging(calls))
 
         # Binomial needs several IRLS iterations, so the unlatched code would
-        # warn several times; Gaussian converges in ~2 and barely discriminates.
+        # report several times; Gaussian converges in ~2 and barely discriminates.
         rng = np.random.default_rng(0)
         x = np.sort(rng.uniform(0, 1, 200))
         y = (rng.uniform(size=200) < 1.0 / (1.0 + np.exp(-8.0 * (x - 0.5)))).astype(float)
@@ -462,19 +487,25 @@ class TestCallSiteWarnings:
             features={"x": BSplineSmooth(n_knots=8, constraint=Constraint.fit.increasing)},
         )
 
-        with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
-            model.fit(df[["x"]], df["y"])
+        with caplog.at_level(logging.INFO, logger="superglm.solvers.irls_direct"):
+            model.fit(df[["x"]], df["y"], max_iter=6)
 
         # Precondition: enough non-converging QP solves that an unlatched
-        # warning would be clearly visible as a repeat.
+        # INFO record would be clearly visible as a repeat.
         assert len(calls) >= 5, f"only {len(calls)} QP solves; test cannot discriminate"
 
-        warnings = [
+        records = [
             record
             for record in caplog.records
             if "constrained QP did not converge" in record.getMessage()
         ]
-        assert len(warnings) == 1, f"expected exactly 1 warning, got {len(warnings)}"
+        assert len(records) == 1, f"expected exactly 1 KKT note, got {len(records)}"
+        assert records[0].levelno == logging.INFO
+        assert "KKT certificate is incomplete" in records[0].getMessage()
+        assert not model.result.converged
+        assert model.result.termination_reason == "constraint_kkt_incomplete"
+        assert "approximately satisfied" not in caplog.text
+        assert "violates hard constraints" not in caplog.text
 
 
 class TestInconsistentNormalEquations:

@@ -313,15 +313,22 @@ def build_centered_system(
     # Both terms are mathematically PSD. Degenerate spline
     # reparameterizations can introduce visible negative round-off, so project
     # only this declared-PSD system back onto its valid cone before rank work.
+    # Keep structurally empty coordinates outside the eigensolve: reconstructing
+    # the full matrix can scatter round-off into exact zero rows, manufacture
+    # numerical rank, and obscure an empty-support spline direction.
+    active = np.flatnonzero(np.any(hessian != 0.0, axis=0) | np.any(hessian != 0.0, axis=1))
+    active_hessian = hessian[np.ix_(active, active)]
     try:
-        np.linalg.cholesky(hessian)
+        np.linalg.cholesky(active_hessian)
     except np.linalg.LinAlgError:
-        hessian_eigenvalues, hessian_eigenvectors = np.linalg.eigh(hessian)
+        hessian_eigenvalues, hessian_eigenvectors = np.linalg.eigh(active_hessian)
         if hessian_eigenvalues.size and hessian_eigenvalues[0] < 0.0:
-            hessian = (
+            active_hessian = (
                 hessian_eigenvectors * np.maximum(hessian_eigenvalues, 0.0)[None, :]
             ) @ hessian_eigenvectors.T
-            hessian = 0.5 * (hessian + hessian.T)
+            active_hessian = 0.5 * (active_hessian + active_hessian.T)
+            hessian = np.zeros_like(hessian)
+            hessian[np.ix_(active, active)] = active_hessian
     return CenteredSystem(
         sum_w=sum_w,
         mean_x=_freeze(mean_x),

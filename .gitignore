@@ -30,11 +30,11 @@ data/
 .ruff_cahce/
 scratch/
 
-# Benchmark outputs (generated, not tracked) — but the CI perf-gate
+# Benchmark outputs (generated, not tracked) — but the local perf-gate
 # baselines are tracked configuration, not output; the /* form (not the
 # bare-directory form) is required for the negation to take effect.
 benchmarks/results/*
-!benchmarks/results/ci_perf_baselines.json
+!benchmarks/results/local_perf_baselines.json
 
 # Generated parity/reference CSVs (keep local, do not track)
 tests/fixtures/mgcv_gamma_mtpl2sev_fitted.csv

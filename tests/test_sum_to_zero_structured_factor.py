@@ -91,6 +91,55 @@ def _sum_to_zero_centered_operator(
     )
 
 
+def _sum_to_zero_public_factor(
+    local_factors: tuple[np.ndarray, ...],
+    small_factor: np.ndarray,
+) -> np.ndarray:
+    """Map heterogeneous raw block factors into public sum-to-zero coordinates."""
+    small_factor = np.asarray(small_factor, dtype=np.float64)
+    n_levels = len(local_factors)
+    block_size = local_factors[0].shape[1]
+    small_width = small_factor.shape[1]
+    raw_width = small_width + n_levels * block_size
+    public_width = small_width + (n_levels - 1) * block_size
+    row_count = small_factor.shape[0] + sum(factor.shape[0] for factor in local_factors)
+    raw_factor = np.zeros((row_count, raw_width))
+    cursor = small_factor.shape[0]
+    raw_factor[:cursor, :small_width] = small_factor
+    for level, factor in enumerate(local_factors):
+        next_cursor = cursor + factor.shape[0]
+        columns = slice(
+            small_width + level * block_size,
+            small_width + (level + 1) * block_size,
+        )
+        raw_factor[cursor:next_cursor, columns] = factor
+        cursor = next_cursor
+
+    transform = np.zeros((raw_width, public_width))
+    transform[:small_width, :small_width] = np.eye(small_width)
+    for level in range(n_levels - 1):
+        raw_columns = slice(
+            small_width + level * block_size,
+            small_width + (level + 1) * block_size,
+        )
+        public_columns = slice(
+            small_width + level * block_size,
+            small_width + (level + 1) * block_size,
+        )
+        transform[raw_columns, public_columns] = np.eye(block_size)
+    final_columns = slice(
+        small_width + (n_levels - 1) * block_size,
+        small_width + n_levels * block_size,
+    )
+    for level in range(n_levels - 1):
+        public_columns = slice(
+            small_width + level * block_size,
+            small_width + (level + 1) * block_size,
+        )
+        transform[final_columns, public_columns] = -np.eye(block_size)
+    return raw_factor @ transform
+
+
 def _sum_to_zero_diagonal_moment_operator(D: np.ndarray) -> CenteredBlockOperator:
     n_levels, block_size, _ = D.shape
     structured_indices = np.arange(
@@ -867,7 +916,7 @@ def test_wide_deficient_sum_to_zero_estimability_matches_dense_compactly(
     assert actual[small_indices[0]]
 
 
-def test_wide_deficient_sum_to_zero_expands_roundoff_local_null(
+def test_wide_deficient_sum_to_zero_uses_public_factor_local_null(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     n_levels = 130
@@ -879,6 +928,22 @@ def test_wide_deficient_sum_to_zero_expands_roundoff_local_null(
         dtype=np.intp,
     ).reshape(n_levels - 1, block_size)
     local_factor = np.random.default_rng(3).normal(size=(2, block_size))
+    identity_factors = tuple(np.eye(block_size) for _level in range(1, n_levels))
+    public_factor = _sum_to_zero_public_factor(
+        (local_factor, *identity_factors),
+        np.array([[np.sqrt(2.0)]]),
+    )
+    expected = decompose_factor(public_factor).coefficient_estimable()
+    assert decompose_factor(local_factor).rank == 2
+
+    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
+        raise AssertionError("wide deficient SZ estimability must remain compact")
+
+    monkeypatch.setattr(
+        "superglm.solvers._structured.geometry._bounded_centered_estimability",
+        reject_dense_fallback,
+    )
+
     D = np.tile(np.eye(block_size), (n_levels, 1, 1))
     D[0] = local_factor.T @ local_factor
     raw = SumToZeroBlockOperator(
@@ -896,23 +961,11 @@ def test_wide_deficient_sum_to_zero_expands_roundoff_local_null(
         center=cross,
         raw_structured_cross=np.zeros((n_levels, block_size)),
     )
-    expected = decompose_gram(materialize_compact_operator(operator)).coefficient_estimable()
-
-    # The formed moment retains one roundoff direction that the row factor
-    # correctly rejects.  The compact path must expand that residual null
-    # instead of abandoning all inference for this 517-column system.
-    assert decompose_factor(local_factor).rank == 2
-    assert decompose_gram(D[0]).rank == 3
-
-    def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
-        raise AssertionError("wide deficient SZ estimability must remain compact")
-
-    monkeypatch.setattr(
-        "superglm.solvers._structured.geometry._bounded_centered_estimability",
-        reject_dense_fallback,
+    assert needs_factor_certification(decompose_gram(D[0]))
+    np.testing.assert_array_equal(
+        centered_operator_coefficient_estimable(operator),
+        expected,
     )
-
-    np.testing.assert_array_equal(centered_operator_coefficient_estimable(operator), expected)
 
 
 def test_wide_deficient_sum_to_zero_schur_rank_uses_augmented_scale(
@@ -1062,7 +1115,7 @@ def test_sum_to_zero_public_spectral_bound_covers_the_structured_gram() -> None:
     )
 
 
-def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
+def test_wide_sum_to_zero_certifies_local_factor_geometry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     n_levels = 129
@@ -1071,13 +1124,11 @@ def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
     local_factors = np.tile(local_factor, (n_levels, 1, 1))
     small = np.tile(local_factor[:, :2], (n_levels, 1))
     operator, public_design = _sum_to_zero_centered_operator(local_factors, small)
-    expected = decompose_factor(public_design - np.mean(public_design, axis=0))
-    local_decomposition = decompose_gram(local_factor.T @ local_factor)
-
+    expected_estimable = decompose_factor(
+        public_design - np.mean(public_design, axis=0)
+    ).coefficient_estimable()
     assert decompose_factor(local_factor).rank == 3
-    assert local_decomposition.rank == block_size
-    assert needs_factor_certification(local_decomposition)
-    assert np.all(expected.coefficient_estimable()[: small.shape[1]])
+    assert np.all(expected_estimable[: small.shape[1]])
 
     def reject_dense_fallback(_operator: CenteredBlockOperator) -> np.ndarray:
         raise AssertionError("wide certification-limited SZ inference must remain compact")
@@ -1087,9 +1138,10 @@ def test_wide_sum_to_zero_dispatches_certification_limited_local_grams(
         reject_dense_fallback,
     )
 
+    assert needs_factor_certification(decompose_gram(operator.raw.D[0]))
     np.testing.assert_array_equal(
         centered_operator_coefficient_estimable(operator),
-        expected.coefficient_estimable(),
+        expected_estimable,
     )
 
 

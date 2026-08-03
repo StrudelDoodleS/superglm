@@ -1,8 +1,67 @@
 # Measured tensor-interaction cost — real freMTPL2, exact vs discrete
 
-Script: `profiles/tensor_cost.py`. Model: 4 × `Spline(ps, k=10)` (DrivAge, VehAge, BonusMalus, VehPower)
-+ `Categorical(Area)`, Poisson/log, exposure as `sample_weight`. Tensor variant adds one
-`ti(DrivAge, BonusMalus)` via `_add_interaction` (spline×spline → TensorInteraction factory).
+Script: `benchmarks/benchmark_tensor_cost.py`. Model: 4 × `Spline(ps, k=10)` (DrivAge,
+VehAge, BonusMalus, VehPower) + `Categorical(Area)`, Poisson/log, exposure as
+`sample_weight`. Tensor variant adds one `ti(DrivAge, BonusMalus)` via
+`_add_interaction` (spline×spline → TensorInteraction factory).
+
+## Local performance certification
+
+Wall-time certification is deliberately local-only. Hosted CI runs synthetic
+tests of the gate logic, but it must never execute these benchmark producers or
+use hosted-runner timing/RSS as a performance decision.
+
+The committed `superglm-reference-box-2026-07-29` baseline has
+`certification_enabled: false`. Its machine and software identity is not
+sufficiently established, so all of its timing numbers and thresholds are
+historical, non-certifying provenance. Even supplying its matching profile ID
+must be refused before measurement artifacts are read. Typing an ID is only an
+operator assertion; the gate does not inspect or authenticate hardware.
+
+Certification becomes available only after a fresh calibration on a
+deliberately selected, stable local machine and software/thread environment.
+Choose a new profile ID and run the producers sequentially on an otherwise
+quiet system:
+
+```bash
+export LOCAL_PERF_PROFILE="replace-with-new-local-profile-id"
+
+uv run --with pyarrow python benchmarks/fetch_mtpl2.py
+
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  uv run --with pyarrow python benchmarks/benchmark_tensor_cost.py \
+  --n 30000 --reps 5 --json-out /tmp/tensor_cost_local.json
+
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  uv run --with pyarrow python benchmarks/timing_30rep_superglm.py \
+  --reps 30 --json-out /tmp/flagship_local.json
+```
+
+Use those fresh artifacts from that same environment to update the baseline
+profile ID, timing references, ratios, repetition counts, numerical invariants,
+and only facts actually known about the environment. Set
+`certification_enabled` to `true` only after that calibration is reviewed.
+Then—and only then—the local certification command is:
+
+```bash
+uv run python benchmarks/local_perf_gate.py \
+  --machine-profile "$LOCAL_PERF_PROFILE" \
+  --baselines benchmarks/results/local_perf_baselines.json \
+  --tensor-json /tmp/tensor_cost_local.json \
+  --flagship-json /tmp/flagship_local.json
+```
+
+The tensor references use five steady complete fits after one excluded warmup;
+the flagship artifact uses its existing 30-repetition protocol and excludes
+its first repetition from steady statistics. The JSON artifacts retain raw
+complete-fit timings, numerical outputs, dimensions, backend dispatch, and
+whole-process peak RSS where available. Peak RSS is provenance, not a gate.
+
+A disabled, missing, mismatched, or unknown profile cannot certify performance.
+Results from another machine must not be mixed into an enabled profile. The
+gate also refuses to run when `GITHUB_ACTIONS` or the conventional `CI`
+environment variable is truthy, before reading any baseline or measurement
+file.
 
 ## Usage survey
 

@@ -145,6 +145,15 @@ def run_fixed_monotone_reml(
             debug_recorder=debug_recorder,
             debug_context={"phase": "fixed_constraint"},
         )
+        if result.termination_reason == "constraint_infeasible":
+            raise RuntimeError(
+                "fixed-lambda constrained REML fit ended at an infeasible coefficient mode"
+            )
+        if result.termination_reason == "constraint_kkt_incomplete":
+            raise RuntimeError(
+                "fixed-lambda constrained REML fit ended without a complete inner-QP "
+                "KKT certificate"
+            )
 
     model._result = result
     model._reml_lambdas = lambdas

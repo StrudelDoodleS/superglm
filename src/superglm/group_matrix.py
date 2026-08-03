@@ -38,6 +38,7 @@ from ._group_matrix._group_matrix_discretized import (
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 from ._group_matrix._group_matrix_execution import MatrixExecutionPlan
@@ -64,6 +65,7 @@ DiscretizedSSPGroupMatrix.__module__ = __name__
 SupportCompressedSSPGroupMatrix.__module__ = __name__
 DiscretizedSCOPGroupMatrix.__module__ = __name__
 DiscretizedSplineCategoricalGroupMatrix.__module__ = __name__
+SupportCompressedSplineCategoricalGroupMatrix.__module__ = __name__
 DiscretizedTensorGroupMatrix.__module__ = __name__
 
 
@@ -86,8 +88,10 @@ GroupMatrix = (
     | DiscretizedTensorGroupMatrix
 )
 
-_MAX_DISC_DISC_HIST_CELLS = 5_000_000
-_MAX_DISC_DISC_CHANNEL_HIST_CELLS = 5_000_000
+# The histogram cell caps live in _group_matrix_algebra, which is where they are
+# read.  Duplicating them here was dead weight of an actively misleading kind:
+# they are the names a reviewer greps first, and patching them did nothing --
+# the same failure mode as a threshold frozen into a default argument.
 
 
 def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:

@@ -69,17 +69,21 @@ class QPResult:
 
     ``converged`` means the full KKT certificate holds for ``beta``: the
     active-set loop reached its own termination test (a stationary step with
-    no negative multiplier) *and* ``beta`` is feasible.  It is ``False`` when
-    the loop exhausted ``max_iter``, and when the loop terminated but the
-    returned point still violates a constraint.  In either case ``beta`` is the
-    best available point, not a certified solution.
+    no negative multiplier) *and* the certified candidate is feasible.  It is
+    ``False`` whenever the solver did not complete that certificate, including
+    when the loop exhausted ``max_iter`` or a stationary candidate failed its
+    primal-feasibility check.  In the latter case a subsequent projection may
+    make the returned ``beta`` feasible, but it does not re-establish
+    stationarity or dual feasibility; projection can also fail to repair an
+    infeasible system.  Thus ``converged=False`` does not imply that the
+    returned ``beta`` is infeasible.  It is the best available point, not a
+    certified solution.
 
-    A mutually infeasible constraint system is one way to reach the second
-    case, but not the only one and not the common one: the loop can also stop
-    at a stationary point on a *subset* active set with another row materially
-    violated, on a system that has a feasible point.  See the early return
-    below for the measurement and for why ``converged=False`` is weaker
-    protection than it looks.
+    A mutually infeasible constraint system is one way for the candidate
+    feasibility check to fail, but not the only one and not the common one:
+    the loop can also stop at a stationary point on a *subset* active set with
+    another row materially violated, on a system that has a feasible point.
+    See the early return below for the measurement and projection.
     """
 
     beta: NDArray
@@ -1051,11 +1055,17 @@ def solve_constrained_qp(
             # the QP initialisation moved.  So the rank-deficient half below is
             # new to this branch and the full-rank half is inherited.
             #
-            # ``converged=False`` is weaker protection than it looks, which is
-            # why it is not the whole answer.  ``irls_direct.py:1614`` does
-            # ``beta = qp_result.beta`` unconditionally, six lines *before* it
-            # reads ``converged``, which drives nothing but a latched log line
-            # -- so the infeasible point flows into the fit either way.  For the
+            # ``converged`` is the inner KKT certificate, while ``beta`` remains
+            # the best finite iterate.  ``irls_direct`` deliberately consumes
+            # that iterate so a later outer iteration can recover, but attaches
+            # the certificate to the retained coefficient state: an incomplete
+            # certificate blocks outer convergence and, if still incomplete at
+            # termination, produces ``constraint_kkt_incomplete`` plus a
+            # warning.  Fixed-lambda and automatic constrained REML reject that
+            # terminal reason before publication.  Projection is still needed
+            # here because consuming a finite iterate is safe only when the
+            # hard constraints are satisfied; the certificate alone does not
+            # make an infeasible coefficient vector admissible.  For the
             # rank-deficient half the population is this branch's own: on
             # ``master`` ``np.linalg.solve(H, g)`` ran before the loop, so a
             # singular ``H`` raised ``LinAlgError`` and the loop never ran at

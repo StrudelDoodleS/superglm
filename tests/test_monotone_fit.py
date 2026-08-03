@@ -410,8 +410,9 @@ class TestMonotoneFitPSpline:
         model.fit(df[["x"]], df["y"])
         assert model._result.converged
 
-    def test_scop_plus_qp_raises(self):
-        """SCOP + QP monotone in same model raises NotImplementedError."""
+    @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
+    def test_scop_plus_qp_raises(self, fit_method):
+        """Every fit entry point rejects mixed SCOP and QP engines."""
         rng = np.random.default_rng(42)
         n = 200
         x1 = rng.uniform(0, 1, n)
@@ -427,7 +428,7 @@ class TestMonotoneFitPSpline:
             },
         )
         with pytest.raises(NotImplementedError, match="SCOP.*QP"):
-            model.fit(df[["x1", "x2"]], df["y"])
+            getattr(model, fit_method)(df[["x1", "x2"]], df["y"])
 
 
 # ── fit_reml with fixed lambda tests ────────────────────────────────────────────
