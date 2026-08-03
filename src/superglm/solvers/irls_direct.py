@@ -1269,7 +1269,14 @@ def _fit_irls_direct_once(
 
     max_halving = 20  # max step-halving attempts per iteration
     _consecutive_svd = 0  # for auto-mode warning
-    _reported_qp_nonconvergence = False  # emit once; final feasibility is separate
+    _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
+    # A constrained fit-entry state has not been certified by the inner QP.
+    # The flag follows the retained coefficient state below: a rejected
+    # proposal must not erase a certificate already owned by ``committed``,
+    # while a damped interpolation is not itself the QP solution even when
+    # the full proposal was certified.
+    committed_qp_converged = not has_constraints
+    retained_qp_converged = committed_qp_converged
 
     for it in range(max_iter):
         beta_prev = committed.beta
@@ -1277,6 +1284,8 @@ def _fit_irls_direct_once(
         beta = committed.beta.copy()
         intercept = committed.intercept
         committed_active_set = None if prev_active_set is None else list(prev_active_set)
+        proposal_qp_converged = not has_constraints
+        retained_qp_converged = committed_qp_converged
         rank_truncated: bool | None = None
         used_rank_certification = False
         scop_proposal_eta_unclipped: NDArray | None = None
@@ -1583,19 +1592,20 @@ def _fit_irls_direct_once(
                 )
                 beta = qp_result.beta
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
+                proposal_qp_converged = bool(qp_result.converged)
                 prev_active_set = qp_result.active_set
                 # Non-convergence usually persists for the rest of the fit, so
                 # latch the report to the first occurrence rather than emitting
-                # one identical line per IRLS iteration. This reports the QP's
-                # KKT certificate only; final primal feasibility is checked
-                # independently on the retained IRLS state below.
+                # one identical line per IRLS iteration. A later solve may
+                # recover; the retained state's terminal authority is checked
+                # independently below.
                 if not qp_result.converged and not _reported_qp_nonconvergence:
                     _reported_qp_nonconvergence = True
                     logger.info(
                         "fit_irls_direct: constrained QP did not converge at "
                         "iteration %d; its KKT certificate is incomplete. "
-                        "Final hard-constraint feasibility is checked separately. "
-                        "Later KKT-certificate failures in this fit are not reported.",
+                        "A later IRLS iteration may recover; subsequent inner "
+                        "failures in this fit are not reported here.",
                         it + 1,
                     )
                 _used_svd = False
@@ -1844,6 +1854,16 @@ def _fit_irls_direct_once(
                     it + 1,
                 )
             retained = committed if decision.step_rejected else trial_cache[decision.alpha]
+            if has_constraints:
+                if decision.step_rejected:
+                    retained_qp_converged = committed_qp_converged
+                elif decision.alpha == 1.0:
+                    retained_qp_converged = proposal_qp_converged
+                else:
+                    # A line-searched interpolation can be primal-feasible,
+                    # but it is not the coefficient vector whose inner QP
+                    # stationarity and dual feasibility were certified.
+                    retained_qp_converged = False
             evaluation_elapsed = time.perf_counter() - _t0
             _t_deviance += evaluation_elapsed
             _t_deviance_eval += evaluation_elapsed
@@ -1928,6 +1948,12 @@ def _fit_irls_direct_once(
             # may still repair an infeasible warm start.
             if not constraints_feasible_this_iter:
                 converged_this_iter = False
+            # Outer coefficient/deviance stagnation cannot replace the inner
+            # QP's stationarity and dual-feasibility certificate. Keep a
+            # finite feasible iterate and continue: a later full QP proposal
+            # may still obtain the missing certificate.
+            if not retained_qp_converged:
+                converged_this_iter = False
 
         curvature_rescue_activated = bool(
             step_rejected
@@ -1942,6 +1968,11 @@ def _fit_irls_direct_once(
             not constraints_feasible_this_iter
             and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
         )
+        terminal_constraint_kkt_incomplete = bool(
+            has_constraints
+            and not retained_qp_converged
+            and (step_rejected or not np.isfinite(dev) or it + 1 == max_iter)
+        )
 
         if fisher_fallback_activated:
             termination_reason = "curvature_fallback"
@@ -1949,6 +1980,8 @@ def _fit_irls_direct_once(
             termination_reason = "curvature_rescue"
         elif terminal_constraint_infeasible:
             termination_reason = "constraint_infeasible"
+        elif terminal_constraint_kkt_incomplete:
+            termination_reason = "constraint_kkt_incomplete"
         elif step_rejected:
             termination_reason = "step_rejected"
         elif not np.isfinite(dev):
@@ -2161,6 +2194,7 @@ def _fit_irls_direct_once(
             )
 
         committed = retained
+        committed_qp_converged = retained_qp_converged
         if _has_scop:
             scop_committed = retained_scop
         if converged_this_iter:
@@ -2188,6 +2222,13 @@ def _fit_irls_direct_once(
                 "(minimum scaled slack %.3e, tolerance %.1e); fit is not converged.",
                 minimum_scaled_slack,
                 _QP_FEASIBILITY_TOL,
+            )
+        elif not retained_qp_converged:
+            converged = False
+            termination_reason = "constraint_kkt_incomplete"
+            logger.warning(
+                "fit_irls_direct: retained coefficient mode has no complete "
+                "constrained-QP KKT certificate; fit is not converged."
             )
 
     if _has_scop:

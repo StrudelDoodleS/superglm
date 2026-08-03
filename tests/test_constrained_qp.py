@@ -401,7 +401,7 @@ class TestCallSiteWarnings:
         assert "solver-space" in caplog.text
         assert "raw-space" not in caplog.text
 
-    def test_irls_direct_reports_incomplete_kkt_without_feasibility_warning(
+    def test_irls_direct_reports_incomplete_kkt_as_terminal_nonconvergence(
         self,
         caplog,
         monkeypatch,
@@ -429,11 +429,11 @@ class TestCallSiteWarnings:
         )
 
         with caplog.at_level(logging.INFO, logger="superglm.solvers.irls_direct"):
-            model.fit(df[["x"]], df["y"])
+            model.fit(df[["x"]], df["y"], max_iter=3)
 
-        assert calls, "the patched solver was never called"
-        assert model.result.converged
-        assert model.result.termination_reason == "converged"
+        assert len(calls) == 3
+        assert not model.result.converged
+        assert model.result.termination_reason == "constraint_kkt_incomplete"
 
         x_grid = pd.DataFrame({"x": np.linspace(0.0, 1.0, 200)})
         assert np.min(np.diff(model.predict(x_grid))) >= -1e-10
@@ -446,6 +446,13 @@ class TestCallSiteWarnings:
         assert len(qp_records) == 1
         assert qp_records[0].levelno == logging.INFO
         assert "KKT certificate is incomplete" in qp_records[0].getMessage()
+        terminal_records = [
+            record
+            for record in caplog.records
+            if "no complete constrained-QP KKT certificate" in record.getMessage()
+        ]
+        assert len(terminal_records) == 1
+        assert terminal_records[0].levelno == logging.WARNING
         assert "approximately satisfied" not in caplog.text
         assert "violates hard constraints" not in caplog.text
 
@@ -481,7 +488,7 @@ class TestCallSiteWarnings:
         )
 
         with caplog.at_level(logging.INFO, logger="superglm.solvers.irls_direct"):
-            model.fit(df[["x"]], df["y"])
+            model.fit(df[["x"]], df["y"], max_iter=6)
 
         # Precondition: enough non-converging QP solves that an unlatched
         # INFO record would be clearly visible as a repeat.
@@ -495,6 +502,8 @@ class TestCallSiteWarnings:
         assert len(records) == 1, f"expected exactly 1 KKT note, got {len(records)}"
         assert records[0].levelno == logging.INFO
         assert "KKT certificate is incomplete" in records[0].getMessage()
+        assert not model.result.converged
+        assert model.result.termination_reason == "constraint_kkt_incomplete"
         assert "approximately satisfied" not in caplog.text
         assert "violates hard constraints" not in caplog.text
 
