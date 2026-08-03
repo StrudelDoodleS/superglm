@@ -49,6 +49,109 @@ def _increasing_model() -> SuperGLM:
     )
 
 
+def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finite feasible inner iterate is not thereby a converged QP solution."""
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    calls: list[None] = []
+
+    def feasible_but_uncertified_qp(*_args, **_kwargs):
+        calls.append(None)
+        return QPResult(beta=np.zeros(1), converged=False)
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", feasible_but_uncertified_qp)
+    with caplog.at_level(logging.WARNING, logger="superglm.solvers.irls_direct"):
+        result, _ = irls_direct.fit_irls_direct(
+            design,
+            y,
+            weights,
+            Gaussian(),
+            IdentityLink(),
+            groups,
+            lambda2=0.0,
+            max_iter=3,
+            tol=1e-10,
+            convergence="coefficients",
+        )
+
+    # The outer coefficient criterion is already stationary at beta=0, so
+    # current code stops after one solve and reports success unless the inner
+    # certificate is authoritative.
+    assert len(calls) == 3
+    np.testing.assert_array_equal(result.beta, np.zeros(1))
+    constraint = groups[0].constraints
+    assert constraint is not None
+    np.testing.assert_array_equal(constraint.A @ result.beta, constraint.b)
+    assert not result.converged
+    assert result.termination_reason == "constraint_kkt_incomplete"
+    terminal_warnings = [
+        record
+        for record in caplog.records
+        if "no complete constrained-QP KKT certificate" in record.getMessage()
+    ]
+    assert len(terminal_warnings) == 1
+    assert terminal_warnings[0].levelno == logging.WARNING
+
+
+def test_rejected_uncertified_proposal_preserves_the_committed_qp_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QP authority follows the retained state, not the latest attempted solve."""
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.distributions import Gaussian
+    from superglm.links import IdentityLink
+    from superglm.solvers.constrained_qp import QPResult
+    from superglm.solvers.irls_state import _IRLSStepDecision
+
+    design, y, weights, groups = _one_coefficient_line_search_problem(constrained=True)
+    qp_calls = [0]
+    decisions = [0]
+
+    def certified_then_uncertified(*_args, **_kwargs):
+        qp_calls[0] += 1
+        if qp_calls[0] == 1:
+            return QPResult(beta=np.array([1.0]), converged=True)
+        return QPResult(beta=np.array([0.0]), converged=False)
+
+    def accept_then_reject(**_kwargs):
+        decisions[0] += 1
+        return _IRLSStepDecision(
+            alpha=1.0 if decisions[0] == 1 else 0.0,
+            step_halvings=0 if decisions[0] == 1 else 20,
+            step_rejected=decisions[0] != 1,
+            trials_attempted=1 if decisions[0] == 1 else 20,
+        )
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", certified_then_uncertified)
+    monkeypatch.setattr(irls_direct, "_select_irls_trial", accept_then_reject)
+    result, _ = irls_direct.fit_irls_direct(
+        design,
+        y,
+        weights,
+        Gaussian(),
+        IdentityLink(),
+        groups,
+        lambda2=0.0,
+        beta_init=np.zeros(1),
+        intercept_init=0.0,
+        max_iter=3,
+        tol=1e-10,
+        convergence="coefficients",
+    )
+
+    assert qp_calls[0] == 2
+    np.testing.assert_array_equal(result.beta, np.ones(1))
+    assert not result.converged
+    assert result.termination_reason == "step_rejected"
+
+
 @pytest.mark.parametrize("fit_method", ["fit", "fit_reml"])
 def test_healthy_constrained_fit_finishes_with_feasible_coefficients_and_predictions(
     fit_method: str,
@@ -583,8 +686,25 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
     assert decisions[-1].payload["termination_reason"] == result.termination_reason
 
 
-def test_qp_reml_refuses_infeasible_terminal_state_before_objective_or_publication(
+@pytest.mark.parametrize(
+    ("failure_reason", "error_pattern"),
+    [
+        pytest.param(
+            "constraint_infeasible",
+            "terminal constrained REML refit ended at an infeasible coefficient mode",
+            id="primal-infeasible",
+        ),
+        pytest.param(
+            "constraint_kkt_incomplete",
+            "terminal constrained REML refit ended without a complete inner-QP KKT certificate",
+            id="kkt-incomplete",
+        ),
+    ],
+)
+def test_qp_reml_refuses_uncertified_terminal_state_before_objective_or_publication(
     monkeypatch: pytest.MonkeyPatch,
+    failure_reason: str,
+    error_pattern: str,
 ) -> None:
     """The constrained terminal state gates REML objective and public install."""
     from superglm.model import reml_finalize
@@ -593,7 +713,7 @@ def test_qp_reml_refuses_infeasible_terminal_state_before_objective_or_publicati
     model = _increasing_model()
     terminal_objective_calls: list[None] = []
 
-    def force_infeasible_terminal(
+    def force_uncertified_terminal(
         work_model,
         *,
         qp_saved_state,
@@ -601,16 +721,17 @@ def test_qp_reml_refuses_infeasible_terminal_state_before_objective_or_publicati
         **_kwargs,
     ):
         reml_finalize.restore_qp_group_state(work_model, qp_saved_state)
-        group = next(group for group in work_model._groups if group.constraints is not None)
-        infeasible_beta = pirls_result.beta.copy()
-        infeasible_beta[group.sl] = -10.0 * group.constraints.A[0]
-        slack = group.constraints.A @ infeasible_beta[group.sl] - group.constraints.b
-        assert np.min(slack) < -1.0
+        terminal_beta = pirls_result.beta.copy()
+        if failure_reason == "constraint_infeasible":
+            group = next(group for group in work_model._groups if group.constraints is not None)
+            terminal_beta[group.sl] = -10.0 * group.constraints.A[0]
+            slack = group.constraints.A @ terminal_beta[group.sl] - group.constraints.b
+            assert np.min(slack) < -1.0
         return replace(
             pirls_result,
-            beta=infeasible_beta,
+            beta=terminal_beta,
             converged=False,
-            termination_reason="constraint_infeasible",
+            termination_reason=failure_reason,
         )
 
     def unexpected_terminal_objective(*_args, **_kwargs):
@@ -620,7 +741,7 @@ def test_qp_reml_refuses_infeasible_terminal_state_before_objective_or_publicati
     monkeypatch.setattr(
         reml_finalize,
         "maybe_qp_passthrough_refit",
-        force_infeasible_terminal,
+        force_uncertified_terminal,
     )
     monkeypatch.setattr(
         reml_finalize,
@@ -630,7 +751,7 @@ def test_qp_reml_refuses_infeasible_terminal_state_before_objective_or_publicati
 
     with pytest.raises(
         RuntimeError,
-        match="terminal constrained REML refit ended at an infeasible coefficient mode",
+        match=error_pattern,
     ):
         model.fit_reml(frame, y, max_reml_iter=8, runtime_validation="skip")
 
@@ -639,10 +760,27 @@ def test_qp_reml_refuses_infeasible_terminal_state_before_objective_or_publicati
     assert getattr(model, "_reml_result", None) is None
 
 
-def test_fixed_lambda_qp_reml_refuses_infeasible_result_before_publication(
+@pytest.mark.parametrize(
+    ("failure_reason", "error_pattern"),
+    [
+        pytest.param(
+            "constraint_infeasible",
+            "fixed-lambda constrained REML fit ended at an infeasible coefficient mode",
+            id="primal-infeasible",
+        ),
+        pytest.param(
+            "constraint_kkt_incomplete",
+            "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate",
+            id="kkt-incomplete",
+        ),
+    ],
+)
+def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
     monkeypatch: pytest.MonkeyPatch,
+    failure_reason: str,
+    error_pattern: str,
 ) -> None:
-    """The fixed-lambda route gates infeasibility before installing fit state."""
+    """The fixed-lambda route gates an uncertified result before installing fit state."""
     import superglm.model.reml_execute as reml_execute
     from superglm import LambdaPolicy
 
@@ -661,20 +799,21 @@ def test_fixed_lambda_qp_reml_refuses_infeasible_result_before_publication(
     real_fit = reml_execute.fit_irls_direct
     fixed_route_calls: list[dict[str, str]] = []
 
-    def force_infeasible_fixed_result(*args, **kwargs):
+    def force_uncertified_fixed_result(*args, **kwargs):
         result, inverse = real_fit(*args, **kwargs)
-        group = next(group for group in kwargs["groups"] if group.constraints is not None)
-        infeasible_beta = result.beta.copy()
-        infeasible_beta[group.sl] = -10.0 * group.constraints.A[0]
-        slack = group.constraints.A @ infeasible_beta[group.sl] - group.constraints.b
-        assert np.min(slack) < -1.0
+        terminal_beta = result.beta.copy()
+        if failure_reason == "constraint_infeasible":
+            group = next(group for group in kwargs["groups"] if group.constraints is not None)
+            terminal_beta[group.sl] = -10.0 * group.constraints.A[0]
+            slack = group.constraints.A @ terminal_beta[group.sl] - group.constraints.b
+            assert np.min(slack) < -1.0
         fixed_route_calls.append(kwargs["debug_context"])
         return (
             replace(
                 result,
-                beta=infeasible_beta,
+                beta=terminal_beta,
                 converged=False,
-                termination_reason="constraint_infeasible",
+                termination_reason=failure_reason,
             ),
             inverse,
         )
@@ -682,11 +821,11 @@ def test_fixed_lambda_qp_reml_refuses_infeasible_result_before_publication(
     monkeypatch.setattr(
         reml_execute,
         "fit_irls_direct",
-        force_infeasible_fixed_result,
+        force_uncertified_fixed_result,
     )
     with pytest.raises(
         RuntimeError,
-        match="fixed-lambda constrained REML fit ended at an infeasible coefficient mode",
+        match=error_pattern,
     ):
         model.fit_reml(frame, y, runtime_validation="skip")
 
@@ -769,7 +908,10 @@ def test_feasible_committed_state_never_accepts_infeasible_trial(
     assert result.iteration_log[0].accepted_alpha == 0.5
     assert result.iteration_log[0].step_halvings == 1
     assert result.beta[0] >= -1e-12
-    assert result.termination_reason != "constraint_infeasible"
+    # The full inner solve was marked converged, but the retained half-step is
+    # not that QP solution and therefore does not inherit its KKT certificate.
+    assert not result.converged
+    assert result.termination_reason == "constraint_kkt_incomplete"
 
 
 def test_unconstrained_line_search_still_accepts_the_full_merit_improving_proposal() -> None:

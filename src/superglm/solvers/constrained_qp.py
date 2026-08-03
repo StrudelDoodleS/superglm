@@ -1051,11 +1051,17 @@ def solve_constrained_qp(
             # the QP initialisation moved.  So the rank-deficient half below is
             # new to this branch and the full-rank half is inherited.
             #
-            # ``converged=False`` is weaker protection than it looks, which is
-            # why it is not the whole answer.  ``irls_direct.py:1614`` does
-            # ``beta = qp_result.beta`` unconditionally, six lines *before* it
-            # reads ``converged``, which drives nothing but a latched log line
-            # -- so the infeasible point flows into the fit either way.  For the
+            # ``converged`` is the inner KKT certificate, while ``beta`` remains
+            # the best finite iterate.  ``irls_direct`` deliberately consumes
+            # that iterate so a later outer iteration can recover, but attaches
+            # the certificate to the retained coefficient state: an incomplete
+            # certificate blocks outer convergence and, if still incomplete at
+            # termination, produces ``constraint_kkt_incomplete`` plus a
+            # warning.  Fixed-lambda and automatic constrained REML reject that
+            # terminal reason before publication.  Projection is still needed
+            # here because consuming a finite iterate is safe only when the
+            # hard constraints are satisfied; the certificate alone does not
+            # make an infeasible coefficient vector admissible.  For the
             # rank-deficient half the population is this branch's own: on
             # ``master`` ``np.linalg.solve(H, g)`` ran before the loop, so a
             # singular ``H`` raised ``LinAlgError`` and the loop never ran at
