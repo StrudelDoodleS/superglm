@@ -69,17 +69,21 @@ class QPResult:
 
     ``converged`` means the full KKT certificate holds for ``beta``: the
     active-set loop reached its own termination test (a stationary step with
-    no negative multiplier) *and* ``beta`` is feasible.  It is ``False`` when
-    the loop exhausted ``max_iter``, and when the loop terminated but the
-    returned point still violates a constraint.  In either case ``beta`` is the
-    best available point, not a certified solution.
+    no negative multiplier) *and* the certified candidate is feasible.  It is
+    ``False`` whenever the solver did not complete that certificate, including
+    when the loop exhausted ``max_iter`` or a stationary candidate failed its
+    primal-feasibility check.  In the latter case a subsequent projection may
+    make the returned ``beta`` feasible, but it does not re-establish
+    stationarity or dual feasibility; projection can also fail to repair an
+    infeasible system.  Thus ``converged=False`` does not imply that the
+    returned ``beta`` is infeasible.  It is the best available point, not a
+    certified solution.
 
-    A mutually infeasible constraint system is one way to reach the second
-    case, but not the only one and not the common one: the loop can also stop
-    at a stationary point on a *subset* active set with another row materially
-    violated, on a system that has a feasible point.  See the early return
-    below for the measurement and for why ``converged=False`` is weaker
-    protection than it looks.
+    A mutually infeasible constraint system is one way for the candidate
+    feasibility check to fail, but not the only one and not the common one:
+    the loop can also stop at a stationary point on a *subset* active set with
+    another row materially violated, on a system that has a feasible point.
+    See the early return below for the measurement and projection.
     """
 
     beta: NDArray
