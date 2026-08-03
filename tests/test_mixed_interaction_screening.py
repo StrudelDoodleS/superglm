@@ -927,19 +927,21 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     applies, it just no longer terminates the pair.
     """
     # k = 12 * 12 = 144 for every pair.  max_cells is chosen so 144 lands
-    # between the unpenalized ceiling (5.5e6^(1/3) = 176) and the penalized
-    # one (2.75e6^(1/3) = 140), and still clears the (k^2 <= 4*max_cells)
-    # intermediate gate at 20736 <= 22000.  The spline margins are carried on
-    # a 40-point grid so that every pair also clears the SUPPORT-scaled
-    # intermediate budgets (dense and structured alike); the subject here is
-    # the cubic charge, and an allocation refusal would mask it.
-    max_cells = 5_500
+    # between the unpenalized ceiling (5.8e6^(1/3) = 179) and the penalized
+    # one (2.9e6^(1/3) = 142), and still clears the (k^2 <= 4*max_cells)
+    # intermediate gate at 20736 <= 23200.  The spline margins are carried on
+    # a 7-point grid so that every pair also clears the SUPPORT-scaled
+    # intermediate budgets (dense and structured alike), and the structured
+    # setup still has two endpoint evaluations left after its two QR passes
+    # and seven factor-work units.  The subject here is the cubic charge, and
+    # either an allocation or setup refusal would mask it.
+    max_cells = 5_800
     n_levels, reps = 13, 14
     rng = np.random.default_rng(23)
     n = n_levels * n_levels * reps
     a = np.repeat(np.arange(n_levels), n_levels * reps)
     b = np.tile(np.repeat(np.arange(n_levels), reps), n_levels)
-    grid = np.linspace(0.0, 1.0, 40)
+    grid = np.linspace(0.0, 1.0, 7)
     df = pd.DataFrame(
         {
             "g": np.array([f"G{i}" for i in range(n_levels)])[a],
