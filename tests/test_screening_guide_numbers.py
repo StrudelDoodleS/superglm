@@ -23,11 +23,19 @@ they run everywhere.
 
 ``test_screening_guide_fixture_matches_the_real_book`` recomputes that
 measurement from the freMTPL2 parquet, so the fixture cannot itself go stale
-behind a code change.  It skips when the (gitignored) parquet is absent.
+behind a code change.  It skips when the (gitignored) parquet is absent, so it
+does not run in CI; read its docstring for what it does and does not prove.
+
+One number the closing paragraph reads against — the ``ti`` null floor, 7.31 —
+comes from a *different* measurement, the 160-fit null battery in
+``benchmarks/screening_null_floors.py``, which was not regenerated.
+``test_screening_guide_ti_floor_survives_the_dispersion_contract_change``
+pins the argument for why it did not have to be.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from pathlib import Path
@@ -36,8 +44,13 @@ import numpy as np
 import pytest
 
 from superglm import Categorical, SuperGLM
+from superglm.distributions import Gaussian
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
+from superglm.solvers.dispersion import (
+    dispersion_likelihood_size,
+    pearson_residual_degrees_of_freedom,
+)
 
 from . import _datasets
 
@@ -145,6 +158,19 @@ def test_screening_guide_quotes_the_measured_dispersion(guide, measured) -> None
     # far below the row count; quoting a phi consistent with an n - edf
     # denominator would understate it by roughly a factor of two.
     assert measured["sum_sample_weight"] < 0.6 * measured["n_rows"]
+
+    # The retired publication reconciles exactly, which is what makes this a
+    # regeneration rather than a re-measurement of something else: the same
+    # Pearson sum over the *retired* count_nonzero(w) - edf denominator is
+    # 2.55, the number this guide printed at 37a1c18 and earlier.  If the
+    # fixture had been produced from a different sample, a different mains
+    # model or a different response encoding, this identity would not close.
+    pearson = measured["phi"] * (measured["sum_sample_weight"] - measured["mains_edf"])
+    retired = pearson / (measured["n_rows"] - measured["mains_edf"])
+    assert retired == pytest.approx(measured["retired_phi_n_minus_edf"], rel=1e-6)
+    assert retired == pytest.approx(2.55, abs=5e-3)
+    # ... and the guide must no longer publish it as a number of its own.
+    assert re.search(r"(?<![0-9.])2\.55(?![0-9])", guide) is None
 
 
 def test_screening_guide_confirmatory_refit_table_matches_the_measured_gains(
@@ -274,6 +300,64 @@ def test_screening_guide_top_row_is_read_against_the_published_ti_floor(guide, m
     )
 
 
+def test_screening_guide_ti_floor_survives_the_dispersion_contract_change(guide) -> None:
+    """The `ti` floor is a unit-weight measurement, so the new phi cannot move it.
+
+    Everything the worked example prints moved when the screen's Pearson
+    denominator moved.  The closing paragraph reads its top row against a
+    number from a *different* measurement — the null battery's ``ti`` maximum —
+    which was not regenerated.  This pins the argument that it did not have to
+    be, entirely from published numbers plus the battery's own construction:
+
+    1. the guide attributes both maxima above 6, the ``ti`` one included, to
+       the dispersed Gaussian arm of the battery;
+    2. only the Poisson arm of that battery screens with a ``sample_weight``
+       at all, and the guide publishes its maximum anywhere as well below the
+       ``ti`` floor, so the floor cannot have been Poisson-carried and a
+       Poisson row cannot become the maximum by moving *down*;
+    3. under unit weights the two denominators are the same number, so no
+       unweighted arm's ``z`` moved at all.
+
+    Give the battery's Gaussian arm a ``sample_weight`` and step 2 fails: the
+    floor would then be contract-sensitive and would have to be re-measured
+    alongside the worked example.
+    """
+    battery = importlib.import_module("benchmarks.screening_null_floors")
+    text = " ".join(guide.split())
+
+    # (1) the published attribution, cross-checked against the per-kind table.
+    carried = _search(
+        guide,
+        r"dispersed Gaussian carries it: [^.]*?both maxima above 6 "
+        r"\(([0-9.]+) on `numeric_cat`, ([0-9.]+) on `ti`\)",
+    )
+    ti_floor = _search(guide, r"\| `ti` \| 480 \| [0-9.]+ \| [0-9.]+ \| ([0-9.]+) \|").group(1)
+    numeric_cat_floor = _search(
+        guide, r"\| `numeric_cat` \| 960 \| [0-9.]+ \| [0-9.]+ \| ([0-9.]+) \|"
+    ).group(1)
+    assert carried.group(2) == ti_floor
+    assert carried.group(1) == numeric_cat_floor
+    assert f"({ti_floor} for `ti`)" in text
+
+    # (2) the battery's weighted arm is the Poisson one, and only that one.
+    df, exposure = battery._frame(64, np.random.default_rng(0))
+    weighted = {}
+    for family in battery.FAMILIES:
+        _, weight = battery._null_response(df, exposure, family, np.random.default_rng(0))
+        weighted[family] = weight is not None
+    assert weighted == {"poisson": True, "gamma": False, "binomial": False, "gaussian": False}
+    poisson_max = float(_search(guide, r"\(Poisson at most ([0-9.]+),").group(1))
+    assert poisson_max < float(ti_floor)
+
+    # (3) with unit weights the retired and current denominators coincide, so
+    #     the Gaussian arm that carries the floor is untouched by the change.
+    ones = np.ones(64, dtype=np.float64)
+    assert dispersion_likelihood_size(Gaussian(), ones) == pytest.approx(
+        float(np.count_nonzero(ones))
+    )
+    assert pearson_residual_degrees_of_freedom(Gaussian(), ones, 4.0) == pytest.approx(64.0 - 4.0)
+
+
 # ── the fixture is anchored to the real book (skips without the parquet) ────
 
 
@@ -315,7 +399,35 @@ def _guide_frame(n_rows: int):
 
 @FREQ_SKIP
 def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
-    """Recompute the published sweep so the committed fixture cannot go stale."""
+    """Regression guard for an ALREADY-SHIPPED fix, plus the fixture's anchor.
+
+    Two honest labels, because this test cannot do what its siblings do.
+
+    *It cannot fail against 37a1c18, by construction.*  The behaviour it pins
+    shipped in 67b90f8 ("fix: resolve numerical audit findings"), an ancestor
+    of this branch's parent: the screen's Pearson denominator moved from
+    ``count_nonzero(w) - edf`` to the fit's own ``sum(w) - edf`` contract, and
+    ``quantile_tempered`` knot placement started consuming frequency mass.
+    Issue #219 is the docs half of that change — the branch diff touches no
+    ``src/`` line — so a docs-only yardstick has nothing here to detect.  What
+    it does fail against is a surgical revert of either half of 67b90f8:
+    restoring ``n_eff = count_nonzero(weights)`` in ``screen_interactions``
+    turns the ``phi`` identity below into 2.554 against 4.821, and restoring
+    ``del sample_weight`` / ``spec._place_knots(x)`` in
+    ``_spline_build.build_group_info`` moves the ``BonusMalus`` margin and
+    breaks the mains ``effective_df`` assertion before the screen is even
+    reached.  Both were demonstrated; if a future change makes neither break
+    this test, the test has gone inert and should be deleted rather than kept.
+
+    *It is also the fixture's only tie to reality.*  The five
+    ``test_screening_guide_*`` tests compare the published document to
+    ``tests/fixtures/screening_guide_fremtpl.json``, which would be circular
+    if the fixture were back-filled from whatever a fixing agent happened to
+    print.  This test refits the real 80,000-row book and rederives every
+    committed value, so the fixture is a measurement and not an assertion.
+    It skips wherever the gitignored parquet is absent, CI included; run it
+    locally to regenerate the fixture after any deliberate contract change.
+    """
     df, y, exposure = _guide_frame(measured["n_rows"])
     # The dispersion contract this example documents only bites because the
     # exposure mass is far below the row count: sum(w) - edf is the denominator,
@@ -329,6 +441,17 @@ def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     assert model._result.effective_df == pytest.approx(measured["mains_edf"], rel=1e-5)
 
     table = model.screen_interactions(df, y, sample_weight=exposure)
+
+    # Name the denominator rather than only the number it produces, so a
+    # reverted contract fails as a contract failure and not as a bare number
+    # mismatch.  The Pearson sum is recomputed here from the public prediction
+    # path, independently of the screen's own internals; only the divisor
+    # distinguishes the current reading from the retired one.
+    mu = np.asarray(model.predict(df), dtype=np.float64)
+    pearson = float(np.sum(exposure * (y - mu) ** 2 / mu))
+    edf = float(model._result.effective_df)
+    assert float(table.attrs["phi"]) == pytest.approx(pearson / (exposure.sum() - edf), rel=1e-6)
+    assert pearson / (len(df) - edf) == pytest.approx(measured["retired_phi_n_minus_edf"], rel=1e-4)
     assert float(table.attrs["phi"]) == pytest.approx(measured["phi"], rel=1e-5)
 
     expected = measured["rows"]
