@@ -129,7 +129,8 @@ def test_editor_payload_reserves_significance_for_global_ordered_smooth():
 def test_metrics_feature_se_reports_ordered_level_contrasts():
     ordered, _, X, y, weights, levels = _fit_ordered_and_direct_spline()
 
-    result = ordered.metrics(X, y, sample_weight=weights).feature_se("band")
+    metrics = ordered.metrics(X, y, sample_weight=weights)
+    result = metrics.feature_se("band")
 
     assert set(result) == {"levels", "base_level", "se_log_relativity"}
     assert list(result["levels"]) == levels
@@ -140,7 +141,12 @@ def test_metrics_feature_se_reports_ordered_level_contrasts():
     assert np.all(se >= 0.0)
 
     summary_se = np.asarray([row.se for row in _level_rows(ordered.summary())])
-    np.testing.assert_allclose(se, summary_se, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        se,
+        np.sqrt(metrics._coefficient_dispersion) * summary_se,
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_model_and_metrics_summaries_agree_on_ordered_smooth_test():

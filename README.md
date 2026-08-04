@@ -161,7 +161,8 @@ cv = cross_validate(
     return_oof=True,
 )
 
-gini = lorenz_curve(y_holdout, mu_holdout, exposure=exposure_holdout)
+lorenz = lorenz_curve(y_holdout, mu_holdout, exposure=exposure_holdout)
+print(f"Gini ratio: {lorenz.gini_ratio:.4f}")
 lift = double_lift_chart(
     y_obs=y_holdout,
     y_pred_model=mu_holdout,
@@ -183,21 +184,24 @@ Key outputs:
 SuperGLM supports solver-backed monotone spline fitting. This is the preferred
 way to enforce business shape constraints inside the model itself.
 
-- `BSplineSmooth(..., monotone="increasing", monotone_mode="fit")`:
+- `BSplineSmooth(..., constraint=Constraint.fit.increasing)`:
   constrained QP path
-- `CubicRegressionSpline(..., monotone="decreasing", monotone_mode="fit")`:
+- `CubicRegressionSpline(..., constraint=Constraint.fit.decreasing)`:
   constrained QP path
-- `PSpline(..., monotone="increasing", monotone_mode="fit")`:
+- `PSpline(..., constraint=Constraint.fit.increasing)`:
   SCOP path
 
 ```python
-from superglm import BSplineSmooth, PSpline, SuperGLM
+from superglm import BSplineSmooth, Constraint, PSpline, SuperGLM
 
 qp_model = SuperGLM(
     family="gaussian",
     selection_penalty=0.0,
     features={
-        "x": BSplineSmooth(n_knots=8, monotone="increasing", monotone_mode="fit"),
+        "x": BSplineSmooth(
+            n_knots=8,
+            constraint=Constraint.fit.increasing,
+        ),
     },
 )
 
@@ -205,7 +209,10 @@ scop_model = SuperGLM(
     family="gaussian",
     selection_penalty=0.0,
     features={
-        "x": PSpline(n_knots=10, monotone="increasing", monotone_mode="fit"),
+        "x": PSpline(
+            n_knots=10,
+            constraint=Constraint.fit.increasing,
+        ),
     },
 )
 ```
@@ -243,8 +250,25 @@ features = {
 
 ## Weights And Offsets
 
-Public fitting examples use `sample_weight=`. In insurance settings this means
-exposure / frequency weight, not inverse-variance weight.
+Weight semantics are family-specific. For Poisson, negative binomial,
+binomial, Gaussian, and Gamma fits, `sample_weight=` is a case/frequency
+weight: once feature geometry is fixed, integer weights have the same
+likelihood and dispersion semantics as repeating rows. It is not an
+inverse-variance weight. In the Poisson rate example below, exposure is a
+frequency weight.
+
+Tweedie is the exception: its weights are strictly positive EDM prior weights,
+with `Var(Y_i | x_i) = phi * mu_i**p / w_i`, and are not replication counts.
+See the [families guide](docs/guide/families.md#weight-semantics) before using
+weighted Gaussian or Gamma averages, where choosing the wrong interpretation
+changes dispersion and inference.
+
+The replication equivalence remains conditional on the constructed design.
+Main-effect non-Tweedie spline boundaries and adaptive knots honor frequency
+mass and omit zero-weight rows. Some adaptive interaction and categorical
+feature geometry can still depend on the physical row layout, however, so use
+fixed or preconstructed feature geometry when exact end-to-end replication
+parity matters.
 
 ```python
 import numpy as np

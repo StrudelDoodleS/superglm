@@ -4,9 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy.stats import chi2 as chi2_dist
+from scipy.stats import exponnorm
+from scipy.stats import f as f_dist
 
+from superglm.stats import wood_pvalue as wood_pvalue_module
 from superglm.stats.davies import psum_chisq, satterthwaite
-from superglm.stats.wood_pvalue import _mixture_pvalue, wood_test_smooth
+from superglm.stats.wood_pvalue import (
+    _fallback_tail,
+    _fractional_tail,
+    wood_test_smooth,
+)
 
 # ── Davies algorithm ─────────────────────────────────────────────
 
@@ -61,9 +68,11 @@ class TestDavies:
         assert p < 0.001
 
     def test_empty_weights(self):
-        """Empty weights: q=0 → p=1, q>0 → p=0."""
+        """The degenerate zero form respects the strict upper-tail event."""
         p1, _ = psum_chisq(0.0, np.array([]))
-        assert p1 == 1.0
+        assert p1 == 0.0
+        p0, _ = psum_chisq(-1.0, np.array([]))
+        assert p0 == 1.0
         p2, _ = psum_chisq(5.0, np.array([]))
         assert p2 == 0.0
 
@@ -84,6 +93,302 @@ class TestDavies:
         weights = np.array([2.0, -1.0, 1.5])
         p, ifault = psum_chisq(q, weights)
         assert 0.0 <= p <= 1.0
+
+    def test_equal_unit_weight_far_tail_is_exact_and_monotone(self):
+        """Equal weights are the certified chi-square oracle across the tail."""
+        q_values = np.logspace(-1.0, np.log10(5e4), 80)
+        actual = []
+        for q in q_values:
+            p_value, ifault = psum_chisq(q, np.ones(5))
+            assert ifault == 0
+            actual.append(p_value)
+
+        actual = np.asarray(actual)
+        expected = chi2_dist.sf(q_values, 5)
+        assert np.all(np.diff(actual) <= 0.0)
+        np.testing.assert_allclose(
+            actual,
+            expected,
+            rtol=100.0 * np.finfo(np.float64).eps,
+            atol=0.0,
+        )
+
+    def test_unequal_weight_oscillatory_tail_matches_hypoexponential_oracle(self):
+        """Two chi-square(2) terms give a closed-form convolution oracle."""
+        weights = np.array([1.0, 0.5])
+        df = np.array([2.0, 2.0])
+        accuracy = 1e-11
+        for q in (1.0, 10.0, 30.0):
+            p_value, ifault = psum_chisq(q, weights, df=df, acc=accuracy)
+            expected = 2.0 * np.exp(-q / 2.0) - np.exp(-q)
+            assert ifault == 0
+            assert abs(p_value - expected) <= 10.0 * accuracy
+
+    def test_ifault_marks_a_tail_that_cannot_be_resolved(self):
+        """A tiny unequal-weight tail may be returned only if exact or flagged."""
+        q = 100.0
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([1.0, 0.5]),
+            df=np.array([2.0, 2.0]),
+        )
+        expected = 2.0 * np.exp(-q / 2.0) - np.exp(-q)
+        if ifault == 0:
+            np.testing.assert_allclose(
+                p_value,
+                expected,
+                rtol=100.0 * np.finfo(np.float64).eps,
+                atol=0.0,
+            )
+        else:
+            assert ifault == 1
+
+    def test_ifault_marks_an_unresolved_lower_tail_of_a_mixed_form(self):
+        """Gross error in the complement must also prevent a success flag."""
+        positive_weight = 1.0
+        negative_weight = 1e5
+        q = -4.3e7
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([2.0, 2.0]),
+        )
+        expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
+            q / (2.0 * negative_weight)
+        )
+
+        if ifault == 0:
+            np.testing.assert_allclose(
+                p_value,
+                expected,
+                rtol=100.0 * np.finfo(np.float64).eps,
+                atol=0.0,
+            )
+        else:
+            assert ifault == 1
+
+    @pytest.mark.parametrize(
+        ("weights", "df", "sigma", "lim", "acc"),
+        [
+            (np.array([1.0]), np.array([1.0, 1.0]), 0.0, 100, 1e-6),
+            (np.array([1.0]), np.array([0.0]), 0.0, 100, 1e-6),
+            (np.array([np.nan]), None, 0.0, 100, 1e-6),
+            (np.array([1.0]), None, -1.0, 100, 1e-6),
+            (np.array([1.0]), None, 0.0, 2, 1e-6),
+            (np.array([1.0]), None, 0.0, 3.5, 1e-6),
+            (np.array([1.0]), None, 0.0, np.inf, 1e-6),
+            (np.array([1.0]), None, 0.0, 100, 0.0),
+        ],
+    )
+    def test_invalid_inputs_have_documented_ifault_four(
+        self,
+        weights,
+        df,
+        sigma,
+        lim,
+        acc,
+    ):
+        p_value, ifault = psum_chisq(
+            1.0,
+            weights,
+            df=df,
+            sigma=sigma,
+            lim=lim,
+            acc=acc,
+        )
+        assert np.isnan(p_value)
+        assert ifault == 4
+
+    @pytest.mark.parametrize("q", [-5.0, -1.0, 0.0, 1.0, 5.0, 20.0])
+    def test_mixed_sign_tail_orientation_matches_asymmetric_laplace(self, q):
+        """A difference of chi-square(2) terms has an exact two-sided oracle."""
+        positive_weight = 2.0
+        negative_weight = 0.7
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([2.0, 2.0]),
+            acc=1e-12,
+        )
+        if q < 0.0:
+            expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
+                q / (2.0 * negative_weight)
+            )
+        else:
+            expected = (
+                positive_weight
+                / (positive_weight + negative_weight)
+                * np.exp(-q / (2.0 * positive_weight))
+            )
+
+        assert ifault == 0
+        np.testing.assert_allclose(p_value, expected, rtol=2e-11, atol=2e-13)
+
+    @pytest.mark.parametrize("direction", [-1.0, 1.0])
+    def test_mixed_sign_tail_is_continuous_at_numerically_nonzero_q(self, direction):
+        """Tiny nonzero q must not enter an ill-conditioned Fourier limit."""
+        positive_weight = 0.15
+        negative_weight = 7.0
+        q = direction * 32.0 * np.finfo(np.float64).eps * negative_weight
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([2.0, 2.0]),
+            acc=1e-12,
+        )
+        if q < 0.0:
+            expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
+                q / (2.0 * negative_weight)
+            )
+        else:
+            expected = (
+                positive_weight
+                / (positive_weight + negative_weight)
+                * np.exp(-q / (2.0 * positive_weight))
+            )
+
+        assert ifault == 0
+        np.testing.assert_allclose(p_value, expected, rtol=2e-11, atol=2e-13)
+
+    def test_mixed_sign_small_q_between_direct_and_fourier_scales(self):
+        """A small Fourier frequency must not be reported as a successful tail."""
+        positive_weight = 1.0
+        negative_weight = 0.1
+        q = 5e-8
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([2.0, 2.0]),
+        )
+        expected = (
+            positive_weight
+            / (positive_weight + negative_weight)
+            * np.exp(-q / (2.0 * positive_weight))
+        )
+
+        assert ifault == 0
+        np.testing.assert_allclose(p_value, expected, rtol=2e-11, atol=2e-13)
+
+    @pytest.mark.parametrize("q", [-3.168e-4, -1e-4, 1e-4, 3.168e-4])
+    def test_mixed_sign_small_q_matches_asymmetric_laplace_oracle(self, q):
+        positive_weight = 2.0
+        negative_weight = 0.7
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([2.0, 2.0]),
+            acc=1e-12,
+        )
+        if q < 0.0:
+            expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
+                q / (2.0 * negative_weight)
+            )
+        else:
+            expected = (
+                positive_weight
+                / (positive_weight + negative_weight)
+                * np.exp(-q / (2.0 * positive_weight))
+            )
+
+        assert ifault == 0
+        np.testing.assert_allclose(
+            p_value,
+            expected,
+            rtol=100.0 * np.finfo(np.float64).eps,
+            atol=0.0,
+        )
+
+    @pytest.mark.parametrize("q", [-1e308, 1e308])
+    def test_asymmetric_laplace_exact_path_avoids_finite_scale_overflow(self, q):
+        weight = 1e308
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([weight, -weight]),
+            df=np.array([2.0, 2.0]),
+        )
+        if q < 0.0:
+            expected = 1.0 - 0.5 * np.exp(0.5 * q / weight)
+        else:
+            expected = 0.5 * np.exp(-0.5 * q / weight)
+
+        assert ifault == 0
+        np.testing.assert_allclose(p_value, expected, rtol=1e-15, atol=0.0)
+
+    def test_mixed_sign_zero_tail_resolves_widely_separated_component_scales(self):
+        """Direct inversion must visit the reciprocal scale of every component."""
+        positive_weight = 1.0
+        negative_weight = 1e-5
+        p_value, ifault = psum_chisq(
+            0.0,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([2.0, 2.0]),
+        )
+        expected = positive_weight / (positive_weight + negative_weight)
+
+        assert ifault == 0
+        np.testing.assert_allclose(p_value, expected, rtol=2e-11, atol=2e-13)
+
+    @pytest.mark.parametrize("negative_weight", [1e-12, 1e-6, 1.0, 1e6, 1e12])
+    @pytest.mark.parametrize(("positive_df", "negative_df"), [(4.0, 4.0), (3.0, 90.0)])
+    def test_zero_tail_two_component_mixture_matches_exact_f_ratio(
+        self,
+        negative_weight,
+        positive_df,
+        negative_df,
+    ):
+        """The exact q=0 F identity remains stable across component scales."""
+        positive_weight = 1.0
+        p_value, ifault = psum_chisq(
+            0.0,
+            np.array([positive_weight, -negative_weight]),
+            df=np.array([positive_df, negative_df]),
+            acc=1e-12,
+        )
+        threshold = negative_weight * negative_df / (positive_weight * positive_df)
+        expected = f_dist.sf(threshold, positive_df, negative_df)
+
+        assert ifault == 0
+        np.testing.assert_allclose(
+            p_value,
+            expected,
+            rtol=1e-12,
+            atol=0.0,
+        )
+
+    @pytest.mark.parametrize(
+        ("q", "weights"),
+        [
+            (5e-5, np.array([1.0, 0.9])),
+            (-5e-5, np.array([-1.0, -0.9])),
+        ],
+    )
+    def test_one_sided_near_support_tail_is_not_silently_certified(self, q, weights):
+        """Direct inversion must flag a support-boundary tail it cannot resolve."""
+        _, ifault = psum_chisq(
+            q,
+            weights,
+            df=np.array([1.0, 1.0]),
+            acc=1e-12,
+        )
+
+        assert ifault == 1
+
+    @pytest.mark.parametrize("q", [-3.0, 0.0, 1.0, 3.0, 10.0])
+    def test_normal_component_matches_exponentially_modified_normal(self, q):
+        """chi-square(2) plus a Gaussian is scipy's exponnorm exactly."""
+        weight = 1.3
+        sigma = 0.8
+        p_value, ifault = psum_chisq(
+            q,
+            np.array([weight]),
+            df=np.array([2.0]),
+            sigma=sigma,
+            acc=1e-12,
+        )
+        expected = exponnorm.sf(q, 2.0 * weight / sigma, loc=0.0, scale=sigma)
+
+        assert ifault == 0
+        np.testing.assert_allclose(p_value, expected, rtol=2e-10, atol=2e-13)
 
 
 # ── Satterthwaite fallback ───────────────────────────────────────
@@ -239,58 +544,125 @@ class TestWoodTestSmooth:
             assert np.isfinite(ref_df), f"Non-finite ref_df for p_g={p_g}"
 
 
+# ── Mixture failure handling ─────────────────────────────────────
+
+
+class TestMixtureFailureHandling:
+    def test_known_scale_fractional_tail_uses_satterthwaite_on_each_fault(
+        self,
+        monkeypatch,
+    ):
+        calls = []
+
+        def failed_tail(q, weights, df=None, **kwargs):
+            calls.append((q, np.asarray(weights), df))
+            return np.nan, 1
+
+        monkeypatch.setattr(wood_pvalue_module, "psum_chisq", failed_tail)
+        stat = 9.0
+        stat_alt = 7.0
+        weights = np.array([1.0, 0.65, 0.2])
+        actual = _fractional_tail(stat, stat_alt, weights, res_df=-1.0)
+        primary, _, _ = satterthwaite(stat, weights)
+        alternate, _, _ = satterthwaite(stat_alt, weights)
+
+        assert len(calls) == 2
+        assert actual == pytest.approx(0.5 * (primary + alternate))
+
+    def test_estimated_scale_fractional_tail_falls_back_if_either_call_faults(
+        self,
+        monkeypatch,
+    ):
+        calls = []
+
+        def failed_tail(q, weights, df=None, **kwargs):
+            calls.append((q, np.asarray(weights), df))
+            return np.nan, 1 if len(calls) == 1 else 0
+
+        monkeypatch.setattr(wood_pvalue_module, "psum_chisq", failed_tail)
+        stat = 8.0
+        stat_alt = 6.5
+        weights = np.array([1.0, 0.55])
+        res_df = 90.0
+        actual = _fractional_tail(stat, stat_alt, weights, res_df)
+        expected = _fallback_tail(
+            stat,
+            stat_alt,
+            float(np.sum(weights)),
+            res_df,
+        )
+
+        assert len(calls) == 2
+        assert all(call[2] is not None for call in calls)
+        assert actual == pytest.approx(expected)
+
+    def test_estimated_scale_extreme_component_ratio_triggers_live_fallback(self):
+        residual_df = 90.0
+        stat = residual_df * 1e-12
+        weights = np.array([1.0, 1.0, 1.20707142, 0.49292858])
+
+        actual = _fractional_tail(stat, stat, weights, residual_df)
+        expected = _fallback_tail(
+            stat,
+            stat,
+            float(np.sum(weights)),
+            residual_df,
+        )
+
+        assert actual == pytest.approx(expected)
+
+
 # ── F-correction for estimated scale ─────────────────────────────
 
 
 class TestFCorrection:
-    """Verify _mixture_pvalue uses F(d, res_df) for estimated scale."""
+    """Verify Wood's live estimated-scale paths use an F reference."""
 
-    def test_unit_weights_known_scale_equals_chi2(self):
-        """Known scale with unit weights should match chi²(k)."""
-        k = 5
-        q = 11.07  # chi²(5) 95th percentile
-        p = _mixture_pvalue(q, np.ones(k), res_df=-1.0)
-        expected = 1.0 - chi2_dist.cdf(q, k)
-        np.testing.assert_allclose(p, expected, atol=0.01)
-
-    def test_unit_weights_estimated_scale_equals_f(self):
-        """Estimated scale with unit weights should match F(k, res_df)."""
+    def test_fractional_residual_df_is_not_rounded(self):
+        """The denominator chi-square must retain its fractional fitted df."""
         from scipy.stats import f as f_dist
 
-        k = 5
-        q = 11.07
-        res_df = 100.0
-        p = _mixture_pvalue(q, np.ones(k), res_df=res_df)
-        # Unit weights: c=1, d=k, so F_stat = q/k
-        expected = 1.0 - f_dist.cdf(q / k, k, res_df)
-        np.testing.assert_allclose(p, expected, atol=0.01)
+        numerator_df = 3.0
+        residual_df = 2.5
+        stat = 12.0
+        actual = _fractional_tail(
+            stat,
+            stat,
+            np.ones(int(numerator_df)),
+            residual_df,
+        )
+        expected = f_dist.sf(stat / numerator_df, numerator_df, residual_df)
+        np.testing.assert_allclose(actual, expected, rtol=2e-10, atol=2e-13)
 
-    def test_estimated_scale_more_conservative(self):
-        """F-test p-value should be >= chi² p-value (more conservative)."""
-        q = 15.0
-        weights = np.array([1.0, 0.8, 0.5, 0.3])
-        p_chi2 = _mixture_pvalue(q, weights, res_df=-1.0)
-        p_f = _mixture_pvalue(q, weights, res_df=100.0)
-        assert p_f >= p_chi2 - 1e-6, f"F-test p={p_f:.6f} should be >= chi² p={p_chi2:.6f}"
+    def test_subunit_rank_fault_falls_back_to_the_live_one_df_mixture(
+        self,
+        monkeypatch,
+    ):
+        """A displayed fractional rank must not replace the mixture's test df."""
+        from scipy.stats import f as f_dist
 
-    def test_f_correction_grows_with_fewer_res_df(self):
-        """Smaller res_df = more uncertainty in phi = larger p-value."""
-        q = 15.0
-        weights = np.array([1.0, 0.8, 0.5, 0.3])
-        p_large = _mixture_pvalue(q, weights, res_df=10000.0)
-        p_medium = _mixture_pvalue(q, weights, res_df=100.0)
-        p_small = _mixture_pvalue(q, weights, res_df=10.0)
-        # More residual df → converges to chi², less → more conservative
-        assert p_small >= p_medium - 1e-6
-        assert p_medium >= p_large - 1e-6
+        monkeypatch.setattr(
+            wood_pvalue_module,
+            "psum_chisq",
+            lambda *args, **kwargs: (np.nan, 1),
+        )
+        stat = 8.0
+        residual_df = 90.0
+        beta = np.array([np.sqrt(stat)])
+        X = np.ones((12, 1))
+        covariance = np.ones((1, 1))
 
-    def test_large_res_df_converges_to_chi2(self):
-        """F(d, very large res_df) ≈ chi²(d)/d, so p-values should match."""
-        q = 12.0
-        weights = np.array([1.0, 0.7, 0.4])
-        p_chi2 = _mixture_pvalue(q, weights, res_df=-1.0)
-        p_f_large = _mixture_pvalue(q, weights, res_df=1e6)
-        np.testing.assert_allclose(p_f_large, p_chi2, atol=0.01)
+        actual_stat, actual_p, displayed_ref_df = wood_test_smooth(
+            beta,
+            X,
+            covariance,
+            edf1_j=0.5,
+            res_df=residual_df,
+        )
+
+        assert actual_stat == pytest.approx(stat)
+        assert displayed_ref_df == pytest.approx(0.5)
+        assert actual_p == pytest.approx(f_dist.sf(stat, 1.0, residual_df))
 
     def test_wood_test_integer_rank_f_matches_scipy(self):
         """Integer rank path: F(k, res_df) should match scipy directly."""

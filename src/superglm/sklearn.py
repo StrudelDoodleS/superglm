@@ -43,7 +43,6 @@ from superglm._frame import (
     is_supported_eager_frame,
 )
 from superglm.distributions import Distribution
-from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.model import SuperGLM
 from superglm.penalties.base import Penalty
 
@@ -826,36 +825,10 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     def decision_function(self, X) -> NDArray:
         """Return log-odds (linear predictor)."""
         X_frame, feature_cols, offset_array = _prepare_predict(self, X)
-        X_frame.require_columns(tuple(feature_cols))
-
-        blocks = []
-        for name in self._model._feature_order:
-            spec = self._model._specs[name]
-            blocks.append(spec.transform(X_frame.column_array(name)))
-        for iname in self._model._interaction_order:
-            ispec = self._model._interaction_specs[iname]
-            p1, p2 = ispec.parent_names
-            # An interaction parent may need resolving before its column is a
-            # marginal the term can read -- a spline-mode OrderedCategorical
-            # enters through its mapped level scores, not its labels.  Handing
-            # the raw column straight to transform() raises on string levels
-            # and, worse, silently scores a different linear predictor from
-            # the fitted design on numeric ones.  This is the same resolution
-            # dm_builder and the predict path apply.
-            spec1, x1 = resolve_interaction_parent_of(
-                ispec, self._model._specs.get(p1), X_frame.column_array(p1)
-            )
-            spec2, x2 = resolve_interaction_parent_of(
-                ispec, self._model._specs.get(p2), X_frame.column_array(p2)
-            )
-            del spec1, spec2
-            blocks.append(ispec.transform(x1, x2))
-        eta = np.full(len(X_frame), self._model.result.intercept, dtype=np.float64)
-        if blocks:
-            eta += np.hstack(blocks) @ self._model.result.beta
-        if offset_array is not None:
-            eta = eta + offset_array
-        return eta
+        return self._model._predict_eta_raw_exact(
+            _select_feature_frame(X_frame, feature_cols),
+            offset=offset_array,
+        )
 
     def diagnostics(self) -> dict[str, Any]:
         check_is_fitted(self)

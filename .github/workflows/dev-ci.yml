@@ -1,9 +1,8 @@
 name: Dev CI
 
 on:
-  push:
-    branches-ignore: [master]
-  workflow_dispatch:
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: read
@@ -14,7 +13,7 @@ concurrency:
 
 jobs:
   type-check:
-    # ty is intentionally advisory until the existing source backlog is cleared.
+    # The exact backlog is not yet cleared, but increases are blocking.
     runs-on: ubuntu-latest
 
     steps:
@@ -29,9 +28,46 @@ jobs:
       - name: Install dependencies
         run: uv sync --python 3.13 --extra dev
 
-      - name: Advisory ty check
-        continue-on-error: true
-        run: uv run ty check src/superglm --output-format github
+      - name: Enforce the accepted ty backlog
+        shell: bash
+        run: |
+          set +e
+          uv run ty check src/superglm --output-format concise | tee ty-output.txt
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          ty_status=${pipeline_status[0]}
+          tee_status=${pipeline_status[1]}
+          if (( tee_status != 0 )); then
+            echo "tee failed while capturing ty output"
+            exit "$tee_status"
+          fi
+          if (( ty_status > 1 )); then
+            echo "ty exited unexpectedly with status $ty_status"
+            exit "$ty_status"
+          fi
+          if grep -qx "All checks passed!" ty-output.txt; then
+            diagnostics=0
+          else
+            diagnostics=$(sed -En \
+              's/^Found ([0-9]+) diagnostics?$/\1/p' \
+              ty-output.txt | tail -1)
+          fi
+          if [[ -z "$diagnostics" ]]; then
+            echo "ty did not emit a diagnostic count"
+            exit 1
+          fi
+          if (( diagnostics > 905 )); then
+            echo "ty diagnostics increased from the accepted backlog of 905 to $diagnostics"
+            exit 1
+          fi
+          if (( ty_status == 0 && diagnostics != 0 )); then
+            echo "ty reported diagnostics with a successful exit status"
+            exit 1
+          fi
+          if (( ty_status != 0 && diagnostics == 0 )); then
+            echo "ty failed despite reporting zero diagnostics"
+            exit "$ty_status"
+          fi
 
   quality:
     runs-on: ubuntu-latest
@@ -53,6 +89,15 @@ jobs:
 
       - name: Ruff format check
         run: uv run ruff format --check src/ tests/
+
+      - name: Lockfile check
+        run: uv lock --check
+
+      - name: Environment consistency check
+        run: uv pip check
+
+      - name: Public smoke test
+        run: uv run python run_test.py
 
   docs:
     runs-on: ubuntu-latest
@@ -146,3 +191,22 @@ jobs:
           uv run --with pyarrow pytest tests/ -q -m "not browser" --maxfail=1
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
+
+  pytest-312:
+    name: Python 3.12 · required non-browser suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install all tested optional dependencies
+        run: uv sync --python 3.12 --extra dev --extra bench --extra plotting
+
+      - name: Run the complete non-browser suite
+        run: uv run pytest tests/ -q -m "not browser" --maxfail=1

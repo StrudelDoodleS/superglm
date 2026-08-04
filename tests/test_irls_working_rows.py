@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from superglm.distributions import Gamma, Gaussian, Poisson
-from superglm.links import IdentityLink, LogLink
-from superglm.solvers.working_rows import coefficient_working_rows
+from superglm.links import IdentityLink, LogLink, SqrtLink
+from superglm.solvers.working_rows import (
+    coefficient_initial_intercept,
+    coefficient_working_rows,
+)
 
 
 def test_gaussian_identity_preserves_exact_constant_working_rows() -> None:
@@ -128,3 +132,114 @@ def test_invalid_observed_rows_fall_back_atomically_to_fisher() -> None:
     assert rows.fallback_reason == "invalid_observed_rows"
     assert np.all(np.isfinite(rows.weights))
     assert np.all(np.isfinite(rows.response))
+
+
+def test_poisson_sqrt_exact_zero_uses_structural_fisher_limit() -> None:
+    y = np.array([0.0, 1.0e-30, 1.0e-16, 100.0, 1.0e12])
+    eta = np.array([0.0, -0.0, 0.0, -0.0, 0.0])
+    sample_weight = np.array([0.5, 1.0, 2.0, 3.0, 4.0])
+
+    rows = coefficient_working_rows(
+        distribution=Poisson(),
+        link=SqrtLink(),
+        y=y,
+        mu=np.full_like(y, 1.0e-50),
+        eta=eta,
+        sample_weight=sample_weight,
+        prefer_observed=False,
+    )
+
+    np.testing.assert_allclose(
+        rows.weights,
+        4.0 * sample_weight,
+        rtol=2.0e-16,
+        atol=0.0,
+    )
+    np.testing.assert_array_equal(
+        rows.response,
+        np.copysign(np.sqrt(y), eta),
+    )
+
+
+def test_poisson_sqrt_tiny_nonzero_predictor_keeps_fisher_row() -> None:
+    eta = np.array([1.0e-6, -1.0e-4, 1.0e-60, -1.0e-150])
+    y = eta**2
+    numerically_floored_mu = np.maximum(y, 1.0e-50)
+
+    rows = coefficient_working_rows(
+        distribution=Poisson(),
+        link=SqrtLink(),
+        y=y,
+        mu=numerically_floored_mu,
+        eta=eta,
+        sample_weight=np.ones_like(y),
+        prefer_observed=False,
+    )
+
+    np.testing.assert_array_equal(rows.weights, np.full_like(y, 4.0))
+    np.testing.assert_allclose(rows.response, eta, rtol=2.0e-16, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    "eta",
+    [
+        np.array([np.nextafter(0.0, 1.0), -1.0e-307]),
+        np.array([1.0e-305] * 20),
+    ],
+)
+def test_poisson_sqrt_unrepresentable_fisher_system_uses_finite_trust_response(
+    eta: np.ndarray,
+) -> None:
+    y = np.full_like(eta, 100.0)
+
+    rows = coefficient_working_rows(
+        distribution=Poisson(),
+        link=SqrtLink(),
+        y=y,
+        mu=eta**2,
+        eta=eta,
+        sample_weight=np.ones_like(y),
+        prefer_observed=False,
+    )
+
+    np.testing.assert_array_equal(rows.weights, np.full_like(y, 4.0))
+    np.testing.assert_array_equal(
+        rows.response,
+        np.copysign(np.sqrt(y), eta),
+    )
+    assert np.all(np.isfinite(rows.response))
+
+
+def test_poisson_sqrt_representable_large_fisher_system_is_unchanged() -> None:
+    eta = np.array([1.0e-300, -1.0e-300])
+    y = np.full_like(eta, 100.0)
+
+    rows = coefficient_working_rows(
+        distribution=Poisson(),
+        link=SqrtLink(),
+        y=y,
+        mu=eta**2,
+        eta=eta,
+        sample_weight=np.ones_like(y),
+        prefer_observed=False,
+    )
+
+    expected = 0.5 * (eta + y / eta)
+    np.testing.assert_array_equal(rows.response, expected)
+
+
+def test_poisson_sqrt_initial_intercept_preserves_tiny_response_mean() -> None:
+    y = np.array([1.0e-30, 4.0e-30])
+    weights = np.array([1.0, 3.0])
+
+    intercept = coefficient_initial_intercept(
+        distribution=Poisson(),
+        link=SqrtLink(),
+        y=y,
+        sample_weight=weights,
+    )
+
+    assert intercept**2 == pytest.approx(
+        np.average(y, weights=weights),
+        rel=2.0e-16,
+    )

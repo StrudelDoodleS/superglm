@@ -9,9 +9,11 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, clip_mu
+from superglm.distributions import Distribution, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link, stabilize_eta
+from superglm.links import Link, SqrtLink, stabilize_eta
+
+_MAX_FLOAT64_HALVING_DEPTH = 1074
 
 
 @dataclass(frozen=True)
@@ -194,11 +196,107 @@ def _state_merit(state: _IRLSState) -> float:
     return float(state.deviance)
 
 
+def _irls_objective_scale(
+    *,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+) -> float:
+    """Return the natural additive scale for an IRLS objective."""
+    if type(family) is not Poisson or type(link) is not SqrtLink:
+        return 1.0
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        response_mass = float(np.sum(weights * y, dtype=np.float64))
+    if not np.isfinite(response_mass):
+        return 1.0
+    return max(response_mass, np.finfo(np.float64).tiny)
+
+
+def _irls_objective_relative_change(
+    *,
+    objective: float,
+    previous: float,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+) -> float:
+    """Return a convergence ratio with link-appropriate objective units."""
+    # Poisson deviance is homogeneous of degree one when y and μ are rescaled
+    # together.  A fixed ``+1`` denominator therefore declares convergence
+    # prematurely for genuinely tiny sqrt-link means.  Response mass carries
+    # the same units and makes this stopping rule scale-equivariant.
+    objective_scale = _irls_objective_scale(
+        y=y,
+        weights=weights,
+        family=family,
+        link=link,
+    )
+    return abs(objective - previous) / (abs(previous) + objective_scale)
+
+
+def _poisson_sqrt_halving_budget(
+    *,
+    committed: _IRLSState,
+    proposal: _IRLSState,
+    y: NDArray,
+    weights: NDArray,
+    family: Distribution,
+    link: Link,
+    default: int,
+) -> int:
+    """Scale a binary backtracking budget for an exact Poisson/sqrt step.
+
+    For a proposal direction ``d_eta``, let
+
+        R = max_i |d_eta_i| / sqrt(y_i)
+
+    over positive-weight, positive-response rows.  ``R`` is dimensionless and
+    invariant when the response is rescaled by ``c`` and eta by ``sqrt(c)``.
+    Adding ``ceil(log2(R))`` to the ordinary budget gives the search the same
+    number of halvings *after* the proposal displacement reaches its natural
+    response scale.  This changes only how far backtracking may look; it does
+    not alter the Fisher direction, score, or fitted objective.
+    """
+    if default < 1:
+        raise ValueError("default halving budget must be at least 1")
+    if type(family) is not Poisson or type(link) is not SqrtLink:
+        return default
+
+    y_values = np.asarray(y, dtype=np.float64)
+    weight_values = np.asarray(weights, dtype=np.float64)
+    active = (weight_values > 0.0) & (y_values > 0.0)
+    if not np.any(active):
+        return default
+
+    eta_step = np.abs(proposal.eta_unclipped[active] - committed.eta_unclipped[active])
+    moving = eta_step > 0.0
+    if not np.any(moving):
+        return default
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        log2_ratio = np.log2(eta_step[moving]) - 0.5 * np.log2(y_values[active][moving])
+    # A non-finite endpoint direction cannot be recovered by multiplying it by
+    # a positive alpha: IEEE ``alpha * inf`` remains infinite.  Retain the
+    # ordinary bounded rejection path instead of attempting 1074 futile trials.
+    if np.any(np.isposinf(log2_ratio)):
+        return default
+    finite = log2_ratio[np.isfinite(log2_ratio)]
+    if finite.size == 0:
+        return default
+
+    extra_depth = max(0, int(np.ceil(float(np.max(finite)))))
+    return min(default + extra_depth, _MAX_FLOAT64_HALVING_DEPTH)
+
+
 def _irls_trial_is_unsafe(
     candidate: _IRLSState,
     committed: _IRLSState,
     invalid_state: StateInvalid | None = None,
     merit_delta: MeritDelta | None = None,
+    merit_scale: float = 1.0,
 ) -> bool:
     """Reject invalid states or a material increase in the fitted objective."""
     if not _state_is_finite(candidate):
@@ -216,7 +314,7 @@ def _irls_trial_is_unsafe(
         64.0
         * np.finfo(float).eps
         * max(
-            1.0,
+            merit_scale,
             abs(candidate_merit),
             abs(committed_merit),
         )
@@ -235,17 +333,34 @@ def _select_irls_trial(
     invalid_state: StateInvalid | None = None,
     max_halving: int = 20,
     merit_delta: MeritDelta | None = None,
+    merit_scale: float = 1.0,
 ) -> _IRLSStepDecision:
     """Return the largest safe fixed-endpoint trial, or reject atomically."""
     if max_halving < 1:
         raise ValueError("max_halving must be at least 1")
-    if not _irls_trial_is_unsafe(proposal, committed, invalid_state, merit_delta):
+    if not _irls_trial_is_unsafe(
+        proposal,
+        committed,
+        invalid_state,
+        merit_delta,
+        merit_scale,
+    ):
         return _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
+    trials_attempted = 1
     for depth in range(1, max_halving + 1):
         alpha = 2.0**-depth
+        if alpha == 0.0:
+            break
         candidate = evaluate_state(alpha)
-        if not _irls_trial_is_unsafe(candidate, committed, invalid_state, merit_delta):
+        trials_attempted += 1
+        if not _irls_trial_is_unsafe(
+            candidate,
+            committed,
+            invalid_state,
+            merit_delta,
+            merit_scale,
+        ):
             return _IRLSStepDecision(alpha, depth, False, trials_attempted=depth + 1)
 
-    return _IRLSStepDecision(0.0, 0, True, trials_attempted=max_halving + 1)
+    return _IRLSStepDecision(0.0, 0, True, trials_attempted=trials_attempted)

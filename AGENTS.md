@@ -22,7 +22,7 @@ changes or use destructive git commands.
 ## Project structure and style
 
 Package code lives under `src/superglm/`; tests under `tests/`; benchmarks and
-exploratory work remain outside production paths. Target Python 3.10+ and the
+exploratory work remain outside production paths. Target Python 3.12+ and the
 existing Ruff configuration. Preserve mathematical names where they make the
 numerical implementation clearer. Public APIs are exported through
 `src/superglm/__init__.py`.

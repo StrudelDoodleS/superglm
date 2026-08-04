@@ -55,6 +55,66 @@ def _finite_vector(
     return normalized
 
 
+def validate_x_columns(frame: EagerFrame, columns: Iterable[object]) -> None:
+    """Validate configured model columns before feature construction or scoring."""
+    for name in tuple(dict.fromkeys(columns)):
+        values = frame.column_array(name)
+        dtype_kind = getattr(values.dtype, "kind", None)
+        inferred_dtype = ""
+        object_has_complex = False
+        if dtype_kind == "O":
+            invalid_nested_value = False
+            for value in values:
+                if value is None or value is pd.NA or np.isscalar(value):
+                    continue
+                try:
+                    hash(value)
+                except TypeError:
+                    invalid_nested_value = True
+                    break
+            if invalid_nested_value:
+                raise ValueError(
+                    f"X column {name!r} must contain only scalar values or hashable tuple levels"
+                )
+            inferred_dtype = pd.api.types.infer_dtype(values, skipna=True)
+            object_has_complex = inferred_dtype == "complex" or (
+                inferred_dtype.startswith("mixed")
+                and any(isinstance(value, complex | np.complexfloating) for value in values)
+            )
+        if dtype_kind == "c" or object_has_complex:
+            raise ValueError(f"X column {name!r} must be real-valued")
+        numeric_like_object = inferred_dtype in {
+            "decimal",
+            "floating",
+            "integer",
+            "mixed-integer-float",
+        }
+        physical_numeric = dtype_kind in {"b", "i", "u", "f"}
+        if (
+            frame.column_kind(name) in {"numeric", "boolean"}
+            or physical_numeric
+            or numeric_like_object
+        ):
+            try:
+                numeric = np.asarray(values, dtype=np.float64)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"X column {name!r} must contain only real numeric values"
+                ) from exc
+            if not np.all(np.isfinite(numeric)):
+                raise ValueError(
+                    f"X column {name!r} must contain only finite values; "
+                    "non-finite or missing values are not allowed"
+                )
+
+
+def validate_prediction_offset(value, n_rows: int) -> NDArray[np.float64] | None:
+    """Validate a public prediction offset against the scored frame."""
+    if value is None:
+        return None
+    return _finite_vector("offset", value, n_rows)
+
+
 def validate_fit_input(
     X,
     y,
@@ -62,7 +122,7 @@ def validate_fit_input(
     offset,
     *,
     family: Distribution,
-    required_columns: Iterable[str],
+    required_columns: Iterable[object],
     check_all_columns: bool = False,
 ) -> ValidatedFitInput:
     """Validate a public fit call before any feature is built or learned."""
@@ -73,18 +133,7 @@ def validate_fit_input(
     required = tuple(dict.fromkeys(required_columns))
     frame.require_columns(required)
     columns_to_check = frame.columns if check_all_columns else required
-    for name in columns_to_check:
-        values = frame.column_array(name)
-        dtype_kind = getattr(values.dtype, "kind", None)
-        object_has_complex = False
-        if dtype_kind == "O":
-            inferred_dtype = pd.api.types.infer_dtype(values, skipna=True)
-            object_has_complex = inferred_dtype == "complex" or (
-                inferred_dtype.startswith("mixed")
-                and any(isinstance(value, complex | np.complexfloating) for value in values)
-            )
-        if dtype_kind == "c" or object_has_complex:
-            raise ValueError(f"X column {name!r} must be real-valued")
+    validate_x_columns(frame, columns_to_check)
 
     n_rows = len(frame)
     # validate_response() performs the universal finite check together with the

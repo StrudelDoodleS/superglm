@@ -118,8 +118,50 @@ def _lowess(x: NDArray, y: NDArray, *, frac: float = 0.6, n_steps: int = 2) -> N
 # ── Simulation helpers ────────────────────────────────────────────
 
 
+def _validate_diagnostic_weights(family, sample_weight, n_rows: int) -> NDArray:
+    """Normalize diagnostic weights under the family's public contract."""
+    from superglm.distributions import Tweedie
+
+    if n_rows == 0:
+        raise ValueError("y and sample_weight must be non-empty")
+    if sample_weight is None:
+        return np.ones(n_rows, dtype=np.float64)
+
+    message = f"sample_weight must be a numeric one-dimensional array of length {n_rows}"
+    try:
+        raw = np.asarray(sample_weight)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(message) from exc
+    if (
+        raw.ndim != 1
+        or len(raw) != n_rows
+        or np.iscomplexobj(raw)
+        or getattr(raw.dtype, "kind", None) in {"M", "m"}
+    ):
+        raise ValueError(message)
+    try:
+        weights = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(message) from exc
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("sample_weight must contain only finite values")
+    if isinstance(family, Tweedie):
+        if np.any(weights <= 0.0):
+            raise ValueError("Tweedie sample_weight must be strictly positive")
+    else:
+        if np.any(weights < 0.0):
+            raise ValueError("sample_weight must be nonnegative")
+        if not np.any(weights > 0.0):
+            raise ValueError("sample_weight must contain at least one positive value")
+    return weights
+
+
 def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
     """Simulate one response vector from the fitted model.
+
+    Non-Tweedie weights are case/frequency weights, so they do not alter
+    a single row's response distribution. Tweedie weights are EDM prior
+    weights and act through the row dispersion ``phi / sample_weight``.
 
     Returns None if the family is not supported (caller should degrade
     gracefully).
@@ -133,17 +175,15 @@ def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
         Tweedie,
     )
 
-    w = sample_weight
-
     if isinstance(family, Poisson):
-        return rng.poisson(lam=mu * w) / w
+        return np.asarray(rng.poisson(lam=mu), dtype=np.float64)
 
     if isinstance(family, Gaussian):
-        return rng.normal(loc=mu, scale=np.sqrt(phi / w))
+        return rng.normal(loc=mu, scale=np.sqrt(phi))
 
     if isinstance(family, Gamma):
-        shape = w / phi
-        scale = mu * phi / w
+        shape = 1.0 / phi
+        scale = mu * phi
         return rng.gamma(shape=shape, scale=scale)
 
     if isinstance(family, NegativeBinomial):
@@ -156,7 +196,8 @@ def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
     if isinstance(family, Tweedie):
         from superglm.profiling.tweedie import generate_tweedie_cpg
 
-        return generate_tweedie_cpg(len(mu), mu, phi, family.p, rng=rng)
+        weights = np.asarray(sample_weight, dtype=np.float64)
+        return generate_tweedie_cpg(len(mu), mu, phi / weights, family.p, rng=rng)
 
     if isinstance(family, Binomial):
         return rng.binomial(n=1, p=mu).astype(float)
@@ -173,6 +214,70 @@ _QQ_GRID = 1000
 _ENVELOPE_CAP = 50_000
 _ENVELOPE_SIM_CAP = 50
 _BIN_COUNT = 50
+_FREQUENCY_EXPANSION_CAP = 100_000
+
+
+def _diagnostic_rows(
+    model,
+    y,
+    mu,
+    eta,
+    weights,
+    qresid,
+    seed,
+    rng,
+):
+    """Return row-level plot arrays honoring frequency-weight replication."""
+    from superglm.distributions import Tweedie
+
+    if isinstance(model._distribution, Tweedie):
+        return y, mu, eta, weights, qresid
+    if np.all(weights == 1.0):
+        return y, mu, eta, weights, qresid
+
+    positive = weights > 0.0
+    rounded = np.rint(weights)
+    if not np.array_equal(weights, rounded):
+        # Fractional frequency weights have no literal row array. Keep their
+        # weighted calibration representation while dropping zero-mass rows.
+        return (
+            y[positive],
+            mu[positive],
+            eta[positive],
+            weights[positive],
+            qresid[positive],
+        )
+
+    likelihood_size = float(np.sum(weights, dtype=np.float64))
+    if likelihood_size <= _FREQUENCY_EXPANSION_CAP:
+        counts = rounded.astype(np.intp)
+        row_idx = np.repeat(np.arange(len(weights), dtype=np.intp), counts)
+    else:
+        scaled_weights = weights / float(np.max(weights))
+        probabilities = scaled_weights / float(np.sum(scaled_weights))
+        row_idx = rng.choice(
+            len(weights),
+            size=_FREQUENCY_EXPANSION_CAP,
+            replace=True,
+            p=probabilities,
+        )
+
+    if np.array_equal(row_idx, np.arange(len(weights), dtype=np.intp)):
+        return y, mu, eta, weights, qresid
+
+    from superglm.inference.metrics import ModelMetrics
+
+    row_y = y[row_idx]
+    row_mu = mu[row_idx]
+    row_weights = np.ones(len(row_idx), dtype=np.float64)
+    row_metrics = ModelMetrics(
+        model,
+        y=row_y,
+        sample_weight=row_weights,
+        _mu=row_mu,
+    )
+    row_qresid = row_metrics.residuals("quantile", seed=seed)
+    return row_y, row_mu, eta[row_idx], row_weights, row_qresid
 
 
 def _trend_line(ax, x, y, n, rng):
@@ -248,11 +353,11 @@ def _stratified_sample(mu, n_sample, rng):
 
 
 def _panel_calibration(ax, y, mu, w, n_bins=20):
-    """Panel 2: Exposure-weighted calibration by predicted-frequency bins."""
+    """Panel 2: Weight-balanced calibration by predicted-value bins."""
     order = np.argsort(mu)
     mu_s, y_s, w_s = mu[order], y[order], w[order]
 
-    # Equal-exposure bins
+    # Equal-weight-mass bins
     cum_w = np.cumsum(w_s)
     total_w = cum_w[-1]
     bin_edges = np.linspace(0, total_w, n_bins + 1)
@@ -288,7 +393,7 @@ def _panel_calibration(ax, y, mu, w, n_bins=20):
     ax.plot(lims, lims, color="red", linewidth=0.8, linestyle="--", label="y = x")
     ax.set_xlabel("Predicted (bin mean)")
     ax.set_ylabel("Observed (bin mean)")
-    ax.set_title(f"Calibration ({n_bins} equal-exposure bins)")
+    ax.set_title(f"Calibration ({n_bins} equal-weight bins)")
     ax.legend(fontsize=7, loc="upper left")
 
 
@@ -314,8 +419,9 @@ def plot_diagnostics(
 
     1. **Q-Q with simulation envelope** — observed quantile residuals vs
        simulated reference, with 95% pointwise envelope.
-    2. **Calibration** — exposure-weighted observed vs predicted frequency
-       by equal-exposure bins.
+    2. **Calibration** — observed vs predicted values in equal-weight bins.
+       Integer non-Tweedie frequency weights are represented as replicated
+       rows; Tweedie bins use their EDM prior weights.
     3. **Residuals vs Linear Predictor** — quantile residuals vs eta.
     4. **Residual distribution** — histogram with N(0,1) overlay.
 
@@ -328,7 +434,12 @@ def plot_diagnostics(
     y : NDArray
         Response vector.
     sample_weight : NDArray or None
-        Optional observation weights (exposure for frequency models).
+        Optional observation weights. Non-Tweedie families use nonnegative
+        case/frequency weights, with integer values represented as literal row
+        replication in the randomized diagnostics up to 100,000 diagnostic
+        rows; larger frequency populations use a reproducible
+        weight-proportional sample. Tweedie uses finite, strictly positive EDM
+        prior weights and row dispersion ``phi / w``.
     offset : NDArray or None
         Optional offset.
     n_sim : int
@@ -363,20 +474,37 @@ def plot_diagnostics(
 
     rng = np.random.default_rng(seed)
 
+    family = getattr(model, "_distribution")
+    y_input = np.asarray(y)
+    if y_input.ndim != 1:
+        raise ValueError("y must be one-dimensional")
+    diagnostic_weights = _validate_diagnostic_weights(family, sample_weight, len(y_input))
+
     # Build metrics object
-    m = model.metrics(X, y, sample_weight, offset)
+    metrics_weights = None if sample_weight is None else diagnostic_weights
+    m = model.metrics(X, y, metrics_weights, offset)
     mu = m._mu
     eta = m.eta
     y_arr = m._y
-    w = m._weights
-    n = m.n_obs
+    original_weights = diagnostic_weights
 
     # Quantile residuals for all panels
     qresid = m.residuals("quantile", seed=seed)
+    y_arr, mu, eta, w, qresid = _diagnostic_rows(
+        model,
+        y_arr,
+        mu,
+        eta,
+        original_weights,
+        qresid,
+        seed,
+        rng,
+    )
+    n = len(y_arr)
 
     # Family/link label for suptitle
-    family_name = type(model._distribution).__name__
-    link_name = type(model._link).__name__
+    family_name = type(family).__name__
+    link_name = type(getattr(model, "_link")).__name__
 
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     fig.suptitle(f"Diagnostics: {family_name}({link_name})", fontsize=12, y=0.98)
@@ -396,7 +524,7 @@ def plot_diagnostics(
         rng,
     )
 
-    # ── Panel 2: Calibration plot (exposure-weighted) ──────────
+    # ── Panel 2: Calibration plot (family-weight aware) ─────────
     ax2 = axes[0, 1]
     _panel_calibration(ax2, y_arr, mu, w)
 
@@ -422,12 +550,18 @@ def plot_diagnostics(
     ax4.set_xlabel("Quantile residuals")
     ax4.set_ylabel("Density")
     # Annotate with phi and Pearson chi2/df
+    from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+
     phi = m.phi
-    resid_df = max(n - m.effective_df, 1)
+    resid_df = pearson_residual_degrees_of_freedom(
+        family,
+        original_weights,
+        m.effective_df,
+    )
     chi2_ratio = m.pearson_chi2 / resid_df
     ax4.set_title(f"Residual Distribution (φ={phi:.3g}, χ²/df={chi2_ratio:.2f})")
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
 

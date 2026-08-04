@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.features import _spline_constraints
+from superglm.types import LinearConstraintSet
 
 
 def assemble_open_knot_vector(spec: Any, interior: NDArray) -> None:
@@ -50,19 +51,31 @@ def build_scop_reparameterization(
 
     q = spec._n_basis
     kind = getattr(spec, "constraint_kind", None) or spec.monotone
-    reparam = build_scop_reparam(q, kind=kind)
-    null_dim = reparam.null_dim
+    reparam = build_scop_reparam(
+        q,
+        kind=kind,
+        knots=spec._knots,
+        degree=spec.degree,
+        domain=(spec._lo, spec._hi),
+    )
+    drop_dim = 1
 
     x_sigma = basis @ reparam.Sigma
-    x_shape = x_sigma[:, null_dim:]
+    x_shape = x_sigma[:, drop_dim:]
     col_means = x_shape.mean(axis=0)
     x_centered = x_shape - col_means
 
     spec._scop_Sigma = reparam.Sigma
-    spec._scop_null_dim = null_dim
+    spec._scop_null_dim = drop_dim
     spec._scop_col_means = col_means
 
-    solver_reparam = build_scop_solver_reparam(q, kind=kind)
+    solver_reparam = build_scop_solver_reparam(
+        q,
+        kind=kind,
+        knots=spec._knots,
+        degree=spec.degree,
+        domain=(spec._lo, spec._hi),
+    )
     scop_penalty = solver_reparam.penalty_matrix()
     return x_centered, scop_penalty, solver_reparam
 
@@ -73,5 +86,18 @@ def build_shape_constraints_raw(spec: Any):
     if kind in {"increasing", "decreasing"}:
         return _spline_constraints.build_monotone_difference_constraints(spec._n_basis, kind)
     if kind in {"convex", "concave"}:
-        return _spline_constraints.build_curvature_difference_constraints(spec._n_basis, kind)
+        constraints = _spline_constraints.build_curvature_difference_constraints(
+            spec._knots,
+            spec.degree,
+            kind,
+            domain=(spec._lo, spec._hi),
+        )
+        if getattr(spec, "_Z", None) is not None:
+            # Natural boundary conditions already impose the first and last
+            # exact curvature rows as equalities.  Keeping their O(eps)
+            # projections as QP inequalities creates scale-dependent fake
+            # active constraints.
+            interior = constraints.A[1:-1]
+            return LinearConstraintSet(A=interior, b=np.zeros(interior.shape[0]))
+        return constraints
     raise ValueError(f"Unsupported fit-time shape kind: {kind!r}")

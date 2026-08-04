@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from superglm._utils import _default_weights, _ensure_array
+
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
@@ -105,7 +107,205 @@ class LossRatioChartResult:
 
 # ── Private helpers ──────────────────────────────────────────────
 
-from superglm._utils import _default_weights, _ensure_array  # noqa: E402
+
+_LONGDOUBLE_EXTENDS_FLOAT64 = (
+    np.finfo(np.longdouble).max > np.finfo(np.float64).max
+    and np.finfo(np.longdouble).tiny < np.finfo(np.float64).tiny
+)
+
+
+def _require_extended_range(name: str, *values: NDArray) -> None:
+    """Reject arithmetic that float64-only ``longdouble`` cannot represent."""
+    if _LONGDOUBLE_EXTENDS_FLOAT64:
+        return
+    for value in values:
+        magnitudes = np.abs(np.asarray(value, dtype=np.float64))
+        exponents = np.frexp(magnitudes[magnitudes != 0.0])[1]
+        # Dividing by an array's largest scale can retain at most the float64
+        # subnormal exponent range. Check each operand independently: different
+        # physical units across values and weights are not themselves unsafe.
+        if exponents.size and int(np.max(exponents) - np.min(exponents)) >= 1074:
+            raise ValueError(f"{name} requires an extended floating-point range on this platform")
+
+
+def _validated_vector(name: str, value, n_rows: int | None = None) -> NDArray:
+    """Return one finite numeric public-chart vector."""
+    try:
+        raw = np.asarray(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a numeric one-dimensional array") from exc
+    if n_rows is None and raw.size == 0:
+        raise ValueError(f"{name} must be non-empty")
+    if raw.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if np.iscomplexobj(raw):
+        raise ValueError(f"{name} must be real-valued")
+    if getattr(raw.dtype, "kind", None) in {"M", "m"}:
+        raise ValueError(f"{name} must contain only real numeric values")
+    if n_rows is not None and len(raw) != n_rows:
+        raise ValueError(f"{name} must have length {n_rows}, got {len(raw)}")
+    try:
+        values = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must contain only real numeric values") from exc
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain only finite values")
+    return values
+
+
+def _validated_n_bins(n_bins) -> int:
+    """Validate the shared quantile-bin boundary."""
+    if isinstance(n_bins, bool) or not isinstance(n_bins, int | np.integer) or n_bins <= 0:
+        raise ValueError(f"n_bins must be a positive integer, got {n_bins!r}")
+    return int(n_bins)
+
+
+def _validated_chart_inputs(
+    y_obs,
+    *,
+    sample_weight=None,
+    optional_vectors: tuple[str, ...] = (),
+    **vectors,
+) -> tuple[NDArray, dict[str, NDArray], NDArray]:
+    """Validate and remove zero-effective-weight rows for every public chart."""
+    observed = _validated_vector("y_obs", y_obs)
+    n_rows = len(observed)
+    normalized = {
+        name: _validated_vector(name, value, n_rows)
+        for name, value in vectors.items()
+        if value is not None or name not in optional_vectors
+    }
+    weights = (
+        np.ones(n_rows, dtype=np.float64)
+        if sample_weight is None
+        else _validated_vector("sample_weight", sample_weight, n_rows)
+    )
+    if np.any(weights < 0.0):
+        raise ValueError("sample_weight must be nonnegative")
+    if not np.any(weights > 0.0):
+        raise ValueError("sample_weight must not be all zero")
+
+    exposure = normalized.get("exposure")
+    if exposure is not None and np.any(exposure < 0.0):
+        raise ValueError("exposure must be nonnegative")
+    with np.errstate(over="ignore", invalid="ignore"):
+        effective_weight = weights if exposure is None else weights * exposure
+    if not np.all(np.isfinite(effective_weight)):
+        raise ValueError("sample_weight * exposure must contain only finite values")
+    positive = effective_weight > 0.0
+    if not np.any(positive):
+        raise ValueError("sample_weight * exposure must not be all zero")
+    try:
+        total_effective_weight = math.fsum(effective_weight[positive].tolist())
+    except OverflowError:
+        total_effective_weight = float("inf")
+    if not np.isfinite(total_effective_weight):
+        source = "sample_weight * exposure" if exposure is not None else "sample_weight"
+        raise ValueError(f"{source} must have a finite total")
+    if not np.all(positive):
+        observed = observed[positive]
+        normalized = {name: values[positive] for name, values in normalized.items()}
+        weights = weights[positive]
+
+    return observed, normalized, weights
+
+
+def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
+    """Return a finite weighted mean without overflowing intermediate products."""
+    _require_extended_range(f"{name} weighted mean", values, weights)
+    if not _LONGDOUBLE_EXTENDS_FLOAT64:
+        float_values = np.asarray(values, dtype=np.float64)
+        scale = np.max(np.abs(float_values))
+        if scale == 0.0:
+            return 0.0
+        normalized_values = float_values / scale
+        float_weights = np.asarray(weights, dtype=np.float64)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            products = float_weights * normalized_values
+        if np.any(~np.isfinite(products)) or np.any(
+            (products == 0.0) & (float_weights != 0.0) & (normalized_values != 0.0)
+        ):
+            raise ValueError(
+                f"{name} weighted mean requires an extended floating-point range on this platform"
+            )
+        total_weight = math.fsum(float_weights.tolist())
+        if total_weight <= 0.0 or not np.isfinite(total_weight):
+            raise ValueError(f"{name} weights must have a finite positive total")
+        mean_scaled = math.fsum(products.tolist()) / total_weight
+        mean_scaled = float(
+            np.clip(mean_scaled, np.min(normalized_values), np.max(normalized_values))
+        )
+        result = float(scale * mean_scaled)
+        if not np.isfinite(result):
+            raise ValueError(f"{name} weighted mean must be finite")
+        return result
+    extended_weights = np.asarray(weights, dtype=np.longdouble)
+    total_weight = np.sum(extended_weights, dtype=np.longdouble)
+    if total_weight <= 0.0 or not np.isfinite(total_weight):
+        raise ValueError(f"{name} weights must have a finite positive total")
+    extended_values = np.asarray(values, dtype=np.longdouble)
+    scale = np.max(np.abs(extended_values))
+    if scale == 0.0:
+        return 0.0
+    normalized_values = extended_values / scale
+    mean_scaled = np.sum(
+        extended_weights * normalized_values,
+        dtype=np.longdouble,
+    )
+    mean_scaled /= total_weight
+    # A weighted mean must lie in the convex hull.  Rounding the normalized
+    # shares can otherwise produce 1 + 1 ulp and overflow when rescaled by the
+    # largest finite float.
+    mean_scaled = np.clip(
+        mean_scaled,
+        np.min(normalized_values),
+        np.max(normalized_values),
+    )
+    result = float(scale * mean_scaled)
+    if not np.isfinite(result):
+        raise ValueError(f"{name} weighted mean must be finite")
+    return float(result)
+
+
+def _weighted_total(values: NDArray, weights: NDArray, name: str) -> float:
+    """Return a finite weighted total, rejecting a mathematically overflowing result."""
+    _require_extended_range(f"{name} weighted total", values, weights)
+    if not _LONGDOUBLE_EXTENDS_FLOAT64:
+        float_values = np.asarray(values, dtype=np.float64)
+        float_weights = np.asarray(weights, dtype=np.float64)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            products = float_values * float_weights
+        if np.any(~np.isfinite(products)) or np.any(
+            (products == 0.0) & (float_values != 0.0) & (float_weights != 0.0)
+        ):
+            raise ValueError(
+                f"{name} weighted total requires an extended floating-point range on this platform"
+            )
+        try:
+            float_result = math.fsum(products.tolist())
+        except OverflowError:
+            float_result = float("inf")
+        if not np.isfinite(float_result):
+            raise ValueError(f"{name} weighted total must be finite")
+        return float_result
+    extended_result = np.sum(
+        np.asarray(values, dtype=np.longdouble) * np.asarray(weights, dtype=np.longdouble),
+        dtype=np.longdouble,
+    )
+    if not np.isfinite(extended_result) or abs(extended_result) > np.finfo(np.float64).max:
+        raise ValueError(f"{name} weighted total must be finite")
+    return float(extended_result)
+
+
+def _finite_ratio(numerator: float, denominator: float, name: str) -> float:
+    """Divide two finite scalars, retaining the established zero-denominator NaN."""
+    if denominator == 0.0:
+        return float("nan")
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        result = float(np.float64(numerator) / np.float64(denominator))
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
 
 
 def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArray:
@@ -129,6 +329,35 @@ def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArr
     return result
 
 
+def _compensated_cumsum(values: NDArray) -> NDArray:
+    """Return Neumaier-compensated float64 cumulative sums."""
+    result = np.empty(len(values), dtype=np.float64)
+    total = 0.0
+    correction = 0.0
+    for index, value in enumerate(np.asarray(values, dtype=np.float64)):
+        updated = total + float(value)
+        if abs(total) >= abs(value):
+            correction += (total - updated) + float(value)
+        else:
+            correction += (float(value) - updated) + total
+        total = updated
+        result[index] = total + correction
+    return result
+
+
+def _float64_block_sums(values: NDArray, block_starts: NDArray) -> NDArray:
+    """Sum consecutive tie blocks with compensated scalar summation."""
+    array = np.asarray(values, dtype=np.float64)
+    ends = np.concatenate([block_starts[1:], [len(array)]])
+    return np.asarray(
+        [
+            math.fsum(array[int(start) : int(end)].tolist())
+            for start, end in zip(block_starts, ends, strict=True)
+        ],
+        dtype=np.float64,
+    )
+
+
 def _lorenz_cumulative_by_score(
     scores: NDArray,
     exposures: NDArray,
@@ -144,28 +373,67 @@ def _lorenz_cumulative_by_score(
     loss_sorted = losses[order]
 
     _, block_starts = np.unique(scores_sorted, return_index=True)
-    exp_blocks = np.add.reduceat(exp_sorted, block_starts)
-    loss_blocks = np.add.reduceat(loss_sorted, block_starts)
+    if _LONGDOUBLE_EXTENDS_FLOAT64:
+        exp_blocks = np.add.reduceat(exp_sorted, block_starts)
+        loss_blocks = np.add.reduceat(loss_sorted, block_starts)
+        cum_exp = np.cumsum(exp_blocks, dtype=np.longdouble) / np.longdouble(total_exp)
+        cum_loss = np.cumsum(loss_blocks, dtype=np.longdouble) / np.longdouble(total_loss)
+    else:
+        exp_blocks = _float64_block_sums(exp_sorted, block_starts)
+        loss_blocks = _float64_block_sums(loss_sorted, block_starts)
+        cum_exp = _compensated_cumsum(exp_blocks) / float(total_exp)
+        cum_loss = _compensated_cumsum(loss_blocks) / float(total_loss)
+    float64_max = np.longdouble(np.finfo(np.float64).max)
+    if (
+        np.any(~np.isfinite(cum_exp))
+        or np.any(~np.isfinite(cum_loss))
+        or np.any(np.abs(cum_exp) > float64_max)
+        or np.any(np.abs(cum_loss) > float64_max)
+    ):
+        raise ValueError("Lorenz cumulative shares must be finite")
+    return np.asarray(cum_exp, dtype=np.float64), np.asarray(cum_loss, dtype=np.float64)
 
-    cum_exp = np.cumsum(exp_blocks) / total_exp
-    cum_loss = np.cumsum(loss_blocks) / total_loss
-    return cum_exp, cum_loss
 
-
-def _weighted_pair_concordance(scores, weights, centered_target) -> float:
+def _weighted_pair_concordance(scores, weights, centered_target) -> np.longdouble:
     """Sum weighted target differences between ordered, tie-collapsed blocks."""
     order = np.argsort(scores, kind="stable")
     scores_sorted = scores[order]
+    arithmetic_dtype = np.longdouble if _LONGDOUBLE_EXTENDS_FLOAT64 else np.float64
+    weights = np.asarray(weights, dtype=arithmetic_dtype)
+    centered_target = np.asarray(centered_target, dtype=arithmetic_dtype)
     weights_sorted = weights[order]
     target_totals_sorted = (weights * centered_target)[order]
 
     _, block_starts = np.unique(scores_sorted, return_index=True)
-    weight_blocks = np.add.reduceat(weights_sorted, block_starts)
-    target_blocks = np.add.reduceat(target_totals_sorted, block_starts)
-    prior_weights = np.cumsum(weight_blocks) - weight_blocks
-    prior_targets = np.cumsum(target_blocks) - target_blocks
+    if _LONGDOUBLE_EXTENDS_FLOAT64:
+        weight_blocks = np.add.reduceat(weights_sorted, block_starts)
+        target_blocks = np.add.reduceat(target_totals_sorted, block_starts)
+    else:
+        weight_blocks = _float64_block_sums(weights_sorted, block_starts)
+        target_blocks = _float64_block_sums(target_totals_sorted, block_starts)
+    # Build exclusive prefixes directly. Subtracting the current block from an
+    # inclusive cumulative total loses a small prior block when the next block
+    # is much larger, corrupting even a two-row reverse ranking.
+    if _LONGDOUBLE_EXTENDS_FLOAT64:
+        prior_weights = np.concatenate(
+            [
+                np.zeros(1, dtype=np.longdouble),
+                np.cumsum(weight_blocks[:-1], dtype=np.longdouble),
+            ]
+        )
+        prior_targets = np.concatenate(
+            [
+                np.zeros(1, dtype=np.longdouble),
+                np.cumsum(target_blocks[:-1], dtype=np.longdouble),
+            ]
+        )
+    else:
+        prior_weights = np.concatenate([[0.0], _compensated_cumsum(weight_blocks[:-1])])
+        prior_targets = np.concatenate([[0.0], _compensated_cumsum(target_blocks[:-1])])
     terms = prior_weights * target_blocks - prior_targets * weight_blocks
-    return math.fsum(float(term) for term in terms)
+    if _LONGDOUBLE_EXTENDS_FLOAT64:
+        return np.sum(terms, dtype=np.longdouble)
+    return np.longdouble(math.fsum(np.asarray(terms, dtype=np.float64).tolist()))
 
 
 def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float, float]:
@@ -175,25 +443,70 @@ def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float,
     weights = _default_weights(sample_weight, len(y_obs))
     if y_obs.size == 0:
         return 0.0, 0.0, 0.0
-    losses = weights * y_obs
-    total_weight = float(weights.sum())
-    total_loss = float(losses.sum())
-    if total_weight <= 0.0 or total_loss <= 0.0:
+    _require_extended_range("Gini aggregation", y_obs, weights)
+
+    extended_weights = np.asarray(weights, dtype=np.longdouble)
+    extended_target = np.asarray(y_obs, dtype=np.longdouble)
+    target_scale = np.max(np.abs(extended_target))
+    if not np.any(extended_weights > 0.0) or target_scale == 0.0:
+        return 0.0, 0.0, 0.0
+    total_weight = np.sum(extended_weights, dtype=np.longdouble)
+    if total_weight <= 0.0 or not np.isfinite(total_weight):
+        return 0.0, 0.0, 0.0
+    normalized_weights = extended_weights / total_weight
+    scaled_target = extended_target / target_scale
+    loss_products = normalized_weights * scaled_target
+    if not _LONGDOUBLE_EXTENDS_FLOAT64:
+        float_weights = np.asarray(normalized_weights, dtype=np.float64)
+        float_target = np.asarray(scaled_target, dtype=np.float64)
+        with np.errstate(under="ignore", invalid="ignore"):
+            float_loss_products = float_weights * float_target
+        if np.any((float_loss_products == 0.0) & (float_weights != 0.0) & (float_target != 0.0)):
+            raise ValueError(
+                "Gini aggregation requires an extended floating-point range on this platform"
+            )
+        total_loss = np.longdouble(math.fsum(float_loss_products.tolist()))
+    else:
+        total_loss = np.sum(loss_products, dtype=np.longdouble)
+    if total_loss <= 0.0 or not np.isfinite(total_loss):
         return 0.0, 0.0, 0.0
 
     # The usual 1 - 2*AUC calculation loses all precision when the target is
     # nearly constant. Pair concordance is algebraically equivalent, while
     # centering removes the common target level before any subtraction.
-    centered_target = y_obs - np.min(y_obs)
-    perfect_pair_sum = _weighted_pair_concordance(y_obs, weights, centered_target)
+    centered_target = scaled_target - np.min(scaled_target)
+    if not _LONGDOUBLE_EXTENDS_FLOAT64:
+        float_centered = np.asarray(centered_target, dtype=np.float64)
+        with np.errstate(under="ignore", invalid="ignore"):
+            float_centered_products = float_weights * float_centered
+        if np.any(
+            (float_centered_products == 0.0) & (float_weights != 0.0) & (float_centered != 0.0)
+        ):
+            raise ValueError(
+                "Gini aggregation requires an extended floating-point range on this platform"
+            )
+    perfect_pair_sum = _weighted_pair_concordance(
+        scaled_target,
+        normalized_weights,
+        centered_target,
+    )
     if perfect_pair_sum <= 0.0:
         return 0.0, 0.0, 0.0
-    model_pair_sum = _weighted_pair_concordance(y_pred, weights, centered_target)
-    scale = total_weight * total_loss
-    gini_model = model_pair_sum / scale
-    gini_perfect = perfect_pair_sum / scale
+    model_pair_sum = _weighted_pair_concordance(y_pred, normalized_weights, centered_target)
+    gini_model_extended = model_pair_sum / total_loss
+    gini_perfect_extended = perfect_pair_sum / total_loss
+    float64_max = np.longdouble(np.finfo(np.float64).max)
+    if (
+        not np.isfinite(gini_model_extended)
+        or not np.isfinite(gini_perfect_extended)
+        or abs(gini_model_extended) > float64_max
+        or abs(gini_perfect_extended) > float64_max
+    ):
+        raise ValueError("Gini coefficients must be finite")
+    gini_model = float(gini_model_extended)
+    gini_perfect = float(gini_perfect_extended)
     gini_ratio = np.clip(model_pair_sum / perfect_pair_sum, -1.0, 1.0)
-    return float(gini_model), float(gini_perfect), float(gini_ratio)
+    return gini_model, gini_perfect, float(gini_ratio)
 
 
 def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
@@ -246,11 +559,17 @@ def lift_chart(
     LiftChartResult
         Contains a ``bins`` DataFrame and an optional ``figure``.
     """
-    y_obs = _ensure_array(y_obs)
-    y_pred = _ensure_array(y_pred)
+    y_obs, vectors, w = _validated_chart_inputs(
+        y_obs,
+        y_pred=y_pred,
+        sample_weight=sample_weight,
+        exposure=exposure,
+        optional_vectors=("exposure",),
+    )
+    y_pred = vectors["y_pred"]
+    n_bins = _validated_n_bins(n_bins)
     n = len(y_obs)
-    w = _default_weights(sample_weight, n)
-    exp = _ensure_array(exposure) if exposure is not None else np.ones(n, dtype=float)
+    exp = vectors.get("exposure", np.ones(n, dtype=float))
 
     # Bin by predicted value, using exposure as bin weights
     bin_weights = w * exp
@@ -266,10 +585,10 @@ def lift_chart(
         eb = exp[mask]
         we = wb * eb
         we_sum = we.sum()
-        obs_mean = np.sum(we * y_obs[mask]) / we_sum if we_sum > 0 else 0.0
-        pred_mean = np.sum(we * y_pred[mask]) / we_sum if we_sum > 0 else 0.0
+        obs_mean = _weighted_mean(y_obs[mask], we, "y_obs")
+        pred_mean = _weighted_mean(y_pred[mask], we, "y_pred")
         exp_share = we_sum / total_exp if total_exp > 0 else 0.0
-        ratio = obs_mean / pred_mean if pred_mean != 0 else np.nan
+        ratio = _finite_ratio(obs_mean, pred_mean, "observed / predicted ratio")
         rows.append(
             {
                 "bin": b + 1,
@@ -352,16 +671,26 @@ def double_lift_chart(
     CAS RPM 2016, "Predictive Modeling — Lift and Double Lift Charts",
     https://www.casact.org/sites/default/files/presentation/rpm_2016_presentations_pm-lm-4.pdf
     """
-    y_obs = _ensure_array(y_obs)
-    y_pred_model = _ensure_array(y_pred_model)
-    y_pred_current = _ensure_array(y_pred_current)
+    y_obs, vectors, w = _validated_chart_inputs(
+        y_obs,
+        y_pred_model=y_pred_model,
+        y_pred_current=y_pred_current,
+        sample_weight=sample_weight,
+        exposure=exposure,
+        optional_vectors=("exposure",),
+    )
+    y_pred_model = vectors["y_pred_model"]
+    y_pred_current = vectors["y_pred_current"]
+    n_bins = _validated_n_bins(n_bins)
     n = len(y_obs)
-    w = _default_weights(sample_weight, n)
-    exp = _ensure_array(exposure) if exposure is not None else np.ones(n, dtype=float)
+    exp = vectors.get("exposure", np.ones(n, dtype=float))
 
     # Sort score: model / current (with epsilon guard)
     eps = 1e-10
-    sort_score = y_pred_model / np.maximum(y_pred_current, eps)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        sort_score = y_pred_model / np.maximum(y_pred_current, eps)
+    if not np.all(np.isfinite(sort_score)):
+        raise ValueError("y_pred_model / y_pred_current must contain only finite values")
 
     # Equal-exposure bins based on sort score
     bin_weights = w * exp
@@ -369,9 +698,9 @@ def double_lift_chart(
 
     # Overall exposure-weighted averages (for indexing)
     total_we = bin_weights.sum()
-    overall_actual = np.sum(bin_weights * y_obs) / total_we if total_we > 0 else 1.0
-    overall_model = np.sum(bin_weights * y_pred_model) / total_we if total_we > 0 else 1.0
-    overall_current = np.sum(bin_weights * y_pred_current) / total_we if total_we > 0 else 1.0
+    overall_actual = _weighted_mean(y_obs, bin_weights, "y_obs")
+    overall_model = _weighted_mean(y_pred_model, bin_weights, "y_pred_model")
+    overall_current = _weighted_mean(y_pred_current, bin_weights, "y_pred_current")
 
     rows = []
     for b in range(n_bins):
@@ -383,9 +712,9 @@ def double_lift_chart(
         if we_sum <= 0:
             continue
 
-        actual_avg = float(np.sum(we * y_obs[mask]) / we_sum)
-        model_avg = float(np.sum(we * y_pred_model[mask]) / we_sum)
-        current_avg = float(np.sum(we * y_pred_current[mask]) / we_sum)
+        actual_avg = _weighted_mean(y_obs[mask], we, "y_obs")
+        model_avg = _weighted_mean(y_pred_model[mask], we, "y_pred_model")
+        current_avg = _weighted_mean(y_pred_current[mask], we, "y_pred_current")
 
         rows.append(
             {
@@ -393,14 +722,24 @@ def double_lift_chart(
                 "n_rows": int(mask.sum()),
                 "exposure_sum": float(we_sum),
                 "exposure_share": we_sum / total_we,
-                "target_sum": float(np.sum(w[mask] * y_obs[mask] * exp[mask])),
+                "target_sum": _weighted_total(y_obs[mask], we, "y_obs"),
                 "actual_avg": actual_avg,
                 "model_avg": model_avg,
                 "current_avg": current_avg,
-                "actual_index": actual_avg / overall_actual if overall_actual != 0 else np.nan,
-                "model_index": model_avg / overall_model if overall_model != 0 else np.nan,
-                "current_index": (
-                    current_avg / overall_current if overall_current != 0 else np.nan
+                "actual_index": _finite_ratio(
+                    actual_avg,
+                    overall_actual,
+                    "actual index",
+                ),
+                "model_index": _finite_ratio(
+                    model_avg,
+                    overall_model,
+                    "model index",
+                ),
+                "current_index": _finite_ratio(
+                    current_avg,
+                    overall_current,
+                    "current index",
                 ),
                 "sort_score_min": float(sort_score[mask].min()),
                 "sort_score_median": float(np.median(sort_score[mask])),
@@ -513,17 +852,48 @@ def lorenz_curve(
     if engine == "plotly" and ax is not None:
         raise ValueError("ax= is only supported with engine='matplotlib'.")
 
-    y_obs = _ensure_array(y_obs)
-    y_pred = _ensure_array(y_pred)
+    y_obs, vectors, w = _validated_chart_inputs(
+        y_obs,
+        y_pred=y_pred,
+        sample_weight=sample_weight,
+        exposure=exposure,
+        optional_vectors=("exposure",),
+    )
+    y_pred = vectors["y_pred"]
     n = len(y_obs)
-    w = _default_weights(sample_weight, n)
-    exp = _ensure_array(exposure) if exposure is not None else np.ones(n, dtype=float)
+    exp = vectors.get("exposure", np.ones(n, dtype=float))
 
-    losses = w * y_obs * exp  # total loss per observation
-    exposures = w * exp
-
-    total_loss = losses.sum()
-    total_exp = exposures.sum()
+    _require_extended_range("Lorenz aggregation", w, exp, y_obs)
+    if not _LONGDOUBLE_EXTENDS_FLOAT64:
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            float_exposures = np.asarray(w, dtype=np.float64) * np.asarray(exp, dtype=np.float64)
+            float_losses = float_exposures * np.asarray(y_obs, dtype=np.float64)
+        try:
+            absolute_loss_total = math.fsum(np.abs(float_losses).tolist())
+            exposure_total = math.fsum(float_exposures.tolist())
+        except OverflowError:
+            absolute_loss_total = float("inf")
+            exposure_total = float("inf")
+        if (
+            np.any(~np.isfinite(float_exposures))
+            or np.any(~np.isfinite(float_losses))
+            or not np.isfinite(exposure_total)
+            or not np.isfinite(absolute_loss_total)
+            or np.any((float_losses == 0.0) & (float_exposures != 0.0) & (np.asarray(y_obs) != 0.0))
+        ):
+            raise ValueError(
+                "Lorenz aggregation requires an extended floating-point range on this platform"
+            )
+    if _LONGDOUBLE_EXTENDS_FLOAT64:
+        exposures = np.asarray(w, dtype=np.longdouble) * np.asarray(exp, dtype=np.longdouble)
+        losses = exposures * np.asarray(y_obs, dtype=np.longdouble)
+        total_loss = np.sum(losses, dtype=np.longdouble)
+        total_exp = np.sum(exposures, dtype=np.longdouble)
+    else:
+        exposures = float_exposures
+        losses = float_losses
+        total_loss = math.fsum(losses.tolist())
+        total_exp = math.fsum(exposures.tolist())
 
     if total_loss <= 0 or total_exp <= 0:
         # Degenerate: all zeros or no exposure
@@ -729,15 +1099,22 @@ def loss_ratio_chart(
     LossRatioChartResult
         Contains a ``bins`` DataFrame and an optional ``figure``.
     """
-    y_obs = _ensure_array(y_obs)
-    y_pred = _ensure_array(y_pred)
+    y_obs, vectors, w = _validated_chart_inputs(
+        y_obs,
+        y_pred=y_pred,
+        sample_weight=sample_weight,
+        exposure=exposure,
+        feature_values=feature_values,
+        optional_vectors=("exposure", "feature_values"),
+    )
+    y_pred = vectors["y_pred"]
+    n_bins = _validated_n_bins(n_bins)
     n = len(y_obs)
-    w = _default_weights(sample_weight, n)
-    exp = _ensure_array(exposure) if exposure is not None else np.ones(n, dtype=float)
+    exp = vectors.get("exposure", np.ones(n, dtype=float))
 
     # Determine what to bin by
     if feature_values is not None:
-        sort_vals = _ensure_array(feature_values)
+        sort_vals = vectors["feature_values"]
         x_label = feature_name or "Feature"
     else:
         sort_vals = y_pred
@@ -754,8 +1131,8 @@ def loss_ratio_chart(
             continue
         we = w[mask] * exp[mask]
         we_sum = we.sum()
-        obs_lr = np.sum(we * y_obs[mask]) / we_sum if we_sum > 0 else 0.0
-        pred_lr = np.sum(we * y_pred[mask]) / we_sum if we_sum > 0 else 0.0
+        obs_lr = _weighted_mean(y_obs[mask], we, "y_obs")
+        pred_lr = _weighted_mean(y_pred[mask], we, "y_pred")
         rows.append(
             {
                 "bin": b + 1,

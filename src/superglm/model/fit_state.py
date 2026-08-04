@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterator, Mapping
+from collections.abc import Hashable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -80,7 +80,8 @@ class ModelConfig:
     family: object
     link: object
     penalty: object
-    feature_templates: tuple[tuple[str, object], ...]
+    feature_templates: tuple[tuple[Hashable, object], ...]
+    features_explicit: bool
     splines: tuple[str, ...] | None
     n_knots: int | tuple[int, ...]
     degree: int
@@ -98,6 +99,26 @@ class ModelConfig:
     convergence: str
     retain_fit_state: bool
 
+    def __getattr__(self, name: str) -> object:
+        """Supply fields absent from models pickled before config migrations."""
+        if name == "features_explicit":
+            # This exactly matches the pre-field reconstruction contract:
+            # non-empty templates were passed as ``features={...}``, while an
+            # empty template set was reconstructed with ``features=None``.
+            return bool(object.__getattribute__(self, "feature_templates"))
+        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        """Restore older pickles and materialize newly introduced config fields."""
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        if "features_explicit" not in state:
+            object.__setattr__(
+                self,
+                "features_explicit",
+                bool(state.get("feature_templates", ())),
+            )
+
     @classmethod
     def capture(cls, model) -> ModelConfig:
         """Capture configuration without retaining caller-owned mutable objects."""
@@ -112,6 +133,7 @@ class ModelConfig:
             feature_templates=tuple(
                 (name, copy.deepcopy(model._specs[name])) for name in model._feature_order
             ),
+            features_explicit=bool(getattr(model, "_features_explicit", bool(model._specs))),
             splines=splines,
             n_knots=n_knots,
             degree=int(model._degree),
@@ -154,7 +176,7 @@ class ModelConfig:
             "penalty_features": None,
             "features": (
                 {name: copy.deepcopy(spec) for name, spec in self.feature_templates}
-                if self.feature_templates
+                if self.features_explicit
                 else None
             ),
             "splines": (
@@ -182,6 +204,7 @@ class ModelConfig:
             "_link_config": copy.deepcopy(self.link),
             "_penalty_config": copy.deepcopy(self.penalty),
             "_lambda2_config": copy.deepcopy(self.lambda2),
+            "_features_explicit": self.features_explicit,
             "_splines": None if self.splines is None else list(self.splines),
             "_n_knots": self.n_knots if isinstance(self.n_knots, int) else list(self.n_knots),
             "_degree": self.degree,

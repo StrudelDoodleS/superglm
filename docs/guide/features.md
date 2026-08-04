@@ -58,7 +58,11 @@ Spline(kind="ps", k=14, m=(2, 3))
 
 Current limitations:
 
-- `select=True + m=(...)` is not yet supported
+- `select=True + m=(...)` is supported for tuples allowed by the selected
+  spline class (for example, `m=(1, 2)` for P-splines and cubic regression
+  splines). It produces separate null-space and derivative-order penalty
+  components, each with its own REML lambda. Per-class order limits still
+  apply.
 - tensor interactions with multi-order spline parents are not yet supported
 - `kind="cr_cardinal"` currently supports only `m=2`
 

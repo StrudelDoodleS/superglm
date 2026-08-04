@@ -689,12 +689,14 @@ def solve_constrained_qp(
         this test grew in order to stop reading an exactly-active large
         constraint row as violated. So a non-vacuous formulation is not a
         reformulation but a revert. Validation is also honest about the other
-        two jobs this one parameter does: it is the step-norm convergence
-        threshold (``||step|| < tol``) and the multiplier-sign threshold
-        (``min lambda >= -tol``), and neither is meaningful at 1 either -- the
-        first declares stationarity for any step shorter than 1, the second
-        accepts a materially negative multiplier. No in-tree caller passes
-        ``tol`` at all, so the domain restriction is not a breaking change.
+        two jobs this one parameter does: it is the component-scaled step-norm
+        convergence threshold
+        (``||step / max(1, |beta|)|| < tol``) and the multiplier-sign
+        threshold (``min lambda >= -tol``), and neither is meaningful at 1
+        either -- the first declares stationarity for any relatively short
+        step, the second accepts a materially negative multiplier. No in-tree
+        caller passes ``tol`` at all, so the domain restriction is not a
+        breaking change.
     _trace_run : TraceRun | None
         Internal seam, default off. When given an *enabled* ``TraceRun`` the
         active-set loop emits one ``step_decision`` event per blocking
@@ -947,7 +949,19 @@ def solve_constrained_qp(
             step = sol[:p]
 
         # --- Check step feasibility ---
-        if np.linalg.norm(step) < tol:
+        # Judge movement relative to the current coefficient scale, coordinate
+        # by coordinate.  An absolute step threshold is not invariant to
+        # scaling the response: at a genuine active-boundary KKT point,
+        # cancellation in ``g - H @ beta`` leaves an O(eps * |beta|)
+        # correction.  With a large response that correction can exceed an
+        # absolute tolerance forever, even after the active set, feasibility,
+        # stationarity, and multipliers have stabilized.
+        #
+        # Per-coordinate scaling avoids letting one large coefficient hide a
+        # material update to another.  It also preserves the previous absolute
+        # Euclidean test exactly while every ``|beta_i| <= 1``.
+        relative_step = step / np.maximum(1.0, np.abs(beta))
+        if np.linalg.norm(relative_step) < tol:
             # At a stationary point.  With an empty active set that is already
             # the whole dual condition; otherwise the multipliers decide first.
             #
@@ -982,8 +996,9 @@ def solve_constrained_qp(
             # completes the KKT certificate.
             #
             # **Why stationarity holds even though ``step`` may come from
-            # ``lstsq``.**  The termination test above is ``||step|| < tol``,
-            # and reading a small step as stationarity is immediate for
+            # ``lstsq``.**  The termination test above is
+            # ``||step / max(1, |beta|)|| < tol``, and reading a small relative
+            # step as stationarity is immediate for
             # ``np.linalg.solve``, which either returns *the* solution or
             # raises.  It is not immediate for ``_solve_saddle_least_squares``:
             # a minimum-norm least-squares solution is small exactly when

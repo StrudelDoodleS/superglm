@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._utils import _explained_deviance
 from superglm.distributions import (
     Distribution,
     NegativeBinomial,
@@ -258,6 +259,37 @@ def _compute_null_mu(
     if offset is None or np.all(offset == 0):
         return np.full(len(y), y_bar)
 
+    from superglm.links import SqrtLink
+
+    if isinstance(link, SqrtLink):
+        # The inverse sqrt link has two eta branches. A single Fisher-scoring
+        # start can converge to the wrong offset-dependent local solution, so
+        # use the same line-searched direct IRLS solver as a public
+        # intercept-only fit.
+        from superglm.group_matrix import DesignMatrix
+
+        null_design = DesignMatrix([], n=len(y), p=0)
+        null_result, _ = fit_irls_direct(
+            X=null_design,
+            y=y,
+            weights=weights,
+            family=distribution,
+            link=link,
+            groups=[],
+            lambda2=0.0,
+            offset=offset,
+            max_iter=100,
+            tol=1e-10,
+            direct_solve="gram",
+            convergence="deviance",
+            compute_rank_info=False,
+            _compute_fit_statistics=False,
+            _compute_reml_geometry=False,
+            _compute_scop_postfit_inference=False,
+        )
+        eta_null = stabilize_eta(null_result.intercept + offset, link)
+        return clip_mu(link.inverse(eta_null), distribution)
+
     b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
     for _ in range(25):
         eta_null = stabilize_eta(b0 + offset, link)
@@ -314,7 +346,7 @@ def _compute_fit_stats(
         pearson = float(np.sum(weights * (y - mu) ** 2 / V))
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
     dev = float(np.sum(weights * distribution.deviance_unit(y, mu)))
-    expl_dev = 1.0 - dev / null_dev if null_dev > 0 else 0.0
+    expl_dev = _explained_deviance(dev, null_dev, y, null_mu, weights)
 
     return FitStats(
         log_likelihood=ll,
@@ -368,7 +400,26 @@ def _validate_entrypoint_input(model, X, y, sample_weight, offset):
         required_columns=_required_fit_columns(model),
         check_all_columns=config.splines is not None and not config.feature_templates,
     )
+    if (
+        not config.features_explicit
+        and config.splines is None
+        and not config.feature_templates
+        and not config.interaction_templates
+        and not config.interactions
+        and validated.X.columns
+    ):
+        raise ValueError(
+            "X has columns but no features were configured; pass features={...}, "
+            "use splines=[] for legacy auto-detection, or pass features={} for "
+            "an explicit intercept-only model"
+        )
     return validated.X, validated.y, validated.sample_weight, validated.offset
+
+
+def _validate_pirls_iteration_limit(max_iter) -> None:
+    """Preserve the public solver-control error before model-shape validation."""
+    if max_iter < 1:
+        raise ValueError(f"max_iter must be at least 1, got {max_iter}")
 
 
 def _clear_profile_results(model) -> None:
@@ -554,6 +605,8 @@ def _prime_fit_caches(
     sample_weight_ref,
     offset_ref,
     y_arr: NDArray,
+    mu: NDArray | None = None,
+    null_mu: NDArray | None = None,
 ) -> None:
     """Store fit-data caches for summary/metrics fast paths."""
     from superglm.model.fit_data_guard import FitDataGuard, FitGeometryGuard
@@ -563,21 +616,23 @@ def _prime_fit_caches(
         guard_columns.extend(model._interaction_specs[name].parent_names)
     guard_columns = list(dict.fromkeys(guard_columns))
 
-    fit_space_result = (
-        model._solver_pirls_result() if model._solver_result is not None else model.result
-    )
-    eta = model._dm.matvec(fit_space_result.beta) + fit_space_result.intercept
-    if model._fit_offset is not None:
-        eta = eta + model._fit_offset
-    eta = stabilize_eta(eta, model._link)
-    mu = clip_mu(model._link.inverse(eta), model._distribution)
-    null_mu = _compute_null_mu(
-        y_arr,
-        model._fit_weights,
-        model._fit_offset,
-        model._distribution,
-        model._link,
-    )
+    if mu is None:
+        fit_space_result = (
+            model._solver_pirls_result() if model._solver_result is not None else model.result
+        )
+        eta = model._dm.matvec(fit_space_result.beta) + fit_space_result.intercept
+        if model._fit_offset is not None:
+            eta = eta + model._fit_offset
+        eta = stabilize_eta(eta, model._link)
+        mu = clip_mu(model._link.inverse(eta), model._distribution)
+    if null_mu is None:
+        null_mu = _compute_null_mu(
+            y_arr,
+            model._fit_weights,
+            model._fit_offset,
+            model._distribution,
+            model._link,
+        )
     model._fit_mu = mu
     model._fit_null_mu = null_mu
     nb_profile_result = getattr(model, "_nb_profile_result", None)
@@ -733,6 +788,7 @@ def fit(
     record_diagnostics=False,
 ):
     """Fit through an attempt-local workspace and publish one complete state."""
+    _validate_pirls_iteration_limit(max_iter)
     X_ref = X
     y_ref = y
     sample_weight_ref = sample_weight
@@ -884,6 +940,8 @@ def _fit_in_workspace(
         sample_weight_ref=sample_weight_ref,
         offset_ref=offset_ref,
         y_arr=y,
+        mu=mu,
+        null_mu=null_mu,
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
 
@@ -904,6 +962,7 @@ def fit_path(
     lambda_seq=None,
 ):
     """Fit a regularization path and atomically publish its final solution."""
+    _validate_pirls_iteration_limit(model._config.max_iter)
     lambda_seq = path_ops.validate_lambda_path_controls(
         n_lambda=n_lambda,
         lambda_ratio=lambda_ratio,
@@ -1017,6 +1076,8 @@ def _fit_path_in_workspace(
         sample_weight_ref=sample_weight_ref,
         offset_ref=offset_ref,
         y_arr=y,
+        mu=mu,
+        null_mu=null_mu,
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
@@ -1060,6 +1121,7 @@ def fit_reml(
     """Fit REML in a private workspace and atomically publish success."""
     from superglm.reml.w_derivatives import validate_w_correction_order
 
+    _validate_pirls_iteration_limit(max_pirls_iter)
     w_correction_order = validate_w_correction_order(w_correction_order)
     X_ref = X
     y_ref = y
@@ -1231,6 +1293,8 @@ def _fit_reml_in_workspace(
             sample_weight_ref=sample_weight_ref,
             offset_ref=offset_ref,
             y_arr=y,
+            mu=mu,
+            null_mu=null_mu,
         )
         _canonicalize_fitted_model(
             model,

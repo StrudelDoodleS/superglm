@@ -29,6 +29,20 @@ type FrameBackend = Literal["pandas", "polars"]
 type ColumnKind = Literal["numeric", "boolean", "categorical", "unsupported"]
 
 
+def _select_pandas_columns(
+    frame: pd.DataFrame,
+    columns: tuple[object, ...],
+) -> pd.DataFrame:
+    """Select exact labels positionally without pandas coercing falsey keys."""
+    positions: list[int] = []
+    for column in columns:
+        location = frame.columns.get_loc(column)
+        if not isinstance(location, int | np.integer):
+            raise ValueError("X columns must be unique")
+        positions.append(int(location))
+    return frame.iloc[:, positions]
+
+
 @dataclass
 class EagerFrame:
     """One operation-local view of a supported native eager dataframe."""
@@ -151,7 +165,7 @@ class EagerFrame:
             )
         self.require_columns(columns)
         if self.backend == "pandas":
-            return cast(pd.DataFrame, self.native).loc[:, list(columns)]
+            return _select_pandas_columns(cast(pd.DataFrame, self.native), columns)
         return cast(Any, self.native).select(list(columns))
 
     def digest(
@@ -163,7 +177,7 @@ class EagerFrame:
         """Hash selected logical contents for retained fit-data verification."""
         if self.backend == "pandas":
             native = cast(pd.DataFrame, self.native)
-            guarded = native if columns is None else native.loc[:, list(columns)]
+            guarded = native if columns is None else _select_pandas_columns(native, columns)
             digest = hashlib.blake2b(digest_size=16, person=b"superglm-fit-v1")
             metadata = tuple((repr(name), str(dtype)) for name, dtype in guarded.dtypes.items())
             digest.update(repr((guarded.shape, metadata)).encode("utf-8"))

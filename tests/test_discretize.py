@@ -13,7 +13,7 @@ from superglm import (
     SuperGLM,
     discretization_impact,
 )
-from superglm.distributions import Poisson
+from superglm.distributions import Poisson, Tweedie
 from superglm.penalties.group_lasso import GroupLasso
 
 
@@ -318,3 +318,155 @@ class TestDefaultExposure:
         result = m.discretization_impact(df, y, n_bins=10)
         assert isinstance(result, DiscretizationResult)
         assert result.predictions.shape == (len(df),)
+
+
+class TestWeightContract:
+    @pytest.mark.parametrize("bin_strategy", ["exposure_quantile", "uniform", "winsorized"])
+    def test_frequency_weights_match_literal_row_replication(
+        self,
+        fitted_model,
+        bin_strategy,
+    ):
+        model, frame, y, _ = fitted_model
+        weights = (1 + np.arange(len(frame)) % 4).astype(np.float64)
+        rows = np.repeat(np.arange(len(frame)), weights.astype(np.int64))
+
+        weighted = model.discretization_impact(
+            frame,
+            y,
+            sample_weight=weights,
+            n_bins=12,
+            bin_strategy=bin_strategy,
+            features=["age"],
+        )
+        repeated = model.discretization_impact(
+            frame.iloc[rows].reset_index(drop=True),
+            y[rows],
+            n_bins=12,
+            bin_strategy=bin_strategy,
+            features=["age"],
+        )
+
+        weighted_table = weighted.tables["age"]
+        repeated_table = repeated.tables["age"]
+        pd.testing.assert_frame_equal(
+            weighted_table.drop(columns="n_obs"),
+            repeated_table.drop(columns="n_obs"),
+            check_exact=False,
+            rtol=2e-14,
+            atol=2e-14,
+        )
+        assert weighted_table["n_obs"].sum() == len(frame)
+        assert repeated_table["n_obs"].sum() == len(rows)
+        np.testing.assert_allclose(
+            np.repeat(weighted.predictions, weights.astype(np.int64)),
+            repeated.predictions,
+            rtol=2e-14,
+            atol=2e-14,
+        )
+        for key in weighted.metrics:
+            assert weighted.metrics[key] == pytest.approx(
+                repeated.metrics[key],
+                rel=2e-13,
+                abs=2e-13,
+            )
+
+    def test_zero_frequency_rows_do_not_widen_uniform_geometry(self, fitted_model):
+        model, frame, y, _ = fitted_model
+        frame = frame.iloc[:80].copy()
+        y = y[:80]
+        frame.loc[frame.index[-1], "age"] = 1.0e6
+        weights = np.ones(len(frame))
+        weights[-1] = 0.0
+
+        weighted = model.discretization_impact(
+            frame,
+            y,
+            sample_weight=weights,
+            n_bins=8,
+            bin_strategy="uniform",
+            features=["age"],
+        )
+        filtered = model.discretization_impact(
+            frame.iloc[:-1],
+            y[:-1],
+            n_bins=8,
+            bin_strategy="uniform",
+            features=["age"],
+        )
+
+        assert weighted.tables["age"]["bin_to"].iloc[-1] == pytest.approx(
+            filtered.tables["age"]["bin_to"].iloc[-1]
+        )
+        np.testing.assert_allclose(weighted.predictions[:-1], filtered.predictions)
+        for key in weighted.metrics:
+            assert weighted.metrics[key] == pytest.approx(filtered.metrics[key])
+
+    def test_tweedie_prior_weights_leave_geometry_and_prediction_summaries_physical(
+        self,
+        fitted_model,
+    ):
+        model, frame, y, _ = fitted_model
+        model._distribution = Tweedie(p=1.5)
+        weights = np.linspace(0.2, 3.0, len(frame))
+
+        unit = model.discretization_impact(
+            frame,
+            y,
+            n_bins=12,
+            features=["age"],
+        )
+        weighted = model.discretization_impact(
+            frame,
+            y,
+            sample_weight=weights,
+            n_bins=12,
+            features=["age"],
+        )
+
+        columns = ["bin_from", "bin_to", "relativity", "log_relativity", "n_obs"]
+        pd.testing.assert_frame_equal(
+            weighted.tables["age"][columns],
+            unit.tables["age"][columns],
+        )
+        for key in (
+            "max_abs_prediction_change_pct",
+            "mean_abs_prediction_change_pct",
+            "prediction_correlation",
+        ):
+            assert weighted.metrics[key] == unit.metrics[key]
+        assert weighted.metrics["deviance_original"] != unit.metrics["deviance_original"]
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.ones(4), "length"),
+            (np.array([1.0, np.nan, 1.0]), "finite"),
+            (np.array([1.0, -1.0, 1.0]), "nonnegative"),
+            (np.zeros(3), "all zero"),
+            (np.ones((3, 1)), "one-dimensional"),
+        ],
+    )
+    def test_validates_frequency_weights(self, fitted_model, weights, message):
+        model, frame, y, _ = fitted_model
+        with pytest.raises(ValueError, match=message):
+            model.discretization_impact(
+                frame.iloc[:3],
+                y[:3],
+                sample_weight=weights,
+                features=["age"],
+            )
+
+    def test_tweedie_requires_strictly_positive_prior_weights(self, fitted_model):
+        model, frame, y, _ = fitted_model
+        model._distribution = Tweedie(p=1.5)
+        weights = np.ones(len(frame))
+        weights[0] = 0.0
+
+        with pytest.raises(ValueError, match="strictly positive"):
+            model.discretization_impact(
+                frame,
+                y,
+                sample_weight=weights,
+                features=["age"],
+            )

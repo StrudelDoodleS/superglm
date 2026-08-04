@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, Numeric, Spline, SuperGLM
-from superglm.distributions import clip_mu
+from superglm.distributions import Tweedie, clip_mu
 from superglm.links import stabilize_eta
 
 # ── Fixtures ─────────────────────────────────────────────────────
@@ -417,6 +417,57 @@ class TestSplineRedundancy:
         m, X, y, sample_weight = fitted_model
         result = m.spline_redundancy(X, sample_weight=sample_weight)
         assert "region" not in result  # categorical, not spline
+
+    def test_frequency_weights_match_literal_row_replication(self, fitted_model):
+        model, X, _, _ = fitted_model
+        weights = (1 + np.arange(len(X)) % 4).astype(np.float64)
+        rows = np.repeat(np.arange(len(X)), weights.astype(np.int64))
+
+        weighted = model.spline_redundancy(X, sample_weight=weights)["strong"]
+        repeated = model.spline_redundancy(X.iloc[rows].reset_index(drop=True))["strong"]
+
+        np.testing.assert_allclose(weighted.support_mass, repeated.support_mass, atol=2e-15)
+        np.testing.assert_allclose(
+            weighted.adjacent_basis_corr,
+            repeated.adjacent_basis_corr,
+            atol=2e-14,
+        )
+        assert weighted.effective_rank == repeated.effective_rank
+
+    def test_tweedie_prior_weights_do_not_change_physical_geometry(self, fitted_model):
+        model, X, _, _ = fitted_model
+        model._distribution = Tweedie(p=1.5)
+        weights = np.linspace(0.2, 3.0, len(X))
+
+        unit = model.spline_redundancy(X)["strong"]
+        weighted = model.spline_redundancy(X, sample_weight=weights)["strong"]
+
+        np.testing.assert_array_equal(weighted.support_mass, unit.support_mass)
+        np.testing.assert_array_equal(weighted.adjacent_basis_corr, unit.adjacent_basis_corr)
+        assert weighted.effective_rank == unit.effective_rank
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.ones(3), "length"),
+            (np.array([1.0, np.nan]), "finite"),
+            (np.array([1.0, -1.0]), "nonnegative"),
+            (np.zeros(2), "all zero"),
+        ],
+    )
+    def test_validates_frequency_weights(self, fitted_model, weights, message):
+        model, X, _, _ = fitted_model
+        with pytest.raises(ValueError, match=message):
+            model.spline_redundancy(X.iloc[:2], sample_weight=weights)
+
+    def test_tweedie_requires_strictly_positive_prior_weights(self, fitted_model):
+        model, X, _, _ = fitted_model
+        model._distribution = Tweedie(p=1.5)
+        weights = np.ones(len(X))
+        weights[0] = 0.0
+
+        with pytest.raises(ValueError, match="strictly positive"):
+            model.spline_redundancy(X, sample_weight=weights)
 
     def test_over_specified_spline(self):
         """Spline with many knots on linear signal should show concentrated energy."""

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import SuperGLM, Tweedie
 from superglm.debug_weights import compare_irls_weights
 from superglm.features.numeric import Numeric
 from superglm.solvers.pirls import _positive_working_weight_stats
@@ -49,3 +49,30 @@ def test_compare_irls_weights_ignores_zero_frequency_rows():
     assert superglm_row["step_halvings"] == 0
     assert not bool(superglm_row["step_rejected"])
     assert not bool(model.iteration_diagnostics().iloc[0]["step_rejected"])
+
+
+def test_compare_irls_weights_maps_tweedie_weights_to_statsmodels_prior_weights(monkeypatch):
+    sm = pytest.importorskip("statsmodels.api")
+    x = np.linspace(-1.0, 1.0, 40)
+    X = pd.DataFrame({"x": x})
+    y = np.exp(0.2 + 0.3 * x) * (1.0 + 0.03 * np.sin(4.0 * x))
+    weights = np.linspace(0.5, 2.0, len(x))
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    )
+    model.fit(X, y, sample_weight=weights, record_diagnostics=True)
+    original_glm = sm.GLM
+    captured_kwargs = {}
+
+    def capture_glm(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return original_glm(*args, **kwargs)
+
+    monkeypatch.setattr(sm, "GLM", capture_glm)
+
+    compare_irls_weights(model, X, y, sample_weight=weights, max_iter=1)
+
+    np.testing.assert_array_equal(captured_kwargs["var_weights"], weights)
+    assert "freq_weights" not in captured_kwargs

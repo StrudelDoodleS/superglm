@@ -3,6 +3,7 @@
 import inspect
 import pickle
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -19,7 +20,15 @@ from superglm import (
     SuperGLM,
     cross_validate,
 )
-from superglm.model_selection import _clone_model, _score_gini
+from superglm.distributions import Gaussian, Poisson, Tweedie
+from superglm.model_selection import (
+    _clone_model,
+    _pooled_deviance_parts,
+    _pooled_nll_parts,
+    _score_deviance,
+    _score_gini,
+    _score_nll,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -603,6 +612,98 @@ class TestScoring:
         assert result.mean_scores["nll"] != pytest.approx(result.pooled_scores["nll"])
 
 
+class TestWeightContractScoring:
+    class _FixedPredictionModel:
+        def __init__(self, distribution, mu, phi):
+            self._distribution = distribution
+            self._mu = np.asarray(mu, dtype=np.float64)
+            self.result = SimpleNamespace(phi=phi)
+
+        def predict(self, X, offset=None):
+            del X, offset
+            return self._mu
+
+    @pytest.mark.parametrize(
+        ("distribution", "y", "mu", "phi"),
+        [
+            (
+                Gaussian(),
+                np.array([-0.4, 0.2, 1.8, 2.7]),
+                np.array([-0.1, 0.4, 1.5, 2.2]),
+                1.3,
+            ),
+            (
+                Poisson(),
+                np.array([0.0, 1.0, 4.0, 2.0]),
+                np.array([0.4, 1.2, 3.3, 2.4]),
+                1.0,
+            ),
+        ],
+    )
+    def test_frequency_weighted_scores_match_literal_rows(self, distribution, y, mu, phi):
+        weights = np.array([3, 1, 4, 2], dtype=np.float64)
+        repeated = np.repeat(np.arange(len(y)), weights.astype(np.intp))
+        weighted_model = self._FixedPredictionModel(distribution, mu, phi)
+        repeated_model = self._FixedPredictionModel(distribution, mu[repeated], phi)
+
+        weighted_deviance = _score_deviance(
+            weighted_model,
+            None,
+            y,
+            sample_weight=weights,
+        )
+        repeated_deviance = _score_deviance(
+            repeated_model,
+            None,
+            y[repeated],
+        )
+        weighted_nll = _score_nll(
+            weighted_model,
+            None,
+            y,
+            sample_weight=weights,
+        )
+        repeated_nll = _score_nll(
+            repeated_model,
+            None,
+            y[repeated],
+        )
+
+        assert weighted_deviance == pytest.approx(repeated_deviance)
+        assert weighted_nll == pytest.approx(repeated_nll)
+
+    def test_tweedie_scores_use_physical_observation_count(self):
+        distribution = Tweedie(p=1.5)
+        y = np.array([0.0, 0.7, 1.8, 3.2])
+        mu = np.array([0.4, 0.9, 1.6, 2.7])
+        weights = np.array([0.25, 0.8, 1.7, 3.4])
+        model = self._FixedPredictionModel(distribution, mu, phi=0.9)
+
+        deviance_total = float(np.sum(weights * distribution.deviance_unit(y, mu)))
+        nll_total = -distribution.log_likelihood(y, mu, weights, phi=0.9)
+        deviance_parts = _pooled_deviance_parts(
+            model,
+            None,
+            y,
+            sample_weight=weights,
+        )
+        nll_parts = _pooled_nll_parts(
+            model,
+            None,
+            y,
+            sample_weight=weights,
+        )
+
+        assert _score_deviance(model, None, y, sample_weight=weights) == pytest.approx(
+            deviance_total / len(y)
+        )
+        assert _score_nll(model, None, y, sample_weight=weights) == pytest.approx(
+            nll_total / len(y)
+        )
+        assert deviance_parts == pytest.approx((deviance_total, len(y)))
+        assert nll_parts == pytest.approx((nll_total, len(y)))
+
+
 # ── Return options ────────────────────────────────────────────────
 
 
@@ -944,6 +1045,13 @@ class TestInputSafety:
 
 
 class TestValidation:
+    def test_weight_doc_scopes_literal_replication_to_fixed_cv_partition(self):
+        doc = inspect.getdoc(cross_validate)
+
+        assert doc is not None
+        assert "splitters operate on the physical compact rows" in doc
+        assert "within a fixed train/validation partition and fixed feature geometry" in doc
+
     def test_no_split_method(self, poisson_data, base_model):
         """Raise if cv has no .split() method."""
         df, y, _ = poisson_data

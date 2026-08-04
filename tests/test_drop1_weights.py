@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from superglm import Numeric, SuperGLM
 from superglm.inference._term_model_ops import drop1 as internal_drop1
@@ -63,3 +64,43 @@ def test_drop1_reduced_refits_match_manual_weighted_refits():
         reduced.fit(X, y, sample_weight=sample_weight)
         reported = result.loc[result["feature"] == feature, "deviance_reduced"].item()
         assert np.isclose(reported, reduced.result.deviance, rtol=1e-10, atol=1e-10)
+
+
+def test_estimated_scale_f_test_is_invariant_to_frequency_weight_replication():
+    rng = np.random.default_rng(2181)
+    n = 60
+    x = rng.normal(size=n)
+    y = 0.3 * x + rng.normal(scale=2.0, size=n)
+    sample_weight = rng.integers(1, 5, size=n).astype(float)
+    X = pd.DataFrame({"x": x})
+
+    weighted_model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y, sample_weight=sample_weight)
+    weighted_row = weighted_model.drop1(
+        X,
+        y,
+        sample_weight=sample_weight,
+        test="F",
+    ).iloc[0]
+
+    repeated_rows = np.repeat(np.arange(n), sample_weight.astype(int))
+    repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
+    repeated_y = y[repeated_rows]
+    repeated_model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(repeated_X, repeated_y)
+    repeated_row = repeated_model.drop1(repeated_X, repeated_y, test="F").iloc[0]
+
+    assert weighted_row["statistic"] == pytest.approx(
+        repeated_row["statistic"],
+        rel=2e-12,
+    )
+    assert weighted_row["p_value"] == pytest.approx(
+        repeated_row["p_value"],
+        rel=2e-12,
+    )

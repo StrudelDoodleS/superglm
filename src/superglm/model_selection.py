@@ -13,6 +13,8 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
+from superglm.distributions import Tweedie
+from superglm.solvers.dispersion import dispersion_likelihood_size
 from superglm.validation import _normalized_gini
 
 logger = logging.getLogger(__name__)
@@ -29,10 +31,13 @@ class CrossValidationResult:
         ``fit_time_s``, ``score_time_s``, ``converged``, ``n_iter``,
         ``effective_df``, plus one column per requested metric.
     mean_scores : dict
-        Equal-weight mean of each metric across folds.
+        Equal-weight mean of each per-fold metric across folds. Built-in
+        deviance and negative log-likelihood are normalized within each fold
+        by ``sum(sample_weight)`` for non-Tweedie frequency weights and by the
+        physical validation-row count for Tweedie EDM prior weights.
     pooled_scores : dict
         Supported overall pooled metrics, computed as ratio-of-sums rather than
-        mean-of-fold-ratios.
+        mean-of-fold-ratios, with the same family-specific denominator.
     std_scores : dict
         Standard deviation of each metric across folds.
     fold_indices : list[tuple[ndarray, ndarray]] or None
@@ -110,21 +115,33 @@ def _clone_model(model):
 # ── Built-in scorers ─────────────────────────────────────────────
 
 
+def _scoring_weights(model, sample_weight, n_rows: int) -> tuple[NDArray, float]:
+    """Return scoring weights and the family's validation likelihood size."""
+    weights = (
+        np.ones(n_rows, dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64)
+    )
+    denominator = dispersion_likelihood_size(model._distribution, weights)
+    if denominator <= 0.0:
+        raise ValueError("validation sample_weight must have positive likelihood size")
+    return weights, denominator
+
+
 def _score_deviance(model, X_val, y_val, *, sample_weight=None, offset=None):
-    """Mean weighted unit deviance on the validation set."""
+    """Mean unit deviance under the family's sample-weight contract."""
     mu = model.predict(X_val, offset=offset)
     dev = model._distribution.deviance_unit(y_val, mu)
-    if sample_weight is not None:
-        return float(np.sum(sample_weight * dev) / np.sum(sample_weight))
-    return float(np.mean(dev))
+    weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    return float(np.sum(weights * dev) / denominator)
 
 
 def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
-    """Mean negative log-likelihood on the validation set."""
+    """Mean negative log-likelihood under the family's weight contract."""
     mu = model.predict(X_val, offset=offset)
-    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
-    ll = model._distribution.log_likelihood(y_val, mu, w, phi=model.result.phi)
-    return float(-ll / np.sum(w))
+    weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    ll = model._distribution.log_likelihood(y_val, mu, weights, phi=model.result.phi)
+    return float(-ll / denominator)
 
 
 def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
@@ -137,16 +154,16 @@ def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=No
     """Return numerator and denominator for pooled deviance aggregation."""
     mu = model.predict(X_val, offset=offset)
     dev = model._distribution.deviance_unit(y_val, mu)
-    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
-    return float(np.sum(w * dev)), float(np.sum(w))
+    weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    return float(np.sum(weights * dev)), denominator
 
 
 def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
     mu = model.predict(X_val, offset=offset)
-    w = sample_weight if sample_weight is not None else np.ones(len(y_val))
-    ll = model._distribution.log_likelihood(y_val, mu, w, phi=model.result.phi)
-    return float(-ll), float(np.sum(w))
+    weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    ll = model._distribution.log_likelihood(y_val, mu, weights, phi=model.result.phi)
+    return float(-ll), denominator
 
 
 _RESERVED_COLUMNS = frozenset(
@@ -242,7 +259,12 @@ def cross_validate(
         Object with a ``.split(X, y, groups)`` method yielding
         ``(train_idx, test_idx)`` tuples. Any sklearn splitter works.
     sample_weight : array-like, optional
-        Frequency weights, sliced per fold.
+        Sliced per fold; splitters operate on the physical compact rows. For
+        non-Tweedie families these are nonnegative case/frequency weights:
+        within a fixed train/validation partition and fixed feature geometry,
+        integer values are likelihood-equivalent to literal row replication.
+        For Tweedie they are finite, strictly positive EDM prior weights, with
+        ``Var(Y_i) = phi * mu_i**p / w_i``.
     offset : array-like, optional
         Offset term, sliced per fold.
     groups : array-like, optional
@@ -251,6 +273,10 @@ def cross_validate(
         Which fit method to call on each fold estimator.
     scoring : str, callable, or sequence thereof
         Metrics to evaluate. Built-in: ``"deviance"``, ``"nll"``, ``"gini"``.
+        Built-in deviance and NLL divide their weighted totals by
+        ``sum(sample_weight)`` for non-Tweedie frequency weights and by the
+        physical row count for Tweedie prior weights. Gini remains a separately
+        weighted ranking metric.
         Callables must follow ``scorer(model, X, y, *, sample_weight, offset) -> float | dict``.
     return_estimators : bool
         If True, keep the fitted model from each fold.
@@ -277,9 +303,27 @@ def cross_validate(
     frame = as_eager_frame(X)
 
     if sample_weight is not None:
-        sample_weight = np.asarray(sample_weight, dtype=np.float64)
-        if len(sample_weight) != n:
-            raise ValueError(f"sample_weight length {len(sample_weight)} != y length {n}")
+        try:
+            raw_weight = np.asarray(sample_weight)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("sample_weight must be a numeric one-dimensional array") from exc
+        if raw_weight.ndim != 1:
+            raise ValueError("sample_weight must be one-dimensional")
+        if len(raw_weight) != n:
+            raise ValueError(f"sample_weight length {len(raw_weight)} != y length {n}")
+        if np.iscomplexobj(raw_weight) or getattr(raw_weight.dtype, "kind", None) in {"M", "m"}:
+            raise ValueError("sample_weight must contain only real numeric values")
+        try:
+            sample_weight = np.asarray(raw_weight, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("sample_weight must contain only real numeric values") from exc
+        if not np.all(np.isfinite(sample_weight)):
+            raise ValueError("sample_weight must contain only finite values")
+        if isinstance(model._distribution, Tweedie):
+            if np.any(sample_weight <= 0.0):
+                raise ValueError("Tweedie sample_weight must be strictly positive")
+        elif np.any(sample_weight < 0.0):
+            raise ValueError("sample_weight must be nonnegative")
 
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)

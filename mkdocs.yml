@@ -54,6 +54,12 @@ extra_javascript:
 extra_css:
   - stylesheets/extra.css
 
+# Design records and point-in-time audit evidence stay in the repository but
+# are not part of the published user documentation.
+exclude_docs: |
+  audit/
+  superpowers/
+
 plugins:
   - search
   - mkdocs-jupyter:
@@ -100,7 +106,12 @@ nav:
     - Python Support Policy: development/python-support.md
     - Data and Solver Boundaries: development/data-and-solver-boundaries.md
     - Editor Frontend for Python Developers: editor_frontend.md
+    - SCOP Performance Prototype: guide/scop-performance-prototype.md
+    - Tabmat Integration Notes: tabmat-integration-notes.md
+  - Governance:
+    - Model Risk Pack: governance/model_risk_pack.md
   - Examples:
+    - Editor Demo: notebooks/editor_demo.ipynb
     - MTPL2 Frequency Walkthrough: notebooks/mtpl2_frequency_walkthrough.ipynb
     - Plotting & Diagnostics Demo: notebooks/plotting_diagnostics_demo.ipynb
     - Ordered Categorical Smoothing: notebooks/ordered_categorical_smoothing.ipynb

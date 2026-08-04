@@ -3,36 +3,138 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from scipy.interpolate import BSpline as SciPyBSpline
 
+from superglm import Constraint, PSpline
+from superglm.features._spline_constraints import curvature_difference_operator
 from superglm.features._spline_subclass_ops import build_scop_reparameterization
 from superglm.solvers.scop import build_scop_reparam
 
 
+def _padded_irregular_knots(q: int, degree: int = 3) -> np.ndarray:
+    n_interior = q - degree - 1
+    interior = np.linspace(0.0, 1.0, n_interior + 2)[1:-1] ** 1.7
+    lo_effective = -0.001
+    hi_effective = 1.001
+    inner = np.concatenate(([lo_effective], interior, [hi_effective]))
+    lower = lo_effective - (interior[0] - lo_effective) * np.arange(degree, 0, -1)
+    upper = hi_effective + (hi_effective - interior[-1]) * np.arange(1, degree + 1)
+    return np.concatenate((lower, inner, upper))
+
+
 def test_scop_convex_forward_produces_nonnegative_second_differences():
     beta = np.array([0.2, -0.1, -1.0, -0.8, -0.6, -0.4])
-    reparam = build_scop_reparam(q=6, kind="convex")
+    knots = _padded_irregular_knots(6)
+    reparam = build_scop_reparam(
+        q=6,
+        kind="convex",
+        knots=knots,
+        degree=3,
+        domain=(0.0, 1.0),
+    )
     gamma = reparam.forward(beta)
-    assert np.all(np.diff(gamma, n=2) >= -1e-10)
+    curvature = curvature_difference_operator(knots, 3, domain=(0.0, 1.0))
+    assert np.all(curvature @ gamma >= -1e-10)
+    np.testing.assert_allclose(curvature @ reparam.Sigma[:, :2], 0.0, atol=2e-14)
+    np.testing.assert_allclose(
+        curvature @ reparam.Sigma[:, 2:],
+        np.eye(4),
+        atol=2e-14,
+    )
 
 
 def test_scop_concave_forward_produces_nonpositive_second_differences():
     beta = np.array([0.2, -0.1, -1.0, -0.8, -0.6, -0.4])
-    reparam = build_scop_reparam(q=6, kind="concave")
+    knots = _padded_irregular_knots(6)
+    reparam = build_scop_reparam(
+        q=6,
+        kind="concave",
+        knots=knots,
+        degree=3,
+        domain=(0.0, 1.0),
+    )
     gamma = reparam.forward(beta)
-    assert np.all(np.diff(gamma, n=2) <= 1e-10)
+    signed_curvature = -curvature_difference_operator(knots, 3, domain=(0.0, 1.0))
+    assert np.all(signed_curvature @ gamma >= -1e-10)
+    np.testing.assert_allclose(signed_curvature @ reparam.Sigma[:, :2], 0.0, atol=2e-14)
+    np.testing.assert_allclose(
+        signed_curvature @ reparam.Sigma[:, 2:],
+        np.eye(4),
+        atol=2e-14,
+    )
 
 
-def test_scop_helper_drops_full_curvature_null_space():
-    spec = SimpleNamespace(_n_basis=6, constraint_kind="convex", monotone=None)
-    basis = np.eye(6)
+def test_scop_helper_retains_centered_affine_slope():
+    knots = _padded_irregular_knots(6)
+    x = np.linspace(0.0, 1.0, 40)
+    basis = SciPyBSpline(knots, np.eye(6), 3)(x)
+    spec = SimpleNamespace(
+        _n_basis=6,
+        _knots=knots,
+        degree=3,
+        _lo=0.0,
+        _hi=1.0,
+        constraint_kind="convex",
+        monotone=None,
+    )
     omega = np.eye(6)
 
     x_centered, scop_penalty, solver_reparam = build_scop_reparameterization(spec, basis, omega)
 
-    assert x_centered.shape == (6, 4)
-    assert spec._scop_col_means.shape == (4,)
-    assert scop_penalty.shape == (4, 4)
-    assert solver_reparam.q == 4
+    assert x_centered.shape == (40, 5)
+    assert spec._scop_null_dim == 1
+    assert spec._scop_col_means.shape == (5,)
+    active_lo = knots[3]
+    active_hi = knots[6]
+    expected_slope = (x - active_lo) / (active_hi - active_lo)
+    np.testing.assert_allclose(
+        x_centered[:, 0],
+        expected_slope - expected_slope.mean(),
+        atol=2e-15,
+    )
+    assert scop_penalty.shape == (5, 5)
+    np.testing.assert_array_equal(scop_penalty[0], np.zeros(5))
+    assert solver_reparam.q == 5
+    assert solver_reparam.free_dim == 1
+
+
+@pytest.mark.parametrize("kind", ["convex", "concave"])
+@pytest.mark.parametrize("knot_case", ["default", "quantile", "explicit"])
+def test_curvature_scop_sigma_certifies_exact_public_domain_geometry(kind, knot_case):
+    x = np.linspace(0.0, 1.0, 300)
+    kwargs = {}
+    if knot_case == "quantile":
+        x = x**5
+        kwargs["knot_strategy"] = "quantile"
+    elif knot_case == "explicit":
+        kwargs["knots"] = np.array([1e-4, 0.003, 0.04, 0.25, 0.82, 0.98])
+
+    spec = PSpline(
+        n_knots=8,
+        constraint=getattr(Constraint.fit, kind),
+        **kwargs,
+    )
+    spec.build(x)
+    curvature = curvature_difference_operator(
+        spec._knots,
+        spec.degree,
+        domain=(spec._lo, spec._hi),
+    )
+    signed_curvature = curvature if kind == "convex" else -curvature
+    sigma = np.asarray(spec._scop_Sigma)
+
+    np.testing.assert_allclose(
+        signed_curvature @ sigma[:, :2],
+        0.0,
+        atol=3e-13,
+    )
+    np.testing.assert_allclose(
+        signed_curvature @ sigma[:, 2:],
+        np.eye(spec._n_basis - 2),
+        rtol=3e-13,
+        atol=3e-13,
+    )
 
 
 class TestSCOPForwardMap:

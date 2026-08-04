@@ -90,9 +90,9 @@ def scop_fixed_lambda_value(spec: Any) -> float | None:
     return float(wiggle_policy.value) if wiggle_policy.mode == "fixed" else None
 
 
-def scop_group_spec(groupspecs: dict[str, Any], group: GroupSlice) -> Any | None:
+def scop_group_spec(groupspecs: Mapping[Any, Any], group: GroupSlice) -> Any | None:
     """Return the feature spec backing a SCOP-constrained group."""
-    return groupspecs.get(group.feature_name or group.name)
+    return groupspecs.get(group.feature_name)
 
 
 def inject_fixed_scop_lambdas(

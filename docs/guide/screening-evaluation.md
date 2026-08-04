@@ -24,7 +24,7 @@ truth — no top-k shortlist.
 
 ## Setup
 
-freMTPL2 frequency, on the house exposure contract:
+freMTPL2 frequency, using SuperGLM's Poisson case/frequency-weight contract:
 
 ```python
 df["Exposure"] = df["Exposure"].clip(lower=0.01)
@@ -32,6 +32,9 @@ exposure = df["Exposure"].to_numpy(float)
 y = df["ClaimNb"].to_numpy(float) / exposure   # claim RATE
 sample_weight = exposure
 ```
+
+Here exposure is a Poisson frequency weight: it is not the EDM prior-weight
+contract used by Tweedie.
 
 | | |
 |---|---|

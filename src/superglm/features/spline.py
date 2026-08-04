@@ -33,9 +33,19 @@ if TYPE_CHECKING:
     from superglm.solvers.scop import SCOPSolverReparam
 
 
-def _weighted_quantile_knots(x: NDArray, n_knots: int, alpha: float) -> NDArray:
+def _weighted_quantile_knots(
+    x: NDArray,
+    n_knots: int,
+    alpha: float,
+    sample_weight: NDArray | None = None,
+) -> NDArray:
     """Compatibility wrapper for the private weighted-quantile knot helper."""
-    return _spline_knots.weighted_quantile_knots(x, n_knots, alpha)
+    return _spline_knots.weighted_quantile_knots(
+        x,
+        n_knots,
+        alpha,
+        sample_weight=sample_weight,
+    )
 
 
 class _SplineBase:
@@ -190,9 +200,13 @@ class _SplineBase:
         """Evaluate the raw basis with explicit linear continuation outside the fit range."""
         return _spline_runtime.linear_tail_basis_matrix(self, x)
 
-    def _place_knots(self, x: NDArray) -> None:
+    def _place_knots(
+        self,
+        x: NDArray,
+        sample_weight: NDArray | None = None,
+    ) -> None:
         """Place interior knots and build the full knot vector."""
-        _spline_runtime.place_knots(self, x)
+        _spline_runtime.place_knots(self, x, sample_weight)
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
         """Build the full knot vector from interior knots.
@@ -463,7 +477,9 @@ class PSpline(_BSplineBase):
         and use the SCOP engine. This works in both exact and
         ``discrete=True`` fitting paths. With ``fit_reml()``, fixed lambdas
         work directly and automatic lambda estimation uses the dedicated
-        shape-aware SCOP REML / EFS path.
+        shape-aware SCOP REML / EFS path. Fit-time convexity/concavity is
+        supported for degrees one through three; higher degrees require a
+        ``Constraint.postfit.*`` token.
     """
 
     def __init__(
@@ -503,7 +519,7 @@ class PSpline(_BSplineBase):
     def _build_scop_reparameterization(
         self, B: NDArray, omega: NDArray
     ) -> tuple[NDArray, NDArray, SCOPSolverReparam]:
-        """Build SCOP reparameterization for monotone PSpline.
+        """Build SCOP reparameterization for a shape-constrained PSpline.
 
         Returns (B_centered, S_scop, scop_reparam) where:
         - B_centered: design matrix with SCAM-style centering (n, q_eff)
@@ -562,7 +578,9 @@ class BSplineSmooth(_BSplineBase):
         path. With ``fit_reml()``, fixed lambdas work directly; automatic
         lambda estimation uses the QP passthrough heuristic
         (unconstrained REML followed by constrained refit), not exact
-        joint constrained REML.
+        joint constrained REML. Fit-time convexity/concavity is supported for
+        degrees one through three; higher degrees require a
+        ``Constraint.postfit.*`` token.
     m : int or tuple of int
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy or dict or None
@@ -716,15 +734,13 @@ class CubicRegressionSpline(_SplineBase):
     constraint : ConstraintSpec or None
         Public shape-constraint token. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
-        ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
-        ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
-        ``Constraint.postfit.concave``. For ``CubicRegressionSpline``,
-        fit-time monotone and curvature constraints apply on the spline
-        term's linear-predictor contribution and use the constrained QP
-        solver path. With ``fit_reml()``, fixed lambdas work directly;
+        ``Constraint.fit.concave``, or any of the corresponding
+        ``Constraint.postfit.*`` kinds. Fit-time constraints apply on the
+        spline term's linear-predictor contribution and use the constrained
+        QP solver path. With ``fit_reml()``, fixed lambdas work directly;
         automatic lambda estimation uses the QP passthrough heuristic
-        (unconstrained REML followed by constrained refit), not exact
-        joint constrained REML.
+        (unconstrained REML followed by constrained refit), not exact joint
+        constrained REML.
     """
 
     _penalty_semantics = "integrated_derivative"
@@ -841,10 +857,12 @@ class CardinalCRSpline(_SplineBase):
         If True, decompose into linear + wiggly subgroups (double penalty).
     knots : array-like or None
         Explicit interior knot positions.
-    monotone : str or None
-        Monotonicity constraint direction.
-    monotone_mode : str
-        ``"postfit"`` (default) or ``"fit"`` (not yet implemented).
+    constraint : ConstraintSpec or None
+        Public shape-constraint token. Cardinal CR splines support
+        ``Constraint.postfit.increasing``, ``Constraint.postfit.decreasing``,
+        ``Constraint.postfit.convex``, and ``Constraint.postfit.concave``.
+        Fit-time shape constraints are not implemented for this experimental
+        basis and raise ``NotImplementedError``.
     """
 
     _penalty_semantics = "fixed"
@@ -892,9 +910,13 @@ class CardinalCRSpline(_SplineBase):
         self._cr_M: NDArray | None = None
         self._cr_S: NDArray | None = None
 
-    def _place_knots(self, x: NDArray) -> None:
+    def _place_knots(
+        self,
+        x: NDArray,
+        sample_weight: NDArray | None = None,
+    ) -> None:
         """Place K = n_knots + 2 knots and build the cardinal CR matrices."""
-        _spline_cardinal_spec.place_knots(self, x)
+        _spline_cardinal_spec.place_knots(self, x, sample_weight)
 
     def _build_cr_matrices(self) -> None:
         """Build the tridiagonal system matrices for the cardinal CR spline."""

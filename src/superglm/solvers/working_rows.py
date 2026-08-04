@@ -8,8 +8,15 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian
-from superglm.links import IdentityLink, LogLink
+from superglm.distributions import (
+    _VARIANCE_FLOOR,
+    Distribution,
+    Gamma,
+    Gaussian,
+    Poisson,
+    initial_mean,
+)
+from superglm.links import IdentityLink, Link, LogLink, SqrtLink
 
 
 @dataclass(frozen=True)
@@ -29,6 +36,24 @@ def supports_observed_newton(distribution: object, link: object) -> bool:
     return type(distribution) is Gamma and type(link) is LogLink
 
 
+def coefficient_initial_intercept(
+    *,
+    distribution: Distribution,
+    link: Link,
+    y: NDArray,
+    sample_weight: NDArray,
+) -> float:
+    """Return a link-appropriate intercept before offsets are applied."""
+    if type(distribution) is Poisson and type(link) is SqrtLink:
+        # Unlike log, sqrt represents zero and arbitrarily small non-negative
+        # means directly.  Do not inherit the positive-family initialization
+        # floor needed by singular-at-zero links.
+        mean = float(np.average(y, weights=sample_weight))
+        return float(np.sqrt(max(mean, 0.0)))
+    mean = initial_mean(y, sample_weight, distribution)
+    return float(link.link(np.atleast_1d(mean))[0])
+
+
 def _fisher_rows(
     *,
     distribution: object,
@@ -39,6 +64,47 @@ def _fisher_rows(
     sample_weight: NDArray,
     fallback_reason: str | None = None,
 ) -> CoefficientWorkingRows:
+    if type(distribution) is Poisson and type(link) is SqrtLink:
+        # Analytically, μ=η² and V(μ)=μ cancel from the Fisher geometry:
+        #
+        #   W = w (2η)² / η² = 4w,
+        #   z = η + (y-η²)/(2η) = (η + y/η)/2.
+        #
+        # Evaluate that identity directly so generic variance/mean floors do
+        # not distort genuinely tiny nonzero means.  At the sole singular
+        # point η=0, retain the exact 4w limit and enter the branch selected by
+        # signed zero at its saturated predictor ±sqrt(y).
+        weights = 4.0 * sample_weight
+        response = np.empty_like(eta)
+        nonzero = eta != 0.0
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            response[nonzero] = 0.5 * (eta[nonzero] + y[nonzero] / eta[nonzero])
+        response[~nonzero] = np.copysign(
+            np.sqrt(y[~nonzero]),
+            eta[~nonzero],
+        )
+        with np.errstate(invalid="ignore", over="ignore"):
+            weighted_response = weights * response
+            weighted_response_sum = float(np.sum(weighted_response, dtype=np.float64))
+        if (
+            not np.all(np.isfinite(response[nonzero]))
+            or not np.all(np.isfinite(weighted_response[nonzero]))
+            or not np.isfinite(weighted_response_sum)
+        ):
+            # A nonzero subnormal η can make the exact Fisher response exceed
+            # float64 even though its sign branch and optimum are well
+            # defined.  In that arithmetic-only case use the branch-preserving
+            # finite fixed-point response.  This is a trust response, not an
+            # epsilon neighbourhood: every representable Fisher system above
+            # remains unchanged.
+            response = np.copysign(np.sqrt(y), eta)
+        return CoefficientWorkingRows(
+            weights=np.asarray(weights, dtype=np.float64),
+            response=np.asarray(response, dtype=np.float64),
+            curvature_source="fisher",
+            fallback_reason=fallback_reason,
+        )
+
     # For the exact Gaussian/identity pair the Fisher rows reduce algebraically
     # to the supplied weights and y. Preserve that identity bit-for-bit: the
     # generic ``eta + (y - eta)`` expression introduces iteration-dependent

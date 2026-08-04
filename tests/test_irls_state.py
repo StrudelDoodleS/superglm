@@ -8,16 +8,19 @@ import pytest
 from superglm._fit_trace import MemoryTraceSink, NullTraceSink, TraceRun
 from superglm.distributions import Gaussian, Poisson
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
-from superglm.links import IdentityLink, SqrtLink
+from superglm.links import IdentityLink, PowerLink, SqrtLink
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
+    _irls_objective_relative_change,
+    _irls_objective_scale,
     _irls_trial_is_unsafe,
     _IRLSState,
     _IRLSStepDecision,
+    _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
 )
@@ -110,6 +113,169 @@ def test_select_irls_trial_stops_at_largest_safe_fraction() -> None:
 
     assert decision == _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
     assert visited == [0.5]
+
+
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+@pytest.mark.parametrize("response_scale", [1.0e-24, 1.0, 1.0e24])
+def test_poisson_sqrt_halving_budget_is_response_scale_equivariant(
+    sign: float,
+    response_scale: float,
+) -> None:
+    eta_scale = np.sqrt(response_scale)
+    committed = _synthetic_state(2.0, eta=0.0)
+    proposal = _synthetic_state(3.0, eta=sign * 5.0e8 * eta_scale)
+
+    budget = _poisson_sqrt_halving_budget(
+        committed=committed,
+        proposal=proposal,
+        y=np.array([100.0 * response_scale]),
+        weights=np.ones(1),
+        family=Poisson(),
+        link=SqrtLink(),
+        default=20,
+    )
+
+    assert budget == 46
+
+
+def test_poisson_sqrt_halving_budget_handles_inactive_zero_and_float_limits() -> None:
+    committed = _synthetic_state(2.0, eta=0.0)
+    stationary = _synthetic_state(3.0, eta=0.0)
+    finite_proposal = _synthetic_state(3.0, eta=1.0)
+    infinite_proposal = _synthetic_state(3.0, eta=np.inf)
+    common = {
+        "committed": committed,
+        "family": Poisson(),
+        "link": SqrtLink(),
+        "default": 20,
+    }
+
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            proposal=stationary,
+            y=np.ones(1),
+            weights=np.ones(1),
+        )
+        == 20
+    )
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            proposal=finite_proposal,
+            y=np.zeros(1),
+            weights=np.ones(1),
+        )
+        == 20
+    )
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            proposal=finite_proposal,
+            y=np.ones(1),
+            weights=np.zeros(1),
+        )
+        == 20
+    )
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            proposal=infinite_proposal,
+            y=np.ones(1),
+            weights=np.ones(1),
+        )
+        == 20
+    )
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            proposal=_synthetic_state(3.0, eta=np.finfo(float).max),
+            y=np.array([np.nextafter(0.0, 1.0)]),
+            weights=np.ones(1),
+        )
+        == 1074
+    )
+
+
+def test_poisson_sqrt_halving_budget_is_exact_type_gated() -> None:
+    committed = _synthetic_state(2.0, eta=0.0)
+    proposal = _synthetic_state(3.0, eta=1.0e12)
+    common = {
+        "committed": committed,
+        "proposal": proposal,
+        "y": np.ones(1),
+        "weights": np.ones(1),
+        "default": 20,
+    }
+
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            family=Gaussian(),
+            link=SqrtLink(),
+        )
+        == 20
+    )
+    assert (
+        _poisson_sqrt_halving_budget(
+            **common,
+            family=Poisson(),
+            link=PowerLink(0.5),
+        )
+        == 20
+    )
+
+
+def test_select_irls_trial_never_accepts_underflowed_zero_alpha() -> None:
+    visited: list[float] = []
+
+    def reject(alpha: float) -> _IRLSState:
+        assert alpha > 0.0
+        visited.append(alpha)
+        return _synthetic_state(3.0)
+
+    decision = _select_irls_trial(
+        committed=_synthetic_state(2.0),
+        proposal=_synthetic_state(3.0),
+        evaluate_state=reject,
+        max_halving=1075,
+    )
+
+    assert decision.step_rejected
+    assert len(visited) == 1074
+    assert visited[-1] == np.nextafter(0.0, 1.0)
+    assert decision.trials_attempted == 1075
+
+
+@pytest.mark.parametrize("response_scale", [1.0e-30, 1.0, 1.0e30])
+def test_poisson_sqrt_objective_convergence_ratio_is_response_scale_equivariant(
+    response_scale: float,
+) -> None:
+    ratio = _irls_objective_relative_change(
+        objective=0.5 * response_scale,
+        previous=2.0 * response_scale,
+        y=np.array([response_scale]),
+        weights=np.ones(1),
+        family=Poisson(),
+        link=SqrtLink(),
+    )
+
+    assert ratio == pytest.approx(0.5)
+
+
+def test_poisson_sqrt_merit_roundoff_uses_response_units() -> None:
+    scale = _irls_objective_scale(
+        y=np.array([1.0e-30]),
+        weights=np.ones(1),
+        family=Poisson(),
+        link=SqrtLink(),
+    )
+
+    assert _irls_trial_is_unsafe(
+        _synthetic_state(3.0e-30),
+        _synthetic_state(2.0e-30),
+        merit_scale=scale,
+    )
 
 
 def test_nonfinite_proposal_coefficients_can_select_safe_half_step() -> None:

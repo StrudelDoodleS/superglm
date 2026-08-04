@@ -103,9 +103,11 @@ included — are excluded too: the screen profiles only the parent mains, so it
 cannot re-screen a term already in the model.
 
 A mixed sweep comes back as one sorted table. The example below screens an
-80,000-row sample of the freMTPL2 frequency book on the house exposure
-contract (`y` the claim *rate* `ClaimNb / Exposure`, `sample_weight` the
-exposure, `phi` estimated at 2.55).
+80,000-row sample of the freMTPL2 frequency book under SuperGLM's Poisson
+case/frequency-weight contract (`y` the claim *rate* `ClaimNb / Exposure`,
+`sample_weight` the exposure, `phi` estimated at 2.55). This is the
+non-Tweedie frequency interpretation; it is not the Tweedie EDM prior-weight
+contract.
 
 The specification is spelled out rather than assumed, because the screen is
 defined *against the fitted mains*. A margin mis-specified there does not
@@ -336,11 +338,11 @@ subsample, or reordered frame, pass `sample_weight` (and `offset`)
 explicitly. A badly specified mains model screens against the
 wrong baseline — screening quality is downstream of fit quality. The
 Pearson dispersion that scales the statistic is attached to the result as
-`table.attrs["phi"]` and can be overridden with `phi=` (the estimate uses
-positive-weight-row count − edf residual degrees of freedom per the
-exposure weight contract,
-which keeps rankings invariant to the units exposure is measured in; a
-frequency-weight user can supply their own `phi`).
+`table.attrs["phi"]` and can be overridden with `phi=`. By default its
+residual degrees of freedom follow the fitted family's contract: non-Tweedie
+case/frequency weights use `sum(sample_weight) - edf`, while Tweedie EDM prior
+weights use the observation count minus `edf`. The screen and fitted model
+therefore stay on the same dispersion scale.
 
 Factor margins are read through the fitted spec: levels are indexed in the
 fit's own order, any `LevelGrouping` collapse is applied exactly as the fit

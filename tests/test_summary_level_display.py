@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperGLM
+from superglm import Numeric, SuperGLM
 from superglm.features import Categorical, OrderedCategorical, Spline
 from superglm.features.grouping import collapse_levels
 from superglm.inference.summary import ModelSummary, _CoefRow
@@ -542,6 +542,96 @@ def test_ascii_grouped_summary_uses_short_rows_and_membership_legend():
     assert "G1 = B, C" in text
     assert "G2 = D, E" in text
     assert max(len(line) for line in text.splitlines()) <= 100
+
+
+def test_ascii_summary_separates_columns_for_large_fitted_coefficients():
+    rng = np.random.default_rng(226)
+    x = np.linspace(-1.0, 1.0, 300)
+    X = pd.DataFrame({"x": x})
+    y = 250_000.0 + 3_000.0 * x + rng.normal(0.0, 500.0, len(x))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+
+    text = str(model.summary())
+    header = next(line for line in text.splitlines() if "coef" in line and "std err" in line)
+    intercept = next(line for line in text.splitlines() if "Intercept" in line)
+    header_fields = header.strip("║ ").replace("std err", "std_err").split()
+    intercept_fields = intercept.strip("║ ").split()
+
+    assert abs(float(intercept_fields[1])) >= 1e5
+    assert len(intercept_fields) == len(header_fields)
+    assert all(np.isfinite(float(value)) for value in intercept_fields[1:7])
+    box_lines = [line for line in text.splitlines() if line.startswith(("╔", "║", "╠", "╟", "╚"))]
+    assert len({len(line) for line in box_lines}) == 1
+
+
+def test_ascii_summary_uses_bounded_scientific_notation_for_extreme_nonzero_values():
+    summary = ModelSummary(
+        {},
+        _model_info(),
+        [
+            _CoefRow(
+                name="Extreme",
+                coef=-1e100,
+                se=1e-14,
+                z=-1e114,
+                p=1e-300,
+                ci_low=-1e100,
+                ci_high=1e100,
+            )
+        ],
+    )
+
+    text = str(summary)
+    row = next(line for line in text.splitlines() if "Extreme" in line)
+    fields = row.strip("║ ").split()
+
+    assert len(fields) == 9
+    assert float(fields[1]) == pytest.approx(-1e100)
+    assert float(fields[2]) == pytest.approx(1e-14)
+    assert float(fields[3]) == pytest.approx(-1e114)
+    assert float(fields[4]) == pytest.approx(1e-300)
+    assert float(fields[5]) == pytest.approx(-1e100)
+    assert float(fields[6]) == pytest.approx(1e100)
+    assert all("e" in field.lower() for field in fields[1:7])
+    box_lines = [line for line in text.splitlines() if line.startswith(("╔", "║", "╠", "╟", "╚"))]
+    assert len({len(line) for line in box_lines}) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.finfo(np.float64).max,
+        np.nextafter(np.finfo(np.float64).max, 0.0),
+        -np.finfo(np.float64).max,
+        -np.nextafter(np.finfo(np.float64).max, 0.0),
+    ],
+)
+def test_ascii_summary_float_boundary_tokens_parse_as_finite(value: float):
+    summary = ModelSummary(
+        {},
+        _model_info(),
+        [
+            _CoefRow(
+                name="Boundary",
+                coef=value,
+                se=abs(value),
+                z=value,
+                p=abs(value),
+                ci_low=-abs(value),
+                ci_high=abs(value),
+            )
+        ],
+    )
+
+    row = next(line for line in str(summary).splitlines() if "Boundary" in line)
+    fields = row.strip("║ ").split()
+
+    assert len(fields) == 9
+    assert all(np.isfinite(float(token)) for token in fields[1:7])
 
 
 def test_html_summary_renders_expanded_group_column_and_reference():

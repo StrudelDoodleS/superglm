@@ -58,8 +58,13 @@ def _shape_order_and_sign(kind: str) -> tuple[int, float]:
 
 def _raw_shape_coefficients(spec: _SplineBase, beta: NDArray) -> NDArray:
     beta_arr = np.asarray(beta, dtype=np.float64)
-    if getattr(spec, "_scop_Sigma", None) is not None:
-        raise RuntimeError("Post-fit shape certificates do not support SCOP coordinates")
+    scop_sigma = getattr(spec, "_scop_Sigma", None)
+    if scop_sigma is not None:
+        drop_dim = int(getattr(spec, "_scop_null_dim", 1))
+        return np.asarray(
+            np.asarray(scop_sigma, dtype=np.float64)[:, drop_dim:] @ beta_arr,
+            dtype=np.float64,
+        )
     r_inv = getattr(spec, "_R_inv", None)
     return beta_arr if r_inv is None else np.asarray(r_inv @ beta_arr, dtype=np.float64)
 
@@ -100,6 +105,13 @@ def _uses_span_jump_constraints(spec: _SplineBase, kind: str) -> bool:
     return (order == 1 and int(spec.degree) == 0) or (order == 2 and int(spec.degree) == 1)
 
 
+def _has_natural_curvature_boundaries(spec: _SplineBase, kind: str) -> bool:
+    """Whether endpoint curvature is structurally fixed to zero."""
+    return kind in {"convex", "concave"} and (
+        getattr(spec, "_Z", None) is not None or getattr(spec, "_cr_M", None) is not None
+    )
+
+
 def _shape_probe_points(spec: _SplineBase, kind: str) -> NDArray:
     breakpoints = _shape_breakpoints(spec)
     if _uses_span_jump_constraints(spec, kind):
@@ -133,8 +145,13 @@ def shape_derivative_matrix(spec: _SplineBase, x: NDArray, order: int) -> NDArra
             int(spec.degree),
             extrapolate=False,
         )(points, nu=order)
-    r_inv = getattr(spec, "_R_inv", None)
-    fitted = raw if r_inv is None else raw @ r_inv
+    scop_sigma = getattr(spec, "_scop_Sigma", None)
+    if scop_sigma is not None:
+        drop_dim = int(getattr(spec, "_scop_null_dim", 1))
+        fitted = raw @ np.asarray(scop_sigma, dtype=np.float64)[:, drop_dim:]
+    else:
+        r_inv = getattr(spec, "_R_inv", None)
+        fitted = raw if r_inv is None else raw @ r_inv
     return np.asarray(fitted, dtype=np.float64)
 
 
@@ -172,8 +189,13 @@ def _shape_span_jump_matrix(spec: _SplineBase, points: NDArray, order: int) -> N
         right = np.asarray(raw_basis(float(point)), dtype=np.float64)
         rows[row_index] = right - left
 
-    r_inv = getattr(spec, "_R_inv", None)
-    fitted = rows if r_inv is None else rows @ r_inv
+    scop_sigma = getattr(spec, "_scop_Sigma", None)
+    if scop_sigma is not None:
+        drop_dim = int(getattr(spec, "_scop_null_dim", 1))
+        fitted = rows @ np.asarray(scop_sigma, dtype=np.float64)[:, drop_dim:]
+    else:
+        r_inv = getattr(spec, "_R_inv", None)
+        fitted = rows if r_inv is None else rows @ r_inv
     return np.asarray(fitted, dtype=np.float64)
 
 
@@ -188,7 +210,20 @@ def _shape_constraint_rows(spec: _SplineBase, points: NDArray, kind: str) -> NDA
         # Piecewise-linear convexity/concavity lives in the slope jumps;
         # the classical second derivative is identically zero inside spans.
         return sign * _shape_span_jump_matrix(spec, points, 1)
-    return sign * shape_derivative_matrix(spec, points, order)
+    rows = sign * shape_derivative_matrix(spec, points, order)
+    if order == 2 and _has_natural_curvature_boundaries(spec, kind):
+        # Natural spline boundary curvature is structurally zero. The dense
+        # null-space projection can leave an O(eps) residual in these rows;
+        # normalizing that numerical zero would turn it into an O(1) signed
+        # certificate slack. Keep the adjacent interior spans in the
+        # certificate, but represent the exact endpoint equalities as zero.
+        lo = float(getattr(spec, "_lo"))
+        hi = float(getattr(spec, "_hi"))
+        boundary = (points == lo) | (points == hi)
+        if np.any(boundary):
+            rows = rows.copy()
+            rows[boundary] = 0.0
+    return rows
 
 
 def _certificate_candidates(spec: _SplineBase, beta: NDArray, kind: str) -> NDArray:
@@ -292,13 +327,25 @@ def shape_constraint_certificate(
     rows_kept = rows[keep]
     values = rows_kept @ beta_arr
     scaled = normalized_rows @ beta_arr
+    raw_worst_index = int(np.argmin(values))
     scaled_worst_index = int(np.argmin(scaled))
     kept_points = candidates[keep]
+    if _has_natural_curvature_boundaries(spec, kind) and scaled[scaled_worst_index] >= 0.0:
+        # The exact minimum over the closed fitted interval is attained at
+        # both natural boundaries, where the constrained second derivative is
+        # zero. The nonzero rows above certify every interior span.
+        return ShapeConstraintCertificate(
+            kind=kind,
+            minimum_signed_derivative=0.0,
+            minimum_scaled_slack=0.0,
+            worst_x=float(getattr(spec, "_lo")),
+            maximum_row_norm=float(np.max(row_norms[keep])),
+        )
     return ShapeConstraintCertificate(
         kind=kind,
-        minimum_signed_derivative=float(values[scaled_worst_index]),
+        minimum_signed_derivative=float(values[raw_worst_index]),
         minimum_scaled_slack=float(scaled[scaled_worst_index]),
-        worst_x=float(kept_points[scaled_worst_index]),
+        worst_x=float(kept_points[raw_worst_index]),
         maximum_row_norm=float(np.max(row_norms[keep])),
     )
 

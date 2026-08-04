@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Hashable, Mapping, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pandas as pd
 from numpy.typing import NDArray
@@ -67,7 +68,7 @@ class SuperGLM:
         spline_penalty: float | None = None,
         penalty_features: str | list[str] | None = None,
         # Feature configuration
-        features: dict[str, FeatureSpec] | None = None,
+        features: Mapping[Hashable, FeatureSpec] | None = None,
         splines: list[str] | None = None,
         n_knots: int | list[int] = 10,
         degree: int = 3,
@@ -113,8 +114,8 @@ class SuperGLM:
         penalty_features : str or list[str], optional
             Restrict the selection penalty to specific feature or group names.
             ``None`` (default) applies to all penalizable groups.
-        features : dict[str, FeatureSpec], optional
-            Explicit feature specifications mapping column names to feature
+        features : mapping[hashable, FeatureSpec], optional
+            Explicit feature specifications mapping hashable column labels to feature
             objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
             Mutually exclusive with *splines*.
         splines : list[str], optional
@@ -431,8 +432,10 @@ class SuperGLM:
             For Tweedie, these are finite, strictly positive EDM prior weights:
             ``Y_i ~ Tw_p(mu_i, phi / w_i)``, so
             ``Var(Y_i | x_i) = phi * mu_i**p / w_i``. They are not replication counts;
-            zero or non-finite weights are rejected. Non-Tweedie families retain their
-            existing weighting behavior.
+            zero or non-finite weights are rejected. Other families use non-negative
+            case/frequency weights: once feature geometry is fixed, integer weights are
+            likelihood-equivalent to row replication, and estimated dispersion uses
+            ``sum(w) - edf``.
 
             Weights affect fitting but do not enter the linear predictor or
             automatically scale the conditional mean. The model mean is
@@ -549,8 +552,10 @@ class SuperGLM:
             For Tweedie, these are finite, strictly positive EDM prior weights with
             ``Var(Y_i | x_i) = phi * mu_i**p / w_i``; they are not replication counts.
             Weights affect fitting but do not enter the linear predictor or
-            automatically scale the conditional mean. Non-Tweedie families retain their
-            existing weighting behavior.
+            automatically scale the conditional mean. Other families use non-negative
+            case/frequency weights: once feature geometry is fixed, integer weights are
+            likelihood-equivalent to row replication, and estimated dispersion uses
+            ``sum(w) - edf``.
         offset : array-like, optional
             Offset term.
         max_reml_iter : int
@@ -754,7 +759,7 @@ class SuperGLM:
 
     def random_effects(
         self,
-        name: str,
+        name: Hashable,
         *,
         exposure: NDArray | None = None,
         X: FrameLike | None = None,
@@ -896,6 +901,13 @@ class SuperGLM:
 
         ``level_display="expanded"`` shows exact original categorical levels.
         Use ``"grouped"`` for one row per fitted group plus a membership legend.
+
+        Coefficient rows use fitted-family covariance: known-scale families
+        retain ``phi=1`` and estimated-scale families use fitted ``phi``.
+        Pearson quasi-likelihood diagnostics are available separately from
+        :meth:`metrics` through ``coefficient_se``, ``intercept_se``, and
+        ``feature_se``. The dict-like ``standard_errors`` payload labels its
+        coefficient-SE scale explicitly as ``"fitted-family"``.
         """
         return report_ops.summary(
             self,
@@ -904,13 +916,13 @@ class SuperGLM:
             level_display=level_display,
         )
 
-    def _feature_groups(self, name: str) -> list[GroupSlice]:
+    def _feature_groups(self, name: Hashable) -> list[GroupSlice]:
         """Get all groups belonging to a feature."""
-        return report_ops.feature_groups(self, name)
+        return report_ops.feature_groups(self, cast(Any, name))
 
-    def reconstruct_feature(self, name: str) -> dict[str, Any]:
+    def reconstruct_feature(self, name: Hashable) -> dict[str, Any]:
         """Reconstruct a fitted feature's curve or effect on its original scale."""
-        return report_ops.reconstruct_feature(self, name)
+        return report_ops.reconstruct_feature(self, cast(Any, name))
 
     def knot_summary(self) -> dict[str, dict[str, Any]]:
         """Return fitted knot metadata for all spline features."""
@@ -937,7 +949,11 @@ class SuperGLM:
         *,
         test: str = "Chisq",
     ) -> pd.DataFrame:
-        """Drop-one deviance analysis for each feature."""
+        """Drop-one deviance analysis for each feature.
+
+        At exactly zero fitted dispersion, a zero deviance change has statistic
+        zero and p-value one; a nonzero deviance change is undefined and raises.
+        """
         return explain_ops.drop1(self, X, y, sample_weight, offset, test=test)
 
     def refit_unpenalised(
@@ -982,7 +998,7 @@ class SuperGLM:
 
     def simultaneous_bands(
         self,
-        feature: str,
+        feature: Hashable,
         *,
         alpha: float = 0.05,
         n_sim: int = 10_000,
@@ -996,7 +1012,7 @@ class SuperGLM:
 
     def term_inference(
         self,
-        name: str,
+        name: Hashable,
         *,
         with_se: bool = True,
         simultaneous: bool = False,
@@ -1110,7 +1126,7 @@ class SuperGLM:
 
     def plot(
         self,
-        terms: str | list[str] | None = None,
+        terms: Hashable | Sequence[Hashable] | None = cast(Any, plot_ops.TERMS_UNSET),
         *,
         kind: str = "global",
         ci: str | bool | None = "pointwise",
@@ -1146,8 +1162,9 @@ class SuperGLM:
 
         Parameters
         ----------
-        terms : str, list of str, or None
-            Which term(s) to plot.  ``None`` plots all main effects.
+        terms : hashable label, list of labels, or None
+            Which term(s) to plot. ``None`` plots all main effects unless the
+            fitted model has a feature whose exact column label is ``None``.
         kind : {"global", "local"}
             ``"global"`` shows model-wide fitted effects (default).
             ``"local"`` is reserved for per-row explanations (not yet
@@ -1157,9 +1174,11 @@ class SuperGLM:
         X : pandas or eager Polars DataFrame, optional
             Training data for density overlays.
         sample_weight : array-like, optional
-            Frequency weights / sample_weight for density overlays.
+            Observation weights for density overlays. When reusing fitting
+            weights, their semantics remain family-specific: case/frequency
+            weights for non-Tweedie families and EDM prior weights for Tweedie.
         show_density : bool
-            Show sample_weight/observation density (strip for continuous,
+            Show sample-weighted observation density (strip for continuous,
             bars for categorical).  Default True.
         show_knots : bool
             Show interior knot ticks (spline terms only).
@@ -1278,7 +1297,7 @@ class SuperGLM:
         Four panels using quantile residuals (Dunn & Smyth 1996):
 
         1. Q-Q with simulation envelope
-        2. Calibration (exposure-weighted observed vs predicted)
+        2. Calibration (sample-weighted observed vs predicted)
         3. Residuals vs Linear Predictor
         4. Residual distribution (histogram + N(0,1) overlay)
 
@@ -1289,7 +1308,9 @@ class SuperGLM:
         y : NDArray
             Response vector.
         sample_weight : NDArray or None
-            Optional observation weights (exposure for frequency models).
+            Family-specific observation weights: nonnegative case/frequency
+            weights for non-Tweedie families and strictly positive EDM prior
+            weights for Tweedie.
         offset : NDArray or None
             Optional offset.
         n_sim : int
@@ -1327,7 +1348,7 @@ class SuperGLM:
 
     def plot_data(
         self,
-        terms: str | list[str] | None = None,
+        terms: Hashable | Sequence[Hashable] | None = cast(Any, plot_ops.TERMS_UNSET),
         *,
         kind: str = "global",
         ci: str | bool | None = "pointwise",
@@ -1395,6 +1416,21 @@ class SuperGLM:
     ) -> NDArray:
         """Private exact canonical predictor on the link scale."""
         return base.predict_eta_exact(self, X, offset, random_effects=random_effects)
+
+    def _predict_eta_raw_exact(
+        self,
+        X: FrameLike,
+        offset: NDArray | None = None,
+        *,
+        random_effects: str = "conditional",
+    ) -> NDArray:
+        """Private unstabilized exact predictor for raw link-scale APIs."""
+        return base.predict_eta_raw_exact(
+            self,
+            X,
+            offset,
+            random_effects=random_effects,
+        )
 
     def _predict_eta_fast_discrete(
         self,
@@ -1474,11 +1510,11 @@ class SuperGLM:
         *,
         n_grid: int = 500,
     ) -> SuperGLM:
-        """Repair monotone-annotated spline terms after fitting.
+        """Repair post-fit shape-constrained spline terms after fitting.
 
         This is a manual, post-fit repair step. It finds all spline features
-        with ``monotone='increasing'`` or ``monotone='decreasing'``, applies
-        weighted isotonic regression to the fitted curve, and projects the
+        configured with ``Constraint.postfit.*``, applies the corresponding
+        weighted shape projection to the fitted curve, and projects the
         repaired curve back to spline coefficients.
 
         Idempotent: calling twice does not re-repair already-repaired features.
@@ -1488,16 +1524,18 @@ class SuperGLM:
         X : pandas or eager Polars DataFrame
             Training data (used to compute density-based grid weights).
         sample_weight : array-like, optional
-            Frequency weights.
+            Family-specific fitting weights used to weight the post-fit
+            projection: case/frequency weights for non-Tweedie families and
+            EDM prior weights for Tweedie.
         offset : array-like, optional
             Offset term (unused, reserved for deviance computation).
         n_grid : int
-            Grid resolution for isotonic regression (default 500).
+            Grid resolution for the shape repair (default 500).
 
         Returns
         -------
         SuperGLM
-            The model (self), with monotone repairs stored.
+            The model (self), with post-fit shape repairs stored.
         """
         return monotone_ops.monotonize(self, X, sample_weight, offset, n_grid=n_grid)
 

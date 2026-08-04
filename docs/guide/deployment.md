@@ -71,13 +71,11 @@ train_df = pd.DataFrame(
     {
         "region": ["A", "B", "A", "B"] * 40,
         "term_months": [12.0, 12.0, 36.0, 36.0] * 40,
-        "exposure": np.linspace(0.5, 2.0, 160),
     }
 )
-train_df["paid"] = np.array([0.3, 0.5, 1.1, 1.5] * 40) * train_df["exposure"]
 
-y = train_df["paid"].to_numpy() / train_df["exposure"].to_numpy()
-w = train_df["exposure"].to_numpy()
+y = np.array([0.3, 0.5, 1.1, 1.5] * 40)
+w = np.array([1.0, 2.0, 1.0, 2.0] * 40)  # Gamma case/frequency weights
 offset = np.log(train_df["term_months"].to_numpy() / 12.0)
 
 model = SuperGLM(
@@ -136,7 +134,7 @@ If no `offset_source` is supplied, the backward-compatible `Offset Multiplier`
 fallback remains. It contains exact multiplier levels when the fitted offset has
 fewer than 20 distinct multipliers. If the fitted offset has many distinct values,
 the exporter bins the multiplier into the selected rating-table bin count and
-writes the exposure-weighted average multiplier per bin.
+writes the sample-weighted average multiplier per bin.
 
 ## Production Framing
 
@@ -251,14 +249,14 @@ pred = pipe.predict(score_df)
 That is why the fitted estimator, not a detached transformer, is the thing you
 deploy.
 
-## Runnable Examples
+## Executable Round-Trip Checks
 
 ```bash
-uv run python scratch/examples/deployment_roundtrip.py
-uv run python scratch/examples/sklearn_pipeline_roundtrip.py
+uv run pytest tests/test_core.py -q -k pickle_preserves_knots
+uv run pytest tests/test_sklearn.py -q -k pickle_roundtrip
 ```
 
-Those scripts:
+Those repository checks:
 
 1. fit a spline-based Poisson model
 2. serialize it with `pickle`

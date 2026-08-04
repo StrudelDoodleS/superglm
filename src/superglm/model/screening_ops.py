@@ -56,10 +56,11 @@ The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
 without this scaling the ``edf0`` noise floor is only honest for
 unit-dispersion families and a dispersed Gaussian null would swamp the scan.
-The Pearson denominator is ``n - edf`` per the sample_weight=exposure
-contract (Var(y) = phi*V(mu)/w), deliberately NOT the frequency-weight
-``sum(w) - edf`` convention of ``solvers.dispersion`` — measured on
-known-dispersion exposure nulls, only ``n - edf`` is calibrated.
+The Pearson denominator follows the same family-specific weight contract as
+the fitted model.  Non-Tweedie families use case/frequency weights and
+therefore ``sum(w) - edf``; Tweedie uses EDM prior weights and therefore the
+positive-observation count minus ``edf``.  Keeping the screen and published
+fit on one scale is essential because ``T / phi`` drives the ranking.
 
 Per-feature work (unique support, codes, marginal basis menus, marginal
 penalties — level codes and the contrast menu for a categorical margin, the
@@ -81,7 +82,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
-from superglm.distributions import _VARIANCE_FLOOR, validate_response
+from superglm.distributions import _VARIANCE_FLOOR, Tweedie, validate_response
 from superglm.features.categorical import (
     Categorical,
     _resolve_categorical_labels,
@@ -102,6 +103,7 @@ from superglm.screening import (
 )
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._structured import spline_cat_moments, structured_ladder
+from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
 _RESULT_COLUMNS = [
     "feature_a",
@@ -463,8 +465,7 @@ def screen_interactions(
     is scaled by the fit's
     Pearson dispersion estimate before normalization (see module docstring);
     the value used is attached as ``table.attrs["phi"]`` and can be
-    overridden with ``phi=`` (e.g. a frequency-weight user supplying
-    ``sum(w) - edf`` semantics).
+    overridden with ``phi=`` for a deliberately different calibration study.
 
     Returns a frame sorted by ``z`` (descending) with one row per screened
     pair: ``feature_a, feature_b, kind, statistic, z, edf0, lambda0, n_cells,
@@ -578,6 +579,10 @@ def screen_interactions(
         )
     if not np.all(np.isfinite(y)):
         raise ValueError("screen_interactions requires finite y")
+    if isinstance(model._distribution, Tweedie) and (
+        not np.all(np.isfinite(weights)) or np.any(weights <= 0.0)
+    ):
+        raise ValueError("Tweedie sample_weight must be finite and strictly positive")
     if not np.all(np.isfinite(weights)) or np.any(weights < 0.0) or not np.any(weights > 0.0):
         raise ValueError("sample_weight must be finite and non-negative with a positive sum")
     budgets = _validated_budgets(edf0)
@@ -739,22 +744,19 @@ def screen_interactions(
     var_mu = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
     working_weights = weights * dmu_deta**2 / var_mu
 
-    # Residual d.f. is n - edf, NOT the frequency-weight form sum(w) - edf of
-    # pearson_residual_degrees_of_freedom: the screen follows the library's
-    # protected sample_weight=exposure contract, under which Var(y) =
-    # phi*V(mu)/w and E[Pearson] = n*phi.  Measured on known-phi exposure
-    # nulls, n - edf tracks truth exactly while sum(w) - edf misreads phi 1.0
-    # as ~1.55 and demotes refit-confirmed structure (see the plan log,
-    # dispersion-denominator entry).
+    # Use the exact same family-specific residual-d.f. contract as fitting.
+    # A different denominator here changes every T / phi score even though the
+    # coefficients and working problem are otherwise identical.
     if phi is not None:
         phi_hat = float(phi)
     else:
         edf_mains = float(getattr(model._result, "effective_df", float("nan")))
-        # Zero-weight rows contribute exactly zero to the Pearson numerator,
-        # so only positive-weight observations count toward the residual d.f.
-        # (the docstring's "n - edf" means exactly this n).
-        n_eff = float(np.count_nonzero(weights))
-        denom = n_eff - edf_mains if np.isfinite(edf_mains) else n_eff
+        resolved_edf = edf_mains if np.isfinite(edf_mains) else 0.0
+        denom = pearson_residual_degrees_of_freedom(
+            distribution,
+            weights,
+            resolved_edf,
+        )
         phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
         phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))
 

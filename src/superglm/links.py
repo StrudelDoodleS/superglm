@@ -6,6 +6,7 @@ mean (mu), plus the derivative needed by the PIRLS working weights.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
@@ -178,15 +179,16 @@ class CloglogLink:
     """
 
     def link(self, mu: NDArray) -> NDArray:
-        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
-        return np.log(-np.log(1 - mu_safe))
+        mu_safe = np.clip(np.asarray(mu, dtype=np.float64), 1e-15, 1 - 1e-15)
+        return np.log(-np.log1p(-mu_safe))
 
     def inverse(self, eta: NDArray) -> NDArray:
-        return 1 - np.exp(-np.exp(eta))
+        with np.errstate(over="ignore"):
+            return -np.expm1(-np.exp(np.asarray(eta, dtype=np.float64)))
 
     def deriv(self, mu: NDArray) -> NDArray:
-        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
-        return 1.0 / ((1 - mu_safe) * (-np.log(1 - mu_safe)))
+        mu_safe = np.clip(np.asarray(mu, dtype=np.float64), 1e-15, 1 - 1e-15)
+        return 1.0 / ((1.0 - mu_safe) * (-np.log1p(-mu_safe)))
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
         # d/deta [1 - exp(-exp(eta))] = exp(eta) * exp(-exp(eta))
@@ -212,25 +214,65 @@ class CauchitLink:
     """
 
     def link(self, mu: NDArray) -> NDArray:
-        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
-        return np.tan(np.pi * (mu_safe - 0.5))
+        mu_safe = np.clip(np.asarray(mu, dtype=np.float64), 1e-15, 1 - 1e-15)
+        result = np.empty_like(mu_safe)
+        lower = mu_safe < 0.25
+        upper = mu_safe > 0.75
+        central = ~(lower | upper)
+        result[lower] = -1.0 / np.tan(np.pi * mu_safe[lower])
+        upper_tail = np.maximum(1.0 - mu_safe[upper], 1e-15)
+        result[upper] = 1.0 / np.tan(np.pi * upper_tail)
+        result[central] = np.tan(np.pi * (mu_safe[central] - 0.5))
+        return result
 
     def inverse(self, eta: NDArray) -> NDArray:
-        return 0.5 + np.arctan(eta) / np.pi
+        eta_values = np.asarray(eta, dtype=np.float64)
+        result = np.empty_like(eta_values)
+        lower = eta_values < -1.0
+        upper = eta_values > 1.0
+        central = ~(lower | upper)
+        result[lower] = np.arctan(-1.0 / eta_values[lower]) / np.pi
+        result[upper] = 1.0 - np.arctan(1.0 / eta_values[upper]) / np.pi
+        result[central] = 0.5 + np.arctan(eta_values[central]) / np.pi
+        return result
 
     def deriv(self, mu: NDArray) -> NDArray:
-        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
-        return np.pi / np.cos(np.pi * (mu_safe - 0.5)) ** 2
+        eta = self.link(mu)
+        return np.pi * (1.0 + eta**2)
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
-        return 1.0 / (np.pi * (1 + eta**2))
+        eta_values = np.asarray(eta, dtype=np.float64)
+        result = np.empty_like(eta_values)
+        large = np.abs(eta_values) > 1.0
+        reciprocal = 1.0 / eta_values[large]
+        result[large] = reciprocal**2 / (np.pi * (1.0 + reciprocal**2))
+        result[~large] = 1.0 / (np.pi * (1.0 + eta_values[~large] ** 2))
+        return result
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
-        return -2 * eta / (np.pi * (1 + eta**2) ** 2)
+        eta_values = np.asarray(eta, dtype=np.float64)
+        result = np.empty_like(eta_values)
+        large = np.abs(eta_values) > 1.0
+        reciprocal = 1.0 / eta_values[large]
+        result[large] = -2.0 * reciprocal**3 / (np.pi * (1.0 + reciprocal**2) ** 2)
+        result[~large] = -2.0 * eta_values[~large] / (np.pi * (1.0 + eta_values[~large] ** 2) ** 2)
+        return result
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = 2(3η² - 1) / (π(1+η²)³). Wood (2011) Appendix D."""
-        return 2 * (3 * eta**2 - 1) / (np.pi * (1 + eta**2) ** 3)
+        eta_values = np.asarray(eta, dtype=np.float64)
+        result = np.empty_like(eta_values)
+        large = np.abs(eta_values) > 1.0
+        reciprocal = 1.0 / eta_values[large]
+        result[large] = (
+            2.0 * reciprocal**4 * (3.0 - reciprocal**2) / (np.pi * (1.0 + reciprocal**2) ** 3)
+        )
+        result[~large] = (
+            2.0
+            * (3.0 * eta_values[~large] ** 2 - 1.0)
+            / (np.pi * (1.0 + eta_values[~large] ** 2) ** 3)
+        )
+        return result
 
 
 class InverseLink:
@@ -298,7 +340,8 @@ class SqrtLink:
         return eta**2
 
     def deriv(self, mu: NDArray) -> NDArray:
-        return 0.5 / np.sqrt(np.maximum(mu, 1e-15))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return 0.5 / np.abs(np.sqrt(np.asarray(mu)))
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
         return 2.0 * eta
@@ -333,6 +376,8 @@ class PowerLink:
         return np.power(mu, self.power)
 
     def inverse(self, eta: NDArray) -> NDArray:
+        if self.power == 1.0:
+            return np.asarray(eta).copy()
         return np.power(np.maximum(eta, 1e-15), 1.0 / self.power)
 
     def deriv(self, mu: NDArray) -> NDArray:
@@ -340,16 +385,22 @@ class PowerLink:
 
     def deriv_inverse(self, eta: NDArray) -> NDArray:
         p = self.power
+        if p == 1.0:
+            return np.ones_like(eta)
         return (1.0 / p) * np.power(np.maximum(eta, 1e-15), (1.0 / p) - 1)
 
     def deriv2_inverse(self, eta: NDArray) -> NDArray:
         p = self.power
+        if p == 1.0:
+            return np.zeros_like(eta)
         q = 1.0 / p
         return q * (q - 1) * np.power(np.maximum(eta, 1e-15), q - 2)
 
     def deriv3_inverse(self, eta: NDArray) -> NDArray:
         """d³μ/dη³ = q(q-1)(q-2)·η^{q-3}, q=1/p. Wood (2011) Appendix D."""
         p = self.power
+        if p == 1.0:
+            return np.zeros_like(eta)
         q = 1.0 / p
         return q * (q - 1) * (q - 2) * np.power(np.maximum(eta, 1e-15), q - 3)
 
@@ -399,6 +450,86 @@ class NegativeBinomialLink:
 
 _LOG_LINK_ETA_MIN = -80.0
 _LOG_LINK_ETA_MAX = 80.0
+_SQRT_LINK_ETA_MAX = 0.5 * float(np.sqrt(np.finfo(np.float64).max))
+_CAUCHIT_PROBABILITY_EPS = 1e-15
+_CAUCHIT_LINK_ETA_MAX = float(abs(CauchitLink().link(np.array([_CAUCHIT_PROBABILITY_EPS]))[0]))
+_CLOGLOG_PROBABILITY_EPS = 1e-6
+_CLOGLOG_LINK_ETA_MAX = float(CloglogLink().link(np.array([1.0 - _CLOGLOG_PROBABILITY_EPS]))[0])
+
+
+def _identity_eta(eta: NDArray, _link: Link) -> NDArray:
+    return eta
+
+
+def _log_eta(eta: NDArray, _link: Link) -> NDArray:
+    return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
+
+
+def _binary_eta(eta: NDArray, _link: Link) -> NDArray:
+    # Keeps inverse-link derivatives away from numerical zero in IRLS.
+    return np.clip(eta, -20.0, 20.0)
+
+
+def _cloglog_eta(eta: NDArray, _link: Link) -> NDArray:
+    # The positive tail saturates much earlier than logit: cap it at the
+    # representable probability endpoint used by CloglogLink.link().
+    return np.clip(
+        np.asarray(eta, dtype=np.float64),
+        -20.0,
+        _CLOGLOG_LINK_ETA_MAX,
+    )
+
+
+def _cauchit_eta(eta: NDArray, _link: Link) -> NDArray:
+    # Unlike the exponential-tail links, cauchit's inverse approaches the
+    # endpoints polynomially.  Its useful eta range is therefore set by the
+    # same probability resolution used by CauchitLink.link(), not logit's band.
+    return np.clip(
+        np.asarray(eta, dtype=np.float64),
+        -_CAUCHIT_LINK_ETA_MAX,
+        _CAUCHIT_LINK_ETA_MAX,
+    )
+
+
+def _positive_eta(eta: NDArray, _link: Link) -> NDArray:
+    return np.clip(eta, 1e-12, 1e12)
+
+
+def _sqrt_eta(eta: NDArray, _link: Link) -> NDArray:
+    # The inverse μ = η² has two fitted branches even though the forward link
+    # returns the principal square root.  Preserve both and bound only where
+    # squaring would overflow, rather than inheriting a binary-link band.
+    return np.clip(
+        np.asarray(eta, dtype=np.float64),
+        -_SQRT_LINK_ETA_MAX,
+        _SQRT_LINK_ETA_MAX,
+    )
+
+
+def _power_eta(eta: NDArray, link: Link) -> NDArray:
+    assert isinstance(link, PowerLink)
+    if link.power == 1.0:
+        return eta
+    return np.clip(eta, 1e-12, 1e12)
+
+
+def _negative_binomial_eta(eta: NDArray, _link: Link) -> NDArray:
+    return np.clip(eta, -30.0, -1e-10)
+
+
+_STABILIZE_ETA_BY_LINK_TYPE: dict[type, Callable[[NDArray, Link], NDArray]] = {
+    IdentityLink: _identity_eta,
+    LogLink: _log_eta,
+    LogitLink: _binary_eta,
+    ProbitLink: _binary_eta,
+    CloglogLink: _cloglog_eta,
+    CauchitLink: _cauchit_eta,
+    InverseLink: _positive_eta,
+    InverseSquaredLink: _positive_eta,
+    SqrtLink: _sqrt_eta,
+    PowerLink: _power_eta,
+    NegativeBinomialLink: _negative_binomial_eta,
+}
 
 
 def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
@@ -409,23 +540,10 @@ def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
     above float64 subnormal range for all practical distributions, and well
     beyond the -37 / -43 regime seen in real actuarial data.
     """
-    if isinstance(link, IdentityLink):
-        return eta
-    if isinstance(link, LogLink):
-        return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
-    if isinstance(link, LogitLink | ProbitLink | CloglogLink):
-        # Logit/probit/cloglog: mu = sigmoid(eta), dmu/deta → 0 at extremes.
-        # [-20, 20] keeps mu in ~[2e-9, 1-2e-9], safe for (y-mu)/dmu.
-        return np.clip(eta, -20.0, 20.0)
-    if isinstance(link, InverseLink | InverseSquaredLink):
-        return np.clip(eta, 1e-12, 1e12)
-    if isinstance(link, PowerLink):
-        if link.power == 1.0:
-            return eta
-        return np.clip(eta, 1e-12, 1e12)
-    if isinstance(link, NegativeBinomialLink):
-        return np.clip(eta, -30.0, -1e-10)
-    # Catch-all for custom links (conservative)
+    for link_type, stabilizer in _STABILIZE_ETA_BY_LINK_TYPE.items():
+        if isinstance(link, link_type):
+            return stabilizer(eta, link)
+    # Unregistered custom links retain a conservative fallback.
     return np.clip(eta, -20.0, 20.0)
 
 

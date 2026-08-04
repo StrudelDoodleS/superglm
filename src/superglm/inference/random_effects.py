@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Any
 
@@ -151,12 +152,12 @@ def vectorized_conditional_unpooled_effect(
     return effects
 
 
-def _resolve_random_effect(model, name: str) -> tuple[GroupSlice, RandomEffect]:
+def _resolve_random_effect(model, name: Hashable) -> tuple[GroupSlice, RandomEffect]:
     matches: list[tuple[GroupSlice, RandomEffect]] = []
     for group in model._groups:
         if group.name != name and group.feature_name != name:
             continue
-        spec = model._specs.get(group.feature_name or group.name)
+        spec = model._specs.get(group.feature_name)
         if isinstance(spec, RandomEffect):
             matches.append((group, spec))
     if not matches:
@@ -246,7 +247,7 @@ def _reporting_rows(
         offset = model._fit_offset
 
     frame = as_eager_frame(X)
-    feature_name = group.feature_name or group.name
+    feature_name = group.feature_name
     codes = spec._prediction_codes(frame.column_array(feature_name))
     if np.any(codes < 0):
         raise ValueError("random-effect reporting rows contain unseen fitted levels")
@@ -290,7 +291,7 @@ def _reporting_rows(
 
 def random_effect_result(
     model,
-    name: str,
+    name: Hashable,
     *,
     exposure: NDArray | None = None,
     X=None,

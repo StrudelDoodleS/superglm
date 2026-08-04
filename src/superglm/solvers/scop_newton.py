@@ -5,8 +5,9 @@ One damped Newton step on the penalized WLS objective in SCOP solver space.
 The objective is:
     L = 0.5 * sum(W * (z - B @ gamma_eff(beta))^2) + 0.5 * lambda * beta^T S beta
 
-where gamma_eff = reparam.forward(beta) is the nonlinear SCOP map through
-the exp-cumsum chain.
+where gamma_eff = reparam.forward(beta) is the elementwise SCOP map. Shape
+coordinates use an exponential map; a curvature-constrained term also keeps
+one identity-mapped affine slope coordinate.
 
 Full Newton (not Gauss-Newton) is required because Fisher scoring causes
 convergence problems for SCOP terms (Pya & Wood 2015, p. 6, lines 470-476).
@@ -328,9 +329,9 @@ def scop_newton_step(
     beta = beta_scop.copy()
 
     # --- Forward map and residual ---
-    # forward() = exp(beta), jacobian is diagonal: diag(exp(beta))
-    gamma_eff = reparam.forward(beta)  # exp(beta), (q_eff,)
-    j_diag = gamma_eff  # d(exp(b))/db = exp(b) = gamma_eff
+    gamma_eff = reparam.forward(beta)
+    j_diag = reparam.jacobian_diagonal(beta)
+    second_diag = reparam.second_derivative_diagonal(beta)
 
     eta_bin = B_scop @ gamma_eff  # (n_bins,) or (n,)
     if bin_idx is not None:
@@ -389,15 +390,19 @@ def scop_newton_step(
     H_gn = jj * BtWB + lambda2 * S_scop  # elementwise Hadamard, not matmul
 
     # --- Second-order correction (full Newton) ---
-    # H_second[i,i] = grad_data[i] (diagonal correction)
-    H_full = H_gn + np.diag(grad_data)
+    second_order_data = -(second_diag * r_eff)
+    H_full = H_gn + np.diag(second_order_data)
 
     # --- Newton step from the augmented factor (rank truncated first) ---
     factor = _augmented_factor(
         np.sqrt(np.maximum(factor_weights, 0.0))[:, None] * (B_scop * j_diag[None, :]),
         np.sqrt(max(lambda2, 0.0)) * _penalty_root(S_scop),
     )
-    step, used_fisher, discarded = _truncated_factor_step(factor, grad_data, grad)
+    step, used_fisher, discarded = _truncated_factor_step(
+        factor,
+        second_order_data,
+        grad,
+    )
     if step is None:
         # No identifiable direction at all: fall back to a short gradient step
         # rather than claiming a Newton direction.
@@ -676,13 +681,13 @@ def _solve_step_minres(
 def _gauss_newton_hessian(
     H: NDArray,
     joint_slices: list[slice],
-    grad_datas: list[NDArray],
+    second_order_datas: list[NDArray],
 ) -> NDArray:
     """Strip the second-order Newton term, leaving the PSD Gauss-Newton part."""
     gauss_newton = H.copy()
     for idx, sl_i in enumerate(joint_slices):
         block = gauss_newton[sl_i, sl_i].copy()
-        block[np.diag_indices_from(block)] -= grad_datas[idx]
+        block[np.diag_indices_from(block)] -= second_order_datas[idx]
         gauss_newton[sl_i, sl_i] = block
     return gauss_newton
 
@@ -690,7 +695,7 @@ def _gauss_newton_hessian(
 def _gauss_newton_conditioning(
     H: NDArray,
     joint_slices: list[slice],
-    grad_datas: list[NDArray],
+    second_order_datas: list[NDArray],
 ) -> float:
     """Smallest-to-largest eigenvalue of the Gauss-Newton Gram.
 
@@ -698,7 +703,7 @@ def _gauss_newton_conditioning(
     beside the ``n x q`` factor it decides whether to build. Zero when the
     Gram is not usable at all, which routes to the factor.
     """
-    eigenvalues = np.linalg.eigvalsh(_gauss_newton_hessian(H, joint_slices, grad_datas))
+    eigenvalues = np.linalg.eigvalsh(_gauss_newton_hessian(H, joint_slices, second_order_datas))
     if eigenvalues.size == 0:
         return 0.0
     largest = float(eigenvalues[-1])
@@ -757,7 +762,7 @@ def _solve_joint_step(
     grad: NDArray,
     scop_items: list[tuple[int, dict]],
     joint_slices: list[slice],
-    grad_datas: list[NDArray],
+    second_order_datas: list[NDArray],
     BtWBs: list[NDArray],
     j_diags: list[NDArray],
     lambdas_list: list[float],
@@ -784,7 +789,11 @@ def _solve_joint_step(
             step = _solve_step(H, grad)
             if step is not None:
                 return step, False, nothing_discarded, "direct_gram", 0
-            gauss_newton = _gauss_newton_hessian(H, joint_slices, grad_datas)
+            gauss_newton = _gauss_newton_hessian(
+                H,
+                joint_slices,
+                second_order_datas,
+            )
             return _solve_step(gauss_newton, grad), True, nothing_discarded, "direct_gram", 0
         step, used_fisher, discarded = _truncated_factor_step(make_factor(), second_order, grad)
         return step, used_fisher, discarded, "direct", 0
@@ -1189,15 +1198,19 @@ def scop_joint_newton_step(
     q_total = offset
     objective_cache = _build_joint_objective_cache(scop_items, W, z_scop)
 
-    # --- Step 1: Forward map, per-group j_diag, compute shared residual ---
+    # --- Step 1: Forward map and derivatives, compute shared residual ---
     betas = []
+    gammas = []
     j_diags = []
+    second_diags = []
     etas = []
     for gi, st in scop_items:
         beta_i = st["beta_scop"].copy()
         betas.append(beta_i)
         gamma_i = st["reparam"].forward(beta_i)
-        j_diags.append(gamma_i)  # d(exp(b))/db = exp(b) = gamma
+        gammas.append(gamma_i)
+        j_diags.append(st["reparam"].jacobian_diagonal(beta_i))
+        second_diags.append(st["reparam"].second_derivative_diagonal(beta_i))
         eta_bin_i = st["B_scop"] @ gamma_i
         eta_i = eta_bin_i
         if st["bin_idx"] is not None:
@@ -1215,6 +1228,7 @@ def scop_joint_newton_step(
     BtWBs = []
     r_effs = []
     grad_datas = []
+    second_order_datas = []
     for idx, (gi, st) in enumerate(scop_items):
         B_i = st["B_scop"]
         bi_i = st["bin_idx"]
@@ -1235,6 +1249,7 @@ def scop_joint_newton_step(
         r_effs.append(r_eff_i)
         grad_data_i = -(j_i * r_eff_i)
         grad_datas.append(grad_data_i)
+        second_order_datas.append(-(second_diags[idx] * r_eff_i))
 
     # --- Step 3: Assemble joint Hessian and gradient ---
     H = np.zeros((q_total, q_total))
@@ -1248,10 +1263,10 @@ def scop_joint_newton_step(
         lam_i = lambdas_list[idx]
         beta_i = betas[idx]
 
-        # Diagonal block: J^T BtWB J + lambda*S + diag(grad_data)
+        # Diagonal block: J^T BtWB J + lambda*S + map-curvature correction.
         jj_ii = j_i[:, None] * j_i[None, :]
         block = jj_ii * BtWBs[idx] + lam_i * st["S_scop"]
-        block[np.diag_indices_from(block)] += grad_datas[idx]
+        block[np.diag_indices_from(block)] += second_order_datas[idx]
         H[sl_i, sl_i] = block
 
         # Gradient
@@ -1288,7 +1303,7 @@ def scop_joint_newton_step(
         objective_cache.diag_btwb = BtWBs
         objective_cache.cross_btwb = cross_btwb
         obj_before = _joint_objective_from_gammas(
-            j_diags,
+            gammas,
             beta_joint,
             joint_slices,
             lambdas_list,
@@ -1348,16 +1363,16 @@ def scop_joint_newton_step(
     # a margin of ``1 / sqrt(eps)`` -- eight orders of magnitude -- between the
     # cheapest system that takes this path and the dearest one that could have
     # lost a direction to rounding.
-    second_order = np.concatenate(grad_datas)
+    second_order = np.concatenate(second_order_datas)
     step, used_fisher, discarded, linear_solver, linear_iterations = _solve_joint_step(
         lambda: _joint_augmented_factor(scop_items, joint_slices, j_diags, lambdas_list, W),
         second_order,
-        _gauss_newton_conditioning(H, joint_slices, grad_datas),
+        _gauss_newton_conditioning(H, joint_slices, second_order_datas),
         H,
         grad,
         scop_items,
         joint_slices,
-        grad_datas,
+        second_order_datas,
         BtWBs,
         j_diags,
         lambdas_list,
@@ -1378,7 +1393,7 @@ def scop_joint_newton_step(
         for idx in range(n_groups):
             sl_i = joint_slices[idx]
             H_block = H_solved[sl_i, sl_i].copy()
-            H_block[np.diag_indices_from(H_block)] -= grad_datas[idx]
+            H_block[np.diag_indices_from(H_block)] -= second_order_datas[idx]
             H_solved[sl_i, sl_i] = H_block
     else:
         H_solved = H
@@ -1395,7 +1410,7 @@ def scop_joint_newton_step(
             beta_trial,
             joint_slices,
             lambdas_list,
-            j_diags,
+            gammas,
             r_effs,
             objective_cache,
         )

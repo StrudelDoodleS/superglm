@@ -152,7 +152,7 @@ _EDITOR_OFFSET_NOTE = (
 
 def _sig_stars(p: float | None) -> str:
     """R-style significance stars for a p-value."""
-    if p is None or np.isnan(p):
+    if p is None or not np.isfinite(p):
         return ""
     if p < 0.001:
         return "***"
@@ -163,6 +163,35 @@ def _sig_stars(p: float | None) -> str:
     if p < 0.1:
         return "."
     return ""
+
+
+def _format_ascii_number(value: float | None, *, decimals: int, width: int) -> str:
+    """Format one finite table value without exceeding its declared column width."""
+    if value is None or not np.isfinite(value):
+        return "---"
+    numeric = float(value)
+
+    def _is_safe(candidate: str) -> bool:
+        parsed = float(candidate)
+        return np.isfinite(parsed) and (numeric == 0.0 or parsed != 0.0)
+
+    fixed = f"{numeric:.{decimals}f}"
+    if len(fixed) <= width and _is_safe(fixed):
+        return fixed
+    for scientific_decimals in range(decimals, -1, -1):
+        scientific = f"{numeric:.{scientific_decimals}e}"
+        if len(scientific) <= width and _is_safe(scientific):
+            return scientific
+    # Rounding the largest finite float to a width-limited mantissa can produce
+    # ``1.8e+308``, which parses as infinity. A one-digit, toward-zero order of
+    # magnitude remains finite and bounded while preserving sign and scale.
+    exponent = int(np.floor(np.log10(abs(numeric))))
+    fallback = f"{'-' if numeric < 0.0 else ''}1e{exponent:+d}"
+    if len(fallback) <= width and _is_safe(fallback):
+        return fallback
+    # Every coefficient column is wide enough for the shortest finite float64
+    # scientific form (including sign and a three-digit exponent).
+    raise ValueError(f"{numeric!r} cannot be represented in an ASCII field of width {width}")
 
 
 class ModelSummary:
@@ -301,15 +330,25 @@ class ModelSummary:
             rows.append(("Tweedie p", p_str, "Method", method))
 
         # Compute content width from coefficient columns AND header values
-        #   coef table: name_w + coef(10) + se(10) + z(8) + p(8) + ci_lo(9) + ci_hi(9) + sig(4) + qs(2)
+        # Every coefficient field has an explicit leading separator.  Widths
+        # remain minimum alignment widths, never implicit column boundaries.
+        coef_field_widths = (10, 10, 8, 8, 9, 9, 3, 3)
         name_w = max(len(r.name) for r in display_rows) if display_rows else 10
-        name_w = max(name_w, 10)
+        basis_name_w = max(
+            (
+                len(f"  Coef {basis_row.basis_index + 1}")
+                for basis_rows in self._basis_detail.values()
+                for basis_row in basis_rows
+            ),
+            default=0,
+        )
+        name_w = max(name_w, basis_name_w, len("Term"), 10)
         level_group_w = (
             max(len("Level group"), *(len(row.level_group) for row in display_rows))
             if has_level_groups
             else 0
         )
-        coef_W = name_w + level_group_w + 10 + 10 + 8 + 8 + 9 + 9 + 4 + 2
+        coef_W = name_w + level_group_w + sum(coef_field_widths) + len(coef_field_widths)
 
         # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
         # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
@@ -369,6 +408,23 @@ class ModelSummary:
                 prefix += f"{row.level_group if name is None else '':>{level_group_w}s}"
             return prefix
 
+        def _coef_fields(
+            coef: str,
+            se: str,
+            z: str,
+            p: str,
+            ci_low: str,
+            ci_high: str,
+            sig: str = "",
+            qs: str = "",
+        ) -> str:
+            numeric = (coef, se, z, p, ci_low, ci_high)
+            rendered = "".join(
+                f" {value:>{width}s}"
+                for value, width in zip(numeric, coef_field_widths[:6], strict=True)
+            )
+            return f"{rendered} {sig or '---':<3s} {qs or '---':<3s}"
+
         lines: list[str] = []
 
         # Title
@@ -390,19 +446,20 @@ class ModelSummary:
         lines.append(_mid())
 
         # Coefficient table header
-        hdr = (
-            f"{'':>{name_w}s}{'Level group':>{level_group_w}s}"
+        hdr_prefix = (
+            f"{'Term':<{name_w}s}{'Level group':>{level_group_w}s}"
             if has_level_groups
-            else f"{'':>{name_w}s}"
-        ) + (
-            f"{'coef':>10s}"
-            f"{'std err':>10s}"
-            f"{'z':>6s}  "
-            f"{'P>|z|':>8s}"
-            f"{'[' + f'{half:.3f}':>9s}"
-            f"{f'{1 - half:.3f}' + ']':>9s}"
-            f" {'Sig':<3s}"
-            f" {'QS'}"
+            else f"{'Term':<{name_w}s}"
+        )
+        hdr = hdr_prefix + _coef_fields(
+            "coef",
+            "std err",
+            "z",
+            "P>|z|",
+            "[" + f"{half:.3f}",
+            f"{1 - half:.3f}" + "]",
+            "Sig",
+            "QS",
         )
         lines.append(_row(hdr))
         lines.append(_thin())
@@ -501,21 +558,43 @@ class ModelSummary:
                     for br in self._basis_detail[row.name]:
                         b_stars = _sig_stars(br.p)
                         b_label = f"  Coef {br.basis_index + 1}"
-                        if abs(br.z) >= 100:
-                            bz_str = f"{br.z:>8.1f}"
-                        else:
-                            bz_str = f"{br.z:>8.3f}"
+                        bz_decimals = 1 if abs(br.z) >= 100 else 3
                         lines.append(
                             _row(
                                 f"{_coef_prefix(row, name=b_label)}"
-                                f"{br.coef:>10.4f}"
-                                f"{br.se:>10.4f}"
-                                f"{bz_str}"
-                                f"{br.p:>8.3f}"
-                                f"{br.ci_low:>9.3f}"
-                                f"{br.ci_high:>9.3f}"
-                                f" {b_stars:<3s}"
-                                f"{'':>2s}"
+                                + _coef_fields(
+                                    _format_ascii_number(
+                                        br.coef,
+                                        decimals=4,
+                                        width=coef_field_widths[0],
+                                    ),
+                                    _format_ascii_number(
+                                        br.se,
+                                        decimals=4,
+                                        width=coef_field_widths[1],
+                                    ),
+                                    _format_ascii_number(
+                                        br.z,
+                                        decimals=bz_decimals,
+                                        width=coef_field_widths[2],
+                                    ),
+                                    _format_ascii_number(
+                                        br.p,
+                                        decimals=3,
+                                        width=coef_field_widths[3],
+                                    ),
+                                    _format_ascii_number(
+                                        br.ci_low,
+                                        decimals=3,
+                                        width=coef_field_widths[4],
+                                    ),
+                                    _format_ascii_number(
+                                        br.ci_high,
+                                        decimals=3,
+                                        width=coef_field_widths[5],
+                                    ),
+                                    b_stars,
+                                )
                             )
                         )
 
@@ -523,14 +602,7 @@ class ModelSummary:
                 lines.append(
                     _row(
                         f"{_coef_prefix(row)}"
-                        f"{0.0:>10.4f}"
-                        f"{'ref':>10s}"
-                        f"{'---':>8s}"
-                        f"{'---':>8s}"
-                        f"{'---':>9s}"
-                        f"{'---':>9s}"
-                        f"{'':>4s}"
-                        f"{'':>2s}"
+                        + _coef_fields("0.0000", "ref", "---", "---", "---", "---")
                     )
                 )
             elif (
@@ -542,52 +614,59 @@ class ModelSummary:
                 )
             ):
                 stars = _sig_stars(row.p)
-                qs = "?" if row.quasi_separated else " "
-                if row.z is None or not np.isfinite(row.z):
-                    z_str = f"{'---':>8s}"
-                elif abs(row.z) >= 100:
-                    z_str = f"{row.z:>8.1f}"
-                else:
-                    z_str = f"{row.z:>8.3f}"
-                p_str = (
-                    f"{row.p:>8.3f}" if row.p is not None and np.isfinite(row.p) else f"{'---':>8s}"
-                )
-                ci_low_str = (
-                    f"{row.ci_low:>9.3f}"
-                    if row.ci_low is not None and np.isfinite(row.ci_low)
-                    else f"{'---':>9s}"
-                )
-                ci_high_str = (
-                    f"{row.ci_high:>9.3f}"
-                    if row.ci_high is not None and np.isfinite(row.ci_high)
-                    else f"{'---':>9s}"
+                qs = "?" if row.quasi_separated else ""
+                z_decimals = (
+                    1 if row.z is not None and np.isfinite(row.z) and abs(row.z) >= 100 else 3
                 )
                 lines.append(
                     _row(
                         f"{_coef_prefix(row)}"
-                        f"{row.coef:>10.4f}"
-                        f"{row.se:>10.4f}"
-                        f"{z_str}"
-                        f"{p_str}"
-                        f"{ci_low_str}"
-                        f"{ci_high_str}"
-                        f" {stars:<3s}"
-                        f" {qs}"
+                        + _coef_fields(
+                            _format_ascii_number(
+                                row.coef,
+                                decimals=4,
+                                width=coef_field_widths[0],
+                            ),
+                            _format_ascii_number(
+                                row.se,
+                                decimals=4,
+                                width=coef_field_widths[1],
+                            ),
+                            _format_ascii_number(
+                                row.z,
+                                decimals=z_decimals,
+                                width=coef_field_widths[2],
+                            ),
+                            _format_ascii_number(
+                                row.p,
+                                decimals=3,
+                                width=coef_field_widths[3],
+                            ),
+                            _format_ascii_number(
+                                row.ci_low,
+                                decimals=3,
+                                width=coef_field_widths[4],
+                            ),
+                            _format_ascii_number(
+                                row.ci_high,
+                                decimals=3,
+                                width=coef_field_widths[5],
+                            ),
+                            stars,
+                            qs,
+                        )
                     )
                 )
             else:
-                coef_str = f"{row.coef:>10.4f}" if row.coef is not None else f"{'---':>10s}"
+                coef_str = _format_ascii_number(
+                    row.coef,
+                    decimals=4,
+                    width=coef_field_widths[0],
+                )
                 lines.append(
                     _row(
                         f"{_coef_prefix(row)}"
-                        f"{coef_str}"
-                        f"{'---':>10s}"
-                        f"{'---':>8s}"
-                        f"{'---':>8s}"
-                        f"{'---':>9s}"
-                        f"{'---':>9s}"
-                        f"{'':>4s}"
-                        f"{'':>2s}"
+                        + _coef_fields(coef_str, "---", "---", "---", "---", "---")
                     )
                 )
 

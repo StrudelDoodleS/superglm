@@ -23,6 +23,31 @@ _CAT_BAR_COLOR = _PLOTLY_CAT_BAR_COLOR
 _LINE_COLOR = _PLOTLY_LINE_COLOR
 
 
+def _validated_density_weights(model, sample_weight, n_rows: int) -> NDArray:
+    """Validate weights used only to display the empirical row density."""
+    from superglm.distributions import Tweedie
+
+    if n_rows == 0:
+        raise ValueError("X must be non-empty")
+    if sample_weight is None:
+        weights = np.ones(n_rows, dtype=np.float64)
+    elif isinstance(model._distribution, Tweedie):
+        from superglm._utils import _validate_strict_prior_weights
+
+        weights = _validate_strict_prior_weights(sample_weight, n_rows)
+    else:
+        from superglm.model.input_validation import _finite_vector
+
+        weights = _finite_vector("sample_weight", sample_weight, n_rows)
+        if np.any(weights < 0.0):
+            raise ValueError("sample_weight must be nonnegative")
+        if not np.any(weights > 0.0):
+            raise ValueError("sample_weight must not be all zero")
+    if not np.isfinite(np.sum(weights, dtype=np.float64)):
+        raise ValueError("sample_weight must have a finite sum")
+    return weights
+
+
 def plot_interaction(
     model,
     name: str,
@@ -65,7 +90,7 @@ def plot_interaction(
         Plotly view for continuous x continuous interactions. ``"surface"``
         (default) returns the 3D surface. ``"contour"`` returns a 2D contour
         map. ``"contour_pair"`` returns a two-panel figure with the
-        interaction contour and an exposure HDR-mass contour view. Ignored by
+        interaction contour and a weighted-data HDR-mass contour view. Ignored by
         matplotlib and non-surface interaction types.
     surface_opacity : float
         Opacity for Plotly 3D surface interactions (default 0.96). Ignored by
@@ -74,11 +99,14 @@ def plot_interaction(
         For Plotly 3D surface plots: project parent main-effect curves on the
         surface walls (default False).
     X : pandas or eager Polars DataFrame, optional
-        Training data. When provided with *sample_weight*, overlays an
-        sample_weight-weighted density on surface plots (projected on the floor
-        for 3D plotly, contour overlay for matplotlib).
+        Training data for a density overlay on surface plots (projected on the
+        floor for 3D plotly, contour overlay for matplotlib). Unit row weights
+        are used when *sample_weight* is omitted.
     sample_weight : array-like, optional
-        Exposure weights corresponding to rows of *X*.
+        Display weights corresponding to rows of *X*. Non-Tweedie
+        case/frequency weights and Tweedie EDM prior weights are both used
+        only as mass for this empirical density overlay; the display does not
+        reinterpret Tweedie prior precision as replicated statistical rows.
 
     Returns
     -------
@@ -95,10 +123,10 @@ def plot_interaction(
     frame = None if X is None else as_eager_frame(X)
 
     density_data = None
-    if frame is not None and sample_weight is None:
-        sample_weight = np.ones(len(frame), dtype=np.float64)
-    if frame is not None and sample_weight is not None:
-        sample_weight = np.asarray(sample_weight, dtype=np.float64)
+    if frame is None and sample_weight is not None:
+        raise ValueError("sample_weight requires X for an interaction density overlay")
+    if frame is not None:
+        density_weight = _validated_density_weights(model, sample_weight, len(frame))
         p0, p1 = parent_names[0], parent_names[1]
         if (
             p0 in frame.columns
@@ -106,10 +134,14 @@ def plot_interaction(
             and frame.column_kind(p0) == "numeric"
             and frame.column_kind(p1) == "numeric"
         ):
+            density_x1 = frame.column_array(p0, dtype=np.float64)
+            density_x2 = frame.column_array(p1, dtype=np.float64)
+            if not np.all(np.isfinite(density_x1)) or not np.all(np.isfinite(density_x2)):
+                raise ValueError("interaction density columns must contain only finite values")
             density_data = (
-                frame.column_array(p0, dtype=np.float64),
-                frame.column_array(p1, dtype=np.float64),
-                sample_weight,
+                density_x1,
+                density_x2,
+                density_weight,
             )
 
     if engine == "matplotlib":
@@ -690,13 +722,13 @@ def _plot_surface_plotly(
                 cmax=1.0,
                 opacity=0.96,
                 showscale=True,
-                colorbar=dict(title="Exposure<br>Density", x=1.12, len=0.5, y=0.25),
+                colorbar=dict(title="Data<br>Density", x=1.12, len=0.5, y=0.25),
                 lighting=dict(ambient=1.0, diffuse=0.35, roughness=1.0, specular=0.0),
-                name="Exposure density",
+                name="Data density",
                 hovertemplate=(
                     f"{parent_names[0]}: %{{x:.3f}}<br>"
                     f"{parent_names[1]}: %{{y:.3f}}<br>"
-                    "Density: %{customdata:.3f}<extra>Exposure</extra>"
+                    "Weighted data density: %{customdata:.3f}<extra>Data</extra>"
                 ),
             )
         )
@@ -769,14 +801,14 @@ def _plot_surface_contour_plotly(raw, name, parent_names, colormap):
 
 
 def _plot_surface_contour_pair_plotly(raw, name, parent_names, colormap, density_data):
-    """Two-panel contour + exposure HDR-mass view for continuous interactions."""
+    """Two-panel contour + weighted-data HDR-mass view."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
     if density_data is None:
         raise ValueError(
-            "interaction_view='contour_pair' requires X and sample_weight so the "
-            "exposure HDR contours can be computed."
+            "interaction_view='contour_pair' requires numeric parent columns in X "
+            "so the data-density HDR contours can be computed."
         )
 
     x1 = np.asarray(raw["x1"], dtype=np.float64)
@@ -800,7 +832,7 @@ def _plot_surface_contour_pair_plotly(raw, name, parent_names, colormap, density
         rows=1,
         cols=2,
         horizontal_spacing=0.12,
-        subplot_titles=("Interaction contour", "Exposure HDR mass"),
+        subplot_titles=("Interaction contour", "Weighted-data HDR mass"),
     )
     fig.add_trace(
         go.Contour(
@@ -843,7 +875,7 @@ def _plot_surface_contour_pair_plotly(raw, name, parent_names, colormap, density
                 f"{parent_names[0]}: %{{x:.3f}}<br>"
                 f"{parent_names[1]}: %{{y:.3f}}<br>"
                 "HDR mass: %{z:.0%}<br>"
-                "Exposure density: %{customdata:.3f}<extra></extra>"
+                "Weighted data density: %{customdata:.3f}<extra></extra>"
             ),
         ),
         row=1,
@@ -876,7 +908,7 @@ def _plot_surface_contour_pair_plotly(raw, name, parent_names, colormap, density
 
     fig.update_layout(
         title=dict(
-            text=f"{name}<br><sup>Interaction contour plus exposure HDR mass contours</sup>",
+            text=f"{name}<br><sup>Interaction contour plus weighted-data HDR mass contours</sup>",
             x=0.0,
             xanchor="left",
         ),

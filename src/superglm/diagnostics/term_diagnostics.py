@@ -39,7 +39,8 @@ def term_importance(
     X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
     sample_weight : array-like, optional
-        Frequency weights for weighted variance.
+        Nonnegative case/frequency weights for non-Tweedie models. For
+        Tweedie models, finite, strictly positive EDM prior weights.
 
     Returns
     -------
@@ -52,8 +53,27 @@ def term_importance(
 
     frame = as_eager_frame(X)
     beta = model.result.beta
-    weights = sample_weight if sample_weight is not None else np.ones(len(frame))
-    w_sum = np.sum(weights)
+    n = len(frame)
+    if sample_weight is None:
+        weights = np.ones(n, dtype=np.float64)
+    else:
+        from superglm.distributions import Tweedie
+
+        if isinstance(model._distribution, Tweedie):
+            from superglm._utils import _validate_strict_prior_weights
+
+            weights = _validate_strict_prior_weights(sample_weight, n)
+        else:
+            from superglm.model.input_validation import _finite_vector
+
+            weights = _finite_vector("sample_weight", sample_weight, n)
+            if np.any(weights < 0.0):
+                raise ValueError("sample_weight must be nonnegative")
+            if not np.any(weights > 0.0):
+                raise ValueError("sample_weight must not be all zero")
+    w_sum = float(np.sum(weights, dtype=np.float64))
+    if not np.isfinite(w_sum):
+        raise ValueError("sample_weight must have a finite sum")
     group_edf = model._group_edf or {}
     reml_lam = getattr(model, "_reml_lambdas", None) or {}
     lambda2 = getattr(model, "lambda2", None)
@@ -144,8 +164,10 @@ def term_drop_diagnostics(
         Rows used by ``mode="refit"``. They also identify the training-row
         objects eligible for same-object holdout fallback.
     sample_weight, offset : array-like, optional
-        Training/refit weights and offset. In holdout mode these are reused
-        only when ``X_val is X`` and ``y_val is y``.
+        Training/refit weights and offset. Non-Tweedie weights are
+        case/frequency weights; Tweedie weights are finite, strictly positive
+        EDM prior weights. In holdout mode these are reused only when
+        ``X_val is X`` and ``y_val is y``.
     mode : {"refit", "holdout"}
         ``"refit"``: calls ``drop1()`` and adds delta_aic, delta_bic columns.
         ``"holdout"``: zeros each term's contribution on validation set,
@@ -153,8 +175,9 @@ def term_drop_diagnostics(
     X_val, y_val : validation rows and response, optional
         Required by ``mode="holdout"``.
     sample_weight_val, offset_val : array-like, optional
-        Validation-specific weights and offset. Separate validation objects
-        never inherit training vectors merely because their lengths match.
+        Validation-specific weights and offset, with the same family-specific
+        contract as the training weights. Separate validation objects never
+        inherit training vectors merely because their lengths match.
         Offset-fitted models require an evaluation offset.
     """
 
@@ -210,14 +233,24 @@ def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
     full_ll = model._fit_stats.log_likelihood if model._fit_stats else 0.0
     full_edf = model.result.effective_df
     n = len(y)
+    weights = (
+        np.ones(n, dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64)
+    )
+
+    from superglm.solvers.dispersion import dispersion_likelihood_size
+
+    likelihood_size = dispersion_likelihood_size(model._distribution, weights)
 
     full_aic = -2.0 * full_ll + 2.0 * full_edf
-    full_bic = -2.0 * full_ll + np.log(n) * full_edf
+    full_bic = -2.0 * full_ll + np.log(likelihood_size) * full_edf
 
     # Add delta columns
     result = drop1_df.copy()
     if "delta_aic" not in result.columns:
         result["delta_aic"] = result["aic"] - full_aic if "aic" in result.columns else np.nan
+    if "delta_bic" not in result.columns:
         result["delta_bic"] = result["bic"] - full_bic if "bic" in result.columns else np.nan
 
     return result
@@ -251,15 +284,21 @@ def _drop_term_holdout(
         check_finite=False,
     )
     validate_response(y_arr, dist)
-    w = (
-        np.ones(n_val, dtype=np.float64)
-        if sample_weight_val is None
-        else _finite_vector("sample_weight_val", sample_weight_val, n_val)
-    )
-    if np.any(w < 0.0):
-        raise ValueError("sample_weight_val must be nonnegative")
-    if not np.any(w > 0.0):
-        raise ValueError("sample_weight_val must not be all zero")
+    if sample_weight_val is None:
+        w = np.ones(n_val, dtype=np.float64)
+    else:
+        from superglm.distributions import Tweedie
+
+        if isinstance(dist, Tweedie):
+            from superglm._utils import _validate_strict_prior_weights
+
+            w = _validate_strict_prior_weights(sample_weight_val, n_val)
+        else:
+            w = _finite_vector("sample_weight_val", sample_weight_val, n_val)
+            if np.any(w < 0.0):
+                raise ValueError("sample_weight_val must be nonnegative")
+            if not np.any(w > 0.0):
+                raise ValueError("sample_weight_val must not be all zero")
     offset_arr = (
         np.zeros(n_val, dtype=np.float64)
         if offset_val is None
