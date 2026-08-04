@@ -1126,7 +1126,8 @@ def _fit_pirls_inner(
             committed=committed,
             proposal=proposal,
             evaluate_state=evaluate_trial,
-            max_halving=_poisson_sqrt_halving_budget(
+            max_halving=max_halving,
+            extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                 committed=committed,
                 proposal=proposal,
                 y=y,
@@ -1158,10 +1159,7 @@ def _fit_pirls_inner(
         objective_relative_change = _irls_objective_relative_change(
             objective=objective,
             previous=objective_prev,
-            y=y,
-            weights=weights,
-            family=family,
-            link=link,
+            objective_scale=objective_merit_scale,
         )
 
         convergence_criterion = convergence

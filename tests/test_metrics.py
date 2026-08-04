@@ -1093,6 +1093,32 @@ class TestNullModel:
         )
         assert model._fit_stats.null_deviance == pytest.approx(metrics.null_deviance)
 
+    def test_sqrt_offset_null_fit_requests_only_the_working_system(self, monkeypatch):
+        import superglm.model.fit_ops as fit_ops
+        from superglm.distributions import Poisson
+        from superglm.links import SqrtLink
+
+        original_fit = fit_ops.fit_irls_direct
+        shortcut_flags: list[bool] = []
+
+        def recording_fit(*args, **kwargs):
+            shortcut_flags.append(bool(kwargs.get("_return_working_system", False)))
+            return original_fit(*args, **kwargs)
+
+        monkeypatch.setattr(fit_ops, "fit_irls_direct", recording_fit)
+        offset = np.tile([-0.4, -0.2, 0.0, 0.2, 0.4], 8)
+        y = np.tile([1.0, 2.0, 4.0, 3.0, 1.0], 8)
+        null_mu = fit_ops._compute_null_mu(
+            y,
+            np.ones(len(y)),
+            offset,
+            Poisson(),
+            SqrtLink(),
+        )
+
+        assert shortcut_flags == [True]
+        assert np.all(np.isfinite(null_mu))
+
     def test_sqrt_offset_fit_reuses_null_mu_when_priming_caches(self, monkeypatch):
         import superglm.model.fit_ops as fit_ops
 

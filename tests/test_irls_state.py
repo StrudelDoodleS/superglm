@@ -91,6 +91,19 @@ def test_select_irls_trial_accepts_safe_full_without_evaluating_callback() -> No
         committed=_synthetic_state(2.0),
         proposal=_synthetic_state(1.5),
         evaluate_state=lambda alpha: pytest.fail(f"unexpected trial at {alpha}"),
+        extended_max_halving=lambda: pytest.fail("unexpected extended budget"),
+    )
+
+    assert decision == _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
+
+
+def test_select_irls_trial_does_not_extend_when_merit_delta_accepts_full() -> None:
+    decision = _select_irls_trial(
+        committed=_synthetic_state(2.0),
+        proposal=_synthetic_state(10.0),
+        evaluate_state=lambda alpha: pytest.fail(f"unexpected trial at {alpha}"),
+        extended_max_halving=lambda: pytest.fail("unexpected extended budget"),
+        merit_delta=lambda candidate, base: -1.0,
     )
 
     assert decision == _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
@@ -109,10 +122,37 @@ def test_select_irls_trial_stops_at_largest_safe_fraction() -> None:
         committed=_synthetic_state(2.0),
         proposal=_synthetic_state(10.0),
         evaluate_state=evaluate,
+        extended_max_halving=lambda: pytest.fail("unexpected extended budget"),
     )
 
     assert decision == _IRLSStepDecision(0.5, 1, False, trials_attempted=2)
     assert visited == [0.5]
+
+
+def test_select_irls_trial_lazily_continues_into_extended_budget() -> None:
+    visited: list[float] = []
+    extension_calls = 0
+
+    def evaluate(alpha: float) -> _IRLSState:
+        visited.append(alpha)
+        return _synthetic_state(1.5 if alpha == 0.125 else 10.0)
+
+    def extended_budget() -> int:
+        nonlocal extension_calls
+        extension_calls += 1
+        return 3
+
+    decision = _select_irls_trial(
+        committed=_synthetic_state(2.0),
+        proposal=_synthetic_state(10.0),
+        evaluate_state=evaluate,
+        max_halving=1,
+        extended_max_halving=extended_budget,
+    )
+
+    assert decision == _IRLSStepDecision(0.125, 3, False, trials_attempted=4)
+    assert visited == [0.5, 0.25, 0.125]
+    assert extension_calls == 1
 
 
 @pytest.mark.parametrize("sign", [-1.0, 1.0])
@@ -251,16 +291,56 @@ def test_select_irls_trial_never_accepts_underflowed_zero_alpha() -> None:
 def test_poisson_sqrt_objective_convergence_ratio_is_response_scale_equivariant(
     response_scale: float,
 ) -> None:
-    ratio = _irls_objective_relative_change(
-        objective=0.5 * response_scale,
-        previous=2.0 * response_scale,
+    objective_scale = _irls_objective_scale(
         y=np.array([response_scale]),
         weights=np.ones(1),
         family=Poisson(),
         link=SqrtLink(),
     )
+    ratio = _irls_objective_relative_change(
+        objective=0.5 * response_scale,
+        previous=2.0 * response_scale,
+        objective_scale=objective_scale,
+    )
 
     assert ratio == pytest.approx(0.5)
+
+
+def test_direct_sqrt_irls_computes_objective_scale_once_per_fit(monkeypatch) -> None:
+    import superglm.solvers.irls_direct as irls_direct
+
+    real_scale = irls_direct._irls_objective_scale
+    calls = 0
+
+    def counted_scale(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_scale(*args, **kwargs)
+
+    monkeypatch.setattr(irls_direct, "_irls_objective_scale", counted_scale)
+
+    x = np.linspace(-1.0, 1.0, 40)
+    dm = DesignMatrix([DenseGroupMatrix(x[:, None])], n=len(x), p=1)
+    eta = 1.2 + 0.2 * x
+    result, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=eta**2,
+        weights=np.ones(len(x)),
+        family=Poisson(),
+        link=SqrtLink(),
+        groups=[GroupSlice(name="x", start=0, end=1)],
+        lambda2=0.0,
+        max_iter=3,
+        tol=0.0,
+        direct_solve="gram",
+        compute_rank_info=False,
+        _compute_fit_statistics=False,
+        _compute_reml_geometry=False,
+        _compute_scop_postfit_inference=False,
+    )
+
+    assert result.n_iter == 3
+    assert calls == 1
 
 
 def test_poisson_sqrt_merit_roundoff_uses_response_units() -> None:

@@ -247,21 +247,11 @@ def _compute_null_mu(
 ) -> NDArray:
     """Null model prediction: intercept-only MLE, offset-aware."""
     from superglm.distributions import Binomial, Gaussian, clip_mu
-
-    y_bar = float(np.average(y, weights=weights))
-    if isinstance(distribution, Binomial):
-        y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
-    elif isinstance(distribution, Gaussian):
-        y_bar = float(y_bar)
-    else:
-        y_bar = max(y_bar, 1e-10)
-
-    if offset is None or np.all(offset == 0):
-        return np.full(len(y), y_bar)
-
     from superglm.links import SqrtLink
 
-    if isinstance(link, SqrtLink):
+    has_offset = offset is not None and not np.all(offset == 0)
+    if has_offset and isinstance(link, SqrtLink):
+        assert offset is not None
         # The inverse sqrt link has two eta branches. A single Fisher-scoring
         # start can converge to the wrong offset-dependent local solution, so
         # use the same line-searched direct IRLS solver as a public
@@ -283,6 +273,7 @@ def _compute_null_mu(
             direct_solve="gram",
             convergence="deviance",
             compute_rank_info=False,
+            _return_working_system=True,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
             _compute_scop_postfit_inference=False,
@@ -290,6 +281,18 @@ def _compute_null_mu(
         eta_null = stabilize_eta(null_result.intercept + offset, link)
         return clip_mu(link.inverse(eta_null), distribution)
 
+    y_bar = float(np.average(y, weights=weights))
+    if isinstance(distribution, Binomial):
+        y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
+    elif isinstance(distribution, Gaussian):
+        y_bar = float(y_bar)
+    else:
+        y_bar = max(y_bar, 1e-10)
+
+    if not has_offset:
+        return np.full(len(y), y_bar)
+
+    assert offset is not None
     b0 = float(link.link(np.atleast_1d(y_bar))[0]) - float(np.average(offset, weights=weights))
     for _ in range(25):
         eta_null = stabilize_eta(b0 + offset, link)

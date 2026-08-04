@@ -281,11 +281,13 @@ def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
     ``(dmu/deta)^2 / V(mu)`` is exactly constant.  Keep this deliberately
     conservative so performance never changes the fitted problem.
     """
-    from superglm.distributions import Gamma, Gaussian
-    from superglm.links import IdentityLink, LogLink
+    from superglm.distributions import Gamma, Gaussian, Poisson
+    from superglm.links import IdentityLink, LogLink, SqrtLink
 
-    return (type(family) is Gaussian and type(link) is IdentityLink) or (
-        type(family) is Gamma and type(link) is LogLink
+    return (
+        (type(family) is Gaussian and type(link) is IdentityLink)
+        or (type(family) is Gamma and type(link) is LogLink)
+        or (type(family) is Poisson and type(link) is SqrtLink)
     )
 
 
@@ -1770,7 +1772,8 @@ def _fit_irls_direct_once(
                 committed=scop_committed.irls,
                 proposal=proposal_scop.irls,
                 evaluate_state=evaluate_scop_trial,
-                max_halving=_poisson_sqrt_halving_budget(
+                max_halving=max_halving,
+                extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=scop_committed.irls,
                     proposal=proposal_scop.irls,
                     y=y,
@@ -1891,7 +1894,8 @@ def _fit_irls_direct_once(
                 proposal=proposal,
                 evaluate_state=evaluate_trial,
                 invalid_state=constraint_trial_is_invalid,
-                max_halving=_poisson_sqrt_halving_budget(
+                max_halving=max_halving,
+                extended_max_halving=lambda: _poisson_sqrt_halving_budget(
                     committed=committed,
                     proposal=proposal,
                     y=y,
@@ -2001,10 +2005,7 @@ def _fit_irls_direct_once(
                     dev_rel_change = _irls_objective_relative_change(
                         objective=objective,
                         previous=objective_prev,
-                        y=y,
-                        weights=weights,
-                        family=family,
-                        link=link,
+                        objective_scale=objective_merit_scale,
                     )
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
                 convergence_value = dev_rel_change
