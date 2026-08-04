@@ -36,16 +36,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import resource
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_info
 
+import superglm
 from superglm import SuperGLM
 from superglm.features import Categorical
 
@@ -188,6 +192,13 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
     return {
         "configuration": {
             "levels": levels,
+            # What the design actually contains, which is <= `levels` whenever
+            # the uniform draw missed one. Reporting only the request lets a
+            # 26x26 design be labelled 41.
+            "levels_realized": {
+                "g": int(frame["g"].nunique()),
+                "h": int(frame["h"].nunique()),
+            },
             "rows": rows,
             "train_rows": int(len(frame)),
             "parameters": int(model._dm.p),
@@ -233,7 +244,54 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
             },
             "python": platform.python_version(),
         },
+        # Provenance. Without this a payload cannot say which tree produced it:
+        # two runs of the SAME source labelled baseline and branch satisfy every
+        # invariant this file's tests assert, and the commits recorded beside
+        # the committed artifact are typed in by hand.
+        "provenance": _provenance(),
     }
+
+
+def _provenance() -> dict[str, object]:
+    """Identify the tree that produced this payload, from the tree itself.
+
+    Read from the installed package and from git rather than accepted as a
+    flag, so a mislabelled comparison is not merely discouraged but unavailable.
+    """
+    head, dirty = _git_state()
+    return {
+        "superglm_version": _superglm_version(),
+        "superglm_path": str(Path(superglm.__file__).resolve().parent),
+        "git_commit": head,
+        "git_dirty": dirty,
+    }
+
+
+def _superglm_version() -> str | None:
+    return getattr(superglm, "__version__", None)
+
+
+def _git_state() -> tuple[str | None, bool | None]:
+    """``(commit, dirty)`` for the tree the package was imported FROM."""
+    package_root = Path(superglm.__file__).resolve().parent
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(package_root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(package_root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    return head or None, bool(status)
 
 
 def main() -> None:
@@ -248,16 +306,29 @@ def main() -> None:
         ("--levels", args.levels, 2),
         ("--rows", args.rows, 2),
         ("--repeats", args.repeats, 1),
+        # A negative seed died eight NumPy frames deep in `default_rng`, naming
+        # no flag. Every input this harness accepts is validated at the flag.
+        ("--seed", args.seed, 0),
     ):
         if value < minimum:
             raise SystemExit(f"{name} must be >= {minimum}, got {value}")
-    # `_design` keeps half the rows, and a Categorical needs every level to
-    # appear in them: below one training row per level the fit cannot be built
-    # at all, and `--rows 2` died inside the feature rather than at the flag.
-    if args.rows // 2 < args.levels:
+    # `_design` keeps half the rows and draws levels UNIFORMLY, so realizing
+    # every level is coupon-collector, not pigeonhole. The old bound was
+    # `rows // 2 >= levels`, which at 41 levels blessed 82 rows -- where 41
+    # draws realize about 26 distinct levels. The harness then reported
+    # `levels: 41` for a design that is really 26x26, so it measured a smaller
+    # problem than its own configuration block claims.
+    #
+    # E[draws to see all L] = L * H_L ~ L * (ln L + gamma); require twice that
+    # so the shortfall is rare rather than merely expected-to-clear.
+    harmonic = sum(1.0 / i for i in range(1, args.levels + 1))
+    needed = 2 * int(math.ceil(args.levels * harmonic))
+    if args.rows // 2 < needed:
         raise SystemExit(
-            f"--rows {args.rows} keeps {args.rows // 2} training rows for {args.levels} levels "
-            f"per factor; needs at least {2 * args.levels} so every level can appear."
+            f"--rows {args.rows} keeps {args.rows // 2} training rows, which will not "
+            f"realize all {args.levels} levels of each factor; needs at least {2 * needed} "
+            f"(coupon-collector, ~L*ln L, not L). Otherwise the run reports "
+            f"levels={args.levels} for a smaller realized design."
         )
 
     payload = measure(args.levels, args.rows, args.repeats, args.seed)

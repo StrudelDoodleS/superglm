@@ -1592,19 +1592,101 @@ def test_mixed_chunk_bounds_the_sparse_payload_not_just_the_expansion(monkeypatc
     np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
     assert seen, "expected the helper to run"
 
-    # Rebuild each chunk's row range from the expansion sizes and check the
-    # sparse payload it implied, which is what the old sizing ignored.
-    indptr = dense_csr.indptr
-    max_nnz = max(1, budget // 12)
-    offset = 0
-    for rows_in_chunk in seen:
-        nnz = int(indptr[offset + rows_in_chunk]) - int(indptr[offset])
-        assert nnz <= max_nnz or rows_in_chunk == 1, (
-            f"chunk of {rows_in_chunk} rows carried {nnz} stored entries against "
-            f"a {max_nnz}-entry budget"
-        )
-        offset += rows_in_chunk
-    assert offset == n, "the chunks must cover every row exactly once"
+    assert sum(seen) == n, "the chunks must cover every row exactly once"
+
+    # Do NOT re-derive ``nnz <= budget // 12`` from indptr here.  That is the
+    # arithmetic ``_mixed_chunk_stop`` already used to CHOOSE the chunk, so
+    # asserting it back observes no allocation and cannot fail -- which is
+    # exactly how the 2.7x overshoot below survived the last time this class of
+    # bug was fixed.  Measure the bytes instead; see the test that follows.
+
+
+def test_mixed_chunk_peak_bytes_stay_inside_the_budget_the_sizing_assumes(monkeypatch):
+    """The chunk budget assumes 12 B per stored entry.  Hold it to that.
+
+    ``csr[a:b].multiply(w[:, None])`` costs three live buffers per entry, not
+    one: the slice is a full copy and scipy routes the product through COO.
+    Measured 32.2 B/entry, so a 64 MiB bound really peaked near 170 MiB.
+
+    This asserts TRACED BYTES at the moment of the weighting, which is the
+    quantity the budget is denominated in.  A structural assertion (no
+    ``.multiply`` in the loop) would pin today's implementation rather than the
+    property; a byte count survives a rewrite.
+    """
+    import tracemalloc
+
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(4)
+    n_rows, p_csr = 12_000, 20
+    dense_csr = sp.csr_matrix(gen.normal(size=(n_rows, p_csr)))
+    weights = np.abs(gen.normal(1.0, 0.2, n_rows))
+    nnz = int(dense_csr.nnz)
+
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        chunk = algebra._weighted_row_chunk(dense_csr, weights, 0, n_rows)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    bytes_per_entry = (peak - baseline) / nnz
+    assert bytes_per_entry <= 12.0, (
+        f"weighting the chunk peaked at {bytes_per_entry:.1f} bytes per stored "
+        f"entry against the {12} the chunk budget assumes"
+    )
+
+    # Bit-exact against the route it replaces: same two floats, same order.
+    reference = dense_csr.multiply(weights[:, None]).tocsr()
+    assert np.array_equal(chunk.toarray(), reference.toarray())
+
+
+def test_mixed_pairing_peak_stays_inside_the_two_budgets_it_maintains(monkeypatch):
+    """End to end, through the public helper, on traced bytes.
+
+    ``_support_csr_raw_cross`` maintains two budgets: the dense expansion of
+    the compressed side, and the sparse payload beside it.  Their sum is the
+    honest ceiling, so ~2x ``_MAX_CROSS_EXPANSION_BYTES`` is the bound -- and
+    it holds regardless of how the weighting is implemented, which is what
+    makes this survive a rewrite.
+
+    Measured 3.11x before the chunk weighting was fixed and 1.73x after, so
+    this discriminates on BEHAVIOUR rather than on the presence of a helper.
+    """
+    import tracemalloc
+
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+
+    gen = np.random.default_rng(4)
+    n_rows, p_b, p_csr, n_support = 12_000, 5, 20, 40
+    b_unique = gen.normal(size=(n_support, p_b))
+    support_idx = gen.integers(0, n_support, n_rows).astype(np.intp)
+    dense_csr = sp.csr_matrix(gen.normal(size=(n_rows, p_csr)))
+    weights = np.abs(gen.normal(1.0, 0.2, n_rows))
+
+    budget = 1 << 16
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+
+    expected = b_unique[support_idx].T @ (dense_csr.toarray() * weights[:, None])
+
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        actual = algebra._support_csr_raw_cross(b_unique, support_idx, dense_csr, weights)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=1e-9)
+
+    ratio = (peak - baseline) / budget
+    assert ratio <= 2.0, (
+        f"mixed pairing peaked at {ratio:.2f}x the {budget}-byte budget; the two "
+        f"budgets it maintains (dense expansion, sparse payload) sum to 2x"
+    )
 
 
 def test_narrow_support_beside_a_wide_csr_term_bounds_the_aggregate(monkeypatch):

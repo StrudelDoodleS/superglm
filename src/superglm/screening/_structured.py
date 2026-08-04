@@ -207,7 +207,21 @@ def _representative_projection(
         + 2 * max(int(n_levels), 1) * max(k, 1) ** 2
         + max(k, 1) ** 2
     )
-    uncertainty = 16.0 * eps * reduction_depth * leading_scale
+    # Cap the band at half the cutoff.  ``reduction_depth`` grows with n_rows
+    # and n_levels while ``cutoff`` does not, so an uncapped band overtakes it
+    # at ``reduction_depth >= 2**22 * sqrt(k)`` -- ``sqrt(eps)`` is exactly
+    # ``2**-26`` -- and from there ``[cutoff - unc, cutoff + unc]`` contains
+    # zero, so EVERY pivot reads as ambiguous and the projection refuses a
+    # geometry it resolved perfectly well at a smaller budget.  That inverts
+    # the documented monotone budget behaviour: raising ``max_cells`` made a
+    # scored pair go dark.
+    #
+    # Half the cutoff is the largest band that cannot swallow zero, so the
+    # refusal keeps meaning "this pivot is genuinely too close to the cutoff to
+    # call" rather than "the flop count got large".  Below the crossover the
+    # min is inert and the band is bit-identical to before.
+    uncertainty = min(16.0 * eps * reduction_depth, 0.5 * np.sqrt(max(k, 1) * eps))
+    uncertainty *= leading_scale
     if np.any(np.abs(diagonal - cutoff) <= uncertainty):
         return None
     rank = int(np.count_nonzero(diagonal > cutoff))

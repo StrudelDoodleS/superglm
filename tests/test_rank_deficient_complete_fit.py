@@ -25,9 +25,43 @@ import time
 import pytest
 from benchmarks import rank_deficient_complete_fit as bench
 
-# Small enough to run in a test, deficient enough to exercise the path: a
-# 4-level pair on 200 rows still leaves empty joint cells.
-TINY = {"levels": 4, "rows": 200, "repeats": 1, "seed": 31337}
+# Small enough to run in a test, and ACTUALLY deficient. The previous fixture
+# (4 levels, 200 rows) was not: measured `parameters` 15, `data_rank` 15, both
+# methods `cholesky`, both representative flags False, `n_zero` 0. It was fully
+# determined, so every assertion below ran against the dense path while the
+# committed artifact -- and the benchmark's whole reason to exist -- takes
+# `qr_svd` at `data_rank` 1627 of 1680.
+#
+# (41, 800) measures `parameters` 1680, `data_rank` 344, `qr_svd`, `n_zero`
+# 1336, and realizes all 41 levels of both factors. It also satisfies the CLI's
+# coupon-collector row floor, so the fixture and the flag agree.
+TINY = {"levels": 41, "rows": 800, "repeats": 1, "seed": 31337}
+
+
+def test_the_fixture_reaches_the_deficient_path_it_claims_to_measure(payload) -> None:
+    """Guard the fixture itself, not just the harness.
+
+    A benchmark whose test data never reaches the branch it was written to
+    measure reports on something else entirely, and nothing else here would
+    notice: every other assertion in this file passes on a full-rank design.
+    """
+    dispatch = payload["backend_dispatch"]
+    assert dispatch["data_rank"] < payload["configuration"]["parameters"], (
+        "fixture is full rank; it cannot exercise the rank-deficient path"
+    )
+    assert dispatch["data_method"] != "cholesky"
+    assert payload["numerical_outputs"]["n_zero"] > 0
+
+
+def test_the_configuration_reports_the_levels_the_design_realizes(payload) -> None:
+    """`levels` is what was REQUESTED; a uniform draw may realize fewer.
+
+    At 41 levels the old row guard blessed 82 rows, where 41 draws realize
+    about 26 distinct levels -- so the payload said `levels: 41` for a design
+    that was really 26x26.
+    """
+    realized = payload["configuration"]["levels_realized"]
+    assert realized["g"] == realized["h"] == payload["configuration"]["levels"]
 
 
 @pytest.fixture(scope="module")
