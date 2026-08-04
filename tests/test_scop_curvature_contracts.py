@@ -13,7 +13,10 @@ import pytest
 from scipy.interpolate import BSpline as SciPyBSpline
 
 from superglm import Constraint, CubicRegressionSpline, PSpline, SuperGLM
-from superglm.features._spline_constraints import curvature_difference_operator
+from superglm.features._spline_constraints import (
+    build_curvature_difference_constraints,
+    curvature_difference_operator,
+)
 from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
 
 DEGREE = 3
@@ -146,6 +149,38 @@ def test_curvature_operator_accepts_a_clamped_knot_repeated_onto_the_boundary():
     np.testing.assert_allclose(operator, _row_normalized(reference), atol=1e-12)
 
 
+def _clamped_knots_with_a_repeated_interior_knot(degree: int) -> np.ndarray:
+    """Clamped vector whose interior knot 0.5 is repeated ``degree + 1`` times."""
+    interior = np.concatenate(([0.2], np.full(degree + 1, 0.5), [0.8]))
+    return np.concatenate(
+        (np.full(degree + 1, 0.0), interior, np.full(degree + 1, 1.0)),
+    )
+
+
+@pytest.mark.parametrize("degree", [2, 3])
+def test_qp_curvature_constraints_reject_a_repeated_interior_knot(degree):
+    """A ``degree + 1`` repeat away from the boundary must stay rejected.
+
+    Relaxing the zero-span guard for a knot that lands *on* a fitted boundary
+    must not relax it for a coincidence strictly inside the domain: that
+    layout splits the spline into independent pieces, the exact probe set
+    de-duplicates the repeated breakpoint, and
+    ``build_curvature_difference_constraints`` has no rank check to notice the
+    rows it lost.
+    """
+    knots = _clamped_knots_with_a_repeated_interior_knot(degree)
+    n_basis = len(knots) - degree - 1
+    # Left unguarded this layout silently under-constrains: the probe set has
+    # one row per distinct interior breakpoint plus the two domain ends.
+    probe_rows = len(np.unique(knots[(knots > 0.0) & (knots < 1.0)])) + 2
+    assert probe_rows < n_basis - 2
+
+    with pytest.raises(ValueError, match="positive derivative knot spans"):
+        curvature_difference_operator(knots, degree, domain=(0.0, 1.0))
+    with pytest.raises(ValueError, match="positive derivative knot spans"):
+        build_curvature_difference_constraints(knots, degree, "convex", domain=(0.0, 1.0))
+
+
 def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum():
     _assert_first_interior_knot_is_on_the_boundary(CubicRegressionSpline)
     x, rng = _point_mass_at_minimum()
@@ -187,9 +222,32 @@ def test_solver_space_initialize_from_gamma_rejects_a_raw_space_gamma():
         reparam.initialize_from_gamma(np.ones(q_raw))
 
 
-def test_solver_space_initialize_from_gamma_inverts_the_solver_forward_map():
-    reparam = build_scop_solver_reparam(8, direction="increasing")
+@pytest.mark.parametrize("kind", ["increasing", "convex"])
+def test_solver_space_initialize_from_gamma_inverts_the_solver_forward_map(kind):
+    """Regression guard for an already-shipped fix, not for this branch's fix.
+
+    Commit 67b90f8 made ``SCOPSolverReparam.initialize_from_gamma`` the exact
+    inverse of this class's own ``forward``: identity on the ``free_dim``
+    affine coordinates, log on the positivity-mapped shape block.  Before it
+    the method delegated to ``raw_reparam.initialize_from_gamma`` and inverted
+    a different, raw-space map.  So this test cannot fail against this
+    branch's parent -- it discriminates against the pre-67b90f8 delegation and
+    against any map that logs the free coordinate, and it says nothing about
+    the length guard added here, which
+    ``test_solver_space_initialize_from_gamma_rejects_a_raw_space_gamma``
+    covers.
+    """
+    if kind == "increasing":
+        reparam = build_scop_solver_reparam(8, kind=kind)
+    else:
+        knots = np.linspace(-0.3, 1.3, 12)
+        reparam = build_scop_solver_reparam(
+            8, kind=kind, knots=knots, degree=DEGREE, domain=(0.2, 0.8)
+        )
+    # The convex map keeps one identity-mapped affine coordinate, so a
+    # negative leading entry has to survive the round trip untouched.
     beta_eff = np.linspace(-1.2, 0.9, reparam.q)
+    assert reparam.free_dim == (0 if kind == "increasing" else 1)
 
     recovered = reparam.initialize_from_gamma(reparam.forward(beta_eff))
 
