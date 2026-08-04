@@ -12,7 +12,10 @@ from superglm import (
     Spline,
     SuperGLM,
 )
-from superglm.constraints import shape_constraint_certificate
+from superglm.constraints import (
+    shape_constraint_certificate,
+    shape_constraint_is_roundoff_feasible,
+)
 
 
 def test_qp_convex_fit_reml_auto_lambda_constrained_refit():
@@ -228,13 +231,22 @@ def test_cr_clustered_quantile_large_response_completes_kkt_certificate(
     r_squared = 1.0 - np.sum((y - fitted) ** 2) / np.sum((y - y.mean()) ** 2)
     group = next(group for group in fitted_model._groups if group.name == "x")
     beta = fitted_model.result.beta[group.sl]
-    certificate = shape_constraint_certificate(fitted_model._specs["x"], beta, kind)
+    spec = fitted_model._specs["x"]
+    group_index = next(
+        index for index, fitted_group in enumerate(fitted_model._groups) if fitted_group is group
+    )
+    solver_map = fitted_model._dm.group_matrices[group_index].R_inv
+    raw_constraints = spec._build_monotone_constraints_raw()
+    expected_constraints = raw_constraints.compose(solver_map)
 
     assert fitted_model.result.converged
     assert fitted_model.result.termination_reason == "converged"
     assert r_squared > 0.95
     assert np.ptp(fitted) > 1e5
-    assert certificate.minimum_scaled_slack >= -1e-10
+    assert group.constraints is not None
+    np.testing.assert_array_equal(group.constraints.A, expected_constraints.A)
+    np.testing.assert_array_equal(group.constraints.b, expected_constraints.b)
+    assert shape_constraint_is_roundoff_feasible(spec, beta, kind)
 
 
 @pytest.mark.parametrize(

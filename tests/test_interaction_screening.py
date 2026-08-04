@@ -1434,9 +1434,10 @@ def test_screen_preserves_eta_sign_for_noninjective_links():
         family="poisson",
         link="sqrt",
         selection_penalty=None,
+        spline_penalty=20.0,
         discrete=False,
         features={name: Spline(kind="ps", k=6) for name in frame.columns},
-    ).fit_reml(frame, y, offset=off)
+    ).fit(frame, y, offset=off)
 
     eta = model._predict_eta_exact(frame, off)
     assert (np.asarray(eta) < 0).any(), "test needs negative fitted eta rows"

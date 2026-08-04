@@ -49,6 +49,85 @@ def _increasing_model() -> SuperGLM:
     )
 
 
+@pytest.mark.parametrize("cold_converged", [False, True])
+def test_failed_warm_qp_retries_cold_without_weakening_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+    cold_converged: bool,
+) -> None:
+    """A warm active set is only an optimization hint for the same QP."""
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.constrained_qp import QPResult
+
+    warm_result = QPResult(
+        beta=np.array([0.25]),
+        active_set=[0],
+        converged=False,
+    )
+    cold_result = QPResult(
+        beta=np.array([0.5]),
+        active_set=[],
+        converged=cold_converged,
+    )
+    active_sets: list[list[int] | None] = []
+
+    def fake_solve(*_args, active_set_init=None, **_kwargs):
+        active_sets.append(active_set_init)
+        return warm_result if active_set_init is not None else cold_result
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", fake_solve)
+    result = irls_direct._solve_constrained_qp_with_cold_retry(
+        np.eye(1),
+        np.ones(1),
+        np.ones((1, 1)),
+        np.zeros(1),
+        [0],
+    )
+
+    assert active_sets == [[0], None]
+    assert result is (cold_result if cold_converged else warm_result)
+
+
+@pytest.mark.parametrize(
+    ("active_set_init", "converged"),
+    [
+        pytest.param(None, False, id="cold-start"),
+        pytest.param([], False, id="empty-warm-set"),
+        pytest.param([0], True, id="certified-warm-result"),
+    ],
+)
+def test_qp_cold_retry_is_absent_from_the_normal_solve_path(
+    monkeypatch: pytest.MonkeyPatch,
+    active_set_init: list[int] | None,
+    converged: bool,
+) -> None:
+    """Cold retry adds no work unless a nonempty warm active set fails."""
+    import superglm.solvers.irls_direct as irls_direct
+    from superglm.solvers.constrained_qp import QPResult
+
+    result = QPResult(
+        beta=np.array([0.25]),
+        active_set=[] if active_set_init is None else active_set_init,
+        converged=converged,
+    )
+    active_sets: list[list[int] | None] = []
+
+    def fake_solve(*_args, active_set_init=None, **_kwargs):
+        active_sets.append(active_set_init)
+        return result
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", fake_solve)
+    observed = irls_direct._solve_constrained_qp_with_cold_retry(
+        np.eye(1),
+        np.ones(1),
+        np.ones((1, 1)),
+        np.zeros(1),
+        active_set_init,
+    )
+
+    assert active_sets == [active_set_init]
+    assert observed is result
+
+
 def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

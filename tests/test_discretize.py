@@ -364,7 +364,41 @@ class TestWeightContract:
             rtol=2e-14,
             atol=2e-14,
         )
-        for key in weighted.metrics:
+        for result in (weighted, repeated):
+            assert result.metrics["deviance_change"] == (
+                result.metrics["deviance_discretized"] - result.metrics["deviance_original"]
+            )
+            assert result.metrics["deviance_change_pct"] == (
+                100.0 * result.metrics["deviance_change"] / result.metrics["deviance_original"]
+            )
+
+        deviance_scale = max(
+            abs(weighted.metrics["deviance_original"]),
+            abs(weighted.metrics["deviance_discretized"]),
+            abs(repeated.metrics["deviance_original"]),
+            abs(repeated.metrics["deviance_discretized"]),
+        )
+        change_atol = 64.0 * np.finfo(np.float64).eps * deviance_scale
+        assert weighted.metrics["deviance_change"] == pytest.approx(
+            repeated.metrics["deviance_change"],
+            rel=2e-13,
+            abs=change_atol,
+        )
+        pct_atol = (
+            100.0
+            * change_atol
+            / min(
+                weighted.metrics["deviance_original"],
+                repeated.metrics["deviance_original"],
+            )
+        )
+        assert weighted.metrics["deviance_change_pct"] == pytest.approx(
+            repeated.metrics["deviance_change_pct"],
+            rel=2e-13,
+            abs=pct_atol,
+        )
+
+        for key in weighted.metrics.keys() - {"deviance_change", "deviance_change_pct"}:
             assert weighted.metrics[key] == pytest.approx(
                 repeated.metrics[key],
                 rel=2e-13,

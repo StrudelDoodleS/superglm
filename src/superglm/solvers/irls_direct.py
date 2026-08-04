@@ -55,6 +55,7 @@ from superglm.solvers.centered_system import (
     refresh_centered_rhs,
 )
 from superglm.solvers.constrained_qp import (
+    QPResult,
     _feasibility_slack,
     _is_feasible,
     solve_constrained_qp,
@@ -124,6 +125,42 @@ from superglm.types import GroupSlice, PenaltyComponent
 logger = logging.getLogger(__name__)
 
 _QP_FEASIBILITY_TOL = 1e-12
+
+
+def _solve_constrained_qp_with_cold_retry(
+    H: NDArray,
+    g: NDArray,
+    A: NDArray,
+    b: NDArray,
+    active_set_init: list[int] | None,
+) -> QPResult:
+    """Retry a failed warm active set without weakening the KKT contract.
+
+    A warm active set is an acceleration hint, not part of the mathematical
+    problem. Near an active boundary, platform-dependent roundoff can make the
+    warm solve project a stationary candidate and correctly withhold its KKT
+    certificate even though the identical problem converges from a cold active
+    set. Retry only that failed warm case, and replace its best iterate only
+    when the ordinary cold solve returns a complete certificate.
+    """
+    result = solve_constrained_qp(
+        H,
+        g,
+        A,
+        b,
+        active_set_init=active_set_init,
+    )
+    if active_set_init and not result.converged:
+        cold_result = solve_constrained_qp(
+            H,
+            g,
+            A,
+            b,
+            active_set_init=None,
+        )
+        if cold_result.converged:
+            return cold_result
+    return result
 
 
 @dataclass(frozen=True)
@@ -1605,12 +1642,12 @@ def _fit_irls_direct_once(
 
                 # Solve the constrained system in its existing coordinate space.
                 _t0 = time.perf_counter()
-                qp_result = solve_constrained_qp(
+                qp_result = _solve_constrained_qp_with_cold_retry(
                     centered.hessian,
                     centered.rhs,
                     A_all,
                     b_all,
-                    active_set_init=prev_active_set,
+                    prev_active_set,
                 )
                 beta = qp_result.beta
                 intercept = centered.mean_z - float(centered.mean_x @ beta)
