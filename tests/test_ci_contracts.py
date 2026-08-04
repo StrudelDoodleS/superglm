@@ -32,7 +32,7 @@ def _check_run_names(workflow: str) -> dict[str, list[str]]:
         if declared is None:
             published[job_id] = [job_id]
             continue
-        template = declared.group(1).strip()
+        template = declared.group(1).strip().strip("\"'")
         matrix_key = re.fullmatch(r"\$\{\{ *matrix\.([\w-]+) *\}\}", template)
         if matrix_key is None:
             published[job_id] = [template]
@@ -177,52 +177,118 @@ def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
 
 
 def test_frontend_check_names_are_unambiguous() -> None:
+    """Regression guard for a fix that shipped before this branch.
+
+    The duplicate-`frontend` defect (issue #227 item 3) was already fixed in
+    commit 67b90f8, which renamed ci.yml's `frontend` job to `frontend-browser`
+    and gave it an explicit `name:`.  That commit is an ancestor of this
+    branch's parent 37a1c18, so no form of this test can fail at 37a1c18; it is
+    kept to stop the duplicate name coming back, not to prove a fix made here.
+
+    The mutants it is verified against are built by
+    `test_frontend_contract_rejects_a_second_job_publishing_the_frontend_check`:
+    the exact inverse of 67b90f8, a second `frontend` job added beside
+    `frontend-browser`, and a matrix job whose quoted `name:` resolves to
+    `frontend`.
+    """
     required = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     compatibility = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-    assert "\n  frontend:\n" in required
-    assert "\n  frontend-browser:\n" in compatibility
+    assert "\n  frontend:\n" in required, (
+        "dev-ci.yml must define the job that owns the required check run"
+    )
+    assert "\n  frontend-browser:\n" in compatibility, (
+        "ci.yml's browser job must keep the disambiguated frontend-browser id"
+    )
     assert "frontend" not in {
         name for names in _check_run_names(compatibility).values() for name in names
     }, "ci.yml must not define a job that publishes the required 'frontend' check run"
 
 
-_REINTRODUCED_FRONTEND_JOB = """
-  frontend:
+_RENAME_67B90F8 = "  frontend-browser:\n    name: frontend-browser\n"
+
+_MATRIX_FRONTEND_JOB = """  frontend-checks:
+    name: "${{ matrix.check }}"
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - check: frontend
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Check frontend modules
         run: npm run check:frontend
+
 """
+
+
+def _reverse_the_disambiguating_rename(compatibility: str) -> str:
+    """Undo commit 67b90f8: hand ci.yml's browser job its `frontend` id back."""
+    mutant = compatibility.replace(_RENAME_67B90F8, "  frontend:\n", 1)
+    assert mutant != compatibility
+    return mutant
+
+
+def _duplicate_the_frontend_job(compatibility: str) -> str:
+    """Add a second `frontend` job while keeping `frontend-browser` intact."""
+    browser = _jobs(compatibility)["frontend-browser"]
+    mutant = compatibility.replace(
+        browser, _reverse_the_disambiguating_rename(browser) + browser, 1
+    )
+    assert mutant != compatibility
+    return mutant
+
+
+def _publish_frontend_from_a_matrix(compatibility: str) -> str:
+    """Add a job whose quoted matrix `name:` resolves to the `frontend` context."""
+    browser = _jobs(compatibility)["frontend-browser"]
+    mutant = compatibility.replace(browser, _MATRIX_FRONTEND_JOB + browser, 1)
+    assert mutant != compatibility
+    return mutant
 
 
 def test_frontend_contract_rejects_a_second_job_publishing_the_frontend_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Re-adding a `frontend` job to ci.yml must fail the unambiguity contract.
+    """Each way of restoring the duplicate `frontend` context must fail the guard.
 
-    Both workflows fire on `pull_request`, so a `frontend` job in either one
-    publishes a check run under the required `frontend` context on the same head
-    SHA, and the weaker of the two is enough to satisfy the gate.
+    Both workflows fire on `pull_request`, so a job publishing `frontend` in
+    either one attaches a second check run to the required `frontend` context on
+    the same head SHA, and the weaker of the two is enough to satisfy the gate.
+    This proves the guard above is not inert by running it against three faithful
+    mutants of the tree it protects.
     """
     dev_ci = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     compatibility = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    mutant = compatibility.replace(
-        "\n  frontend-browser:\n",
-        f"{_REINTRODUCED_FRONTEND_JOB}\n  frontend-browser:\n",
-        1,
-    )
-
-    assert "\n  frontend:\n" in mutant
-    assert "\n  frontend-browser:\n" in mutant
-
-    _mirror_workflows(tmp_path, dev_ci=dev_ci, compatibility=mutant)
     monkeypatch.setattr(sys.modules[__name__], "_ROOT", tmp_path)
 
-    with pytest.raises(AssertionError, match="publishes the required 'frontend' check run"):
+    # Mutant 1 - the exact inverse of commit 67b90f8, the state ci.yml was in
+    # when two workflows really did publish `frontend`.
+    reverted = _reverse_the_disambiguating_rename(compatibility)
+    assert "\n  frontend:\n" in reverted
+    assert "\n  frontend-browser:\n" not in reverted
+    _mirror_workflows(tmp_path, dev_ci=dev_ci, compatibility=reverted)
+    with pytest.raises(AssertionError, match="disambiguated frontend-browser id"):
+        test_frontend_check_names_are_unambiguous()
+
+    # Mutant 2 - the forward-looking shape: a `frontend` job re-added beside the
+    # renamed one, so only the negative assertion can catch it.
+    duplicated = _duplicate_the_frontend_job(compatibility)
+    assert "\n  frontend:\n" in duplicated
+    assert "\n  frontend-browser:\n" in duplicated
+    _mirror_workflows(tmp_path, dev_ci=dev_ci, compatibility=duplicated)
+    with pytest.raises(AssertionError, match="must not define a job that publishes"):
+        test_frontend_check_names_are_unambiguous()
+
+    # Mutant 3 - the same duplicate smuggled in behind a quoted matrix
+    # reference, which no job-id substring check can see.
+    from_matrix = _publish_frontend_from_a_matrix(compatibility)
+    assert "\n  frontend:\n" not in from_matrix
+    assert "\n  frontend-browser:\n" in from_matrix
+    _mirror_workflows(tmp_path, dev_ci=dev_ci, compatibility=from_matrix)
+    with pytest.raises(AssertionError, match="must not define a job that publishes"):
         test_frontend_check_names_are_unambiguous()
 
 
