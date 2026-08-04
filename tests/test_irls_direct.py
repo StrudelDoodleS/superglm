@@ -691,6 +691,148 @@ class TestDirectSolverBasic:
         assert cached.intercept == pytest.approx(uncached.intercept, abs=1e-12)
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
+    def test_poisson_sqrt_reuses_constant_weighted_gram(self, monkeypatch):
+        """Exact Poisson/sqrt Fisher weights reuse X'WX without changing the fit."""
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Poisson
+        from superglm.links import SqrtLink
+
+        rng = np.random.default_rng(20260804)
+        n = 160
+        x = np.linspace(-1.0, 1.0, n)
+        X_raw = np.column_stack((x, x**2))
+        offset = 0.12 * np.sin(2.0 * x)
+        eta = 1.4 + 0.25 * x - 0.08 * x**2 + offset
+        y = rng.poisson(eta**2).astype(np.float64)
+        weights = rng.uniform(0.5, 2.0, size=n)
+        dm = DesignMatrix([DenseGroupMatrix(X_raw)], n=n, p=2)
+        groups = [GroupSlice(name="x", start=0, end=2)]
+
+        original_centered = irls_direct.build_centered_system
+        centered_calls = 0
+
+        def counting_centered_system(*args, **kwargs):
+            nonlocal centered_calls
+            centered_calls += 1
+            return original_centered(*args, **kwargs)
+
+        assert irls_direct._has_constant_irls_weights(Poisson(), SqrtLink())
+        monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
+        cached, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Poisson(),
+            link=SqrtLink(),
+            groups=groups,
+            lambda2=0.0,
+            offset=offset,
+            max_iter=20,
+            tol=1e-10,
+            direct_solve="gram",
+        )
+        cached_centered_calls = centered_calls
+
+        monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
+        uncached, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Poisson(),
+            link=SqrtLink(),
+            groups=groups,
+            lambda2=0.0,
+            offset=offset,
+            max_iter=20,
+            tol=1e-10,
+            direct_solve="gram",
+        )
+
+        assert cached.n_iter > 1
+        assert cached_centered_calls == 1
+        assert centered_calls > cached_centered_calls + 1
+        np.testing.assert_allclose(cached.beta, uncached.beta, rtol=0.0, atol=1e-12)
+        assert cached.intercept == pytest.approx(uncached.intercept, abs=1e-12)
+        assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
+
+    def test_poisson_sqrt_constant_weight_cache_is_exact_type_gated(self):
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Poisson
+        from superglm.links import SqrtLink
+
+        class DerivedPoisson(Poisson):
+            pass
+
+        class DerivedSqrtLink(SqrtLink):
+            pass
+
+        assert not irls_direct._has_constant_irls_weights(DerivedPoisson(), SqrtLink())
+        assert not irls_direct._has_constant_irls_weights(Poisson(), DerivedSqrtLink())
+
+    def test_sqrt_null_shortcut_skips_only_unused_terminal_working_rows(self, monkeypatch):
+        import superglm.solvers.irls_direct as irls_direct
+        from superglm.distributions import Poisson
+        from superglm.links import SqrtLink
+
+        offset = np.tile([-0.4, -0.2, 0.0, 0.2, 0.4], 12)
+        y = np.tile([1.0, 2.0, 4.0, 3.0, 1.0], 12)
+        weights = np.linspace(0.5, 1.5, len(y))
+        dm = DesignMatrix([], n=len(y), p=0)
+        original_rows = irls_direct.coefficient_working_rows
+        row_calls = 0
+
+        def counted_rows(*args, **kwargs):
+            nonlocal row_calls
+            row_calls += 1
+            return original_rows(*args, **kwargs)
+
+        monkeypatch.setattr(irls_direct, "coefficient_working_rows", counted_rows)
+        shortcut, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Poisson(),
+            link=SqrtLink(),
+            groups=[],
+            lambda2=0.0,
+            offset=offset,
+            max_iter=100,
+            tol=1e-10,
+            direct_solve="gram",
+            compute_rank_info=False,
+            _return_working_system=True,
+            _compute_fit_statistics=False,
+            _compute_reml_geometry=False,
+            _compute_scop_postfit_inference=False,
+        )
+        shortcut_row_calls = row_calls
+
+        ordinary, _ = irls_direct.fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=weights,
+            family=Poisson(),
+            link=SqrtLink(),
+            groups=[],
+            lambda2=0.0,
+            offset=offset,
+            max_iter=100,
+            tol=1e-10,
+            direct_solve="gram",
+            compute_rank_info=False,
+            _compute_fit_statistics=False,
+            _compute_reml_geometry=False,
+            _compute_scop_postfit_inference=False,
+        )
+        ordinary_row_calls = row_calls - shortcut_row_calls
+
+        assert shortcut_row_calls == shortcut.n_iter
+        assert ordinary_row_calls == ordinary.n_iter + 1
+        assert shortcut.n_iter == ordinary.n_iter
+        assert shortcut.converged == ordinary.converged
+        assert shortcut.intercept == ordinary.intercept
+        assert shortcut.deviance == ordinary.deviance
+
     def test_distribution_subclass_cannot_inherit_constant_weight_cache(self, monkeypatch):
         """Behavior-changing family subclasses must rebuild their weighted Gram."""
         import superglm.solvers.irls_direct as irls_direct

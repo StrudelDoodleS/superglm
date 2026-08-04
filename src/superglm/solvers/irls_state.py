@@ -218,22 +218,14 @@ def _irls_objective_relative_change(
     *,
     objective: float,
     previous: float,
-    y: NDArray,
-    weights: NDArray,
-    family: Distribution,
-    link: Link,
+    objective_scale: float,
 ) -> float:
     """Return a convergence ratio with link-appropriate objective units."""
     # Poisson deviance is homogeneous of degree one when y and μ are rescaled
     # together.  A fixed ``+1`` denominator therefore declares convergence
     # prematurely for genuinely tiny sqrt-link means.  Response mass carries
-    # the same units and makes this stopping rule scale-equivariant.
-    objective_scale = _irls_objective_scale(
-        y=y,
-        weights=weights,
-        family=family,
-        link=link,
-    )
+    # the same units and makes this stopping rule scale-equivariant.  Callers
+    # compute this fit-invariant scale once and reuse it for every iteration.
     return abs(objective - previous) / (abs(previous) + objective_scale)
 
 
@@ -332,10 +324,16 @@ def _select_irls_trial(
     evaluate_state: Callable[[float], _IRLSState],
     invalid_state: StateInvalid | None = None,
     max_halving: int = 20,
+    extended_max_halving: Callable[[], int] | None = None,
     merit_delta: MeritDelta | None = None,
     merit_scale: float = 1.0,
 ) -> _IRLSStepDecision:
-    """Return the largest safe fixed-endpoint trial, or reject atomically."""
+    """Return the largest safe fixed-endpoint trial, or reject atomically.
+
+    ``extended_max_halving`` is resolved only after the ordinary budget is
+    exhausted.  Extreme Poisson/sqrt fits can therefore search beyond the
+    default float depth without paying to derive that bound on normal steps.
+    """
     if max_halving < 1:
         raise ValueError("max_halving must be at least 1")
     if not _irls_trial_is_unsafe(
@@ -351,7 +349,7 @@ def _select_irls_trial(
     for depth in range(1, max_halving + 1):
         alpha = 2.0**-depth
         if alpha == 0.0:
-            break
+            return _IRLSStepDecision(0.0, 0, True, trials_attempted=trials_attempted)
         candidate = evaluate_state(alpha)
         trials_attempted += 1
         if not _irls_trial_is_unsafe(
@@ -362,5 +360,34 @@ def _select_irls_trial(
             merit_scale,
         ):
             return _IRLSStepDecision(alpha, depth, False, trials_attempted=depth + 1)
+
+    if extended_max_halving is not None:
+        extended_limit = extended_max_halving()
+        if extended_limit < max_halving:
+            raise ValueError("extended_max_halving must be at least max_halving")
+        for depth in range(max_halving + 1, extended_limit + 1):
+            alpha = 2.0**-depth
+            if alpha == 0.0:
+                return _IRLSStepDecision(
+                    0.0,
+                    0,
+                    True,
+                    trials_attempted=trials_attempted,
+                )
+            candidate = evaluate_state(alpha)
+            trials_attempted += 1
+            if not _irls_trial_is_unsafe(
+                candidate,
+                committed,
+                invalid_state,
+                merit_delta,
+                merit_scale,
+            ):
+                return _IRLSStepDecision(
+                    alpha,
+                    depth,
+                    False,
+                    trials_attempted=depth + 1,
+                )
 
     return _IRLSStepDecision(0.0, 0, True, trials_attempted=trials_attempted)
