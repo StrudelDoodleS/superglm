@@ -49,7 +49,18 @@ module are parsed with ``ast``.  A test function counts as evidence if it was
 added, or if its body or decorators changed -- comparing ``ast.dump`` output
 detects a strengthened assertion without any diff-line bookkeeping, and ignores
 a pure move.  Requiring merely that *something* in the changed modules fails is
-satisfied by a neighbouring test the same change reparameterised.
+satisfied by an untouched neighbour.
+
+Crediting a *modified* test is a deliberate trade with a cost worth stating: the
+AST cannot distinguish an assertion that was tightened adversarially from one
+mechanically updated to match the new behaviour, and both fail against the
+rolled-back ``src/``.  So a change that edits an expected constant earns a
+``PASS`` on that edit alone.  The alternative -- crediting only added tests --
+was worse: tightening an existing assertion is the textbook fix for a test that
+was too weak (it is how two of the three examples above should have been fixed),
+and refusing it left the blanket ``mutation-gate-exempt`` label as the only
+remedy, which disables the check for the whole change including the production
+edits that do need constraining.
 
 **Outcomes come from ``--junit-xml``, not from the terminal summary.**  Scraping
 ``N passed`` counts *items*, while ``ast`` counts *function definitions*; the two
@@ -526,16 +537,24 @@ def main() -> int:
                 + note,
             )
 
-        errored = [t for t in evaluable if base_outcomes[t].errored]
-        if errored:
+        # A target with NO record at base did not survive the mutant -- it was
+        # never measured. A module that fails to import against the rolled-back
+        # src raises a *collection* error, which JUnit files against the module
+        # rather than the test, so it matches no target and leaves the outcome
+        # empty. Reading that as "passed at base" is how an unobserved result
+        # becomes a FAIL against a correct change.
+        unmeasured = [
+            t for t in evaluable if base_outcomes[t].errored or base_outcomes[t].collected == 0
+        ]
+        if unmeasured:
             return report(
                 INCONCLUSIVE,
-                f"{len(errored)} evaluable test(s) errored against the unfixed code "
-                "rather than failing.",
+                f"{len(unmeasured)} evaluable test(s) errored or never ran against the "
+                "unfixed code, rather than failing.",
                 "An error is not a demonstrated behavioural constraint - it is usually a\n"
                 "missing symbol, which a genuinely new module produces legitimately.\n"
                 "Verify by hand that these fail for the intended reason.\n\n"
-                + "\n".join(f"  {n}" for n in errored)
+                + "\n".join(f"  {n}" for n in unmeasured)
                 + note
                 + "\n\n"
                 + base_out[-1500:],
