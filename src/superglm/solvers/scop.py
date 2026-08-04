@@ -89,14 +89,34 @@ def _curvature_scop_basis(
         domain=domain,
     )
     expected_shape = (max(q - 2, 0), q)
+    active_lo = float(knots_arr[degree])
+    active_hi = float(knots_arr[q])
+    if curvature.shape != expected_shape and domain is not None:
+        # A knot placed exactly on a fitted boundary is not an interior
+        # breakpoint of the second derivative, so the exact public-domain
+        # probe set loses a row while the SCOP map still has q - 2 non-affine
+        # directions to invert.  Probing every active knot instead restores
+        # one row per direction and is a strictly stronger curvature
+        # condition than the public-domain rows it replaces: the second
+        # derivative is linear on each knot span, so signing it at both ends
+        # of every span signs it on the fitted domain too.
+        active_domain = (active_lo, active_hi)
+        if active_domain != tuple(float(bound) for bound in domain):
+            curvature = curvature_difference_operator(
+                knots_arr,
+                degree,
+                domain=active_domain,
+            )
     if curvature.shape != expected_shape:
         raise ValueError(
             "Curvature SCOP domain must retain one independent row per "
-            "non-affine coefficient direction"
+            "non-affine coefficient direction; the fitted knot vector "
+            f"{np.array2string(knots_arr, threshold=12)} carries repeated or "
+            "domain-coincident knots. Re-place the knots (a different "
+            "knot_strategy, fewer n_knots, or an explicit boundary) so each "
+            "knot span is non-empty."
         )
 
-    active_lo = float(knots_arr[degree])
-    active_hi = float(knots_arr[q])
     normalized_knots = (knots_arr - active_lo) / (active_hi - active_lo)
     greville = np.asarray(
         [np.mean(normalized_knots[index + 1 : index + degree + 1]) for index in range(q)],
@@ -356,8 +376,18 @@ class SCOPSolverReparam:
         return S
 
     def initialize_from_gamma(self, gamma: NDArray, floor: float = 1e-6) -> NDArray:
-        """Recover solver-space beta_eff from gamma."""
+        """Invert ``forward``: solver-space gamma_eff -> solver-space beta_eff.
+
+        ``gamma`` is the length-``q`` solver-space vector produced by
+        :meth:`forward`, not the length ``q + 1`` raw-space gamma that
+        :meth:`SCOPReparameterization.initialize_from_gamma` consumes.
+        """
         beta = np.array(gamma, dtype=np.float64, copy=True)
+        if beta.shape != (self.q,):
+            raise ValueError(
+                f"SCOP solver-space initialize_from_gamma expects a length-{self.q} "
+                f"solver-space gamma, got shape {beta.shape}"
+            )
         if self.shape_dim:
             beta[self.free_dim :] = np.log(np.maximum(beta[self.free_dim :], floor))
         return beta
