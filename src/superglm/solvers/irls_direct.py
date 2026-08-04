@@ -1669,8 +1669,12 @@ def _fit_irls_direct_once(
                         "failures in this fit are not reported here.",
                         it + 1,
                     )
-                _used_svd = False
-                _cond_est = 0.0
+                # Report what the QP actually inverted.  These were hardcoded
+                # to False/0.0, so the constrained branch published "perfectly
+                # conditioned" to the consumers below while the unconstrained
+                # branch above read the real numbers off its decomposition.
+                _used_svd = qp_result.used_svd_fallback
+                _cond_est = qp_result.condition
                 _t_solve += time.perf_counter() - _t0
 
             # A bounded factor pass can intentionally replace an uncertain Gram

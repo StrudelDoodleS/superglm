@@ -24,6 +24,17 @@ class RankPolicy:
 
     That is the one thing a stored ``RankDecomposition`` or ``RankInfo`` cannot
     re-derive for itself, so it is the one thing the version has to carry.
+
+    **Bump contract.**  Bump when the deficient path can return a different
+    ``active_columns`` for the same input under the same thresholds.  A newly
+    recorded field, a new report, or a change outside this module is NOT a
+    bump: the version is a claim about the selection rule, and it can only
+    honestly cover what this module decides.  Note that several
+    selection-deciding constants live outside this object as module literals,
+    so a bump is a claim about the rule as a whole, not about the fields here.
+
+    The version reaches a recorded fit through
+    ``training_telemetry()["rank_policy"]["version"]``.
     """
 
     version: int

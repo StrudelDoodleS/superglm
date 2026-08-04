@@ -197,16 +197,26 @@ def _psd_rank(A: NDArray, inv_scale: NDArray | None = None) -> float:
     makes every direction O(1) by construction, which is exactly what a rank
     count must not do -- on ``diag(3, 2, 1e-18)`` it turns a rank of 2 into 3.
     """
-    A = 0.5 * (A + A.T)
-    if inv_scale is not None:
-        A = A * inv_scale[:, None] * inv_scale[None, :]
-    w = np.linalg.eigvalsh(A)
+    w = _psd_spectrum(A, inv_scale)
     if w.size == 0:
         return 0.0
     top = float(w[-1])
     if top <= 0.0:
         return 0.0
     return float(np.sum(w > _rank_floor(w.size) * top))
+
+
+def _psd_spectrum(A: NDArray, inv_scale: NDArray | None = None) -> NDArray:
+    """Ascending eigenvalues of the symmetrized, optionally balanced block.
+
+    Split out of :func:`_psd_rank` so that two operands about to be DIFFERENCED
+    can be counted against one absolute cut rather than against two relative
+    ones.  See :func:`_profiled_rank`.
+    """
+    A = 0.5 * (A + A.T)
+    if inv_scale is not None:
+        A = A * inv_scale[:, None] * inv_scale[None, :]
+    return np.linalg.eigvalsh(A)
 
 
 def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
@@ -310,7 +320,32 @@ def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
     inv = np.ones(k + q, dtype=np.float64)
     if tr_v > 0.0 and tr_m > 0.0:
         inv[:k] = np.sqrt(tr_m / tr_v)
-    return max(_psd_rank(K, inv) - _psd_rank(M), 0.0)
+    # ONE RULER for both operands.  Counting each at its own relative floor
+    # makes the thresholds differ by DIMENSION -- ``(k + q) * eps`` against
+    # ``q * eps`` -- so a nuisance direction can fall below the cut in the
+    # joint while surviving in ``M``, and the difference undercounts by a whole
+    # degree of freedom.  Balancing does not reach this: it equalises the two
+    # blocks' SCALES, and here the disagreement is between their dimensions.
+    #
+    # ``inv[k:]`` is 1, so ``M`` is bitwise the joint's trailing block and the
+    # single cut applies to it unchanged -- no congruence question arises.
+    #
+    # One-sided by construction: ``M`` is a principal submatrix of the balanced
+    # joint, so Cauchy interlacing gives ``top_M <= top_K``, and ``k + q > q``
+    # gives ``_rank_floor(k + q) > _rank_floor(q)``.  The shared cut therefore
+    # always exceeds the old nuisance cut, the nuisance count can only fall,
+    # and the profiled rank can only rise.  The clamp below is retained as a
+    # cheap invariant rather than a live branch.
+    w_joint = _psd_spectrum(K, inv)
+    if w_joint.size == 0:
+        return 0.0
+    top = float(w_joint[-1])
+    if top <= 0.0:
+        return 0.0
+    cut = _rank_floor(w_joint.size) * top
+    w_nuisance = _psd_spectrum(M)
+    retained = np.count_nonzero(w_joint > cut) - np.count_nonzero(w_nuisance > cut)
+    return max(float(retained), 0.0)
 
 
 @dataclass(frozen=True)
