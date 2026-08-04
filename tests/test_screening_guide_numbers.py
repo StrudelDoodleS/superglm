@@ -1,0 +1,366 @@
+"""The screening guide's worked freMTPL example is a published measurement.
+
+``docs/guide/screening.md`` prints a twelve-row sweep table and then reasons
+about individual cells of it: the top row's ``z`` against the measured ``ti``
+noise maximum, the ``cat_cat`` row's ``z`` and ``statistic``, how many rows
+carry a negative ``z``, and two confirmatory refit gains.  Every one of those
+moves when the screen's dispersion contract moves or when a margin's knots
+move, and both moved together — the Pearson denominator went from
+``count_nonzero(w) - edf`` to ``sum(w) - edf`` (on this book ``sum(w)`` is
+roughly half of ``n``, so ``phi`` nearly doubles) and ``quantile_tempered``
+knot placement started consuming frequency mass, which shifts the
+``BonusMalus`` margin the example is built around.  The prose was rewritten to
+describe the new contract; the numbers were not regenerated.
+
+Two layers keep the guide honest:
+
+The ``test_screening_guide_*`` tests read the numbers back out of the published
+document — the printed sweep table, the quoted ``phi``, the confirmatory-refit
+table, the incomparable-``statistic`` paragraph and the closing reading against
+the ``ti`` floor — and compare each to the committed measurement in
+``tests/fixtures/screening_guide_fremtpl.json``.  They need no data file, so
+they run everywhere.
+
+``test_screening_guide_fixture_matches_the_real_book`` recomputes that
+measurement from the freMTPL2 parquet, so the fixture cannot itself go stale
+behind a code change.  It skips when the (gitignored) parquet is absent.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from superglm import Categorical, SuperGLM
+from superglm.features.numeric import Numeric
+from superglm.features.spline import Spline
+
+from . import _datasets
+
+_ROOT = Path(__file__).resolve().parents[1]
+_GUIDE_PATH = _ROOT / "docs/guide/screening.md"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "screening_guide_fremtpl.json"
+
+_WORD_NUMBERS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+
+
+@pytest.fixture(scope="module")
+def measured() -> dict:
+    return json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def guide() -> str:
+    return _GUIDE_PATH.read_text(encoding="utf-8")
+
+
+def _published_sweep_rows(guide_text: str) -> list[dict]:
+    """Parse the ``print(table.to_string(index=False))`` output block."""
+    match = re.search(
+        r"^print\(table\.to_string\(index=False\)\)\n(?P<body>(?:^#.*\n)+)",
+        guide_text,
+        re.MULTILINE,
+    )
+    assert match is not None, "the guide no longer prints the sweep table"
+    lines = [line.lstrip("#").strip() for line in match.group("body").splitlines()]
+    header, *body = [line for line in lines if line]
+    assert header.split() == [
+        "feature_a",
+        "feature_b",
+        "kind",
+        "statistic",
+        "z",
+        "edf0",
+        "lambda0",
+        "n_cells",
+        "approx",
+    ], header
+    rows = []
+    for line in body:
+        a, b, kind, statistic, z, edf0, lambda0, n_cells, approx = line.split()
+        rows.append(
+            {
+                "feature_a": a,
+                "feature_b": b,
+                "kind": kind,
+                "statistic": float(statistic),
+                "z": float(z),
+                "edf0": float(edf0),
+                "lambda0": float(lambda0),
+                "n_cells": int(n_cells),
+                "approx": {"True": True, "False": False}[approx],
+            }
+        )
+    return rows
+
+
+def _search(guide_text: str, pattern: str) -> re.Match:
+    match = re.search(pattern, " ".join(guide_text.split()))
+    assert match is not None, f"the guide no longer contains {pattern!r}"
+    return match
+
+
+def test_screening_guide_table_matches_the_measured_sweep(guide, measured) -> None:
+    """Every printed cell of the worked sweep is the measured value."""
+    published = _published_sweep_rows(guide)
+    expected = measured["rows"]
+
+    # Order is part of the claim: the guide says the sweep comes back as "one
+    # sorted table" and then reads the top two rows as the queue.
+    assert [(r["feature_a"], r["feature_b"], r["kind"]) for r in published] == [
+        (r["feature_a"], r["feature_b"], r["kind"]) for r in expected
+    ]
+    for got, want in zip(published, expected, strict=True):
+        where = f"{want['feature_a']} x {want['feature_b']}"
+        # Printed at six decimals, so half a unit in the last place.
+        for column in ("statistic", "z", "edf0"):
+            assert got[column] == pytest.approx(want[column], abs=5e-7), f"{where}.{column}"
+        assert got["lambda0"] == pytest.approx(want["lambda0"], rel=5e-7), f"{where}.lambda0"
+        assert got["n_cells"] == want["n_cells"], where
+        assert got["approx"] == want["approx"], where
+
+
+def test_screening_guide_quotes_the_measured_dispersion(guide, measured) -> None:
+    """The example's ``phi`` is the one the documented denominator produces."""
+    phi = float(_search(guide, r"`phi` estimated at ([0-9.]+)\)").group(1))
+    assert phi == pytest.approx(measured["phi"], abs=5e-3)
+    # phi is the Pearson sum over sum(w) - edf, and the exposure mass here is
+    # far below the row count; quoting a phi consistent with an n - edf
+    # denominator would understate it by roughly a factor of two.
+    assert measured["sum_sample_weight"] < 0.6 * measured["n_rows"]
+
+
+def test_screening_guide_confirmatory_refit_table_matches_the_measured_gains(
+    guide, measured
+) -> None:
+    """The ``z`` / probe df / refit gain table under the sweep is measured."""
+    rows = measured["rows"]
+
+    # The confirmatory-refit table: | pair | kind | z | probe df | refit gain |
+    for refit in measured["confirmatory_refits"]:
+        pair = f"{refit['feature_a']} x {refit['feature_b']}"
+        row = next(
+            r
+            for r in rows
+            if (r["feature_a"], r["feature_b"]) == (refit["feature_a"], refit["feature_b"])
+        )
+        match = _search(
+            guide,
+            rf"\| `{re.escape(pair)}` \| `{re.escape(refit['kind'])}` "
+            rf"\| (-?[0-9.]+) \| ([0-9]+) \| ([0-9.]+) \|",
+        )
+        assert float(match.group(1)) == pytest.approx(row["z"], abs=5e-3), f"{pair} z"
+        assert int(match.group(2)) == round(row["edf0"]), f"{pair} probe df"
+        # Published to one decimal, so a tenth either way.
+        assert float(match.group(3)) == pytest.approx(refit["deviance_gain"], abs=0.1), (
+            f"{pair} refit gain"
+        )
+
+    # "43.9 on 2 df is 22.0 per df against 7.3"
+    density = _search(guide, r"([0-9.]+) on ([0-9]+) df is ([0-9.]+) per df against ([0-9.]+)")
+    first, second = measured["confirmatory_refits"]
+    first_row, second_row = (
+        next(
+            r
+            for r in rows
+            if (r["feature_a"], r["feature_b"]) == (refit["feature_a"], refit["feature_b"])
+        )
+        for refit in (first, second)
+    )
+    assert float(density.group(1)) == pytest.approx(first["deviance_gain"], abs=0.1)
+    assert int(density.group(2)) == round(first_row["edf0"])
+    assert float(density.group(3)) == pytest.approx(
+        first["deviance_gain"] / first_row["edf0"], abs=0.1
+    )
+    assert float(density.group(4)) == pytest.approx(
+        second["deviance_gain"] / second_row["edf0"], abs=0.1
+    )
+    # The ranking lesson only holds while the wider block still buys more.
+    assert second["deviance_gain"] > first["deviance_gain"]
+    assert second_row["z"] < first_row["z"]
+
+
+def test_screening_guide_incomparable_statistic_claims_match(guide, measured) -> None:
+    """The "`statistic` is not comparable" paragraph quotes real cells."""
+    rows = measured["rows"]
+    by_kind: dict[str, list[dict]] = {}
+    for row in rows:
+        by_kind.setdefault(row["kind"], []).append(row)
+
+    # "the `cat_cat` row's X is a 208-dimensional block and the `numeric_cat`
+    # row's Y a 10-dimensional one"
+    cat_cat = by_kind["cat_cat"][0]
+    incomparable = _search(
+        guide,
+        r"the `cat_cat` row's ([0-9.]+) is a ([0-9]+)-dimensional block and the "
+        r"`numeric_cat` row's ([0-9.]+) a ([0-9]+)-dimensional one",
+    )
+    assert float(incomparable.group(1)) == pytest.approx(cat_cat["statistic"], abs=0.5)
+    assert int(incomparable.group(2)) == round(cat_cat["edf0"])
+    numeric_cat = next(
+        r for r in by_kind["numeric_cat"] if round(r["edf0"]) == int(incomparable.group(4))
+    )
+    assert float(incomparable.group(3)) == pytest.approx(numeric_cat["statistic"], abs=5e-2)
+
+    # "Eight of the twelve rows carry a negative `z`"
+    negatives = _search(guide, r"(\w+) of the (\w+) rows carry a negative `z`")
+    assert _WORD_NUMBERS[negatives.group(1).lower()] == sum(1 for r in rows if r["z"] < 0.0)
+    assert _WORD_NUMBERS[negatives.group(2).lower()] == len(rows)
+
+    # "The `cat_cat` row's -6.51 is the extreme case ... lands at 75"
+    extreme = _search(
+        guide,
+        r"The `cat_cat` row's (-[0-9.]+) is the extreme case .*? lands at ([0-9.]+),",
+    )
+    assert float(extreme.group(1)) == pytest.approx(cat_cat["z"], abs=5e-3)
+    assert float(extreme.group(2)) == pytest.approx(cat_cat["statistic"], abs=0.5)
+    assert cat_cat["z"] == min(r["z"] for r in rows)
+
+    # "the `VehBrand x Region` row above reports `edf0 = 208` against a
+    # nominal 210" — the rank-deficiency illustration in the budget section
+    # reads the same row.
+    deficient = _search(
+        guide,
+        r"the `(\w+) x (\w+)` row above reports `edf0 = ([0-9]+)` against a nominal ([0-9]+)",
+    )
+    assert (deficient.group(1), deficient.group(2)) == (
+        cat_cat["feature_a"],
+        cat_cat["feature_b"],
+    )
+    assert int(deficient.group(3)) == round(cat_cat["edf0"])
+    assert int(deficient.group(4)) > round(cat_cat["edf0"])
+
+
+def test_screening_guide_top_row_is_read_against_the_published_ti_floor(guide, measured) -> None:
+    """The closing paragraph compares the real top ``z`` to the real floor."""
+    rows = measured["rows"]
+    first = measured["confirmatory_refits"][0]
+
+    # "(7.31 for `ti`): 4.40 does not clear it -- and the refit bought 43.9
+    # deviance anyway."
+    floor = _search(
+        guide,
+        r"measured noise maximum below \(([0-9.]+) for `ti`\): (-?[0-9.]+) does not clear it "
+        r"[^.]*?refit bought ([0-9.]+) deviance",
+    )
+    top = rows[0]
+    assert float(floor.group(1)) == pytest.approx(measured["ti_null_floor_max_z"], abs=5e-3)
+    assert float(floor.group(2)) == pytest.approx(top["z"], abs=5e-3)
+    assert float(floor.group(3)) == pytest.approx(first["deviance_gain"], abs=0.1)
+    # The sentence claims the top row falls short of the floor; if the measured
+    # z ever cleared it the paragraph would say the opposite.
+    assert top["z"] < measured["ti_null_floor_max_z"]
+    # ... and the floor itself is the one published in this same guide.
+    assert (
+        _search(guide, r"\| `ti` \| 480 \| [0-9.]+ \| [0-9.]+ \| ([0-9.]+) \|").group(1)
+        == f"{measured['ti_null_floor_max_z']:.2f}"
+    )
+
+
+# ── the fixture is anchored to the real book (skips without the parquet) ────
+
+
+def _freq_available() -> bool:
+    return _datasets.find("freMTPL2freq.parquet") is not None
+
+
+FREQ_SKIP = pytest.mark.skipif(
+    not _freq_available(),
+    reason="data/freMTPL2freq.parquet not found (gitignored)",
+)
+
+
+def _guide_features() -> dict:
+    """Exactly the specification published in the guide's fence."""
+    return {
+        "DrivAge": Spline(kind="ps", n_knots=8),
+        "VehAge": Spline(kind="ps", n_knots=12),
+        "BonusMalus": Spline(
+            kind="ps",
+            n_knots=12,
+            knot_strategy="quantile_tempered",
+            knot_alpha=0.2,
+        ),
+        "LogDensity": Numeric(),
+        "VehBrand": Categorical(),
+        "Region": Categorical(),
+    }
+
+
+def _guide_frame(n_rows: int):
+    df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
+    df["Exposure"] = df["Exposure"].clip(lower=0.01)
+    df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))
+    exposure = df["Exposure"].to_numpy(dtype=np.float64)
+    y = df["ClaimNb"].to_numpy(dtype=np.float64) / exposure
+    return df, y, exposure
+
+
+@FREQ_SKIP
+def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
+    """Recompute the published sweep so the committed fixture cannot go stale."""
+    df, y, exposure = _guide_frame(measured["n_rows"])
+    # The dispersion contract this example documents only bites because the
+    # exposure mass is far below the row count: sum(w) - edf is the denominator,
+    # not n - edf, so the two differ by roughly a factor of two here.
+    assert exposure.sum() == pytest.approx(measured["sum_sample_weight"], rel=1e-6)
+    assert exposure.sum() < 0.6 * len(df)
+
+    model = SuperGLM(family="poisson", features=_guide_features())
+    model.fit_reml(df, y, sample_weight=exposure)
+    assert model._result.deviance == pytest.approx(measured["mains_deviance"], rel=1e-6)
+    assert model._result.effective_df == pytest.approx(measured["mains_edf"], rel=1e-5)
+
+    table = model.screen_interactions(df, y, sample_weight=exposure)
+    assert float(table.attrs["phi"]) == pytest.approx(measured["phi"], rel=1e-5)
+
+    expected = measured["rows"]
+    assert len(table) == len(expected)
+    got = table.reset_index(drop=True)
+    assert list(zip(got["feature_a"], got["feature_b"], got["kind"], strict=True)) == [
+        (r["feature_a"], r["feature_b"], r["kind"]) for r in expected
+    ]
+    for position, want in enumerate(expected):
+        row = got.iloc[position]
+        where = f"{want['feature_a']} x {want['feature_b']}"
+        assert float(row["statistic"]) == pytest.approx(want["statistic"], rel=1e-4, abs=1e-4), (
+            f"{where}.statistic"
+        )
+        assert float(row["z"]) == pytest.approx(want["z"], rel=1e-4, abs=1e-4), f"{where}.z"
+        assert float(row["edf0"]) == pytest.approx(want["edf0"], abs=1e-2), f"{where}.edf0"
+        # lambda0 at a clamped rung is a bracket edge, so it is pinned only to
+        # the bracket rather than to the last printed digit.
+        assert float(row["lambda0"]) == pytest.approx(want["lambda0"], rel=1e-2, abs=1e-6), (
+            f"{where}.lambda0"
+        )
+        assert int(row["n_cells"]) == want["n_cells"], f"{where}.n_cells"
+        assert bool(row["approx"]) == want["approx"], f"{where}.approx"
+
+    for refit in measured["confirmatory_refits"]:
+        confirm = SuperGLM(
+            family="poisson",
+            features=_guide_features(),
+            interactions=[(refit["feature_a"], refit["feature_b"])],
+        )
+        confirm.fit_reml(df, y, sample_weight=exposure)
+        gain = model._result.deviance - confirm._result.deviance
+        assert gain == pytest.approx(refit["deviance_gain"], rel=1e-3), (
+            f"{refit['feature_a']} x {refit['feature_b']} refit gain"
+        )
