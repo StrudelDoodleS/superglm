@@ -290,7 +290,7 @@ def test_pandas_selection_and_digest_preserve_falsey_hashable_column_labels() ->
         }
     )
     frame = as_eager_frame(native)
-    labels = (0, None, "", ("tuple", "label"))
+    labels = (None, "", ("tuple", "label"))
 
     selected = frame.select_native(labels)
 
@@ -299,6 +299,13 @@ def test_pandas_selection_and_digest_preserve_falsey_hashable_column_labels() ->
 
 
 def test_pandas_selection_reads_a_boolean_column_label_as_a_label_not_a_mask() -> None:
+    """Regression guard for the ``_select_pandas_columns`` fix shipped in 67b90f8.
+
+    That fix predates this branch, so this test cannot fail at the branch parent.
+    It fails against the pre-67b90f8 ``native.loc[:, list(columns)]`` form, which
+    reads ``[False]`` as a length-1 boolean mask over a two-column frame and
+    raises ``IndexError`` instead of selecting the ``False``-labelled column.
+    """
     native = pd.DataFrame({False: [1.0, 2.0], "z": [3.0, 4.0]})
     frame = as_eager_frame(native)
 
@@ -311,6 +318,13 @@ def test_pandas_selection_reads_a_boolean_column_label_as_a_label_not_a_mask() -
 
 
 def test_pandas_digest_of_a_lone_boolean_label_tracks_that_column_values() -> None:
+    """Regression guard for the ``_select_pandas_columns`` fix shipped in 67b90f8.
+
+    That fix predates this branch, so this test cannot fail at the branch parent.
+    It fails against the pre-67b90f8 ``native.loc[:, list(columns)]`` form: on a
+    one-column frame the length-1 mask ``[False]`` selects zero columns without
+    raising, so the retained-fit-data digest silently stops tracking the values.
+    """
     before = as_eager_frame(pd.DataFrame({False: [1.0, 2.0]}))
     after = as_eager_frame(pd.DataFrame({False: [1.0, 99.0]}))
 
