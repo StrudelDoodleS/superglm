@@ -34,6 +34,12 @@ concurrency:
 jobs:
   mutation-gate:
     name: Added tests must fail against the unfixed code
+    # Every label change would otherwise cancel an in-flight run and restart a
+    # 30-minute job, because `cancel-in-progress` groups on the PR number.
+    # Only the exemption label changes this job's outcome.
+    if: >-
+      github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'mutation-gate-exempt'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -51,6 +57,11 @@ jobs:
       # 3.12 is the declared floor and the version ci.yml evaluates pull
       # requests on. Running the mutant on a different version can skip a
       # version-specific regression test and report a false result.
+      #
+      # AGENTS.md installs the dev environment on 3.13, so a local run uses a
+      # different interpreter than this one. Both runs of a given invocation
+      # share their interpreter, so the head-versus-mutant comparison stays
+      # valid either way; only which version-guarded tests are skipped differs.
       - name: Set up Python
         run: uv python install 3.12
 

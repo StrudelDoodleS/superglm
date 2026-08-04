@@ -114,12 +114,30 @@ behaviour of the fix.  Driving the public API instead would fail behaviourally
 and earn a ``PASS``.
 
 The classification is on the *name*, not the exception class.  Matching
-``AttributeError`` alone threw away real evidence in the other direction: when
-the defect itself is a null-handling bug, the regression test fails against the
-mutant with a perfectly genuine ``AttributeError: 'NoneType' object has no
-attribute ...``, which is a kill.  So each message shape captures the name that
-was missing, and it only counts as absence when that name is one this change
-added to ``src/`` -- established by parsing both trees, not guessed.
+``AttributeError`` alone threw away real evidence in the other direction: three
+sites in this repository raise it deliberately as a behavioural guard
+(``solvers/pirls.py``, ``_group_matrix/_group_matrix_execution.py``,
+``profiling/nb.py``), and when the defect itself is a null-handling bug the
+regression test fails against the mutant with a perfectly genuine
+``AttributeError: 'NoneType' object has no attribute ...``, which is a kill.  So
+each message shape captures the name that was missing, and it only counts as
+absence when that name is one this change added to ``src/`` -- established by
+parsing both trees, not guessed.  ``TypeError: ... got an unexpected keyword
+argument 'x'`` is in the list for the same reason: a new parameter is an absent
+name, and it would otherwise have made a hollow test body earn a ``PASS``.
+
+**This classifier is a heuristic on a string, and the residue is disclosed
+rather than hidden.**  It can still be defeated: a new enum member or option
+string fails at base as ``ValueError: unknown family ...``, and a new dict key
+as ``KeyError``, both of which are absence-of-symbol evidence counted as a kill.
+Neither class can be added -- ``ValueError`` is the commonest *behavioural*
+signal in numerical code, so listing it would discard far more than it saves.
+Chained exceptions defeat it too, since JUnit's ``message`` is
+``exconly(tryshort=True)`` and reports the outermost type.  Because the residue
+cannot be closed, the ``PASS`` detail prints the first line of the failure each
+killed test raised against the mutant, so a reviewer can see that "killed by
+``TypeError: got an unexpected keyword argument 'robust'``" is weaker evidence
+than "killed by ``assert d2.min() > -5e-3``" instead of reading one word.
 
 **Evidence held in data is reported, not silently dismissed.**  Attribution
 works function by function, so a regression that lives in *data* is invisible
@@ -305,7 +323,12 @@ def module_shell(source: str | None) -> str:
     return ast.dump(tree)
 
 
-def candidate_node_ids(merge_base: str, head: str, test_files: list[str]) -> tuple[list[str], int]:
+def candidate_node_ids(
+    merge_base: str,
+    head: str,
+    test_files: list[str],
+    renamed_from: dict[str, str] | None = None,
+) -> tuple[list[str], int]:
     """Node IDs this change added or strengthened, and how many were added.
 
     A modified test counts: tightening an assertion so it fails against the
@@ -314,10 +337,11 @@ def candidate_node_ids(merge_base: str, head: str, test_files: list[str]) -> tup
     only remedy -- turning the gate off for the whole change, including the
     production edits that do need constraining.
     """
+    renamed_from = renamed_from or {}
     node_ids: list[str] = []
     added_count = 0
     for path in test_files:
-        before = test_functions(file_at(merge_base, path))
+        before = test_functions(file_at(merge_base, renamed_from.get(path, path)))
         after = test_functions(file_at(head, path))
         qualifying = sorted(name for name, dump in after.items() if before.get(name) != dump)
         added_count += sum(1 for name in qualifying if name not in before)
@@ -382,6 +406,13 @@ class Outcome:
     collected: int = 0
     passed: int = 0
     failed: list[str] = field(default_factory=list)
+    #: One "item: first line of the failure" per entry in ``failed``. The
+    #: classifier below is a heuristic on a message string, so a PASS has to
+    #: show a reviewer *why* each kill happened -- "killed by TypeError: got an
+    #: unexpected keyword argument 'robust'" is visibly weaker evidence than
+    #: "killed by assert d2.min() > -5e-3", and flattening both to one word
+    #: hides the difference.
+    reasons: list[str] = field(default_factory=list)
     symbol_errors: list[str] = field(default_factory=list)
     errored: list[str] = field(default_factory=list)
     skipped: int = 0
@@ -414,6 +445,10 @@ _SYMBOL_PATTERNS = (
     re.compile(r"AttributeError: type object ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"),
     re.compile(r"AttributeError: ['\"]?[\w.]+['\"]? object has no attribute ['\"](\w+)['\"]"),
     re.compile(r"NameError: name ['\"](\w+)['\"] is not defined"),
+    # A new keyword argument is an absent *name* too, and it arrives under a
+    # class no amount of exception-name listing would have caught. `defined_names`
+    # collects ast.arg, so the parameter this change added is in `added`.
+    re.compile(r"TypeError: .*got an unexpected keyword argument ['\"](\w+)['\"]"),
 )
 
 
@@ -485,6 +520,15 @@ def run_pytest(
             "addopts=",
             "-p",
             "no:cacheprovider",
+            # Without this, one changed test module that cannot import against
+            # the rolled-back src/ raises Interrupted and exits 2 before any
+            # other module runs -- so a sibling module's genuine killer is
+            # never executed and a correct change reports INCONCLUSIVE. Adding
+            # a public symbol alongside a fix is the modal multi-module change.
+            # With it, the collection error is filed by JUnit against the
+            # module, matches no target, and leaves that target unmeasured
+            # while its siblings are still judged.
+            "--continue-on-collection-errors",
             "--no-header",
             "--tb=no",
             "-q",
@@ -514,10 +558,12 @@ def run_pytest(
         failure = case.find("failure")
         if failure is not None:
             message = failure.get("message") or failure.text or ""
+            reason = message.splitlines()[0][:100] if message.strip() else "no message"
             if is_symbol_error(message, added):
-                outcome.symbol_errors.append(f"{item}: {message.splitlines()[0][:100]}")
+                outcome.symbol_errors.append(f"{item}: {reason}")
             else:
                 outcome.failed.append(item)
+                outcome.reasons.append(f"{item}: {reason}")
         elif case.find("error") is not None:
             outcome.errored.append(item)
         elif case.find("skipped") is not None:
@@ -543,7 +589,10 @@ def imported_from(tree: Path) -> str | None:
 
 
 def report(status: str, headline: str, detail: str = "") -> int:
-    marker = {SKIP: "-", PASS: "+", FAIL: "x", NO_EVIDENCE: "?", INCONCLUSIVE: "?"}[status]
+    # NO EVIDENCE and INCONCLUSIVE are deliberately different outcomes -- "you
+    # added nothing" against "this technique cannot tell" -- so they must not
+    # share a marker in the log.
+    marker = {SKIP: "-", PASS: "+", FAIL: "x", NO_EVIDENCE: "0", INCONCLUSIVE: "?"}[status]
     print(f"\n{marker} mutation gate: {status}\n  {headline}")
     if detail:
         print("\n" + detail.rstrip())
@@ -589,9 +638,20 @@ def main() -> int:
 
     merge_base = git("merge-base", args.base_ref, args.head_ref)
     head = git("rev-parse", args.head_ref)
-    changed = [
-        line for line in git("diff", "--name-only", f"{merge_base}..{head}").splitlines() if line
-    ]
+    # `-M` so a moved test module is one rename, not a delete plus an add.
+    # Without it the old path is filtered out for not existing at head and the
+    # new path has no base-side counterpart, so every function in the file reads
+    # as *added*, passes against the mutant with its content unchanged, and a
+    # correct change is reported FAIL with only the blanket label as a remedy.
+    changed: list[str] = []
+    renamed_from: dict[str, str] = {}
+    for line in git("diff", "--name-status", "-M", f"{merge_base}..{head}").splitlines():
+        if not line:
+            continue
+        fields = line.split("\t")
+        if fields[0].startswith("R") and len(fields) == 3:
+            renamed_from[fields[2]] = fields[1]
+        changed.append(fields[-1])
     src_changed = [p for p in changed if p.startswith(PACKAGE)]
     tests_changed = [p for p in changed if is_test_module(p) and file_at(head, p) is not None]
     support_changed = [p for p in changed if is_test_support(p) and file_at(head, p) is not None]
@@ -620,7 +680,7 @@ def main() -> int:
             + "\n".join(f"  {p}" for p in src_changed),
         )
 
-    candidates, added_count = candidate_node_ids(merge_base, head, tests_changed)
+    candidates, added_count = candidate_node_ids(merge_base, head, tests_changed, renamed_from)
     print(f"mutation gate: base {merge_base[:12]}  head {head[:12]}")
     print(f"  production files changed: {len(src_changed)}")
     print(f"  test modules changed:     {len(tests_changed)}")
@@ -637,7 +697,10 @@ def main() -> int:
     #   base_tests_tree the merge base untouched, used only to enumerate which
     #                   test items existed before, so a new parametrise case is
     #                   attributable even when the function's AST is unchanged
-    tests_at_base = [p for p in tests_changed if file_at(merge_base, p) is not None]
+    # Collected at the base revision's own paths, so a renamed module is still
+    # compared against its previous contents rather than looking wholly new.
+    base_of = {renamed_from.get(p, p): p for p in tests_changed}
+    tests_at_base = [b for b in base_of if file_at(merge_base, b) is not None]
     scratch = Path(tempfile.mkdtemp(prefix="mutation-gate-"))
     base_tree, head_tree = scratch / "base", scratch / "head"
     base_tests_tree = scratch / "base-tests"
@@ -677,8 +740,26 @@ def main() -> int:
 
         # Item-level attribution catches what the AST cannot: a case appended to
         # a module-level list feeding an unchanged @parametrize decorator.
-        base_items, _, _ = collect_items(base_tests_tree, tests_at_base)
-        new_item_owners = {owning_function(i) for i in head_items - base_items}
+        base_items, base_collect_status, _ = collect_items(base_tests_tree, tests_at_base)
+        # Base-side item IDs carry the base-side path; map them forward so a
+        # renamed module's pre-existing items are not all mistaken for new.
+        base_items = {
+            f"{base_of.get(p, p)}{sep}{rest}"
+            for p, sep, rest in (item.partition("::") for item in base_items)
+        }
+        new_items = head_items - base_items
+        if base_collect_status == 0:
+            new_item_owners = {owning_function(i) for i in new_items}
+        else:
+            # Degrade narrower, never wider. An empty `base_items` does not mean
+            # "every item is new"; it means the comparison is unavailable -- and
+            # taking it at face value would make every collected function in
+            # every changed module a candidate, quietly restoring the "something
+            # in the changed modules fails" criterion that attribution exists to
+            # replace. Fall back to strict AST attribution and say so.
+            new_items = set()
+            new_item_owners = set()
+            print("  item diff:                unavailable (base collection failed)")
 
         collected_functions = {owning_function(i) for i in head_items}
         qualifying = sorted(
@@ -698,7 +779,8 @@ def main() -> int:
             unattributable = list(support_changed) + [
                 p
                 for p in tests_changed
-                if module_shell(file_at(merge_base, p)) != module_shell(file_at(head, p))
+                if module_shell(file_at(merge_base, renamed_from.get(p, p)))
+                != module_shell(file_at(head, p))
             ]
             if unattributable:
                 return report(
@@ -735,27 +817,31 @@ def main() -> int:
             defined_names(head_tree / PACKAGE) - defined_names(base_tree / PACKAGE)
         )
         head_outcomes, head_status, head_out = run_pytest(head_tree, targets, added_symbols)
-        base_outcomes, base_status, base_out = run_pytest(base_tree, targets, added_symbols)
 
-        # Exit status is evidence in its own right. A clean JUnit record says
-        # nothing about a session-finish, plugin or internal error, and pytest
-        # reports those only through the process status.
-        if head_status != 0:
-            return report(
-                INCONCLUSIVE,
-                f"pytest exited {head_status} at the head revision.",
-                "Only exit 0 means every target was collected and passed. A non-zero\n"
-                "status with clean per-test records is a session, plugin or internal\n"
-                "error, and nothing measured under it can be trusted.\n\n" + head_out[-1500:],
+        # Targets are node IDs, and a node ID inside a module that cannot import
+        # against the rolled-back src/ is a *usage* error: pytest reports "found
+        # no collectors" and exits 4 having run nothing, so one new module that
+        # a sibling test imports would discard the sibling's genuine killer.
+        # --continue-on-collection-errors does not cover this -- it turns an
+        # Interrupted collection into exit 1, but cannot conjure a collector for
+        # an ID that does not exist. So ask base only for what base can collect;
+        # the rest keep an empty record and are reported as unmeasured.
+        base_targets, uncollectable_at_base = [], []
+        for module in sorted({t.split("::")[0] for t in targets}):
+            in_module = [t for t in targets if t.split("::")[0] == module]
+            if collect_items(base_tree, [module])[1] == 0:
+                base_targets += in_module
+            else:
+                uncollectable_at_base += in_module
+
+        if base_targets:
+            base_outcomes, base_status, base_out = run_pytest(
+                base_tree, base_targets, added_symbols
             )
-        if base_status not in (0, 1):
-            return report(
-                INCONCLUSIVE,
-                f"pytest exited {base_status} against the unfixed code.",
-                "Only 0 (all passed) and 1 (tests failed) are meaningful here; 2-5 are\n"
-                "interruption, internal error, usage error and no-tests-collected, none\n"
-                "of which measures the mutant.\n\n" + base_out[-1500:],
-            )
+        else:
+            base_outcomes, base_status, base_out = {}, 0, "no target module collects at base"
+        for target in uncollectable_at_base:
+            base_outcomes[target] = Outcome()
 
         # Partition rather than bail: a test skipped on this runner is not
         # evidence, but it does not invalidate its siblings either.
@@ -765,6 +851,11 @@ def main() -> int:
             t for t in targets if not head_outcomes[t].clean and not head_outcomes[t].red
         ]
 
+        # Diagnose before consulting the exit status. pytest exits 1 for any
+        # failing or erroring target, so testing `head_status != 0` first made
+        # this branch unreachable and answered the commonest cause of a red
+        # head -- a test that simply does not pass yet -- with "session, plugin
+        # or internal error", which is both wrong and unactionable.
         if red_at_head:
             return report(
                 INCONCLUSIVE,
@@ -774,6 +865,29 @@ def main() -> int:
                 + "\n".join(f"  {n}" for n in red_at_head)
                 + "\n\n"
                 + head_out[-1500:],
+            )
+
+        # Exit status is evidence in its own right, for what the JUnit report
+        # cannot express. With the red-at-head case already handled, 0 and 1 are
+        # both consistent with per-test records, and anything else is a
+        # session-finish, plugin or internal error.
+        if head_status not in (0, 1):
+            return report(
+                INCONCLUSIVE,
+                f"pytest exited {head_status} at the head revision.",
+                "Every target's record is clean, so this is a session, plugin or internal\n"
+                "error rather than a failing test, and nothing measured under it can be\n"
+                "trusted.\n\n" + head_out[-1500:],
+            )
+        if base_status not in (0, 1):
+            return report(
+                INCONCLUSIVE,
+                f"pytest exited {base_status} against the unfixed code.",
+                "Only 0 (all passed) and 1 (tests failed, including a collection error\n"
+                "tolerated by --continue-on-collection-errors) are meaningful here.\n"
+                "3-5 are internal error, usage error and no-tests-collected, and a\n"
+                "negative status is a signal; none of them measures the mutant.\n\n"
+                + base_out[-1500:],
             )
 
         if not evaluable:
@@ -802,11 +916,29 @@ def main() -> int:
         # error, which JUnit files against the module rather than the test and
         # leaves the record empty; an in-test importorskip skips instead; a
         # teardown error leaves the call passing. Only `.clean` proves survival.
-        killed = [t for t in evaluable if base_outcomes[t].failed]
+        # A target credited only by the item diff must be killed by one of the
+        # items that is actually new. Crediting the whole function reopened the
+        # "refactored neighbour" hole one level down: appending a case id to a
+        # shared list makes five functions candidates while every pre-existing
+        # item keeps its id, so an untouched item failing against the mutant
+        # would carry a change whose new case passes at base.
+        data_only = set(new_item_owners) - set(candidates)
+
+        def killed_by_a_new_item(target: str) -> bool:
+            prefix = target.rsplit("::", 1)[0]
+            return any(f"{prefix}::{item}" in new_items for item in base_outcomes[target].failed)
+
+        killed = [
+            t
+            for t in evaluable
+            if base_outcomes[t].failed and (t not in data_only or killed_by_a_new_item(t))
+        ]
         unmeasured = [t for t in evaluable if not base_outcomes[t].clean and t not in killed]
 
         def why_unmeasured(node: str) -> str:
             outcome = base_outcomes[node]
+            if node in uncollectable_at_base:
+                return "its module does not import against the unfixed code"
             if outcome.symbol_errors:
                 return "; ".join(outcome.symbol_errors)
             parts = []
@@ -830,13 +962,9 @@ def main() -> int:
                 PASS,
                 f"{len(killed)} of {len(evaluable)} evaluable test(s) fail against the "
                 "unfixed code and pass at head, as required.",
-                "\n".join(
-                    f"  {n}"
-                    + "".join(
-                        f"\n      {i}"
-                        for i in base_outcomes[n].failed
-                        if i != n.rsplit("::", 1)[-1]
-                    )
+                "Killed, with the failure each one raised against the unfixed code:\n"
+                + "\n".join(
+                    f"  {n}" + "".join(f"\n      {r}" for r in base_outcomes[n].reasons)
                     for n in killed
                 )
                 + note

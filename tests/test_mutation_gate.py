@@ -291,7 +291,13 @@ def branch(repo: Path, name: str, start: str = "gate-base") -> None:
     )
 
 
-def run_gate(repo: Path, base: str, head: str = "HEAD", **extra: str) -> tuple[int, str]:
+def verdict(repo: Path, base: str, head: str = "HEAD", **extra: str) -> tuple[int, str]:
+    """Exit code and status only, for scenarios that pin just the outcome."""
+    code, status, _ = run_gate(repo, base, head, **extra)
+    return code, status
+
+
+def run_gate(repo: Path, base: str, head: str = "HEAD", **extra: str) -> tuple[int, str, str]:
     # Inherit the platform environment rather than replacing it. A hardcoded
     # "/usr/bin:/bin" PATH left the gate unable to find `git` anywhere but
     # Unix, so the suite crashed before reaching a verdict. Only what a
@@ -315,8 +321,15 @@ def run_gate(repo: Path, base: str, head: str = "HEAD", **extra: str) -> tuple[i
         env=env,
     )
     out = proc.stdout + proc.stderr
+    # The original P0 on this script was data loss in the caller's checkout.
+    # Nothing else pins the property that fixed it, so every scenario checks
+    # that the run left no worktree registered behind.
+    worktrees = subprocess.run(
+        ["git", "worktree", "list"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    assert len(worktrees) == 1, f"gate leaked a worktree: {worktrees}"
     found = STATUS.findall(out)
-    return proc.returncode, (found[-1] if found else f"NO STATUS: {out[-400:]}")
+    return proc.returncode, (found[-1] if found else f"NO STATUS: {out[-400:]}"), out
 
 
 @pytest.mark.slow
@@ -331,7 +344,7 @@ def test_weak_added_test_does_not_constrain_the_change(clone):
         "\n\n\ndef test_weak():\n    assert isinstance(ETA_MIN, float)\n",
     )
     commit(clone, "weak")
-    assert run_gate(clone, "gate-base") == (1, "FAIL")
+    assert verdict(clone, "gate-base") == (1, "FAIL")
 
 
 @pytest.mark.slow
@@ -340,7 +353,7 @@ def test_added_test_that_fails_against_the_mutant_passes(clone):
     bump(clone)
     write(clone, CASE, IMPORT + "\n\ndef test_strong():\n    assert ETA_MIN == -70.0\n")
     commit(clone, "strong")
-    assert run_gate(clone, "gate-base") == (0, "PASS")
+    assert verdict(clone, "gate-base") == (0, "PASS")
 
 
 @pytest.mark.slow
@@ -360,7 +373,7 @@ def test_parametrised_test_is_judged_on_its_items(clone):
         "def test_param(bound):\n    assert ETA_MIN == bound\n",
     )
     commit(clone, "param")
-    assert run_gate(clone, "gate-base") == (0, "PASS")
+    assert verdict(clone, "gate-base") == (0, "PASS")
 
 
 @pytest.mark.slow
@@ -387,7 +400,7 @@ def test_new_parametrise_case_counts_even_when_the_function_is_unchanged(clone):
         "def test_bounds(bound):\n    assert ETA_MIN == bound\n",
     )
     commit(clone, "data after")
-    assert run_gate(clone, "s-data-before") == (0, "PASS")
+    assert verdict(clone, "s-data-before") == (0, "PASS")
 
 
 @pytest.mark.slow
@@ -396,7 +409,7 @@ def test_strengthened_existing_test_counts_as_evidence(clone):
     bump(clone)
     write(clone, CASE, IMPORT + "\n\ndef test_pin():\n    assert ETA_MIN == -70.0\n")
     commit(clone, "tighten")
-    assert run_gate(clone, "gate-base") == (0, "PASS")
+    assert verdict(clone, "gate-base") == (0, "PASS")
 
 
 @pytest.mark.slow
@@ -411,7 +424,7 @@ def test_skipped_sibling_is_excluded_not_fatal(clone):
         "def test_skipped():\n    assert ETA_MIN == -70.0\n",
     )
     commit(clone, "partial")
-    assert run_gate(clone, "gate-base") == (0, "PASS")
+    assert verdict(clone, "gate-base") == (0, "PASS")
 
 
 @pytest.mark.slow
@@ -425,7 +438,7 @@ def test_only_a_skipped_added_test_is_inconclusive(clone):
         "def test_only_skipped():\n    assert ETA_MIN == -70.0\n",
     )
     commit(clone, "allskip")
-    assert run_gate(clone, "gate-base") == (1, "INCONCLUSIVE")
+    assert verdict(clone, "gate-base") == (1, "INCONCLUSIVE")
 
 
 @pytest.mark.slow
@@ -441,11 +454,19 @@ def test_uncollectable_node_id_does_not_poison_its_siblings(clone):
         "def test_killer():\n    assert ETA_MIN == -70.0\n",
     )
     commit(clone, "uncollect")
-    assert run_gate(clone, "gate-base") == (0, "PASS")
+    assert verdict(clone, "gate-base") == (0, "PASS")
 
 
 @pytest.mark.slow
 def test_added_test_red_at_head_is_a_defect_in_the_change(clone):
+    """Asserts the diagnosis, not just the verdict.
+
+    pytest exits 1 for any failing target, so checking the exit status before
+    partitioning made the red-at-head branch unreachable: this scenario stayed
+    green while the author was told a plain failing test was a "session, plugin
+    or internal error". A scenario pinning only ``(exit, STATUS)`` cannot tell
+    which branch produced it.
+    """
     branch(clone, "s-broken")
     bump(clone)
     write(
@@ -454,7 +475,11 @@ def test_added_test_red_at_head_is_a_defect_in_the_change(clone):
         IMPORT + "\n\ndef test_always_fails():\n    assert ETA_MIN == 12345\n",
     )
     commit(clone, "broken")
-    assert run_gate(clone, "gate-base") == (1, "INCONCLUSIVE")
+    code, status, out = run_gate(clone, "gate-base")
+
+    assert (code, status) == (1, "INCONCLUSIVE")
+    assert "do not pass at the head revision" in out
+    assert "session, plugin or internal" not in out
 
 
 @pytest.mark.slow
@@ -468,7 +493,7 @@ def test_fix_in_a_new_module_is_inconclusive_not_passed(clone):
         "from superglm._gatefix import answer\n\n\ndef test_answer():\n    assert answer() == 42\n",
     )
     commit(clone, "new module")
-    assert run_gate(clone, "gate-base") == (1, "INCONCLUSIVE")
+    assert verdict(clone, "gate-base") == (1, "INCONCLUSIVE")
 
 
 @pytest.mark.slow
@@ -488,7 +513,7 @@ def test_in_body_import_error_is_not_a_kill(clone):
         "    assert answer() == 42\n",
     )
     commit(clone, "in-body import")
-    assert run_gate(clone, "gate-base") == (1, "INCONCLUSIVE")
+    assert verdict(clone, "gate-base") == (1, "INCONCLUSIVE")
 
 
 @pytest.mark.slow
@@ -504,7 +529,7 @@ def test_base_side_skip_is_not_survival(clone):
         "    from superglm._gatefix import answer\n\n    assert answer() == 42\n",
     )
     commit(clone, "base skip")
-    assert run_gate(clone, "s-baseskip~1") == (1, "INCONCLUSIVE")
+    assert verdict(clone, "s-baseskip~1") == (1, "INCONCLUSIVE")
 
 
 @pytest.mark.slow
@@ -535,7 +560,7 @@ def test_runtime_attribute_error_against_the_mutant_is_a_kill(clone):
         "def test_band_has_a_lower_bound():\n    assert band().lower == -80.0\n",
     )
     commit(clone, "fix and regression test")
-    assert run_gate(clone, "s-null-before") == (0, "PASS")
+    assert verdict(clone, "s-null-before") == (0, "PASS")
 
 
 @pytest.mark.slow
@@ -545,7 +570,7 @@ def test_support_file_change_is_inconclusive_not_absent_evidence(clone):
     bump(clone)
     write(clone, "tests/_gate_oracles.py", "EXPECTED_BOUND = -70.0\n")
     commit(clone, "oracle strengthened")
-    assert run_gate(clone, "gate-base") == (1, "INCONCLUSIVE")
+    assert verdict(clone, "gate-base") == (1, "INCONCLUSIVE")
 
 
 @pytest.mark.slow
@@ -568,7 +593,147 @@ def test_retuned_value_behind_a_stable_id_is_inconclusive_not_absent(clone):
     bump(clone)
     write(clone, CASE, body.format(value="-70.0"))
     commit(clone, "stable id, retuned value")
-    assert run_gate(clone, "s-stable-before") == (1, "INCONCLUSIVE")
+    assert verdict(clone, "s-stable-before") == (1, "INCONCLUSIVE")
+
+
+@pytest.mark.slow
+def test_a_sibling_module_that_cannot_import_at_base_does_not_abort_the_run(clone):
+    """The modal multi-module change: a fix plus a new public helper.
+
+    Without ``--continue-on-collection-errors`` pytest raises ``Interrupted``
+    and exits 2 on the first un-importable module, so the real killer in the
+    other module never ran and a correct change reported INCONCLUSIVE.
+    """
+    branch(clone, "s-twomod")
+    bump(clone)
+    write(clone, NEWMOD, "def answer() -> int:\n    return 42\n")
+    write(clone, CASE, IMPORT + "\n\ndef test_killer():\n    assert ETA_MIN == -70.0\n")
+    write(
+        clone,
+        "tests/test_gate_helper.py",
+        "from superglm._gatefix import answer\n\n\ndef test_answer():\n    assert answer() == 42\n",
+    )
+    commit(clone, "fix plus new helper")
+    code, status, out = run_gate(clone, "gate-base")
+
+    assert (code, status) == (0, "PASS")
+    # The killer carried it; the un-importable module is disclosed, not hidden.
+    assert "test_killer" in out
+    assert "tests/test_gate_helper.py::test_answer" in out
+
+
+@pytest.mark.slow
+def test_class_scoped_test_round_trips_through_a_real_junit_report(clone):
+    """``junit_key`` has unit cover, but 518 ``class Test`` definitions across 65
+    files are the house style and no scenario proved the classname matches what
+    the locked pytest actually writes."""
+    branch(clone, "s-class")
+    bump(clone)
+    write(
+        clone,
+        CASE,
+        IMPORT + "\n\nclass TestBand:\n"
+        "    def test_lower(self):\n        assert ETA_MIN == -70.0\n",
+    )
+    commit(clone, "class-scoped killer")
+    assert verdict(clone, "gate-base") == (0, "PASS")
+
+
+@pytest.mark.slow
+def test_a_fixture_error_at_base_is_unmeasured_not_a_kill(clone):
+    """Produces a JUnit ``<error>`` end to end.
+
+    Every other scenario is a fixture-free module-level function, so the
+    ``<failure>`` versus ``<error>`` distinction the design rests on was never
+    exercised against a real report.
+    """
+    branch(clone, "s-fixture")
+    write(clone, NEWMOD, "def answer() -> int:\n    return 42\n")
+    write(
+        clone,
+        CASE,
+        "import pytest\n\n\n@pytest.fixture\ndef helper():\n"
+        "    from superglm._gatefix import answer\n\n    return answer()\n\n\n"
+        "def test_via_fixture(helper):\n    assert helper == 42\n",
+    )
+    commit(clone, "fixture error at base")
+    code, status, out = run_gate(clone, "gate-base")
+
+    assert (code, status) == (1, "INCONCLUSIVE")
+    assert "errored" in out
+
+
+@pytest.mark.slow
+def test_absent_keyword_argument_is_not_behavioural_evidence(clone):
+    """A new parameter is an absent *name*, and it arrives as ``TypeError``.
+
+    No amount of listing exception classes would have caught this: a hollow
+    test body earned the identical PASS as a strong one.
+    """
+    branch(clone, "s-kwarg-before")
+    write(clone, FIXTURE, "ETA_MIN = -80.0\n\n\ndef band(scale=1.0):\n    return ETA_MIN * scale\n")
+    commit(clone, "band without the option")
+    branch(clone, "s-kwarg-after", "s-kwarg-before")
+    write(
+        clone,
+        FIXTURE,
+        "ETA_MIN = -80.0\n\n\ndef band(scale=1.0, robust=False):\n    return ETA_MIN * scale\n",
+    )
+    write(
+        clone,
+        CASE,
+        "from superglm._gate_fixture import band\n\n\n"
+        "def test_robust_option():\n    assert band(robust=True) == -80.0\n",
+    )
+    commit(clone, "new keyword argument, hollow assertion")
+    assert verdict(clone, "s-kwarg-before") == (1, "INCONCLUSIVE")
+
+
+@pytest.mark.slow
+def test_untouched_item_of_a_shared_list_does_not_carry_the_change(clone):
+    """Appending a case id credits the function; only a *new* item may kill it.
+
+    Otherwise a pre-existing item failing against the mutant carries a change
+    whose actually-new case passes at base -- the refactored-neighbour hole one
+    level down.
+    """
+    body = (
+        PARAM + "\n\nCASES = {cases}\nEXPECTED = {{'old': -80.0, 'new': -80.0}}\n\n\n"
+        '@pytest.mark.parametrize("case", CASES)\n'
+        "def test_bounds(case):\n    assert ETA_MIN == EXPECTED[case]\n"
+    )
+    branch(clone, "s-shared-before")
+    write(clone, CASE, body.format(cases="['old']"))
+    commit(clone, "one case")
+    branch(clone, "s-shared-after", "s-shared-before")
+    bump(clone)
+    # 'new' passes at base (-80.0 == -80.0); only the untouched 'old' fails there.
+    write(clone, CASE, body.format(cases="['old', 'new']"))
+    commit(clone, "case appended, but the old one is what fails")
+    assert verdict(clone, "s-shared-before") == (1, "INCONCLUSIVE")
+
+
+@pytest.mark.slow
+def test_a_moved_test_module_is_not_all_new(clone):
+    """A rename is delete-plus-add without ``-M``, so every function read as
+    added, all passed at base, and a correct change was reported FAIL."""
+    branch(clone, "s-move")
+    bump(clone)
+    write(clone, "tests/test_gate_moved.py", (clone / CASE).read_text())
+    subprocess.run(["git", "rm", "-q", CASE], cwd=clone, check=True, capture_output=True)
+    write(
+        clone,
+        "tests/test_gate_moved.py",
+        IMPORT + "\n\ndef test_pin():\n    assert isinstance(ETA_MIN, float)"
+        "\n\n\ndef test_killer():\n    assert ETA_MIN == -70.0\n",
+    )
+    commit(clone, "move the module and add a killer")
+    code, status, out = run_gate(clone, "gate-base")
+
+    assert (code, status) == (0, "PASS")
+    # test_pin moved unchanged: it must not be credited as an added test.
+    assert "test_killer" in out
+    assert "  tests added:              1" in out
 
 
 @pytest.mark.slow
@@ -576,7 +741,7 @@ def test_production_change_with_no_test_change_has_no_evidence(clone):
     branch(clone, "s-noev")
     bump(clone)
     commit(clone, "noev")
-    assert run_gate(clone, "gate-base") == (1, "NO EVIDENCE")
+    assert verdict(clone, "gate-base") == (1, "NO EVIDENCE")
 
 
 @pytest.mark.slow
@@ -584,7 +749,7 @@ def test_change_outside_the_package_is_skipped(clone):
     branch(clone, "s-docs")
     write(clone, "README.md", (clone / "README.md").read_text() + "\n")
     commit(clone, "docs")
-    assert run_gate(clone, "gate-base") == (0, "SKIP")
+    assert verdict(clone, "gate-base") == (0, "SKIP")
 
 
 @pytest.mark.slow
@@ -597,7 +762,7 @@ def test_uncommitted_work_is_refused_rather_than_silently_unmeasured(clone):
     branch(clone, "s-dirty")
     bump(clone)
     try:
-        assert run_gate(clone, "gate-base") == (1, "INCONCLUSIVE")
+        assert verdict(clone, "gate-base") == (1, "INCONCLUSIVE")
     finally:
         subprocess.run(["git", "checkout", "--", "src"], cwd=clone, check=True, capture_output=True)
 
@@ -607,7 +772,7 @@ def test_exemption_label_short_circuits_everything(clone):
     branch(clone, "s-exempt")
     bump(clone)
     commit(clone, "exempt")
-    assert run_gate(clone, "gate-base", MUTATION_GATE_EXEMPT="mutation-gate-exempt label") == (
+    assert verdict(clone, "gate-base", MUTATION_GATE_EXEMPT="mutation-gate-exempt label") == (
         0,
         "SKIP",
     )
