@@ -453,7 +453,11 @@ _LOG_LINK_ETA_MAX = 80.0
 _SQRT_LINK_ETA_MAX = 0.5 * float(np.sqrt(np.finfo(np.float64).max))
 _CAUCHIT_PROBABILITY_EPS = 1e-15
 _CAUCHIT_LINK_ETA_MAX = float(abs(CauchitLink().link(np.array([_CAUCHIT_PROBABILITY_EPS]))[0]))
-_CLOGLOG_PROBABILITY_EPS = 1e-6
+# ``clip_mu`` clamps binomial means to [_BINOMIAL_CLIP_MU_EPS, 1 - _BINOMIAL_CLIP_MU_EPS].
+# Cloglog's cap must sit strictly inside that band (see _cloglog_eta), so keep one
+# factor of two of headroom above the family's own floor.
+_BINOMIAL_CLIP_MU_EPS = 1e-7
+_CLOGLOG_PROBABILITY_EPS = 2.0 * _BINOMIAL_CLIP_MU_EPS
 _CLOGLOG_LINK_ETA_MAX = float(CloglogLink().link(np.array([1.0 - _CLOGLOG_PROBABILITY_EPS]))[0])
 
 
@@ -471,8 +475,17 @@ def _binary_eta(eta: NDArray, _link: Link) -> NDArray:
 
 
 def _cloglog_eta(eta: NDArray, _link: Link) -> NDArray:
-    # The positive tail saturates much earlier than logit: cap it at the
-    # representable probability endpoint used by CloglogLink.link().
+    # The positive tail saturates much earlier than logit -- dμ/dη = exp(η-e^η)
+    # is already 0.0 at η = 20 -- so the band needs its own cap.  That cap is set
+    # by ``clip_mu``, not by CloglogLink.link()'s 1e-15 endpoint: the eta the
+    # stabiliser hands back must invert to a mean the family will keep.  A cap
+    # at (or past) clip_mu's 1 - 1e-7 boundary lets clip_mu rewrite mu behind
+    # this function's back, which both desynchronises eta from mu and leaves the
+    # two band edges equidistant from the probability boundary, so the IRLS line
+    # search cannot tell a saturated positive start from its mirror image.  A cap
+    # tighter than the family's floor is just as wrong the other way: it pins any
+    # fit whose MLE tail mass falls between the cap and clip_mu -- e.g. an
+    # exposure-weighted rate at 1 - 3.3e-07 -- while still reporting convergence.
     return np.clip(
         np.asarray(eta, dtype=np.float64),
         -20.0,
