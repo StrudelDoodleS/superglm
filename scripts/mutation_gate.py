@@ -215,6 +215,12 @@ def collectable(
 
     Passing an uncollectable node ID makes pytest exit 4 as a usage error
     without running anything, which would discard every other result in the run.
+
+    ``-o addopts=`` is load-bearing.  This repository sets ``addopts = "-v
+    --tb=short"``, and pytest *prepends* those, so the ``-v`` cancels ``-q`` to
+    net verbosity 0 -- at which point ``--collect-only`` prints its indented
+    tree of ``<Module>``/``<Function>`` nodes instead of flat node IDs, and this
+    parser found nothing collectable at all.
     """
     proc = subprocess.run(
         [
@@ -223,6 +229,8 @@ def collectable(
             "pytest",
             *test_files,
             "--collect-only",
+            "-o",
+            "addopts=",
             "-q",
             "--no-header",
             "-p",
@@ -232,13 +240,9 @@ def collectable(
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "PYTHONPATH": str(tree / PACKAGE.split("/")[0])},
+        env={**os.environ, "PYTHONPATH": str(tree / SRC)},
     )
-    collected = {
-        line.strip().split("[")[0]
-        for line in proc.stdout.splitlines()
-        if "::" in line and not line.startswith(" ")
-    }
+    collected = {line.strip().split("[")[0] for line in proc.stdout.splitlines() if "::" in line}
     keep = [c for c in candidates if c in collected]
     drop = [c for c in candidates if c not in collected]
     return keep, drop
@@ -288,6 +292,8 @@ def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], str]
             "-m",
             "pytest",
             *targets,
+            "-o",
+            "addopts=",
             "-p",
             "no:cacheprovider",
             "--no-header",
@@ -509,7 +515,12 @@ def main() -> int:
                 f"{len(killed)} of {len(evaluable)} evaluable test(s) fail against the "
                 "unfixed code and pass at head, as required.",
                 "\n".join(
-                    f"  {n}\n" + "\n".join(f"      {i}" for i in base_outcomes[n].failed)
+                    f"  {n}"
+                    + "".join(
+                        f"\n      {i}"
+                        for i in base_outcomes[n].failed
+                        if i != n.rsplit("::", 1)[-1]
+                    )
                     for n in killed
                 )
                 + note,
