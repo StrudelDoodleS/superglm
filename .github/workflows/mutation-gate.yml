@@ -29,17 +29,20 @@ permissions:
 
 concurrency:
   group: mutation-gate-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Label events do not cancel: a label change would otherwise kill an in-flight
+  # run and restart a 30-minute job. Everything else still supersedes.
+  #
+  # This deliberately does NOT skip the job with a `if:` condition on label
+  # events. A job skipped by `if:` still reports a check run, with conclusion
+  # `skipped` -- and `skipped` *satisfies* a required status check. The day this
+  # enters the ruleset, that would let anyone clear a red gate by adding an
+  # unrelated label. A duplicate run is the cheaper mistake.
+  cancel-in-progress: >-
+    ${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
 
 jobs:
   mutation-gate:
     name: Added tests must fail against the unfixed code
-    # Every label change would otherwise cancel an in-flight run and restart a
-    # 30-minute job, because `cancel-in-progress` groups on the PR number.
-    # Only the exemption label changes this job's outcome.
-    if: >-
-      github.event.action != 'labeled' && github.event.action != 'unlabeled'
-      || github.event.label.name == 'mutation-gate-exempt'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

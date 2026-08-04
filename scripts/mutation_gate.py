@@ -198,6 +198,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = "src"
@@ -328,25 +329,29 @@ def candidate_node_ids(
     head: str,
     test_files: list[str],
     renamed_from: dict[str, str] | None = None,
-) -> tuple[list[str], int]:
-    """Node IDs this change added or strengthened, and how many were added.
+) -> tuple[list[str], list[str]]:
+    """Node IDs this change added or strengthened, and which of them are new.
 
     A modified test counts: tightening an assertion so it fails against the
     unfixed code is the textbook fix for a test that was too weak, and refusing
     to credit it would leave the blanket ``mutation-gate-exempt`` label as the
     only remedy -- turning the gate off for the whole change, including the
     production edits that do need constraining.
+
+    The two are returned separately because they carry different weight: only an
+    *added* test that passes at base earns the FAIL accusation. A modified one
+    may have gained a decorator and never been offered as evidence at all.
     """
     renamed_from = renamed_from or {}
     node_ids: list[str] = []
-    added_count = 0
+    added: list[str] = []
     for path in test_files:
         before = test_functions(file_at(merge_base, renamed_from.get(path, path)))
         after = test_functions(file_at(head, path))
         qualifying = sorted(name for name, dump in after.items() if before.get(name) != dump)
-        added_count += sum(1 for name in qualifying if name not in before)
         node_ids += [f"{path}::{name}" for name in qualifying]
-    return node_ids, added_count
+        added += [f"{path}::{name}" for name in qualifying if name not in before]
+    return node_ids, added
 
 
 def collect_items(tree: Path, test_files: list[str]) -> tuple[set[str], int, str]:
@@ -438,51 +443,104 @@ class Outcome:
 # attribute 'shape'` -- real evidence that a class-name test would discard.  So
 # each pattern captures the name that was missing, and it only counts as a
 # symbol error when that name is one this change added to src/.
-_SYMBOL_PATTERNS = (
-    re.compile(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]"),
-    re.compile(r"ImportError: cannot import name ['\"](\w+)['\"]"),
-    re.compile(r"AttributeError: module ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"),
-    re.compile(r"AttributeError: type object ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"),
-    re.compile(r"AttributeError: ['\"]?[\w.]+['\"]? object has no attribute ['\"](\w+)['\"]"),
-    re.compile(r"NameError: name ['\"](\w+)['\"] is not defined"),
+# Each pattern says which set of added names can explain it. Widening the set
+# is not free: an `AttributeError: 'NoneType' object has no attribute 'lower'`
+# is a genuine kill unless `lower` is genuinely new, so if a *local variable*
+# named `lower` anywhere in a new helper counted, an ordinary commit that adds
+# a helper and repairs a null return would report INCONCLUSIVE. Attributes are
+# therefore matched only against declarations -- module- and class-level
+# bindings, def/class names, module stems -- while the keyword-argument pattern,
+# which needs parameter names, gets those and nothing else.
+_SYMBOL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]"), "declared"),
+    (re.compile(r"ImportError: cannot import name ['\"](\w+)['\"]"), "declared"),
+    (
+        re.compile(r"AttributeError: module ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"),
+        "declared",
+    ),
+    (
+        re.compile(
+            r"AttributeError: type object ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"
+        ),
+        "declared",
+    ),
+    (
+        re.compile(r"AttributeError: ['\"]?[\w.]+['\"]? object has no attribute ['\"](\w+)['\"]"),
+        "declared",
+    ),
+    (re.compile(r"NameError: name ['\"](\w+)['\"] is not defined"), "declared"),
     # A new keyword argument is an absent *name* too, and it arrives under a
-    # class no amount of exception-name listing would have caught. `defined_names`
-    # collects ast.arg, so the parameter this change added is in `added`.
-    re.compile(r"TypeError: .*got an unexpected keyword argument ['\"](\w+)['\"]"),
+    # class no amount of exception-name listing would have caught.
+    (re.compile(r"TypeError: .*got an unexpected keyword argument ['\"](\w+)['\"]"), "parameters"),
 )
 
 
-def defined_names(src_root: Path) -> set[str]:
-    """Every name ``src_root`` binds at any level, plus its module names.
+class AddedNames(NamedTuple):
+    """Names present at head and absent at the merge base, split by kind."""
 
-    Deliberately a superset: a false membership costs an INCONCLUSIVE, while a
-    miss would let a missing symbol be counted as a mutation kill.
-    """
-    names: set[str] = set()
+    #: Module stems and every def/class/assignment binding at module or class
+    #: level -- the things another module can reach for by name.
+    declared: frozenset[str] = frozenset()
+    #: Function parameter names, which only the keyword-argument pattern needs.
+    parameters: frozenset[str] = frozenset()
+
+
+def defined_names_from_source(source: str) -> AddedNames:
+    """Split one module's bindings into declarations and parameter names."""
+    declared: set[str] = set()
+    parameters: set[str] = set()
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return AddedNames()
+
+    def declarations(node: ast.AST) -> None:
+        """Walk only what is reachable by name: module and class bodies.
+
+        A function's locals are deliberately out of scope. Nothing outside can
+        reach for them, so counting them would only misclassify behavioural
+        failures that happen to mention a common name.
+        """
+        for child in getattr(node, "body", []):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                declared.add(child.name)
+                if isinstance(child, ast.ClassDef):
+                    declarations(child)
+            elif isinstance(child, ast.Assign | ast.AnnAssign | ast.AugAssign):
+                for target in ast.walk(child):
+                    if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store):
+                        declared.add(target.id)
+            elif isinstance(child, ast.If | ast.Try):
+                declarations(child)
+
+    declarations(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg):
+            parameters.add(node.arg)
+    return AddedNames(frozenset(declared), frozenset(parameters))
+
+
+def defined_names(src_root: Path) -> AddedNames:
+    """Declarations and parameter names bound anywhere under ``src_root``."""
+    declared: set[str] = set()
+    parameters: set[str] = set()
     for path in src_root.rglob("*.py"):
-        names.add(path.stem)
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, ValueError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                names.add(node.name)
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                names.add(node.id)
-            elif isinstance(node, ast.arg):
-                names.add(node.arg)
-    return names
+        declared.add(path.stem)
+        names = defined_names_from_source(path.read_text(encoding="utf-8", errors="replace"))
+        declared |= names.declared
+        parameters |= names.parameters
+    return AddedNames(frozenset(declared), frozenset(parameters))
 
 
-def is_symbol_error(message: str, added: frozenset[str] = frozenset()) -> bool:
+def is_symbol_error(message: str, added: AddedNames = AddedNames()) -> bool:
     """True when this failure is a symbol the head revision added, not behaviour."""
-    for pattern in _SYMBOL_PATTERNS:
+    for pattern, kind in _SYMBOL_PATTERNS:
         match = pattern.search(message)
         if match is None:
             continue
+        candidates = getattr(added, kind)
         name = match.group(1)
-        return name in added or name.rsplit(".", 1)[-1] in added
+        return name in candidates or name.rsplit(".", 1)[-1] in candidates
     return False
 
 
@@ -494,7 +552,7 @@ def junit_key(node_id: str) -> tuple[str, str]:
 
 
 def run_pytest(
-    tree: Path, targets: list[str], added: frozenset[str] = frozenset()
+    tree: Path, targets: list[str], added: AddedNames = AddedNames()
 ) -> tuple[dict[str, Outcome], int, str]:
     """Run ``targets`` inside ``tree`` and attribute every item to its function.
 
@@ -584,7 +642,9 @@ def imported_from(tree: Path) -> str | None:
         check=False,
         env={**os.environ, "PYTHONPATH": str(tree / SRC)},
     )
-    # A genuinely absent package at the base revision is handled downstream.
+    # None is fatal for either tree. An absent package at the mutant used to be
+    # "handled downstream", but the only thing downstream sees is a body-scope
+    # ModuleNotFoundError, which reads as a behavioural kill.
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
@@ -645,7 +705,12 @@ def main() -> int:
     # correct change is reported FAIL with only the blanket label as a remedy.
     changed: list[str] = []
     renamed_from: dict[str, str] = {}
-    for line in git("diff", "--name-status", "-M", f"{merge_base}..{head}").splitlines():
+    # -M25% rather than git's 50% default: a moved module that also gains a
+    # substantial test drops under half-similar, rename detection silently stops,
+    # and the false FAIL this follows renames to avoid comes straight back. The
+    # threshold is a cliff at any value; putting it low makes the cliff far from
+    # where real changes sit.
+    for line in git("diff", "--name-status", "-M25%", f"{merge_base}..{head}").splitlines():
         if not line:
             continue
         fields = line.split("\t")
@@ -680,7 +745,8 @@ def main() -> int:
             + "\n".join(f"  {p}" for p in src_changed),
         )
 
-    candidates, added_count = candidate_node_ids(merge_base, head, tests_changed, renamed_from)
+    candidates, added_ids = candidate_node_ids(merge_base, head, tests_changed, renamed_from)
+    added_count = len(added_ids)
     print(f"mutation gate: base {merge_base[:12]}  head {head[:12]}")
     print(f"  production files changed: {len(src_changed)}")
     print(f"  test modules changed:     {len(tests_changed)}")
@@ -714,19 +780,48 @@ def main() -> int:
         # tests, conftest, pyproject - stays at head, so the only difference
         # between the two runs is the fix itself.
         shutil.rmtree(base_tree / SRC, ignore_errors=True)
-        git("checkout", merge_base, "--", SRC, cwd=base_tree, check=False)
-
-        # Total, silent failure mode if it ever breaks: both runs would measure
-        # head code and every change would be reported FAIL.
-        resolved = imported_from(head_tree)
-        if resolved is not None and not resolved.startswith(str(head_tree)):
+        restore = subprocess.run(
+            ["git", "checkout", merge_base, "--", SRC],
+            cwd=base_tree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if restore.returncode != 0:
+            # Ignoring this produced the one verdict the gate exists to prevent.
+            # With src/ deleted and not restored, a test importing superglm
+            # inside its body fails at base with `ModuleNotFoundError: No module
+            # named 'superglm'` -- and `superglm` is not a name any module
+            # *defines*, so the symbol-error rule calls it behavioural, counts
+            # it as a kill, and reports PASS for a mutant that was never built.
             return report(
                 INCONCLUSIVE,
-                "pytest would import superglm from outside the mutant tree.",
-                f"PYTHONPATH was ignored; superglm resolved to:\n  {resolved}\n\n"
-                "An installed distribution is shadowing the worktree, so neither run\n"
-                "would measure the revision it claims to.",
+                "The mutant could not be built: restoring src/ at the merge base failed.",
+                "Nothing was measured. Reporting anything else would grade a change\n"
+                "against a tree that has no package in it at all.\n\n"
+                + (restore.stderr.strip() or restore.stdout.strip())[-1000:],
             )
+
+        # Total, silent failure mode if either breaks: both runs would measure
+        # head code and every change would be reported FAIL. The base tree is
+        # checked too -- an absent package there is the failed-revert case above
+        # arriving by another route, and it must never reach the classifier.
+        for label, tree in (("head", head_tree), ("mutant", base_tree)):
+            resolved = imported_from(tree)
+            if resolved is None:
+                return report(
+                    INCONCLUSIVE,
+                    f"superglm does not import in the {label} tree.",
+                    "The tree is unusable, so no comparison against it means anything.",
+                )
+            if not resolved.startswith(str(tree)):
+                return report(
+                    INCONCLUSIVE,
+                    f"pytest would import superglm from outside the {label} tree.",
+                    f"PYTHONPATH was ignored; superglm resolved to:\n  {resolved}\n\n"
+                    "An installed distribution is shadowing the worktree, so neither run\n"
+                    "would measure the revision it claims to.",
+                )
 
         head_items, collect_status, collect_out = collect_items(head_tree, tests_changed)
         if collect_status != 0:
@@ -813,8 +908,10 @@ def main() -> int:
         # Names this change introduced. A base-side failure only counts as a
         # missing symbol when it names one of these; anything else that reads
         # like an AttributeError is a genuine behavioural difference.
-        added_symbols = frozenset(
-            defined_names(head_tree / PACKAGE) - defined_names(base_tree / PACKAGE)
+        at_head, at_base = defined_names(head_tree / PACKAGE), defined_names(base_tree / PACKAGE)
+        added_symbols = AddedNames(
+            declared=at_head.declared - at_base.declared,
+            parameters=at_head.parameters - at_base.parameters,
         )
         head_outcomes, head_status, head_out = run_pytest(head_tree, targets, added_symbols)
 
@@ -939,6 +1036,14 @@ def main() -> int:
             outcome = base_outcomes[node]
             if node in uncollectable_at_base:
                 return "its module does not import against the unfixed code"
+            if outcome.failed:
+                # Reachable only through the data_only guard, and the fallback
+                # below would have called this "did not run" about a test that
+                # ran and failed.
+                return (
+                    "failed against the unfixed code, but only on items this change "
+                    "did not add: " + "; ".join(outcome.reasons)
+                )
             if outcome.symbol_errors:
                 return "; ".join(outcome.symbol_errors)
             parts = []
@@ -975,21 +1080,37 @@ def main() -> int:
             reasons = "\n".join(f"  {n}\n      {why_unmeasured(n)}" for n in unmeasured)
             return report(
                 INCONCLUSIVE,
-                f"{len(unmeasured)} evaluable test(s) neither passed nor failed against "
-                "the unfixed code.",
-                "They errored, were skipped, or never ran. None of those is a demonstrated\n"
-                "behavioural constraint - a missing symbol is what a genuinely new module\n"
-                "produces legitimately, and a call-phase ImportError is the same case\n"
-                "wearing the costume of a failure. Verify by hand that these fail for the\n"
-                "intended reason.\n\n" + reasons + note + "\n\n" + base_out[-1500:],
+                f"{len(unmeasured)} evaluable test(s) were not measured against the unfixed code.",
+                "None of these demonstrates a behavioural constraint. They errored, were\n"
+                "skipped, never ran, or failed only on items this change did not add - a\n"
+                "missing symbol is what a genuinely new module produces legitimately, and\n"
+                "a call-phase ImportError is the same case wearing the costume of a\n"
+                "failure. Each one's reason is given; verify by hand that these fail for\n"
+                "the intended reason.\n\n" + reasons + note + "\n\n" + base_out[-1500:],
             )
 
+        # An added test that passes at base is the accusation this gate exists
+        # to make. A *modified* one may only have gained a decorator or had a
+        # local renamed -- it qualified as a candidate, but nobody offered it as
+        # evidence, so it must not be told it observes what the code already did.
+        added_here = [t for t in evaluable if t in set(added_ids)]
+        if added_here:
+            charge = (
+                f"{len(added_here)} added test(s) pass against the unfixed code.\n"
+                "They observe behaviour the code already had, so they do not constrain\n"
+                "this change. Make at least one fail at the merge base."
+            )
+        else:
+            charge = (
+                "No test was added; the candidates here are existing tests this change\n"
+                "modified, and none of them fails at the merge base. A decorator or a\n"
+                "rename qualifies a test as a candidate without making it evidence, so\n"
+                "this may simply mean the change needs a regression test."
+            )
         return report(
             FAIL,
             f"All {len(evaluable)} evaluable test(s) PASS against the unfixed code.",
-            "They observe behaviour the code already had, so they do not constrain this\n"
-            "change. Make at least one fail at the merge base.\n\n"
-            "Evaluated:\n" + "\n".join(f"  {n}" for n in evaluable) + note,
+            charge + "\n\nEvaluated:\n" + "\n".join(f"  {n}" for n in evaluable) + note,
         )
     finally:
         for tree in (base_tree, head_tree, base_tests_tree):

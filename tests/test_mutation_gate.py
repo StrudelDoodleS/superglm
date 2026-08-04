@@ -92,7 +92,7 @@ def test_owning_function_strips_the_parametrise_suffix(item, expected):
     assert mutation_gate.owning_function(item) == expected
 
 
-_ADDED = frozenset({"_new", "_helper", "_x", "thing"})
+_ADDED = mutation_gate.AddedNames(declared=frozenset({"_new", "_helper", "_x", "thing"}))
 
 
 @pytest.mark.parametrize(
@@ -127,8 +127,38 @@ def test_runtime_attribute_error_is_behaviour_not_absence():
     so the name decides, not the exception class.
     """
     message = "AttributeError: 'NoneType' object has no attribute 'lower'"
-    assert mutation_gate.is_symbol_error(message, frozenset({"unrelated"})) is False
-    assert mutation_gate.is_symbol_error(message, frozenset({"lower"})) is True
+    declared = mutation_gate.AddedNames(declared=frozenset({"lower"}))
+    assert mutation_gate.is_symbol_error(message, _ADDED) is False
+    assert mutation_gate.is_symbol_error(message, declared) is True
+
+
+def test_a_local_variable_does_not_make_an_attribute_error_absence():
+    """Widening the name set is not free.
+
+    Every ``Name``-Store and ``ast.arg`` in the package used to count, so a
+    change adding any helper with a local named ``lower`` would turn a genuine
+    ``AttributeError`` kill into INCONCLUSIVE -- and adding a helper while
+    repairing a null return is one ordinary commit.
+    """
+    source = "def _new_helper(scale):\n    lower = scale - 1\n    return lower\n"
+    names = mutation_gate.defined_names_from_source(source)
+
+    assert "lower" not in names.declared
+    assert "scale" in names.parameters
+    assert "_new_helper" in names.declared
+    # The parameter is still reachable where it is genuinely needed.
+    assert (
+        mutation_gate.is_symbol_error(
+            "TypeError: band() got an unexpected keyword argument 'scale'", names
+        )
+        is True
+    )
+    assert (
+        mutation_gate.is_symbol_error(
+            "AttributeError: 'NoneType' object has no attribute 'lower'", names
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
@@ -181,11 +211,20 @@ def test_defined_names_reports_module_and_binding_names(tmp_path):
     package = tmp_path / "superglm"
     package.mkdir()
     (package / "_new_helper.py").write_text(
-        "CONSTANT = 1\n\n\ndef helper():\n    inner = 2\n    return inner\n\n\nclass Band:\n    lower = 0\n"
+        "CONSTANT = 1\n\n\ndef helper(scale):\n    inner = 2\n    return inner\n\n\n"
+        "class Band:\n    lower = 0\n"
     )
     names = mutation_gate.defined_names(package)
 
-    assert {"_new_helper", "CONSTANT", "helper", "inner", "Band", "lower"} <= names
+    # Module stem, module-level assignment, def, class, and class-level binding.
+    assert {"_new_helper", "CONSTANT", "helper", "Band", "lower"} <= names.declared
+    assert "scale" in names.parameters
+    # A function-local is reachable by no other module, so it is not a declaration.
+    assert "inner" not in names.declared
+
+
+def test_defined_names_survives_a_syntax_error():
+    assert mutation_gate.defined_names_from_source("def (:\n") == mutation_gate.AddedNames()
 
 
 def test_test_functions_reports_class_qualified_names():
@@ -697,20 +736,34 @@ def test_untouched_item_of_a_shared_list_does_not_carry_the_change(clone):
     whose actually-new case passes at base -- the refactored-neighbour hole one
     level down.
     """
+    # Every item must PASS at head, or the run stops at red_at_head and never
+    # reaches the guard -- which is what the first version of this scenario did.
+    # So the appended case asserts something independent of the mutated
+    # constant: hollow on purpose, passing at both revisions, while the
+    # pre-existing 'old' case is the only thing that fails against the mutant.
     body = (
-        PARAM + "\n\nCASES = {cases}\nEXPECTED = {{'old': -80.0, 'new': -80.0}}\n\n\n"
+        PARAM + "\n\nCASES = {cases}\nEXPECTED = {{'old': -70.0, 'new': None}}\n\n\n"
         '@pytest.mark.parametrize("case", CASES)\n'
-        "def test_bounds(case):\n    assert ETA_MIN == EXPECTED[case]\n"
+        "def test_bounds(case):\n"
+        "    expected = EXPECTED[case]\n"
+        "    if expected is None:\n"
+        "        assert isinstance(ETA_MIN, float)\n"
+        "    else:\n"
+        "        assert ETA_MIN == expected\n"
     )
     branch(clone, "s-shared-before")
     write(clone, CASE, body.format(cases="['old']"))
     commit(clone, "one case")
     branch(clone, "s-shared-after", "s-shared-before")
     bump(clone)
-    # 'new' passes at base (-80.0 == -80.0); only the untouched 'old' fails there.
     write(clone, CASE, body.format(cases="['old', 'new']"))
     commit(clone, "case appended, but the old one is what fails")
-    assert verdict(clone, "s-shared-before") == (1, "INCONCLUSIVE")
+    code, status, out = run_gate(clone, "s-shared-before")
+
+    assert (code, status) == (1, "INCONCLUSIVE")
+    # The guard, not red-at-head and not a plain absence of evidence.
+    assert "only on items this change did not add" in out
+    assert "do not pass at the head revision" not in out
 
 
 @pytest.mark.slow
@@ -734,6 +787,72 @@ def test_a_moved_test_module_is_not_all_new(clone):
     # test_pin moved unchanged: it must not be credited as an added test.
     assert "test_killer" in out
     assert "  tests added:              1" in out
+
+
+@pytest.mark.slow
+def test_a_mutant_that_could_not_be_built_is_never_a_pass(clone):
+    """A merge base with no ``src/`` at all, so the revert cannot succeed.
+
+    The checkout was unchecked, so ``base_tree`` simply had no package. A test
+    importing superglm *inside its body* then failed at base with
+    ``ModuleNotFoundError: No module named 'superglm'`` -- and ``superglm`` is
+    not a name any module declares, so the symbol rule called it behavioural,
+    counted it as a kill, and reported PASS for a mutant that never existed.
+    Module-scope imports were safe (the pre-collection catches them); this is
+    the shape that was not.
+    """
+    branch(clone, "s-norevert-base")
+    subprocess.run(["git", "rm", "-rq", "src"], cwd=clone, check=True, capture_output=True)
+    commit(clone, "a base revision with no src/ at all")
+    branch(clone, "s-norevert", "s-norevert-base")
+    subprocess.run(
+        ["git", "checkout", "gate-base", "--", "src"], cwd=clone, check=True, capture_output=True
+    )
+    bump(clone)
+    write(
+        clone,
+        CASE,
+        "def test_in_body():\n    from superglm._gate_fixture import ETA_MIN\n\n"
+        "    assert ETA_MIN == -70.0\n",
+    )
+    commit(clone, "restore src and fix")
+    code, status, out = run_gate(clone, "s-norevert-base")
+
+    assert (code, status) == (1, "INCONCLUSIVE")
+    assert "mutant could not be built" in out
+
+
+@pytest.mark.slow
+def test_a_mutant_without_the_package_is_never_measured(clone):
+    """``src/`` restores, but the package is not in it.
+
+    This is the branch that actually closes the false green. An editable
+    install satisfies ``import superglm`` from *outside* the tree, so the
+    mutant silently becomes the installed copy and every comparison against it
+    is meaningless. Without the check the base failure is whatever the
+    installed package happens to raise.
+    """
+    branch(clone, "s-nopkg-base")
+    subprocess.run(
+        ["git", "mv", "src/superglm", "src/renamed_pkg"], cwd=clone, check=True, capture_output=True
+    )
+    commit(clone, "a base revision where the package sits elsewhere")
+    branch(clone, "s-nopkg", "s-nopkg-base")
+    subprocess.run(
+        ["git", "mv", "src/renamed_pkg", "src/superglm"], cwd=clone, check=True, capture_output=True
+    )
+    bump(clone)
+    write(
+        clone,
+        CASE,
+        "def test_in_body():\n    from superglm._gate_fixture import ETA_MIN\n\n"
+        "    assert ETA_MIN == -70.0\n",
+    )
+    commit(clone, "move the package back and fix")
+    code, status, out = run_gate(clone, "s-nopkg-base")
+
+    assert (code, status) == (1, "INCONCLUSIVE")
+    assert "mutant tree" in out or "does not import" in out
 
 
 @pytest.mark.slow
