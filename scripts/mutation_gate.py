@@ -105,21 +105,46 @@ test *body* as a JUnit ``<failure>``, indistinguishable by tag from an assertion
 failure -- so a test whose only claim against the mutant is ``ImportError`` or
 ``AttributeError`` on a name the change introduced would otherwise be counted as
 evidence, and moving an import from module scope into the body would flip
-``INCONCLUSIVE`` to ``PASS``.  Failures whose message names an import, attribute
-or name error are tracked separately and never count.  This is stricter than it
-first looks: a real shipped fix in this repository (``dc0dd57``) adds a private
-helper and tests it directly, so every failing item at base is a missing-symbol
-error and the honest verdict is ``INCONCLUSIVE`` -- those tests constrain the
-helper's existence, not the behaviour of the fix.  Driving the public API instead
-would fail behaviourally and earn a ``PASS``.
+``INCONCLUSIVE`` to ``PASS``.  Such failures are tracked separately and never
+count.  This is stricter than it first looks: a real shipped fix in this
+repository (``dc0dd57``) adds a private helper and tests it directly, so every
+failing item at base is a missing-symbol error and the honest verdict is
+``INCONCLUSIVE`` -- those tests constrain the helper's existence, not the
+behaviour of the fix.  Driving the public API instead would fail behaviourally
+and earn a ``PASS``.
 
-Two known limitations, reported honestly rather than papered over: a change
+The classification is on the *name*, not the exception class.  Matching
+``AttributeError`` alone threw away real evidence in the other direction: when
+the defect itself is a null-handling bug, the regression test fails against the
+mutant with a perfectly genuine ``AttributeError: 'NoneType' object has no
+attribute ...``, which is a kill.  So each message shape captures the name that
+was missing, and it only counts as absence when that name is one this change
+added to ``src/`` -- established by parsing both trees, not guessed.
+
+**Evidence held in data is reported, not silently dismissed.**  Attribution
+works function by function, so a regression that lives in *data* is invisible
+to it: 73% of this repository's ``pytest.param`` sites carry an explicit
+``id=``, and 32 ``@parametrize`` sites bind to a module-level table of case-id
+strings whose expected values sit in a separate lookup.  Retuning one of those
+values moves neither the function's dump nor its collected node ID.  Nor does
+strengthening an oracle in ``tests/_wood_reml_oracles.py`` or a fixture in
+``conftest.py``, which pytest never collects as a test at all.  Crediting the
+whole module in those cases would reopen the loophole the gate exists to close,
+since an untouched neighbour failing against the mutant would then read as
+evidence.  Instead the change is detected -- a module-shell fingerprint that
+excludes the test functions, plus the changed-support-file list -- and reported
+``INCONCLUSIVE``: this may well be constrained, and this technique cannot say.
+
+Three known limitations, reported honestly rather than papered over: a change
 containing several independent fixes is accepted once *any* qualifying test is
 killed -- mapping each production hunk to its own killed mutation would need
-per-hunk mutants and is out of scope, per the note on prior art above.  And a fix
+per-hunk mutants and is out of scope, per the note on prior art above.  A fix
 landing entirely in a **new** module cannot be measured this way at all: at the
 base revision the module does not exist, so its tests error or raise rather than
-fail.  That is reported ``INCONCLUSIVE``, never ``PASS``.
+fail.  That is reported ``INCONCLUSIVE``, never ``PASS``.  And the data-driven
+case above is *detected* rather than measured; measuring it needs per-item
+parameter capture at both revisions, which the case-id-plus-lookup style
+defeats anyway.
 
 Outcomes
 --------
@@ -147,6 +172,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -193,6 +219,19 @@ def is_test_module(path: str) -> bool:
     )
 
 
+def is_test_support(path: str) -> bool:
+    """A ``tests/`` file pytest will not collect but a test module may read.
+
+    ``conftest.py``, shared oracle tables and dataset helpers carry regression
+    evidence just as a test module does: strengthening an expected value in
+    ``tests/_wood_reml_oracles.py`` constrains the change without touching a
+    discovery-named file at all.  Nothing here can be *run*, so these paths
+    never become targets -- they exist so the gate can say "the evidence may be
+    in data I cannot attribute" instead of silently reporting no evidence.
+    """
+    return path.startswith(f"{TESTS}/") and path.endswith(".py") and not is_test_module(path)
+
+
 def file_at(rev: str, path: str) -> str | None:
     """A file's contents at ``rev``, or None when it does not exist there."""
     result = subprocess.run(
@@ -228,6 +267,42 @@ def test_functions(source: str | None) -> dict[str, str]:
 
     walk(tree, "")
     return found
+
+
+def module_shell(source: str | None) -> str:
+    """The module's structure with every test function removed.
+
+    Attribution works function by function, so evidence held in *data* is
+    invisible to it: 73% of this repository's ``pytest.param`` sites carry an
+    explicit ``id=``, and 32 ``@parametrize`` sites bind to a module-level table
+    of case-id strings whose expected values live in a separate lookup.
+    Retuning one of those values changes neither the test function's dump nor
+    its collected node ID.  This fingerprint does change, which is enough to
+    report INCONCLUSIVE rather than claim there was no evidence.
+    """
+    if source is None:
+        return ""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+
+    def strip(node: ast.AST) -> None:
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            return
+        kept = []
+        for child in body:
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) and child.name.startswith(
+                "test"
+            ):
+                continue
+            strip(child)
+            kept.append(child)
+        node.body = kept
+
+    strip(tree)
+    return ast.dump(tree)
 
 
 def candidate_node_ids(merge_base: str, head: str, test_files: list[str]) -> tuple[list[str], int]:
@@ -322,19 +397,58 @@ class Outcome:
 
 
 # A call-phase exception is a JUnit <failure>, tag-identical to an assertion
-# failure -- only the message distinguishes them. These names are what a test
-# raises when the symbol it needs does not exist at the base revision, which is
-# the new-module case wearing a different hat: not behavioural evidence.
-_SYMBOL_ERRORS = (
-    "ModuleNotFoundError",
-    "ImportError",
-    "AttributeError",
-    "NameError",
+# failure -- only the message distinguishes them. A test that reaches for a
+# symbol the base revision does not have is the new-module case wearing a
+# different hat: not behavioural evidence.
+#
+# Matching on the exception class alone is too coarse in the other direction.
+# When the defect *is* a null-handling bug, the regression test fails against
+# the mutant with a perfectly genuine `AttributeError: 'NoneType' object has no
+# attribute 'shape'` -- real evidence that a class-name test would discard.  So
+# each pattern captures the name that was missing, and it only counts as a
+# symbol error when that name is one this change added to src/.
+_SYMBOL_PATTERNS = (
+    re.compile(r"ModuleNotFoundError: No module named ['\"]([\w.]+)['\"]"),
+    re.compile(r"ImportError: cannot import name ['\"](\w+)['\"]"),
+    re.compile(r"AttributeError: module ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"),
+    re.compile(r"AttributeError: type object ['\"][\w.]+['\"] has no attribute ['\"](\w+)['\"]"),
+    re.compile(r"AttributeError: ['\"]?[\w.]+['\"]? object has no attribute ['\"](\w+)['\"]"),
+    re.compile(r"NameError: name ['\"](\w+)['\"] is not defined"),
 )
 
 
-def is_symbol_error(message: str) -> bool:
-    return message.lstrip().startswith(_SYMBOL_ERRORS)
+def defined_names(src_root: Path) -> set[str]:
+    """Every name ``src_root`` binds at any level, plus its module names.
+
+    Deliberately a superset: a false membership costs an INCONCLUSIVE, while a
+    miss would let a missing symbol be counted as a mutation kill.
+    """
+    names: set[str] = set()
+    for path in src_root.rglob("*.py"):
+        names.add(path.stem)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                names.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+            elif isinstance(node, ast.arg):
+                names.add(node.arg)
+    return names
+
+
+def is_symbol_error(message: str, added: frozenset[str] = frozenset()) -> bool:
+    """True when this failure is a symbol the head revision added, not behaviour."""
+    for pattern in _SYMBOL_PATTERNS:
+        match = pattern.search(message)
+        if match is None:
+            continue
+        name = match.group(1)
+        return name in added or name.rsplit(".", 1)[-1] in added
+    return False
 
 
 def junit_key(node_id: str) -> tuple[str, str]:
@@ -344,7 +458,9 @@ def junit_key(node_id: str) -> tuple[str, str]:
     return ".".join([module, *parts[:-1]]), parts[-1]
 
 
-def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], int, str]:
+def run_pytest(
+    tree: Path, targets: list[str], added: frozenset[str] = frozenset()
+) -> tuple[dict[str, Outcome], int, str]:
     """Run ``targets`` inside ``tree`` and attribute every item to its function.
 
     The process status is returned alongside the per-item outcomes and must be
@@ -398,7 +514,7 @@ def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], int,
         failure = case.find("failure")
         if failure is not None:
             message = failure.get("message") or failure.text or ""
-            if is_symbol_error(message):
+            if is_symbol_error(message, added):
                 outcome.symbol_errors.append(f"{item}: {message.splitlines()[0][:100]}")
             else:
                 outcome.failed.append(item)
@@ -478,11 +594,22 @@ def main() -> int:
     ]
     src_changed = [p for p in changed if p.startswith(PACKAGE)]
     tests_changed = [p for p in changed if is_test_module(p) and file_at(head, p) is not None]
+    support_changed = [p for p in changed if is_test_support(p) and file_at(head, p) is not None]
 
     if not src_changed:
         return report(SKIP, "No change under src/superglm - nothing to mutate.")
 
     if not tests_changed:
+        if support_changed:
+            return report(
+                INCONCLUSIVE,
+                f"Only test-support files changed ({len(support_changed)}), "
+                "and pytest collects no test from them.",
+                "A fixture or oracle table can carry a regression that no discovery-named\n"
+                "module records, and there is no test function to attribute it to. The\n"
+                "evidence may be real -- this gate cannot see it. Say in the PR body which\n"
+                "test the new data strengthens.\n\n" + "\n".join(f"  {p}" for p in support_changed),
+            )
         return report(
             NO_EVIDENCE,
             f"{len(src_changed)} production file(s) changed, no test module added or changed.",
@@ -564,6 +691,26 @@ def main() -> int:
 
         targets = qualifying
         if not targets and not candidates:
+            # Nothing attributable to a *function*. Before calling that an absence
+            # of evidence, check the two places evidence hides from attribution:
+            # a changed support file, and changed module-level data behind a
+            # @parametrize whose ids are stable.
+            unattributable = list(support_changed) + [
+                p
+                for p in tests_changed
+                if module_shell(file_at(merge_base, p)) != module_shell(file_at(head, p))
+            ]
+            if unattributable:
+                return report(
+                    INCONCLUSIVE,
+                    f"{len(unattributable)} test file(s) changed outside any test function.",
+                    "No test function's body, decorators or collected items changed, so\n"
+                    "there is nothing to attribute -- but module-level data did change.\n"
+                    "Retuning an expected value behind a stable parametrise id constrains\n"
+                    "the change without leaving a trace attribution can follow. Name the\n"
+                    "test that data strengthens in the PR body.\n\n"
+                    + "\n".join(f"  {p}" for p in unattributable),
+                )
             return report(
                 NO_EVIDENCE,
                 "Test modules changed but nothing was added, strengthened or given a new case.",
@@ -581,8 +728,14 @@ def main() -> int:
                 + "\n".join(f"  {n}" for n in uncollectable),
             )
 
-        head_outcomes, head_status, head_out = run_pytest(head_tree, targets)
-        base_outcomes, base_status, base_out = run_pytest(base_tree, targets)
+        # Names this change introduced. A base-side failure only counts as a
+        # missing symbol when it names one of these; anything else that reads
+        # like an AttributeError is a genuine behavioural difference.
+        added_symbols = frozenset(
+            defined_names(head_tree / PACKAGE) - defined_names(base_tree / PACKAGE)
+        )
+        head_outcomes, head_status, head_out = run_pytest(head_tree, targets, added_symbols)
+        base_outcomes, base_status, base_out = run_pytest(base_tree, targets, added_symbols)
 
         # Exit status is evidence in its own right. A clean JUnit record says
         # nothing about a session-finish, plugin or internal error, and pytest
