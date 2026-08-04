@@ -290,12 +290,31 @@ def test_pandas_selection_and_digest_preserve_falsey_hashable_column_labels() ->
         }
     )
     frame = as_eager_frame(native)
-    labels = (None, "", ("tuple", "label"))
+    labels = (0, None, "", ("tuple", "label"))
 
     selected = frame.select_native(labels)
 
     assert list(selected.columns) == list(labels)
     assert frame.digest(labels) == as_eager_frame(selected).digest()
+
+
+def test_pandas_selection_reads_a_boolean_column_label_as_a_label_not_a_mask() -> None:
+    native = pd.DataFrame({False: [1.0, 2.0], "z": [3.0, 4.0]})
+    frame = as_eager_frame(native)
+
+    selected = frame.select_native((False,))
+
+    assert list(selected.columns) == [False]
+    np.testing.assert_array_equal(np.asarray(selected).ravel(), [1.0, 2.0])
+    assert frame.digest((False,)) == as_eager_frame(selected).digest()
+    assert frame.digest((False,)) != frame.digest(("z",))
+
+
+def test_pandas_digest_of_a_lone_boolean_label_tracks_that_column_values() -> None:
+    before = as_eager_frame(pd.DataFrame({False: [1.0, 2.0]}))
+    after = as_eager_frame(pd.DataFrame({False: [1.0, 99.0]}))
+
+    assert before.digest((False,)) != after.digest((False,))
 
 
 @pytest.mark.parametrize("backend", ["pandas", "polars"])

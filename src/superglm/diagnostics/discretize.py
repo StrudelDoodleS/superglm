@@ -327,6 +327,7 @@ def discretization_impact(
 
     from superglm.model.input_validation import validate_x_columns
 
+    frame.require_columns(tuple(target_features))
     validate_x_columns(frame, target_features)
     eta_orig = base.predict_eta_exact(model, frame, offset=offset)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
