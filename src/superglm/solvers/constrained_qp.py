@@ -84,12 +84,31 @@ class QPResult:
     the loop can also stop at a stationary point on a *subset* active set with
     another row materially violated, on a system that has a feasible point.
     See the early return below for the measurement and projection.
+
+    ``rank``, ``width``, ``method``, ``condition`` and ``used_svd_fallback``
+    report the geometry of the ``H`` decomposition this solve actually ran on.
+    They are read straight off the decomposition computed below -- attribute
+    reads, no extra work -- and exist because the constrained branch of
+    :func:`~superglm.solvers.irls_direct.fit_irls_direct` previously reported
+    none of it, hardcoding a condition of ``0.0`` where the unconstrained
+    branch forty lines above reads the real number.  ``0.0`` reads as
+    "perfectly conditioned" to every consumer, so the one branch with the least
+    visible linear algebra was also the one claiming the most certainty.
+
+    ``condition`` is ``pre_truncation_condition`` -- deliberately the same
+    quantity the unconstrained branch publishes, so the two are comparable.
+    The defaults describe "no decomposition was reached".
     """
 
     beta: NDArray
     active_set: list[int] = field(default_factory=list)
     n_iter: int = 0
     converged: bool = True
+    rank: int = -1
+    width: int = -1
+    method: str = ""
+    condition: float = 0.0
+    used_svd_fallback: bool = False
 
 
 def _null_space_mass(decomposition: RankDecomposition, g: NDArray) -> tuple[float, float]:
@@ -754,6 +773,17 @@ def solve_constrained_qp(
     except ValueError as exc:
         raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
 
+    # Geometry of the decomposition every pure-H solve below runs on.  Attribute
+    # reads only -- no extra factorization -- carried onto every return so the
+    # constrained IRLS branch can report what it actually inverted.
+    geometry = {
+        "rank": int(decomposition.rank),
+        "width": int(decomposition.width),
+        "method": str(decomposition.method),
+        "condition": float(decomposition.pre_truncation_condition),
+        "used_svd_fallback": bool(decomposition.used_svd_fallback),
+    }
+
     # --- Unconstrained solution ---
     beta_unc = decomposition.solve(g)
 
@@ -794,10 +824,10 @@ def solve_constrained_qp(
 
     if m == 0:
         # No constraints: the unconstrained solve above is already the answer.
-        return QPResult(beta=beta_unc, active_set=[], n_iter=0)
+        return QPResult(beta=beta_unc, active_set=[], n_iter=0, **geometry)
 
     if _is_feasible(A, beta_unc, b, tol):
-        return QPResult(beta=beta_unc, active_set=[], n_iter=0)
+        return QPResult(beta=beta_unc, active_set=[], n_iter=0, **geometry)
 
     # --- Initialize active set ---
     if active_set_init is not None:
@@ -1163,6 +1193,7 @@ def solve_constrained_qp(
                 active_set=active,
                 n_iter=it + 1,
                 converged=feasible,
+                **geometry,
             )
 
         # --- Step ratio: find blocking constraint ---
@@ -1237,4 +1268,4 @@ def solve_constrained_qp(
     # certificate to complete.  A merely feasible point is not a solution --
     # any interior point is feasible -- so consulting feasibility here would
     # report success for a search that was cut off mid-flight.
-    return QPResult(beta=beta, active_set=active, n_iter=max_iter, converged=False)
+    return QPResult(beta=beta, active_set=active, n_iter=max_iter, converged=False, **geometry)

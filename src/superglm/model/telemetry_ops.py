@@ -28,6 +28,7 @@ def training_telemetry(model) -> dict[str, Any]:
                 "version": __version__,
             },
             "model": _model_config(model),
+            "rank_policy": _rank_policy_payload(result),
             "fit": _fit_payload(model, result),
             "fit_statistics": _fit_statistics_payload(model),
             "features": feature_schema(model),
@@ -35,6 +36,26 @@ def training_telemetry(model) -> dict[str, Any]:
             "reml": reml_diagnostics(model),
         }
     )
+
+
+def _rank_policy_payload(result) -> dict[str, Any]:
+    """The rank policy this fit's zeros were decided under.
+
+    ``RankPolicy.version`` is stamped onto every ``RankDecomposition`` and every
+    ``RankInfo``, and before this was read by nothing -- so a governed fit could
+    not be traced back to the rule that chose which coefficients are reported as
+    exact zeros.  Recording it here is what the field is for.
+
+    It is read off the fitted result rather than off the live shared policy, so
+    a result carried across a version boundary reports the version that actually
+    decided it rather than today's.
+    """
+    rank_info = getattr(result, "rank_info", None)
+    version = getattr(rank_info, "policy_version", None)
+    return {
+        "version": int(version) if version is not None else None,
+        "coordinate_space": getattr(rank_info, "coordinate_space", None),
+    }
 
 
 def reml_diagnostics(model) -> dict[str, Any]:
