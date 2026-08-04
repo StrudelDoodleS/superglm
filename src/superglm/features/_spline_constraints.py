@@ -29,6 +29,13 @@ def curvature_difference_operator(
     cubic splines.  Without ``domain``, the derivative-coefficient difference
     operator over the complete active knot interval is returned.
 
+    A knot vector in which ``degree + 1`` knots coincide strictly inside the
+    active interval is rejected: the probe set de-duplicates the repeated
+    breakpoint and would silently under-constrain.  A coincidence *on* a
+    fitted boundary -- what a clamped vector makes of an interior knot that
+    lands on the boundary -- is accepted on the exact ``domain`` paths, which
+    do not divide by the derivative knot spans.
+
     The knot geometry is normalized before differentiation, and each result
     row is normalized with a max-first norm.  Both operations preserve signs
     while avoiding overflow/underflow for valid extreme predictor scales.
@@ -52,13 +59,28 @@ def curvature_difference_operator(
     normalized_knots = (knots - active_lo) / active_span
 
     spans = normalized_knots[degree + 1 : degree + n_basis] - normalized_knots[1:n_basis]
-    # Degree-two and cubic domain rows are exact second-derivative probes and
-    # never divide by these spans.  A knot placed on the fitted boundary of a
-    # clamped vector repeats it ``degree + 2`` times and so zeroes a span, but
-    # that only invalidates the derivative-coefficient operator, which those
-    # paths do not build.
+    # A zero span means ``degree + 1`` consecutive knots coincide.  Only the
+    # derivative-coefficient operator divides by the spans; the exact
+    # degree-two and cubic domain rows are second-derivative probes that never
+    # do.  That alone does not make every coincidence admissible:
+    #
+    # - Strictly inside the active interval, such a coincidence splits the
+    #   spline into independent pieces.  The probe set de-duplicates the
+    #   repeated breakpoint and so loses one row per live curvature direction,
+    #   with no rank check on the QP path to catch it.  Keep rejecting it.
+    # - On a fitted boundary -- what a clamped knot vector makes of an interior
+    #   knot that lands on the boundary -- the coincidence instead zeroes the
+    #   support of one basis function per repeat, exactly the directions whose
+    #   probe rows are dropped with it.  The exact rows stay complete and only
+    #   the division is unusable, so relax the guard there and nowhere else.
     uses_derivative_coefficients = domain is None or degree == 1
-    if spans.shape != (n_basis - 1,) or (uses_derivative_coefficients and np.any(spans <= 0.0)):
+    if spans.shape != (n_basis - 1,):
+        raise ValueError("Curvature constraints require positive derivative knot spans")
+    degenerate_spans = spans <= 0.0
+    if not uses_derivative_coefficients:
+        repeated_knot = knots[1:n_basis]
+        degenerate_spans &= (repeated_knot > active_lo) & (repeated_knot < active_hi)
+    if np.any(degenerate_spans):
         raise ValueError("Curvature constraints require positive derivative knot spans")
 
     if uses_derivative_coefficients:
