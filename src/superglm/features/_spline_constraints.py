@@ -52,11 +52,20 @@ def curvature_difference_operator(
     normalized_knots = (knots - active_lo) / active_span
 
     spans = normalized_knots[degree + 1 : degree + n_basis] - normalized_knots[1:n_basis]
-    if spans.shape != (n_basis - 1,) or np.any(spans <= 0.0):
+    # Degree-two and cubic domain rows are exact second-derivative probes and
+    # never divide by these spans.  A knot placed on the fitted boundary of a
+    # clamped vector repeats it ``degree + 2`` times and so zeroes a span, but
+    # that only invalidates the derivative-coefficient operator, which those
+    # paths do not build.
+    uses_derivative_coefficients = domain is None or degree == 1
+    if spans.shape != (n_basis - 1,) or (uses_derivative_coefficients and np.any(spans <= 0.0)):
         raise ValueError("Curvature constraints require positive derivative knot spans")
 
-    first_derivative = np.diff(np.eye(n_basis), axis=0) / spans[:, None]
-    curvature = np.diff(first_derivative, axis=0)
+    if uses_derivative_coefficients:
+        first_derivative = np.diff(np.eye(n_basis), axis=0) / spans[:, None]
+        curvature = np.diff(first_derivative, axis=0)
+    else:
+        curvature = np.zeros((0, n_basis), dtype=np.float64)
 
     if domain is not None:
         if degree > 3:
