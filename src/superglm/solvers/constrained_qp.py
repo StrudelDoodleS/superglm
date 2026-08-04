@@ -773,16 +773,28 @@ def solve_constrained_qp(
     except ValueError as exc:
         raise ValueError(f"solve_constrained_qp requires a usable PSD H: {exc}") from exc
 
-    # Geometry of the decomposition every pure-H solve below runs on.  Attribute
-    # reads only -- no extra factorization -- carried onto every return so the
-    # constrained IRLS branch can report what it actually inverted.
-    geometry = {
-        "rank": int(decomposition.rank),
-        "width": int(decomposition.width),
-        "method": str(decomposition.method),
-        "condition": float(decomposition.pre_truncation_condition),
-        "used_svd_fallback": bool(decomposition.used_svd_fallback),
-    }
+    def _result(
+        beta: NDArray,
+        active_set: list[int],
+        n_iter: int,
+        converged: bool = True,
+    ) -> QPResult:
+        """Build a result carrying the geometry every pure-H solve ran on.
+
+        Attribute reads only -- no extra factorization.  A closure rather than a
+        splatted dict so each field keeps its own type at every return site.
+        """
+        return QPResult(
+            beta=beta,
+            active_set=active_set,
+            n_iter=n_iter,
+            converged=converged,
+            rank=int(decomposition.rank),
+            width=int(decomposition.width),
+            method=str(decomposition.method),
+            condition=float(decomposition.pre_truncation_condition),
+            used_svd_fallback=bool(decomposition.used_svd_fallback),
+        )
 
     # --- Unconstrained solution ---
     beta_unc = decomposition.solve(g)
@@ -824,10 +836,10 @@ def solve_constrained_qp(
 
     if m == 0:
         # No constraints: the unconstrained solve above is already the answer.
-        return QPResult(beta=beta_unc, active_set=[], n_iter=0, **geometry)
+        return _result(beta_unc, [], 0)
 
     if _is_feasible(A, beta_unc, b, tol):
-        return QPResult(beta=beta_unc, active_set=[], n_iter=0, **geometry)
+        return _result(beta_unc, [], 0)
 
     # --- Initialize active set ---
     if active_set_init is not None:
@@ -1188,13 +1200,7 @@ def solve_constrained_qp(
             feasible = _is_feasible(A, beta, b, tol)
             if not feasible:
                 beta = _project_feasible(beta, A, b, tol)
-            return QPResult(
-                beta=beta,
-                active_set=active,
-                n_iter=it + 1,
-                converged=feasible,
-                **geometry,
-            )
+            return _result(beta, active, it + 1, converged=feasible)
 
         # --- Step ratio: find blocking constraint ---
         # Both tests below go through the same per-row scale the convergence
@@ -1268,4 +1274,4 @@ def solve_constrained_qp(
     # certificate to complete.  A merely feasible point is not a solution --
     # any interior point is feasible -- so consulting feasibility here would
     # report success for a search that was cut off mid-flight.
-    return QPResult(beta=beta, active_set=active, n_iter=max_iter, converged=False, **geometry)
+    return _result(beta, active, max_iter, converged=False)
