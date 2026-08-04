@@ -469,15 +469,9 @@ def main() -> int:
     print(f"  tests added:              {added_count}")
     print(f"  tests strengthened:       {len(candidates) - added_count}")
 
-    if not candidates:
-        return report(
-            NO_EVIDENCE,
-            "Test modules changed but no test function was added or strengthened.",
-            "Attribution needs a test whose body or decorators this change touched.\n"
-            "Renames, moves and formatting do not qualify. Add or tighten a regression\n"
-            "test, or apply the mutation-gate-exempt label.\n\n"
-            + "\n".join(f"  {p}" for p in tests_changed),
-        )
+    # No early return on an empty AST candidate set: a case appended to a
+    # module-level list feeding an unchanged @parametrize leaves every function
+    # dump identical, and only the collected-item diff below can see it.
 
     # Three isolated trees. The caller's checkout is never touched.
     #   head_tree       head src + head tests -- the change as proposed
@@ -538,6 +532,15 @@ def main() -> int:
             print(f"  tests with new cases:     {len(data_driven)}")
 
         targets = qualifying
+        if not targets and not candidates:
+            return report(
+                NO_EVIDENCE,
+                "Test modules changed but nothing was added, strengthened or given a new case.",
+                "Attribution needs a test whose body or decorators this change touched, or\n"
+                "a new collected item. Renames, moves and formatting do not qualify. Add\n"
+                "or tighten a regression test, or apply the mutation-gate-exempt label.\n\n"
+                + "\n".join(f"  {p}" for p in tests_changed),
+            )
         if not targets:
             return report(
                 INCONCLUSIVE,
