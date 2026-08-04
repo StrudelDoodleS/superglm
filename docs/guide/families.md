@@ -4,11 +4,16 @@
 
 | Family | Variance function | Default link | Use case |
 |--------|------------------|-------------|----------|
+| `Gaussian()` | V(μ) = 1 | identity | Continuous outcomes |
 | `Poisson()` | V(μ) = μ | log | Claim frequency |
 | `NegativeBinomial(theta=1.0)` | V(μ) = μ + μ²/θ | log | Overdispersed frequency |
 | `Gamma()` | V(μ) = μ² | log | Claim severity |
 | `Tweedie(p=1.5)` | V(μ) = μᵖ | log | Pure premium (frequency × severity) |
 | `Binomial()` | V(μ) = μ(1 − μ) | logit | Binary classification |
+
+The native API examples below assume `features` is an explicit mapping from
+input columns to feature specs, such as `{"age": Numeric()}`. SuperGLM does
+not guess an omitted native feature configuration at fit time.
 
 ## Binomial (binary classification)
 
@@ -17,7 +22,7 @@ For binary outcomes (y in {0, 1}):
 ```python
 from superglm import SuperGLM
 
-model = SuperGLM(family="binomial", selection_penalty=0)
+model = SuperGLM(family="binomial", selection_penalty=0, features=features)
 model.fit(df, y)
 probabilities = model.predict(df)  # returns P(Y=1)
 ```
@@ -28,10 +33,20 @@ The default link is logit. Alternative links can be passed via `link=`:
 from superglm import SuperGLM, ProbitLink, CloglogLink
 
 # Probit link (latent variable interpretation)
-model = SuperGLM(family="binomial", link=ProbitLink(), selection_penalty=0)
+model = SuperGLM(
+    family="binomial",
+    link=ProbitLink(),
+    selection_penalty=0,
+    features=features,
+)
 
 # Complementary log-log (asymmetric alternative)
-model = SuperGLM(family="binomial", link=CloglogLink(), selection_penalty=0)
+model = SuperGLM(
+    family="binomial",
+    link=CloglogLink(),
+    selection_penalty=0,
+    features=features,
+)
 ```
 
 For sklearn-compatible binary classification, use `SuperGLMClassifier`:
@@ -48,21 +63,71 @@ clf.decision_function(df)  # log-odds
 
 Scale is known (phi = 1) for binomial, so no dispersion estimation is needed.
 
+## Weight semantics
+
+`sample_weight` has an explicit family-specific contract:
+
+- Poisson, negative binomial, binomial, Gaussian, and Gamma use
+  **case/frequency weights**. Once feature geometry is fixed, integer weights
+  are likelihood-equivalent to repeating the corresponding rows. For Gaussian
+  and Gamma, Pearson dispersion therefore uses
+  `sum(sample_weight) - edf`.
+- Tweedie uses strictly positive **EDM prior weights**:
+  `Var(Y_i | x_i) = phi * mu_i**p / w_i`. Its weights are not replication
+  counts, and dispersion uses the observation count rather than the weight
+  sum.
+
+These contracts are not interchangeable. In particular, a Gamma response
+containing an average severity with claim count as `sample_weight` is often
+intended as a prior-weight model with
+`Var(Y_i | x_i) = phi * V(mu_i) / w_i` and residual degrees of freedom
+`n - edf`. SuperGLM's Gamma fit does not implement that contract: it interprets
+the count as a frequency weight and uses `sum(w) - edf`. For calibrated Gamma
+dispersion and Wald inference, retain the individual claim-severity rows (and
+their ordinary case weights), or use a model with an explicit prior-weight
+likelihood. Do not pass claim counts beside aggregated average severities and
+interpret the resulting inference as prior-weight inference.
+
+The frequency-weight replication statement is conditional on an identical
+constructed design. Main-effect non-Tweedie spline boundaries and the
+`quantile_rows` and `quantile_tempered` knot strategies use frequency mass and
+ignore zero-weight rows, matching integer row expansion and omission without
+materializing copies. Tweedie prior weights intentionally leave spline
+geometry determined by physical rows. Some tensor-interaction marginal
+centering, interaction-local spline geometry, and categorical/ordered/factor
+feature geometry can still depend on the physical row layout. Use fixed or
+preconstructed feature geometry when exact end-to-end replication parity
+matters.
+
+`sample_weight` never enters the linear predictor; use an offset when exposure
+should scale the conditional mean.
+
 ## Negative binomial: estimating theta
 
 For overdispersed count data where the Poisson variance assumption is too restrictive:
 
 ```python
+import numpy as np
+
 from superglm import SuperGLM, NegativeBinomial
 
+log_exposure = np.log(exposure)
+
 # Fixed theta
-model = SuperGLM(family=NegativeBinomial(theta=1.0), selection_penalty=0.01)
-model.fit(df, y, sample_weight=exposure)
+model = SuperGLM(
+    family=NegativeBinomial(theta=1.0),
+    selection_penalty=0.01,
+    features=features,
+)
+model.fit(df, y, offset=log_exposure)
 
 # Profile estimate theta (MASS-style alternating GLM + Newton update)
-result = model.estimate_theta(df, y, sample_weight=exposure)
+result = model.estimate_theta(df, y, offset=log_exposure)
 print(result.theta_hat)  # estimated dispersion
 ```
+
+Here `y` contains raw counts, so exposure enters through the log offset rather
+than through `sample_weight`.
 
 `estimate_theta()` uses the MASS-style alternating algorithm: fit the GLM at current theta, then take a Newton step on the NB2 profile log-likelihood for theta given the fitted means. Converges in 2–3 outer iterations.
 
@@ -88,14 +153,22 @@ Fit with a fixed Tweedie power:
 ```python
 from superglm import SuperGLM, Tweedie
 
-model = SuperGLM(family=Tweedie(p=1.5), selection_penalty=0.01)
+model = SuperGLM(
+    family=Tweedie(p=1.5),
+    selection_penalty=0.01,
+    features=features,
+)
 model.fit(df, y, sample_weight=exposure)
 ```
 
 Or estimate the power via profile likelihood:
 
 ```python
-model = SuperGLM(family=Tweedie(p=1.5), selection_penalty=0.01)
+model = SuperGLM(
+    family=Tweedie(p=1.5),
+    selection_penalty=0.01,
+    features=features,
+)
 result = model.estimate_p(
     df,
     y,

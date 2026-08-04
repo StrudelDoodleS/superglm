@@ -279,6 +279,15 @@ class TestPenaltyFeatureHelpers:
         assert not penalty_targets_group(pen_group, groups[0])
         assert penalty_targets_group(pen_group, groups[1])
 
+    def test_empty_string_filter_targets_only_the_exact_empty_label(self):
+        group = GroupSlice("display", 0, 1, feature_name="")
+        other = GroupSlice("other", 1, 2, feature_name="other")
+        penalty = GroupLasso(lambda1=0.1, features=[""])
+
+        assert penalty.features == frozenset({""})
+        assert penalty_targets_group(penalty, group)
+        assert not penalty_targets_group(penalty, other)
+
     def test_validate_penalty_features_raises_on_unknown_name(self):
         groups = [GroupSlice("region", 0, 2, feature_name="region")]
         pen = GroupLasso(lambda1=0.1, features=["missing"])

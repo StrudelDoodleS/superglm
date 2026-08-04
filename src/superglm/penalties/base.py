@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Protocol, runtime_checkable
 
 from numpy.typing import NDArray
@@ -10,7 +10,9 @@ from numpy.typing import NDArray
 from superglm.types import GroupSlice
 
 
-def normalize_penalty_features(features: str | Iterable[str] | None) -> frozenset[str] | None:
+def normalize_penalty_features(
+    features: str | Iterable[Hashable] | None,
+) -> frozenset[Hashable] | None:
     """Normalize optional penalty feature filters.
 
     Parameters
@@ -26,8 +28,8 @@ def normalize_penalty_features(features: str | Iterable[str] | None) -> frozense
         tokens = [features]
     else:
         tokens = list(features)
-    cleaned = [str(token).strip() for token in tokens if str(token).strip()]
-    return frozenset(cleaned) if cleaned else None
+    normalized = [token.strip() if isinstance(token, str) else token for token in tokens]
+    return frozenset(normalized)
 
 
 def penalty_targets_group(penalty: object, group: GroupSlice) -> bool:
@@ -49,9 +51,9 @@ def validate_penalty_features(
     if features is None:
         return
     available = {g.feature_name for g in groups} | {g.name for g in groups}
-    missing = sorted(features - available)
+    missing = sorted(features - available, key=repr)
     if missing:
-        available_names = sorted(available)
+        available_names = sorted(available, key=repr)
         raise ValueError(
             "Unknown penalty feature/group filter(s): "
             f"{missing}. Available names: {available_names}"
@@ -97,7 +99,7 @@ class Penalty(Protocol):
     def flavor(self) -> Flavor | None: ...
 
     @property
-    def features(self) -> frozenset[str] | None: ...
+    def features(self) -> frozenset[Hashable] | None: ...
 
     def prox(self, beta: NDArray, groups: list[GroupSlice], step: float) -> NDArray:
         """Proximal operator: argmin_z  step * P(z) + 0.5 * ||beta - z||^2."""

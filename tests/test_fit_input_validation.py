@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
 
-from superglm import Numeric, SuperGLM
+from superglm import (
+    Categorical,
+    Constraint,
+    LambdaPolicy,
+    Numeric,
+    PSpline,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+)
 from superglm.distributions import (
     Binomial,
     Gamma,
@@ -16,6 +27,8 @@ from superglm.distributions import (
     validate_response,
 )
 from superglm.model.input_validation import validate_fit_input
+from superglm.model.reml_setup import scop_group_spec
+from superglm.types import GroupSlice
 
 ENTRYPOINTS = ("fit", "fit_path", "fit_reml")
 
@@ -203,6 +216,363 @@ def test_intercept_only_fit_ignores_unused_complex_column() -> None:
     assert model._dm.shape == (len(X), 0)
     assert model.result.beta.shape == (0,)
     np.testing.assert_allclose(model.predict(X), np.mean(y))
+
+
+def test_explicit_intercept_only_intent_survives_clone() -> None:
+    X = pd.DataFrame({"unused": np.arange(6, dtype=float)})
+    y = np.arange(1.0, 7.0)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+    ).clone_unfitted()
+
+    model.fit(X, y)
+
+    assert model._config.features_explicit
+    assert model._dm.shape == (len(X), 0)
+    np.testing.assert_allclose(model.predict(X), np.mean(y))
+
+
+def test_clone_preserves_omitted_versus_explicit_empty_feature_configuration() -> None:
+    omitted = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+    ).clone_unfitted()
+    explicit_empty = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={},
+    ).clone_unfitted()
+
+    assert not omitted._config.features_explicit
+    assert omitted._config.constructor_kwargs()["features"] is None
+    assert explicit_empty._config.features_explicit
+    assert explicit_empty._config.constructor_kwargs()["features"] == {}
+
+    X = pd.DataFrame({"unused": [0.0, 1.0]})
+    y = np.array([1.0, 2.0])
+    with pytest.raises(ValueError, match="no features were configured"):
+        omitted.fit(X, y)
+    explicit_empty.fit(X, y)
+    np.testing.assert_allclose(explicit_empty.predict(X), np.mean(y))
+
+
+@pytest.mark.parametrize("pickle_roundtrip", [False, True], ids=["live-state", "pickle"])
+def test_legacy_model_config_without_features_explicit_clones_and_refits(
+    pickle_roundtrip: bool,
+) -> None:
+    X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 20)})
+    y = 1.0 + 0.4 * X["x"].to_numpy()
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+
+    object.__delattr__(model._config, "features_explicit")
+    del model._features_explicit
+    if pickle_roundtrip:
+        model = pickle.loads(pickle.dumps(model))
+
+    clone = model.clone_unfitted().fit(X, y)
+    model.fit(X, y)
+
+    np.testing.assert_allclose(clone.predict(X), y, atol=1e-12)
+    np.testing.assert_allclose(model.predict(X), y, atol=1e-12)
+    assert clone._config.features_explicit
+    assert model._config.features_explicit
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_omitted_feature_configuration_rejects_nonempty_column_frame(
+    entrypoint: str,
+) -> None:
+    X = pd.DataFrame({"ignored": np.linspace(-1.0, 1.0, 20)})
+    y = 1.0 + X["ignored"].to_numpy()
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.1 if entrypoint == "fit_path" else 0.0,
+    )
+
+    with pytest.raises(ValueError, match="no features were configured.*features=\\{\\}"):
+        _call_entrypoint(model, entrypoint, X, y)
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_fit_entrypoints_reject_nonfinite_numeric_x_before_feature_build(
+    entrypoint: str,
+    bad_value: float,
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = {"x": [0.0, bad_value]}
+    X = pd.DataFrame(data) if backend == "pandas" else pl.DataFrame(data)
+    monkeypatch.setattr(Numeric, "build", _fail_if_feature_builds)
+
+    with pytest.raises(ValueError, match="X column 'x' must contain only finite values"):
+        _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("storage", ["object", "category"])
+def test_fit_entrypoints_reject_nonfinite_numeric_like_pandas_columns(
+    entrypoint: str,
+    bad_value: float,
+    storage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = pd.Series([0.0, bad_value], dtype=storage)
+    X = pd.DataFrame({"x": values})
+    monkeypatch.setattr(Numeric, "build", _fail_if_feature_builds)
+
+    with pytest.raises(ValueError, match="X column 'x' must contain only finite values"):
+        _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_fit_entrypoints_reject_array_valued_cells_before_feature_build(
+    entrypoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    X = pd.DataFrame(
+        {
+            "x": [
+                np.array([0.0, 1.0]),
+                np.array([2.0, 3.0]),
+            ]
+        }
+    )
+    monkeypatch.setattr(Numeric, "build", _fail_if_feature_builds)
+
+    with pytest.raises(ValueError, match="X column 'x' must contain only scalar values"):
+        _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+def test_hashable_tuple_categorical_levels_fit_and_predict() -> None:
+    levels = pd.Series(
+        [("low", 1), ("high", 2)] * 20,
+        dtype=object,
+    )
+    X = pd.DataFrame({"group": levels})
+    y = np.tile(np.array([1.0, 3.0]), 20)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"group": Categorical(base="first")},
+    ).fit(X, y)
+
+    np.testing.assert_allclose(model.predict(X), y, atol=1e-12)
+
+
+@pytest.mark.parametrize("spec", [Numeric(), Spline(n_knots=4)])
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_predict_rejects_nonfinite_numeric_x_consistently(
+    spec,
+    bad_value: float,
+    backend: str,
+) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    X = pd.DataFrame({"x": x})
+    y = 1.0 + 0.4 * x
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": spec},
+    ).fit(X, y)
+    bad_x = x.copy()
+    bad_x[5] = bad_value
+    X_bad = pd.DataFrame({"x": bad_x}) if backend == "pandas" else pl.DataFrame({"x": bad_x})
+
+    with pytest.raises(ValueError, match="X column 'x' must contain only finite values"):
+        model.predict(X_bad)
+
+
+@pytest.mark.parametrize("spec", [Numeric(), Spline(n_knots=4)])
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("storage", ["object", "category"])
+def test_predict_rejects_nonfinite_numeric_like_pandas_columns(
+    spec,
+    bad_value: float,
+    storage: str,
+) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    X = pd.DataFrame({"x": x})
+    y = 1.0 + 0.4 * x
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": spec},
+    ).fit(X, y)
+    bad_x = x.astype(object)
+    bad_x[5] = bad_value
+    X_bad = pd.DataFrame({"x": pd.Series(bad_x, dtype=storage)})
+
+    with pytest.raises(ValueError, match="X column 'x' must contain only finite values"):
+        model.predict(X_bad)
+
+
+def test_predict_rejects_numpy_matrix_at_dataframe_boundary() -> None:
+    x = np.linspace(-1.0, 1.0, 20)
+    X = pd.DataFrame({"x": x})
+    model = _model().fit(X, 1.0 + 0.2 * x)
+
+    with pytest.raises(ValueError, match="X must be a pandas or eager Polars DataFrame"):
+        model.predict(x.reshape(-1, 1))
+
+
+@pytest.mark.parametrize(
+    ("offset", "message"),
+    [
+        (np.array([0.0, np.nan]), "offset must contain only finite values"),
+        (np.array([0.0, np.inf]), "offset must contain only finite values"),
+        (np.array([0.0, -np.inf]), "offset must contain only finite values"),
+        (np.array([0.0]), "offset must have length 2, got 1"),
+        (np.array(0.0), "offset must be one-dimensional"),
+        (np.zeros((2, 1)), "offset must be one-dimensional"),
+        (np.array([0.0 + 1.0j, 0.0]), "offset must be real-valued"),
+    ],
+)
+def test_predict_validates_offset_before_broadcasting(offset, message) -> None:
+    X = pd.DataFrame({"x": [0.0, 1.0]})
+    model = _model().fit(X, np.array([1.0, 2.0]))
+
+    with pytest.raises(ValueError, match=message):
+        model.predict(X, offset=offset)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [0, 0.0, False, "", None, ("numeric", "column")],
+    ids=["int-zero", "float-zero", "false", "empty-string", "none", "tuple"],
+)
+def test_hashable_numeric_column_label_fits_clones_and_predicts(label) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    X = pd.DataFrame({label: x})
+    y = 2.0 + 0.5 * x
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={label: Numeric()},
+    ).fit(X, y)
+
+    assert model._groups[0].feature_name == label
+    np.testing.assert_allclose(model.predict(X), y, atol=1e-12)
+    assert "Intercept" in str(model.summary())
+    payload = model.plot_data(label, ci=None, show_density=False)
+    assert payload["terms"][0]["name"] == label
+    assert model.plot(label, ci=None, show_density=False) is not None
+    clone = model.clone_unfitted().fit(X, y)
+    assert clone._groups[0].feature_name == label
+    np.testing.assert_allclose(clone.predict(X), y, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [0, 0.0, False, "", None, ("numeric", "column")],
+    ids=["int-zero", "float-zero", "false", "empty-string", "none", "tuple"],
+)
+def test_hashable_numeric_column_label_auto_detects_and_predicts(label) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    X = pd.DataFrame({label: x})
+    y = 2.0 + 0.5 * x
+    with pytest.warns(FutureWarning, match="auto-detection is deprecated"):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            splines=[],
+        )
+
+    model.fit(X, y)
+
+    assert model._feature_order == [label]
+    assert model._groups[0].feature_name == label
+    np.testing.assert_allclose(model.predict(X), y, atol=1e-12)
+
+
+def test_omitted_plot_terms_and_explicit_none_label_are_distinct() -> None:
+    columns = pd.Index([None, "z"], dtype=object)
+    X = pd.DataFrame(
+        np.column_stack(
+            [
+                np.linspace(-1.0, 1.0, 40),
+                np.linspace(1.0, -1.0, 40),
+            ]
+        ),
+        columns=columns,
+    )
+    y = 1.0 + 0.2 * X.iloc[:, 0].to_numpy() - 0.3 * X.iloc[:, 1].to_numpy()
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={None: Numeric(), "z": Numeric()},
+    ).fit(X, y)
+
+    all_terms = model.plot_data(ci=None, show_density=False)
+    none_term = model.plot_data(None, ci=None, show_density=False)
+
+    assert [term["name"] for term in all_terms["terms"]] == [None, "z"]
+    assert [term["name"] for term in none_term["terms"]] == [None]
+    assert model.plot(ci=None, show_density=False) is not None
+    assert model.plot(None, ci=None, show_density=False) is not None
+
+
+@pytest.mark.parametrize("label", [0, False, None])
+def test_scop_group_spec_uses_falsey_feature_name_exactly(label) -> None:
+    spec = object()
+    group = GroupSlice(
+        name="display-name",
+        start=0,
+        end=1,
+        feature_name=label,
+        monotone_engine="scop",
+    )
+
+    assert scop_group_spec({label: spec}, group) is spec
+
+
+@pytest.mark.parametrize("label", [0, None], ids=["zero", "none"])
+def test_fixed_scop_lambda_uses_falsey_feature_label(label) -> None:
+    x = np.linspace(0.0, 1.0, 80)
+    X = pd.DataFrame({label: x})
+    y = x**2
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            label: PSpline(
+                n_knots=6,
+                constraint=Constraint.fit.increasing,
+                lambda_policy=LambdaPolicy.fixed(1.7),
+            )
+        },
+    ).fit_reml(X, y)
+    group = next(group for group in model._groups if group.feature_name == label)
+
+    assert model._reml_lambdas[group.name] == pytest.approx(1.7)
+
+
+@pytest.mark.parametrize("label", [0, None], ids=["zero", "none"])
+def test_random_effect_reporting_uses_falsey_feature_label(label) -> None:
+    levels = np.repeat(np.array(["a", "b", "c"], dtype=object), 20)
+    X = pd.DataFrame({label: levels})
+    y = np.repeat(np.array([-0.5, 0.0, 0.5]), 20)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            label: RandomEffect(lambda_policy=LambdaPolicy.fixed(1.2)),
+        },
+    ).fit_reml(X, y)
+
+    report = model.random_effects(label)
+
+    assert len(report.table) == 3
+    assert set(report.table["level"]) == {"a", "b", "c"}
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)

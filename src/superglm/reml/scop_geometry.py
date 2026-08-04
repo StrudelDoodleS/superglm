@@ -94,6 +94,12 @@ class SCOPModeScore:
 
 
 def _jacobian_diag(state: dict) -> NDArray:
+    reparam = state.get("reparam")
+    if reparam is not None and hasattr(reparam, "jacobian_diagonal"):
+        beta_eff = np.asarray(state["beta_eff"], dtype=np.float64)
+        if beta_eff.ndim != 1 or not np.all(np.isfinite(beta_eff)):
+            raise ValueError("SCOP beta_eff must be a finite vector")
+        return np.asarray(reparam.jacobian_diagonal(beta_eff), dtype=np.float64)
     gamma_eff = state.get("gamma_eff")
     if gamma_eff is not None:
         gamma_eff = np.asarray(gamma_eff, dtype=np.float64)
@@ -103,6 +109,18 @@ def _jacobian_diag(state: dict) -> NDArray:
     if beta_eff.ndim != 1 or not np.all(np.isfinite(beta_eff)):
         raise ValueError("SCOP beta_eff must be a finite vector")
     return np.exp(np.clip(beta_eff, -500.0, 500.0))
+
+
+def _second_derivative_diag(state: dict) -> NDArray:
+    """Return elementwise second derivatives of the latent coefficient map."""
+    reparam = state.get("reparam")
+    if reparam is not None and hasattr(reparam, "second_derivative_diagonal"):
+        beta_eff = np.asarray(state["beta_eff"], dtype=np.float64)
+        return np.asarray(
+            reparam.second_derivative_diagonal(beta_eff),
+            dtype=np.float64,
+        )
+    return _jacobian_diag(state)
 
 
 def _joint_jacobian_diag(width: int, scop_states: Mapping[int, dict]) -> NDArray:
@@ -119,9 +137,9 @@ def _joint_jacobian_diag(width: int, scop_states: Mapping[int, dict]) -> NDArray
             raise ValueError("SCOP coefficient slices must not overlap")
         claimed[indices] = True
         result[group_slice] = jacobian
-    # ``exp(beta_eff)`` is mathematically positive but can underflow to zero.
-    # Every mapping below multiplies by C and never forms C^{-1}, so retaining
-    # that numerical boundary is both safe and more stable than rejecting it.
+    # Exponential shape-coordinate derivatives can underflow to zero. Every
+    # mapping below multiplies by C and never forms C^{-1}, so retaining that
+    # numerical boundary is both safe and more stable than rejecting it.
     if not np.all(np.isfinite(result)) or np.any(result < 0.0):
         raise ValueError("SCOP Jacobian entries must be non-negative and finite")
     return result
@@ -837,9 +855,9 @@ def assemble_observed_scop_hessian(
 
     ``raw_negative_score`` is the slope gradient of the negative
     unit-dispersion log likelihood in mapped coefficient coordinates.  For a
-    SCOP block with ``gamma = exp(beta_eff)``, the diagonal block is
+    SCOP block with an elementwise coefficient map, the diagonal block is
 
-    ``J X' W_obs X J + diag(J X' g_eta) + S_lambda``.
+    ``J X' W_obs X J + diag(F'' X' g_eta) + S_lambda``.
 
     Ordinary/SCOP and SCOP/SCOP cross-blocks, followed by the intercept Schur
     complement, are delegated to the shared joint-assembly kernel.
@@ -875,7 +893,8 @@ def assemble_observed_scop_hessian(
             raise ValueError("SCOP Jacobian width does not match its coefficient slice")
         block = raw_observed_gram[group_slice, group_slice] * jacobian[:, None] * jacobian[None, :]
         block = block.copy()
-        block[np.diag_indices_from(block)] += jacobian * raw_negative_score[group_slice]
+        second_derivative = _second_derivative_diag(state)
+        block[np.diag_indices_from(block)] += second_derivative * raw_negative_score[group_slice]
         block += penalty[group_slice, group_slice]
         joint_state = dict(state)
         joint_state["H_scop_penalized"] = block
@@ -980,9 +999,9 @@ def build_observed_scop_joint_geometry(
     centered = observed_centered.data_gram * jacobian[:, None] * jacobian[None, :] + penalty
     for state in scop_states.values():
         group_slice = state["group_sl"]
-        group_jacobian = jacobian[group_slice]
+        second_derivative = _second_derivative_diag(state)
         block = centered[group_slice, group_slice].copy()
-        block[np.diag_indices_from(block)] += group_jacobian * raw_negative_score[group_slice]
+        block[np.diag_indices_from(block)] += second_derivative * raw_negative_score[group_slice]
         centered[group_slice, group_slice] = block
     curvature_source: Literal["observed", "fisher"] = "observed"
     sum_w = observed_sum_w

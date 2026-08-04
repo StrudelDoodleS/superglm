@@ -35,7 +35,7 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
-from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
@@ -64,8 +64,11 @@ from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
     _immutable_array,
+    _irls_objective_relative_change,
+    _irls_objective_scale,
     _IRLSState,
     _IRLSStepDecision,
+    _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
     _state_is_finite,
@@ -112,6 +115,7 @@ from superglm.solvers.sum_to_zero import (
     SumToZeroIdentifiabilityError,
 )
 from superglm.solvers.working_rows import (
+    coefficient_initial_intercept,
     coefficient_working_rows,
     supports_observed_newton,
 )
@@ -509,7 +513,8 @@ def _fit_irls_direct_once(
     y : (n,) array
         Response variable.
     weights : (n,) array
-        Frequency weights / sample_weight.
+        Family-specific fitting weights: case/frequency weights for
+        non-Tweedie families and EDM prior weights for Tweedie.
     family : Distribution
         GLM family (Poisson, Gamma, NB2, etc.).
     link : Link
@@ -596,6 +601,12 @@ def _fit_irls_direct_once(
         raise ValueError("weights must be finite and non-negative")
     if not np.any(weights > 0.0):
         raise ValueError("weights must contain at least one positive value")
+    objective_merit_scale = _irls_objective_scale(
+        y=y,
+        weights=weights,
+        family=family,
+        link=link,
+    )
 
     structured_decision = resolve_structured_backend(
         gms,
@@ -639,8 +650,12 @@ def _fit_irls_direct_once(
     if intercept_init is not None:
         intercept = intercept_init
     else:
-        mu0 = initial_mean(y, weights, family)
-        intercept = float(link.link(np.atleast_1d(mu0))[0])
+        intercept = coefficient_initial_intercept(
+            distribution=family,
+            link=link,
+            y=y,
+            sample_weight=weights,
+        )
 
     # Dense paths retain the existing p x p penalty oracle. Structured paths
     # add each penalty directly to A or d, unless a caller already supplied a
@@ -968,10 +983,17 @@ def _fit_irls_direct_once(
             phase="scop_initialization",
             iteration=0,
         )
-        V_init = np.maximum(family.variance(provisional.mu), _VARIANCE_FLOOR)
-        dmu_deta_init = link.deriv_inverse(provisional.eta)
-        W_init = weights * dmu_deta_init**2 / V_init
-        z_init = provisional.eta + (y - provisional.mu) / dmu_deta_init
+        initial_rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=provisional.mu,
+            eta=provisional.eta,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        W_init = initial_rows.weights
+        z_init = initial_rows.response
         z_off_init = z_init - offset
         for gi, st in _scop_state.items():
             if st["beta_scop"] is None:
@@ -1711,7 +1733,16 @@ def _fit_irls_direct_once(
                 committed=scop_committed.irls,
                 proposal=proposal_scop.irls,
                 evaluate_state=evaluate_scop_trial,
-                max_halving=max_halving,
+                max_halving=_poisson_sqrt_halving_budget(
+                    committed=scop_committed.irls,
+                    proposal=proposal_scop.irls,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    default=max_halving,
+                ),
+                merit_scale=objective_merit_scale,
             )
             retained_scop = (
                 scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
@@ -1823,7 +1854,16 @@ def _fit_irls_direct_once(
                 proposal=proposal,
                 evaluate_state=evaluate_trial,
                 invalid_state=constraint_trial_is_invalid,
-                max_halving=max_halving,
+                max_halving=_poisson_sqrt_halving_budget(
+                    committed=committed,
+                    proposal=proposal,
+                    y=y,
+                    weights=weights,
+                    family=family,
+                    link=link,
+                    default=max_halving,
+                ),
+                merit_scale=objective_merit_scale,
                 merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
                     candidate,
                     base,
@@ -1921,7 +1961,14 @@ def _fit_irls_direct_once(
                     else retained.penalized_deviance
                 )
                 if np.isfinite(objective_prev):
-                    dev_rel_change = abs(objective - objective_prev) / (abs(objective_prev) + 1.0)
+                    dev_rel_change = _irls_objective_relative_change(
+                        objective=objective,
+                        previous=objective_prev,
+                        y=y,
+                        weights=weights,
+                        family=family,
+                        link=link,
+                    )
                 converged_this_iter = dev_rel_change is not None and dev_rel_change < tol
                 convergence_value = dev_rel_change
         else:
@@ -2231,10 +2278,17 @@ def _fit_irls_direct_once(
     if _has_scop:
         # Final Gram and SCOP Hessian caches must describe the retained model,
         # not the working state or a discarded full proposal.
-        V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-        dmu_deta_final = link.deriv_inverse(eta)
-        W = weights * dmu_deta_final**2 / V_final
-        z = eta + (y - mu) / dmu_deta_final
+        final_rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        W = final_rows.weights
+        z = final_rows.response
 
         needs_initial_hessian = any(
             state.get("H_scop_penalized") is None for state in _scop_state.values()
@@ -2305,10 +2359,17 @@ def _fit_irls_direct_once(
     # model. Private fREML performance iterations deliberately reuse the
     # working system used for their one coefficient update.
     if not _return_working_system:
-        V_export = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-        dmu_deta_export = link.deriv_inverse(eta)
-        W = weights * dmu_deta_export**2 / V_export
-        z = eta + (y - mu) / dmu_deta_export
+        export_rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        W = export_rows.weights
+        z = export_rows.response
 
     # Accumulate phase timing into the profile dict if provided
     if profile is not None:

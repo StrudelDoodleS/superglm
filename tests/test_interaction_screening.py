@@ -1200,8 +1200,7 @@ def test_screen_intermediate_budget_triggers_binning():
 
 
 def test_screen_phi_is_visible_and_overridable():
-    """Reviewer ask: phi materially selects the winning rung, so it must be
-    auditable (table.attrs) and overridable (frequency-weight escape hatch)."""
+    """Phi materially selects the winning rung, so it is visible and overridable."""
     import pytest
 
     frame, y, w = _screening_data(13, interaction=0.5)
@@ -1216,6 +1215,81 @@ def test_screen_phi_is_visible_and_overridable():
 
     with pytest.raises(ValueError, match="phi override"):
         model.screen_interactions(frame, y, sample_weight=w, phi=-1.0)
+
+
+def test_weighted_gaussian_screen_uses_the_fitted_frequency_weight_scale():
+    """Screening and published inference must use one sample-weight contract."""
+    import pandas as pd
+
+    from superglm import Numeric, SuperGLM
+
+    rng = np.random.default_rng(219)
+    n = 240
+    frame = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+        }
+    )
+    weights = rng.integers(1, 6, size=n).astype(np.float64)
+    y = 1.2 + 0.8 * frame["x1"].to_numpy() + rng.normal(scale=1.7, size=n)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x1": Numeric(), "x2": Numeric()},
+    ).fit(frame, y, sample_weight=weights)
+
+    table = model.screen_interactions(
+        frame,
+        y,
+        sample_weight=weights,
+        candidates=[("x1", "x2")],
+    )
+
+    assert table.attrs["phi"] == pytest.approx(model.result.phi, rel=2e-12, abs=2e-12)
+
+
+def test_weighted_tweedie_screen_retains_the_prior_weight_scale():
+    """Tweedie is the deliberate n-edf exception to frequency-weight fitting."""
+    import pandas as pd
+
+    from superglm import Numeric, SuperGLM, Tweedie
+
+    rng = np.random.default_rng(220)
+    n = 240
+    frame = pd.DataFrame(
+        {
+            "x1": rng.normal(size=n),
+            "x2": rng.normal(size=n),
+        }
+    )
+    weights = rng.uniform(0.25, 4.0, size=n)
+    mu = np.exp(0.2 + 0.3 * frame["x1"].to_numpy())
+    noise_scale = 0.25 / np.sqrt(weights)
+    y = mu * np.exp(rng.normal(scale=noise_scale) - 0.5 * noise_scale**2)
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        selection_penalty=0.0,
+        features={"x1": Numeric(), "x2": Numeric()},
+    ).fit(frame, y, sample_weight=weights)
+
+    table = model.screen_interactions(
+        frame,
+        y,
+        sample_weight=weights,
+        candidates=[("x1", "x2")],
+    )
+
+    assert table.attrs["phi"] == pytest.approx(model.result.phi, rel=2e-12, abs=2e-12)
+    zero_weight = weights.copy()
+    zero_weight[0] = 0.0
+    with pytest.raises(ValueError, match="Tweedie sample_weight.*strictly positive"):
+        model.screen_interactions(
+            frame,
+            y,
+            sample_weight=zero_weight,
+            candidates=[("x1", "x2")],
+        )
 
 
 def test_screen_discrete_mains_rows_flag_approx():

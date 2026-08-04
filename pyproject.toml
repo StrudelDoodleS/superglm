@@ -130,7 +130,7 @@ filterwarnings = [
 [tool.coverage.run]
 source = ["superglm"]
 branch = true
-omit = ["src/superglm/plotting.py"]
+omit = ["src/superglm/plotting/*"]
 
 [tool.coverage.report]
 exclude_lines = [

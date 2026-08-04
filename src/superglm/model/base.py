@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Hashable, Mapping
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -32,6 +33,7 @@ from superglm.model.fit_state import (
     fitted_lambda2,
     fitted_penalty,
 )
+from superglm.model.input_validation import validate_prediction_offset, validate_x_columns
 from superglm.penalties.base import (
     Penalty,
     penalty_has_targets,
@@ -59,7 +61,7 @@ _PENALTY_SHORTCUTS: dict[str, type[Any]] = {
 }
 
 
-def _group_beta_indices(groups: list[GroupSlice], feature_name: str) -> NDArray[np.intp]:
+def _group_beta_indices(groups: list[GroupSlice], feature_name: object) -> NDArray[np.intp]:
     """Concatenate coefficient indices for one feature or interaction."""
     idx = [
         np.arange(g.start, g.end, dtype=np.intp) for g in groups if g.feature_name == feature_name
@@ -69,6 +71,14 @@ def _group_beta_indices(groups: list[GroupSlice], feature_name: str) -> NDArray[
     if len(idx) == 1:
         return idx[0]
     return np.concatenate(idx)
+
+
+def _validate_group_feature_names(model, groups: list[GroupSlice]) -> None:
+    """Reject incomplete design bookkeeping before any coefficient solve."""
+    expected = (*model._feature_order, *model._interaction_order)
+    missing = [name for name in expected if not any(group.feature_name == name for group in groups)]
+    if missing:
+        raise ValueError(f"No design-matrix groups were built for configured features: {missing}")
 
 
 def _fit_discretizer_metadata(values: NDArray, n_bins: int) -> dict[str, Any]:
@@ -401,8 +411,9 @@ def _predict_eta(
     *,
     fast_discrete: bool,
     random_effects: str,
+    stabilize: bool = True,
 ) -> NDArray[np.floating]:
-    """Predict the stabilized linear predictor on exact or fast-discrete blocks."""
+    """Predict the raw or stabilized linear predictor on canonical blocks."""
     if random_effects not in ("conditional", "population"):
         raise ValueError(
             f"random_effects must be 'conditional' or 'population', got {random_effects!r}"
@@ -420,6 +431,8 @@ def _predict_eta(
         )
     )
     frame.require_columns(required_columns)
+    validate_x_columns(frame, required_columns)
+    offset = validate_prediction_offset(offset, len(frame))
     beta_all = model.result.beta
     eta = np.full(len(frame), model.result.intercept, dtype=np.float64)
 
@@ -448,8 +461,8 @@ def _predict_eta(
             eta += scorer(term, frame, beta_all)
 
     if offset is not None:
-        eta = eta + np.asarray(offset, dtype=np.float64)
-    return stabilize_eta(eta, model._link)
+        eta = eta + offset
+    return stabilize_eta(eta, model._link) if stabilize else eta
 
 
 def predict_eta_exact(
@@ -466,6 +479,24 @@ def predict_eta_exact(
         offset,
         fast_discrete=False,
         random_effects=random_effects,
+    )
+
+
+def predict_eta_raw_exact(
+    model,
+    X: EagerFrame | FrameLike,
+    offset: NDArray | None = None,
+    *,
+    random_effects: str = "conditional",
+) -> NDArray[np.floating]:
+    """Predict an unstabilized linear predictor through the exact design path."""
+    return _predict_eta(
+        model,
+        X,
+        offset,
+        fast_discrete=False,
+        random_effects=random_effects,
+        stabilize=False,
     )
 
 
@@ -643,7 +674,7 @@ def init_model(
     lambda1: SelectionPenalty = None,
     lambda2: float = 0.1,
     penalty_features: str | list[str] | None = None,
-    features: dict[str, FeatureSpec] | None = None,
+    features: Mapping[Hashable, FeatureSpec] | None = None,
     splines: list[str] | None = None,
     n_knots: int | list[int] = 10,
     degree: int = 3,
@@ -670,6 +701,7 @@ def init_model(
     model.link = link
     model.penalty = resolve_penalty(penalty, lambda1, penalty_features)
     model.lambda2 = lambda2
+    model._features_explicit = features is not None
     model._splines = None if splines is None else list(splines)
     model._n_knots = copy.deepcopy(n_knots)
     model._degree = degree
@@ -700,8 +732,8 @@ def init_model(
         )
     model._convergence = convergence
 
-    model._specs: dict[str, FeatureSpec] = {}
-    model._feature_order: list[str] = []
+    model._specs: dict[Hashable, FeatureSpec] = {}
+    model._feature_order: list[Hashable] = []
     model._groups: list[GroupSlice] = []
     model._distribution: Distribution | None = None
     model._link: Link | None = None
@@ -959,6 +991,7 @@ def model_build_design_matrix(
     model._link = result.link
     model._pending_interactions = ()
     model._groups = result.groups
+    _validate_group_feature_names(model, result.groups)
     validate_penalty_features(configured_penalty(model), result.groups)
     model._dm = result.dm
     # Every fit path funnels through here, so this is the first point the

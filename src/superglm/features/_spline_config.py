@@ -91,6 +91,13 @@ def initialize_spec(
             f"degree=0 splines are discontinuous and cannot represent a classical "
             f"{constraint_kind} curve; use degree>=1"
         )
+    if constraint_mode == "fit" and constraint_kind in {"convex", "concave"} and degree > 3:
+        raise NotImplementedError(
+            "Fit-time convex/concave constraints require degree <= 3. "
+            "For higher degrees, non-negative derivative control coefficients "
+            "are sufficient but not necessary for global curvature; use "
+            "degree<=3 or a Constraint.postfit.* token."
+        )
 
     spec.constraint_kind = constraint_kind
     spec.constraint_mode = constraint_mode

@@ -220,6 +220,41 @@ def resolve_discrete_n_bins(
     return n_bins
 
 
+def _discretize_spline_column(
+    x: NDArray,
+    n_bins: int,
+    geometry_weight: NDArray | None,
+) -> tuple[NDArray, NDArray]:
+    """Discretize on the positive-frequency support and map every fit row.
+
+    Zero-frequency rows need a valid bin index because the design retains its
+    physical row count, but they must not widen or otherwise change the
+    learned support. Mapping those inactive rows to the nearest active support
+    point is consistent with clipped spline evaluation and cannot affect the
+    weighted fit.
+    """
+    values = np.asarray(x, dtype=np.float64).ravel()
+    if geometry_weight is None:
+        return _discretize_column(values, n_bins)
+
+    weights = np.asarray(geometry_weight, dtype=np.float64).ravel()
+    active = weights > 0.0
+    if np.all(active):
+        return _discretize_column(values, n_bins)
+
+    support, active_index = _discretize_column(values[active], n_bins)
+    if len(support) == 1:
+        full_index = np.zeros(len(values), dtype=np.intp)
+    else:
+        insertion = np.searchsorted(support, values)
+        right = np.clip(insertion, 0, len(support) - 1)
+        left = np.clip(insertion - 1, 0, len(support) - 1)
+        choose_right = np.abs(values - support[right]) <= np.abs(values - support[left])
+        full_index = np.where(choose_right, right, left).astype(np.intp)
+    full_index[active] = active_index
+    return support, full_index
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Feature auto-detection and interaction dispatch
 # ═══════════════════════════════════════════════════════════════════
@@ -253,7 +288,7 @@ def auto_detect_features(
             spec = PSpline(n_knots=nk, degree=degree, penalty="ssp")
             specs[col] = spec
             feature_order.append(col)
-            lines.append(f"  {col:<20s} → Spline(n_knots={nk}, degree={degree})")
+            lines.append(f"  {str(col):<20s} → Spline(n_knots={nk}, degree={degree})")
         elif kind == "categorical":
             base = categorical_base
             if base == "most_exposed" and sample_weight is None:
@@ -261,12 +296,12 @@ def auto_detect_features(
             spec = Categorical(base=base)
             specs[col] = spec
             feature_order.append(col)
-            lines.append(f"  {col:<20s} → Categorical(base={base})")
+            lines.append(f"  {str(col):<20s} → Categorical(base={base})")
         elif kind in ("numeric", "boolean"):
             spec = Numeric()
             specs[col] = spec
             feature_order.append(col)
-            lines.append(f"  {col:<20s} → Numeric()")
+            lines.append(f"  {str(col):<20s} → Numeric()")
         else:
             raise ValueError(
                 f"X column {col!r} has unsupported dtype {X.column_dtype(col)!r} "
@@ -762,6 +797,12 @@ def build_design_matrix(
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
     link = resolve_link(link_spec, distribution)
+    from superglm.features.spline import _SplineBase
+
+    # Non-Tweedie weights are frequency mass for learned spline geometry.
+    # Tweedie weights are EDM prior weights, so its geometry stays a function
+    # of physical rows only.
+    geometry_weight = None if isinstance(distribution, Tweedie) else sample_weight
 
     group_matrices: list[GroupMatrix] = []
     col_offset = 0
@@ -770,6 +811,7 @@ def build_design_matrix(
     for name in feature_order:
         spec = specs[name]
         x_col = X.column_array(name)
+        spline_geometry_weight = geometry_weight if isinstance(spec, _SplineBase) else sample_weight
 
         # Check if this feature should use fit-time discretization
         use_discrete = should_discretize(spec, model_discrete)
@@ -791,10 +833,14 @@ def build_design_matrix(
 
         if use_discrete:
             omega, n_cols_penalty, projection_penalty = spec.build_knots_and_penalty(
-                x_col, sample_weight
+                x_col, spline_geometry_weight
             )
             n_bins_feat = resolve_discrete_n_bins(name, spec, n_bins_config)
-            bin_centers, bin_idx = _discretize_column(x_col, n_bins_feat)
+            bin_centers, bin_idx = _discretize_spline_column(
+                x_col,
+                n_bins_feat,
+                spline_geometry_weight,
+            )
             B_unique = spec._raw_basis_matrix(bin_centers)
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
 
@@ -819,23 +865,35 @@ def build_design_matrix(
                 from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
 
                 q_raw = spec._n_basis
-                raw_reparam = build_scop_reparam(q_raw, kind=constraint_kind)
+                raw_reparam = build_scop_reparam(
+                    q_raw,
+                    kind=constraint_kind,
+                    knots=spec._knots,
+                    degree=spec.degree,
+                    domain=(spec._lo, spec._hi),
+                )
                 X_sigma_unique = B_unique @ raw_reparam.Sigma  # (n_bins, K)
 
                 # Centering weighted by bin counts (equivalent to full-data mean)
                 n_obs = len(bin_idx)
                 bin_counts = np.bincount(bin_idx, minlength=len(bin_centers))
-                null_dim = raw_reparam.null_dim
-                X_shape_unique = X_sigma_unique[:, null_dim:]
+                drop_dim = 1
+                X_shape_unique = X_sigma_unique[:, drop_dim:]
                 col_means = (X_shape_unique.T @ bin_counts) / n_obs
                 X_centered_unique = X_shape_unique - col_means  # (n_bins, q_eff)
 
                 # Store on spec for predict-time transform
                 spec._scop_Sigma = raw_reparam.Sigma
-                spec._scop_null_dim = null_dim
+                setattr(spec, "_scop_null_dim", drop_dim)
                 spec._scop_col_means = col_means
 
-                solver_reparam = build_scop_solver_reparam(q_raw, kind=constraint_kind)
+                solver_reparam = build_scop_solver_reparam(
+                    q_raw,
+                    kind=constraint_kind,
+                    knots=spec._knots,
+                    degree=spec.degree,
+                    domain=(spec._lo, spec._hi),
+                )
                 S_scop = solver_reparam.penalty_matrix()
                 q_eff = X_centered_unique.shape[1]
 
@@ -917,7 +975,7 @@ def build_design_matrix(
                     )
                 ]
         else:
-            result = spec.build(x_col, sample_weight=sample_weight)
+            result = spec.build(x_col, sample_weight=spline_geometry_weight)
             infos = result if isinstance(result, list) else [result]
 
         # Resolve lambda_policies from the spec onto each GroupInfo.

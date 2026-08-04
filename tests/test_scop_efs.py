@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 import superglm.reml.scop_efs as scop_efs_module
-from superglm import Constraint, SuperGLM
+from superglm import Constraint, Numeric, SuperGLM
 from superglm.families import Gaussian, Poisson
 from superglm.features.spline import PSpline
 from superglm.inference.covariance import _active_penalty_matrix
@@ -25,6 +25,27 @@ from superglm.reml.scop_efs import (
 )
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.types import GroupSlice, PenaltyComponent
+
+
+def _curvature_solver_reparam(q_raw: int, kind: str):
+    from superglm.solvers.scop import build_scop_solver_reparam
+
+    degree = 3
+    n_interior = q_raw - degree - 1
+    knots = np.concatenate(
+        (
+            np.zeros(degree + 1),
+            np.linspace(0.0, 1.0, n_interior + 2)[1:-1] ** 1.7,
+            np.ones(degree + 1),
+        )
+    )
+    return build_scop_solver_reparam(
+        q_raw,
+        kind=kind,
+        knots=knots,
+        degree=degree,
+        domain=(0.0, 1.0),
+    )
 
 
 @pytest.fixture
@@ -750,6 +771,46 @@ class TestAssembleJointHessian:
 
         # Verify cross-blocks are NOT unchanged (they were transformed)
         assert not np.allclose(H_joint[linear_sl, scop_sl], XtWX_plus_S[linear_sl, scop_sl])
+
+    def test_curvature_cross_blocks_use_mixed_identity_exp_jacobian(self):
+        """EFS must not scale the retained affine slope as though it were exp-mapped."""
+        rng = np.random.default_rng(216)
+        reparam = _curvature_solver_reparam(7, "convex")
+        p_linear = 3
+        scop_slice = slice(p_linear, p_linear + reparam.q)
+        linear_slice = slice(0, p_linear)
+        raw_factor = rng.standard_normal((20, scop_slice.stop))
+        raw_hessian = raw_factor.T @ raw_factor + np.eye(scop_slice.stop)
+        beta_eff = np.linspace(-0.6, 0.7, reparam.q)
+        retained_block = raw_hessian[scop_slice, scop_slice] + 2.0 * np.eye(reparam.q)
+        states = {
+            0: {
+                "group_sl": scop_slice,
+                "H_scop_penalized": retained_block,
+                "group_name": "convex_x",
+                "beta_eff": beta_eff,
+                "reparam": reparam,
+            }
+        }
+
+        actual, _ = assemble_joint_hessian(raw_hessian, states)
+        jacobian = reparam.jacobian_diagonal(beta_eff)
+        expected_cross = raw_hessian[linear_slice, scop_slice] * jacobian[None, :]
+
+        np.testing.assert_allclose(
+            actual[linear_slice, scop_slice],
+            expected_cross,
+            rtol=2e-14,
+            atol=2e-14,
+        )
+        np.testing.assert_array_equal(
+            actual[linear_slice, scop_slice.start],
+            raw_hessian[linear_slice, scop_slice.start],
+        )
+        assert not np.allclose(
+            actual[linear_slice, slice(scop_slice.start + 1, scop_slice.stop)],
+            raw_hessian[linear_slice, slice(scop_slice.start + 1, scop_slice.stop)],
+        )
 
     def test_mapping_correct(self):
         """Mapping dict has correct group_name -> slice entries."""
@@ -2912,7 +2973,11 @@ class TestIterationDiagnosticsSmallSample:
     @pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6])
     def test_opt_in_diagnostics_survive_small_samples(self, n):
         frame, response = self._frame(n)
-        fitted = SuperGLM(family="poisson").fit(frame, response, record_diagnostics=True)
+        fitted = SuperGLM(family="poisson", features={"x": Numeric()}).fit(
+            frame,
+            response,
+            record_diagnostics=True,
+        )
         log = fitted.iteration_diagnostics()
         assert len(log) >= 1
         # every recorded index is a real observation
@@ -4568,6 +4633,100 @@ class TestJointSCOPNewton:
             st = scop_states[gi]
             groups.append(MockGroup(name=st["group_name"], sl=st["group_sl"]))
         return groups
+
+    @pytest.mark.parametrize("discretized", [False, True], ids=["dense", "discrete"])
+    def test_joint_curvature_mixed_map_objective_matches_brute_force(self, discretized):
+        """Joint line search must use mapped coefficients, not Jacobian diagonals."""
+        from superglm.solvers.scop_newton import (
+            _safe_joint_objective,
+            scop_joint_newton_step,
+        )
+
+        rng = np.random.default_rng(216)
+        n = 180
+        q1, q2 = 5, 4
+        reparam1 = _curvature_solver_reparam(q1 + 1, "convex")
+        reparam2 = _curvature_solver_reparam(q2 + 1, "concave")
+        if discretized:
+            bin1 = rng.integers(0, 37, size=n)
+            bin2 = rng.integers(0, 29, size=n)
+            basis1 = rng.normal(size=(37, q1))
+            basis2 = rng.normal(size=(29, q2))
+        else:
+            bin1 = None
+            bin2 = None
+            basis1 = rng.normal(size=(n, q1))
+            basis2 = rng.normal(size=(n, q2))
+
+        beta1 = rng.normal(scale=0.25, size=q1)
+        beta2 = rng.normal(scale=0.25, size=q2)
+        beta1[0] = -0.7
+        beta2[0] = 1.4
+        eta1 = basis1 @ reparam1.forward(beta1)
+        eta2 = basis2 @ reparam2.forward(beta2)
+        if discretized:
+            eta1 = eta1[bin1]
+            eta2 = eta2[bin2]
+        weights = rng.uniform(0.2, 2.0, size=n)
+        response = eta1 + eta2 + rng.normal(scale=0.2, size=n)
+        states = {
+            0: {
+                "B_scop": basis1,
+                "S_scop": reparam1.penalty_matrix(),
+                "beta_scop": beta1,
+                "reparam": reparam1,
+                "bin_idx": bin1,
+                "group_sl": slice(0, q1),
+                "group_name": "x1",
+            },
+            1: {
+                "B_scop": basis2,
+                "S_scop": reparam2.penalty_matrix(),
+                "beta_scop": beta2,
+                "reparam": reparam2,
+                "bin_idx": bin2,
+                "group_sl": slice(q1, q1 + q2),
+                "group_name": "x2",
+            },
+        }
+        groups = self._make_mock_groups(states)
+        scop_items = sorted(states.items())
+        slices = [slice(0, q1), slice(q1, q1 + q2)]
+        lambdas = {"x1": 0.7, "x2": 0.3}
+        lambda_list = [lambdas["x1"], lambdas["x2"]]
+        beta_before = np.concatenate((beta1, beta2))
+        objective_before = _safe_joint_objective(
+            scop_items,
+            weights,
+            response,
+            beta_before,
+            slices,
+            lambda_list,
+        )
+
+        results = scop_joint_newton_step(
+            states,
+            weights,
+            response,
+            lambdas,
+            groups,
+        )
+        beta_after = np.concatenate((results[0].beta_new, results[1].beta_new))
+        objective_after = _safe_joint_objective(
+            scop_items,
+            weights,
+            response,
+            beta_after,
+            slices,
+            lambda_list,
+        )
+
+        assert beta1[0] != reparam1.jacobian_diagonal(beta1)[0]
+        assert beta2[0] != reparam2.jacobian_diagonal(beta2)[0]
+        for result in results.values():
+            np.testing.assert_allclose(result.objective_before, objective_before, atol=1e-10)
+            np.testing.assert_allclose(result.objective_after, objective_after, atol=1e-10)
+        assert objective_after <= objective_before + 1e-12
 
     def test_single_group_matches_existing(self):
         """Joint step with one group should match sequential scop_newton_step."""

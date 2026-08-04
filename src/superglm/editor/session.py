@@ -100,6 +100,7 @@ class EditorSession:
             train_data=train_data,
             validation_data=validation_data,
             test_data=test_data,
+            family=model._distribution,
         )
         names = list(model._feature_order if terms is None else terms)
         editable = cls._editable_terms_from_model(

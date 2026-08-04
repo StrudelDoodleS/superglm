@@ -280,6 +280,24 @@ def test_select_native_preserves_backend_order_and_rows(backend: str) -> None:
     assert len(selected_frame) == 2
 
 
+def test_pandas_selection_and_digest_preserve_falsey_hashable_column_labels() -> None:
+    native = pd.DataFrame(
+        {
+            0: [1.0, 2.0],
+            None: [3.0, 4.0],
+            "": [5.0, 6.0],
+            ("tuple", "label"): [7.0, 8.0],
+        }
+    )
+    frame = as_eager_frame(native)
+    labels = (None, "", ("tuple", "label"))
+
+    selected = frame.select_native(labels)
+
+    assert list(selected.columns) == list(labels)
+    assert frame.digest(labels) == as_eager_frame(selected).digest()
+
+
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
 def test_select_native_rejects_empty_selection_without_losing_row_count(backend: str) -> None:
     native = (

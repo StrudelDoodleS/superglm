@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from typing import Any
 
 import numpy as np
@@ -46,6 +47,7 @@ def build_coef_rows(
     selected_group_names: set[str] | None = None,
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
+    distribution: Any | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -114,6 +116,20 @@ def build_coef_rows(
                 exp_share = exp_per / max(total_weight, 1e-300)
                 _level_diag[g.name] = {i: (int(n_per[i]), float(exp_share[i])) for i in range(K)}
     phi = result.phi
+
+    def _wood_residual_df(edf: NDArray) -> float:
+        if known_scale:
+            return -1.0
+        effective_df = 1.0 + float(np.sum(edf))
+        if distribution is not None and sample_weights is not None:
+            from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+
+            return pearson_residual_degrees_of_freedom(
+                distribution,
+                sample_weights,
+                effective_df,
+            )
+        return max(float(n_obs) - effective_df, 1.0)
 
     # Compute per-group SEs from augmented inverse (accounts for intercept).
     # The augmented inverse has intercept at row/col 0; feature blocks start at 1.
@@ -283,11 +299,12 @@ def build_coef_rows(
 
     # Monotone repair info
     _mono_repairs = monotone_repairs or {}
-    handled_ordered_features: set[str] = set()
+    handled_ordered_features: set[Hashable] = set()
 
     # Feature rows
     for g in groups:
         spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
+        feature_label = str(g.feature_name)
         b_g = beta[g.sl]
         se_g = se_dict[g.name]
         active = g.name in selected_names
@@ -302,7 +319,7 @@ def build_coef_rows(
             rows.append(
                 _CoefRow(
                     name=g.name,
-                    group=g.feature_name or g.name,
+                    group=feature_label,
                     structured_kind=structured_kind,
                     n_levels=len(spec._levels),
                     n_params=g.size,
@@ -378,7 +395,7 @@ def build_coef_rows(
                     edf, edf1 = _get_influence_edf()
                     edf1_j = float(np.sum(edf1[active_indices]))
                     X_j = R_a[:, active_indices]
-                    res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+                    res_df = _wood_residual_df(edf)
 
                     try:
                         stat, p_val, ref_df = wood_test_smooth(
@@ -398,8 +415,8 @@ def build_coef_rows(
                 )
                 rows.append(
                     _CoefRow(
-                        name=g.feature_name,
-                        group=g.feature_name,
+                        name=feature_label,
+                        group=feature_label,
                         is_spline=True,
                         n_params=len(beta_combined),
                         active=feature_active,
@@ -441,7 +458,7 @@ def build_coef_rows(
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
-                            group=g.feature_name,
+                            group=feature_label,
                             coef=coef_val,
                             se=se_val,
                             ci_low=level_ci_lo,
@@ -459,7 +476,7 @@ def build_coef_rows(
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
-                            group=g.feature_name,
+                            group=feature_label,
                             coef=coef_val,
                             se=se_val,
                             z=z,
@@ -505,7 +522,7 @@ def build_coef_rows(
                     edf, edf1 = _get_influence_edf()
                     edf1_j = float(np.sum(edf1[ag.sl]))
                     X_j = R_a[:, ag.sl]
-                    res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+                    res_df = _wood_residual_df(edf)
 
                     try:
                         stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
@@ -518,7 +535,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=True,
@@ -544,7 +561,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=False,
@@ -601,7 +618,7 @@ def build_coef_rows(
                 edf, edf1 = _get_influence_edf()
                 edf1_j = float(np.sum(edf1[ag.sl]))
                 X_j = R_a[:, ag.sl]
-                res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+                res_df = _wood_residual_df(edf)
 
                 try:
                     stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
@@ -612,7 +629,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=True,
@@ -628,7 +645,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=False,
@@ -675,7 +692,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=True,
@@ -689,7 +706,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=False,
@@ -768,7 +785,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=True,
@@ -784,7 +801,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=False,
@@ -810,7 +827,7 @@ def build_coef_rows(
                 edf, edf1 = _get_influence_edf()
                 edf1_j = float(np.sum(edf1[ag.sl]))
                 X_j = R_a[:, ag.sl]
-                res_df = -1.0 if known_scale else float(n_obs - np.sum(edf))
+                res_df = _wood_residual_df(edf)
 
                 try:
                     stat, p_val, ref_df = wood_test_smooth(b_g, X_j, V_b_j, edf1_j, res_df)
@@ -820,7 +837,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=True,
@@ -836,7 +853,7 @@ def build_coef_rows(
                 rows.append(
                     _CoefRow(
                         name=g.name,
-                        group=g.feature_name,
+                        group=feature_label,
                         is_spline=True,
                         n_params=g.size,
                         active=False,

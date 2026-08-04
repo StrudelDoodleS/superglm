@@ -933,6 +933,65 @@ class TestInformationCriteria:
         """EBIC(gamma=0) == BIC."""
         np.testing.assert_allclose(metrics_obj.ebic(gamma=0.0), metrics_obj.bic, atol=1e-10)
 
+    def test_frequency_weighted_criteria_match_literal_row_replication(self):
+        rng = np.random.default_rng(2190)
+        n = 90
+        x = rng.normal(size=n)
+        y = 0.4 + 0.7 * x + rng.normal(scale=1.3, size=n)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        X = pd.DataFrame({"x": x})
+        weighted_model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+
+        repeated_rows = np.repeat(np.arange(n), weights.astype(int))
+        repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
+        repeated_y = y[repeated_rows]
+        repeated_model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(repeated_X, repeated_y)
+
+        weighted = weighted_model.metrics(X, y, sample_weight=weights)
+        repeated = repeated_model.metrics(repeated_X, repeated_y)
+        assert weighted._likelihood_size == pytest.approx(np.sum(weights))
+        assert weighted.bic == pytest.approx(repeated.bic, rel=2e-12)
+        assert weighted.aicc == pytest.approx(repeated.aicc, rel=2e-12)
+        assert weighted_model.summary()["information_criteria"]["bic"] == pytest.approx(
+            repeated_model.summary()["information_criteria"]["bic"],
+            rel=2e-12,
+        )
+        assert weighted_model.summary()["information_criteria"]["aicc"] == pytest.approx(
+            repeated_model.summary()["information_criteria"]["aicc"],
+            rel=2e-12,
+        )
+
+    def test_tweedie_prior_weights_keep_physical_row_count_in_criteria(self):
+        rng = np.random.default_rng(2191)
+        n = 100
+        x = rng.normal(size=n)
+        y = np.maximum(rng.gamma(shape=1.7, scale=np.exp(0.2 + 0.1 * x), size=n), 1e-8)
+        weights = np.linspace(0.3, 3.0, n)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+        metrics = model.metrics(X, y, sample_weight=weights)
+        edf = metrics.effective_df
+
+        assert metrics._likelihood_size == float(n)
+        assert metrics.bic == pytest.approx(-2.0 * metrics.log_likelihood + np.log(n) * edf)
+        assert metrics.aicc == pytest.approx(
+            metrics.aic + 2.0 * edf * (edf + 1.0) / (n - edf - 1.0)
+        )
+        assert model.summary()["information_criteria"]["bic"] == pytest.approx(metrics.bic)
+        assert model.summary()["information_criteria"]["aicc"] == pytest.approx(metrics.aicc)
+
 
 @pytest.mark.parametrize(
     ("family", "expected"),
@@ -1004,6 +1063,66 @@ class TestNullModel:
         score = np.sum(y - m._null_mu)
         assert abs(score) < 1.0
 
+    def test_sqrt_offset_null_mu_matches_explicit_intercept_only_fit(self):
+        offset = np.tile([-3.0, -2.0, -1.0, 0.0, 1.0], 10)
+        y = np.tile([5.0, 2.0, 1.0, 1.0, 3.0], 10)
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, len(y))})
+        model = SuperGLM(
+            family="poisson",
+            link="sqrt",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+            tol=1e-10,
+        ).fit(X, y, offset=offset)
+        explicit_null = SuperGLM(
+            family="poisson",
+            link="sqrt",
+            selection_penalty=0.0,
+            features={},
+            tol=1e-10,
+        ).fit(X, y, offset=offset)
+
+        metrics = model.metrics(X.copy(), y.copy(), offset=offset.copy())
+        explicit_mu = explicit_null.predict(X, offset=offset)
+
+        np.testing.assert_allclose(metrics._null_mu, explicit_mu, rtol=2e-11, atol=2e-11)
+        assert metrics.null_deviance == pytest.approx(
+            explicit_null.result.deviance,
+            rel=2e-11,
+            abs=2e-11,
+        )
+        assert model._fit_stats.null_deviance == pytest.approx(metrics.null_deviance)
+
+    def test_sqrt_offset_fit_reuses_null_mu_when_priming_caches(self, monkeypatch):
+        import superglm.model.fit_ops as fit_ops
+
+        offset = np.tile([-0.4, -0.2, 0.0, 0.2, 0.4], 8)
+        y = np.tile([1.0, 2.0, 4.0, 3.0, 1.0], 8)
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, len(y))})
+        original_compute_null_mu = fit_ops._compute_null_mu
+        calls = 0
+
+        def counted_compute_null_mu(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original_compute_null_mu(*args, **kwargs)
+
+        monkeypatch.setattr(fit_ops, "_compute_null_mu", counted_compute_null_mu)
+
+        model = SuperGLM(
+            family="poisson",
+            link="sqrt",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+            tol=1e-10,
+        ).fit(X, y, offset=offset)
+
+        assert calls == 1
+        np.testing.assert_array_equal(
+            model._fit_null_mu,
+            model.metrics(X, y, offset=offset)._null_mu,
+        )
+
 
 # ── Deviance ──────────────────────────────────────────────────────
 
@@ -1020,6 +1139,129 @@ class TestDeviance:
     def test_pearson_chi2_positive(self, metrics_obj):
         assert metrics_obj.pearson_chi2 > 0
 
+    def test_holdout_deviance_and_explained_deviance_use_holdout_rows(self):
+        rng = np.random.default_rng(221)
+        x_train = rng.normal(size=600)
+        X_train = pd.DataFrame({"x": x_train})
+        y_train = rng.poisson(np.exp(0.2 + 0.35 * x_train)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X_train, y_train)
+
+        x_holdout = rng.normal(size=180)
+        X_holdout = pd.DataFrame({"x": x_holdout})
+        y_holdout = rng.poisson(40.0 * np.exp(0.2 + 0.35 * x_holdout)).astype(float)
+        weights = np.linspace(0.5, 2.0, len(y_holdout))
+        metrics = model.metrics(X_holdout, y_holdout, sample_weight=weights)
+
+        expected = float(
+            np.sum(
+                weights
+                * model._distribution.deviance_unit(
+                    y_holdout,
+                    metrics._mu,
+                )
+            )
+        )
+        assert metrics.deviance == pytest.approx(expected)
+        assert not np.isclose(metrics.deviance, model.result.deviance)
+        assert metrics.explained_deviance == pytest.approx(1.0 - expected / metrics.null_deviance)
+
+    def test_evaluation_zero_null_deviance_matches_fit_stats_guard(self):
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 40)})
+        y = np.full(len(X), 3.5)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y)
+
+        metrics = model.metrics(X.copy(), y.copy())
+
+        assert metrics.null_deviance == 0.0
+        assert metrics.explained_deviance == 0.0
+        assert metrics.summary()["deviance"]["explained_deviance"] == 0.0
+
+    def test_roundoff_scale_null_deviance_uses_zero_null_convention_everywhere(self):
+        from superglm.editor.metrics import _compute_metrics
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 41)})
+        y = np.full(len(X), 0.3)
+        weights = np.ones(len(X))
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y)
+
+        metrics = model.metrics(X.copy(), y.copy())
+        editor_metrics = _compute_metrics(model, X.copy(), y.copy(), weights, None)
+
+        assert metrics.null_deviance > 0.0
+        assert model._fit_stats.null_deviance > 0.0
+        assert metrics.explained_deviance == 0.0
+        assert model._fit_stats.explained_deviance == 0.0
+        assert editor_metrics["explained_deviance"] == 0.0
+
+    def test_zero_weight_outlier_does_not_break_active_constant_null_guard(self):
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 42)})
+        y = np.full(len(X), 0.3)
+        y[-1] = 9.0
+        weights = np.ones(len(X))
+        weights[-1] = 0.0
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+
+        metrics = model.metrics(
+            X.copy(),
+            y.copy(),
+            sample_weight=weights.copy(),
+        )
+
+        assert metrics.null_deviance > 0.0
+        assert metrics.explained_deviance == 0.0
+        assert model._fit_stats.explained_deviance == 0.0
+
+    def test_ulp_guard_preserves_genuine_small_scale_signal(self):
+        x = np.linspace(-1.0, 1.0, 41)
+        X = pd.DataFrame({"x": x})
+        y = 3e-8 + 2e-10 * x
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y)
+
+        metrics = model.metrics(X.copy(), y.copy())
+
+        assert 0.0 < metrics.null_deviance < 1e-15
+        assert metrics.explained_deviance > 0.99
+        assert model._fit_stats.explained_deviance > 0.99
+
+    @pytest.mark.parametrize("base", [3e-8, 1e100])
+    def test_ulp_guard_preserves_adjacent_float_two_level_signal(self, base):
+        x = np.tile([0.0, 1.0], 50)
+        X = pd.DataFrame({"x": x})
+        adjacent = np.nextafter(base, np.inf)
+        y = np.where(x == 0.0, base, adjacent)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y)
+
+        metrics = model.metrics(X.copy(), y.copy())
+        raw_explained = 1.0 - metrics.deviance / metrics.null_deviance
+
+        assert raw_explained > 0.5
+        assert metrics.explained_deviance == pytest.approx(raw_explained)
+        assert model._fit_stats.explained_deviance == pytest.approx(raw_explained)
+
 
 # ── Residuals ─────────────────────────────────────────────────────
 
@@ -1029,6 +1271,38 @@ class TestResiduals:
         """sum(r_dev^2) should approximately equal the deviance."""
         r = metrics_obj.residuals("deviance")
         np.testing.assert_allclose(np.sum(r**2), metrics_obj.deviance, rtol=0.01)
+
+    @pytest.mark.parametrize("kind", ["deviance", "pearson"])
+    def test_frequency_weighted_residual_squares_aggregate_literal_copies(self, kind):
+        rng = np.random.default_rng(2196)
+        n = 90
+        x = rng.normal(size=n)
+        y = rng.poisson(np.exp(0.1 + 0.3 * x)).astype(float)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+
+        compressed = model.metrics(X, y, sample_weight=weights).residuals(kind)
+        repeated_rows = np.repeat(np.arange(n), weights.astype(int))
+        repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
+        repeated_y = y[repeated_rows]
+        literal = model.metrics(repeated_X, repeated_y).residuals(kind)
+        literal_squares_by_row = np.bincount(
+            repeated_rows,
+            weights=literal**2,
+            minlength=n,
+        )
+
+        np.testing.assert_allclose(
+            compressed**2,
+            literal_squares_by_row,
+            rtol=2e-12,
+            atol=2e-12,
+        )
 
     def test_pearson_residuals_mean_approx_zero(self, metrics_obj):
         """Pearson residuals should have mean approximately 0."""
@@ -1044,6 +1318,68 @@ class TestResiduals:
         """Working residuals are (y - mu) / mu for log link."""
         r = metrics_obj.residuals("working")
         np.testing.assert_allclose(r, (metrics_obj._y - metrics_obj._mu) / metrics_obj._mu)
+
+    def test_retained_sqrt_eta_and_working_residual_preserve_fitted_sign(self, metrics_obj):
+        from superglm.links import SqrtLink
+
+        # Seed the retained solver coordinate explicitly. This represents a
+        # fitted state with both inverse-link branches and isolates metrics
+        # from changes to the fitter's admissible eta domain.
+        fitted_eta = np.linspace(-2.0, 2.0, metrics_obj.n_obs)
+        mu = fitted_eta**2
+        y = mu + np.linspace(0.1, 0.2, metrics_obj.n_obs)
+        metrics_obj._link = SqrtLink()
+        metrics_obj._mu = mu
+        metrics_obj._y = y
+        metrics_obj.__dict__["_working_eta_mu"] = (fitted_eta, mu)
+
+        assert np.any(fitted_eta < 0.0)
+        np.testing.assert_allclose(metrics_obj.eta, fitted_eta, rtol=0.0, atol=0.0)
+        expected_working = (y - mu) / (2.0 * fitted_eta)
+        np.testing.assert_allclose(
+            metrics_obj.residuals("working"),
+            expected_working,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    @pytest.mark.parametrize("retain_fit_state", [True, False])
+    def test_public_sqrt_holdout_eta_and_working_residual_preserve_negative_branch(
+        self,
+        retain_fit_state,
+    ):
+        rng = np.random.default_rng(225)
+        n = 600
+        x = rng.normal(size=n)
+        offset = rng.uniform(-3.0, 0.0, size=n)
+        eta_true = 1.2 + 0.25 * x + offset
+        y = rng.poisson(np.maximum(np.abs(eta_true), 0.2) ** 2).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            link="sqrt",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+            max_iter=100,
+            retain_fit_state=retain_fit_state,
+        ).fit(X, y, offset=offset)
+
+        holdout_X = X.copy()
+        holdout_y = y.copy()
+        holdout_offset = offset.copy()
+        fitted_eta = model._predict_eta_exact(holdout_X, holdout_offset)
+        assert np.any(fitted_eta < 0.0), "fixture must exercise the negative fitted branch"
+        metrics = model.metrics(holdout_X, holdout_y, offset=holdout_offset)
+
+        assert not metrics._uses_fit_design
+        np.testing.assert_allclose(metrics.eta, fitted_eta, rtol=0.0, atol=0.0)
+        expected_working = (y - metrics._mu) / (2.0 * fitted_eta)
+        np.testing.assert_allclose(
+            metrics.residuals("working"),
+            expected_working,
+            rtol=0.0,
+            atol=0.0,
+        )
 
     def test_unknown_residual_raises(self, metrics_obj):
         with pytest.raises(ValueError, match="Unknown residual type"):
@@ -1078,6 +1414,61 @@ class TestResiduals:
         assert abs(np.mean(r)) < 0.15
         assert 0.7 < np.std(r) < 1.3
 
+    def test_poisson_quantile_residual_cdf_is_frequency_weight_invariant(self):
+        rng = np.random.default_rng(2192)
+        n = 160
+        x = rng.normal(size=n)
+        y = rng.poisson(np.exp(0.2 + 0.25 * x)).astype(float)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+
+        weighted = model.metrics(X, y, sample_weight=weights).residuals(
+            "quantile",
+            seed=2192,
+        )
+        unit_weight = model.metrics(X.copy(), y.copy()).residuals(
+            "quantile",
+            seed=2192,
+        )
+
+        np.testing.assert_allclose(weighted, unit_weight, rtol=0.0, atol=0.0)
+
+    def test_gaussian_quantile_residuals_match_frequency_row_replication(self):
+        rng = np.random.default_rng(2193)
+        n = 80
+        x = rng.normal(size=n)
+        y = 0.3 + 0.5 * x + rng.normal(scale=1.1, size=n)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        X = pd.DataFrame({"x": x})
+        weighted_model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+
+        repeated_rows = np.repeat(np.arange(n), weights.astype(int))
+        repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
+        repeated_y = y[repeated_rows]
+        repeated_model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(repeated_X, repeated_y)
+
+        weighted = weighted_model.metrics(X, y, sample_weight=weights).residuals("quantile")
+        repeated = repeated_model.metrics(repeated_X, repeated_y).residuals("quantile")
+        np.testing.assert_allclose(
+            repeated,
+            weighted[repeated_rows],
+            rtol=2e-12,
+            atol=2e-12,
+        )
+
     def test_quantile_residuals_tweedie(self):
         """Quantile residuals for Tweedie should be approximately standard normal."""
         from superglm.profiling.tweedie import generate_tweedie_cpg
@@ -1104,6 +1495,81 @@ class TestResiduals:
         # Well-specified model: quantile residuals should be ~N(0,1)
         assert abs(np.mean(qr)) < 0.15
         assert abs(np.std(qr) - 1.0) < 0.15
+
+    def test_tweedie_quantile_residuals_retain_prior_weight_precision(self):
+        from superglm.profiling.tweedie import generate_tweedie_cpg
+
+        rng = np.random.default_rng(2194)
+        n = 180
+        x = rng.normal(size=n)
+        mu = np.exp(0.2 + 0.15 * x)
+        weights = np.linspace(0.4, 2.5, n)
+        y = generate_tweedie_cpg(
+            n,
+            mu,
+            phi=0.8 / weights,
+            p=1.5,
+            rng=rng,
+        )
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+
+        prior_weighted = model.metrics(X, y, sample_weight=weights).residuals(
+            "quantile",
+            seed=2194,
+        )
+        unit_weighted = model.metrics(X.copy(), y.copy(), sample_weight=np.ones(n)).residuals(
+            "quantile",
+            seed=2194,
+        )
+
+        assert not np.allclose(prior_weighted, unit_weighted)
+
+    def test_tweedie_metrics_reject_nonpositive_prior_weights(self):
+        rng = np.random.default_rng(2195)
+        n = 70
+        X = pd.DataFrame({"x": rng.normal(size=n)})
+        y = np.maximum(rng.gamma(shape=1.5, scale=1.0, size=n), 1e-8)
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=np.ones(n))
+        invalid_weights = np.ones(n)
+        invalid_weights[0] = 0.0
+
+        with pytest.raises(ValueError, match="strictly positive"):
+            model.metrics(X.copy(), y.copy(), sample_weight=invalid_weights)
+
+    @pytest.mark.parametrize(
+        ("case", "message"),
+        [
+            ("negative", "nonnegative"),
+            ("all_zero", "not be all zero"),
+            ("nan", "finite"),
+        ],
+    )
+    def test_non_tweedie_metrics_reject_invalid_frequency_weights(
+        self,
+        fitted_poisson,
+        case,
+        message,
+    ):
+        model, X, y, _ = fitted_poisson
+        weights = np.ones(len(y))
+        if case == "negative":
+            weights[0] = -1.0
+        elif case == "all_zero":
+            weights[:] = 0.0
+        else:
+            weights[0] = np.nan
+
+        with pytest.raises(ValueError, match=message):
+            model.metrics(X.copy(), y.copy(), sample_weight=weights)
 
 
 # ── Leverage ──────────────────────────────────────────────────────
@@ -1168,10 +1634,18 @@ class TestSummary:
     def test_summary_values_finite(self, metrics_obj):
         s = metrics_obj.summary()
         for key, section in s.items():
-            if key == "standard_errors":
+            if key in {"standard_errors", "diagnostic_contract"}:
                 continue  # tested separately
             for v in section.values():
                 assert np.isfinite(v), f"Non-finite value in summary: {v}"
+
+    def test_summary_labels_weighted_residual_and_influence_contract(self, metrics_obj):
+        contract = metrics_obj.summary()["diagnostic_contract"]
+        assert contract == {
+            "deviance_pearson_residuals": "compressed-row aggregate",
+            "response_working_quantile_residuals": "per-row",
+            "leverage_standardized_residuals_cooks_distance": ("compressed weighted-cell deletion"),
+        }
 
     def test_summary_returns_model_summary(self, metrics_obj):
         """summary() returns a ModelSummary object."""
@@ -1380,12 +1854,121 @@ class TestCoefficientSE:
             assert np.all(se_arr > 0), f"Raw SE for {name} should be positive"
 
     def test_se_raw_vs_corrected_poisson(self, metrics_obj):
-        """For Poisson, corrected SE = sqrt(phi) * raw SE."""
-        phi = metrics_obj.phi
+        """For Poisson, corrected SE uses the Pearson quasi dispersion."""
+        dispersion = metrics_obj.pearson_chi2 / max(
+            metrics_obj.n_obs - metrics_obj.effective_df,
+            1.0,
+        )
         for name in metrics_obj.coefficient_se:
             se_corr = metrics_obj.coefficient_se[name]
             se_raw = metrics_obj.coefficient_se_raw[name]
-            np.testing.assert_allclose(se_corr, np.sqrt(phi) * se_raw, rtol=1e-10)
+            np.testing.assert_allclose(
+                se_corr,
+                np.sqrt(dispersion) * se_raw,
+                rtol=1e-10,
+            )
+
+    def test_overdispersed_poisson_se_applies_documented_quasi_correction(self):
+        rng = np.random.default_rng(5225)
+        n = 1200
+        x = rng.normal(size=n)
+        mu = np.exp(0.3 + 0.4 * x)
+        theta = 1.5
+        y = rng.negative_binomial(theta, theta / (theta + mu)).astype(float)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y)
+        metrics = model.metrics(X, y)
+
+        dispersion = metrics.pearson_chi2 / max(
+            metrics.n_obs - metrics.effective_df,
+            1.0,
+        )
+        assert model.result.phi == 1.0
+        assert dispersion > 1.5
+        raw = metrics.coefficient_se_raw["x"]
+        corrected = metrics.coefficient_se["x"]
+        np.testing.assert_allclose(
+            corrected,
+            np.sqrt(dispersion) * raw,
+            rtol=1e-12,
+            atol=0.0,
+        )
+        assert not np.array_equal(corrected, raw)
+
+        # Quasi SE accessors are deliberately separate from the default
+        # fitted-family coefficient table, which retains phi=1 for Poisson.
+        summary = metrics.summary()
+        summary_row = next(row for row in summary._coef_rows if row.name == "x")
+        assert summary_row.se == pytest.approx(raw[0])
+        assert summary_row.se != pytest.approx(corrected[0])
+        model_summary = model.summary()
+        model_summary_row = next(row for row in model_summary._coef_rows if row.name == "x")
+        assert model_summary_row.se == pytest.approx(raw[0])
+        np.testing.assert_allclose(
+            summary["standard_errors"]["coefficient_se"]["x"],
+            corrected,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert summary["standard_errors"]["coefficient_se_scale"] == "quasi-likelihood"
+        assert summary["standard_errors"]["rendered_coefficient_se_scale"] == "fitted-family"
+        assert model_summary["standard_errors"]["coefficient_se_scale"] == "fitted-family"
+        assert model_summary["standard_errors"]["rendered_coefficient_se_scale"] == "fitted-family"
+
+    def test_quasi_se_respects_frequency_weight_row_replication(self):
+        """Pearson residual df must follow the family's weight contract."""
+        rng = np.random.default_rng(225_1)
+        n = 120
+        x = rng.normal(size=n)
+        y = rng.poisson(np.exp(0.2 + 0.35 * x)).astype(float)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        X = pd.DataFrame({"x": x})
+
+        weighted_model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(X, y, sample_weight=weights)
+        repeated_rows = np.repeat(np.arange(n), weights.astype(int))
+        repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
+        repeated_y = y[repeated_rows]
+        repeated_model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        ).fit(repeated_X, repeated_y)
+
+        weighted = weighted_model.metrics(X, y, sample_weight=weights)
+        repeated = repeated_model.metrics(repeated_X, repeated_y)
+        expected_residual_df = np.sum(weights) - weighted.effective_df
+        assert weighted._coefficient_dispersion == pytest.approx(
+            weighted.pearson_chi2 / expected_residual_df
+        )
+        assert weighted._coefficient_dispersion == pytest.approx(repeated._coefficient_dispersion)
+        np.testing.assert_allclose(
+            weighted.coefficient_se["x"],
+            repeated.coefficient_se["x"],
+            rtol=2e-11,
+            atol=0.0,
+        )
+        assert weighted.intercept_se == pytest.approx(repeated.intercept_se, rel=2e-11)
+        assert weighted.intercept_se == pytest.approx(
+            np.sqrt(weighted._coefficient_dispersion) * weighted.intercept_se_raw,
+            rel=2e-11,
+        )
+        assert weighted.intercept_se != pytest.approx(weighted.intercept_se_raw)
+        assert weighted.feature_se("x")["se_coef"] == pytest.approx(
+            weighted.coefficient_se["x"][0],
+            rel=2e-11,
+        )
+        assert weighted.feature_se("x")["se_coef"] == pytest.approx(
+            repeated.feature_se("x")["se_coef"],
+            rel=2e-11,
+        )
 
     def test_se_reasonable_magnitude(self, fitted_poisson):
         """SEs should be much smaller than coefficients for well-determined params."""
@@ -1619,7 +2202,7 @@ class TestRelativitiesWithSE:
 
 
 class TestOffsetSEConsistency:
-    """Model-level SEs (relativities) must match metrics-level SEs when offset is present."""
+    """Exact model SEs and explicit quasi metrics SEs share one covariance geometry."""
 
     def test_spline_se_agrees_with_offset(self):
         rng = np.random.default_rng(99)
@@ -1646,8 +2229,12 @@ class TestOffsetSEConsistency:
         fse = m.feature_se("x")
         metrics_se = fse["se_log_relativity"]
 
-        # Both paths should agree (they compute the same Bayesian covariance)
-        np.testing.assert_allclose(model_se, metrics_se, rtol=0.05)
+        np.testing.assert_allclose(
+            metrics_se,
+            np.sqrt(m._coefficient_dispersion) * model_se,
+            rtol=2e-10,
+            atol=1e-12,
+        )
 
     def test_categorical_se_agrees_with_offset(self):
         rng = np.random.default_rng(77)
@@ -1676,7 +2263,55 @@ class TestOffsetSEConsistency:
         fse = m.feature_se("g")
         metrics_se = fse["se_log_relativity"]
 
-        np.testing.assert_allclose(model_se, metrics_se, rtol=0.05)
+        np.testing.assert_allclose(
+            metrics_se,
+            np.sqrt(m._coefficient_dispersion) * model_se,
+            rtol=2e-10,
+            atol=1e-12,
+        )
+
+
+class TestWeightedSmoothInference:
+    def test_estimated_scale_wood_p_value_matches_frequency_row_replication(self):
+        rng = np.random.default_rng(2196)
+        n = 110
+        x = rng.uniform(-2.0, 2.0, size=n)
+        y = 0.2 + 0.4 * np.sin(1.5 * x) + rng.normal(scale=1.2, size=n)
+        weights = rng.integers(1, 5, size=n).astype(float)
+        X = pd.DataFrame({"x": x})
+        weighted_model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={
+                "x": Spline(
+                    n_knots=7,
+                    knot_strategy="uniform",
+                    penalty="ssp",
+                )
+            },
+        ).fit(X, y, sample_weight=weights)
+
+        repeated_rows = np.repeat(np.arange(n), weights.astype(int))
+        repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
+        repeated_y = y[repeated_rows]
+        repeated_model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={
+                "x": Spline(
+                    n_knots=7,
+                    knot_strategy="uniform",
+                    penalty="ssp",
+                )
+            },
+        ).fit(repeated_X, repeated_y)
+
+        weighted_row = next(row for row in weighted_model.summary()._coef_rows if row.is_spline)
+        repeated_row = next(row for row in repeated_model.summary()._coef_rows if row.is_spline)
+
+        assert weighted_row.wald_chi2 == pytest.approx(repeated_row.wald_chi2, rel=2e-10)
+        assert weighted_row.ref_df == pytest.approx(repeated_row.ref_df, rel=2e-10)
+        assert weighted_row.wald_p == pytest.approx(repeated_row.wald_p, rel=2e-10)
 
 
 # ── Coverage gap tests ──────────────────────────────────────────

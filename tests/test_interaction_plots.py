@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from superglm.distributions import Tweedie
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.polynomial import Polynomial
@@ -290,7 +291,7 @@ class TestSurfacePlotly:
 
     def test_contour_pair_requires_density_data(self, interaction_data):
         model = _fit_poly_poly(interaction_data)
-        with pytest.raises(ValueError, match="requires X and sample_weight"):
+        with pytest.raises(ValueError, match="requires numeric parent columns in X"):
             plot_interaction(
                 model,
                 "age:bm",
@@ -353,7 +354,7 @@ class TestSurfacePlotly:
             sample_weight=sample_weight,
         )
         density = next(
-            t for t in fig.data if isinstance(t, go.Surface) and t.name == "Exposure density"
+            t for t in fig.data if isinstance(t, go.Surface) and t.name == "Data density"
         )
         z_density = float(np.asarray(density.z).flat[0])
         z_floor = float(fig.layout.scene.zaxis.range[0])
@@ -494,6 +495,78 @@ class TestInteractionPlotAPI:
         model = _fit_spline_cat(interaction_data)
         with pytest.raises(ValueError, match="Unknown engine"):
             plot_interaction(model, "age:region", engine="bokeh")
+
+    def test_sample_weight_requires_X(self, interaction_data):
+        X, _ = interaction_data
+        model = _fit_poly_poly(interaction_data)
+        with pytest.raises(ValueError, match="sample_weight requires X"):
+            plot_interaction(
+                model,
+                "age:bm",
+                sample_weight=np.ones(len(X)),
+            )
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.ones(4), "length"),
+            (np.array([1.0, np.nan, 1.0]), "finite"),
+            (np.array([1.0, -1.0, 1.0]), "nonnegative"),
+            (np.zeros(3), "all zero"),
+            (np.ones((3, 1)), "one-dimensional"),
+        ],
+    )
+    def test_density_overlay_validates_frequency_weights(
+        self,
+        interaction_data,
+        weights,
+        message,
+    ):
+        X, _ = interaction_data
+        model = _fit_poly_poly(interaction_data)
+        with pytest.raises(ValueError, match=message):
+            plot_interaction(
+                model,
+                "age:bm",
+                X=X.iloc[:3],
+                sample_weight=weights,
+            )
+
+    def test_tweedie_density_requires_strictly_positive_prior_weights(
+        self,
+        interaction_data,
+    ):
+        X, _ = interaction_data
+        model = _fit_poly_poly(interaction_data)
+        model._distribution = Tweedie(p=1.5)
+        weights = np.ones(len(X))
+        weights[0] = 0.0
+
+        with pytest.raises(ValueError, match="strictly positive"):
+            plot_interaction(
+                model,
+                "age:bm",
+                X=X,
+                sample_weight=weights,
+            )
+
+    def test_density_labels_are_weight_semantics_neutral(self, interaction_data):
+        import plotly.graph_objects as go
+
+        X, _ = interaction_data
+        model = _fit_poly_poly(interaction_data)
+        fig = plot_interaction(
+            model,
+            "age:bm",
+            engine="plotly",
+            X=X,
+            sample_weight=np.ones(len(X)),
+        )
+        density = next(
+            t for t in fig.data if isinstance(t, go.Surface) and t.name == "Data density"
+        )
+        assert "Exposure" not in str(density.colorbar.title.text)
+        assert "Exposure" not in str(density.hovertemplate)
 
     def test_plotly_import_error(self, interaction_data):
         model = _fit_spline_cat(interaction_data)

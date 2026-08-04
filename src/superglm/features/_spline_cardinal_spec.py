@@ -11,9 +11,13 @@ from numpy.typing import NDArray
 from superglm.features import _spline_cardinal, _spline_knots, _spline_runtime
 
 
-def place_knots(spec: Any, x: NDArray) -> None:
+def place_knots(
+    spec: Any,
+    x: NDArray,
+    sample_weight: NDArray | None = None,
+) -> None:
     """Place K = n_knots + 2 cardinal knots and build the penalty matrices."""
-    x = np.asarray(x, dtype=np.float64).ravel()
+    x, sample_weight = _spline_knots.knot_geometry_data(x, sample_weight)
     if spec._explicit_boundary is not None:
         spec._lo, spec._hi = spec._explicit_boundary
     else:
@@ -32,6 +36,7 @@ def place_knots(spec: Any, x: NDArray) -> None:
         knot_alpha=spec.knot_alpha,
         explicit_knots=spec._explicit_knots,
         explicit_boundary=spec._explicit_boundary,
+        sample_weight=sample_weight,
     )
 
     spec._cr_knots = np.concatenate([[spec._lo], interior, [spec._hi]])

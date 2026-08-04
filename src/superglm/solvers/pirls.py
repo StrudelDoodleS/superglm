@@ -15,7 +15,7 @@ import scipy.optimize
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import _VARIANCE_FLOOR, Distribution, initial_mean
+from superglm.distributions import _VARIANCE_FLOOR, Distribution
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -38,7 +38,10 @@ from superglm.solvers.centered_system import (
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
+    _irls_objective_relative_change,
+    _irls_objective_scale,
     _IRLSState,
+    _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
 )
@@ -48,6 +51,10 @@ from superglm.solvers.rank import (
     RankInfo,
     decompose_factor,
     decompose_gram_if_authoritative,
+)
+from superglm.solvers.working_rows import (
+    coefficient_initial_intercept,
+    coefficient_working_rows,
 )
 from superglm.types import GroupSlice
 
@@ -554,10 +561,17 @@ def _composite_kkt_violation(
     implements the solver's proximal protocol.  This is evaluated only when
     the requested outer stopping criterion first appears satisfied.
     """
-    variance = np.maximum(family.variance(state.mu), _VARIANCE_FLOOR)
-    dmu_deta = link.deriv_inverse(state.eta)
-    W = weights * dmu_deta**2 / variance
-    working_residual = (y - state.mu) / dmu_deta
+    working_rows = coefficient_working_rows(
+        distribution=family,
+        link=link,
+        y=y,
+        mu=state.mu,
+        eta=state.eta,
+        sample_weight=weights,
+        prefer_observed=False,
+    )
+    W = working_rows.weights
+    working_residual = working_rows.response - state.eta
     loss_gradient = -dm.rmatvec(W * working_residual)
     if has_smooth_penalty:
         assert S is not None
@@ -589,9 +603,24 @@ def _composite_kkt_violation(
     # row pass.  A proximal fixed point is independent of which positive step
     # size is used, so the preceding outer iteration's L values are valid for
     # this convergence diagnostic even when the candidate's IRLS weights moved.
-    scale = max(1.0, float(np.sum(W)) * max(1.0, abs(state.intercept)))
-    for group, L_g in zip(groups, L_groups, strict=True):
-        scale = max(scale, L_g * max(1.0, float(np.linalg.norm(state.beta[group.sl]))))
+    from superglm.distributions import Poisson
+    from superglm.links import SqrtLink
+
+    if type(family) is Poisson and type(link) is SqrtLink:
+        # The Poisson/sqrt score scales as sqrt(y).  Fixed unit floors in this
+        # KKT normalization otherwise certify visibly wrong modes when all
+        # means are tiny.
+        with np.errstate(over="ignore", invalid="ignore"):
+            response_score_scale = float(np.sum(weights * np.sqrt(y), dtype=np.float64))
+        if not np.isfinite(response_score_scale):
+            response_score_scale = 1.0
+        scale = max(response_score_scale, np.finfo(np.float64).tiny)
+        for group, L_g in zip(groups, L_groups, strict=True):
+            scale = max(scale, L_g * float(np.linalg.norm(state.beta[group.sl])))
+    else:
+        scale = max(1.0, float(np.sum(W)) * max(1.0, abs(state.intercept)))
+        for group, L_g in zip(groups, L_groups, strict=True):
+            scale = max(scale, L_g * max(1.0, float(np.linalg.norm(state.beta[group.sl]))))
     return max_violation / scale
 
 
@@ -690,13 +719,23 @@ def _fit_pirls_inner(
     # Always an empty list; only ``record_diagnostics`` decides whether rows are
     # appended and whether it is published on the result.
     iteration_log: list[IterationDiagnostics] = []
+    objective_merit_scale = _irls_objective_scale(
+        y=y,
+        weights=weights,
+        family=family,
+        link=link,
+    )
 
     # Initialize intercept
     if intercept_init is not None:
         intercept = intercept_init
     else:
-        mu0 = initial_mean(y, weights, family)
-        intercept = float(link.link(np.atleast_1d(mu0))[0])
+        intercept = coefficient_initial_intercept(
+            distribution=family,
+            link=link,
+            y=y,
+            sample_weight=weights,
+        )
 
     gms = list(dm.group_matrices)
     n_groups = len(groups)
@@ -891,11 +930,17 @@ def _fit_pirls_inner(
         mu = committed.mu
 
         # Working weights and response (PIRLS)
-        V = family.variance(mu)
-        V = np.maximum(V, _VARIANCE_FLOOR)
-        dmu_deta = link.deriv_inverse(eta)
-        W = weights * dmu_deta**2 / V
-        z = eta + (y - mu) / dmu_deta
+        working_rows = coefficient_working_rows(
+            distribution=family,
+            link=link,
+            y=y,
+            mu=mu,
+            eta=eta,
+            sample_weight=weights,
+            prefer_observed=False,
+        )
+        W = working_rows.weights
+        z = working_rows.response
 
         # Per-group Hessians and Lipschitz constants
         t0 = time.perf_counter()
@@ -1081,7 +1126,16 @@ def _fit_pirls_inner(
             committed=committed,
             proposal=proposal,
             evaluate_state=evaluate_trial,
-            max_halving=max_halving,
+            max_halving=_poisson_sqrt_halving_budget(
+                committed=committed,
+                proposal=proposal,
+                y=y,
+                weights=weights,
+                family=family,
+                link=link,
+                default=max_halving,
+            ),
+            merit_scale=objective_merit_scale,
             merit_delta=lambda candidate, base: _stable_penalized_deviance_delta(
                 candidate,
                 base,
@@ -1101,6 +1155,14 @@ def _fit_pirls_inner(
             objective = dev
         n_halvings = decision.step_halvings
         step_rejected = decision.step_rejected
+        objective_relative_change = _irls_objective_relative_change(
+            objective=objective,
+            previous=objective_prev,
+            y=y,
+            weights=weights,
+            family=family,
+            link=link,
+        )
 
         convergence_criterion = convergence
         kkt_violation: float | None = None
@@ -1115,7 +1177,7 @@ def _fit_pirls_inner(
             )
             iteration_converged = convergence_value < tol
         else:
-            convergence_value = abs(objective - objective_prev) / (abs(objective_prev) + 1.0)
+            convergence_value = objective_relative_change
             iteration_converged = convergence_value < tol
 
         # Objective or coefficient stagnation is necessary but not sufficient
@@ -1268,7 +1330,7 @@ def _fit_pirls_inner(
         logger.info(
             f"  outer={outer + 1:3d}  bcd_cycles={inner_iters:4d}  "
             f"dev={dev:12.1f}  "
-            f"pdev_delta={abs(objective - objective_prev) / (abs(objective_prev) + 1):10.2e}  "
+            f"pdev_delta={objective_relative_change:10.2e}  "
             f"time={t_outer_elapsed:.3f}s"
         )
 
@@ -1365,9 +1427,17 @@ def _fit_pirls_inner(
     has_inference_curvature = bool(np.any(selected_penalty))
 
     V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
-    dmu_deta_final = link.deriv_inverse(eta_new)
-    W_final = weights * dmu_deta_final**2 / V_final
-    z_final = eta_new + (y - mu_new) / dmu_deta_final
+    final_working_rows = coefficient_working_rows(
+        distribution=family,
+        link=link,
+        y=y,
+        mu=mu_new,
+        eta=eta_new,
+        sample_weight=weights,
+        prefer_observed=False,
+    )
+    W_final = final_working_rows.weights
+    z_final = final_working_rows.response
     centered = build_centered_system(
         dm=selected_dm,
         W=W_final,

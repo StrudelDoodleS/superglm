@@ -62,7 +62,7 @@ jump to the solver layer you care about.
 - [17. Appendix: demystifying the implementation-heavy parts](#17-appendix-demystifying-the-implementation-heavy-parts)
     - [17.1 Cached W: what is actually being cached?](#171-cached-w-what-is-actually-being-cached)
     - [17.2 Why the "dead group" logic exists](#172-why-the-dead-group-logic-exists)
-    - [17.3 QR: why is there QR code in `metrics.py` if the fitter uses Cholesky/eigendecomposition?](#173-qr-why-is-there-qr-code-in-metricspy-if-the-fitter-uses-choleskyeigendecomposition)
+    - [17.3 QR: why is there QR code in `covariance.py` if the fitter uses Cholesky/eigendecomposition?](#173-qr-why-is-there-qr-code-in-covariancepy-if-the-fitter-uses-choleskyeigendecomposition)
     - [17.4 Kernels: what are they really doing?](#174-kernels-what-are-they-really-doing)
     - [17.5 A good way to read this code without getting lost](#175-a-good-way-to-read-this-code-without-getting-lost)
 
@@ -93,17 +93,25 @@ Then you realize observations should not contribute equally. WLS introduces a di
 
 Still linear algebra, still one solve. The only change is that \(\mathbf{X}^\top\mathbf{X}\) becomes \(\mathbf{X}^\top\mathbf{W}\mathbf{X}\) and \(\mathbf{X}^\top\mathbf{y}\) becomes \(\mathbf{X}^\top\mathbf{W}\mathbf{y}\).
 
-**Where do the weights come from?** Three common sources, each with a different interpretation:
+**Where do the weights come from?** Weighted-model notation is overloaded.
+Three common sources have different interpretations:
 
 | Source | Weight | Meaning |
 |--------|--------|---------|
 | Inverse-variance | \(w_i = 1 / \text{Var}(y_i)\) | More precise observations contribute more — this is the classical GLS motivation |
-| Frequency / exposure | \(w_i = e_i\) (e.g. policy-years) | Observation \(i\) represents \(e_i\) units of exposure, so its expected count scales linearly: \(\text{E}[y_i] = e_i \cdot \lambda_i\) |
-| IRLS working weights | \(w_i = e_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)\) | Local curvature of the GLM log-likelihood — this is the weight that makes the WLS subproblem equivalent to one Fisher-scoring step |
+| Case / frequency | \(a_i = e_i\), for a Poisson *rate* row | Observation \(i\) contributes \(e_i\) likelihood units; for fixed feature geometry, integer \(a_i\) is likelihood-level row replication, and \(\text{E}[y_i]=\lambda_i\) remains a rate |
+| IRLS working weights | \(W_i = a_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)\) | Local curvature of the GLM log-likelihood — this is the weight that makes the WLS subproblem equivalent to one Fisher-scoring step |
 
 In the IRLS ladder below, the third type is what appears. The weights are not fixed — they are recomputed at each iteration from the current fit. That is the whole point of "iteratively **reweighted**" least squares.
 
-In insurance pricing, the frequency/exposure weights \(e_i\) enter as a multiplier on the IRLS working weights. A policy observed for 3 years contributes 3x the information of a policy observed for 1 year. The product \(w_i = e_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)\) combines both the exposure and the local curvature into a single diagonal weight.
+For the Poisson rate encoding, exposure \(a_i=e_i\) multiplies the IRLS
+curvature, so a three-year rate row contributes three times the information of
+a one-year row. It does not multiply the conditional mean automatically. For
+a raw count response, put `log(exposure)` in the offset so that
+\(\text{E}[\text{count}_i]=e_i\lambda_i\). SuperGLM does not interpret
+Gaussian/Gamma `sample_weight` as the generic inverse-variance row above, and
+Tweedie uses EDM prior weights; see [Families & Dispersion](families.md#weight-semantics)
+for the family-specific contract.
 
 ### 1.3 IRLS
 
@@ -252,10 +260,12 @@ until λ stabilizes
 !!! note "Current multi-penalty guard rails"
     The exact and discrete REML paths support shared-block multi-penalty terms
     such as tensor margins and `Spline(m=(...))`. The sparse-additive
-    `selection_penalty > 0` path does not yet support those shared-block
-    multi-penalty combinations. Likewise, `select=True + m=(...)` is deferred
-    until the select architecture is refactored to use same-block penalty
-    components instead of split subgroups.
+    `selection_penalty > 0` path also accepts shared-block multi-penalty
+    terms. For tuples compatible with the selected spline class,
+    `select=True + m=(...)` produces a null-space component plus one component
+    per derivative order, with separate REML lambdas; per-class order limits
+    still apply. Tensor interactions with multi-order spline parents remain
+    unsupported.
 
 So the rough historical ladder is:
 
@@ -276,7 +286,7 @@ that matter for this repo:
 | GLM likelihood | How should the mean depend on the predictors? | `beta`, intercept | The base statistical model | `fit()`, `fit_reml()` |
 | IRLS / PIRLS | What quadratic surrogate should represent the GLM right now? | working weights `W`, working response `z` | GLM loss is not quadratic | `src/superglm/solvers/pirls.py`, `src/superglm/solvers/irls_direct.py` |
 | Inner coefficient solver | For fixed `W` and `z`, what coefficients solve the penalized WLS problem? | `beta`, intercept | penalties may be nonsmooth | direct solve or proximal Newton BCD |
-| REML / fREML | How smooth should each smooth term be? | per-term `lambda_j` | the inner fit does not choose smoothness for you | `src/superglm/reml_optimizer.py` |
+| REML / fREML | How smooth should each smooth term be? | per-term `lambda_j` | the inner fit does not choose smoothness for you | `src/superglm/reml/` |
 
 !!! tip "If you remember one thing"
     `IRLS` fits coefficients for fixed penalties. `REML` fits the penalties themselves.
@@ -676,7 +686,7 @@ That is why `fit_reml()` is "refit-heavy". It is solving a different optimizatio
 
 ## 12. What the REML objective is doing
 
-In this repo, `reml_laml_objective()` in `src/superglm/reml_optimizer.py` evaluates a Laplace-approximate REML criterion (Wood 2011).
+In this repo, `reml_laml_objective()` in `src/superglm/reml/objective.py` evaluates a Laplace-approximate REML criterion (Wood 2011).
 
 This section stays intentionally short. A full REML derivation turns into a paper-sized detour;
 the main thing this guide needs is the role each term plays in the outer optimization.
@@ -693,7 +703,7 @@ Here \(|\mathbf{S}|_+\) means the pseudo-determinant of \(\mathbf{S}\): the prod
 The `+` matters because spline penalties usually have a null space, so \(\mathbf{S}\) is often rank-deficient. For example,
 constant or linear directions may be left unpenalized, which gives exact zero eigenvalues that should be excluded from the
 log-determinant term. In the code, this is the same idea as `log_det_omega_plus` and `cached_logdet_s_plus(...)` in
-`src/superglm/reml.py`.
+`src/superglm/reml/penalty_algebra.py`.
 
 The four terms:
 
@@ -777,7 +787,7 @@ for iter in 1, 2, ..., max_reml_iter:
 
 This is the cleanest path mathematically. The \(W(\boldsymbol{\rho})\) correction (enabled after warmup) accounts for the fact that changing \(\boldsymbol{\lambda}\) changes \(\hat{\boldsymbol{\beta}}\), which changes \(\boldsymbol{\mu}\), which changes \(\mathbf{W}\).
 
-In this repo: `src/superglm/reml_optimizer.py::optimize_direct_reml`.
+In this repo: `src/superglm/reml/direct.py::optimize_direct_reml`.
 
 ### 13.2 Discrete cached-W REML (fREML)
 
@@ -822,7 +832,7 @@ The mental model is:
 - if \(\mathbf{W}\) changes, the local geometry changed and you need fresh weighted summaries (expensive)
 - if only \(\mathbf{S}(\boldsymbol{\lambda})\) changes, you can reuse the same weighted geometry and do cheap \(p \times p\) algebra (free)
 
-In this repo: `src/superglm/reml_optimizer.py::optimize_discrete_reml_cached_w`.
+In this repo: `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`.
 
 ### 13.3 EFS REML (Fellner-Schall for sparse models)
 
@@ -864,7 +874,7 @@ So when both sparsity and smoothness selection are active:
 - PIRLS + BCD handles coefficient sparsity (which features survive)
 - EFS REML handles smoothness (how wiggly the survivors are)
 
-In this repo: `src/superglm/reml_optimizer.py::optimize_efs_reml`.
+In this repo: `src/superglm/reml/efs.py::optimize_efs_reml`.
 
 ## 14. Compared to other software
 
@@ -922,10 +932,10 @@ If you want to understand the implementation from top to bottom, read in this or
 2. `src/superglm/solvers/pirls.py::_fit_pirls_inner`
 3. `src/superglm/solvers/irls_direct.py::fit_irls_direct`
 4. `src/superglm/model/fit_ops.py::fit_reml`
-5. `src/superglm/reml_optimizer.py::reml_laml_objective`
-6. `src/superglm/reml_optimizer.py::optimize_direct_reml`
-7. `src/superglm/reml_optimizer.py::optimize_discrete_reml_cached_w`
-8. `src/superglm/reml_optimizer.py::optimize_efs_reml`
+5. `src/superglm/reml/objective.py::reml_laml_objective`
+6. `src/superglm/reml/direct.py::optimize_direct_reml`
+7. `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`
+8. `src/superglm/reml/efs.py::optimize_efs_reml`
 
 !!! tip "Three questions to keep in your head"
     `IRLS`: what weighted least-squares problem is the GLM pretending to be right now?
@@ -991,11 +1001,12 @@ That is why the code can sometimes keep nudging those lambdas upward without a f
 
 It is a pragmatic shortcut, not a new statistical principle.
 
-### 17.3 QR: why is there QR code in `metrics.py` if the fitter uses Cholesky/eigendecomposition?
+### 17.3 QR: why is there QR code in `covariance.py` if the fitter uses Cholesky/eigendecomposition?
 
 Because the QR code is mostly for diagnostics and inference, not for the hot fitting path.
 
-The main QR block is in `src/superglm/metrics.py`. It builds an augmented matrix:
+The dense covariance fallback in `src/superglm/inference/covariance.py` builds
+an augmented matrix:
 
 $$
 \mathbf{A} = \begin{pmatrix} \mathbf{W}^{1/2} \mathbf{X}_a \\ \mathbf{S}^{1/2} \end{pmatrix}
@@ -1023,7 +1034,7 @@ The QR path is basically saying:
 
 > I want a reliable factorization of the penalized weighted design, even if the active design is a bit awkward or nearly rank-deficient
 
-There is also pivoted QR in `src/superglm/wood_pvalue.py`, but that is again an inference thing, not a fitting thing. There QR is used to move a smooth term into a numerically stable test space before doing Wood-style significance calculations.
+There is also pivoted QR in `src/superglm/stats/wood_pvalue.py`, but that is again an inference thing, not a fitting thing. There QR is used to move a smooth term into a numerically stable test space before doing Wood-style significance calculations.
 
 ### 17.4 Kernels: what are they really doing?
 

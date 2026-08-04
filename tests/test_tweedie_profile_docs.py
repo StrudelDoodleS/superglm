@@ -68,6 +68,30 @@ def test_tweedie_family_guide_documents_current_profile_contract():
     assert "near *p*=1 and *p*=2" in tweedie
 
 
+def test_binomial_family_guide_block_executes_a_real_fit() -> None:
+    import numpy as np
+    import pandas as pd
+
+    from superglm import Numeric
+
+    guide = (_ROOT / "docs/guide/families.md").read_text()
+    section = guide.split("## Binomial (binary classification)", maxsplit=1)[1]
+    block = section.split("```python", maxsplit=1)[1].split("```", maxsplit=1)[0]
+    frame = pd.DataFrame({"age": np.linspace(18.0, 80.0, 80)})
+    response = (np.arange(len(frame)) % 3 == 0).astype(np.float64)
+    namespace = {
+        "df": frame,
+        "features": {"age": Numeric()},
+        "y": response,
+    }
+
+    exec(compile(block, "docs/guide/families.md#binomial", "exec"), namespace)
+
+    probabilities = namespace["probabilities"]
+    assert probabilities.shape == response.shape
+    assert np.all((probabilities > 0.0) & (probabilities < 1.0))
+
+
 def test_tweedie_notebook_removes_stale_pearson_default_claims():
     source = _notebook_source()
     all_source = _notebook_all_source()
@@ -115,7 +139,102 @@ def test_public_fit_docstrings_explain_family_specific_tweedie_prior_weights():
         assert "Var(Y_i | x_i) = phi * mu_i**p / w_i" in docstring
         assert "not replication counts" in docstring
         assert "do not enter the linear predictor or automatically scale" in docstring
-        assert "Non-Tweedie families retain their existing weighting behavior" in docstring
+        assert "case/frequency weights" in docstring
+        assert "once feature geometry is fixed" in docstring
+        assert "likelihood-equivalent to row replication" in docstring
+        assert "sum(w) - edf" in docstring
+
+
+def test_plotting_docstrings_use_family_specific_weight_language() -> None:
+    for function in (SuperGLM.plot, SuperGLM.plot_diagnostics):
+        docstring = " ".join((function.__doc__ or "").split())
+        assert "case/frequency weights for non-Tweedie families" in docstring
+        assert "EDM prior weights for Tweedie" in docstring
+    plot_docstring = " ".join((SuperGLM.plot_diagnostics.__doc__ or "").split())
+    assert "sample-weighted observed vs predicted" in plot_docstring
+    assert "exposure-weighted observed vs predicted" not in plot_docstring
+
+    main_effects = (_ROOT / "src/superglm/plotting/main_effects.py").read_text()
+    assert "Weights for the display-density overlay" in main_effects
+    assert "Exposure / frequency weights." not in main_effects
+
+
+def test_family_guide_makes_weight_contracts_mutually_exclusive():
+    guide = (_ROOT / "docs/guide/families.md").read_text()
+    weights = " ".join(
+        guide.split("## Weight semantics", maxsplit=1)[1]
+        .split("## Negative binomial", maxsplit=1)[0]
+        .split()
+    )
+
+    assert "case/frequency weights" in weights
+    assert "repeating the corresponding rows" in weights
+    assert "`sum(sample_weight) - edf`" in weights
+    assert "EDM prior weights" in weights
+    assert "not replication counts" in weights
+    assert "These contracts are not interchangeable" in weights
+    assert "`n - edf`" in weights
+    assert "Gamma fit does not implement that contract" in weights
+    assert "retain the individual claim-severity rows" in weights
+    assert "conditional on an identical constructed design" in weights
+    assert "`quantile_rows` and `quantile_tempered` knot strategies use frequency mass" in weights
+    assert "ignore zero-weight rows" in weights
+    assert "Tweedie prior weights intentionally leave spline geometry" in weights
+    assert "tensor-interaction marginal centering" in weights
+    assert "categorical/ordered/factor feature geometry" in weights
+    assert "fixed or preconstructed feature geometry" in weights
+    assert "derive spline knots from the physical row distribution" not in weights
+    assert "are not removed before feature construction" not in weights
+
+
+def test_screening_guides_use_the_fitted_family_weight_contract() -> None:
+    guide = (_ROOT / "docs/guide/screening.md").read_text()
+    evaluation = (_ROOT / "docs/guide/screening-evaluation.md").read_text()
+    normalized_guide = " ".join(guide.split())
+
+    assert "`sum(sample_weight) - edf`" in normalized_guide
+    assert "Tweedie EDM prior weights use the observation count minus `edf`" in normalized_guide
+    assert "positive-weight-row count" not in guide
+    assert "frequency-weight user can supply their own `phi`" not in guide
+    assert "house exposure contract" not in guide
+    assert "house exposure contract" not in evaluation
+    assert "Poisson case/frequency-weight contract" in evaluation
+
+
+def test_validation_and_diagnostic_guides_follow_family_weight_contracts() -> None:
+    workflows = " ".join((_ROOT / "docs/guide/workflows.md").read_text().split())
+    results = " ".join((_ROOT / "docs/guide/results.md").read_text().split())
+    validation = " ".join((_ROOT / "docs/guide/validation.md").read_text().split())
+
+    assert "`sum(sample_weight)`" in workflows
+    assert "`sum(sample_weight) - edf`" in results
+    for document in (workflows, results):
+        assert "Tweedie EDM prior weights" in document
+        assert "observation count" in document or "`n - edf`" in document
+    assert "row's response distribution is unchanged by its weight" in results
+    assert r"\(\phi / w_i\)" in results
+    assert "diagnose raw claim counts with `log(exposure)` as an offset" in results
+    assert "Poisson rate response" in validation
+    assert "exposure is a case/frequency weight" in validation
+    assert "Tweedie uses strictly positive EDM prior weights" in validation
+    assert "portfolio aggregation weight" in validation
+    assert "sample-weighted calibration" in validation
+    assert "exposure-weighted calibration" not in validation
+    assert (
+        "a rate plus frequency weight cannot reconstruct the corresponding count CDF" in validation
+    )
+
+
+def test_monotone_guide_scopes_fit_curvature_to_cubic_or_lower_degree() -> None:
+    guide = (_ROOT / "docs/guide/monotone.md").read_text()
+    normalized = " ".join(guide.split())
+
+    assert "convex/concave only when `degree <= 3`" in normalized
+    assert "`PSpline` and `BSplineSmooth` with `degree > 3`" in normalized
+    assert "still support fit-time increasing/decreasing constraints" in normalized
+    assert "not `Constraint.fit.convex` or `Constraint.fit.concave`" in normalized
+    assert "`CubicRegressionSpline` is always degree three" in normalized
+    assert "This restriction does not apply to the separate `Constraint.postfit.*`" in normalized
 
 
 def test_quickstart_scopes_frequency_weight_guidance_to_poisson():

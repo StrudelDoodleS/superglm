@@ -1,5 +1,10 @@
 # Inspecting Results
 
+The examples on this page assume the Poisson rate workflow, where `exposure`
+is a case/frequency weight. Weight semantics differ by family; see
+[Families & Dispersion](families.md#weight-semantics) before carrying this
+spelling into Gaussian, Gamma, or Tweedie diagnostics.
+
 ## Summary table
 
 Statsmodels-style summary with SEs, p-values, and smooth tests:
@@ -19,6 +24,30 @@ The same `level_display="expanded"` or `"grouped"` option is available from a me
 ```python
 m = model.metrics(df, y, sample_weight=exposure)
 print(m.summary(level_display="grouped"))
+```
+
+## Diagnostic weight semantics
+
+Quantile residuals and diagnostic simulations follow the same family-specific
+contract as fitting:
+
+- for non-Tweedie case/frequency weights, the row's response distribution is
+  unchanged by its weight; the weight represents repeated likelihood
+  contribution rather than smaller row variance
+- for Tweedie EDM prior weights, row \(i\) has observation-specific dispersion
+  \(\phi / w_i\), which is used by both its CDF residual and simulation
+
+For exact discrete Poisson quantile residuals, diagnose raw claim counts with
+`log(exposure)` as an offset. A fractional rate response with exposure as a
+frequency weight is useful for fitting, but the case/frequency API cannot
+reconstruct that row's count distribution from `sample_weight`.
+
+The diagnostic Pearson denominator follows the same split:
+`sum(sample_weight) - edf` for non-Tweedie families and `n - edf` for
+Tweedie.
+
+```python
+fig = model.plot_diagnostics(df, y, sample_weight=exposure)
 ```
 
 ## Per-term inference

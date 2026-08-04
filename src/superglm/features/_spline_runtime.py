@@ -99,8 +99,13 @@ def linear_tail_basis_matrix(spec: Any, x: NDArray):
     )
 
 
-def place_knots(spec: Any, x: NDArray) -> None:
+def place_knots(
+    spec: Any,
+    x: NDArray,
+    sample_weight: NDArray | None = None,
+) -> None:
     """Place interior knots and build the full knot vector."""
+    x, sample_weight = _spline_knots.knot_geometry_data(x, sample_weight)
     if spec._explicit_boundary is not None:
         spec._lo, spec._hi = spec._explicit_boundary
     else:
@@ -119,6 +124,7 @@ def place_knots(spec: Any, x: NDArray) -> None:
         knot_alpha=spec.knot_alpha,
         explicit_knots=spec._explicit_knots,
         explicit_boundary=spec._explicit_boundary,
+        sample_weight=sample_weight,
     )
     spec._assemble_knot_vector(interior)
 

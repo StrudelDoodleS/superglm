@@ -7,7 +7,7 @@ The solver never sees feature types — only GroupInfo objects.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -260,6 +260,13 @@ class GroupInfo:
 
 
 # ── Group bookkeeping for the solver ────────────────────────────
+class _FeatureNameUnset:
+    """Private identity sentinel that cannot collide with a frame column label."""
+
+
+_FEATURE_NAME_UNSET = _FeatureNameUnset()
+
+
 @dataclass
 class GroupSlice:
     """Tracks where each group lives in the full coefficient vector."""
@@ -269,14 +276,14 @@ class GroupSlice:
     end: int
     weight: float = 1.0  # sqrt(p_g) by default, or adaptive weight
     penalized: bool = True  # whether this group is subject to the penalty
-    feature_name: str = ""  # parent feature name, defaults to name
+    feature_name: Hashable = _FEATURE_NAME_UNSET  # parent feature name, defaults to name
     subgroup_type: str | None = None  # "linear", "spline", or None
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
     scop_reparameterization: SCOPSolverReparam | None = None
 
     def __post_init__(self):
-        if not self.feature_name:
+        if self.feature_name is _FEATURE_NAME_UNSET:
             self.feature_name = self.name
 
     @property

@@ -51,7 +51,8 @@ def compare_irls_weights(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Frequency weights / sample_weight.
+        Family-specific fitting weights: case/frequency weights for
+        non-Tweedie families and EDM prior weights for Tweedie.
     offset : array-like, optional
         Offset term.
     max_iter : int
@@ -119,7 +120,15 @@ def compare_irls_weights(
     )
     X_sm = sm.add_constant(numeric_values)
 
-    freq_weights = sample_weight if sample_weight is not None else np.ones(len(y))
+    comparison_weights = sample_weight if sample_weight is not None else np.ones(len(y))
+    # statsmodels exposes the two supported contracts as separate arguments.
+    # They enter its IRLS working weights identically, but choosing the matching
+    # argument also preserves the family's likelihood and dispersion semantics.
+    sm_weight_kwargs = (
+        {"var_weights": comparison_weights}
+        if isinstance(family, Tweedie)
+        else {"freq_weights": comparison_weights}
+    )
     sm_offset = offset if offset is not None else None
 
     rows = []
@@ -128,8 +137,8 @@ def compare_irls_weights(
             y,
             X_sm,
             family=sm_family,
-            freq_weights=freq_weights,
             offset=sm_offset,
+            **sm_weight_kwargs,
         )
         # Per-iteration stats: fit with maxiter=1,2,...,max_iter
         # and record W at each step. statsmodels doesn't expose
@@ -139,7 +148,7 @@ def compare_irls_weights(
             sm_result = sm_model.fit(maxiter=it, disp=0)
             mu_it = sm_result.mu
             w_family = sm_family.weights(mu_it)
-            W_it = freq_weights * w_family
+            W_it = comparison_weights * w_family
             _, _, w_ratio = _positive_working_weight_stats(W_it)
             top_idx, bot_idx = _extreme_weight_indices(W_it)
             rows.append(
@@ -237,7 +246,8 @@ def inspect_worst_observations(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Frequency weights.
+        Family-specific fitting weights: case/frequency weights for
+        non-Tweedie families and EDM prior weights for Tweedie.
     iteration : int
         Which IRLS iteration to inspect (1-based).
 
@@ -267,12 +277,12 @@ def inspect_worst_observations(
     all_idx = np.concatenate([top_idx, bot_idx])
 
     rows = []
-    exp = sample_weight if sample_weight is not None else np.ones(len(y))
+    weights = sample_weight if sample_weight is not None else np.ones(len(y))
     for i in all_idx:
         row: dict[object, Any] = {
             "obs_index": int(i),
             "y": float(y[i]),
-            "sample_weight": float(exp[i]),
+            "sample_weight": float(weights[i]),
         }
         # Add feature values
         for col in frame.columns:

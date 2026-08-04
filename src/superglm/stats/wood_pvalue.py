@@ -144,18 +144,28 @@ def _fractional_tail(
 ) -> float:
     """Tail probability for the fractional-rank test statistic."""
     if res_df <= 0:
-        p_primary, _ = psum_chisq(stat, weights)
-        p_alt, _ = psum_chisq(stat_alt, weights)
+        p_primary, primary_fault = psum_chisq(stat, weights)
+        if primary_fault != 0:
+            p_primary, _, _ = satterthwaite(stat, weights)
+        p_alt, alt_fault = psum_chisq(stat_alt, weights)
+        if alt_fault != 0:
+            p_alt, _, _ = satterthwaite(stat_alt, weights)
         return 0.5 * (p_primary + p_alt)
 
-    k0 = max(1, int(round(res_df)))
+    denominator_df = float(res_df)
     base_df = np.ones(len(weights), dtype=np.float64)
-    tail_df = np.concatenate([base_df, np.array([k0], dtype=np.float64)])
+    tail_df = np.concatenate([base_df, np.array([denominator_df], dtype=np.float64)])
 
-    mix_primary = np.concatenate([weights, np.array([-stat / k0], dtype=np.float64)])
-    mix_alt = np.concatenate([weights, np.array([-stat_alt / k0], dtype=np.float64)])
-    p_primary, _ = psum_chisq(0.0, mix_primary, df=tail_df)
-    p_alt, _ = psum_chisq(0.0, mix_alt, df=tail_df)
+    mix_primary = np.concatenate([weights, np.array([-stat / denominator_df], dtype=np.float64)])
+    mix_alt = np.concatenate([weights, np.array([-stat_alt / denominator_df], dtype=np.float64)])
+    p_primary, primary_fault = psum_chisq(0.0, mix_primary, df=tail_df)
+    p_alt, alt_fault = psum_chisq(0.0, mix_alt, df=tail_df)
+    if primary_fault != 0 or alt_fault != 0:
+        # The reference rank displayed for a sub-unit smooth can be fractional
+        # even though its live test mixture is exactly one chi-square term.
+        # The fallback follows the mixture distribution, not that display rank.
+        fallback_df = float(np.sum(weights))
+        return _fallback_tail(stat, stat_alt, fallback_df, res_df)
     return 0.5 * (p_primary + p_alt)
 
 
@@ -171,32 +181,6 @@ def _fallback_tail(stat: float, stat_alt: float, ref_df: float, res_df: float) -
     return 0.5 * (
         f_dist.sf(stat / ref_df, ref_df, res_df) + f_dist.sf(stat_alt / ref_df, ref_df, res_df)
     )
-
-
-def _mixture_pvalue(
-    stat: float,
-    weights: NDArray,
-    res_df: float,
-) -> float:
-    """Reference tail for a weighted chi-square mixture."""
-    weights = np.asarray(weights, dtype=np.float64).ravel()
-    if res_df > 0:
-        from scipy.stats import f as f_dist
-
-        mean = float(np.sum(weights))
-        var = float(np.sum(2.0 * weights**2))
-        if mean <= 0.0 or var <= 0.0:
-            return 1.0 if stat <= 0.0 else 0.0
-
-        scale = var / (2.0 * mean)
-        df_num = 2.0 * mean**2 / var
-        f_stat = stat / (scale * df_num)
-        return float(f_dist.sf(f_stat, df_num, res_df))
-
-    p_val, ifault = psum_chisq(stat, weights)
-    if ifault != 0:
-        p_val, _, _ = satterthwaite(stat, weights)
-    return float(p_val)
 
 
 def wood_test_smooth(

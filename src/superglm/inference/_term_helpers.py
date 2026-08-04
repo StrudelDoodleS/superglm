@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import replace
 from typing import Any, cast
 
@@ -86,7 +87,7 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
 
 def _spline_se(
     spline_spec,
-    name: str,
+    name: Hashable,
     beta: NDArray,
     feature_groups: list,
     active_groups: list,

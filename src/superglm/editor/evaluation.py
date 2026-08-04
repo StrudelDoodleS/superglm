@@ -33,11 +33,34 @@ class EvaluationDataset:
         return len(self.X)
 
 
+def _validate_evaluation_weights(sample_weight, n_obs: int, *, family=None):
+    """Normalize split weights and enforce the family-specific public contract."""
+    if sample_weight is None:
+        return None
+
+    from superglm.distributions import Tweedie
+
+    if isinstance(family, Tweedie):
+        from superglm._utils import _validate_strict_prior_weights
+
+        return _validate_strict_prior_weights(sample_weight, n_obs)
+
+    from superglm.model.input_validation import _finite_vector
+
+    weights = _finite_vector("sample_weight", sample_weight, n_obs)
+    if np.any(weights < 0.0):
+        raise ValueError("sample_weight must be nonnegative")
+    if not np.any(weights > 0.0):
+        raise ValueError("sample_weight must not be all zero")
+    return weights
+
+
 def coerce_evaluation_data(
     *,
     train_data=None,
     validation_data=None,
     test_data=None,
+    family=None,
 ) -> dict[str, EvaluationDataset]:
     """Normalize plain ``(X, y[, w[, offset]])`` tuples by split name."""
     datasets: dict[str, EvaluationDataset] = {}
@@ -46,13 +69,13 @@ def coerce_evaluation_data(
         ("validation", validation_data),
         ("test", test_data),
     ):
-        dataset = coerce_dataset(name, data)
+        dataset = coerce_dataset(name, data, family=family)
         if dataset is not None:
             datasets[name] = dataset
     return datasets
 
 
-def coerce_dataset(name: str, data) -> EvaluationDataset | None:
+def coerce_dataset(name: str, data, *, family=None) -> EvaluationDataset | None:
     """Convert a split tuple into an :class:`EvaluationDataset`."""
     if data is None:
         return None
@@ -68,8 +91,7 @@ def coerce_dataset(name: str, data) -> EvaluationDataset | None:
     frame = as_eager_frame(X)
     if len(frame) != n_obs:
         raise ValueError(f"{name}_data X and y lengths differ.")
-    if sample_weight is not None and len(sample_weight) != n_obs:
-        raise ValueError(f"{name}_data sample_weight length differs from y.")
+    sample_weight = _validate_evaluation_weights(sample_weight, n_obs, family=family)
     if offset is not None and len(offset) != n_obs:
         raise ValueError(f"{name}_data offset length differs from y.")
     return EvaluationDataset(

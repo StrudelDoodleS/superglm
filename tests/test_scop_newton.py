@@ -6,6 +6,25 @@ from superglm.solvers.scop import build_scop_solver_reparam
 from superglm.solvers.scop_newton import SCOPNewtonResult, scop_newton_step
 
 
+def _curvature_solver_reparam(q_raw: int, kind: str):
+    degree = 3
+    n_interior = q_raw - degree - 1
+    knots = np.concatenate(
+        (
+            np.zeros(degree + 1),
+            np.linspace(0.0, 1.0, n_interior + 2)[1:-1] ** 1.7,
+            np.ones(degree + 1),
+        )
+    )
+    return build_scop_solver_reparam(
+        q_raw,
+        kind=kind,
+        knots=knots,
+        degree=degree,
+        domain=(0.0, 1.0),
+    )
+
+
 class TestSCOPNewtonStep:
     """Single Newton step on SCOP working model."""
 
@@ -192,3 +211,63 @@ class TestSCOPNewtonStep:
             lambda2=0.1,
         )
         assert result.objective_after <= result.objective_before + 1e-10
+
+    def test_curvature_mixed_map_hessian_matches_finite_differences(self):
+        """The retained slope has identity, not exponential, map curvature."""
+        rng = np.random.default_rng(216)
+        reparam = _curvature_solver_reparam(8, "convex")
+        q_eff = reparam.q
+        B = rng.standard_normal((100, q_eff))
+        W = rng.uniform(0.2, 2.0, size=100)
+        beta = rng.normal(scale=0.3, size=q_eff)
+        S = reparam.penalty_matrix()
+        lambda2 = 0.4
+        mapped = reparam.forward(beta)
+        z = B @ mapped + 0.02 * rng.standard_normal(100)
+
+        result = scop_newton_step(
+            B_scop=B,
+            W=W,
+            z=z,
+            beta_scop=beta,
+            reparam=reparam,
+            S_scop=S,
+            lambda2=lambda2,
+        )
+
+        def gradient(parameters):
+            residual = z - B @ reparam.forward(parameters)
+            projected_residual = B.T @ (W * residual)
+            return -reparam.jacobian_diagonal(parameters) * projected_residual + lambda2 * (
+                S @ parameters
+            )
+
+        epsilon = 2e-5
+        eye = np.eye(q_eff)
+        numerical_hessian = np.column_stack(
+            [
+                (gradient(beta + epsilon * step) - gradient(beta - epsilon * step))
+                / (2.0 * epsilon)
+                for step in eye
+            ]
+        )
+        weighted_gram = B.T @ (W[:, None] * B)
+        projected_residual = B.T @ (W * (z - B @ mapped))
+
+        assert abs(projected_residual[0]) > 0.1
+        assert result.used_fisher_fallback is False
+        assert result.discarded_directions.shape == (0, q_eff)
+        np.testing.assert_allclose(
+            result.H_penalized,
+            numerical_hessian,
+            rtol=2e-9,
+            atol=3e-7,
+        )
+        # An erroneous exp-style second derivative on the free slope would
+        # add ``-projected_residual[0]`` to this entry.
+        np.testing.assert_allclose(
+            result.H_penalized[0, 0],
+            weighted_gram[0, 0],
+            rtol=2e-14,
+            atol=2e-14,
+        )

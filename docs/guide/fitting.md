@@ -246,10 +246,13 @@ model.fit_reml(df, y, sample_weight=exposure)
 
 Current guard rails:
 
-- `select=True + m=(...)` is not yet supported
+- `select=True + m=(...)` is supported for tuples compatible with the selected
+  spline class and produces a null-space penalty plus one component per
+  derivative order; per-class order limits still apply
 - tensor interactions with a multi-order spline parent are not yet supported
 - `kind="cr_cardinal"` currently supports only the default `m=2`
-- `selection_penalty > 0` with shared-block multi-penalty terms remains guarded
+- shared-block multi-penalty terms are accepted by the fixed
+  `selection_penalty > 0` path
 
 ## Regularisation Path
 

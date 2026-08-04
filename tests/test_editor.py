@@ -5294,7 +5294,7 @@ def test_dataset_metrics_use_offset_aware_null_deviance():
     assert metrics["explained_deviance"] == pytest.approx(1.0 - deviance / null_deviance)
 
 
-def test_dataset_metrics_flatten_column_vector_inputs():
+def test_dataset_metrics_reject_column_vector_weights():
     from superglm.editor.evaluation import EvaluationDataset
     from superglm.editor.metrics import compute_dataset_metrics
 
@@ -5330,10 +5330,10 @@ def test_dataset_metrics_flatten_column_vector_inputs():
     )
 
     flat_metrics = compute_dataset_metrics(model, flat)
-    column_metrics = compute_dataset_metrics(model, column)
 
-    for key, value in flat_metrics.items():
-        assert column_metrics[key] == pytest.approx(value)
+    assert np.isfinite(flat_metrics["deviance"])
+    with pytest.raises(ValueError, match="sample_weight must be one-dimensional"):
+        compute_dataset_metrics(model, column)
 
 
 def test_widget_http_summary_and_fixed_offset_refit(editor_model):

@@ -18,6 +18,12 @@ after the model is already chosen.
 it with `fit_mode="fit_reml"` so each fold uses the same fitting story as the
 final model.
 
+The fitting examples on this page assume a Poisson rate response
+(`y = claim_count / exposure`), for which exposure is a case/frequency weight.
+Other families retain their own contract: Tweedie uses strictly positive EDM
+prior weights rather than replication weights. See
+[Families & Dispersion](families.md#weight-semantics).
+
 ```python
 from sklearn.model_selection import KFold
 from superglm.model_selection import cross_validate
@@ -40,6 +46,10 @@ Key outputs:
 - `result.mean_scores` / `result.std_scores`: summary comparisons
 - `result.oof_predictions`: out-of-fold predictions for every training row
 
+Built-in deviance and NLL averages use the fitted family's likelihood size:
+`sum(sample_weight)` for non-Tweedie case/frequency weights and the physical
+observation count for Tweedie EDM prior weights.
+
 Typical metric interpretation:
 
 | Metric | Measures | Better |
@@ -56,6 +66,10 @@ into its own fitted mean.
 
 After cross-validation, refit the chosen candidates on all training data and
 evaluate them on holdout.
+
+The `exposure=` argument to the business-validation helpers below is a
+portfolio aggregation weight. It does not change or infer the fitted model's
+family-specific `sample_weight` contract.
 
 ### Lorenz Curve And Gini
 
@@ -102,9 +116,16 @@ model.plot_diagnostics(X, y, sample_weight=exposure)
 The four-panel diagnostic figure includes:
 
 1. Q-Q with simulation envelope
-2. exposure-weighted calibration
+2. sample-weighted calibration
 3. residuals versus linear predictor
 4. residual histogram with normal overlay
+
+Diagnostic weighting follows the fitted family too: a non-Tweedie
+case/frequency weight repeats a row's contribution without changing its
+response distribution, while a Tweedie prior weight gives row \(i\)
+observation-specific dispersion \(\phi / w_i\). For exact discrete Poisson
+quantile residuals, diagnose raw claim counts with `log(exposure)` as an offset;
+a rate plus frequency weight cannot reconstruct the corresponding count CDF.
 
 For large datasets, the plotting code automatically switches to more efficient
 rendering paths such as hexbin density summaries.

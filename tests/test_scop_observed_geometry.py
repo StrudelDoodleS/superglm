@@ -5,6 +5,27 @@ import pandas as pd
 import pytest
 
 
+def _curvature_solver_reparam(q_raw: int, kind: str):
+    from superglm.solvers.scop import build_scop_solver_reparam
+
+    degree = 3
+    n_interior = q_raw - degree - 1
+    knots = np.concatenate(
+        (
+            np.zeros(degree + 1),
+            np.linspace(0.0, 1.0, n_interior + 2)[1:-1] ** 1.7,
+            np.ones(degree + 1),
+        )
+    )
+    return build_scop_solver_reparam(
+        q_raw,
+        kind=kind,
+        knots=knots,
+        degree=degree,
+        domain=(0.0, 1.0),
+    )
+
+
 def test_scop_curvature_classifier_covers_proven_builtin_pairs():
     """Only analytically equal Fisher/observed pairs may reuse Fisher geometry."""
     from superglm.distributions import (
@@ -536,6 +557,78 @@ def test_gamma_log_latent_hessian_matches_finite_difference_with_intercept():
 
     np.testing.assert_allclose(transformed_cross, expected_cross, rtol=2e-9, atol=2e-9)
     np.testing.assert_allclose(actual, expected_centered, rtol=2e-8, atol=2e-8)
+
+
+def test_curvature_mixed_map_observed_hessian_matches_finite_difference():
+    """Observed REML keeps zero map curvature on the free affine slope."""
+    from superglm.reml.scop_geometry import assemble_observed_scop_hessian
+
+    rng = np.random.default_rng(217)
+    n = 90
+    reparam = _curvature_solver_reparam(7, "concave")
+    basis = rng.normal(size=(n, reparam.q))
+    weights = rng.uniform(0.5, 2.0, size=n)
+    beta_eff = np.array([-0.45, np.log(0.7), np.log(1.1), -0.2, 0.15, -0.35])
+    intercept = 0.2
+    penalty = 0.3 * reparam.penalty_matrix()
+    theta = np.concatenate(([intercept], beta_eff))
+
+    retained_eta = intercept + basis @ reparam.forward(beta_eff)
+    retained_mu = np.exp(retained_eta)
+    y = retained_mu * rng.lognormal(mean=-0.03, sigma=0.18, size=n)
+
+    def gradient(parameters):
+        latent = parameters[1:]
+        mapped = reparam.forward(latent)
+        eta = parameters[0] + basis @ mapped
+        mu = np.exp(eta)
+        negative_score_eta = weights * (1.0 - y / mu)
+        return np.concatenate(
+            (
+                [np.sum(negative_score_eta)],
+                reparam.jacobian_diagonal(latent) * (basis.T @ negative_score_eta)
+                + penalty @ latent,
+            )
+        )
+
+    observed_weights = weights * y / retained_mu
+    negative_score_eta = weights * (1.0 - y / retained_mu)
+    raw_observed_gram = basis.T @ (observed_weights[:, None] * basis)
+    raw_negative_score = basis.T @ negative_score_eta
+    states = {
+        0: {
+            "group_sl": slice(0, reparam.q),
+            "group_name": "concave_x",
+            "beta_eff": beta_eff,
+            "reparam": reparam,
+        }
+    }
+    actual, transformed_cross = assemble_observed_scop_hessian(
+        raw_observed_gram=raw_observed_gram,
+        raw_negative_score=raw_negative_score,
+        penalty=penalty,
+        scop_states=states,
+        XtW1=basis.T @ observed_weights,
+        sum_W=float(np.sum(observed_weights)),
+    )
+
+    epsilon = 2e-5
+    eye = np.eye(theta.size)
+    numerical = np.column_stack(
+        [
+            (gradient(theta + epsilon * step) - gradient(theta - epsilon * step)) / (2.0 * epsilon)
+            for step in eye
+        ]
+    )
+    numerical = 0.5 * (numerical + numerical.T)
+    expected_cross = numerical[1:, 0]
+    expected_centered = (
+        numerical[1:, 1:] - np.outer(expected_cross, expected_cross) / numerical[0, 0]
+    )
+
+    assert abs(raw_negative_score[0]) > 0.1
+    np.testing.assert_allclose(transformed_cross, expected_cross, rtol=2e-8, atol=1e-8)
+    np.testing.assert_allclose(actual, expected_centered, rtol=3e-8, atol=3e-8)
 
 
 @pytest.mark.slow

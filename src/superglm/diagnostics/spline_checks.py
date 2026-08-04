@@ -13,9 +13,62 @@ from numpy.typing import NDArray
 from superglm._frame import FrameLike, as_eager_frame
 
 
+def _redundancy_geometry_weights(model, sample_weight, n_rows: int) -> NDArray:
+    """Validate weights and return the row mass used by spline geometry."""
+    from superglm.distributions import Tweedie
+
+    if n_rows == 0:
+        raise ValueError("X must be non-empty")
+    if sample_weight is None:
+        weights = np.ones(n_rows, dtype=np.float64)
+    elif isinstance(model._distribution, Tweedie):
+        from superglm._utils import _validate_strict_prior_weights
+
+        # Tweedie weights are prior precision, not replicated design rows.
+        _validate_strict_prior_weights(sample_weight, n_rows)
+        weights = np.ones(n_rows, dtype=np.float64)
+    else:
+        from superglm.model.input_validation import _finite_vector
+
+        weights = _finite_vector("sample_weight", sample_weight, n_rows)
+        if np.any(weights < 0.0):
+            raise ValueError("sample_weight must be nonnegative")
+        if not np.any(weights > 0.0):
+            raise ValueError("sample_weight must not be all zero")
+
+    total = float(np.sum(weights, dtype=np.float64))
+    if not np.isfinite(total):
+        raise ValueError("sample_weight must have a finite sum")
+    return weights
+
+
+def _weighted_correlation(x: NDArray, y: NDArray, weights: NDArray) -> float:
+    """Correlation equivalent to replicating rows by integer weights."""
+    positive = weights > 0.0
+    x_active = np.asarray(x[positive], dtype=np.float64)
+    y_active = np.asarray(y[positive], dtype=np.float64)
+    mass = np.asarray(weights[positive], dtype=np.float64)
+    mass /= np.sum(mass, dtype=np.float64)
+    x_centered = x_active - float(np.sum(mass * x_active))
+    y_centered = y_active - float(np.sum(mass * y_active))
+    var_x = float(np.sum(mass * x_centered**2))
+    var_y = float(np.sum(mass * y_centered**2))
+    if np.sqrt(var_x) <= 1e-12 or np.sqrt(var_y) <= 1e-12:
+        return 0.0
+    correlation = float(np.sum(mass * x_centered * y_centered) / np.sqrt(var_x * var_y))
+    return float(np.clip(correlation, -1.0, 1.0))
+
+
 @dataclass
 class SplineRedundancyReport:
-    """Redundancy diagnostics for one spline feature."""
+    """Redundancy diagnostics for one spline feature.
+
+    ``support_mass``, ``adjacent_basis_corr``, and ``effective_rank`` use
+    case/frequency mass for non-Tweedie families. Integer weights therefore
+    match literal row replication. Tweedie weights are validated as finite,
+    strictly positive EDM prior weights, but these geometric summaries use
+    the physical rows rather than treating prior precision as row frequency.
+    """
 
     feature_name: str
     n_knots: int
@@ -36,6 +89,12 @@ def spline_redundancy(
     """Spline redundancy diagnostics for all spline features.
 
     Diagnostic-only. No auto-pruning. Interpretation: "try lower k and refit".
+
+    Non-Tweedie ``sample_weight`` is case/frequency mass, so the support
+    fractions, correlations, and weighted-basis singular values match literal
+    integer row replication. Tweedie ``sample_weight`` is finite, strictly
+    positive EDM prior precision; it is validated but does not alter the
+    physical-row spline geometry summarized here.
     """
     from superglm.features.spline import _SplineBase
 
@@ -43,6 +102,8 @@ def spline_redundancy(
         raise RuntimeError("Model must be fitted.")
 
     frame = as_eager_frame(X)
+    geometry_weight = _redundancy_geometry_weights(model, sample_weight, len(frame))
+    geometry_total = float(np.sum(geometry_weight, dtype=np.float64))
     results = {}
 
     for name, spec in model._specs.items():
@@ -71,7 +132,10 @@ def spline_redundancy(
                 hi = spec._hi
             else:
                 hi = 0.5 * (kn + interior_knots[i + 1])
-            support_mass[i] = np.sum((x_col >= lo) & (x_col <= hi)) / len(x_col)
+            support_mass[i] = float(
+                np.sum(geometry_weight[(x_col >= lo) & (x_col <= hi)], dtype=np.float64)
+                / geometry_total
+            )
 
         # Adjacent basis correlation
         B = spec.transform(x_col)
@@ -79,9 +143,7 @@ def spline_redundancy(
         adj_corr = np.zeros(max(n_cols - 1, 0))
         for j in range(n_cols - 1):
             c1, c2 = B[:, j], B[:, j + 1]
-            s1, s2 = np.std(c1), np.std(c2)
-            if s1 > 1e-12 and s2 > 1e-12:
-                adj_corr[j] = float(np.corrcoef(c1, c2)[0, 1])
+            adj_corr[j] = _weighted_correlation(c1, c2, geometry_weight)
 
         # Coefficient energy in penalized directions
         beta = model.result.beta
@@ -90,7 +152,9 @@ def spline_redundancy(
         coef_energy = beta_combined**2
 
         # Effective rank via singular values of transformed basis
-        sv = np.linalg.svd(B, compute_uv=False)
+        active = geometry_weight > 0.0
+        weighted_basis = B[active] * np.sqrt(geometry_weight[active, None])
+        sv = np.linalg.svd(weighted_basis, compute_uv=False)
         sv_norm = sv / sv[0] if sv[0] > 1e-12 else sv
         effective_rank = float(np.sum(sv_norm > 1e-4))
         small_sv = sv_norm[sv_norm < 0.01]

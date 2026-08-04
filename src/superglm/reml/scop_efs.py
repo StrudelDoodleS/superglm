@@ -183,7 +183,11 @@ def _get_scop_penalty_metadata(st: dict) -> tuple[float, float, NDArray]:
 
 
 def _scop_jacobian_diag(st: dict) -> NDArray:
-    """Return diag(d gamma / d beta_eff), reusing cached gamma where available."""
+    """Return the diagonal of the solver-space coefficient-map Jacobian."""
+    reparam = st.get("reparam")
+    if reparam is not None and hasattr(reparam, "jacobian_diagonal"):
+        beta_eff = np.asarray(st["beta_eff"], dtype=np.float64)
+        return np.asarray(reparam.jacobian_diagonal(beta_eff), dtype=np.float64)
     gamma_eff = st.get("gamma_eff")
     if gamma_eff is not None:
         gamma_eff = np.asarray(gamma_eff, dtype=np.float64)
@@ -332,8 +336,9 @@ def compute_scop_aware_penalty_quad(
     """Compute penalty quadratic with correct SCOP beta_eff contributions.
 
     For non-SCOP groups, result.beta @ S @ result.beta is correct (SSP space).
-    For SCOP groups, result.beta contains gamma_eff = exp(beta_eff), but the
-    penalty is defined on beta_eff: lambda * beta_eff^T @ S_scop @ beta_eff.
+    For SCOP groups, ``result.beta`` contains the elementwise mapped
+    ``gamma_eff = forward(beta_eff)``, but the penalty is defined on
+    ``beta_eff``: ``lambda * beta_eff^T @ S_scop @ beta_eff``.
     We subtract the wrong gamma-space contribution and add the correct
     beta_eff-space contribution.
 
@@ -387,7 +392,7 @@ def assemble_joint_hessian(
     The XtWX_plus_S matrix is in gamma space for SCOP groups: the SCOP
     diagonal block has only ``lambda * S_scop`` (missing data curvature),
     and the cross-blocks ``X_linear^T W B_scop`` lack the SCOP Jacobian
-    factor ``diag(exp(beta_eff))``.
+    factor.
 
     This function:
 
@@ -395,7 +400,7 @@ def assemble_joint_hessian(
        full Newton Hessian in beta_eff space, including data curvature).
     2. Transforms cross-blocks to beta_eff space by scaling columns
        (for ``H[other, scop]``) and rows (for ``H[scop, other]``) by
-       ``j_diag = exp(beta_eff)``, the diagonal of the SCOP Jacobian
+       the diagonal of the SCOP Jacobian
        ``d(gamma_eff)/d(beta_eff)``.
 
     Parameters
@@ -1584,7 +1589,8 @@ def optimize_scop_efs_reml(
     y : ndarray
         Response vector.
     sample_weight : ndarray
-        Sample weights (exposure/frequency).
+        Case/frequency weights for non-Tweedie families and EDM prior weights
+        for Tweedie.
     offset_arr : ndarray
         Offset vector.
     lambdas : dict

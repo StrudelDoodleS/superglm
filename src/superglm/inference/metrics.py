@@ -304,9 +304,23 @@ class ModelMetrics:
 
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
-        self._weights = (
-            np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
-        )
+        if sample_weight is None:
+            self._weights = np.ones(n)
+        else:
+            from superglm.distributions import Tweedie
+
+            if isinstance(self._family, Tweedie):
+                from superglm._utils import _validate_strict_prior_weights
+
+                self._weights = _validate_strict_prior_weights(sample_weight, n)
+            else:
+                from superglm.model.input_validation import _finite_vector
+
+                self._weights = _finite_vector("sample_weight", sample_weight, n)
+                if np.any(self._weights < 0.0):
+                    raise ValueError("sample_weight must be nonnegative")
+                if not np.any(self._weights > 0.0):
+                    raise ValueError("sample_weight must not be all zero")
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)
@@ -415,9 +429,10 @@ class ModelMetrics:
     def phi(self) -> float:
         return self._result.phi
 
-    @property
+    @cached_property
     def deviance(self) -> float:
-        return self._result.deviance
+        """Weighted residual deviance on this object's evaluation rows."""
+        return float(np.sum(self._weights * self._family.deviance_unit(self._y, self._mu)))
 
     @cached_property
     def log_likelihood(self) -> float:
@@ -425,43 +440,16 @@ class ModelMetrics:
 
     @cached_property
     def _null_mu(self) -> NDArray:
-        """Null model prediction: intercept-only MLE, offset-aware.
+        """Authoritative offset-aware intercept-only null prediction."""
+        from superglm.model.fit_ops import _compute_null_mu
 
-        Without offset: mu = weighted mean of y (exact for canonical links).
-        With offset: solves for b0 via Newton so that sum(w*(y-mu))=0
-        where mu_i = link^{-1}(b0 + offset_i).
-        """
-        from superglm.distributions import Binomial, Gaussian, clip_mu
-        from superglm.links import stabilize_eta
-
-        y_bar = float(np.average(self._y, weights=self._weights))
-        if isinstance(self._family, Binomial):
-            y_bar = np.clip(y_bar, 1e-3, 1 - 1e-3)
-        elif isinstance(self._family, Gaussian):
-            y_bar = float(y_bar)
-        else:
-            y_bar = max(y_bar, 1e-10)
-
-        if np.all(self._offset == 0):
-            return np.full(self.n_obs, y_bar)
-
-        # Newton iterations for intercept-only with offset
-        b0 = float(self._link.link(np.atleast_1d(y_bar))[0]) - np.average(
-            self._offset, weights=self._weights
+        return _compute_null_mu(
+            self._y,
+            self._weights,
+            self._offset,
+            self._family,
+            self._link,
         )
-        for _ in range(25):
-            eta = stabilize_eta(b0 + self._offset, self._link)
-            mu = clip_mu(self._link.inverse(eta), self._family)
-            dmu = self._link.deriv_inverse(eta)
-            score = np.sum(self._weights * (self._y - mu) * dmu / self._family.variance(mu))
-            info = np.sum(self._weights * dmu**2 / self._family.variance(mu))
-            step = score / max(info, 1e-10)
-            b0 += step
-            if abs(step) < 1e-8:
-                break
-
-        eta = stabilize_eta(b0 + self._offset, self._link)
-        return clip_mu(self._link.inverse(eta), self._family)
 
     @cached_property
     def null_log_likelihood(self) -> float:
@@ -475,20 +463,35 @@ class ModelMetrics:
     @cached_property
     def explained_deviance(self) -> float:
         """1 - deviance / null_deviance. Analogous to R-squared."""
-        return 1.0 - self.deviance / self.null_deviance
+        from superglm._utils import _explained_deviance
+
+        return _explained_deviance(
+            self.deviance,
+            self.null_deviance,
+            self._y,
+            self._null_mu,
+            self._weights,
+        )
 
     @property
     def aic(self) -> float:
         return -2.0 * self.log_likelihood + 2.0 * self.effective_df
 
+    @cached_property
+    def _likelihood_size(self) -> float:
+        """Family-specific likelihood size used by finite-sample criteria."""
+        from superglm.solvers.dispersion import dispersion_likelihood_size
+
+        return dispersion_likelihood_size(self._family, self._weights)
+
     @property
     def bic(self) -> float:
-        return -2.0 * self.log_likelihood + np.log(self.n_obs) * self.effective_df
+        return -2.0 * self.log_likelihood + np.log(self._likelihood_size) * self.effective_df
 
     @property
     def aicc(self) -> float:
         edf = self.effective_df
-        n = self.n_obs
+        n = self._likelihood_size
         denom = n - edf - 1.0
         if denom <= 0:
             return np.inf
@@ -520,12 +523,23 @@ class ModelMetrics:
     @cached_property
     def eta(self) -> NDArray:
         """Linear predictor (link-scale fitted values)."""
-        return self._link.link(self._mu)
+        return self._working_eta_mu[0]
 
     # ── Residuals ─────────────────────────────────────────────────
 
     def residuals(self, kind: str = "deviance", *, seed: int | None = 42) -> NDArray:
         """Compute residuals of the specified type.
+
+        Deviance and Pearson residuals use a compressed-row aggregate
+        representation: a case/frequency-weighted row is multiplied by
+        ``sqrt(sample_weight)`` so its squared residual equals the sum of the
+        squared residuals from literal replicated rows. Response, working, and
+        quantile residuals retain per-row semantics and are not multiplied by
+        frequency weights. Tweedie weights remain prior precision weights in
+        every diagnostic where the family distribution depends on them.
+        Influence diagnostics combine the aggregate residual with compressed
+        leverage and therefore describe deletion of the whole weighted cell,
+        not deletion of one literal expanded copy.
 
         Parameters
         ----------
@@ -550,8 +564,7 @@ class ModelMetrics:
             return y - mu
 
         if kind == "working":
-            eta = self._link.link(mu)
-            dmu_deta = self._link.deriv_inverse(eta)
+            dmu_deta = self._link.deriv_inverse(self.eta)
             return (y - mu) / dmu_deta
 
         if kind == "quantile":
@@ -565,10 +578,10 @@ class ModelMetrics:
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
 
-        Weight-aware: for rate-encoded data (e.g. Poisson frequency with
-        exposure weights), the CDF is computed on the count scale
-        (y*w ~ Poisson(mu*w)) so that residuals correctly reflect the
-        precision of each observation.
+        Non-Tweedie case/frequency weights do not change an observation's
+        family CDF; integer weights represent repeated copies of that same
+        response. Tweedie EDM prior weights do change the per-row distribution
+        through ``phi / w`` and therefore remain in its CDF construction.
 
         For discrete families (Poisson, NB2, Binomial), uses jittered
         uniform on the CDF interval [F(y-1), F(y)]. For continuous
@@ -602,34 +615,25 @@ class ModelMetrics:
             b = np.where(y == 0, 1.0 - mu, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
-            # Rate encoding: count = y * w ~ Poisson(mu * w).
-            # CDF on the count scale, then jitter.
-            count = np.round(y * w)
-            lam = mu * w
+            count = np.round(y)
+            lam = mu
             a = poisson.cdf(count - 1, lam)
             b = poisson.cdf(count, lam)
             u = rng.uniform(a, b)
         elif isinstance(self._family, NegativeBinomial):
             theta = self._family.theta
             p_nb = theta / (mu + theta)
-            # NB2: count = y * w ~ NB(theta, p_nb) with mean mu * w.
-            # For weighted NB2, adjust n and p to match mean = mu * w:
-            # E[Y] = n*(1-p)/p = mu*w => n = theta*w, p = theta/(mu+theta)
-            # But theta*w may not be integer; use scipy which handles float n.
-            count = np.round(y * w)
-            n_param = theta * w
+            count = np.round(y)
+            n_param = theta
             a = nbinom.cdf(count - 1, n=n_param, p=p_nb)
             b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
-            # Gamma: effective shape = w/phi, scale = mu*phi/w
-            # E[Y] = mu, Var[Y] = mu^2 * phi / w
-            shape = w / self.phi
-            scale = mu * self.phi / w
+            shape = 1.0 / self.phi
+            scale = mu * self.phi
             u = gamma_dist.cdf(y, a=shape, scale=scale)
         elif isinstance(self._family, Gaussian):
-            # Effective variance = phi / w
-            u = norm.cdf(y, loc=mu, scale=np.sqrt(self.phi / w))
+            u = norm.cdf(y, loc=mu, scale=np.sqrt(self.phi))
         elif isinstance(self._family, Tweedie):
             # Tweedie p in (1,2): compound Poisson-Gamma.
             # With weights: lambda and scale both depend on w.
@@ -928,12 +932,22 @@ class ModelMetrics:
 
     @property
     def leverage(self) -> NDArray:
-        """Hat matrix diagonal. sum(h) approx effective_df - 1 (excludes intercept)."""
+        """Compressed-row hat diagonal under the supplied evaluation weights.
+
+        This is the influence of one weighted cell as represented in the
+        compressed design, not the leverage of each literal expanded copy.
+        ``sum(h)`` is approximately effective_df - 1 (excluding the intercept).
+        """
         return self._hat_diag
 
     @cached_property
     def cooks_distance(self) -> NDArray:
-        """Cook's distance for each observation."""
+        """Compressed-row aggregate Cook's distance.
+
+        Both the Pearson residual contribution and leverage correspond to
+        deletion of the supplied weighted cell, rather than deletion of one
+        literal expanded copy.
+        """
         h = self._hat_diag
         r_p = self.residuals("pearson")
         p = self.effective_df
@@ -944,7 +958,12 @@ class ModelMetrics:
 
     @cached_property
     def std_deviance_residuals(self) -> NDArray:
-        """Standardized deviance residuals: r_dev / sqrt(phi * (1 - h))."""
+        """Standardized compressed-row deviance residuals.
+
+        Equal to ``r_dev / sqrt(phi * (1 - h))`` using aggregate weighted
+        residual and compressed-row leverage, so it represents deletion of the
+        whole weighted cell rather than one literal expanded copy.
+        """
         h = self._hat_diag
         r = self.residuals("deviance")
         scale = np.sqrt(self.phi * np.maximum(1.0 - h, 1e-10))
@@ -952,7 +971,12 @@ class ModelMetrics:
 
     @cached_property
     def std_pearson_residuals(self) -> NDArray:
-        """Standardized Pearson residuals: r_pear / sqrt(phi * (1 - h))."""
+        """Standardized compressed-row Pearson residuals.
+
+        Equal to ``r_pear / sqrt(phi * (1 - h))`` using aggregate weighted
+        residual and compressed-row leverage, so it represents deletion of the
+        whole weighted cell rather than one literal expanded copy.
+        """
         h = self._hat_diag
         r = self.residuals("pearson")
         scale = np.sqrt(self.phi * np.maximum(1.0 - h, 1e-10))
@@ -973,12 +997,35 @@ class ModelMetrics:
         return np.ones(len(self._result.beta), dtype=bool)
 
     @cached_property
-    def coefficient_se(self) -> dict[str, NDArray]:
-        """Per-group coefficient standard errors (phi-scaled).
+    def _coefficient_dispersion(self) -> float:
+        """Dispersion used by the explicitly quasi-likelihood SE accessor."""
+        if not self._known_scale:
+            return max(float(self.phi), 0.0)
+        from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
-        Uses estimated phi (quasi-likelihood correction). For Poisson,
-        this gives quasi-Poisson SEs. For Gamma/Tweedie, phi is always
-        estimated so this is the standard choice.
+        residual_df = pearson_residual_degrees_of_freedom(
+            self._family,
+            self._weights,
+            self.effective_df,
+        )
+        return max(float(self.pearson_chi2) / residual_df, 0.0)
+
+    @cached_property
+    def coefficient_se(self) -> dict[str, NDArray]:
+        """Per-group quasi-likelihood coefficient standard errors.
+
+        For known-scale families such as Poisson and Binomial, the covariance
+        is scaled by the Pearson dispersion estimate
+        ``pearson_chi2 / residual_df``, where ``residual_df`` follows the
+        family's sample-weight semantics. For estimated-scale families such
+        as Gaussian, Gamma, and Tweedie, it uses the fitted dispersion
+        ``phi``. Use :attr:`coefficient_se_raw` for the unscaled,
+        exact-family covariance.
+
+        This accessor is an explicit quasi-likelihood diagnostic. Rendered
+        coefficient tables retain the fitted-family scale (and hence
+        ``phi=1`` for known-scale families) unless a quasi-summary option is
+        requested by a future API.
 
         Inactive groups get all-zero SEs.
 
@@ -987,7 +1034,7 @@ class ModelMetrics:
         uncertainty (same convention as glmnet / mgcv).
         """
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        phi = self.phi
+        dispersion = self._coefficient_dispersion
         selected_names = selected_group_name_set(
             self._result,
             self._groups,
@@ -1006,7 +1053,7 @@ class ModelMetrics:
                     1 + ag.end,
                     dtype=np.intp,
                 )
-                var_diag = phi * covariance_selected_diagonal(
+                var_diag = dispersion * covariance_selected_diagonal(
                     XtWX_inv_aug,
                     augmented_indices,
                 )
@@ -1019,9 +1066,11 @@ class ModelMetrics:
     def coefficient_se_raw(self) -> dict[str, NDArray]:
         """Per-group coefficient standard errors assuming phi=1.
 
-        For Poisson: these assume the Poisson variance is exactly correct
-        (no overdispersion). For Gamma/Tweedie: these differ from
-        coefficient_se since phi != 1.
+        For known-scale families these are the exact-family standard errors,
+        without the Pearson quasi-likelihood correction applied by
+        :attr:`coefficient_se`. For estimated-scale families these omit the
+        fitted dispersion and therefore differ from :attr:`coefficient_se`
+        whenever ``phi != 1``.
 
         Inactive groups get all-zero SEs.
         """
@@ -1054,21 +1103,23 @@ class ModelMetrics:
 
     @cached_property
     def intercept_se(self) -> float:
-        """Standard error of the intercept (phi-scaled).
+        """Quasi-likelihood standard error of the intercept.
 
         Computed from the [0,0] element of the augmented Fisher information
         inverse, which accounts for covariance between the intercept and
-        all other coefficients.
+        all other coefficients. Uses the same dispersion convention as
+        :attr:`coefficient_se`, including Pearson dispersion for known-scale
+        families. Rendered coefficient tables retain fitted-family scale.
         """
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
             return 0.0
-        return float(np.sqrt(max(self.phi, 0.0) * icpt_var))
+        return float(np.sqrt(self._coefficient_dispersion * icpt_var))
 
     @cached_property
     def intercept_se_raw(self) -> float:
-        """Standard error of the intercept assuming phi=1."""
+        """Exact-family intercept SE for known scale, otherwise assuming phi=1."""
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])
         if icpt_var <= 0:
@@ -1091,7 +1142,8 @@ class ModelMetrics:
         For categoricals: returns ``{levels, se_log_relativity}`` per level.
         For numerics: returns ``{se_coef}``.
 
-        Uses phi-scaled covariance (quasi-likelihood) when ``phi_scale=True``.
+        Uses the same quasi-likelihood dispersion as
+        :attr:`coefficient_se` when ``phi_scale=True``.
 
         Parameters
         ----------
@@ -1116,7 +1168,7 @@ class ModelMetrics:
         )
         if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
             _, _, _, XtWX_inv_aug, active_groups = self._active_info
-            phi = self.phi if phi_scale else 1.0
+            phi = self._coefficient_dispersion if phi_scale else 1.0
             se = feature_se_from_cov(
                 name,
                 covariance_slope_view(XtWX_inv_aug, scale=phi),
@@ -1148,7 +1200,7 @@ class ModelMetrics:
 
         # Gather covariance from all active subgroups (use augmented inverse)
         _, _, _, XtWX_inv_aug, active_groups = self._active_info
-        phi = self.phi if phi_scale else 1.0
+        phi = self._coefficient_dispersion if phi_scale else 1.0
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
             if isinstance(spec, _SplineBase):
@@ -1193,7 +1245,12 @@ class ModelMetrics:
             return {"se": se}
 
     def feature_se(self, name: str, n_points: int = 200) -> dict[str, Any]:
-        """SE of the log-relativity curve/levels for a feature."""
+        """Quasi-likelihood SE of a feature curve, levels, or coefficient.
+
+        Uses the same dispersion convention as :attr:`coefficient_se`,
+        including Pearson dispersion for known-scale families. Rendered
+        coefficient tables retain fitted-family scale.
+        """
         return self._feature_se_impl(name, n_points=n_points, phi_scale=True)
 
     # ── Summary ───────────────────────────────────────────────────
@@ -1248,6 +1305,7 @@ class ModelMetrics:
                 self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None
             ),
             sample_weights=self._weights,
+            distribution=self._family,
         )
 
     def summary(
@@ -1257,6 +1315,16 @@ class ModelMetrics:
         level_display: str = "expanded",
     ) -> ModelSummary:
         """Formatted model summary with coefficient table.
+
+        The rendered coefficient table uses fitted-family covariance:
+        known-scale families retain ``phi=1`` and estimated-scale families
+        use their fitted ``phi``. It deliberately does not reuse the explicit
+        Pearson quasi-likelihood accessors :attr:`coefficient_se`,
+        :attr:`intercept_se`, or :attr:`feature_se`.
+
+        The dict-like ``standard_errors`` payload retains the historical
+        ``coefficient_se`` key for the explicit quasi-likelihood accessor and
+        labels its scale separately from the rendered fitted-family table.
 
         Parameters
         ----------
@@ -1309,6 +1377,15 @@ class ModelMetrics:
             "standard_errors": {
                 "coefficient_se": self.coefficient_se,
                 "coefficient_se_raw": self.coefficient_se_raw,
+                "coefficient_se_scale": "quasi-likelihood",
+                "rendered_coefficient_se_scale": "fitted-family",
+            },
+            "diagnostic_contract": {
+                "deviance_pearson_residuals": "compressed-row aggregate",
+                "response_working_quantile_residuals": "per-row",
+                "leverage_standardized_residuals_cooks_distance": (
+                    "compressed weighted-cell deletion"
+                ),
             },
         }
 

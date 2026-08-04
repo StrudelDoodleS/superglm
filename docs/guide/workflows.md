@@ -99,7 +99,7 @@ model = SuperGLM(
         "BonusMalus": PSpline(n_knots=10, constraint=Constraint.fit.increasing),
     },
 )
-model.fit_reml(df, y, sample_weight=exposure)
+model.fit_reml(df, y)
 ```
 
 Use post-fit monotone repair only as a manual fallback.
@@ -110,16 +110,25 @@ Use the same folds across all candidate models and keep holdout untouched until
 you are ready to judge challengers.
 
 ```python
+from sklearn.model_selection import KFold
+from superglm import cross_validate
+
 result = cross_validate(
     model,
     train_df,
     y_train,
+    cv=KFold(n_splits=5, shuffle=True, random_state=42),
     sample_weight=exposure_train,
     fit_mode="fit_reml",
     scoring=("deviance", "nll", "gini"),
     return_oof=True,
 )
 ```
+
+Built-in deviance and negative-log-likelihood averages use the fitted family's
+likelihood size: `sum(sample_weight)` for non-Tweedie case/frequency weights,
+and the physical observation count for Tweedie EDM prior weights. This keeps
+fold and pooled scores on the same scale as fitting.
 
 Then refit on all training data and evaluate:
 

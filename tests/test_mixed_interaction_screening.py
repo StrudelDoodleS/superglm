@@ -624,11 +624,12 @@ def _fremtpl_features():
 
 def _fremtpl_frame(n_rows=80_000):
     df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
-    # The weight contract is Var(y) = phi * V(mu) / w, so an exposure-weighted
-    # response is the claim RATE, not the count -- counts weighted by exposure
-    # under-estimate phi and inflate every z in the sweep.  Clip the exposure
-    # first, exactly as tests/test_realdata_parity.py::_prep_freq does, so a
-    # near-zero denominator cannot manufacture a several-hundred-claim rate.
+    # This fixture uses the documented Poisson case/frequency-weight encoding:
+    # the response is the claim rate and exposure controls its likelihood
+    # contribution. This is not Tweedie's Var(y) = phi * V(mu) / w prior-weight
+    # contract. Clip exposure first, exactly as
+    # tests/test_realdata_parity.py::_prep_freq does, so a near-zero denominator
+    # cannot manufacture a several-hundred-claim rate.
     df["Exposure"] = df["Exposure"].clip(lower=0.01)
     # log1p is the house transform for this column (see the credibility demo).
     df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))

@@ -5,6 +5,32 @@ from __future__ import annotations
 from superglm._frame import as_eager_frame
 
 
+class TermsUnset:
+    """Sentinel whose repr preserves the historical public signature display."""
+
+    def __repr__(self) -> str:
+        return "None"
+
+
+TERMS_UNSET = TermsUnset()
+
+
+def _is_scalar_term_selector(model, terms) -> bool:
+    """Identify one hashable configured term without expanding tuple labels."""
+    if isinstance(terms, str):
+        return True
+    try:
+        if terms in model._specs or terms in model._interaction_specs:
+            return True
+    except TypeError:
+        return False
+    try:
+        iter(terms)
+    except TypeError:
+        return True
+    return False
+
+
 def resolve_ci(ci):
     """Normalize the ``ci`` parameter to an interval string or None."""
     if ci is None or ci is False:
@@ -21,7 +47,7 @@ def resolve_ci(ci):
 
 def plot(
     model,
-    terms=None,
+    terms=TERMS_UNSET,
     *,
     kind="global",
     ci="pointwise",
@@ -63,10 +89,12 @@ def plot(
 
     interval = resolve_ci(ci)
 
-    if terms is None:
+    if terms is TERMS_UNSET or (
+        terms is None and None not in model._specs and None not in model._interaction_specs
+    ):
         names = list(model._feature_order)
         mode = "all_main"
-    elif isinstance(terms, str):
+    elif _is_scalar_term_selector(model, terms):
         names = [terms]
         in_main = terms in model._specs
         in_inter = terms in model._interaction_specs
@@ -208,7 +236,7 @@ def plot(
 
 def plot_data(
     model,
-    terms=None,
+    terms=TERMS_UNSET,
     *,
     kind="global",
     ci="pointwise",
@@ -236,10 +264,12 @@ def plot_data(
 
     interval = resolve_ci(ci)
 
-    if terms is None:
+    if terms is TERMS_UNSET or (
+        terms is None and None not in model._specs and None not in model._interaction_specs
+    ):
         names = list(model._feature_order)
         mode = "all_main"
-    elif isinstance(terms, str):
+    elif _is_scalar_term_selector(model, terms):
         names = [terms]
         in_main = terms in model._specs
         in_inter = terms in model._interaction_specs

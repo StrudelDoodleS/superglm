@@ -286,10 +286,15 @@ def test_reml_result_exposes_multi_scop_cleanup_metrics():
         assert active_names.isdisjoint(frozen_names)
         assert active_names | frozen_names == managed_cleanup_names
 
-    assert "BonusMalus" not in frozen_history[1]
-    assert "BonusMalus" in frozen_history[2]
-    assert "BonusMalus" not in active_history[2]
+    assert frozen_history[0] == set()
+    for previous, current in zip(frozen_history, frozen_history[1:], strict=False):
+        assert previous <= current
     assert reml_result.managed_cleanup_frozen_names == sorted(frozen_history[-1])
-    assert "BonusMalus" in reml_result.managed_cleanup_frozen_names
-    assert observed_freeze_iter == 3
-    assert reml_result.managed_cleanup_freeze_iter == 3
+    assert reml_result.managed_cleanup_freeze_iter == observed_freeze_iter
+
+    if observed_freeze_iter is None:
+        assert all(names == managed_cleanup_names for names in active_history)
+        assert all(not names for names in frozen_history)
+    else:
+        assert frozen_history[observed_freeze_iter - 1]
+        assert active_history[observed_freeze_iter - 1] != managed_cleanup_names

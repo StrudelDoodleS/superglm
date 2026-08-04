@@ -66,6 +66,25 @@ class TestClassifierContract:
         assert df.min() < 0
         assert df.max() > 0
 
+    def test_decision_function_preserves_raw_extreme_offset_log_odds(self):
+        y = np.tile(np.array([0.0, 1.0]), 30)
+        training = pd.DataFrame({"off": np.zeros(len(y))})
+        clf = SuperGLMClassifier(
+            selection_penalty=0.0,
+            features={},
+            offset="off",
+        ).fit(training, y)
+        scoring = pd.DataFrame({"off": [-100.0, 100.0]})
+
+        decision = clf.decision_function(scoring)
+        probability = clf.predict_proba(scoring)[:, 1]
+
+        assert decision[0] < -90.0
+        assert decision[1] > 90.0
+        assert decision[1] - decision[0] == pytest.approx(200.0)
+        assert np.all(np.isfinite(probability))
+        assert np.all((probability > 0.0) & (probability < 1.0))
+
     def test_predict_proba_consistent_with_predict(self, binary_data):
         X, y = binary_data
         clf = SuperGLMClassifier(selection_penalty=0)

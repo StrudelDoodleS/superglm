@@ -100,10 +100,19 @@ def summary(
     edf = res.effective_df
     n = fs.n_obs
     ll = fs.log_likelihood
+    from superglm.solvers.dispersion import dispersion_likelihood_size
+
+    likelihood_weights = getattr(model, "_fit_weights", None)
+    if likelihood_weights is None:
+        likelihood_weights = np.ones(n, dtype=np.float64)
+    likelihood_size = dispersion_likelihood_size(
+        model._distribution,
+        likelihood_weights,
+    )
 
     aic = -2 * ll + 2 * edf
-    bic = -2 * ll + np.log(n) * edf
-    denom = n - edf - 1.0
+    bic = -2 * ll + np.log(likelihood_size) * edf
+    denom = likelihood_size - edf - 1.0
     aicc = aic + 2 * edf * (edf + 1) / denom if denom > 0 else np.inf
     selected_names = selected_group_name_set(res, model._groups, penalty=fitted_penalty(model))
     n_active = len(selected_names)
@@ -281,6 +290,7 @@ def summary(
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
+        distribution=model._distribution,
     )
     phi = res.phi
     se_dict: dict[str, np.ndarray] = {}
@@ -310,6 +320,8 @@ def summary(
     data["standard_errors"] = {
         "coefficient_se": se_dict,
         "coefficient_se_raw": se_raw_dict,
+        "coefficient_se_scale": "fitted-family",
+        "rendered_coefficient_se_scale": "fitted-family",
     }
     basis_detail = build_basis_detail(
         groups=model._groups,

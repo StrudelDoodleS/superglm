@@ -209,6 +209,26 @@ def _requires_reml_term_names(model) -> list[str]:
     return [name for name, spec in configured_terms if getattr(spec, "requires_reml", False)]
 
 
+def _drop1_reduced_frame(model, X: FrameLike) -> FrameLike:
+    """Select a reduced model's physical columns without changing label identity."""
+    from superglm._frame import as_eager_frame
+
+    frame = as_eager_frame(X)
+    columns = list(model._feature_order)
+    for name in model._interaction_order:
+        columns.extend(model._interaction_specs[name].parent_names)
+    selected = tuple(dict.fromkeys(columns))
+    if not selected:
+        # An intercept-only refit still needs the original row count.
+        return X
+    if frame.backend == "pandas":
+        # A plain Python list makes pandas coerce a mixed label sequence such
+        # as (None, "") to [nan, ""]. An object Index preserves the exact
+        # arbitrary-hashable labels configured on the model.
+        return cast(pd.DataFrame, frame.native).loc[:, pd.Index(selected, dtype=object)]
+    return frame.select_native(selected)
+
+
 def drop1(
     model,
     X: FrameLike,
@@ -218,12 +238,24 @@ def drop1(
     *,
     test: str = "Chisq",
 ) -> pd.DataFrame:
-    """Drop-one deviance analysis for each feature."""
+    """Drop-one deviance analysis for each feature.
+
+    ``test="Chisq"`` compares ``delta_deviance / phi`` with a chi-square
+    reference on the effective-d.f. difference. ``test="F"`` compares
+    ``(delta_deviance / delta_df) / phi`` with an F reference whose residual
+    d.f. follows the fitted family's sample-weight contract. Known-scale
+    families retain their fitted unit dispersion in both paths. For an
+    estimated-scale fit with exactly zero dispersion, an unchanged reduced
+    deviance is reported as statistic 0 and p-value 1; a nonzero deviance
+    change is undefined and raises an explicit error.
+    """
     from scipy.stats import chi2
     from scipy.stats import f as f_dist
 
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling drop1().")
+    if test not in {"Chisq", "F"}:
+        raise ValueError(f"test must be 'Chisq' or 'F', got {test!r}")
 
     reml_only_terms = _requires_reml_term_names(model)
     if reml_only_terms:
@@ -237,6 +269,17 @@ def drop1(
     edf_full = model._result.effective_df
     n = len(y) if not hasattr(y, "__len__") else len(y)
     phi = model._result.phi
+    if sample_weight is None:
+        diagnostic_weights = np.ones(n, dtype=np.float64)
+    else:
+        from superglm.distributions import Tweedie
+
+        if isinstance(model._distribution, Tweedie):
+            from superglm._utils import _validate_strict_prior_weights
+
+            diagnostic_weights = _validate_strict_prior_weights(sample_weight, n)
+        else:
+            diagnostic_weights = np.asarray(sample_weight, dtype=np.float64)
 
     rows = []
     for name in model._feature_order:
@@ -247,51 +290,39 @@ def drop1(
             if p1 == name or p2 == name:
                 drop_set.add(iname)
 
-        remaining = [f for f in model._feature_order if f not in drop_set]
-
-        if not remaining:
-            from superglm.distributions import Binomial, Gaussian, clip_mu
-            from superglm.links import stabilize_eta
-
-            y_arr = np.asarray(y, dtype=np.float64)
-            w = (
-                np.ones(n, dtype=np.float64)
-                if sample_weight is None
-                else np.asarray(sample_weight, dtype=np.float64)
-            )
-            y_mean = float(np.average(y_arr, weights=w))
-            if isinstance(model._distribution, Binomial):
-                y_mean = np.clip(y_mean, 1e-3, 1 - 1e-3)
-            elif isinstance(model._distribution, Gaussian):
-                y_mean = float(y_mean)
-            else:
-                y_mean = max(y_mean, 1e-10)
-
-            if offset is not None:
-                offset_arr = np.asarray(offset, dtype=np.float64)
-                b0 = float(model._link.link(np.atleast_1d(y_mean))[0]) - np.average(
-                    offset_arr, weights=w
-                )
-                eta0 = stabilize_eta(b0 + offset_arr, model._link)
-                null_mu = clip_mu(model._link.inverse(eta0), model._distribution)
-            else:
-                null_mu = np.full(n, y_mean)
-            dev_reduced = float(np.sum(w * model._distribution.deviance_unit(y_arr, null_mu)))
-            edf_reduced = 1.0
-        else:
-            reduced = model._clone_without_features(drop_set)
-            reduced.fit(X, y, sample_weight=sample_weight, offset=offset)
-            dev_reduced = reduced.result.deviance
-            edf_reduced = reduced.result.effective_df
+        reduced = model._clone_without_features(drop_set)
+        reduced_X = _drop1_reduced_frame(reduced, X)
+        reduced.fit(reduced_X, y, sample_weight=sample_weight, offset=offset)
+        dev_reduced = reduced.result.deviance
+        edf_reduced = reduced.result.effective_df
         delta_dev = dev_reduced - dev_full
         delta_df = max(edf_full - edf_reduced, 1e-4)
 
-        if test == "F":
+        if not np.isfinite(phi) or phi < 0.0:
+            raise ValueError(
+                f"drop1 requires a finite nonnegative fitted dispersion; got phi={phi!r}"
+            )
+        if phi == 0.0:
+            if delta_dev != 0.0:
+                raise ValueError(
+                    f"drop1 {test} statistic for feature {name!r} is undefined: "
+                    "the fitted dispersion phi is zero but dropping the feature "
+                    f"changes deviance by {delta_dev!r}"
+                )
+            stat = 0.0
+            p_value = 1.0
+        elif test == "F":
+            from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+
             stat = (delta_dev / delta_df) / phi
-            resid_df = max(n - edf_full, 1.0)
+            resid_df = pearson_residual_degrees_of_freedom(
+                model._distribution,
+                diagnostic_weights,
+                edf_full,
+            )
             p_value = float(f_dist.sf(stat, delta_df, resid_df))
         else:
-            stat = delta_dev
+            stat = delta_dev / phi
             p_value = float(chi2.sf(stat, delta_df))
 
         rows.append(

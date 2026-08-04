@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 class ZeroInflationResult:
     """Result from :func:`zero_inflation_index`."""
 
-    observed_zeros: int
+    observed_zeros: float
     expected_zeros: float
     zero_inflation_index: float
     ratio: float
@@ -73,7 +73,7 @@ def _check_family(model: SuperGLM, allowed: set[str], func_name: str) -> str:
     """Check that the model's family is in the allowed set."""
     from superglm.distributions import NegativeBinomial, Poisson
 
-    family = model._distribution
+    family = getattr(model, "_distribution")
     if isinstance(family, Poisson):
         name = "Poisson"
     elif isinstance(family, NegativeBinomial):
@@ -84,6 +84,25 @@ def _check_family(model: SuperGLM, allowed: set[str], func_name: str) -> str:
     if name not in allowed:
         raise ValueError(f"{func_name} requires family in {sorted(allowed)}, got {name}.")
     return name
+
+
+def _frequency_weights(sample_weight, n: int) -> tuple[NDArray, float]:
+    """Validate case/frequency weights and return their likelihood size."""
+    from superglm.model.input_validation import _finite_vector
+
+    if sample_weight is None:
+        weights = np.ones(n, dtype=np.float64)
+    else:
+        weights = _finite_vector("sample_weight", sample_weight, n)
+        if np.any(weights < 0.0):
+            raise ValueError("sample_weight must be nonnegative")
+        if not np.any(weights > 0.0):
+            raise ValueError("sample_weight must not be all zero")
+
+    likelihood_size = float(np.sum(weights, dtype=np.float64))
+    if not np.isfinite(likelihood_size):
+        raise ValueError("sample_weight must have a finite sum")
+    return weights, likelihood_size
 
 
 def _per_obs_ll_poisson(y: NDArray, mu: NDArray) -> NDArray:
@@ -120,18 +139,33 @@ def _per_obs_ll_binomial(y: NDArray, mu: NDArray) -> NDArray:
     return y * np.log(mu_safe) + (1 - y) * np.log(1 - mu_safe)
 
 
-def _per_obs_ll_tweedie(y: NDArray, mu: NDArray, phi: float, p: float) -> NDArray:
-    """Per-observation Tweedie log-likelihood (unweighted density)."""
+def _per_obs_ll_tweedie(
+    y: NDArray,
+    mu: NDArray,
+    phi: float,
+    p: float,
+    sample_weight=None,
+) -> NDArray:
+    """Per-observation Tweedie log-density at dispersion ``phi / w_i``."""
     from superglm.profiling.tweedie import tweedie_logpdf
 
-    return tweedie_logpdf(y, mu, phi, p)
+    return tweedie_logpdf(y, mu, phi, p, weights=sample_weight)
 
 
-def _per_obs_log_likelihood(model: SuperGLM, X, y: NDArray, offset=None) -> NDArray:
+def _per_obs_log_likelihood(
+    model: SuperGLM,
+    X,
+    y: NDArray,
+    offset=None,
+    *,
+    sample_weight=None,
+) -> NDArray:
     """Compute per-observation log-likelihood for any supported family.
 
-    Returns the *unweighted* log-density at each observation. Callers
-    (e.g. vuong_test) handle observation weighting separately.
+    Non-Tweedie results are unweighted row log-densities; callers apply
+    case/frequency weights as literal replication. For Tweedie,
+    ``sample_weight`` is an EDM prior weight and is part of each row's
+    density through the dispersion ``phi / w_i``.
     """
     from superglm.distributions import (
         Binomial,
@@ -144,7 +178,7 @@ def _per_obs_log_likelihood(model: SuperGLM, X, y: NDArray, offset=None) -> NDAr
 
     mu = _get_mu(model, X, y, offset)
     y = np.asarray(y, dtype=float)
-    family = model._distribution
+    family = getattr(model, "_distribution")
     result = model.result
 
     if isinstance(family, Poisson):
@@ -158,7 +192,13 @@ def _per_obs_log_likelihood(model: SuperGLM, X, y: NDArray, offset=None) -> NDAr
     elif isinstance(family, Binomial):
         return _per_obs_ll_binomial(y, mu)
     elif isinstance(family, Tweedie):
-        return _per_obs_ll_tweedie(y, mu, result.phi, family.p)
+        return _per_obs_ll_tweedie(
+            y,
+            mu,
+            result.phi,
+            family.p,
+            sample_weight=sample_weight,
+        )
     else:
         raise ValueError(f"Unsupported family: {type(family).__name__}")
 
@@ -177,6 +217,8 @@ def zero_inflation_index(
     """Descriptive zero-inflation index.
 
     Computes the ratio of observed to expected zeros under the assumed family.
+    ``sample_weight`` is a case/frequency weight: both counts and the index
+    denominator use the corresponding replicated-row measure.
 
     Parameters
     ----------
@@ -185,7 +227,8 @@ def zero_inflation_index(
     mu : array-like
         Fitted mean values.
     sample_weight : array-like or None
-        Optional observation weights (used for counting).
+        Optional nonnegative case/frequency weights. Integer weights are
+        equivalent to literal row replication.
     family : str
         Family assumption: ``"poisson"`` or ``"nb2"``.
     theta : float or None
@@ -195,9 +238,17 @@ def zero_inflation_index(
     -------
     ZeroInflationResult
     """
-    y = np.asarray(y, dtype=float)
-    mu = np.asarray(mu, dtype=float)
-    n = len(y)
+    from superglm.model.input_validation import _finite_vector
+
+    y_raw = np.asarray(y)
+    if y_raw.ndim != 1 or y_raw.size == 0:
+        raise ValueError("y must be a non-empty one-dimensional array")
+    n = len(y_raw)
+    y = _finite_vector("y", y_raw, n)
+    mu = _finite_vector("mu", mu, n)
+    if np.any(mu < 0.0):
+        raise ValueError("mu must be nonnegative")
+    weights, likelihood_size = _frequency_weights(sample_weight, n)
 
     family_lower = family.lower()
     if family_lower not in {"poisson", "nb2"}:
@@ -205,22 +256,20 @@ def zero_inflation_index(
             f"zero_inflation_index requires family 'poisson' or 'nb2', got {family!r}."
         )
 
-    observed_zeros = int(np.sum(y == 0))
+    observed_zeros = float(np.sum(weights * (y == 0)))
 
     if family_lower == "poisson":
         p_zero = np.exp(-mu)
     else:  # nb2
         if theta is None:
             raise ValueError("theta must be provided for NB2 family.")
+        theta = float(theta)
+        if not np.isfinite(theta) or theta <= 0.0:
+            raise ValueError("theta must be finite and strictly positive for NB2 family.")
         p_zero = (theta / (theta + mu)) ** theta
 
-    if sample_weight is not None:
-        w = np.asarray(sample_weight, dtype=float)
-        expected_zeros = float(np.sum(w * p_zero))
-    else:
-        expected_zeros = float(np.sum(p_zero))
-
-    zi_index = (observed_zeros - expected_zeros) / n
+    expected_zeros = float(np.sum(weights * p_zero))
+    zi_index = (observed_zeros - expected_zeros) / likelihood_size
     ratio = observed_zeros / expected_zeros if expected_zeros > 0 else float("inf")
 
     return ZeroInflationResult(
@@ -252,7 +301,7 @@ def score_test_zi(
     y : array-like
         Observed response values.
     sample_weight : array-like or None
-        Observation weights.
+        Observation weights. Currently unsupported.
     offset : array-like or None
         Optional offset.
 
@@ -320,7 +369,7 @@ def dispersion_test(
     y : array-like
         Observed response values.
     sample_weight : array-like or None
-        Observation weights.
+        Observation weights. Currently unsupported.
     offset : array-like or None
         Optional offset.
     alternative : str
@@ -402,7 +451,12 @@ def vuong_test(
     y : array-like
         Observed response values.
     sample_weight : array-like or None
-        Observation weights.
+        Family-specific observation weights. For two non-Tweedie models these
+        are case/frequency weights and integer values are exactly equivalent
+        to row replication. For two Tweedie models they are finite, strictly
+        positive EDM prior weights and enter each density through
+        ``phi_i = phi / w_i``. A weighted Tweedie/non-Tweedie comparison is
+        rejected because a single vector cannot represent both contracts.
     offset : array-like or None
         Optional offset.
     correction : str
@@ -415,24 +469,70 @@ def vuong_test(
     if correction not in {"none", "aic", "bic"}:
         raise ValueError(f"correction must be 'none', 'aic', or 'bic', got {correction!r}.")
 
-    y_arr = np.asarray(y, dtype=float)
-    n = len(y_arr)
+    from superglm.distributions import Tweedie
+    from superglm.model.input_validation import _finite_vector
 
-    ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
-    ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
+    y_raw = np.asarray(y)
+    if y_raw.ndim != 1 or y_raw.size == 0:
+        raise ValueError("y must be a non-empty one-dimensional array")
+    n = len(y_raw)
+    y_arr = _finite_vector("y", y_raw, n)
 
-    d = ll_a - ll_b  # per-observation LL differences
+    model_a_is_tweedie = isinstance(getattr(model_a, "_distribution"), Tweedie)
+    model_b_is_tweedie = isinstance(getattr(model_b, "_distribution"), Tweedie)
+    mixed_weight_contracts = model_a_is_tweedie != model_b_is_tweedie
+    if mixed_weight_contracts and sample_weight is not None:
+        raise ValueError(
+            "sample_weight has incompatible semantics for a weighted "
+            "Tweedie/non-Tweedie Vuong comparison"
+        )
 
-    if sample_weight is not None:
-        w = np.asarray(sample_weight, dtype=float)
-        # Weighted mean and Bessel-corrected weighted std
-        sum_w = w.sum()
-        mean_m = float(np.sum(w * d) / sum_w)
-        sum_w2 = np.sum(w**2)
-        omega = float(np.sqrt(np.sum(w * (d - mean_m) ** 2) / (sum_w - sum_w2 / sum_w)))
-    else:
+    if model_a_is_tweedie and model_b_is_tweedie:
+        if sample_weight is None:
+            prior_weights = None
+        else:
+            from superglm._utils import _validate_strict_prior_weights
+
+            prior_weights = _validate_strict_prior_weights(sample_weight, n)
+        ll_a = _per_obs_log_likelihood(
+            model_a,
+            X,
+            y_arr,
+            offset,
+            sample_weight=prior_weights,
+        )
+        ll_b = _per_obs_log_likelihood(
+            model_b,
+            X,
+            y_arr,
+            offset,
+            sample_weight=prior_weights,
+        )
+        d = ll_a - ll_b
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
+        likelihood_size = float(n)
+    elif mixed_weight_contracts:
+        ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
+        ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
+        d = ll_a - ll_b
+        mean_m = float(np.mean(d))
+        omega = float(np.std(d, ddof=1))
+        likelihood_size = float(n)
+    else:
+        frequency_weights, likelihood_size = _frequency_weights(sample_weight, n)
+        ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
+        ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
+        d = ll_a - ll_b
+        mean_m = float(np.sum(frequency_weights * d) / likelihood_size)
+        if likelihood_size <= 1.0:
+            raise ValueError("Vuong test requires an effective likelihood size greater than one")
+        omega = float(
+            np.sqrt(np.sum(frequency_weights * (d - mean_m) ** 2) / (likelihood_size - 1.0))
+        )
+
+    if likelihood_size <= 1.0:
+        raise ValueError("Vuong test requires an effective likelihood size greater than one")
 
     # Model complexities
     p_a = model_a.result.effective_df
@@ -440,9 +540,9 @@ def vuong_test(
 
     # Apply correction
     if correction == "aic":
-        mean_m -= (p_a - p_b) / n
+        mean_m -= (p_a - p_b) / likelihood_size
     elif correction == "bic":
-        mean_m -= (p_a - p_b) * np.log(n) / (2 * n)
+        mean_m -= (p_a - p_b) * np.log(likelihood_size) / (2 * likelihood_size)
 
     if omega < 1e-10:
         # Models are essentially identical
@@ -455,7 +555,7 @@ def vuong_test(
             omega=omega,
         )
 
-    v_stat = float(np.sqrt(n) * mean_m / omega)
+    v_stat = float(np.sqrt(likelihood_size) * mean_m / omega)
     p_value = float(2.0 * (1.0 - stats.norm.cdf(abs(v_stat))))
 
     if p_value < 0.05:

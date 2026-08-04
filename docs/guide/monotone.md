@@ -43,15 +43,23 @@ feature class:
 
 | Feature spec | Fit-time kinds | Engine | Notes |
 |---|---|---|---|
-| `PSpline(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)` | monotone + curvature | SCOP | exact and `discrete=True` paths, integrated constrained `fit_reml()` |
-| `BSplineSmooth(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)` | monotone + curvature | QP | constrained solve on the B-spline smooth basis |
-| `CubicRegressionSpline(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)` | monotone + curvature | QP | constrained solve on the cubic regression spline basis |
+| `PSpline(...)` | increasing/decreasing at supported degrees; convex/concave only when `degree <= 3` | SCOP | exact and `discrete=True` paths, integrated constrained `fit_reml()` |
+| `BSplineSmooth(...)` | increasing/decreasing at supported degrees; convex/concave only when `degree <= 3` | QP | constrained solve on the B-spline smooth basis |
+| `CubicRegressionSpline(...)` | increasing/decreasing/convex/concave | QP | inherently cubic; knot-spacing-aware constraints on the natural cubic regression spline basis |
 
 Specifically:
 
 - `PSpline(..., constraint=Constraint.fit.*)` uses SCOP
 - `BSplineSmooth(..., constraint=Constraint.fit.*)` uses QP
 - `CubicRegressionSpline(..., constraint=Constraint.fit.*)` uses QP
+
+Fit-time convexity and concavity use an exact coefficient-space curvature
+characterization only for splines of degree three or lower. Consequently,
+`PSpline` and `BSplineSmooth` with `degree > 3` still support fit-time
+increasing/decreasing constraints, but not `Constraint.fit.convex` or
+`Constraint.fit.concave`. `CubicRegressionSpline` is always degree three.
+This restriction does not apply to the separate `Constraint.postfit.*` repair
+workflow.
 
 ## QP-Backed Shape Fits
 
@@ -67,6 +75,7 @@ model = SuperGLM(
     features={
         "x1": BSplineSmooth(
             n_knots=8,
+            degree=3,
             constraint=Constraint.fit.convex,
         ),
         "x2": CubicRegressionSpline(
@@ -94,6 +103,7 @@ model = SuperGLM(
     features={
         "x": PSpline(
             n_knots=10,
+            degree=3,
             constraint=Constraint.fit.convex,
         ),
     },
@@ -111,8 +121,8 @@ semantics are different for SCOP and QP:
 
 | Path | `fit_reml()` with fixed lambdas | `fit_reml()` with automatic lambda estimation |
 |---|---|---|
-| SCOP (`PSpline(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)`) | supported | integrated constrained REML / EFS path |
-| QP (`BSplineSmooth(..., constraint=Constraint.fit.*)`, `CubicRegressionSpline(..., constraint=Constraint.fit.*)`) | supported | passthrough heuristic: unconstrained REML followed by constrained refit |
+| SCOP (`PSpline(..., constraint=Constraint.fit.*)`) | supported within the degree limits above | integrated constrained REML / EFS path |
+| QP (`BSplineSmooth(..., constraint=Constraint.fit.*)`, `CubicRegressionSpline(..., constraint=Constraint.fit.*)`) | supported within the degree limits above | passthrough heuristic: unconstrained REML followed by constrained refit |
 
 The important nuance is that "SCOP works with REML but QP does not" is too
 strong. QP-constrained terms do work with `fit_reml()`. The difference is that
@@ -149,6 +159,8 @@ These combinations are intentionally guarded:
 - fit-time shape constraints with `select=True`
 - mixed SCOP and QP constrained engines in the same model
 - `kind="ns"` fit-time shape constraints
+- `Constraint.fit.convex` or `Constraint.fit.concave` on a `PSpline` or
+  `BSplineSmooth` with `degree > 3`
 
 If you need one of these combinations, treat it as unsupported rather than
 assuming it is a valid workflow.

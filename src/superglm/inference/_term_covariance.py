@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -55,7 +56,7 @@ def compute_coef_covariance(
 
 
 def _active_subgroup_columns(
-    feature_name: str,
+    feature_name: Hashable,
     feature_groups: list[GroupSlice],
     active_subs: list[GroupSlice],
 ) -> NDArray:
@@ -72,13 +73,13 @@ def _active_subgroup_columns(
 
 
 def feature_se_from_cov(
-    name: str,
+    name: Hashable,
     Cov_active: NDArray,
     active_groups: list[GroupSlice],
     result: PIRLSResult,
     groups: list[GroupSlice],
-    specs: dict[str, Any],
-    interaction_specs: dict[str, Any],
+    specs: Mapping[Any, Any],
+    interaction_specs: Mapping[Any, Any],
     n_points: int = 200,
 ) -> NDArray:
     """Compute feature-level SEs from a precomputed covariance matrix."""
