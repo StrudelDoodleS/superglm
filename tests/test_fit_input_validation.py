@@ -425,6 +425,23 @@ def test_predict_rejects_numpy_matrix_at_dataframe_boundary() -> None:
         model.predict(x.reshape(-1, 1))
 
 
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_discretization_impact_reports_missing_x_columns_as_valueerror(backend: str) -> None:
+    x = np.linspace(-1.0, 1.0, 40)
+    y = 1.0 + 0.4 * x
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": PSpline(n_knots=6)},
+    ).fit(pd.DataFrame({"x": x}), y)
+    wrong_columns = (
+        pd.DataFrame({"other": x}) if backend == "pandas" else pl.DataFrame({"other": x})
+    )
+
+    with pytest.raises(ValueError, match=r"X is missing required columns.*'x'"):
+        model.discretization_impact(wrong_columns, y)
+
+
 @pytest.mark.parametrize(
     ("offset", "message"),
     [
