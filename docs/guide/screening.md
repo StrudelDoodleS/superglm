@@ -105,7 +105,7 @@ cannot re-screen a term already in the model.
 A mixed sweep comes back as one sorted table. The example below screens an
 80,000-row sample of the freMTPL2 frequency book under SuperGLM's Poisson
 case/frequency-weight contract (`y` the claim *rate* `ClaimNb / Exposure`,
-`sample_weight` the exposure, `phi` estimated at 2.55). This is the
+`sample_weight` the exposure, `phi` estimated at 4.82). This is the
 non-Tweedie frequency interpretation; it is not the Tweedie EDM prior-weight
 contract.
 
@@ -138,18 +138,18 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus          ti  10.808079  4.404039   2.000000 1.015252e+02     5244   False
-# BonusMalus   VehBrand  spline_cat  22.694719  2.838625  10.000002 7.795736e+09     1012   False
-#     VehAge   VehBrand  spline_cat  24.953074  1.582695  16.000001 7.157880e+00      627   False
-#    DrivAge BonusMalus          ti   6.843804  1.005437   4.000000 5.438702e+01     7360   False
-#    DrivAge     VehAge          ti   1.035635 -0.482183   2.000001 5.044407e+01     4560   False
-# BonusMalus     Region  spline_cat  13.204863 -1.202813  20.999975 4.187772e+09     2024   False
-#    DrivAge     Region  spline_cat  12.741508 -1.274315  21.000018 6.858873e+09     1760   False
-#    DrivAge   VehBrand  spline_cat   3.697832 -1.409210  10.000019 1.301011e+10      880   False
-# LogDensity     Region numeric_cat   9.940738 -1.706481  21.000000 0.000000e+00       22   False
-# LogDensity   VehBrand numeric_cat   2.051610 -1.777314  10.000000 0.000000e+00       11   False
-#     VehAge     Region  spline_cat   3.792551 -2.655057  20.998793 2.449225e+09     1254   False
-#   VehBrand     Region     cat_cat  75.254940 -6.508362 208.000000 0.000000e+00      242   False
+#     VehAge BonusMalus          ti   5.691031  1.845515   2.000000 1.023164e+02     5244   False
+# BonusMalus   VehBrand  spline_cat  11.960590  0.438392  10.000039 7.818052e+09     1012   False
+#    DrivAge BonusMalus          ti   1.810776 -0.094612   2.000000 2.611293e+02     7360   False
+#     VehAge   VehBrand  spline_cat   7.805371 -0.490676   9.999710 3.779926e+09      627   False
+#    DrivAge     VehAge          ti   0.547721 -0.726139   1.999999 5.044231e+01     4560   False
+#    DrivAge   VehBrand  spline_cat   1.958248 -1.798192  10.000015 1.301005e+10      880   False
+# LogDensity   VehBrand numeric_cat   1.087365 -1.992926  10.000000 0.000000e+00       11   False
+# BonusMalus     Region  spline_cat   6.972247 -2.164535  21.000052 4.198782e+09     2024   False
+#    DrivAge     Region  spline_cat   6.754044 -2.198201  21.000021 6.858867e+09     1760   False
+# LogDensity     Region numeric_cat   5.266167 -2.427783  21.000000 0.000000e+00       22   False
+#     VehAge     Region  spline_cat   2.008955 -2.930334  20.999438 2.449232e+09     1254   False
+#   VehBrand     Region     cat_cat  39.860771 -8.243704 208.000000 0.000000e+00      242   False
 ```
 
 Every eligible pair, four kinds, one ranking by `z` alone. Twelve rows, not
@@ -161,8 +161,8 @@ Confirming each by refit — the gate, not the score:
 
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
-| `VehAge x BonusMalus` | `ti` | 4.40 | 2 | 43.9 |
-| `BonusMalus x VehBrand` | `spline_cat` | 2.84 | 10 | 73.3 |
+| `VehAge x BonusMalus` | `ti` | 1.85 | 2 | 43.9 |
+| `BonusMalus x VehBrand` | `spline_cat` | 0.44 | 10 | 73.1 |
 
 The second pair buys *more* deviance and ranks *below* the first. That is the
 design rather than a defect: 43.9 on 2 df is 22.0 per df against 7.3, and `z`
@@ -172,19 +172,19 @@ the refit budget there. An independent holdout study of this ranking, against
 confirmatory refits on a 200,000-row split, is in
 [Screening Evaluation](screening-evaluation.md).
 
-`statistic` is not comparable down that column: the `cat_cat` row's 75 is a
-208-dimensional block and the `numeric_cat` row's 2.0 a 10-dimensional one. The
+`statistic` is not comparable down that column: the `cat_cat` row's 39.9 is a
+208-dimensional block and the `numeric_cat` row's 1.1 a 10-dimensional one. The
 large `lambda0` values are bracket edges at clamped rungs, not fitted smoothing
-parameters. Eight of the twelve rows carry a negative `z`, which is ordinary: a
+parameters. Ten of the twelve rows carry a negative `z`, which is ordinary: a
 statistic can land below its rung's noise floor, and on this book most pairs
-do. The `cat_cat` row's -6.51 is the extreme case — a 208-df block whose
-statistic, scaled by the *whole model's* dispersion, lands at 75, so the global
-`phi` is conservative for that block. A large negative `z` only pushes a pair
-down the queue; it never promotes one. Nothing here was binned or refused
-(`approx` is False throughout, no NaN rows).
+do. The `cat_cat` row's -8.24 is the extreme case — a 208-df block whose
+statistic, scaled by the *whole model's* dispersion, lands at 39.9, so the
+global `phi` is conservative for that block. A large negative `z` only pushes
+a pair down the queue; it never promotes one. Nothing here was binned or
+refused (`approx` is False throughout, no NaN rows).
 
 Read the top row against its own kind's measured noise maximum below (7.31 for
-`ti`): 4.40 does not clear it — and the refit bought 43.9 deviance anyway. That
+`ti`): 1.85 does not clear it — and the refit bought 43.9 deviance anyway. That
 is the screen working as described rather than a contradiction: the floor is
 the largest value a wide null battery produced, not a threshold a real pair
 must beat, and the confirmatory refit is what settles the question.
