@@ -219,13 +219,18 @@ def candidate_node_ids(merge_base: str, head: str, test_files: list[str]) -> tup
     return node_ids, added_count
 
 
-def collectable(
-    tree: Path, test_files: list[str], candidates: list[str]
-) -> tuple[list[str], list[str]]:
-    """Split ``candidates`` into those pytest collects and those it does not.
+def collect_items(tree: Path, test_files: list[str]) -> tuple[set[str], int, str]:
+    """Every item ID pytest collects from ``test_files``, with its exit status.
 
-    Passing an uncollectable node ID makes pytest exit 4 as a usage error
-    without running anything, which would discard every other result in the run.
+    Item IDs carry the parametrise suffix, which is what makes a *data-driven*
+    strengthening visible: appending a case to a module-level list consumed by an
+    unchanged ``@pytest.mark.parametrize(..., CASES)`` leaves the function's AST
+    byte-identical, so comparing ASTs alone reports NO EVIDENCE for a real new
+    regression case.  Comparing collected items catches it.
+
+    The exit code must be checked by the caller.  A module that fails to collect
+    contributes nothing here, and silently dropping its candidates would let a
+    sibling module's killer carry a change whose other test module is broken.
 
     ``-o addopts=`` is load-bearing.  This repository sets ``addopts = "-v
     --tb=short"``, and pytest *prepends* those, so the ``-v`` cancels ``-q`` to
@@ -233,6 +238,8 @@ def collectable(
     tree of ``<Module>``/``<Function>`` nodes instead of flat node IDs, and this
     parser found nothing collectable at all.
     """
+    if not test_files:
+        return set(), 0, ""
     proc = subprocess.run(
         [
             sys.executable,
@@ -253,10 +260,13 @@ def collectable(
         check=False,
         env={**os.environ, "PYTHONPATH": str(tree / SRC)},
     )
-    collected = {line.strip().split("[")[0] for line in proc.stdout.splitlines() if "::" in line}
-    keep = [c for c in candidates if c in collected]
-    drop = [c for c in candidates if c not in collected]
-    return keep, drop
+    items = {line.strip() for line in proc.stdout.splitlines() if "::" in line}
+    return items, proc.returncode, proc.stdout + proc.stderr
+
+
+def owning_function(item_id: str) -> str:
+    """The test function node ID that owns a collected item."""
+    return item_id.split("[")[0]
 
 
 @dataclass
@@ -266,6 +276,7 @@ class Outcome:
     collected: int = 0
     passed: int = 0
     failed: list[str] = field(default_factory=list)
+    symbol_errors: list[str] = field(default_factory=list)
     errored: list[str] = field(default_factory=list)
     skipped: int = 0
 
@@ -276,7 +287,23 @@ class Outcome:
 
     @property
     def red(self) -> bool:
-        return bool(self.failed or self.errored)
+        return bool(self.failed or self.symbol_errors or self.errored)
+
+
+# A call-phase exception is a JUnit <failure>, tag-identical to an assertion
+# failure -- only the message distinguishes them. These names are what a test
+# raises when the symbol it needs does not exist at the base revision, which is
+# the new-module case wearing a different hat: not behavioural evidence.
+_SYMBOL_ERRORS = (
+    "ModuleNotFoundError",
+    "ImportError",
+    "AttributeError",
+    "NameError",
+)
+
+
+def is_symbol_error(message: str) -> bool:
+    return message.lstrip().startswith(_SYMBOL_ERRORS)
 
 
 def junit_key(node_id: str) -> tuple[str, str]:
@@ -286,8 +313,12 @@ def junit_key(node_id: str) -> tuple[str, str]:
     return ".".join([module, *parts[:-1]]), parts[-1]
 
 
-def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], str]:
+def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], int, str]:
     """Run ``targets`` inside ``tree`` and attribute every item to its function.
+
+    The process status is returned alongside the per-item outcomes and must be
+    checked: a session-finish, plugin or internal error leaves every target's
+    record clean, so reading only the JUnit report would call a red run green.
 
     ``PYTHONPATH`` must point at this tree's ``src`` or the editable install's
     ``.pth`` would import the caller's checkout and every run would measure the
@@ -322,7 +353,7 @@ def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], str]
 
     outcomes = {t: Outcome() for t in targets}
     if not report_path.exists():
-        return outcomes, out
+        return outcomes, proc.returncode, out
 
     index = {junit_key(t): t for t in targets}
     for case in ET.parse(report_path).getroot().iter("testcase"):
@@ -333,8 +364,13 @@ def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], str]
         item = case.get("name", "")
         outcome = outcomes[target]
         outcome.collected += 1
-        if case.find("failure") is not None:
-            outcome.failed.append(item)
+        failure = case.find("failure")
+        if failure is not None:
+            message = failure.get("message") or failure.text or ""
+            if is_symbol_error(message):
+                outcome.symbol_errors.append(f"{item}: {message.splitlines()[0][:100]}")
+            else:
+                outcome.failed.append(item)
         elif case.find("error") is not None:
             outcome.errored.append(item)
         elif case.find("skipped") is not None:
@@ -342,7 +378,7 @@ def run_pytest(tree: Path, targets: list[str]) -> tuple[dict[str, Outcome], str]
         else:
             outcome.passed += 1
     report_path.unlink(missing_ok=True)
-    return outcomes, out
+    return outcomes, proc.returncode, out
 
 
 def imported_from(tree: Path) -> str | None:
@@ -443,12 +479,20 @@ def main() -> int:
             + "\n".join(f"  {p}" for p in tests_changed),
         )
 
-    # Two isolated trees, both at head. The caller's checkout is never touched.
+    # Three isolated trees. The caller's checkout is never touched.
+    #   head_tree       head src + head tests -- the change as proposed
+    #   base_tree       base src + head tests -- the mutant
+    #   base_tests_tree the merge base untouched, used only to enumerate which
+    #                   test items existed before, so a new parametrise case is
+    #                   attributable even when the function's AST is unchanged
+    tests_at_base = [p for p in tests_changed if file_at(merge_base, p) is not None]
     scratch = Path(tempfile.mkdtemp(prefix="mutation-gate-"))
     base_tree, head_tree = scratch / "base", scratch / "head"
+    base_tests_tree = scratch / "base-tests"
     try:
         git("worktree", "add", "--detach", "--quiet", str(base_tree), head)
         git("worktree", "add", "--detach", "--quiet", str(head_tree), head)
+        git("worktree", "add", "--detach", "--quiet", str(base_tests_tree), merge_base)
 
         # Roll src/ back by REPLACING it: delete first so head-only modules go
         # away, then restore the merge base's tree exactly. Everything else --
@@ -469,7 +513,31 @@ def main() -> int:
                 "would measure the revision it claims to.",
             )
 
-        targets, uncollectable = collectable(head_tree, tests_changed, candidates)
+        head_items, collect_status, collect_out = collect_items(head_tree, tests_changed)
+        if collect_status != 0:
+            return report(
+                INCONCLUSIVE,
+                "pytest could not collect every changed test module at head.",
+                "A module that fails to collect contributes no candidates, and a sibling\n"
+                "module's killer must not carry a change whose other test module is\n"
+                "broken. Fix collection first.\n\n" + collect_out[-1500:],
+            )
+
+        # Item-level attribution catches what the AST cannot: a case appended to
+        # a module-level list feeding an unchanged @parametrize decorator.
+        base_items, _, _ = collect_items(base_tests_tree, tests_at_base)
+        new_item_owners = {owning_function(i) for i in head_items - base_items}
+
+        collected_functions = {owning_function(i) for i in head_items}
+        qualifying = sorted(
+            (set(candidates) | new_item_owners) & collected_functions,
+        )
+        uncollectable = sorted(set(candidates) - collected_functions)
+        data_driven = sorted(new_item_owners - set(candidates))
+        if data_driven:
+            print(f"  tests with new cases:     {len(data_driven)}")
+
+        targets = qualifying
         if not targets:
             return report(
                 INCONCLUSIVE,
@@ -479,8 +547,28 @@ def main() -> int:
                 + "\n".join(f"  {n}" for n in uncollectable),
             )
 
-        head_outcomes, head_out = run_pytest(head_tree, targets)
-        base_outcomes, base_out = run_pytest(base_tree, targets)
+        head_outcomes, head_status, head_out = run_pytest(head_tree, targets)
+        base_outcomes, base_status, base_out = run_pytest(base_tree, targets)
+
+        # Exit status is evidence in its own right. A clean JUnit record says
+        # nothing about a session-finish, plugin or internal error, and pytest
+        # reports those only through the process status.
+        if head_status != 0:
+            return report(
+                INCONCLUSIVE,
+                f"pytest exited {head_status} at the head revision.",
+                "Only exit 0 means every target was collected and passed. A non-zero\n"
+                "status with clean per-test records is a session, plugin or internal\n"
+                "error, and nothing measured under it can be trusted.\n\n" + head_out[-1500:],
+            )
+        if base_status not in (0, 1):
+            return report(
+                INCONCLUSIVE,
+                f"pytest exited {base_status} against the unfixed code.",
+                "Only 0 (all passed) and 1 (tests failed) are meaningful here; 2-5 are\n"
+                "interruption, internal error, usage error and no-tests-collected, none\n"
+                "of which measures the mutant.\n\n" + base_out[-1500:],
+            )
 
         # Partition rather than bail: a test skipped on this runner is not
         # evidence, but it does not invalidate its siblings either.
@@ -519,7 +607,37 @@ def main() -> int:
             else ""
         )
 
+        # Only a real call-phase failure is a kill. Anything that did not
+        # cleanly pass at base and was not killed is UNMEASURED, not survived --
+        # enumerating the ways it can be unmeasured and defaulting the rest to
+        # "passed" is how an unobserved outcome becomes a verdict. A module that
+        # fails to import against the rolled-back src raises a *collection*
+        # error, which JUnit files against the module rather than the test and
+        # leaves the record empty; an in-test importorskip skips instead; a
+        # teardown error leaves the call passing. Only `.clean` proves survival.
         killed = [t for t in evaluable if base_outcomes[t].failed]
+        unmeasured = [t for t in evaluable if not base_outcomes[t].clean and t not in killed]
+
+        def why_unmeasured(node: str) -> str:
+            outcome = base_outcomes[node]
+            if outcome.symbol_errors:
+                return "; ".join(outcome.symbol_errors)
+            parts = []
+            if outcome.errored:
+                parts.append(f"{len(outcome.errored)} errored")
+            if outcome.skipped:
+                parts.append(f"{outcome.skipped} skipped")
+            if not outcome.collected:
+                parts.append("never collected")
+            return ", ".join(parts) or "did not run"
+
+        pending = (
+            "\n\nNot measured against the unfixed code:\n"
+            + "\n".join(f"  {n}\n      {why_unmeasured(n)}" for n in unmeasured)
+            if unmeasured
+            else ""
+        )
+
         if killed:
             return report(
                 PASS,
@@ -534,30 +652,21 @@ def main() -> int:
                     )
                     for n in killed
                 )
-                + note,
+                + note
+                + pending,
             )
 
-        # A target with NO record at base did not survive the mutant -- it was
-        # never measured. A module that fails to import against the rolled-back
-        # src raises a *collection* error, which JUnit files against the module
-        # rather than the test, so it matches no target and leaves the outcome
-        # empty. Reading that as "passed at base" is how an unobserved result
-        # becomes a FAIL against a correct change.
-        unmeasured = [
-            t for t in evaluable if base_outcomes[t].errored or base_outcomes[t].collected == 0
-        ]
         if unmeasured:
+            reasons = "\n".join(f"  {n}\n      {why_unmeasured(n)}" for n in unmeasured)
             return report(
                 INCONCLUSIVE,
-                f"{len(unmeasured)} evaluable test(s) errored or never ran against the "
-                "unfixed code, rather than failing.",
-                "An error is not a demonstrated behavioural constraint - it is usually a\n"
-                "missing symbol, which a genuinely new module produces legitimately.\n"
-                "Verify by hand that these fail for the intended reason.\n\n"
-                + "\n".join(f"  {n}" for n in unmeasured)
-                + note
-                + "\n\n"
-                + base_out[-1500:],
+                f"{len(unmeasured)} evaluable test(s) neither passed nor failed against "
+                "the unfixed code.",
+                "They errored, were skipped, or never ran. None of those is a demonstrated\n"
+                "behavioural constraint - a missing symbol is what a genuinely new module\n"
+                "produces legitimately, and a call-phase ImportError is the same case\n"
+                "wearing the costume of a failure. Verify by hand that these fail for the\n"
+                "intended reason.\n\n" + reasons + note + "\n\n" + base_out[-1500:],
             )
 
         return report(
@@ -568,7 +677,7 @@ def main() -> int:
             "Evaluated:\n" + "\n".join(f"  {n}" for n in evaluable) + note,
         )
     finally:
-        for tree in (base_tree, head_tree):
+        for tree in (base_tree, head_tree, base_tests_tree):
             git("worktree", "remove", "--force", str(tree), check=False)
         shutil.rmtree(scratch, ignore_errors=True)
         git("worktree", "prune", check=False)
