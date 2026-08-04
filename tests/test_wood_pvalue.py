@@ -1,5 +1,7 @@
 """Tests for Davies' algorithm and Wood (2013) Bayesian p-values."""
 
+import inspect
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -124,6 +126,51 @@ class TestDavies:
             assert ifault == 0
             assert abs(p_value - expected) <= 10.0 * accuracy
 
+    def test_far_tail_is_invariant_to_the_units_of_the_weights(self):
+        """Scaling every weight and q by one factor cannot move the tail.
+
+        P[sum(w_j * chi2_j) > q] depends only on the ratios w_j / q, so the
+        answer must not depend on the units the caller happens to work in.
+        """
+        weights = np.array([1.0, 2.0])
+        q = 30.0
+        reference, reference_ifault = psum_chisq(q, weights)
+        assert reference_ifault == 0
+
+        for scale in (1e-6, 1e-3, 1.0, 1e3, 1e6, 1e9):
+            p_value, ifault = psum_chisq(q * scale, weights * scale)
+            assert ifault == 0, f"weights scaled by {scale:g} were flagged: {p_value}"
+            np.testing.assert_allclose(
+                p_value,
+                reference,
+                rtol=1e-8,
+                atol=0.0,
+                err_msg=f"the tail moved when the weights were scaled by {scale:g}",
+            )
+
+    def test_far_tail_matches_hypoexponential_oracle_at_every_weight_magnitude(self):
+        """Two chi-square(2) terms keep their closed form at any magnitude.
+
+        The tail is followed down to 6e-7 at the tolerance that can certify it,
+        which is where an oscillatory quadrature stops being able to hide.
+        """
+        for scale in (1.0, 1e4, 1e6, 1e8):
+            weights = np.array([scale, 0.5 * scale])
+            df = np.array([2.0, 2.0])
+            for accuracy, multiples in ((1e-4, (1.0, 10.0, 15.2)), (1e-12, (20.0, 25.0, 30.0))):
+                for multiple in multiples:
+                    q = multiple * scale
+                    expected = 2.0 * np.exp(-q / (2.0 * scale)) - np.exp(-q / scale)
+                    p_value, ifault = psum_chisq(q, weights, df=df, acc=accuracy)
+                    assert ifault == 0, f"scale {scale:g} at q = {q:g} was flagged: {p_value}"
+                    np.testing.assert_allclose(
+                        p_value,
+                        expected,
+                        rtol=1e-8,
+                        atol=0.0,
+                        err_msg=f"oscillatory tail is wrong at scale {scale:g}, q = {q:g}",
+                    )
+
     def test_ifault_marks_a_tail_that_cannot_be_resolved(self):
         """A tiny unequal-weight tail may be returned only if exact or flagged."""
         q = 100.0
@@ -143,29 +190,39 @@ class TestDavies:
         else:
             assert ifault == 1
 
-    def test_ifault_marks_an_unresolved_lower_tail_of_a_mixed_form(self):
-        """Gross error in the complement must also prevent a success flag."""
+    def test_mixed_form_lower_tail_complement_is_exact_or_flagged(self):
+        """A representable complement must be exact; an underflowed one flagged.
+
+        chi-square(2) is chi-square(1) + chi-square(1), so the four unit-df
+        components below are the same distribution as the two chi-square(2)
+        components of the exact asymmetric-Laplace form -- written so that the
+        closed-form early return cannot answer them. That leaves the numerical
+        inversion carrying the lower tail, which is what this guards.
+        """
         positive_weight = 1.0
         negative_weight = 1e5
-        q = -4.3e7
-        p_value, ifault = psum_chisq(
-            q,
-            np.array([positive_weight, -negative_weight]),
-            df=np.array([2.0, 2.0]),
-        )
-        expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
-            q / (2.0 * negative_weight)
+        weights = np.array([positive_weight, positive_weight, -negative_weight, -negative_weight])
+        df = np.ones(4)
+        negative_share = negative_weight / (positive_weight + negative_weight)
+
+        q = -1e6
+        expected_complement = negative_share * np.exp(0.5 * q / negative_weight)
+        p_value, ifault = psum_chisq(q, weights, df=df)
+        assert ifault == 0, f"an exactly resolvable lower tail was flagged: {p_value}"
+        np.testing.assert_allclose(
+            1.0 - p_value,
+            expected_complement,
+            rtol=1e-8,
+            atol=0.0,
+            err_msg="lower-tail complement is wrong",
         )
 
-        if ifault == 0:
-            np.testing.assert_allclose(
-                p_value,
-                expected,
-                rtol=100.0 * np.finfo(np.float64).eps,
-                atol=0.0,
-            )
-        else:
-            assert ifault == 1
+        # Further down the lower tail the complement (about 1.9e-22 here)
+        # underflows the double that carries it. Reporting 1.0 is then the only
+        # available answer, and it must not be certified.
+        underflowed, underflowed_ifault = psum_chisq(-1e7, weights, df=df)
+        assert underflowed == 1.0
+        assert underflowed_ifault == 1
 
     @pytest.mark.parametrize(
         ("weights", "df", "sigma", "lim", "acc"),
@@ -199,6 +256,36 @@ class TestDavies:
         assert np.isnan(p_value)
         assert ifault == 4
 
+    def test_documented_accuracy_and_ifault_contract_matches_behaviour(self):
+        """`acc` is clamped and ifault=1 is broader than non-convergence.
+
+        Both are deliberate, and both differ from what a caller reading the
+        signature would assume, so the docstring has to state them.
+        """
+        weights = np.array([1.0, 0.5])
+        df = np.array([2.0, 2.0])
+        q = 30.0
+        floor = 1e-10
+        ceiling = 50.0 * np.finfo(np.float64).eps
+
+        # Anything looser than the internal floor is ignored, ...
+        assert psum_chisq(q, weights, df=df, acc=1e-2) == psum_chisq(q, weights, df=df, acc=floor)
+        # ... anything tighter than the resolution of the integrand is too, ...
+        assert psum_chisq(q, weights, df=df, acc=1e-16) == psum_chisq(
+            q, weights, df=df, acc=ceiling
+        )
+        # ... and in between the request is honoured: this tail is certifiable
+        # at 1e-12 and not at 1e-10.
+        assert psum_chisq(q, weights, df=df, acc=1e-12)[1] == 0
+        assert psum_chisq(q, weights, df=df, acc=floor)[1] == 1
+
+        documentation = inspect.getdoc(psum_chisq)
+        assert "1e-10" in documentation, "the acc clamp is not documented"
+        assert "certified" in documentation, (
+            "ifault=1 is documented as non-convergence alone, but it also covers "
+            "converged integrals whose value cannot be certified"
+        )
+
     @pytest.mark.parametrize("q", [-5.0, -1.0, 0.0, 1.0, 5.0, 20.0])
     def test_mixed_sign_tail_orientation_matches_asymmetric_laplace(self, q):
         """A difference of chi-square(2) terms has an exact two-sided oracle."""
@@ -226,48 +313,68 @@ class TestDavies:
 
     @pytest.mark.parametrize("direction", [-1.0, 1.0])
     def test_mixed_sign_tail_is_continuous_at_numerically_nonzero_q(self, direction):
-        """Tiny nonzero q must not enter an ill-conditioned Fourier limit."""
-        positive_weight = 0.15
-        negative_weight = 7.0
-        q = direction * 32.0 * np.finfo(np.float64).eps * negative_weight
-        p_value, ifault = psum_chisq(
-            q,
-            np.array([positive_weight, -negative_weight]),
-            df=np.array([2.0, 2.0]),
-            acc=1e-12,
-        )
-        if q < 0.0:
-            expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
-                q / (2.0 * negative_weight)
+        """Tiny nonzero q must not enter an ill-conditioned inversion limit.
+
+        Split into unit-df components so that the exact two-term early return
+        cannot answer it: the oracle stays closed-form while the direct
+        inversion is the code actually under test, at every weight magnitude.
+        """
+        for scale in (1.0, 1e4, 1e6, 1e8):
+            positive_weight = 0.15 * scale
+            negative_weight = 7.0 * scale
+            weights = np.array(
+                [positive_weight, positive_weight, -negative_weight, -negative_weight]
             )
-        else:
+            q = direction * 32.0 * np.finfo(np.float64).eps * negative_weight
+            p_value, ifault = psum_chisq(q, weights, df=np.ones(4), acc=1e-12)
+            if q < 0.0:
+                expected = 1.0 - negative_weight / (positive_weight + negative_weight) * np.exp(
+                    q / (2.0 * negative_weight)
+                )
+            else:
+                expected = (
+                    positive_weight
+                    / (positive_weight + negative_weight)
+                    * np.exp(-q / (2.0 * positive_weight))
+                )
+
+            assert ifault == 0, f"scale {scale:g} was flagged: {p_value}"
+            np.testing.assert_allclose(
+                p_value,
+                expected,
+                rtol=1e-10,
+                atol=0.0,
+                err_msg=f"tail is discontinuous at q = {q:g} for scale {scale:g}",
+            )
+
+    def test_mixed_sign_small_q_between_direct_and_fourier_scales(self):
+        """A q far below the weight scale must still be resolved exactly.
+
+        Unit-df components again keep the exact early return out of the way, so
+        the small-frequency inversion branch is the one being measured.
+        """
+        for scale in (1.0, 1e4, 1e6, 1e8):
+            positive_weight = 1.0 * scale
+            negative_weight = 0.1 * scale
+            weights = np.array(
+                [positive_weight, positive_weight, -negative_weight, -negative_weight]
+            )
+            q = 5e-8 * scale
+            p_value, ifault = psum_chisq(q, weights, df=np.ones(4))
             expected = (
                 positive_weight
                 / (positive_weight + negative_weight)
                 * np.exp(-q / (2.0 * positive_weight))
             )
 
-        assert ifault == 0
-        np.testing.assert_allclose(p_value, expected, rtol=2e-11, atol=2e-13)
-
-    def test_mixed_sign_small_q_between_direct_and_fourier_scales(self):
-        """A small Fourier frequency must not be reported as a successful tail."""
-        positive_weight = 1.0
-        negative_weight = 0.1
-        q = 5e-8
-        p_value, ifault = psum_chisq(
-            q,
-            np.array([positive_weight, -negative_weight]),
-            df=np.array([2.0, 2.0]),
-        )
-        expected = (
-            positive_weight
-            / (positive_weight + negative_weight)
-            * np.exp(-q / (2.0 * positive_weight))
-        )
-
-        assert ifault == 0
-        np.testing.assert_allclose(p_value, expected, rtol=2e-11, atol=2e-13)
+            assert ifault == 0, f"scale {scale:g} was flagged: {p_value}"
+            np.testing.assert_allclose(
+                p_value,
+                expected,
+                rtol=1e-10,
+                atol=0.0,
+                err_msg=f"small-q tail is wrong at scale {scale:g}",
+            )
 
     @pytest.mark.parametrize("q", [-3.168e-4, -1e-4, 1e-4, 3.168e-4])
     def test_mixed_sign_small_q_matches_asymmetric_laplace_oracle(self, q):
