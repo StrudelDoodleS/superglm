@@ -236,6 +236,63 @@ class TestDrop1DispersionScaling:
         assert row["statistic"] == pytest.approx(row["delta_deviance"])
         assert row["p_value"] == pytest.approx(chi2.sf(row["delta_deviance"], row["delta_df"]))
 
+    @pytest.mark.parametrize(
+        ("dispersion_shape", "seed"),
+        [("under", 1), ("over", 7)],
+    )
+    def test_known_scale_chisq_ignores_path_fitted_pearson_dispersion(self, dispersion_shape, seed):
+        """fit_path() leaves phi at Pearson; the known-scale LRT must still use 1.0.
+
+        ``fit()`` pins ``phi = 1.0`` for Poisson, so a fitted-phi divisor is
+        invisible there. ``fit_path()`` publishes the path solution untouched,
+        so its ``phi`` is the Pearson dispersion of a mis-specified count fit —
+        below 1 for under-dispersed counts and above 1 for over-dispersed ones.
+        Dividing the deviance change by it moves term ``z`` across the 5% line
+        in both directions.
+        """
+        rng = np.random.default_rng(seed)
+        n = 400
+        x = rng.normal(size=n)
+        z = rng.normal(size=n)
+        eta = 0.2 + 0.4 * x + 0.05 * z
+        if dispersion_shape == "under":
+            # Binomial counts under a Poisson family: variance below the mean.
+            y = rng.binomial(6, 1.0 / (1.0 + np.exp(-eta))).astype(float)
+        else:
+            theta = 0.8
+            mu = np.exp(eta)
+            y = rng.negative_binomial(theta, theta / (theta + mu)).astype(float)
+        X = pd.DataFrame({"x": x, "z": z})
+
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.001,
+            features={"x": Numeric(), "z": Numeric()},
+        )
+        model.fit_path(X, y, n_lambda=5)
+        phi = model.result.phi
+
+        # The fixture is only meaningful while fit_path leaves phi off 1.0.
+        assert phi != 1.0
+        if dispersion_shape == "under":
+            assert phi < 0.6
+        else:
+            assert phi > 2.0
+
+        table = model.drop1(X, y)
+        for _, row in table.iterrows():
+            assert row["statistic"] == pytest.approx(row["delta_deviance"])
+            assert row["p_value"] == pytest.approx(chi2.sf(row["delta_deviance"], row["delta_df"]))
+
+        weak = table.loc[table["feature"] == "z"].iloc[0]
+        scaled_p = float(chi2.sf(weak["delta_deviance"] / phi, weak["delta_df"]))
+        if dispersion_shape == "under":
+            assert weak["p_value"] > 0.05
+            assert scaled_p < 0.01
+        else:
+            assert weak["p_value"] < 0.005
+            assert scaled_p > 0.03
+
     def test_known_scale_f_uses_unit_scale_and_frequency_residual_df(self):
         rng = np.random.default_rng(2182)
         n = 180
