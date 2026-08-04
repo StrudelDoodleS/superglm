@@ -793,6 +793,38 @@ def _mixed_chunk_stop(
     return max(stop_row, start_row + 1)
 
 
+def _weighted_row_chunk(csr, W_rows: NDArray, start_row: int, stop_row: int):
+    """``diag(W[a:b]) @ csr[a:b]`` at ONE live buffer per stored entry.
+
+    ``csr[a:b].multiply(w[:, None])`` costs three: the slice is a full copy
+    (12 B/entry), and scipy routes the product through COO, allocating a row
+    array, gathered weights and the product itself before returning -- measured
+    32.2 B/entry against the ``// 12`` the chunk budget assumes, so the budget
+    was optimistic by 2.7x exactly where it is load-bearing.
+
+    Slicing ``indptr``/``indices``/``data`` directly keeps the index array a
+    VIEW, and scaling into the ``repeat`` buffer rather than out of it leaves
+    one float64 array live: measured 8.6 B/entry at full density and 8.9 at
+    35%, which puts the budget back on the conservative side of the truth.
+
+    Bit-exact, not merely close: the same two floats are multiplied in the same
+    order as ``multiply`` performs them, so no reassociation occurs and fitted
+    values are unchanged.  Scaling the DENSE side instead would be cheaper
+    still, but computes ``b * (w * c)`` where this computes ``(w * b) * c``.
+    """
+    lo = int(csr.indptr[start_row])
+    hi = int(csr.indptr[stop_row])
+    row_ptr = csr.indptr[start_row : stop_row + 1]
+    data = np.repeat(W_rows[start_row:stop_row], np.diff(row_ptr))
+    data *= csr.data[lo:hi]
+    # Built from the input's own class: this module never imports scipy, it
+    # duck-types on whatever ``tocsr()`` returned.
+    return csr.__class__(
+        (data, csr.indices[lo:hi], row_ptr - lo),
+        shape=(stop_row - start_row, csr.shape[1]),
+    )
+
+
 def _support_csr_raw_cross(
     B_unique: NDArray,
     support_idx: NDArray,
@@ -836,7 +868,7 @@ def _support_csr_raw_cross(
     while start_row < n_rows:
         stop_row = _mixed_chunk_stop(csr.indptr, start_row, n_rows, dense_rows, max_nnz)
         left = _expand_support_rows(B_unique, support_idx[start_row:stop_row])
-        right = csr[start_row:stop_row].multiply(W_rows[start_row:stop_row, None])
+        right = _weighted_row_chunk(csr, W_rows, start_row, stop_row)
         # sparse.T @ dense keeps the CSR side sparse; the product is (p_csr, p_b).
         out += np.asarray(right.T @ left, dtype=np.float64).T
         del left, right
