@@ -175,9 +175,15 @@ def _format_ascii_number(value: float | None, *, decimals: int, width: int) -> s
         parsed = float(candidate)
         return np.isfinite(parsed) and (numeric == 0.0 or parsed != 0.0)
 
-    fixed = f"{numeric:.{decimals}f}"
-    if len(fixed) <= width and _is_safe(fixed):
-        return fixed
+    # Shed fixed decimals before switching notation. A width-limited scientific
+    # field keeps only ``width - 5`` significant figures, so jumping straight to
+    # it discards digits the column can still hold: a monetary-scale interval
+    # would collapse to a zero-width ``2.500e+05 2.500e+05``, and a leading minus
+    # sign alone would drop a value from nine significant figures to four.
+    for fixed_decimals in range(decimals, -1, -1):
+        fixed = f"{numeric:.{fixed_decimals}f}"
+        if len(fixed) <= width and _is_safe(fixed):
+            return fixed
     for scientific_decimals in range(decimals, -1, -1):
         scientific = f"{numeric:.{scientific_decimals}e}"
         if len(scientific) <= width and _is_safe(scientific):

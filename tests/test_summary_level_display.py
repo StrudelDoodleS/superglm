@@ -568,6 +568,47 @@ def test_ascii_summary_separates_columns_for_large_fitted_coefficients():
     assert len({len(line) for line in box_lines}) == 1
 
 
+def test_ascii_summary_large_coefficient_ci_brackets_the_printed_estimate():
+    rng = np.random.default_rng(226)
+    x = np.linspace(-1.0, 1.0, 3000)
+    X = pd.DataFrame({"x": x})
+    y = 250_000.0 + 3_000.0 * x + rng.normal(0.0, 500.0, len(x))
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"x": Numeric()},
+    ).fit(X, y)
+
+    summary = model.summary()
+    fitted = next(row for row in summary._coef_rows if row.name == "Intercept")
+    assert abs(fitted.coef) >= 1e5
+    true_width = fitted.ci_high - fitted.ci_low
+    assert true_width > 0.0
+
+    intercept = next(line for line in str(summary).splitlines() if "Intercept" in line)
+    fields = intercept.strip("║ ").split()
+    printed_coef = float(fields[1])
+    printed_low = float(fields[5])
+    printed_high = float(fields[6])
+
+    assert printed_high > printed_low
+    assert printed_low <= printed_coef <= printed_high
+    assert printed_high - printed_low == pytest.approx(true_width, rel=1e-3)
+
+
+@pytest.mark.parametrize("magnitude", [10232.9551, 249965.223])
+def test_ascii_summary_number_precision_does_not_depend_on_sign(magnitude: float):
+    from superglm.inference.summary import _format_ascii_number
+
+    positive = _format_ascii_number(magnitude, decimals=4, width=10)
+    negative = _format_ascii_number(-magnitude, decimals=4, width=10)
+
+    assert len(positive) <= 10
+    assert len(negative) <= 10
+    assert float(positive) == pytest.approx(magnitude, rel=1e-7)
+    assert float(negative) == pytest.approx(-magnitude, rel=1e-7)
+
+
 def test_ascii_summary_uses_bounded_scientific_notation_for_extreme_nonzero_values():
     summary = ModelSummary(
         {},
