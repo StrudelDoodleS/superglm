@@ -14,6 +14,13 @@
   "mains_edf": 52.866921516271546,
   "mains_deviance": 25016.433016529278,
   "phi": 4.821131435487084,
+  "_retired_phi_comment": [
+    "The same Pearson sum over the RETIRED count_nonzero(w) - edf denominator,",
+    "i.e. the phi this guide published before 67b90f8 changed the contract.",
+    "Recorded so the regeneration can be reconciled against the old number",
+    "instead of merely replacing it."
+  ],
+  "retired_phi_n_minus_edf": 2.554020871312444,
   "rows": [
     {"feature_a": "VehAge", "feature_b": "BonusMalus", "kind": "ti", "statistic": 5.691031, "z": 1.845515, "edf0": 2.000000, "lambda0": 1.023164e+02, "n_cells": 5244, "approx": false},
     {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 11.960590, "z": 0.438392, "edf0": 10.000039, "lambda0": 7.818052e+09, "n_cells": 1012, "approx": false},
