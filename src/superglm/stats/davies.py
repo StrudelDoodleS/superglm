@@ -45,14 +45,21 @@ def psum_chisq(
     lim : int
         Maximum number of integration subdivisions for quad.
     acc : float
-        Required accuracy.
+        Requested absolute accuracy of the inversion, clamped to
+        [50 * eps, 1e-10]. A looser request is ignored: certifying a far tail
+        needs an absolute tolerance well below the probability being reported,
+        and the default of 1e-4 predates that contract.
 
     Returns
     -------
     p_value : float
         Upper tail probability P[Q > q].
     ifault : int
-        0 = success, 1 = non-convergence, 4 = invalid input.
+        0 = the returned probability is certified. 1 = it is not, either
+        because the integration did not converge or because a converged value
+        cannot be certified: a tail below the resolution of the tolerance in
+        use, a one-sided support boundary, or components too disparate in
+        scale. 4 = invalid input.
     """
     import warnings
 
@@ -184,6 +191,24 @@ def psum_chisq(
     )
     component_scale_ratio = weight_scale / smallest_component_scale
 
+    # Integrate in units of the dominant component scale. The substitution
+    # u = v / unit_scale leaves the Imhof integral unchanged -- the 1/u factor
+    # cancels the Jacobian -- but keeps the transform frequency and every
+    # component transition O(1). QUADPACK loses accuracy without warning at
+    # large absolute frequencies, and P[Q > q] depends only on the ratios
+    # lambda_j / q, so the answer must not depend on the units the caller
+    # works in. A power-of-two unit makes the rescaling exact in binary
+    # floating point; it is abandoned only where q could not survive it.
+    unit_scale = math.ldexp(1.0, math.frexp(weight_scale)[1])
+    scaled_q = float(q) / unit_scale
+    if not np.isfinite(scaled_q):
+        unit_scale = 1.0
+        scaled_q = float(q)
+    scaled_lb = lb / unit_scale
+    scaled_sigma = sigma / unit_scale
+    scaled_mean = float(np.dot(scaled_lb, n))
+    scaled_weight_scale = weight_scale / unit_scale
+
     # Imhof (1961) formula:
     # P[Q > q] = 0.5 + (1/pi) * integral_0^inf f(u) du
     #
@@ -200,7 +225,7 @@ def psum_chisq(
     def _phase_and_log_rho(u: float) -> tuple[float, float]:
         phase = 0.0
         log_rho = 0.0
-        for lj, nj in zip(lb, n, strict=True):
+        for lj, nj in zip(scaled_lb, n, strict=True):
             lu = float(lj) * u
             phase += 0.5 * float(nj) * math.atan(lu)
             abs_lu = abs(lu)
@@ -211,7 +236,7 @@ def psum_chisq(
             log_rho += 0.25 * float(nj) * log_one_plus_square
 
         if sigsq > 0.0:
-            sigma_u = sigma * u
+            sigma_u = scaled_sigma * u
             if abs(sigma_u) >= normal_decay_limit:
                 return phase, math.inf
             log_rho += 0.125 * sigma_u * sigma_u
@@ -219,13 +244,13 @@ def psum_chisq(
 
     def _integrand(u: float) -> float:
         if u == 0.0:
-            return 0.5 * (mean - q)
+            return 0.5 * (scaled_mean - scaled_q)
 
         phase, log_rho = _phase_and_log_rho(u)
         if log_rho > 745.0:
             return 0.0
 
-        theta = phase - 0.5 * q * u
+        theta = phase - 0.5 * scaled_q * u
         return math.sin(theta) * math.exp(-log_rho) / u
 
     # The default public tolerance predates the far-tail contract and is too
@@ -260,12 +285,12 @@ def psum_chisq(
         # its transition occurs around u=1/abs(weight), potentially decades
         # after the largest component has decayed. Partitioning at every such
         # reciprocal scale makes those transitions explicit to QUADPACK.
-        omega = 0.5 * abs(float(q))
-        used_direct_inversion = omega <= epsilon**0.25 * weight_scale
+        omega = 0.5 * abs(scaled_q)
+        used_direct_inversion = omega <= epsilon**0.25 * scaled_weight_scale
         if used_direct_inversion:
-            component_scales = np.abs(lb)
+            component_scales = np.abs(scaled_lb)
             if sigma > 0.0:
-                component_scales = np.append(component_scales, sigma)
+                component_scales = np.append(component_scales, scaled_sigma)
             with np.errstate(over="ignore"):
                 reciprocal_scales = 1.0 / component_scales
             breakpoints = np.unique(
@@ -298,7 +323,7 @@ def psum_chisq(
             # Fourier routines integrate the remaining cos(q*u/2) and
             # sin(q*u/2) components cycle by cycle. A single adaptive integral
             # over (0, inf) can entirely miss those cycles for large |q|.
-            split = min(1.0 / weight_scale, math.pi / omega)
+            split = min(1.0 / scaled_weight_scale, math.pi / omega)
             component_acc = integration_acc / 3.0
             near, near_err, near_ok = _quad_checked(
                 _integrand,
