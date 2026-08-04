@@ -59,8 +59,10 @@ def test_type_check_enforces_and_validates_the_accepted_backlog() -> None:
     workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     type_job = workflow.split("  type-check:", maxsplit=1)[1].split("  quality:", maxsplit=1)[0]
 
+    assert "uv sync --locked --python 3.13" in type_job
+    assert "--extra dev --extra bench --extra plotting" in type_job
     assert 'pipeline_status=("${PIPESTATUS[@]}")' in type_job
-    assert "diagnostics > 905" in type_job
+    assert "diagnostics > 903" in type_job
     assert 'grep -qx "All checks passed!"' in type_job
     assert "diagnostics?" in type_job
     assert "ty_status > 1" in type_job

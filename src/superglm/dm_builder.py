@@ -739,6 +739,9 @@ def _process_info(
     # ── Compose constraints into solver coordinates ──
     # Constraints from build() are in post-identifiability space (after projection).
     # R_inv_local maps projected -> solver coords (SSP transform only).
+    # Main-effect QP constraints are rebuilt once from raw rows and the full
+    # R_inv in the feature loop below; this provisional composition preserves
+    # the generic GroupInfo contract for other callers.
     if info.constraints is not None and R_inv_local is not None:
         info.constraints = info.constraints.compose(R_inv_local)
     # raw_to_solver_map from build() is the identifiability projection (raw -> projected).
@@ -1009,6 +1012,23 @@ def build_design_matrix(
                 exposure_agg=exposure_agg,
                 lambda2=lambda2,
             )
+            qp_info = cast(GroupInfo, info)
+            if qp_info.monotone_engine == "qp":
+                raw_builder = getattr(spec, "_build_monotone_constraints_raw", None)
+                if raw_builder is None:
+                    raise RuntimeError(
+                        f"cannot build QP constraints for feature {name!r}: "
+                        "its raw constraint geometry is unavailable"
+                    )
+                raw_constraints = raw_builder()
+                qp_info.constraints = (
+                    raw_constraints if r_inv is None else raw_constraints.compose(r_inv)
+                )
+                if qp_info.constraints.n_params != n_cols:
+                    raise RuntimeError(
+                        f"QP constraint width for feature {name!r} does not match "
+                        "its solver-coordinate group"
+                    )
             if r_inv is not None:
                 r_inv_parts.append(r_inv)
 
