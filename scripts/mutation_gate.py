@@ -26,9 +26,28 @@ invisible to review and has been found repeatedly in this repository:
 Design notes, each answering a way an earlier revision of this script could be
 satisfied for the wrong reason:
 
-**The mutant is the head tree with ``src/`` rolled back.**  Both worktrees are
-created at the head revision; the base tree then has ``src/`` deleted outright
-and restored from the merge base.  Building the base tree *at the merge base*
+**Scope, and what this is not.**  The underlying rule -- a regression test must
+fail before the fix and pass after it -- is standard practice, taught directly in
+Django's and Qt's contribution guides.  What is unusual here is the automation:
+this builds a single coarse *historical mutant* by reverting all of ``src/`` to
+the merge base.  That is cheap (two focused test runs), and it measures the
+genuine unfixed implementation rather than a synthetic fault, which is what makes
+it good at catching hollow assertions and tests that merely execute code.  It is
+also blunt in two directions: one unrelated failure can kill the mutant, and one
+valid test can make a change carrying several independent fixes look fully
+constrained.  Real mutation-testing systems -- mutmut and Cosmic Ray in Python,
+Stryker, PIT, cargo-mutants elsewhere -- instead inject many small targeted
+faults, and cargo-mutants can scope them to a diff; Google has reported running
+diff-filtered mutation results into review at scale.  Per-function mutation of
+the changed code would be strictly more precise and considerably more expensive.
+This script is deliberately the cheap version, and it is advisory.
+
+**The mutant is the head tree with ``src/`` rolled back.**  Three worktrees are
+built, all from throwaway temporary directories.  ``head_tree`` and ``base_tree``
+are both created at the head revision, and ``base_tree`` then has ``src/``
+deleted outright and restored from the merge base; ``base_tests_tree`` sits at
+the merge base and is used only to enumerate which test items existed before.
+Building the base tree *at the merge base*
 instead left every non-``src`` file -- ``pyproject.toml``, ``conftest.py``,
 shared helpers, ``scripts/`` -- at the base revision, so the two runs differed by
 more than the fix.  Overlaying with ``git checkout <rev> -- <dir>`` is not a
@@ -81,14 +100,26 @@ on this runner -- ``browser``-marked, or ``skipif``-guarded on a platform -- is
 not evidence, but neither does it invalidate its siblings.  Those are excluded
 and named; the remaining tests are still judged.
 
-One known limitation, reported honestly rather than papered over: a change
+**A missing symbol is never a kill.**  pytest records an exception raised in the
+test *body* as a JUnit ``<failure>``, indistinguishable by tag from an assertion
+failure -- so a test whose only claim against the mutant is ``ImportError`` or
+``AttributeError`` on a name the change introduced would otherwise be counted as
+evidence, and moving an import from module scope into the body would flip
+``INCONCLUSIVE`` to ``PASS``.  Failures whose message names an import, attribute
+or name error are tracked separately and never count.  This is stricter than it
+first looks: a real shipped fix in this repository (``dc0dd57``) adds a private
+helper and tests it directly, so every failing item at base is a missing-symbol
+error and the honest verdict is ``INCONCLUSIVE`` -- those tests constrain the
+helper's existence, not the behaviour of the fix.  Driving the public API instead
+would fail behaviourally and earn a ``PASS``.
+
+Two known limitations, reported honestly rather than papered over: a change
 containing several independent fixes is accepted once *any* qualifying test is
-killed.  Mapping each production hunk to its own killed mutation would need
-per-hunk mutants and is deliberately out of scope.  A fix landing entirely in a
-**new** module is a related case -- at the base revision the module does not
-exist, so its tests error rather than fail, and an ``ImportError`` is not
-evidence that a test constrains behaviour.  That is reported ``INCONCLUSIVE``,
-never ``PASS``.
+killed -- mapping each production hunk to its own killed mutation would need
+per-hunk mutants and is out of scope, per the note on prior art above.  And a fix
+landing entirely in a **new** module cannot be measured this way at all: at the
+base revision the module does not exist, so its tests error or raise rather than
+fail.  That is reported ``INCONCLUSIVE``, never ``PASS``.
 
 Outcomes
 --------

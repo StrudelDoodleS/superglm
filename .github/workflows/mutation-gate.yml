@@ -57,6 +57,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --python 3.12 --extra dev
 
+      # The gate's own scenarios are marked `slow`, which the pull-request suite
+      # deselects. They are the only thing standing between a defect in this
+      # script and a silently wrong verdict on every other pull request, so they
+      # run here where the cost is already being paid.
+      - name: Test the gate itself
+        run: uv run --python 3.12 pytest tests/test_mutation_gate.py -q -m "slow or not slow"
+
       - name: Build the mutant and run the added tests
         env:
           # Reviewed, per-pull-request, and visible in the PR's own metadata.
