@@ -45,8 +45,11 @@ baseline.
   numerical correctness.
 - Adversarial regressions include a mutation check or a demonstration against
   the unfixed implementation. `scripts/mutation_gate.py` enforces this: it
-  reverts `src/` to the merge base, keeps the branch's tests, and requires at
-  least one to fail. Run it locally with
+  builds the branch's tree with `src/` rolled back to the merge base, and
+  requires that at least one test the branch added or strengthened passes at the
+  head revision and fails against that mutant. Commit first — it compares two
+  committed revisions and refuses to run on a dirty `src/` or `tests/`. Run it
+  locally with
   `uv run python scripts/mutation_gate.py --base-ref origin/master`.
   `docs/development/fixing-issues.md` describes the surrounding process.
 

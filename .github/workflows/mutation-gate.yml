@@ -10,14 +10,19 @@ name: Mutation gate
 # ruleset once a few pull requests have shown its outcome distribution. Until
 # then a red result is informational and does not block.
 
+# No `paths:` filter, deliberately. A workflow skipped by a path filter never
+# reports its check, and a *required* check that never reports leaves the pull
+# request blocked forever. The script's own no-production-change branch returns
+# SKIP with exit 0, which is the same saving with none of the trap.
+#
+# `labeled`/`unlabeled` are listed because the default activity set is only
+# [opened, synchronize, reopened]: without them the advertised
+# mutation-gate-exempt escape hatch cannot be applied after a failure without
+# pushing another commit, and a re-run replays the original payload's labels.
 on:
   pull_request:
     branches: [master]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "scripts/mutation_gate.py"
-      - ".github/workflows/mutation-gate.yml"
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read

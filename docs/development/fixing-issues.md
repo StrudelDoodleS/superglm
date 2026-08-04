@@ -51,14 +51,17 @@ until that check is added to the ruleset.
 uv run pytest tests/test_your_area.py -q      # must FAIL
 ```
 
-Then, once the fix is in, check the test still constrains it:
+Then, once the fix is in **and committed**, check the test still constrains it:
 
 ```bash
 uv run python scripts/mutation_gate.py --base-ref origin/master
 ```
 
-That reverts `src/` to the merge base, keeps your tests, and requires at least
-one to fail. **A test that passes against the unfixed code is not a regression
+That builds your branch's tree with `src/` rolled back to the merge base, and
+requires that at least one test you added or strengthened passes at your head
+and fails against that mutant. It compares two committed revisions, so it
+refuses to run while `src/` or `tests/` are dirty rather than quietly measuring
+nothing. **A test that passes against the unfixed code is not a regression
 test** — it observes what the code already did. Three shipped examples:
 
 - `tests/test_shape_fit.py` asserts one-sided second-derivative bounds that an
