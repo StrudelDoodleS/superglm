@@ -195,7 +195,12 @@ jobs:
           --splitting-algorithm least_duration
 
   pytest-312:
-    name: Python 3.12 · required non-browser suite
+    # Covers the declared floor (pyproject requires-python = ">=3.12") and is the
+    # only job that installs every tested extra. The context is not in the
+    # "Protect master" ruleset yet: the policy is strict, so requiring a context
+    # that the already-open pull requests have never reported would block them.
+    # Add the check-run name below to the ruleset once they have merged (#227).
+    name: Python 3.12 · non-browser suite · version floor
     runs-on: ubuntu-latest
 
     steps:
