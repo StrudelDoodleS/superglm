@@ -240,14 +240,19 @@ def drop1(
 ) -> pd.DataFrame:
     """Drop-one deviance analysis for each feature.
 
-    ``test="Chisq"`` compares ``delta_deviance / phi`` with a chi-square
-    reference on the effective-d.f. difference. ``test="F"`` compares
+    ``test="Chisq"`` compares the deviance change divided by the family's
+    dispersion with a chi-square reference on the effective-d.f. difference.
+    Estimated-scale families divide by the fitted ``phi``; known-scale
+    families such as Poisson and Binomial divide by their unit scale, taken
+    from the family rather than from the result because ``fit()`` pins
+    ``phi`` to 1.0 while ``fit_path()`` publishes the solver's Pearson
+    dispersion untouched. ``test="F"`` compares
     ``(delta_deviance / delta_df) / phi`` with an F reference whose residual
-    d.f. follows the fitted family's sample-weight contract. Known-scale
-    families retain their fitted unit dispersion in both paths. For an
-    estimated-scale fit with exactly zero dispersion, an unchanged reduced
-    deviance is reported as statistic 0 and p-value 1; a nonzero deviance
-    change is undefined and raises an explicit error.
+    d.f. follows the fitted family's sample-weight contract; an F reference
+    presumes an estimated scale, so that path always divides by the fitted
+    dispersion. For an estimated-scale fit with exactly zero dispersion, an
+    unchanged reduced deviance is reported as statistic 0 and p-value 1; a
+    nonzero deviance change is undefined and raises an explicit error.
     """
     from scipy.stats import chi2
     from scipy.stats import f as f_dist
@@ -269,6 +274,11 @@ def drop1(
     edf_full = model._result.effective_df
     n = len(y) if not hasattr(y, "__len__") else len(y)
     phi = model._result.phi
+    # The chi-square LRT reference for a known-scale family is the family's
+    # unit dispersion. Reading it off the result would make the test depend on
+    # the fitting entry point: fit() pins phi to 1.0, but fit_path() publishes
+    # the path solution's Pearson dispersion untouched.
+    chisq_scale = 1.0 if getattr(model._distribution, "scale_known", True) else phi
     if sample_weight is None:
         diagnostic_weights = np.ones(n, dtype=np.float64)
     else:
@@ -322,7 +332,7 @@ def drop1(
             )
             p_value = float(f_dist.sf(stat, delta_df, resid_df))
         else:
-            stat = delta_dev / phi
+            stat = delta_dev / chisq_scale
             p_value = float(chi2.sf(stat, delta_df))
 
         rows.append(
