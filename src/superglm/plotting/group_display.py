@@ -170,8 +170,13 @@ def _collapsed_smooth_curve(
     draw a shape the model never fitted.
     """
     curve = ti.smooth_curve
-    if curve is None or curve.level_x is None:
-        return curve
+    if curve is None:
+        return None
+    if curve.level_x is None:
+        # Without level positions there is nothing to collapse, and handing the
+        # uncollapsed curve to a display term with fewer levels would put the
+        # markers and the curve on incompatible axes.
+        return None
     level_x = np.asarray(curve.level_x, dtype=np.float64)
     collapsed_x = np.asarray(
         [float(np.mean(level_x[indices])) for indices in groups], dtype=np.float64
