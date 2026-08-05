@@ -12,7 +12,7 @@ This feature type respects the ordering with two modes:
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,9 @@ from numpy.typing import NDArray
 
 from superglm.features.categorical import _grouping_labels, _validate_categorical_levels
 from superglm.types import GroupInfo
+
+if TYPE_CHECKING:  # Spline imports this module at runtime; keep the cycle type-only.
+    from superglm.features.spline import _SplineBase
 
 
 def _spline_kind_name(spline: Any) -> str:
@@ -371,17 +374,35 @@ class OrderedCategorical:
         self._R_inv: NDArray | None = None
 
         # Spline mode: create internal spline (deferred until we know n_levels)
-        self._spline = None
+        self._spline: _SplineBase | None = None
         if self.basis == "spline":
             self._init_spline()
             if self._spline_obj is not None:
                 # The object API is authoritative; ignored legacy shortcuts must
                 # not leak contradictory metadata into summaries or editor clones.
                 self.kind = _spline_kind_name(self._spline)
-                self.select = self._spline.select
-                self.penalty = self._spline.penalty
-                self.degree = self._spline.degree
-                self.n_knots = self._spline.n_knots
+                self.select = self._basis_spline.select
+                self.penalty = self._basis_spline.penalty
+                self.degree = self._basis_spline.degree
+                self.n_knots = self._basis_spline.n_knots
+
+    @property
+    def _basis_spline(self) -> _SplineBase:
+        """The inner spline, narrowed to non-None.
+
+        ``_spline`` is only populated in spline mode, so every path that reaches
+        the basis has already branched on ``self.basis == "spline"``. Routing those
+        reads through here states that invariant once instead of leaving a dozen
+        implicit ``None`` dereferences, and turns a violation into a named error
+        rather than ``AttributeError: 'NoneType' object has no attribute 'score'``.
+        """
+        spline = self._spline
+        if spline is None:
+            raise AttributeError(
+                f"OrderedCategorical(basis={self.basis!r}) has no inner spline; "
+                "this attribute is only available in spline mode."
+            )
+        return spline
 
     def __repr__(self) -> str:
         n = self._n_levels
@@ -500,10 +521,10 @@ class OrderedCategorical:
         """Spline mode: map to numeric, delegate to internal Spline."""
         self._choose_base(x, sample_weight)
         if not self.has_specials:
-            return self._spline.build(self._map_to_numeric(x))
+            return self._basis_spline.build(self._map_to_numeric(x))
 
         special_mask = self._special_mask(x)
-        ordered_mask = ~special_mask.any(axis=1)
+        ordered_mask = np.asarray(~special_mask.any(axis=1), dtype=bool)
         missing = [lev for j, lev in enumerate(self._specials) if not special_mask[:, j].any()]
         if missing:
             raise ValueError(
@@ -518,7 +539,15 @@ class OrderedCategorical:
         # Building over all rows would break 1'(B@Z) = 0 once the special rows are
         # zeroed, and would let a fabricated coordinate reach knot placement.
         ordered_numeric = self._map_to_numeric(x[ordered_mask])
-        spline_info = self._spline.build(ordered_numeric)
+        spline_info = self._basis_spline.build(ordered_numeric)
+        # build() is declared as returning one GroupInfo or a list of them; the
+        # spline bases reachable from here return exactly one, and _expand_rows and
+        # the two-block contract both assume it. Say so rather than indexing on faith.
+        if not isinstance(spline_info, GroupInfo):
+            raise TypeError(
+                f"OrderedCategorical specials require a single-group spline basis; "
+                f"{type(self._basis_spline).__name__} produced {len(spline_info)} groups."
+            )
         spline_info = self._expand_rows(spline_info, ordered_mask)
 
         indicators = sp.csr_matrix(special_mask.astype(np.float64))
@@ -594,7 +623,7 @@ class OrderedCategorical:
     def _spline_n_cols(self) -> int:
         """Fitted width of the spline block, for zero-filling special rows."""
         probe = np.array([self._level_to_value[self._smooth_levels[0]]], dtype=np.float64)
-        return int(np.asarray(self._spline.transform(probe)).shape[1])
+        return int(np.asarray(self._basis_spline.transform(probe)).shape[1])
 
     @staticmethod
     def _expand_rows(info: GroupInfo, ordered_mask: NDArray[np.bool_]) -> GroupInfo:
@@ -680,12 +709,12 @@ class OrderedCategorical:
 
         if self.basis == "spline":
             if not self.has_specials:
-                return self._spline.transform(self._map_to_numeric(x))
+                return self._basis_spline.transform(self._map_to_numeric(x))
             special_mask = self._special_mask(x)
             ordered_mask = ~special_mask.any(axis=1)
             spline_cols = np.zeros((len(x), self._spline_n_cols()), dtype=np.float64)
             if ordered_mask.any():
-                spline_cols[ordered_mask] = self._spline.transform(
+                spline_cols[ordered_mask] = self._basis_spline.transform(
                     self._map_to_numeric(x[ordered_mask])
                 )
             return np.column_stack([spline_cols, special_mask.astype(np.float64)])
@@ -713,12 +742,12 @@ class OrderedCategorical:
         if self.basis == "spline":
             spline_beta, special_beta = self._split_beta(beta)
             if not self.has_specials:
-                return self._spline.score(self._map_to_numeric(x), spline_beta)
+                return self._basis_spline.score(self._map_to_numeric(x), spline_beta)
             special_mask = self._special_mask(x)
             ordered_mask = ~special_mask.any(axis=1)
             out = special_mask.astype(np.float64) @ special_beta
             if ordered_mask.any():
-                out[ordered_mask] = self._spline.score(
+                out[ordered_mask] = self._basis_spline.score(
                     self._map_to_numeric(x[ordered_mask]), spline_beta
                 )
             return out
@@ -737,7 +766,7 @@ class OrderedCategorical:
             return 0.0
         spline_beta, _ = self._split_beta(beta)
         base_value = np.array([self._level_to_value[self._base_level]], dtype=np.float64)
-        return float(self._spline.score(base_value, spline_beta)[0])
+        return float(self._basis_spline.score(base_value, spline_beta)[0])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Convert fitted coefficients to interpretable output."""
@@ -755,11 +784,13 @@ class OrderedCategorical:
         can reconstruct predictions from one level table.
         """
         spline_beta, special_beta = self._split_beta(beta)
-        raw = self._spline.reconstruct(spline_beta)
+        raw = self._basis_spline.reconstruct(spline_beta)
 
         # Per-level values on the fitted curve
         level_values = np.array([self._level_to_value[lev] for lev in self._smooth_levels])
-        level_log_rels = np.asarray(self._spline.score(level_values, spline_beta), dtype=np.float64)
+        level_log_rels = np.asarray(
+            self._basis_spline.score(level_values, spline_beta), dtype=np.float64
+        )
 
         # Shift so base level = 0 (relativity = 1)
         base_shift = self._base_log_effect(beta)
@@ -806,7 +837,7 @@ class OrderedCategorical:
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:
         if self.basis == "spline":
-            self._spline.set_reparametrisation(R_inv)
+            self._basis_spline.set_reparametrisation(R_inv)
         else:
             self._R_inv = R_inv
 
