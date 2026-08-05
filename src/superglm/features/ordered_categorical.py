@@ -46,6 +46,41 @@ def _spline_kind_name(spline: Any) -> str:
     return type(spline).__name__
 
 
+def _require_two_smooth_levels(smooth_levels: list[str], special_set: set[str]) -> None:
+    """Both level-derivation paths must leave at least two levels to smooth."""
+    if special_set and len(smooth_levels) < 2:
+        raise ValueError(
+            "OrderedCategorical needs at least two non-special levels to fit a "
+            f"smooth; got {smooth_levels!r} after removing {sorted(special_set)!r}. "
+            "Use Categorical(...) for independent level effects."
+        )
+
+
+def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
+    """Refuse a grouping that merges a special into any other level.
+
+    Merging a special into an ordered group would smooth it after all, while
+    ``_specials`` still reports it free — an inconsistent spec with no error.
+    Merging two specials is refused for the same reason the editor refuses it
+    (``_require_no_special_members``): the group label would have to replace
+    both members in ``specials=``.
+    """
+    if not special_set or grouping is None:
+        return
+    for label, originals in grouping.group_to_originals.items():
+        members = [str(member) for member in originals]
+        if len(members) < 2:
+            continue
+        merged = [member for member in members if member in special_set]
+        if merged:
+            joined = ", ".join(repr(member) for member in merged)
+            raise ValueError(
+                f"OrderedCategorical grouping merges free level(s) {joined} into group "
+                f"{label!r}. Specials are fitted outside the smooth and may not be "
+                "grouped; group the ordered levels only."
+            )
+
+
 class OrderedCategorical:
     """Ordered categorical feature with spline or step basis.
 
@@ -106,6 +141,14 @@ class OrderedCategorical:
         Deprecated spline shortcut for double-penalty shrinkage.
     penalty : str or None
         Deprecated spline shortcut for penalty type.
+    specials : list[str] or None
+        Level labels held out of the smooth and fitted as free, unpenalized
+        level effects — one indicator column and one coefficient each. Use for
+        levels that are structurally different rather than merely sparse (a
+        ``MISSING`` band, a structural zero); the penalty already handles
+        sparse bands better than free levels do. A label listed here is
+        removed from ``order``/``values`` if also present there, and never
+        receives a numeric position on the smooth's axis.
 
     Examples
     --------
@@ -140,6 +183,7 @@ class OrderedCategorical:
         select: bool | None = None,
         penalty: str | None = None,
         grouping: Any = None,
+        specials: list[str] | None = None,
     ):
         from superglm.features.spline import _SplineBase
 
@@ -147,6 +191,20 @@ class OrderedCategorical:
             raise ValueError("Specify exactly one of 'values' or 'order', not both.")
         if values is None and order is None:
             raise ValueError("Must specify either 'values' or 'order'.")
+
+        self._specials: list[str] = []
+        if specials is not None:
+            for lev in specials:
+                if lev in self._specials:
+                    raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
+                self._specials.append(lev)
+        special_set = set(self._specials)
+
+        if special_set:
+            if values is not None:
+                values = {k: v for k, v in values.items() if k not in special_set}
+            else:
+                order = [lev for lev in order if lev not in special_set]
 
         basis_was_explicit = basis is not None
         shortcut_values = {
@@ -222,6 +280,11 @@ class OrderedCategorical:
 
         if self.basis == "step" and resolved_select:
             raise ValueError("select=True is not supported with basis='step'.")
+        if self.basis == "step" and special_set:
+            raise ValueError(
+                "specials= is not supported with basis='step', which is deprecated. "
+                "Use basis=Spline(...) for a smoothed ordinal term with free levels."
+            )
 
         self.kind = resolved_kind
         self.base = base
@@ -229,25 +292,27 @@ class OrderedCategorical:
         self.penalty = resolved_penalty
         self.degree = resolved_degree
         self.n_knots = resolved_n_knots
+        self._smooth_levels: list[str] = []
         self._ordered_levels: list[str] = []
 
-        # Derive ordered levels and numeric values
+        # Derive smooth levels and numeric values
         if values is not None:
             sorted_items = sorted(values.items(), key=lambda kv: kv[1])
-            self._ordered_levels = [k for k, _ in sorted_items]
+            self._smooth_levels = [k for k, _ in sorted_items]
             self._level_to_value = dict(values)
         else:
-            self._ordered_levels = list(order)
+            self._smooth_levels = list(order)
             n = len(order)
             vals = np.linspace(0.0, 1.0, n) if n > 1 else np.array([0.0])
             self._level_to_value = dict(zip(order, vals.tolist()))
+        self._ordered_levels = list(self._smooth_levels)
+
+        _require_two_smooth_levels(self._smooth_levels, special_set)
 
         # Grouping: validate and store
         self._grouping = grouping
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
-            # _known_levels includes all *original* levels (for predict-time validation)
-            self._known_levels = set(grouping.all_original_levels)
             # Preserve original level→value mapping for plot expansion
             orig_ltv = dict(self._level_to_value)
             self._original_level_to_value = orig_ltv
@@ -266,10 +331,22 @@ class OrderedCategorical:
                     if vals:
                         grouped_ltv[glev] = float(np.mean(vals))
             self._level_to_value = grouped_ltv
-            self._ordered_levels = list(grouping.grouped_levels)
+            self._smooth_levels = [lev for lev in grouping.grouped_levels if lev not in special_set]
+            # _known_levels includes all *original* levels (for predict-time validation)
+            self._known_levels = set(grouping.all_original_levels) | special_set
         else:
-            self._known_levels = set(self._ordered_levels)
-        self._n_levels = len(self._ordered_levels)
+            self._known_levels = set(self._smooth_levels) | special_set
+        self._ordered_levels = list(self._smooth_levels) + list(self._specials)
+        self._n_levels = len(self._smooth_levels)
+
+        _require_no_grouped_specials(grouping, special_set)
+        _require_two_smooth_levels(self._smooth_levels, special_set)
+        if base in special_set:
+            raise ValueError(
+                f"OrderedCategorical reporting base {base!r} is a special level. The base "
+                "anchors every reported relativity and must lie on the smooth; choose one "
+                f"of {self._smooth_levels!r}."
+            )
 
         # Step mode state
         self._base_level: str = ""
@@ -294,6 +371,11 @@ class OrderedCategorical:
         if self._spline is not None:
             return f"OrderedCategorical(basis={self._spline!r}, {n} levels)"
         return f"OrderedCategorical(basis={self.basis!r}, {n} levels, n_knots={self.n_knots})"
+
+    @property
+    def has_specials(self) -> bool:
+        """True when one or more levels are fitted as free effects."""
+        return bool(self._specials)
 
     def _init_spline(self) -> None:
         """Create the internal Spline object for spline mode."""
@@ -341,25 +423,30 @@ class OrderedCategorical:
         return pd.Series(x).map(self._level_to_value).values.astype(np.float64)
 
     def _choose_base(self, x: NDArray, sample_weight: NDArray | None) -> None:
-        """Choose the base level for relativities."""
-        if self._base_level and self._base_level in self._ordered_levels:
+        """Choose the base level for relativities.
+
+        Specials are excluded: the base anchors every reported relativity and
+        must lie on the smooth. On a real book a MISSING band is often the most
+        exposed level, so ``most_exposed`` would otherwise select it.
+        """
+        if self._base_level and self._base_level in self._smooth_levels:
             return
 
         if self.base == "most_exposed" and sample_weight is not None:
             exp_by_level = {
-                lev: float(sample_weight[x == lev].sum()) for lev in self._ordered_levels
+                lev: float(sample_weight[x == lev].sum()) for lev in self._smooth_levels
             }
             self._base_level = max(exp_by_level, key=exp_by_level.get)
         elif self.base == "most_exposed" and sample_weight is None:
-            self._base_level = self._ordered_levels[0]
+            self._base_level = self._smooth_levels[0]
         elif self.base == "first":
-            self._base_level = self._ordered_levels[0]
-        elif self.base in self._ordered_levels:
+            self._base_level = self._smooth_levels[0]
+        elif self.base in self._smooth_levels:
             self._base_level = self.base
         else:
-            raise ValueError(f"Base '{self.base}' not found in levels: {self._ordered_levels}")
+            raise ValueError(f"Base '{self.base}' not found in levels: {self._smooth_levels}")
 
-        self._non_base = [lev for lev in self._ordered_levels if lev != self._base_level]
+        self._non_base = [lev for lev in self._smooth_levels if lev != self._base_level]
 
     # ── Build ──────────────────────────────────────────────────────
 
