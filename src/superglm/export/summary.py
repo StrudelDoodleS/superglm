@@ -266,12 +266,27 @@ def _source_spec(model: SuperGLM, groups: tuple[Any, ...]) -> Any:
 def _group_test_kind(model: SuperGLM, row, groups: tuple[Any, ...]) -> str:
     spec = _source_spec(model, groups)
     if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
-        return "smooth"
+        # Per-term marker: the term's whole-smooth row records that the term
+        # contains free levels.  Which ones is recorded on the level rows.
+        return "smooth+free" if spec.has_specials else "smooth"
     if isinstance(spec, _SplineBase):
         return "group" if row.subgroup_type == "linear" else "smooth"
     if isinstance(spec, SplineCategorical | TensorInteraction):
         return "smooth"
     return "group"
+
+
+def _level_row_kind(row) -> str:
+    """Per-level provenance for a level row.
+
+    The Summary sheet emits one row per coefficient row, so an
+    OrderedCategorical special already has its own row here; it only needs a
+    kind that says so.  ``level_fit`` is set by both level-row builders
+    (``coef_tables.build_coef_rows`` and
+    ``report_ops._build_editor_stale_coef_rows``), so the edited-model path
+    carries the marker too.
+    """
+    return "free level" if getattr(row, "level_fit", None) == "free" else "level"
 
 
 def _significance(p_value: float | None, quasi_separated: bool) -> str:
@@ -306,7 +321,7 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
         kind = (
             _group_test_kind(model, row, source_groups)
             if is_group_row
-            else ("level" if row.name in level_names else "coefficient")
+            else (_level_row_kind(row) if row.name in level_names else "coefficient")
         )
         statistic = _finite_float(
             row.wald_chi2 if is_group_test else (None if is_structured_metadata else row.z)
@@ -357,7 +372,7 @@ def _summary_notes(
         offset_terms = ", ".join(info.get("editor_offset_terms") or [])
         notes.append(f"{_EDITOR_OFFSET_NOTE} Offset terms: {offset_terms}.")
     if not inference_stale:
-        if any(row.kind == "smooth" for row in terms):
+        if any(row.kind.startswith("smooth") for row in terms):
             notes.append(_SMOOTH_WOOD_NOTE)
         if any(row.kind == "group" and row.statistic_type == "chi2" for row in terms):
             notes.append(_GROUP_WALD_NOTE)
