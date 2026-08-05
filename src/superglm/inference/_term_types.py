@@ -46,7 +46,7 @@ class SmoothCurve:
     x: NDArray
     log_relativity: NDArray
     relativity: NDArray
-    level_x: NDArray | None = None  # numeric x positions of the K levels
+    level_x: NDArray | None = None  # numeric x positions of the K *smooth* levels
     se_log_relativity: NDArray | None = None
     ci_lower: NDArray | None = None
     ci_upper: NDArray | None = None
@@ -95,6 +95,10 @@ class TermInference:
 
     # Smooth curve for plotting (OrderedCategorical spline mode)
     smooth_curve: SmoothCurve | None = None
+
+    # Free (unpenalised) levels held out of the smooth: parallel to ``levels``.
+    # None when the term has no specials, so existing terms are unchanged.
+    level_is_special: NDArray[np.bool_] | None = None
 
     # Monotonicity
     monotone: str | None = None  # "increasing", "decreasing", or None

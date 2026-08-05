@@ -205,6 +205,16 @@ def term_inference(
             level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
             level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
 
+            # Specials are free levels with no position on the spline axis: they
+            # stay out of level_x and are flagged for the renderers instead.
+            special_labels = set(spec._specials) if spec.has_specials else set()
+            level_is_special = (
+                np.array([lv in special_labels for lv in levels], dtype=bool)
+                if special_labels
+                else None
+            )
+            smooth_levels = [lv for lv in levels if lv not in special_labels]
+
             # Per-level SEs (at K category positions)
             se = ci_lo = ci_hi = None
             curve = None
@@ -222,15 +232,26 @@ def term_inference(
                 ci_lo = _safe_exp(level_log_rels - z_alpha * se)
                 ci_hi = _safe_exp(level_log_rels + z_alpha * se)
 
-                # Continuous curve for plotting
-                level_x = np.array([raw["level_values"][lv] for lv in levels])
+                # Continuous curve for plotting (ordered levels only)
+                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
                 assert active_groups_cov is not None
+                # The curve is a statement about the spline block alone; its SE
+                # must be too.  feature_se_from_cov's level SEs are unaffected —
+                # that path transforms through the OC spec at full p+s width.
+                smooth_feature_groups = [
+                    fg for fg in feature_groups if fg.subgroup_type != "special"
+                ]
+                smooth_active_cov = [
+                    ag
+                    for ag in active_groups_cov
+                    if not (ag.feature_name == name and ag.subgroup_type == "special")
+                ]
                 curve_se = _spline_se(
                     inner,
                     name,
                     result.beta,
-                    feature_groups,
-                    active_groups_cov,
+                    smooth_feature_groups,
+                    smooth_active_cov,
                     Cov_active,
                     x_eval=raw["x"],
                     reference_x=np.array(
@@ -249,7 +270,7 @@ def term_inference(
                 )
             elif active:
                 # No SEs requested but still provide the curve shape
-                level_x = np.array([raw["level_values"][lv] for lv in levels])
+                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
                 curve = SmoothCurve(
                     x=raw["x"],
                     log_relativity=raw["log_relativity"],
@@ -274,6 +295,7 @@ def term_inference(
                 edf=edf,
                 smoothing_lambda=lam,
                 smooth_curve=curve,
+                level_is_special=level_is_special,
                 spline=spline_meta,
                 alpha=alpha,
             )

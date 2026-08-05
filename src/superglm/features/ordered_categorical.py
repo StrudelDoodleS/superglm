@@ -207,6 +207,12 @@ class OrderedCategorical:
                     raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
                 self._specials.append(lev)
         special_set = set(self._specials)
+        # Ungrouped OrderedCategorical validates raw column labels, so a special
+        # declared as `9` must be admissible in both the raw and the string form
+        # its mask matches on; otherwise the level is rejected as unseen.
+        known_special_labels: set[Any] = set(special_set)
+        if specials is not None:
+            known_special_labels |= set(specials)
 
         if special_set:
             if values is not None:
@@ -339,9 +345,9 @@ class OrderedCategorical:
             self._level_to_value = grouped_ltv
             self._smooth_levels = [lev for lev in grouping.grouped_levels if lev not in special_set]
             # _known_levels includes all *original* levels (for predict-time validation)
-            self._known_levels = set(grouping.all_original_levels) | special_set
+            self._known_levels = set(grouping.all_original_levels) | known_special_labels
         else:
-            self._known_levels = set(self._smooth_levels) | special_set
+            self._known_levels = set(self._smooth_levels) | known_special_labels
         self._ordered_levels = list(self._smooth_levels) + list(self._specials)
         self._n_levels = len(self._smooth_levels)
 
@@ -516,8 +522,45 @@ class OrderedCategorical:
         return [spline_info, special_info]
 
     def _special_mask(self, x: NDArray) -> NDArray[np.bool_]:
-        """(n, n_specials) boolean membership matrix, column j == self._specials[j]."""
-        return np.column_stack([np.asarray(x == lev) for lev in self._specials])
+        """(n, n_specials) boolean membership matrix, column j == self._specials[j].
+
+        ``self._specials`` is string-coerced at construction (so a special
+        listed as ``9`` still pops out of ``order=``/``values=``), so the
+        column is compared through a string view — otherwise construction and
+        build disagree and the special's rows fall through to the smooth.
+        """
+        labels = pd.Series(np.asarray(x).ravel()).astype(str).to_numpy()
+        return np.column_stack([labels == lev for lev in self._specials])
+
+    @property
+    def _n_special_cols(self) -> int:
+        return len(self._specials)
+
+    def _split_beta(
+        self, beta: NDArray[np.floating]
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        """Split a full-width feature coefficient vector into its two blocks.
+
+        Callers throughout inference concatenate every GroupSlice of a feature
+        and hand the result here; the block order is the documented build()
+        contract — spline first, specials second.
+        """
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        if not self.has_specials:
+            return beta, np.empty(0, dtype=np.float64)
+        n_special = self._n_special_cols
+        if len(beta) < n_special:
+            raise ValueError(
+                f"OrderedCategorical received {len(beta)} coefficients but has "
+                f"{n_special} special level(s); the feature's blocks are out of order "
+                "or a caller passed only the spline block."
+            )
+        return beta[: len(beta) - n_special], beta[len(beta) - n_special :]
+
+    def _spline_n_cols(self) -> int:
+        """Fitted width of the spline block, for zero-filling special rows."""
+        probe = np.array([self._level_to_value[self._smooth_levels[0]]], dtype=np.float64)
+        return int(np.asarray(self._spline.transform(probe)).shape[1])
 
     @staticmethod
     def _expand_rows(info: GroupInfo, ordered_mask: NDArray[np.bool_]) -> GroupInfo:
@@ -602,8 +645,16 @@ class OrderedCategorical:
             _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
-            x_numeric = self._map_to_numeric(x)
-            return self._spline.transform(x_numeric)
+            if not self.has_specials:
+                return self._spline.transform(self._map_to_numeric(x))
+            special_mask = self._special_mask(x)
+            ordered_mask = ~special_mask.any(axis=1)
+            spline_cols = np.zeros((len(x), self._spline_n_cols()), dtype=np.float64)
+            if ordered_mask.any():
+                spline_cols[ordered_mask] = self._spline.transform(
+                    self._map_to_numeric(x[ordered_mask])
+                )
+            return np.column_stack([spline_cols, special_mask.astype(np.float64)])
         else:
             # Step mode: one-hot then apply R_inv
             onehot = np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
@@ -626,8 +677,17 @@ class OrderedCategorical:
             _validate_categorical_levels(x, self._known_levels)
 
         if self.basis == "spline":
-            x_numeric = self._map_to_numeric(x)
-            return self._spline.score(x_numeric, beta)
+            spline_beta, special_beta = self._split_beta(beta)
+            if not self.has_specials:
+                return self._spline.score(self._map_to_numeric(x), spline_beta)
+            special_mask = self._special_mask(x)
+            ordered_mask = ~special_mask.any(axis=1)
+            out = special_mask.astype(np.float64) @ special_beta
+            if ordered_mask.any():
+                out[ordered_mask] = self._spline.score(
+                    self._map_to_numeric(x[ordered_mask]), spline_beta
+                )
+            return out
 
         beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
         level_scores = {self._base_level: 0.0}
@@ -641,8 +701,9 @@ class OrderedCategorical:
         """Return the fitted term effect at the reporting reference level."""
         if self.basis != "spline":
             return 0.0
+        spline_beta, _ = self._split_beta(beta)
         base_value = np.array([self._level_to_value[self._base_level]], dtype=np.float64)
-        return float(self._spline.score(base_value, beta)[0])
+        return float(self._spline.score(base_value, spline_beta)[0])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Convert fitted coefficients to interpretable output."""
@@ -655,13 +716,16 @@ class OrderedCategorical:
         """Spline mode: delegate to internal spline, add per-level annotations.
 
         Shifts the curve so that the base level has log_relativity=0 (relativity=1),
-        giving proper categorical-style relativities.
+        giving proper categorical-style relativities. Specials are reported on the
+        same scale — beta_special minus the curve at the base — so the rating table
+        can reconstruct predictions from one level table.
         """
-        raw = self._spline.reconstruct(beta)
+        spline_beta, special_beta = self._split_beta(beta)
+        raw = self._spline.reconstruct(spline_beta)
 
         # Per-level values on the fitted curve
-        level_values = np.array([self._level_to_value[lev] for lev in self._ordered_levels])
-        level_log_rels = np.asarray(self._spline.score(level_values, beta), dtype=np.float64)
+        level_values = np.array([self._level_to_value[lev] for lev in self._smooth_levels])
+        level_log_rels = np.asarray(self._spline.score(level_values, spline_beta), dtype=np.float64)
 
         # Shift so base level = 0 (relativity = 1)
         base_shift = self._base_log_effect(beta)
@@ -669,11 +733,19 @@ class OrderedCategorical:
         raw["log_relativity"] = raw["log_relativity"] - base_shift
         raw["relativity"] = np.exp(raw["log_relativity"])
 
+        all_levels = list(self._smooth_levels) + list(self._specials)
+        all_log_rels = np.concatenate(
+            [level_log_rels, np.asarray(special_beta, dtype=np.float64) - base_shift]
+        )
+
         raw["base_level"] = self._base_level
-        raw["levels"] = self._ordered_levels
-        raw["level_values"] = dict(zip(self._ordered_levels, level_values.tolist()))
-        raw["level_log_relativities"] = dict(zip(self._ordered_levels, level_log_rels.tolist()))
-        raw["level_relativities"] = dict(zip(self._ordered_levels, np.exp(level_log_rels).tolist()))
+        raw["levels"] = all_levels
+        raw["special_levels"] = list(self._specials)
+        # Keyed on the smooth levels only — a special never receives a coordinate
+        # on the spline's axis.
+        raw["level_values"] = dict(zip(self._smooth_levels, level_values.tolist()))
+        raw["level_log_relativities"] = dict(zip(all_levels, all_log_rels.tolist()))
+        raw["level_relativities"] = dict(zip(all_levels, np.exp(all_log_rels).tolist()))
         return raw
 
     def _reconstruct_step(self, beta: NDArray) -> dict[str, Any]:
