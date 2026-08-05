@@ -23,9 +23,14 @@ def _validate_observed_categorical_levels(
     """Raise for observed levels outside a fitted categorical domain."""
     unseen = observed - known_levels
     if unseen:
+        # Sort by str: a domain may legitimately mix types (numeric bands beside a
+        # labelled special, `order=[1..6], specials=["MISSING"]`), and a bare
+        # sorted() raises TypeError comparing int to str -- turning a clean report
+        # of a genuinely unseen level into a crash from the error path itself.
         msg = (
-            f"Encountered unseen categorical levels at predict time: {sorted(unseen)}. "
-            f"All levels must be among those seen during fit: {sorted(known_levels)}."
+            f"Encountered unseen categorical levels at predict time: "
+            f"{sorted(unseen, key=str)}. All levels must be among those seen "
+            f"during fit: {sorted(known_levels, key=str)}."
         )
         if context:
             msg = f"[{context}] {msg}"
@@ -52,7 +57,15 @@ def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str 
             msg = f"[{context}] {msg}"
         raise ValueError(msg)
 
-    observed = set(np.unique(x).tolist())
+    try:
+        observed = set(np.unique(x).tolist())
+    except TypeError:
+        # np.unique sorts, and an object column holding more than one type has no
+        # order: `["MISSING", 1]` raises TypeError comparing str to int. Membership
+        # is all this function needs, so fall back to a plain set. Kept as a
+        # fallback rather than the default because np.unique is much faster on the
+        # homogeneous columns that are the common case.
+        observed = set(np.asarray(x).ravel().tolist())
     _validate_observed_categorical_levels(
         observed,
         known_levels,

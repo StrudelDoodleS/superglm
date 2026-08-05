@@ -463,6 +463,47 @@ def test_a_non_string_special_label_builds_on_a_float_column():
     assert np.allclose(out[-2:, :n_spline], 0.0)
 
 
+def test_numeric_order_with_a_string_special_builds_and_transforms():
+    # The commonest real shape of all -- numeric bands beside a labelled special,
+    # `order=[1..6], specials=["MISSING"]` -- and it does not fit today. The
+    # ungrouped path validates raw column labels, and `_validate_categorical_levels`
+    # calls `np.unique`, which SORTS: on an object column holding both ints and
+    # "MISSING" that raises `TypeError: '<' not supported between 'int' and 'str'`
+    # before `_special_mask` ever gets to hold the special out. Nothing about the
+    # domain is actually wrong -- only the validator's insistence on ordering it.
+    spec = OrderedCategorical(
+        order=[1, 2, 3, 4, 5, 6], specials=["MISSING"], basis=Spline(kind="ps", k=5)
+    )
+    x = np.array([1, 2, 3, 4, 5, 6, "MISSING", "MISSING"], dtype=object)
+    spline_info, special_info = spec.build(x, np.ones(len(x)))
+    assert special_info.n_cols == 1
+    indicator = np.asarray(special_info.columns.todense()).ravel()
+    np.testing.assert_array_equal(indicator == 1.0, np.array(x) == "MISSING")
+    out = spec.transform(x)
+    n_spline = spline_info.columns.shape[1]
+    assert out.shape == (len(x), n_spline + 1)
+    # The special rows carry the indicator and a zeroed spline block; the ordered
+    # rows carry a real basis, so this cannot pass on an all-zero design.
+    np.testing.assert_array_equal(out[:, -1] == 1.0, np.array(x) == "MISSING")
+    assert np.allclose(out[-2:, :n_spline], 0.0)
+    assert not np.allclose(out[:-2, :n_spline], 0.0)
+
+
+def test_an_unseen_level_still_reports_against_a_mixed_type_domain():
+    # The other half: the validator must still REJECT genuinely unseen levels when
+    # the domain is mixed, and must be able to render the message. Formatting it
+    # sorts both the unseen set and the known domain, which is the same TypeError
+    # one layer down -- so a fix that only stops np.unique sorting turns a clean
+    # ValueError into a TypeError from the error path itself.
+    spec = OrderedCategorical(
+        order=[1, 2, 3, 4, 5, 6], specials=["MISSING"], basis=Spline(kind="ps", k=5)
+    )
+    x = np.array([1, 2, 3, 4, 5, 6, "MISSING"], dtype=object)
+    spec.build(x, np.ones(len(x)))
+    with pytest.raises(ValueError, match="unseen categorical levels"):
+        spec.transform(np.array([1, 2, "NOT_A_LEVEL"], dtype=object))
+
+
 # score() and reconstruct() forward the whole vector to the inner spline today,
 # so with specials present they read special coefficients as spline ones.
 def test_score_uses_the_free_coefficient_on_special_rows():
