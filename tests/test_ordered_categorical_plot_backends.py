@@ -1,12 +1,17 @@
 """The two plot backends must draw the same fitted curve for an OC term."""
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from superglm import Numeric, OrderedCategorical, Spline, SuperGLM
 from superglm.editor import EditorSession
-from superglm.plotting.group_display import project_grouped_term_for_display
+from superglm.plotting.group_display import (
+    _collapsed_smooth_curve,
+    project_grouped_term_for_display,
+)
 
 AGE_VALUES = {
     "18-24": 21.0,
@@ -43,8 +48,7 @@ def ordered_spline_model():
     return X, sample_weight, model
 
 
-@pytest.fixture
-def collapsed_ordered_spline_model():
+def _collapse_session():
     X, y, sample_weight = _age_band_frame(20260806, 700)
     model = SuperGLM(
         family="gaussian",
@@ -60,8 +64,24 @@ def collapsed_ordered_spline_model():
         terms=["age_band"],
         train_data=(X, y, sample_weight),
     )
+    return X, sample_weight, session
+
+
+@pytest.fixture
+def collapsed_ordered_spline_model():
+    X, sample_weight, session = _collapse_session()
     session.select_levels("age_band", ["18-24", "25-34", "35-49"])
     collapsed = session.replace_with_collapsed_levels("age_band", method="fit")
+    return X, sample_weight, collapsed
+
+
+@pytest.fixture
+def single_group_collapsed_model():
+    """Every level in one group: the degenerate one-marker display."""
+    X, sample_weight, session = _collapse_session()
+    session.select_levels("age_band", list(AGE_VALUES))
+    with pytest.warns(UserWarning, match="clamped"):
+        collapsed = session.replace_with_collapsed_levels("age_band", method="fit")
     return X, sample_weight, collapsed
 
 
@@ -167,3 +187,84 @@ def test_collapsed_display_keeps_the_fitted_curve(collapsed_ordered_spline_model
         np.asarray(display.term.smooth_curve.level_x, dtype=np.float64),
         [np.mean([21.0, 30.0, 42.0]), 57.0, 72.0],
     )
+
+
+def test_collapsed_panel_x_limits_hold_the_whole_curve(collapsed_ordered_spline_model):
+    # Markers sit at group means (31, 57, 72) but the curve still spans the
+    # original level range (21 .. 72), so limits derived from the markers alone
+    # cut the leading 2.5 units of the fitted curve off-canvas.
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    X, sample_weight, model = collapsed_ordered_spline_model
+    curve = model.term_inference("age_band").smooth_curve
+    curve_x = np.asarray(curve.x, dtype=np.float64)
+
+    ax = model.plot("age_band", X=X, sample_weight=sample_weight).axes[0]
+    lo, hi = ax.get_xlim()
+    x_pos = np.asarray(ax.get_xticks(), dtype=np.float64)
+
+    np.testing.assert_allclose(x_pos, [np.mean([21.0, 30.0, 42.0]), 57.0, 72.0])
+    # The left edge is the curve's own start, below the marker padding.
+    assert lo == pytest.approx(float(curve_x.min()))
+    assert lo < float(x_pos.min())
+    # The right edge still keeps the marker padding, which reaches past the curve.
+    assert hi >= float(curve_x.max())
+    assert hi > float(x_pos.max())
+
+    drawn_x, _ = _matplotlib_curve(ax, len(curve_x))
+    assert float(drawn_x.min()) >= lo and float(drawn_x.max()) <= hi
+
+
+def test_single_group_collapse_still_shows_the_whole_curve(single_group_collapsed_model):
+    # Degenerate display: every level lands in one group, so there is one marker
+    # and no spacing to derive.  The panel must still show all of the curve
+    # rather than a 1-unit window around the single marker.
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    X, sample_weight, single = single_group_collapsed_model
+
+    ti = single.term_inference("age_band")
+    display = project_grouped_term_for_display(single, ti, "auto")
+    assert len(display.term.levels) == 1
+
+    curve_x = np.asarray(ti.smooth_curve.x, dtype=np.float64)
+    ax = single.plot("age_band", X=X, sample_weight=sample_weight).axes[0]
+    lo, hi = ax.get_xlim()
+
+    assert np.asarray(ax.get_xticks()).size == 1
+    assert lo == pytest.approx(float(curve_x.min()))
+    assert hi == pytest.approx(float(curve_x.max()))
+
+
+def test_collapsed_curve_is_dropped_when_it_has_no_level_positions(ordered_spline_model):
+    # A curve without level_x cannot be re-positioned onto the collapsed
+    # markers, and handing the uncollapsed curve to a display term with fewer
+    # levels would draw it in level-value units against arange(n_collapsed).
+    _, _, model = ordered_spline_model
+    ti = model.term_inference("age_band")
+    groups = [[0, 1, 2], [3], [4]]
+
+    assert _collapsed_smooth_curve(ti, groups) is not None
+
+    without_level_x = replace(ti, smooth_curve=replace(ti.smooth_curve, level_x=None))
+    assert _collapsed_smooth_curve(without_level_x, groups) is None
+    assert _collapsed_smooth_curve(replace(ti, smooth_curve=None), groups) is None
+
+
+def test_ordered_bar_width_follows_the_shared_level_spacing(ordered_spline_model):
+    # _ordered_bar_width delegates to _ordered_level_spacing; pin both the
+    # spaced case and the degenerate single-position fallback.
+    from superglm.plotting.common import _ordered_level_spacing
+    from superglm.plotting.main_effects_plotly import _ordered_bar_width
+
+    _, _, model = ordered_spline_model
+    level_x = np.asarray(model.term_inference("age_band").smooth_curve.level_x, dtype=np.float64)
+
+    assert _ordered_level_spacing(level_x) == pytest.approx(9.0)  # min gap 30 - 21
+    assert _ordered_bar_width(level_x) == pytest.approx(9.0 * 0.72)
+    assert _ordered_level_spacing(np.array([44.4])) == pytest.approx(1.0)
+    assert _ordered_bar_width(np.array([44.4])) == pytest.approx(0.72)

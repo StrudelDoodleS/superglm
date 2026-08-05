@@ -629,7 +629,17 @@ def _plot_ordered_spline_panel(
     rot = 45 if n_levels > 8 else 0
     ha = "right" if rot else "center"
     ax.set_xticklabels(levels, rotation=rot, ha=ha, fontsize=8)
-    ax.set_xlim(float(x_pos.min()) - spacing / 2.0, float(x_pos.max()) + spacing / 2.0)
+    # The markers may be group means over a subrange of the fitted curve, so the
+    # limits are the union of the marker padding and the curve's own extent --
+    # padding alone clips the fitted curve wherever the two disagree.
+    lo = float(x_pos.min()) - spacing / 2.0
+    hi = float(x_pos.max()) + spacing / 2.0
+    if curve is not None:
+        curve_x = np.asarray(curve.x, dtype=np.float64)
+        if curve_x.size:
+            lo = min(lo, float(curve_x.min()))
+            hi = max(hi, float(curve_x.max()))
+    ax.set_xlim(lo, hi)
     ax.set_ylabel("Relativity")
     ax.set_title(ti.name, fontweight="bold")
     ax.grid(alpha=0.22)
