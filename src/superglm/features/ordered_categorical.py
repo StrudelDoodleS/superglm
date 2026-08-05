@@ -197,6 +197,10 @@ class OrderedCategorical:
             raise ValueError("Must specify either 'values' or 'order'.")
 
         self._specials: list[str] = []
+        # The declarations as given, positionally aligned with `_specials`.
+        # `_special_mask` needs them: the string view alone cannot match a
+        # non-str label against a numeric column (9.0 renders as "9.0").
+        self._special_raw: list[Any] = []
         if specials is not None:
             # Level labels live in `str` space throughout this file (grouping
             # coerces too), so coerce here or a non-str special silently fails
@@ -206,6 +210,7 @@ class OrderedCategorical:
                 if lev in self._specials:
                     raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
                 self._specials.append(lev)
+                self._special_raw.append(raw_lev)
         special_set = set(self._specials)
         # Ungrouped OrderedCategorical validates raw column labels, so a special
         # declared as `9` must be admissible in both the raw and the string form
@@ -528,9 +533,22 @@ class OrderedCategorical:
         listed as ``9`` still pops out of ``order=``/``values=``), so the
         column is compared through a string view — otherwise construction and
         build disagree and the special's rows fall through to the smooth.
+
+        The string view alone is not enough: a float column renders ``9.0`` as
+        ``"9.0"``, which never equals the declared ``"9"``, so a special
+        declared as a non-str is matched against its raw label as well. That
+        comparison runs through pandas, which yields element-wise ``False``
+        when the column's dtype cannot hold the label rather than raising.
         """
-        labels = pd.Series(np.asarray(x).ravel()).astype(str).to_numpy()
-        return np.column_stack([labels == lev for lev in self._specials])
+        raw = pd.Series(np.asarray(x).ravel())
+        labels = raw.astype(str).to_numpy()
+        columns = []
+        for lev, raw_lev in zip(self._specials, self._special_raw):
+            hit = labels == lev
+            if not isinstance(raw_lev, str):
+                hit = hit | np.asarray(raw == raw_lev, dtype=bool)
+            columns.append(hit)
+        return np.column_stack(columns)
 
     @property
     def _n_special_cols(self) -> int:
@@ -544,16 +562,25 @@ class OrderedCategorical:
         Callers throughout inference concatenate every GroupSlice of a feature
         and hand the result here; the block order is the documented build()
         contract — spline first, specials second.
+
+        The width check is an equality, not a lower bound: the realistic bad
+        input is the spline block alone, which is *longer* than ``n_special``
+        and would otherwise be split silently, reinterpreting its last
+        coefficients as free level effects. ``_spline_n_cols()`` tracks the
+        inner spline's current width in both the pre-reparametrisation and the
+        post-fit state, so equality is well-defined at every call site.
         """
         beta = np.asarray(beta, dtype=np.float64).ravel()
         if not self.has_specials:
             return beta, np.empty(0, dtype=np.float64)
         n_special = self._n_special_cols
-        if len(beta) < n_special:
+        expected = self._spline_n_cols() + n_special
+        if len(beta) != expected:
             raise ValueError(
-                f"OrderedCategorical received {len(beta)} coefficients but has "
-                f"{n_special} special level(s); the feature's blocks are out of order "
-                "or a caller passed only the spline block."
+                f"OrderedCategorical received {len(beta)} coefficients but its blocks "
+                f"are {expected} wide ({expected - n_special} spline + {n_special} "
+                "special); a caller passed only the spline block or the blocks are "
+                "out of order."
             )
         return beta[: len(beta) - n_special], beta[len(beta) - n_special :]
 

@@ -399,11 +399,30 @@ def test_split_beta_partitions_by_block_width():
     frame = _fit_frame()
     spec = _oc()
     spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
-    beta = np.arange(spline_info.n_cols + special_info.n_cols, dtype=np.float64)
+    # The full width the term actually consumes: the inner spline has not had
+    # the identifiability reparametrisation pushed back in, so its block is as
+    # wide as it was built, and n_cols (post-projection) is the wrong yardstick.
+    n_spline = spline_info.columns.shape[1]
+    beta = np.arange(n_spline + special_info.n_cols, dtype=np.float64)
     spline_beta, special_beta = spec._split_beta(beta)
-    assert len(spline_beta) == spline_info.n_cols
-    assert len(special_beta) == special_info.n_cols
+    # Assert the block BOUNDARY, not the lengths: _split_beta strips the trailing
+    # n_special from whatever it is handed, so a length check is a tautology.
+    np.testing.assert_array_equal(spline_beta, beta[: -special_info.n_cols])
+    np.testing.assert_array_equal(special_beta, beta[-special_info.n_cols :])
     assert special_beta[0] == beta[-1]
+
+
+def test_split_beta_rejects_a_spline_only_vector():
+    # The realistic bad input a width guard exists to catch: a caller hands over
+    # the spline block alone. It is longer than n_special, so a one-sided
+    # `len(beta) < n_special` check passes it through and the last spline
+    # coefficients are silently reinterpreted as free level effects.
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, _ = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    spline_only = np.arange(spline_info.columns.shape[1], dtype=np.float64)
+    with pytest.raises(ValueError, match="coefficients but its blocks"):
+        spec._split_beta(spline_only)
 
 
 def test_a_non_string_special_label_builds_and_transforms():
@@ -424,6 +443,26 @@ def test_a_non_string_special_label_builds_and_transforms():
     assert np.allclose(out[-2:, :n_spline], 0.0)
 
 
+def test_a_non_string_special_label_builds_on_a_float_column():
+    # The mirror case, and the half a str-only mask misses: on a FLOAT column
+    # `pd.Series(9.0).astype(str)` renders "9.0", which never equals the coerced
+    # "9". The special rows then miss the indicator, the build sees an all-zero
+    # column and raises "never observed" on data that plainly contains them.
+    # Plain OC takes a float column in its stride (`_level_to_value[9.0]` hits
+    # the int key), so the specials path must not be narrower.
+    spec = OrderedCategorical(order=[1, 2, 3, 4, 5, 9], specials=[9], basis=Spline(kind="ps", k=5))
+    x = np.array([1, 2, 3, 4, 5, 9, 9], dtype=float)
+    spline_info, special_info = spec.build(x, np.ones(len(x)))
+    assert special_info.n_cols == 1
+    indicator = np.asarray(special_info.columns.todense()).ravel()
+    np.testing.assert_array_equal(indicator == 1.0, x == 9.0)
+    out = spec.transform(x)
+    n_spline = spline_info.columns.shape[1]
+    assert out.shape == (len(x), n_spline + 1)
+    np.testing.assert_array_equal(out[:, -1] == 1.0, x == 9.0)
+    assert np.allclose(out[-2:, :n_spline], 0.0)
+
+
 # score() and reconstruct() forward the whole vector to the inner spline today,
 # so with specials present they read special coefficients as spline ones.
 def test_score_uses_the_free_coefficient_on_special_rows():
@@ -432,25 +471,47 @@ def test_score_uses_the_free_coefficient_on_special_rows():
     spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
     # The spec has not had the identifiability reparametrisation pushed back in,
     # so the inner spline still expects one coefficient per built column.
-    beta = np.zeros(spline_info.columns.shape[1] + special_info.n_cols)
+    n_spline = spline_info.columns.shape[1]
+    # A nonzero, non-constant spline block. With an all-zero one an ordered row
+    # reads 0.0 whether the smooth is evaluated or dropped from score() outright,
+    # so the whole ordered branch could be deleted with this test still green.
+    beta = np.linspace(0.1, 0.9, n_spline + special_info.n_cols)
     beta[-1] = -0.55
     scored = spec.score(np.array(["1", SPECIAL], dtype=object), beta)
     assert scored[1] == pytest.approx(-0.55)
-    # The special's coefficient must not leak into an ordered row.
-    assert scored[0] == pytest.approx(0.0)
+    # The ordered row carries the inner smooth evaluated at its own level...
+    expected = float(spec._spline.score(np.array([spec._level_to_value["1"]]), beta[:n_spline])[0])
+    assert scored[0] == pytest.approx(expected)
+    assert abs(scored[0]) > 1e-6  # ...and the smooth is genuinely nonzero there
+    # ...and none of the special's coefficient: moving it must not move the
+    # ordered row. An all-zero-except-the-last beta cannot see that.
+    moved = beta.copy()
+    moved[-1] = 4.0
+    assert spec.score(np.array(["1"], dtype=object), moved)[0] == pytest.approx(expected)
 
 
 def test_reconstruct_reports_every_level_and_flags_the_specials():
     frame = _fit_frame()
     spec = _oc()
     spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
-    beta = np.zeros(spline_info.columns.shape[1] + special_info.n_cols)
+    n_spline = spline_info.columns.shape[1]
+    # A nonzero spline block, so the base shift is live: with an all-zero one
+    # `base_shift` is exactly 0.0 and the spec's `beta_special - f(base)`
+    # reporting rule can be dropped from _reconstruct_spline unnoticed.
+    beta = np.zeros(n_spline + special_info.n_cols)
+    beta[:n_spline] = 0.3
     beta[-1] = -0.55
     raw = spec.reconstruct(beta)
     assert raw["levels"] == ORDERED + [SPECIAL]
     assert raw["special_levels"] == [SPECIAL]
     assert set(raw["level_relativities"]) == set(ORDERED + [SPECIAL])
-    assert raw["level_log_relativities"][SPECIAL] == pytest.approx(-0.55)
+    base_shift = spec._base_log_effect(beta)
+    assert base_shift != pytest.approx(0.0)
+    # The spec's reporting rule: a special reports beta_special - f(base), on the
+    # same scale as every smooth level, which is anchored at zero on the base.
+    assert raw["level_log_relativities"][SPECIAL] == pytest.approx(-0.55 - base_shift)
+    assert raw["level_relativities"][SPECIAL] == pytest.approx(np.exp(-0.55 - base_shift))
+    assert raw["level_log_relativities"][spec._base_level] == pytest.approx(0.0)
     # A special never receives a coordinate on the smooth's axis.
     assert SPECIAL not in raw["level_values"]
 
