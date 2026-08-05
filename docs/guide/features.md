@@ -187,13 +187,23 @@ and place free levels as detached points past its end.
 **The reported intercept changes when you add or remove a special.** The
 smooth's identifiability constraint is taken over the rows it is built on, so
 with `specials=` the intercept is the baseline of the *ordered* rows alone;
-without it, the special's rows are inside that baseline. Level relativities are
-reported against the base level and are unaffected, but do not compare
-intercepts across two models that differ in `specials=`.
+without it, the special's rows are inside that baseline. Reporting relativities
+against the base level removes that constraint shift exactly, so the two models'
+level relativities are directly comparable; their intercepts are not.
 
-A special must be present in the training data (an all-zero indicator column
-has no identifiable coefficient), may not be the reporting `base=`, and may not
-be merged into a level group. `specials=` requires `basis=Spline(...)`;
+That is a statement about *reporting*, not a claim that the fitted curve is
+identical. Adding a special leaves the ordered levels' fitted values unchanged
+to machine precision only when the term is the model's sole predictor and the
+smoothing parameter is held fixed. With another correlated, imbalanced predictor
+the shared IRLS weights change and the ordered curve moves a little — measured
+at around 1e-3 in log relativity with one imbalanced factor at a 5% special
+share — and it moves again if `fit_reml()` re-selects the smoothing parameter,
+which the default path does. Expect small differences rather than none.
+
+A special must be present in the training data and carry positive weight (an
+all-zero indicator column, or one whose rows all have zero weight, has no
+identifiable coefficient), may not be the reporting `base=`, and may not be
+merged into a level group. `specials=` requires `basis=Spline(...)`;
 interactions and PSST screening on a term with specials are not supported yet
 and are reported as deferred rather than silently skipped.
 

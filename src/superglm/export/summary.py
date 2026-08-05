@@ -335,6 +335,19 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
             row.wald_p if is_group_test else (None if is_structured_metadata else row.p)
         )
         quasi_separated = bool(row.quasi_separated)
+        # A "smooth+free" row describes the SPLINE block -- every statistic on it
+        # was scoped there. Its feature also contributes an unpenalized special
+        # block, which selection can never drop, so asking whether any source
+        # group survived would keep the row permanently active and contradict
+        # model.summary(), which reports the same row inactive. Level rows keep
+        # the wider gate: a free special is still fitted when the curve is gone.
+        active_groups = source_groups
+        if kind == "smooth+free":
+            active_groups = tuple(
+                group
+                for group in source_groups
+                if getattr(group, "subgroup_type", None) != "special"
+            )
         terms.append(
             SummaryTermRow(
                 term=str(row.name),
@@ -353,7 +366,7 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
                 smoothing_lambda=_finite_float(row.smoothing_lambda),
                 active=(
                     str(row.name) == "Intercept"
-                    or any(group.name in selected_names for group in source_groups)
+                    or any(group.name in selected_names for group in active_groups)
                 ),
                 significance=_significance(p_value, quasi_separated),
                 warning="Quasi-separated" if quasi_separated else "",

@@ -323,12 +323,25 @@ call succeeded:
 
 Two further notes carried from the probe:
 
-- **SSP conditioning.** `dm_builder.py:123-134` normalises the Gram by the weight
-  sum over all `n` rows while only ordered rows contribute, so the normalisation
-  is off by `ordered_exposure / total_exposure` and the fixed `1e-8·I` ridge
-  becomes relatively larger exactly when specials carry material exposure. Not a
-  correctness bug — REML re-estimates λ — but it needs a conditioning test with a
-  high-exposure special, and preferably the ordered-row weight sum passed through.
+- **SSP conditioning.** ~~`dm_builder.py:123-134` normalises the Gram by the weight
+  sum over all `n` rows while only ordered rows contribute, so the normalisation is
+  off by `ordered_exposure / total_exposure`; preferably pass the ordered-row weight
+  sum through.~~ **Superseded — do not act on this.** Measured during Task 3 and
+  again in review: the all-row scale is *correct* and the suggested change makes
+  conditioning worse. `compute_R_inv` yields `X'WX / W_total ≈ I − λR⁻ᵀΩR⁻¹ −
+  εR⁻ᵀR⁻¹`, and that identity is what puts every block of the assembled normal
+  equations on one scale; normalising this block by the ordered-row sum alone would
+  rescale it by `1/r` against every other column, a pure scale error.
+  `test_ssp_gram_of_the_zero_filled_block_is_on_the_all_row_scale` pins the shipped
+  behaviour and discriminates the alternative (~6× error against `atol=1e-3`).
+
+  What survives is the second half: the fixed `1e-8·I` ridge *is* the term that
+  degrades as a special takes exposure, since deviation from `I` goes as
+  `ε·λ_min(G)⁻¹` and `G` carries the ordered-weight share `r`. At the test's
+  `r ≈ 0.167` that is ~6e-4, so its `atol=1e-3` is about 1.6× the expected
+  deviation — a valid pin, but it is measuring the ridge more than the normaliser,
+  and it would degrade another ~17× if a special ever carried ~99% of exposure.
+  Loosening that tolerance would lose the discrimination.
 - **Intercept meaning shifts.** Restricting the identifiability constraint to
   ordered rows means the reported intercept changes when a special is added to or
   removed from an existing model. This is editor-visible and is documented rather

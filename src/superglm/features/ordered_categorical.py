@@ -533,6 +533,24 @@ class OrderedCategorical:
                 "unidentifiable coefficient; remove it from specials= or supply data "
                 "containing it."
             )
+        # Presence is not enough: it is X'WX that has to see the indicator. A
+        # special observed only on zero-weight rows contributes nothing to it, so
+        # its unpenalized coefficient is exactly as unidentifiable as the absent
+        # case above -- the design just does not look empty.
+        if sample_weight is not None:
+            w = np.asarray(sample_weight, dtype=np.float64).ravel()
+            unweighted = [
+                lev
+                for j, lev in enumerate(self._specials)
+                if not float(w[special_mask[:, j]].sum()) > 0.0
+            ]
+            if unweighted:
+                raise ValueError(
+                    f"Special level(s) {unweighted!r} carry no weight in the training data. "
+                    "Their rows are present but all have zero weight, so the indicator "
+                    "contributes nothing to the fit and the coefficient is unidentifiable; "
+                    "remove them from specials= or supply weighted rows."
+                )
 
         # The identifiability constraint is a column sum over the rows present, so
         # the spline must be built on exactly the rows its block is nonzero on.
