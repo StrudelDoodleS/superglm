@@ -309,3 +309,48 @@ def test_collapsed_display_of_a_grouped_specials_term_keeps_level_x_smooth_only(
     # One position per SMOOTH display group: the free level has none.
     smooth_count = int((~np.asarray(display.term.level_is_special)).sum())
     assert len(display.term.smooth_curve.level_x) == smooth_count == 5
+
+
+def test_editing_one_level_moves_only_that_level_s_predictions(specials_model):
+    # The assertion that binds. Every other editor test here compares an edit
+    # against another edit, or asserts on `_reported_effects` -- and both are
+    # BASE-RELATIVE, so a constant shift of the whole linear predictor cancels
+    # out of them exactly. Predictions are where it survives.
+    #
+    # `_apply_ordered_spline_term` feeds base-relative targets (f(l) - f(base))
+    # to `_solve_with_intercept`, so a null edit solves to a = -f(base) and
+    # `_adjust_intercept` moves EVERY row by -f(base). The relativity between
+    # levels stays right, which is why nothing caught it; the book level does
+    # not. Plain Categorical (apply.py, `target[base] = 0`) gets this for free,
+    # so this is the contract the spline path has to match.
+    model, X, _ = specials_model
+    edited = _edited_model(model, "MISSING", 0.7)
+
+    delta = np.asarray(edited._predict_eta_exact(X)) - np.asarray(model._predict_eta_exact(X))
+    is_missing = (X["band"] == "MISSING").to_numpy()
+
+    assert delta[is_missing] == pytest.approx(0.7, abs=1e-10)
+    assert delta[~is_missing] == pytest.approx(0.0, abs=1e-10)
+
+
+def test_editing_an_ordered_level_without_specials_moves_only_that_level():
+    # The same defect on the no-specials path (`_apply_projected_term`), which
+    # predates specials entirely -- pinned here so the fix covers both callers
+    # rather than only the branch this feature added.
+    rng = np.random.default_rng(20260805)
+    labels = rng.choice(SMOOTH_LEVELS, 900)
+    X = pd.DataFrame({"band": labels})
+    y = np.array([SMOOTH_EFFECT[label] for label in labels]) + rng.normal(0.0, 0.15, 900)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": OrderedCategorical(order=SMOOTH_LEVELS, basis=Spline(kind="ps", k=8))},
+    )
+    model.fit(X, y)
+
+    edited = _edited_model(model, "3", 0.7)
+    delta = np.asarray(edited._predict_eta_exact(X)) - np.asarray(model._predict_eta_exact(X))
+    is_three = (X["band"] == "3").to_numpy()
+
+    assert delta[is_three] == pytest.approx(0.7, abs=1e-10)
+    assert delta[~is_three] == pytest.approx(0.0, abs=1e-10)

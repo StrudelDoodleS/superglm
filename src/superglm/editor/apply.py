@@ -193,6 +193,22 @@ def _apply_projected_term(
     _patch_beta_block(model, groups, beta_new)
 
 
+def _ordered_spline_base_shift(model, spec: OrderedCategorical, groups: list[GroupSlice]) -> float:
+    """Return f(base) under the term's PRE-edit coefficients.
+
+    Read before the block is patched: this is the constant the base-relative
+    targets have already had removed, and it has to go back into the intercept so
+    an edit moves only what the user selected.
+    """
+    for result_name in ("_result", "_solver_result"):
+        result = getattr(model, result_name, None)
+        if result is None:
+            continue
+        beta = np.concatenate([np.asarray(result.beta)[group.sl] for group in groups])
+        return spec._base_log_effect(beta)
+    return 0.0
+
+
 def _apply_ordered_spline_term(
     model,
     spec: OrderedCategorical,
@@ -211,8 +227,17 @@ def _apply_ordered_spline_term(
     intercept and the fitted curve.
     """
     x_values = _ordered_spline_x(term)
+    # The editable targets are BASE-RELATIVE (`f(level) - f(base)`), so the
+    # least-squares intercept they imply is short by exactly f(base): a null edit
+    # solves to a = -f(base) and `_adjust_intercept` then shifts every prediction
+    # down by f(base), on top of whatever the user asked for. The relativities stay
+    # correct, which is why only an absolute assertion catches it. Add the base
+    # effect of the PRE-edit coefficients back, mirroring what the Categorical path
+    # gets for free from `target[base] = 0`.
+    base_shift = _ordered_spline_base_shift(model, spec, groups)
     if not spec.has_specials:
         _apply_projected_term(model, spec, groups, term, x_values)
+        _adjust_intercept(model, base_shift)
         return
 
     B = _as_dense(spec.transform(x_values))
@@ -234,7 +259,7 @@ def _apply_ordered_spline_term(
         weights[smooth_rows],
     )
     special_beta = targets[special_rows] - intercept_delta
-    _adjust_intercept(model, intercept_delta)
+    _adjust_intercept(model, intercept_delta + base_shift)
     _patch_beta_block(model, groups, np.concatenate([spline_beta, special_beta]))
 
 
