@@ -10,7 +10,11 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
 from superglm.inference.term import SmoothCurve, TermInference
-from superglm.plotting.common import _exposure_kde, _kde_2d
+from superglm.plotting.common import (
+    _exposure_kde,
+    _kde_2d,
+    _level_positions_with_specials,
+)
 from superglm.plotting.interactions import _highest_density_mass_field, _reconstruct_interaction
 
 
@@ -125,9 +129,17 @@ def _build_single_main_effect_payload(
     effect = ti.to_dataframe()
     if ti.smooth_curve is not None:
         level_x = ti.smooth_curve.level_x
-        if level_x is not None and len(effect) == len(level_x):
-            effect = effect.copy()
-            effect["x_position"] = np.asarray(level_x, dtype=np.float64)
+        if level_x is not None:
+            n_special = (
+                int(np.asarray(ti.level_is_special, dtype=bool).sum())
+                if ti.level_is_special is not None
+                else 0
+            )
+            if len(effect) == len(level_x) + n_special:
+                effect = effect.copy()
+                effect["x_position"] = _level_positions_with_specials(
+                    level_x, ti.level_is_special, len(effect)
+                )
 
     payload: dict[str, Any] = {
         "name": ti.name,
