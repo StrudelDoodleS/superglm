@@ -187,27 +187,42 @@ def _expand_grouped_term(
 
     # Expand smooth_curve: give each original level its own x-position and
     # rebuild the display curve via PCHIP interpolation through the expanded
-    # (level_x, relativity) pairs so it passes through every marker.
+    # (level_x, relativity) pairs so it passes through every marker.  level_x
+    # covers the SMOOTHED levels only, so specials are held out of the rebuild
+    # and keep their detached marker rows.
+    expanded_special = (
+        None
+        if ti.level_is_special is None
+        else np.asarray(ti.level_is_special, dtype=bool)[indices]
+    )
     curve = ti.smooth_curve
     if curve is not None and curve.level_x is not None:
         from scipy.interpolate import PchipInterpolator
 
+        smooth_mask = (
+            np.ones(len(expanded_levels), dtype=bool)
+            if expanded_special is None
+            else ~expanded_special
+        )
+        smooth_levels = [lev for lev, keep in zip(expanded_levels, smooth_mask) if keep]
+        smooth_log_rel = log_rel[smooth_mask]
+
         if original_level_values is not None:
-            expanded_level_x = np.array([original_level_values[lev] for lev in expanded_levels])
+            expanded_level_x = np.array([original_level_values[lev] for lev in smooth_levels])
         else:
             grouped_lx = np.asarray(curve.level_x)
-            n_expanded = len(expanded_levels)
+            n_expanded = len(smooth_levels)
             expanded_level_x = (
                 np.linspace(float(grouped_lx.min()), float(grouped_lx.max()), n_expanded)
                 if n_expanded > 1
-                else grouped_lx[indices]
+                else grouped_lx[np.asarray(indices, dtype=np.intp)[smooth_mask]]
             )
 
         # Rebuild display curve through expanded level positions
         # Deduplicate x-positions (grouped levels share the same relativity
         # but may have different x — keep first occurrence for interpolation)
         seen_x = {}
-        for xi, yi in zip(expanded_level_x, log_rel):
+        for xi, yi in zip(expanded_level_x, smooth_log_rel):
             if xi not in seen_x:
                 seen_x[xi] = yi
         uniq_x = np.array(sorted(seen_x.keys()))
@@ -233,29 +248,19 @@ def _expand_grouped_term(
             ci_upper=curve.ci_upper,
         )
 
-    return TermInference(
-        name=ti.name,
-        kind=ti.kind,
-        active=ti.active,
-        x=ti.x,
+    # dataclasses.replace, not a hand-listed rebuild: every field this function
+    # does not touch — including level_is_special's siblings — survives by
+    # construction rather than by remembering to list it.
+    return replace(
+        ti,
         levels=expanded_levels,
         log_relativity=log_rel,
         relativity=rel,
         se_log_relativity=se,
         ci_lower=ci_lo,
         ci_upper=ci_hi,
-        ci_lower_simultaneous=ti.ci_lower_simultaneous,
-        ci_upper_simultaneous=ti.ci_upper_simultaneous,
-        critical_value_simultaneous=ti.critical_value_simultaneous,
-        absorbs_intercept=ti.absorbs_intercept,
-        centering_mode=ti.centering_mode,
-        edf=ti.edf,
-        smoothing_lambda=ti.smoothing_lambda,
-        spline=ti.spline,
         smooth_curve=curve,
-        monotone=ti.monotone,
-        monotone_repaired=ti.monotone_repaired,
-        alpha=ti.alpha,
+        level_is_special=expanded_special,
     )
 
 
