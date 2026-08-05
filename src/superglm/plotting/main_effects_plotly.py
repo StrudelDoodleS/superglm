@@ -1068,6 +1068,11 @@ def _add_categorical_term_trace(
 
     # Error bars — compute for both scales
     resp_error_y = None
+    # Held separately from the dict so the free-level split below can mask them:
+    # `resp_error_y` mixes arrays with a str type tag and a bool `symmetric`, so
+    # subscripting a value out of it and indexing that is not statically sound.
+    resp_err_up: NDArray[np.floating] | None = None
+    resp_err_down: NDArray[np.floating] | None = None
     link_err_up = None
     link_err_down = None
     ci_lo_resp = None
@@ -1086,11 +1091,13 @@ def _add_categorical_term_trace(
         ci_cap_lo = min(y_min / 5.0, 0.01)
         ci_hi_resp = np.minimum(ci_hi_resp, ci_cap_hi)
         ci_lo_resp = np.maximum(ci_lo_resp, ci_cap_lo)
+        resp_err_up = ci_hi_resp - resp_y
+        resp_err_down = resp_y - ci_lo_resp
         resp_error_y = dict(
             type="data",
             symmetric=False,
-            array=ci_hi_resp - resp_y,
-            arrayminus=resp_y - ci_lo_resp,
+            array=resp_err_up,
+            arrayminus=resp_err_down,
             color=style_cfg["error_bar_color"],
         )
         if ti.se_log_relativity is not None:
@@ -1152,11 +1159,11 @@ def _add_categorical_term_trace(
             if not mask.any():
                 continue
             trace_error_y = None
-            if resp_error_y is not None:
+            if resp_error_y is not None and resp_err_up is not None and resp_err_down is not None:
                 trace_error_y = dict(
                     resp_error_y,
-                    array=resp_error_y["array"][mask],
-                    arrayminus=resp_error_y["arrayminus"][mask],
+                    array=resp_err_up[mask],
+                    arrayminus=resp_err_down[mask],
                 )
             fig.add_trace(
                 go.Scatter(
