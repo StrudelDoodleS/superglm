@@ -92,6 +92,7 @@ from superglm.features.ordered_categorical import (
     OrderedCategorical,
     resolve_interaction_parent,
 )
+from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
     numeric_numeric_moments,
@@ -247,6 +248,14 @@ def _margin_kind(spec) -> str | None:
     if isinstance(spec, _SplineBase):
         return "spline"
     if isinstance(spec, OrderedCategorical):
+        # A term with specials= is refused HERE, ahead of the basis test and
+        # before any column is read.  A special is a free level with no
+        # position on the spline axis, so ``resolve_interaction_parent``
+        # refuses it -- and that resolver runs inside the eager pre-read
+        # below, which would abort the WHOLE sweep on the first specials term
+        # rather than skipping it.  Screening one needs composite margins.
+        if spec.has_specials:
+            return None
         # A spline-mode OC is a spline through the level values, so it screens
         # (and refits) exactly like one; step mode has no interaction target.
         if spec.basis == "spline" and spec._spline is not None:
@@ -261,6 +270,34 @@ def _margin_kind(spec) -> str | None:
     if isinstance(spec, Numeric):
         return "numeric"
     return None
+
+
+def _deferral_reason(spec) -> str:
+    """Why a fitted main effect has no screenable margin.
+
+    Called only for names ``_margin_kind`` refused, so every branch is a
+    deferral rather than an error, and the reason is REPORTED --- on
+    ``table.attrs["deferred_features"]`` and in the candidates error --- rather
+    than dropped on the floor.  Polynomial and step-mode OrderedCategorical
+    were silently skipped before this existed, which is the same defect.
+    """
+    if isinstance(spec, OrderedCategorical):
+        if spec.has_specials:
+            return (
+                "OrderedCategorical with specials= is deferred: a special is a free "
+                "level with no position on the spline axis, so the margin has no "
+                "score to grid on; screening the pair needs composite margins"
+            )
+        return (
+            "step-mode OrderedCategorical is deferred: the deprecated one-hot "
+            "geometry has no marginal smooth to cross with"
+        )
+    if isinstance(spec, Polynomial):
+        return (
+            "Polynomial margins are deferred: the basis is not a penalized marginal "
+            "smooth, so no interaction class refits the pair"
+        )
+    return f"{type(spec).__name__} margins are deferred: no screenable margin"
 
 
 # Every entry names a pair kind that has a real refit target; a combination
@@ -279,7 +316,7 @@ def _pair_kind(kind_a: str, kind_b: str) -> str | None:
     return _PAIR_KINDS.get(frozenset((kind_a, kind_b)))
 
 
-def _validated_pairs(candidates, margin_kinds, fitted_pairs, fitted_names):
+def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
     if candidates is None:
         # A pair the model already fits as an interaction is not a candidate:
         # the screen profiles only the parent mains, so it would re-surface
@@ -296,17 +333,16 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, fitted_names):
         pair = tuple(raw)
         if len(pair) == 2 and pair[0] != pair[1]:
             # A name the model DID fit but cannot screen (Polynomial, step-mode
-            # OrderedCategorical) is deferred, not a typo; listing the
-            # screenable features would send the caller hunting for a
-            # misspelling that isn't there.
-            deferred_names = sorted(
-                name for name in pair if name not in margin_kinds and name in fitted_names
-            )
+            # or specials OrderedCategorical) is deferred, not a typo; listing
+            # the screenable features would send the caller hunting for a
+            # misspelling that isn't there.  The reason quoted here is the same
+            # string the result table reports.
+            deferred_names = sorted(name for name in pair if name in deferred_features)
             if deferred_names:
+                detail = "; ".join(f"{n} — {deferred_features[n]}" for n in deferred_names)
                 raise ValueError(
                     f"candidates entry {raw!r} names fitted feature(s) "
-                    f"{deferred_names} that have no screenable margin — "
-                    f"{_DEFERRED_KIND_HINT}"
+                    f"{deferred_names} that have no screenable margin: {detail}"
                 )
         if len(pair) != 2 or pair[0] == pair[1] or not set(margin_kinds).issuperset(pair):
             raise ValueError(
@@ -467,6 +503,13 @@ def screen_interactions(
     the value used is attached as ``table.attrs["phi"]`` and can be
     overridden with ``phi=`` for a deliberately different calibration study.
 
+    Fitted mains with no screenable margin — ``Polynomial``, ``RandomEffect``,
+    step-mode ``OrderedCategorical`` and any ``OrderedCategorical`` carrying
+    ``specials=`` — are excluded from the sweep and reported in
+    ``table.attrs["deferred_features"]``, a ``{feature: reason}`` mapping that
+    is empty when everything fitted was screened.  Naming one of them in
+    ``candidates`` raises with the same reason.
+
     Returns a frame sorted by ``z`` (descending) with one row per screened
     pair: ``feature_a, feature_b, kind, statistic, z, edf0, lambda0, n_cells,
     approx``, where ``kind`` names the interaction class the pair would refit
@@ -604,6 +647,14 @@ def screen_interactions(
         for name in model._feature_order
         if (kind := _margin_kind(model._specs.get(name))) is not None
     }
+    # Every fitted main is either screenable or REPORTED as deferred.  The two
+    # sets partition ``_feature_order``, so a caller can tell a feature that
+    # screened badly from one that was never screened at all.
+    deferred_features = {
+        name: _deferral_reason(model._specs.get(name))
+        for name in model._feature_order
+        if name not in margin_kinds
+    }
     # Every interaction class exposes parent_names, so exclusion covers the
     # whole family (tensor, spline_cat, numeric_cat, cat_cat, ..., and
     # FactorSmooth) rather than tensor terms alone.
@@ -612,7 +663,7 @@ def screen_interactions(
         for spec in getattr(model, "_interaction_specs", {}).values()
         if hasattr(spec, "parent_names")
     }
-    pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs, set(model._specs))
+    pairs = _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features)
 
     def _select_flag(name):
         # Only spline margins carry a double-penalty flag; an OC margin's
@@ -1352,4 +1403,5 @@ def screen_interactions(
     table = pd.DataFrame(rows, columns=_RESULT_COLUMNS)
     table = table.sort_values("z", ascending=False, ignore_index=True)
     table.attrs["phi"] = phi_hat
+    table.attrs["deferred_features"] = deferred_features
     return table
