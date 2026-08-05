@@ -1638,3 +1638,35 @@ def test_export_validates_lengths(tmp_path):
     model, X, y, w = _fit_export_model()
     with pytest.raises(ValueError, match="same length"):
         model.export_rating_tables(tmp_path / "tables.xlsx", X.iloc[:-1], y, sample_weight=w)
+
+
+def test_summary_sheet_keeps_a_deselected_smooth_inactive():
+    # False today. `active` asks whether ANY source group of the row survived
+    # selection, and an OrderedCategorical specials term contributes two: the
+    # penalized spline block and the special block, which is built
+    # `penalized=False` and is therefore never deselected. So the workbook marks
+    # the smooth row active even when the spline was dropped -- and it disagrees
+    # with model.summary(), which reports the same row inactive and suppresses
+    # its Wood statistics (coef_tables.py, fixed for the summary path only).
+    #
+    # The exported workbook is the artefact that leaves the building, so the two
+    # must not say different things about whether a term is in the model.
+    from tests.test_ordered_categorical_inference import (
+        _fit_deselected_spline_with_live_special,
+        _smooth_row,
+    )
+
+    model = _fit_deselected_spline_with_live_special()
+    assert set(model.result.rank_info.selected_group_names) == {"band:special"}
+    assert _smooth_row(model.summary()).active is False
+
+    payload = build_summary_export_payload(model)
+    smooth_row = next(
+        row for row in payload.terms if row.group == "band" and row.kind == "smooth+free"
+    )
+    assert smooth_row.active is False
+
+    # The free level is still fitted, so its own row must stay active: this is
+    # about the smooth, not about suppressing the one estimate the term made.
+    level_rows = [row for row in payload.terms if row.group == "band" and row.kind != "smooth+free"]
+    assert any(row.active for row in level_rows)

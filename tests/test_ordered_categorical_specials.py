@@ -559,7 +559,15 @@ def test_reconstruct_reports_every_level_and_flags_the_specials():
 
 # Nothing enforces this today because the feature does not exist. It is the
 # claim the design rests on: a free level effect makes those rows uninformative
-# for every other coefficient, so the fitted curve must not move.
+# for the term's OWN coefficients, so the fitted curve must not move.
+#
+# Scope, because the unqualified version of that sentence is not true: it holds
+# exactly for this fixture -- one predictor, one smoothing parameter -- and is
+# only approximate once another correlated predictor is present, because the
+# special's rows still reach the other coefficients through the shared IRLS
+# weights (measured at ~1e-3 with one imbalanced factor at a 5% special share),
+# and again once REML re-selects lambda. The fixture below is deliberately
+# single-predictor so the strong claim is the one under test.
 def test_adding_a_special_does_not_move_the_fitted_curve():
     frame = _fit_frame(n=8000, seed=3)
     ordered_only = frame[frame["band"] != SPECIAL].reset_index(drop=True)
@@ -586,3 +594,30 @@ def test_adding_a_special_does_not_move_the_fitted_curve():
     rel_b = dict(zip([str(v) for v in b.levels], np.asarray(b.relativity, dtype=float)))
     for lev in ORDERED:
         assert rel_b[lev] == pytest.approx(rel_a[lev], rel=2e-2)
+
+
+def test_a_special_carrying_no_weight_is_refused_like_an_absent_one():
+    # False today: the presence check reads the raw boolean mask, so a special
+    # that appears only on zero-weight rows counts as observed. In the weighted
+    # fit its indicator contributes nothing to X'WX, so the unpenalized
+    # coefficient is exactly as unidentifiable as the absent case the branch
+    # immediately above already rejects -- the model just does not say so.
+    spec = OrderedCategorical(
+        order=["1", "2", "3", "4", "5"], specials=["MISSING"], basis=Spline(kind="ps", k=5)
+    )
+    x = np.array(["1", "2", "3", "4", "5", "MISSING", "MISSING"], dtype=object)
+    weights = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
+    with pytest.raises(ValueError, match="carry no weight"):
+        spec.build(x, weights)
+
+
+def test_a_special_with_some_positive_weight_still_builds():
+    # The other side of the gate: one weighted row is enough to identify the
+    # coefficient, so the check must not reject a merely-thin special.
+    spec = OrderedCategorical(
+        order=["1", "2", "3", "4", "5"], specials=["MISSING"], basis=Spline(kind="ps", k=5)
+    )
+    x = np.array(["1", "2", "3", "4", "5", "MISSING", "MISSING"], dtype=object)
+    weights = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.25])
+    _, special_info = spec.build(x, weights)
+    assert special_info.n_cols == 1
