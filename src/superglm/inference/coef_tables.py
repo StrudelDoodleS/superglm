@@ -338,10 +338,15 @@ def build_coef_rows(
             handled_ordered_features.add(g.feature_name)
 
             feature_groups = [fg for fg in groups if fg.feature_name == g.feature_name]
+            # A specials term owns a second, unpenalized GroupSlice under the
+            # same feature_name.  ``reconstruct`` needs the full-width vector,
+            # but every statistic reported on the smooth row — edf, the Wood
+            # test, ref_df, n_params — is a statement about the spline block.
+            smooth_groups = [fg for fg in feature_groups if fg.subgroup_type != "special"]
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
             feature_active = any(fg.name in selected_names for fg in feature_groups)
             feature_edf = (
-                sum(_get_group_edf_map().get(fg.name, 0.0) for fg in feature_groups)
+                sum(_get_group_edf_map().get(fg.name, 0.0) for fg in smooth_groups)
                 if feature_active
                 else 0.0
             )
@@ -361,7 +366,7 @@ def build_coef_rows(
 
             if spec.basis == "spline":
                 active_pairs = []
-                for feature_group in feature_groups:
+                for feature_group in smooth_groups:
                     active_group = next(
                         (ag for ag in active_groups if ag.name == feature_group.name),
                         None,
@@ -371,7 +376,7 @@ def build_coef_rows(
 
                 stat = float("nan")
                 p_val = float("nan")
-                ref_df = float(sum(fg.size for fg in feature_groups))
+                ref_df = float(sum(fg.size for fg in smooth_groups))
                 curve_se_min = float("nan")
                 curve_se_max = float("nan")
                 beta_active = (
@@ -410,7 +415,7 @@ def build_coef_rows(
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
                 _, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(
-                    feature_groups[0].name,
+                    smooth_groups[0].name,
                     spec._spline,
                 )
                 rows.append(
@@ -418,7 +423,7 @@ def build_coef_rows(
                         name=feature_label,
                         group=feature_label,
                         is_spline=True,
-                        n_params=len(beta_combined),
+                        n_params=sum(fg.size for fg in smooth_groups),
                         active=feature_active,
                         group_norm=float(np.linalg.norm(beta_active)),
                         wald_chi2=stat if feature_active else None,
