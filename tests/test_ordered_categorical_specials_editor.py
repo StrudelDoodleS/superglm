@@ -354,3 +354,27 @@ def test_editing_an_ordered_level_without_specials_moves_only_that_level():
 
     assert delta[is_three] == pytest.approx(0.7, abs=1e-10)
     assert delta[~is_three] == pytest.approx(0.0, abs=1e-10)
+
+
+def test_the_collapse_clone_keeps_a_special_s_raw_label():
+    # `_ordered_spec_with_grouping` rebuilds the spec with
+    # `specials=list(spec._specials)` -- the STRING-COERCED labels. The rebuilt
+    # spec therefore has `_special_raw == ["9"]` and has lost the raw-label
+    # fallback that `_special_mask` needs, because on a float column
+    # `pd.Series(9.0).astype(str)` renders "9.0", which never equals "9".
+    #
+    # Asserted on the clone directly rather than through a collapse refit: that
+    # path is separately broken for ANY non-string level labels, specials or not
+    # (see the float-column grouping issue), so driving it would test the wrong
+    # defect and could not pass.
+    from superglm.editor.collapse import _ordered_spec_with_grouping
+
+    spec = OrderedCategorical(order=[1, 2, 3, 4, 9], specials=[9], basis=Spline(kind="ps", k=5))
+    assert 9 in spec._special_raw, "precondition: the original keeps the raw label"
+
+    data = pd.DataFrame({"band": np.array([1.0, 2.0, 3.0, 4.0, 9.0, 9.0])})
+
+    clone = _ordered_spec_with_grouping(spec, None, ["1", "2"], "1", data)
+
+    assert clone._specials == ["9"]
+    assert 9 in clone._special_raw, "the clone dropped the raw label and can only match str"

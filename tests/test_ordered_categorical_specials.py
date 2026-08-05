@@ -621,3 +621,22 @@ def test_a_special_with_some_positive_weight_still_builds():
     weights = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.25])
     _, special_info = spec.build(x, weights)
     assert special_info.n_cols == 1
+
+
+def test_a_grouping_that_omits_a_special_is_refused():
+    # `_require_no_grouped_specials` refuses a grouping that MERGES or RENAMES a
+    # special, but not one that simply fails to COVER it. Construction survives
+    # because `_known_levels` re-adds the special, and then build()'s
+    # `pd.Series(x).map(original_to_group)` yields NaN for those rows: the
+    # special mask misses them and they reach `_map_to_numeric` as NaN, dying
+    # inside scipy with "Array must not contain infs or nans" -- a message that
+    # says nothing about the grouping that caused it.
+    from superglm.features.grouping import collapse_levels
+
+    grouping = collapse_levels(
+        np.array(ORDERED, dtype=object),
+        groups={"1+2": ["1", "2"]},
+        order=list(ORDERED),
+    )
+    with pytest.raises(ValueError, match="does not cover"):
+        _oc(grouping=grouping)

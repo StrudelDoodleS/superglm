@@ -196,6 +196,14 @@ def test_ascii_summary_renders_a_fit_column_only_when_levels_are_marked():
     assert "Fit" in header
     assert re.search(r"band\[10\]\s+smooth\s", text)
     assert re.search(r"band\[MISSING\]\s+free\s", text)
+    # The BASE level too -- the most common row in a real specials summary, and
+    # the one the other assertions here miss. It takes the zero-coefficient
+    # branch (0.0000 with no standard error), not the ordinary estimated-level
+    # branch that band[10] exercises. The box-width test cannot cover it either,
+    # because `_row()` pads to a fixed width regardless, so a Fit cell dropped
+    # on this row misaligns silently rather than changing any line length.
+    # Verified to bind: blanking the Fit cell for zero-coefficient rows fails it.
+    assert re.search(r"band\[1\]\s+smooth\s+0\.0000\s", text)
     # The raw lookup key is undecorated: no asterisk, no suffix on the label.
     assert "band[MISSING]*" not in text
     assert "band[MISSING] (free)" not in text
@@ -384,3 +392,30 @@ def test_html_fit_column_grid_holds_on_a_real_fitted_specials_model():
     assert ">Fit</td>" in html
     assert html.count(">free</td>") == 1
     assert set(_row_widths(html)) == {10}
+
+
+def test_curve_se_range_describes_the_spline_block_only():
+    # False today. `_curve_se_range` calls `feature_se_from_cov`, which returns one
+    # SE per level -- K smooth levels AND the S free ones -- and takes min/max over
+    # all of them. So the ordered-spline row can advertise the SPECIAL's standard
+    # error as the widest point on the curve, which is not a point on the curve at
+    # all. Every other statistic on that row was scoped to the spline block, and
+    # _term_ops goes to real trouble to filter the special block out of the curve's
+    # own SE band; this is the one place the two disagree.
+    import numpy as np
+    import pytest
+
+    model = _specials_model()[0]
+    ti = model.term_inference("band")
+    se = np.asarray(ti.se_log_relativity, dtype=float)
+    is_special = np.asarray(ti.level_is_special, dtype=bool)
+    assert is_special.any(), "fixture must have a free level for this to mean anything"
+
+    smooth_se = se[~is_special]
+    # The fixture is only discriminating if the special is the extreme: otherwise
+    # trimming it changes nothing and the test passes either way.
+    assert se.max() > smooth_se.max()
+
+    row = next(r for r in model.summary()._coef_rows if r.name == "band" and r.is_spline)
+    assert row.curve_se_max == pytest.approx(float(smooth_se.max()))
+    assert row.curve_se_min == pytest.approx(float(smooth_se.min()))
