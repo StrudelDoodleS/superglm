@@ -353,7 +353,7 @@ def _ordered_spec_with_grouping(
     data,
 ) -> OrderedCategorical:
     values, native_base = _ordered_original_values(spec, grouping, data, base)
-    specials = list(getattr(spec, "_specials", ()) or ())
+    specials = list(spec._specials)
     if spec.basis == "spline":
         basis = (
             copy.deepcopy(spec._spline_obj)
@@ -483,9 +483,11 @@ def _members_are_contiguous(members: list[str], order: list[str]) -> bool:
     return bool(np.all(np.diff(positions) == 1))
 
 
-def _require_no_special_members(spec, term_name: str, members: list[str]) -> None:
+def _require_no_special_members(
+    spec: OrderedCategorical, term_name: str, members: list[str]
+) -> None:
     """Refuse a collapse selection that contains a free (special) level."""
-    specials = {str(level) for level in getattr(spec, "_specials", ())}
+    specials = {str(level) for level in spec._specials}
     if not specials:
         return
     selected = [member for member in members if member in specials]
