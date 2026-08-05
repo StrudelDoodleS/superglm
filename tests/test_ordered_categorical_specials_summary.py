@@ -117,3 +117,140 @@ def test_level_display_relayout_preserves_the_fit_marker():
 
     assert [row.name for row in level_rows] == [f"band[{level}]" for level in [*ORDERED, "MISSING"]]
     assert [row.level_fit for row in level_rows] == ["smooth"] * len(ORDERED) + ["free"]
+
+
+def _model_info() -> dict[str, object]:
+    return {
+        "family": "Poisson",
+        "link": "Log",
+        "penalty": "None",
+        "method": "ML",
+        "n_obs": 2800,
+        "effective_df": 6.0,
+        "phi": 1.0,
+        "pearson_chi2": 2790.0,
+        "deviance": 2750.0,
+        "log_likelihood": -1400.0,
+        "aic": 2812.0,
+        "aicc": 2812.1,
+        "bic": 2850.0,
+        "ebic": 2855.0,
+        "converged": True,
+        "n_iter": 5,
+    }
+
+
+def _synthetic_rows(*, with_specials: bool) -> list[_CoefRow]:
+    """One ordered-spline group row plus three level rows."""
+    fits = ["smooth", "smooth", "free"] if with_specials else [None, None, None]
+    return [
+        _CoefRow(name="Intercept", coef=-1.2, se=0.02, z=-60.0, p=0.0, ci_low=-1.24, ci_high=-1.16),
+        _CoefRow(
+            name="band",
+            group="band",
+            is_spline=True,
+            n_params=5,
+            active=True,
+            group_norm=1.0,
+            wald_chi2=42.0,
+            wald_p=0.0004,
+            ref_df=4.0,
+            subgroup_type="ordered_spline",
+            edf=3.5,
+            smoothing_lambda=2.0,
+        ),
+        _CoefRow(name="band[1]", group="band", coef=0.0, se=None, level_fit=fits[0]),
+        _CoefRow(
+            name="band[10]",
+            group="band",
+            coef=0.42,
+            se=0.05,
+            ci_low=0.32,
+            ci_high=0.52,
+            level_fit=fits[1],
+        ),
+        _CoefRow(
+            name="band[MISSING]",
+            group="band",
+            coef=-0.55,
+            se=0.07,
+            ci_low=-0.69,
+            ci_high=-0.41,
+            level_fit=fits[2],
+        ),
+    ]
+
+
+def _summary(*, with_specials: bool) -> ModelSummary:
+    rows = _synthetic_rows(with_specials=with_specials)
+    return ModelSummary({}, _model_info(), rows)
+
+
+def test_ascii_summary_renders_a_fit_column_only_when_levels_are_marked():
+    # False today: the ASCII renderer has no Fit column, so "smooth"/"free"
+    # never appear and the header never carries "Fit".
+    text = str(_summary(with_specials=True))
+    lines = text.splitlines()
+    header = next(line for line in lines if "std err" in line)
+
+    assert "Fit" in header
+    assert re.search(r"band\[10\]\s+smooth\s", text)
+    assert re.search(r"band\[MISSING\]\s+free\s", text)
+    # The raw lookup key is undecorated: no asterisk, no suffix on the label.
+    assert "band[MISSING]*" not in text
+    assert "band[MISSING] (free)" not in text
+
+    plain = str(_summary(with_specials=False))
+    plain_header = next(line for line in plain.splitlines() if "std err" in line)
+    assert "Fit" not in plain_header
+    # The header block always says "(3.500 smooth)" for the edf breakdown, so
+    # look for the marker only where the Fit column would render it.
+    plain_levels = [line for line in plain.splitlines() if "band[" in line]
+    assert len(plain_levels) == 3
+    assert not [line for line in plain_levels if "smooth" in line or "free" in line]
+
+
+def test_ascii_fit_column_is_included_in_the_box_width():
+    # False today: there is no Fit column, so nothing pins that adding it
+    # widens coef_W. Without the width fix the marked level lines overflow
+    # W and the box loses its single line length.
+    text = str(_summary(with_specials=True))
+    boxed = [line for line in text.splitlines() if line.startswith(("║", "╠", "╟"))]
+
+    assert len({len(line) for line in boxed}) == 1
+
+
+def _row_widths(html: str) -> list[int]:
+    """Effective column count of every <tr>, honouring colspan."""
+    widths = []
+    for chunk in re.findall(r"<tr>(.*?)</tr>", html, flags=re.S):
+        total = 0
+        for cell in re.findall(r"<t[dh][^>]*>", chunk):
+            match = re.search(r'colspan="(\d+)"', cell)
+            total += int(match.group(1)) if match else 1
+        widths.append(total)
+    return widths
+
+
+def test_html_summary_renders_a_fit_column_only_when_levels_are_marked():
+    # False today: the HTML renderer emits 9 columns and no Fit cell, so
+    # ">free<" never appears in the output.
+    html = _summary(with_specials=True)._repr_html_()
+
+    assert ">Fit</td>" in html
+    assert html.count(">free</td>") == 1
+    assert html.count(">smooth</td>") == 2
+
+    plain = _summary(with_specials=False)._repr_html_()
+    assert ">Fit</td>" not in plain
+    assert ">free</td>" not in plain
+
+
+def test_html_summary_column_grid_absorbs_the_fit_column():
+    # False today: every row is 9 wide. With the Fit column the whole grid
+    # must be 10 wide, including the colspan'd spline and header rows.
+    marked = _summary(with_specials=True)._repr_html_()
+    plain = _summary(with_specials=False)._repr_html_()
+
+    assert set(_row_widths(marked)) == {10}
+    assert set(_row_widths(plain)) == {9}
