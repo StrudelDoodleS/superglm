@@ -160,6 +160,43 @@ confidence intervals, but deliberately have no p-values or significance codes.
 Changing the reporting base therefore changes the displayed level contrasts,
 not the whole-smooth p-value.
 
+### Free levels (`specials=`)
+
+Some levels do not belong on the ordering at all — a `MISSING` band, a
+structural zero. Listing them in `specials=` holds them out of the smooth and
+fits each one as a free, unpenalized level effect:
+
+```python
+OrderedCategorical(
+    order=["1", "2", "3", "4", "5", "6"],
+    specials=["MISSING"],
+    basis=Spline(kind="ps", k=6),
+)
+```
+
+The smooth then spans the ordered levels only, and the special reports its own
+base-relative relativity beside them. Use this for levels that are
+*structurally* different, never for merely sparse ones: the penalty already
+handles a sparse band better than a free level does.
+
+The summary marks each level in a `Fit` column reading `smooth` or `free`, and
+the exported workbook records the term as `smooth+free` with the special's own
+row as a `free level`. Plots draw the fitted curve across the ordered levels
+and place free levels as detached points past its end.
+
+**The reported intercept changes when you add or remove a special.** The
+smooth's identifiability constraint is taken over the rows it is built on, so
+with `specials=` the intercept is the baseline of the *ordered* rows alone;
+without it, the special's rows are inside that baseline. Level relativities are
+reported against the base level and are unaffected, but do not compare
+intercepts across two models that differ in `specials=`.
+
+A special must be present in the training data (an all-zero indicator column
+has no identifiable coefficient), may not be the reporting `base=`, and may not
+be merged into a level group. `specials=` requires `basis=Spline(...)`;
+interactions and PSST screening on a term with specials are not supported yet
+and are reported as deferred rather than silently skipped.
+
 This interpretation depends on the numeric positions assigned to the levels.
 `order=[...]` uses equal spacing on `[0, 1]`; use `values={...}` when the real
 distances are unequal. If spacing and smoothness are not defensible assumptions,
