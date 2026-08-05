@@ -690,6 +690,31 @@ class SparseSSPGroupMatrix:
         return sub
 
 
+# A CSR block stores 12 bytes per entry (float64 + int32 index) against 8 for
+# the same matrix dense, so CSR stops paying for itself on memory alone above
+# 2/3 density.  The gram is the sharper argument: `_csr_weighted_gram` is a
+# scalar accumulation over nonzero PAIRS, so it costs (density * p)**2 per row
+# against a dense p**2 -- but BLAS runs its p**2 in a blocked kernel, and the
+# crossover in practice sits far below the flop-count crossover.
+#
+# The threshold is set at 0.9 rather than at either crossover deliberately.  The
+# shape this exists for is exact: an interaction marginal on a `cr` parent has a
+# GLOBALLY supported basis, and measures density 1.000 -- every row, every
+# column.  At 0.9 both memory and flops improve strictly, so the change cannot
+# make an ordinary sparse block worse; it only reclaims the case where the
+# sparse representation was storing no zeros at all.
+_DENSE_LEVEL_SATURATION = 0.9
+
+
+def _dense_if_saturated(block) -> NDArray | None:
+    """Return a dense copy when the block is too full to be worth storing sparse."""
+    rows, cols = block.shape
+    cells = rows * cols
+    if cells == 0 or block.nnz < _DENSE_LEVEL_SATURATION * cells:
+        return None
+    return np.asarray(block.toarray(), dtype=np.float64)
+
+
 class SplineCategoricalGroupMatrix:
     """One spline-by-category level without materialising a masked spline block."""
 
@@ -699,6 +724,7 @@ class SplineCategoricalGroupMatrix:
         "_data",
         "_indices",
         "_indptr",
+        "_dense_level",
         "_p_b",
         "R_inv",
         "row_idx",
@@ -734,6 +760,11 @@ class SplineCategoricalGroupMatrix:
         self._indices = self.B_level.indices
         self._indptr = self.B_level.indptr
         self._p_b = self.B_level.shape[1]
+        # Deferred: a block that never grams -- one replaced by its
+        # support-compressed variant, say -- must not pay for a dense copy it
+        # will never read.  ``False`` means undecided, ``None`` means decided to
+        # stay sparse.
+        self._dense_level = False
         self.R_inv = np.asarray(R_inv)
         self.shape = (self.n_rows, self.R_inv.shape[1])
         self.omega = None
@@ -756,26 +787,31 @@ class SplineCategoricalGroupMatrix:
         return self.R_inv.T @ np.asarray(self.B_level.T @ w[self.row_idx]).ravel()
 
     def gram(self, W: NDArray) -> NDArray:
-        raw_gram = _csr_weighted_gram(
-            self._data,
-            self._indices,
-            self._indptr,
-            W[self.row_idx],
-            self._p_b,
-        )
-        return self.R_inv.T @ raw_gram @ self.R_inv
+        return self.R_inv.T @ self._raw_gram(W[self.row_idx]) @ self.R_inv
 
-    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
-        W_sub = W[self.row_idx]
-        Wz_sub = Wz[self.row_idx]
-        raw_gram = _csr_weighted_gram(
+    def _raw_gram(self, W_sub: NDArray) -> NDArray:
+        """``B_level.T @ diag(W) @ B_level``, by whichever route the basis earns.
+
+        A saturated basis pays twice for CSR: 12 bytes per stored entry against
+        8, and a scalar numba accumulation where BLAS would run a blocked
+        kernel.  ``_dense_if_saturated`` decides once, at construction.
+        """
+        if self._dense_level is False:
+            self._dense_level = _dense_if_saturated(self.B_level)
+        if self._dense_level is not None:
+            return (self._dense_level * W_sub[:, None]).T @ self._dense_level
+        return _csr_weighted_gram(
             self._data,
             self._indices,
             self._indptr,
             W_sub,
             self._p_b,
         )
-        gram = self.R_inv.T @ raw_gram @ self.R_inv
+
+    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+        W_sub = W[self.row_idx]
+        Wz_sub = Wz[self.row_idx]
+        gram = self.R_inv.T @ self._raw_gram(W_sub) @ self.R_inv
         xtw = self.R_inv.T @ np.asarray(self.B_level.T @ W_sub).ravel()
         xtwz = self.R_inv.T @ np.asarray(self.B_level.T @ Wz_sub).ravel()
         return gram, xtw, xtwz
