@@ -425,12 +425,18 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         **metadata,
                     )
                 )
+                special_labels = set(spec._specials) if spec.has_specials else None
                 for level in raw["levels"]:
                     rows.append(
                         _CoefRow(
                             name=f"{g.feature_name}[{level}]",
                             group=g.feature_name,
                             coef=float(raw["level_log_relativities"][level]),
+                            level_fit=(
+                                None
+                                if special_labels is None
+                                else ("free" if level in special_labels else "smooth")
+                            ),
                         )
                     )
             else:
