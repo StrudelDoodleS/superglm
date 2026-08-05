@@ -166,3 +166,108 @@ def test_collapsing_ordered_levels_keeps_the_special_free(specials_model):
     assert replacement._smooth_levels == ["1", "2+3", "4", "5", "6"]
     assert replacement._ordered_levels == ["1", "2+3", "4", "5", "6", "MISSING"]
     assert "MISSING" not in replacement._level_to_value
+
+
+def _grouped_term_inference(curve):
+    from superglm.inference._term_types import TermInference
+
+    return TermInference(
+        name="band",
+        kind="categorical",
+        active=True,
+        levels=["1+2", "3", "MISSING"],
+        log_relativity=np.array([0.0, 0.2, 0.6]),
+        relativity=np.exp(np.array([0.0, 0.2, 0.6])),
+        absorbs_intercept=False,
+        centering_mode="base_level",
+        smooth_curve=curve,
+        level_is_special=np.array([False, False, True]),
+    )
+
+
+def _identity_plus_pair_grouping():
+    from superglm.features.grouping import collapse_levels
+
+    return collapse_levels(
+        np.array(["1", "2", "3", "MISSING"], dtype=object),
+        groups={"1+2": ["1", "2"]},
+        order=["1", "2", "3", "MISSING"],
+    )
+
+
+def test_grouped_expansion_keeps_the_special_marker():
+    from superglm.inference._term_helpers import _expand_grouped_term
+
+    expanded = _expand_grouped_term(_grouped_term_inference(None), _identity_plus_pair_grouping())
+
+    assert expanded.levels == ["1", "2", "3", "MISSING"]
+    # _expand_grouped_term rebuilds TermInference by hand-listing its fields
+    # (_term_helpers.py:236-258), so level_is_special is None today and every
+    # grouped specials term loses its marker with no error.
+    assert expanded.level_is_special is not None
+    np.testing.assert_array_equal(expanded.level_is_special, [False, False, False, True])
+
+
+def test_grouped_expansion_keeps_level_x_on_smoothed_levels_only():
+    from superglm.inference._term_helpers import _expand_grouped_term
+    from superglm.inference._term_types import SmoothCurve
+
+    grid = np.linspace(0.0, 1.0, 5)
+    curve = SmoothCurve(
+        x=grid,
+        log_relativity=grid * 0.2,
+        relativity=np.exp(grid * 0.2),
+        level_x=np.array([0.25, 1.0]),
+    )
+
+    expanded = _expand_grouped_term(
+        _grouped_term_inference(curve),
+        _identity_plus_pair_grouping(),
+        {"1": 0.0, "2": 0.5, "3": 1.0},
+    )
+
+    # Today this raises KeyError('MISSING') at _term_helpers.py:196: the special
+    # has no entry in _level_to_value and therefore none in original_level_values.
+    np.testing.assert_allclose(expanded.smooth_curve.level_x, [0.0, 0.5, 1.0])
+    np.testing.assert_array_equal(expanded.level_is_special, [False, False, False, True])
+
+
+def test_specials_term_round_trips_through_a_level_collapse(specials_model):
+    model, _, _ = specials_model
+    session = EditorSession.from_model(model, terms=["band"])
+    session.select_levels("band", ["2", "3"])
+
+    refit = session.replace_with_collapsed_levels("band")
+
+    assert refit._specs["band"]._specials == ["MISSING"]
+    assert refit._specs["band"]._smooth_levels == ["1", "2+3", "4", "5", "6"]
+    ti = refit.term_inference("band")
+    assert ti.levels == ["1", "2", "3", "4", "5", "6", "MISSING"]
+    np.testing.assert_array_equal(
+        ti.level_is_special, [False, False, False, False, False, False, True]
+    )
+
+
+def test_collapsed_display_of_a_grouped_specials_term_keeps_level_x_smooth_only(specials_model):
+    # This is the only place grouping and specials coexist, and "collapsed" is
+    # the auto display default for OrderedCategorical (group_display.py:92), so
+    # this is what the default plot path does. level_x covers the smoothed
+    # levels only while the display groups span all K+S levels, so a naive
+    # mean-position calculation indexes past the end of level_x.
+    from superglm.plotting.group_display import project_grouped_term_for_display
+
+    model, _, _ = specials_model
+    session = EditorSession.from_model(model, terms=["band"])
+    session.select_levels("band", ["2", "3"])
+    refit = session.replace_with_collapsed_levels("band")
+
+    display = project_grouped_term_for_display(refit, refit.term_inference("band"), "collapsed")
+
+    assert display.collapsed
+    assert display.term.levels == ["1", "2+3", "4", "5", "6", "MISSING"]
+    np.testing.assert_array_equal(
+        display.term.level_is_special, [False, False, False, False, False, True]
+    )
+    # One position per SMOOTH display group: the free level has none.
+    smooth_count = int((~np.asarray(display.term.level_is_special)).sum())
+    assert len(display.term.smooth_curve.level_x) == smooth_count == 5
