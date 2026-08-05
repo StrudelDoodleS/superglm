@@ -335,14 +335,22 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
             row.wald_p if is_group_test else (None if is_structured_metadata else row.p)
         )
         quasi_separated = bool(row.quasi_separated)
-        # A "smooth+free" row describes the SPLINE block -- every statistic on it
-        # was scoped there. Its feature also contributes an unpenalized special
-        # block, which selection can never drop, so asking whether any source
-        # group survived would keep the row permanently active and contradict
-        # model.summary(), which reports the same row inactive. Level rows keep
-        # the wider gate: a free special is still fitted when the curve is gone.
+        # An OrderedCategorical specials term contributes two source groups: the
+        # penalized spline block and an unpenalized special block that selection
+        # can never drop. Asking whether ANY of them survived would let the
+        # special keep the rest of the term alive:
+        #
+        #   - the "smooth+free" row describes the SPLINE block (every statistic on
+        #     it was scoped there), so it would report active while showing an
+        #     empty smooth, contradicting model.summary();
+        #   - a SMOOTHED level row is no longer fitted once the spline is dropped,
+        #     so it would inherit activity from a block it has no coefficient in.
+        #
+        # Only a level actually fitted free may take its activity from the special
+        # block -- that one really is still estimated when the curve is gone.
+        inherits_from_special = kind == "free level"
         active_groups = source_groups
-        if kind == "smooth+free":
+        if not inherits_from_special:
             active_groups = tuple(
                 group
                 for group in source_groups
