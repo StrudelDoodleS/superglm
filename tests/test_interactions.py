@@ -707,17 +707,15 @@ class TestSplineCategoricalPerLevel:
         real_compute_R_inv = dm_builder.compute_R_inv
         real_compute_projected_R_inv = dm_builder.compute_projected_R_inv
 
-        def record_compute_R_inv(B, omega, weights, lambda2, **kwargs):
+        def record_compute_R_inv(B, omega, weights, lambda2):
             if B.shape[0] in expected_level_rows:
                 seen_rows.append(B.shape[0])
-            return real_compute_R_inv(B, omega, weights, lambda2, **kwargs)
+            return real_compute_R_inv(B, omega, weights, lambda2)
 
-        def record_compute_projected_R_inv(B, projection, penalty_sub, weights, lambda2, **kwargs):
+        def record_compute_projected_R_inv(B, projection, penalty_sub, weights, lambda2):
             if B.shape[0] in expected_level_rows:
                 seen_rows.append(B.shape[0])
-            return real_compute_projected_R_inv(
-                B, projection, penalty_sub, weights, lambda2, **kwargs
-            )
+            return real_compute_projected_R_inv(B, projection, penalty_sub, weights, lambda2)
 
         monkeypatch.setattr(dm_builder, "compute_R_inv", record_compute_R_inv)
         monkeypatch.setattr(
