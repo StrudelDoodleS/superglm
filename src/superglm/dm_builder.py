@@ -91,21 +91,27 @@ def compute_R_inv(
     omega: NDArray,
     sample_weight: NDArray,
     lambda2: float | dict,
+    weight_sum: float | None = None,
 ) -> NDArray:
     """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
 
     Wood (2011) Section 3.1 / Section 5: absorb penalty into parameterization.
     R = chol(B'WB/n + λΩ + εI)^T, then R_inv = R^{-1} so that the SSP basis
     X_ssp = B @ R_inv has near-identity X'WX regardless of λ.
+
+    ``weight_sum`` overrides the normalising total. It defaults to the sum over
+    every row, which is right whenever every row carries basis mass; a block
+    built on a subset of rows and zero-filled elsewhere passes that subset's
+    weight sum, so the fixed ``1e-8`` ridge does not grow relative to the Gram.
     """
     lam2 = _resolve_lambda2(lambda2)
-    weight_sum = float(np.sum(sample_weight))
-    if weight_sum <= 0.0:
+    total = float(np.sum(sample_weight)) if weight_sum is None else float(weight_sum)
+    if total <= 0.0:
         G = np.zeros((omega.shape[0], omega.shape[0]), dtype=np.float64)
     elif sp.issparse(B):
-        G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / weight_sum
+        G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
-        G = (B * sample_weight[:, None]).T @ B / weight_sum
+        G = (B * sample_weight[:, None]).T @ B / total
     M = G + lam2 * omega + np.eye(omega.shape[0]) * 1e-8
     R = np.linalg.cholesky(M).T
     return np.linalg.inv(R)
@@ -117,23 +123,37 @@ def compute_projected_R_inv(
     penalty_sub: NDArray,
     sample_weight: NDArray,
     lambda2: float | dict,
+    weight_sum: float | None = None,
 ) -> NDArray:
-    """Compute SSP R_inv within a projected subspace (linear-split range space)."""
+    """Compute SSP R_inv within a projected subspace (linear-split range space).
+
+    ``weight_sum`` overrides the normalising total; see ``compute_R_inv``.
+    """
     lam2 = _resolve_lambda2(lambda2)
-    weight_sum = float(np.sum(sample_weight))
-    if weight_sum <= 0.0:
+    total = float(np.sum(sample_weight)) if weight_sum is None else float(weight_sum)
+    if total <= 0.0:
         G_full = np.zeros((projection.shape[0], projection.shape[0]), dtype=np.float64)
     elif sp.issparse(B):
-        G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / np.sum(
-            sample_weight
-        )
+        G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
     else:
-        G_full = (B * sample_weight[:, None]).T @ B / weight_sum
+        G_full = (B * sample_weight[:, None]).T @ B / total
     G_sub = projection.T @ G_full @ projection
     n_sub = penalty_sub.shape[0]
     M_sub = G_sub + lam2 * penalty_sub + np.eye(n_sub) * 1e-8
     R_sub = np.linalg.cholesky(M_sub).T
     return np.linalg.inv(R_sub)
+
+
+def _basis_weight_sum(info: GroupInfo, weights: NDArray, use_discrete: bool) -> float | None:
+    """Weight total over the rows a block's basis was built on, else None.
+
+    Returns None under discretisation, where ``weights`` is the per-bin
+    aggregate rather than one entry per row; no restricted-row block takes
+    that path (``should_discretize`` requires a ``_SplineBase`` spec).
+    """
+    if info.basis_rows is None or use_discrete:
+        return None
+    return float(np.sum(np.asarray(weights)[np.asarray(info.basis_rows, dtype=bool)]))
 
 
 def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
@@ -602,7 +622,14 @@ def _process_info(
         if info.reparametrize and info.penalty_matrix is not None:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
-            R_inv_local = compute_projected_R_inv(B_for, P, info.penalty_matrix, exp_for, lambda2)
+            R_inv_local = compute_projected_R_inv(
+                B_for,
+                P,
+                info.penalty_matrix,
+                exp_for,
+                lambda2,
+                weight_sum=_basis_weight_sum(info, exp_for, use_discrete),
+            )
             R_inv = P @ R_inv_local
         else:
             R_inv = P
@@ -642,7 +669,13 @@ def _process_info(
     elif info.reparametrize and info.penalty_matrix is not None:
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
-        R_inv = compute_R_inv(B_for, info.penalty_matrix, exp_for, lambda2)
+        R_inv = compute_R_inv(
+            B_for,
+            info.penalty_matrix,
+            exp_for,
+            lambda2,
+            weight_sum=_basis_weight_sum(info, exp_for, use_discrete),
+        )
         # No projection — constraints are in raw space, same as R_inv input
         R_inv_local = R_inv
         n_cols = R_inv.shape[1]

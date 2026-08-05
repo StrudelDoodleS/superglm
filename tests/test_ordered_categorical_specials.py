@@ -1,6 +1,7 @@
 """Specials: levels held out of the smooth and fitted as free level effects."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from superglm import OrderedCategorical, Spline
@@ -194,3 +195,121 @@ def test_choose_base_reselects_when_a_special_is_already_the_base():
     spec._choose_base(x, np.ones(len(x)))
     assert spec._base_level in ORDERED
     assert SPECIAL not in spec._non_base
+
+
+def _fit_frame(n=4000, seed=11):
+    rng = np.random.default_rng(seed)
+    band = rng.choice(ORDERED + [SPECIAL], size=n)
+    exposure = rng.gamma(shape=4.0, scale=0.25, size=n)
+    t = {lv: i / (len(ORDERED) - 1) for i, lv in enumerate(ORDERED)}
+    log_rel = np.array([0.6 * (1 - np.exp(-3 * t[b])) if b != SPECIAL else -0.55 for b in band])
+    claims = rng.poisson(exposure * np.exp(np.log(0.08) + log_rel))
+    return pd.DataFrame({"band": band, "exposure": exposure, "freq": claims / exposure})
+
+
+# build() has never returned more than one GroupInfo for an OC term.
+def test_build_returns_spline_block_then_special_block():
+    frame = _fit_frame()
+    spec = _oc()
+    infos = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    assert isinstance(infos, list) and len(infos) == 2
+    spline_info, special_info = infos
+    assert spline_info.subgroup_name is None
+    assert special_info.subgroup_name == "special"
+    assert special_info.n_cols == 1
+    assert special_info.penalized is False
+    assert special_info.penalty_matrix is None
+    assert special_info.projection is None
+    assert special_info.reparametrize is False
+
+
+def test_spline_block_is_zero_on_special_rows():
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    is_special = (frame["band"] == SPECIAL).to_numpy()
+    spline_cols = np.asarray(spline_info.columns.todense())
+    assert np.allclose(spline_cols[is_special], 0.0)
+    assert not np.allclose(spline_cols[~is_special], 0.0)
+    indicator = np.asarray(special_info.columns.todense()).ravel()
+    assert np.array_equal(indicator == 1.0, is_special)
+
+
+def test_declared_special_absent_from_training_data_is_rejected():
+    frame = _fit_frame()
+    ordered_only = frame[frame["band"] != SPECIAL]
+    spec = _oc()
+    with pytest.raises(ValueError, match="never observed"):
+        spec.build(ordered_only["band"].to_numpy(), ordered_only["exposure"].to_numpy())
+
+
+# The construction is only legitimate if [1 | centered spline | indicators] is
+# full rank. A centered basis cannot reproduce a constant, so no indicator is
+# recoverable from the other columns — this pins that argument.
+#
+# ``columns`` is the RAW B-spline basis; the centering lives in ``projection``,
+# and the DM builder only ever forms ``columns @ projection @ R_inv_local``
+# (dm_builder._process_info). Rank must therefore be asserted on ``columns @
+# projection``: the raw basis is a partition of unity, so on the raw block
+# ``1 == rowsum(B) + indicator`` for reasons that predate specials entirely.
+def test_assembled_design_with_intercept_is_full_rank():
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    assert spline_info.projection is not None
+    centered = np.asarray(spline_info.columns.todense()) @ spline_info.projection
+    assert centered.shape[1] == spline_info.n_cols
+    design = np.column_stack(
+        [
+            np.ones(len(frame)),
+            centered,
+            np.asarray(special_info.columns.todense()),
+        ]
+    )
+    assert np.linalg.matrix_rank(design) == design.shape[1]
+
+
+def test_identifiability_constraint_holds_on_the_ordered_rows():
+    # The reason the spline is built on the ordered rows rather than on all rows
+    # and zeroed afterwards: build_identifiability_projection forms its constraint
+    # as a column sum over the rows it was handed. Built on all rows, this sum
+    # would be zero over ALL rows and non-zero over the ordered ones once the
+    # special rows are zeroed, so the centered block would still carry a constant.
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, _ = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    ordered = (frame["band"] != SPECIAL).to_numpy()
+    centered = np.asarray(spline_info.columns.todense()) @ spline_info.projection
+    np.testing.assert_allclose(centered[ordered].sum(axis=0), 0.0, atol=1e-8)
+
+
+def test_ssp_gram_is_normalised_by_the_ordered_row_weight_sum():
+    # False today: GroupInfo has no basis_rows field, and the SSP Gram for the
+    # spline block is divided by the ALL-ROW weight sum while only the ordered
+    # rows contribute. With a special carrying ~90% of the exposure the
+    # normalised Gram comes out ~6x the identity instead of ~I, which is the
+    # fixed 1e-8 ridge becoming relatively large on the same term.
+    from superglm.dm_builder import _process_info
+
+    frame = _fit_frame(n=6000, seed=17)
+    band = frame["band"].to_numpy()
+    is_special = band == SPECIAL
+    weight = np.where(is_special, 50.0, 1.0)  # the special dominates exposure
+
+    spec = _oc()
+    spline_info, _ = spec.build(band, weight)
+    assert spline_info.basis_rows is not None
+    np.testing.assert_array_equal(spline_info.basis_rows, ~is_special)
+
+    gm, _, _ = _process_info(spline_info, sample_weight=weight, lambda2=0.0)
+    X = np.asarray(gm.toarray(), dtype=np.float64)
+    assert np.allclose(X[is_special], 0.0)
+
+    w_ordered = weight[~is_special]
+    X_ordered = X[~is_special]
+    gram = X_ordered.T @ (w_ordered[:, None] * X_ordered) / w_ordered.sum()
+    # atol is loose against the 1e-8 ridge's imprint (it lifts the identity by
+    # 1e-8 / smallest Gram eigenvalue) and tight against the defect, which is a
+    # pure scale error of total/ordered ~ 6x on every diagonal entry.
+    np.testing.assert_allclose(gram, np.eye(gram.shape[0]), atol=1e-3)
+    assert 0.99 < float(np.mean(np.diag(gram))) < 1.01
