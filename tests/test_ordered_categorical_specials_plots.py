@@ -79,15 +79,21 @@ def test_predict_reproduces_the_reported_relativities_for_bands_and_specials(spe
     assert abs(rel["MISSING"] / rel["1"] - 1.0) > 0.1
 
 
-@pytest.mark.xfail(reason="display of free levels lands in Task 8", strict=True)
-def test_plotting_a_specials_model_lands_in_task_8(specials_model):
-    # Task 4 shortens SmoothCurve.level_x to the smooth levels while relativity
-    # still carries all of them, so main_effects.py pairs an 11-vector with 10
-    # positions and matplotlib raises. Task 8 owns the display change; this
-    # xfail is strict so that landing it flips this test to a failure and the
-    # gap cannot merge unnoticed.
+def test_plotting_a_specials_model_without_exposure_still_renders(specials_model):
+    # Was a strict xfail through Task 4-7: level_x is smooth-only while
+    # relativity carries every level, so the panel paired an 11-vector with 10
+    # positions and matplotlib raised. Task 8 closes that, and this covers the
+    # bare plot() call — no X, no sample_weight, so no exposure-bar twin axis.
+    import matplotlib
+
+    matplotlib.use("Agg")
     model, _, _ = specials_model
-    assert model.plot("band") is not None
+    fig = model.plot("band")
+    ax = fig.axes[0]
+
+    assert [t.get_text() for t in ax.get_xticklabels()] == [*BANDS, "MISSING"]
+    assert "Free levels" in {c.get_label() for c in ax.containers}
+    assert not [a for a in fig.axes if a.patches]  # no exposure bars drawn
 
 
 def test_term_inference_level_is_special_is_none_without_specials():
@@ -176,3 +182,39 @@ def test_collapse_special_mask_marks_only_all_special_groups():
         _collapse_special_mask(mask, [[0, 1], [2], [3]]), [False, False, True]
     )
     assert _collapse_special_mask(None, [[0], [1]]) is None
+
+
+def test_matplotlib_panel_detaches_the_special_level(specials_model):
+    # False today: the panel puts every level on one K-long position grid, so
+    # either errorbar() raises on the 10-vs-11 mismatch or MISSING is drawn
+    # adjacent to band 10 with no gap. There is no "Free levels" container, no
+    # tick past the last ordered level, and the curve is drawn through all 11.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    model, frame, sample_weight = specials_model
+    fig = model.plot("band", engine="matplotlib", X=frame, sample_weight=sample_weight)
+    ax = fig.axes[0]
+
+    ticks = np.asarray(ax.get_xticks(), dtype=np.float64)
+    labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert labels == [*BANDS, "MISSING"]
+    assert len(ticks) == 11
+    assert ticks[10] - ticks[9] > 1.5 * (ticks[9] - ticks[8])
+
+    containers = {c.get_label(): c for c in ax.containers}
+    assert "Free levels" in containers
+    free_x = np.asarray(containers["Free levels"][0].get_xdata(), dtype=np.float64)
+    np.testing.assert_allclose(free_x, [ticks[10]])
+    ordered_x = np.asarray(containers["Relativity"][0].get_xdata(), dtype=np.float64)
+    assert len(ordered_x) == 10
+
+    curve_line = max(ax.lines, key=lambda line: len(line.get_xdata()))
+    assert len(curve_line.get_xdata()) == 200
+    assert float(np.max(curve_line.get_xdata())) < float(free_x[0])
+
+    bar_axes = [a for a in fig.axes if a.patches]
+    assert bar_axes, "no exposure bars were drawn"
+    centers = sorted(p.get_x() + p.get_width() / 2 for p in bar_axes[0].patches)
+    assert len(centers) == 11
+    assert centers[-1] == pytest.approx(float(ticks[10]))
