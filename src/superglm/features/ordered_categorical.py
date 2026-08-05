@@ -47,7 +47,7 @@ def _spline_kind_name(spline: Any) -> str:
 
 
 def _require_two_smooth_levels(smooth_levels: list[str], special_set: set[str]) -> None:
-    """Both level-derivation paths must leave at least two levels to smooth."""
+    """The final smooth-level list must retain at least two levels to smooth."""
     if special_set and len(smooth_levels) < 2:
         raise ValueError(
             "OrderedCategorical needs at least two non-special levels to fit a "
@@ -63,13 +63,17 @@ def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
     ``_specials`` still reports it free — an inconsistent spec with no error.
     Merging two specials is refused for the same reason the editor refuses it
     (``_require_no_special_members``): the group label would have to replace
-    both members in ``specials=``.
+    both members in ``specials=``.  Renaming a single special under a new group
+    label is refused for the same reason: the renamed level joins the smooth
+    with no numeric position while ``specials=`` still names the original.
+    Only a group that leaves its level untouched (label identical to its one
+    member) is exempt.
     """
     if not special_set or grouping is None:
         return
     for label, originals in grouping.group_to_originals.items():
         members = [str(member) for member in originals]
-        if len(members) < 2:
+        if members == [str(label)]:
             continue
         merged = [member for member in members if member in special_set]
         if merged:
@@ -194,7 +198,11 @@ class OrderedCategorical:
 
         self._specials: list[str] = []
         if specials is not None:
-            for lev in specials:
+            # Level labels live in `str` space throughout this file (grouping
+            # coerces too), so coerce here or a non-str special silently fails
+            # to pop from order=/values= and gets smoothed as well as claimed.
+            for raw_lev in specials:
+                lev = str(raw_lev)
                 if lev in self._specials:
                     raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
                 self._specials.append(lev)
@@ -202,9 +210,9 @@ class OrderedCategorical:
 
         if special_set:
             if values is not None:
-                values = {k: v for k, v in values.items() if k not in special_set}
+                values = {k: v for k, v in values.items() if str(k) not in special_set}
             else:
-                order = [lev for lev in order if lev not in special_set]
+                order = [lev for lev in order if str(lev) not in special_set]
 
         basis_was_explicit = basis is not None
         shortcut_values = {
@@ -307,8 +315,6 @@ class OrderedCategorical:
             self._level_to_value = dict(zip(order, vals.tolist()))
         self._ordered_levels = list(self._smooth_levels)
 
-        _require_two_smooth_levels(self._smooth_levels, special_set)
-
         # Grouping: validate and store
         self._grouping = grouping
         self._original_level_to_value: dict[str, float] | None = None
@@ -341,7 +347,7 @@ class OrderedCategorical:
 
         _require_no_grouped_specials(grouping, special_set)
         _require_two_smooth_levels(self._smooth_levels, special_set)
-        if base in special_set:
+        if str(base) in special_set:
             raise ValueError(
                 f"OrderedCategorical reporting base {base!r} is a special level. The base "
                 "anchors every reported relativity and must lie on the smooth; choose one "
