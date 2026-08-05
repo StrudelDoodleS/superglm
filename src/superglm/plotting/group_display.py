@@ -67,6 +67,7 @@ def project_grouped_term_for_display(
         ci_lower=_collapse_array(ti.ci_lower, group_indices),
         ci_upper=_collapse_array(ti.ci_upper, group_indices),
         spline=None,
+        level_is_special=_collapse_special_mask(ti.level_is_special, group_indices),
         smooth_curve=_collapsed_smooth_curve(ti, group_indices),
     )
     return GroupedTermDisplay(
@@ -159,6 +160,18 @@ def _collapse_array(values: NDArray | None, groups: list[list[int]]) -> NDArray 
     return np.asarray([float(np.mean(arr[indices])) for indices in groups], dtype=np.float64)
 
 
+def _collapse_special_mask(mask: NDArray | None, groups: list[list[int]]) -> NDArray | None:
+    """Collapse the free-level mask onto display groups.
+
+    A group is free only when every member is; a grouping may not mix a special
+    with ordered levels, so this is an all-or-nothing test.
+    """
+    if mask is None:
+        return None
+    arr = np.asarray(mask, dtype=bool)
+    return np.asarray([bool(arr[indices].all()) for indices in groups], dtype=bool)
+
+
 def _collapsed_smooth_curve(
     ti: TermInference,
     groups: list[list[int]],
@@ -168,6 +181,11 @@ def _collapsed_smooth_curve(
     The curve itself is never rebuilt: collapsing levels is a display
     operation, and re-interpolating through the collapsed markers would
     draw a shape the model never fitted.
+
+    ``level_x`` covers the smoothed levels only, so an all-special group has no
+    position on the curve's axis and is dropped here rather than indexed into
+    ``level_x``.  The renderers place those markers from ``level_is_special``,
+    which ``_collapse_special_mask`` keeps parallel to the display levels.
     """
     curve = ti.smooth_curve
     if curve is None:
@@ -178,7 +196,19 @@ def _collapsed_smooth_curve(
         # markers and the curve on incompatible axes.
         return None
     level_x = np.asarray(curve.level_x, dtype=np.float64)
-    collapsed_x = np.asarray(
-        [float(np.mean(level_x[indices])) for indices in groups], dtype=np.float64
+    n_levels = len(ti.levels or [])
+    special = (
+        np.asarray(ti.level_is_special, dtype=bool)
+        if ti.level_is_special is not None
+        else np.zeros(n_levels, dtype=bool)
     )
-    return replace(curve, level_x=collapsed_x)
+    # Position of each smooth display level within level_x.
+    smooth_pos = np.cumsum(~special) - 1
+    collapsed: list[float] = []
+    for indices in groups:
+        idx = np.asarray(indices, dtype=np.intp)
+        smooth_idx = idx[~special[idx]]
+        if smooth_idx.size == 0:
+            continue  # an all-free group has no place on the fitted curve
+        collapsed.append(float(np.mean(level_x[smooth_pos[smooth_idx]])))
+    return replace(curve, level_x=np.asarray(collapsed, dtype=np.float64))

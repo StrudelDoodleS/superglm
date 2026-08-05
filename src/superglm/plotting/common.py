@@ -23,6 +23,7 @@ _REF_COLOR = "0.45"
 _REF_LW = 0.8
 _KNOT_COLOR = "#006FDD"
 _CAT_BAR_COLOR = "#006FDD"
+_SPECIAL_COLOR = "#7A3EA1"
 
 # ── Plotly-specific color overrides ────────────────────────────────
 _PLOTLY_LINE_COLOR = "#E10600"
@@ -32,6 +33,7 @@ _PLOTLY_EXP_FILL = "#FFD323"
 _PLOTLY_EXP_EDGE = "#A85C00"
 _PLOTLY_KNOT_COLOR = "#FFD323"
 _PLOTLY_CAT_BAR_COLOR = "#E10600"
+_PLOTLY_SPECIAL_COLOR = "#1E63D7"
 _PLOTLY_PAPER = "#f5efe3"
 _PLOTLY_PANEL = "#fffdf8"
 _PLOTLY_GRID = "rgba(23, 20, 17, 0.10)"
@@ -80,6 +82,67 @@ def _ordered_level_spacing(x: NDArray) -> float:
     if diffs.size == 0:
         return 1.0
     return float(diffs.min())
+
+
+def _ordered_level_step(x: NDArray) -> float:
+    """Median positive spacing of ordered level positions (1.0 when unknown)."""
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.size < 2:
+        return 1.0
+    diffs = np.diff(np.sort(arr))
+    diffs = diffs[diffs > 0]
+    if diffs.size == 0:
+        return 1.0
+    return float(np.median(diffs))
+
+
+def _special_level_positions(
+    level_x: NDArray, n_specials: int, *, gap_steps: float = 2.0
+) -> NDArray:
+    """X positions for free (special) levels, set off after the ordered levels.
+
+    Each special takes one level-step, starting ``gap_steps`` steps past the
+    last ordered level so the detached points read as a separate block.  With
+    the default ``level_x = 0..K-1`` spacing this puts them on the integer
+    positions ``K+1, K+2, ...``, one empty slot clear of the curve.
+    """
+    if n_specials <= 0:
+        return np.empty(0, dtype=np.float64)
+    arr = np.asarray(level_x, dtype=np.float64)
+    step = _ordered_level_step(arr)
+    start = (float(arr.max()) if arr.size else 0.0) + gap_steps * step
+    return start + step * np.arange(n_specials, dtype=np.float64)
+
+
+def _level_positions_with_specials(
+    level_x: NDArray, level_is_special: NDArray | None, n_levels: int
+) -> NDArray:
+    """Positions for every displayed level, ordered levels first.
+
+    ``level_x`` is ``SmoothCurve.level_x`` — the ordered levels only — and
+    ``level_is_special`` is the mask parallel to ``TermInference.levels``.
+    The result is ``n_levels`` long so callers can zip it against ``levels``
+    without plotly truncating to ``min(len(x), len(y))`` and dropping the
+    specials from markers, bars and tick labels.
+    """
+    arr = np.asarray(level_x, dtype=np.float64)
+    mask = (
+        np.zeros(n_levels, dtype=bool)
+        if level_is_special is None
+        else np.asarray(level_is_special, dtype=bool)
+    )
+    if mask.size != n_levels:
+        raise ValueError(f"level_is_special has {mask.size} entries for {n_levels} levels.")
+    n_ordered = int((~mask).sum())
+    if arr.size != n_ordered:
+        raise ValueError(
+            f"level_x carries {arr.size} positions for {n_ordered} ordered levels; "
+            "it must cover the ordered levels only."
+        )
+    positions = np.empty(n_levels, dtype=np.float64)
+    positions[~mask] = arr
+    positions[mask] = _special_level_positions(arr, int(mask.sum()))
+    return positions
 
 
 def _exposure_kde(x_vals, sample_weight, grid, bw_factor=0.03):

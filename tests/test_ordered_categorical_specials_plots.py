@@ -107,3 +107,72 @@ def test_term_inference_level_is_special_is_none_without_specials():
     ti = model.term_inference("band")
     assert ti.level_is_special is None
     assert len(ti.smooth_curve.level_x) == 10
+
+
+def test_special_level_positions_leave_a_gap_after_the_last_ordered_level():
+    # False today: superglm.plotting.common has no position helper at all.
+    from superglm.plotting.common import _level_positions_with_specials
+
+    level_x = np.arange(10, dtype=np.float64)
+    mask = np.array([False] * 10 + [True])
+    pos = _level_positions_with_specials(level_x, mask, 11)
+
+    np.testing.assert_allclose(pos[:10], level_x)
+    assert pos[10] == 11.0  # one empty slot past the last ordered level at x=9
+
+
+def test_special_level_positions_scale_with_level_spacing():
+    # False today: no helper; the plotly panel would place a special at an
+    # arange() index while the ordered levels sit on midpoint values.
+    from superglm.plotting.common import _level_positions_with_specials
+
+    pos = _level_positions_with_specials(
+        np.array([20.0, 30.0, 40.0]), np.array([False, False, False, True]), 4
+    )
+    np.testing.assert_allclose(pos, [20.0, 30.0, 40.0, 60.0])
+
+
+def test_level_positions_with_specials_rejects_a_full_width_level_x():
+    # False today: no helper. The point of the raise is that a level_x left at
+    # K+S is the silent-drop bug; it must fail loudly instead.
+    from superglm.plotting.common import _level_positions_with_specials
+
+    with pytest.raises(ValueError, match="ordered levels only"):
+        _level_positions_with_specials(
+            np.arange(11, dtype=np.float64), np.array([False] * 10 + [True]), 11
+        )
+
+
+def test_level_positions_without_specials_is_the_identity():
+    # False today: no helper. Guards the no-specials path both panels take.
+    from superglm.plotting.common import _level_positions_with_specials
+
+    level_x = np.array([21.5, 30.5, 40.5])
+    np.testing.assert_allclose(_level_positions_with_specials(level_x, None, 3), level_x)
+
+
+def test_plot_data_keeps_x_position_for_the_special_level(specials_model):
+    # False today: data.py:126-130 only attaches x_position when
+    # len(effect) == len(level_x); with one special those differ by one, so the
+    # column is dropped for the WHOLE term, not just for MISSING.
+    model, _, _ = specials_model
+    payload = model.plot_data("band")
+    effect = payload["terms"][0]["effect"]
+
+    assert list(effect["level"]) == [*BANDS, "MISSING"]
+    assert "x_position" in effect.columns
+    pos = effect["x_position"].to_numpy(dtype=np.float64)
+    ordered_step = pos[9] - pos[8]
+    assert pos[10] - pos[9] > 1.5 * ordered_step
+
+
+def test_collapse_special_mask_marks_only_all_special_groups():
+    # False today: group_display has no mask collapse, so replace(ti, ...) at
+    # group_display.py:61-71 would carry a K+S mask onto a shorter display term.
+    from superglm.plotting.group_display import _collapse_special_mask
+
+    mask = np.array([False, False, False, True])
+    np.testing.assert_array_equal(
+        _collapse_special_mask(mask, [[0, 1], [2], [3]]), [False, False, True]
+    )
+    assert _collapse_special_mask(None, [[0], [1]]) is None
