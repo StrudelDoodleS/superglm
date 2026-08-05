@@ -666,6 +666,14 @@ class SuperGLM:
         subsample, or reordered frame.  The dispersion used is attached as
         ``table.attrs["phi"]`` and can be overridden via ``phi=``.
 
+        Fitted mains with no screenable margin — ``Polynomial``,
+        ``RandomEffect``, step-mode ``OrderedCategorical`` and any
+        ``OrderedCategorical`` carrying ``specials=`` — are excluded from the
+        sweep and reported in ``table.attrs["deferred_features"]``, a
+        ``{feature: reason}`` mapping that is empty when everything fitted was
+        screened.  Naming one of them in ``candidates`` raises with the same
+        reason.
+
         The returned frame is sorted by ``z`` descending; rank by ``z`` —
         ``statistic``/``edf0``/``lambda0`` describe each pair's winning
         rung, so ``statistic`` is not comparable across rows.  Pairs whose
