@@ -74,6 +74,23 @@ def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
     """
     if not special_set or grouping is None:
         return
+    # A grouping must also COVER every special. One that simply omits it passes
+    # construction (``_known_levels`` re-adds the special), and then build()'s
+    # ``map(original_to_group)`` yields NaN for those rows: the special mask
+    # misses them and they reach ``_map_to_numeric`` as NaN, dying inside scipy
+    # with "Array must not contain infs or nans" -- a message that says nothing
+    # about the grouping that caused it.
+    covered = {
+        str(member) for originals in grouping.group_to_originals.values() for member in originals
+    }
+    uncovered = sorted(special_set - covered)
+    if uncovered:
+        raise ValueError(
+            f"OrderedCategorical grouping does not cover free level(s) {uncovered!r}. "
+            "Every special must appear in the grouping as its own single-member "
+            "group; rows of an omitted level map to no group and reach the spline "
+            "as NaN."
+        )
     for label, originals in grouping.group_to_originals.items():
         members = [str(member) for member in originals]
         if members == [str(label)]:

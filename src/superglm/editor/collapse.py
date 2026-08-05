@@ -353,7 +353,12 @@ def _ordered_spec_with_grouping(
     data,
 ) -> OrderedCategorical:
     values, native_base = _ordered_original_values(spec, grouping, data, base)
-    specials = list(spec._specials)
+    # Clone the RAW declarations, not the string-coerced ``_specials``. A special
+    # declared as ``9`` on a float column matches through its raw label -- the
+    # string view renders 9.0 as "9.0", which never equals "9" -- so rebuilding
+    # from the coerced form silently drops that fallback and the special's
+    # indicator comes back all-zero on a refit.
+    specials = list(spec._special_raw) or list(spec._specials)
     if spec.basis == "spline":
         basis = (
             copy.deepcopy(spec._spline_obj)

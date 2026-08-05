@@ -260,6 +260,15 @@ def build_coef_rows(
         se_curve = feature_se_from_cov(
             feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
         )
+        # One SE per level, and for a specials term that includes the FREE levels,
+        # whose uncertainty is not a point on the curve. Every other statistic on
+        # the ordered-spline row describes the spline block; _term_ops already
+        # filters the special block out of the curve's own SE band. Levels are
+        # ordered smooth-then-special (the build() contract), so drop the tail.
+        spec = specs.get(feature_name)
+        n_special = len(getattr(spec, "_specials", ()) or ())
+        if n_special and len(se_curve) > n_special:
+            se_curve = np.asarray(se_curve)[:-n_special]
         return float(np.min(se_curve)), float(np.max(se_curve))
 
     def _augmented_group_block(active_group: GroupSlice) -> NDArray:
