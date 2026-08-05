@@ -472,7 +472,14 @@ class OrderedCategorical:
         x: NDArray,
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        """Build design columns from ordered categorical data."""
+        """Build design columns from ordered categorical data.
+
+        With ``specials=``, returns two GroupInfos in a fixed order: the
+        penalized spline block first, the unpenalized special-indicator block
+        second. Downstream metadata readers select by ``subgroup_type``, but
+        the order is part of the contract — ``_split_beta`` and ``transform``
+        both assume it.
+        """
         x = np.asarray(x).ravel()
 
         if self._grouping is not None:
