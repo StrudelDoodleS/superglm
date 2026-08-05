@@ -15,6 +15,7 @@ from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
 if TYPE_CHECKING:
+    from superglm.inference.summary import _CoefRow
     from superglm.model import SuperGLM
 
 
@@ -276,7 +277,7 @@ def _group_test_kind(model: SuperGLM, row, groups: tuple[Any, ...]) -> str:
     return "group"
 
 
-def _level_row_kind(row) -> str:
+def _level_row_kind(row: _CoefRow) -> str:
     """Per-level provenance for a level row.
 
     The Summary sheet emits one row per coefficient row, so an
@@ -285,8 +286,12 @@ def _level_row_kind(row) -> str:
     (``coef_tables.build_coef_rows`` and
     ``report_ops._build_editor_stale_coef_rows``), so the edited-model path
     carries the marker too.
+
+    Read the field directly: every row here is a ``_CoefRow``, so a defaulting
+    ``getattr`` would only turn a rename or a wrong row type into every special
+    silently reverting to ``"level"`` in the exported workbook.
     """
-    return "free level" if getattr(row, "level_fit", None) == "free" else "level"
+    return "free level" if row.level_fit == "free" else "level"
 
 
 def _significance(p_value: float | None, quasi_separated: bool) -> str:
