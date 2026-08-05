@@ -14,6 +14,7 @@ from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.ordered_categorical import (
     OrderedCategorical,
     resolve_interaction_parent,
+    resolve_interaction_parent_of,
 )
 from superglm.features.spline import Spline, _SplineBase
 
@@ -564,10 +565,27 @@ def test_an_explicit_interaction_spec_cannot_smuggle_a_specials_parent_past_it()
 
 
 def test_a_specials_term_may_still_be_a_factor_smooth_group():
-    """Pins the EXEMPTION, so the refusal cannot be widened by accident: a
-    FactorSmooth reads its group column as labels, never as scores, and
-    resolve_interaction_parent_of hands it both columns untouched.  This fails
-    if the guard is put in resolve_interaction_parent_of instead."""
+    """Pins the EXEMPTION AT ITS EXACT WIDTH, both edges asserted at the one
+    seam that decides it.  The refusal lives in resolve_interaction_parent, so
+    resolve_interaction_parent_of hands a FactorSmooth its group column
+    untouched -- labels, never scores -- while refusing the SAME spec and the
+    SAME column for an interaction that reads both parents marginally.
+    Asserting only that the FactorSmooth fit runs would pass against unguarded
+    code too, since unguarded code refuses nothing anywhere."""
+    spec = _oc_specials()
+    labels = np.array(["18-25", "MISSING", "56+"], dtype=object)
+
+    eff_spec, eff_x = resolve_interaction_parent_of(
+        FactorSmooth(variable="power", group="age_band"), spec, labels
+    )
+    assert eff_spec is spec  # not swapped for spec._spline
+    np.testing.assert_array_equal(eff_x, labels)  # not mapped to level scores
+
+    # ... and the exemption is the interaction's, not the spec's: the same
+    # parent under a marginal-reading interaction is refused.
+    with pytest.raises(NotImplementedError, match="specials"):
+        resolve_interaction_parent_of(TensorInteraction("age_band", "power"), spec, labels)
+
     df, y = _specials_frame()
     model = SuperGLM(
         family="poisson",
@@ -576,3 +594,6 @@ def test_a_specials_term_may_still_be_a_factor_smooth_group():
     )
     model.fit_reml(df, y)
     assert np.isfinite(model._result.effective_df)
+    # The group kept its label identity, the special included as a level of it.
+    fs = model._interaction_specs["power:age_band:fs"]
+    assert set(fs._levels) == set(BANDS) | {"MISSING"}

@@ -288,9 +288,18 @@ def _deferral_reason(spec) -> str:
                 "level with no position on the spline axis, so the margin has no "
                 "score to grid on; screening the pair needs composite margins"
             )
+        # Mirror ``_margin_kind``'s disjunction rather than assuming its
+        # complement: it refuses on ``basis != "spline" OR _spline is None``,
+        # so naming every survivor "step-mode" would mislabel a spline-mode
+        # term that reached here without an inner spline.
+        if spec.basis != "spline":
+            return (
+                "step-mode OrderedCategorical is deferred: the deprecated one-hot "
+                "geometry has no marginal smooth to cross with"
+            )
         return (
-            "step-mode OrderedCategorical is deferred: the deprecated one-hot "
-            "geometry has no marginal smooth to cross with"
+            "OrderedCategorical is deferred: no inner spline was built, so the term "
+            "has no marginal smooth to cross with"
         )
     if isinstance(spec, Polynomial):
         return (
