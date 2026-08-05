@@ -527,10 +527,11 @@ class OrderedCategorical:
         n = len(ordered_mask)
         compact = info.columns
         expanded = sp.lil_matrix((n, compact.shape[1]), dtype=np.float64)
+        # Row i of the compact basis must land on the i-th ordered row: every
+        # other coefficient is fitted against these rows, so a permuted scatter
+        # would fit each row against another row's basis.
         expanded[np.flatnonzero(ordered_mask)] = compact
-        return dataclasses.replace(
-            info, columns=expanded.tocsr(), basis_rows=np.asarray(ordered_mask, dtype=bool)
-        )
+        return dataclasses.replace(info, columns=expanded.tocsr())
 
     def _build_step(self, x: NDArray, sample_weight: NDArray | None) -> GroupInfo:
         """Step mode: one-hot with first-difference penalty."""

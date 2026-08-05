@@ -223,6 +223,25 @@ def test_build_returns_spline_block_then_special_block():
     assert special_info.reparametrize is False
 
 
+def test_special_indicator_columns_follow_the_declared_special_order():
+    # The frozen interface says indicator column j is `spec._specials[j]`. With a
+    # single special every column order is the right one, so this pins it on two.
+    frame = _fit_frame()
+    band = frame["band"].to_numpy()
+    rng = np.random.default_rng(3)
+    second = "REFUSED"
+    band = np.where(
+        (band == "10") & (rng.random(len(band)) < 0.5), second, band.astype(object)
+    ).astype(object)
+    spec = _oc(specials=[SPECIAL, second])
+    _, special_info = spec.build(band, frame["exposure"].to_numpy())
+    assert spec._specials == [SPECIAL, second]
+    assert special_info.n_cols == 2
+    indicators = np.asarray(special_info.columns.todense())
+    for j, lev in enumerate(spec._specials):
+        assert np.array_equal(indicators[:, j] == 1.0, band == lev)
+
+
 def test_spline_block_is_zero_on_special_rows():
     frame = _fit_frame()
     spec = _oc()
@@ -233,6 +252,33 @@ def test_spline_block_is_zero_on_special_rows():
     assert not np.allclose(spline_cols[~is_special], 0.0)
     indicator = np.asarray(special_info.columns.todense()).ravel()
     assert np.array_equal(indicator == 1.0, is_special)
+
+
+def test_expanded_rows_carry_their_own_rows_basis():
+    # Zeroing the special rows is only half of "row-expanded with zeros": each
+    # surviving row must hold the basis of *its own* level. A scatter that
+    # permutes the ordered rows among their own positions leaves the zero
+    # pattern, the column sums and the Gram untouched, so nothing above sees it
+    # — but every row would then be fitted against another row's basis.
+    frame = _fit_frame()
+    band = frame["band"].to_numpy()
+    spec = _oc()
+    spline_info, _ = spec.build(band, frame["exposure"].to_numpy())
+    ordered = band != SPECIAL
+    X = np.asarray(spline_info.columns.todense())[ordered]
+    labels = band[ordered]
+
+    seen = {}
+    for lev in ORDERED:
+        rows = X[labels == lev]
+        assert len(rows) > 0
+        # The basis row is a function of the level alone, so rows sharing a
+        # label must be identical — under a permuted scatter they are not.
+        np.testing.assert_allclose(rows, np.repeat(rows[:1], len(rows), axis=0), atol=1e-12)
+        seen[lev] = rows[0]
+    # ...and distinct levels must not share a basis row, or the check is vacuous.
+    for a, b in zip(ORDERED, ORDERED[1:]):
+        assert not np.allclose(seen[a], seen[b])
 
 
 def test_declared_special_absent_from_training_data_is_rejected():
@@ -252,6 +298,14 @@ def test_declared_special_absent_from_training_data_is_rejected():
 # (dm_builder._process_info). Rank must therefore be asserted on ``columns @
 # projection``: the raw basis is a partition of unity, so on the raw block
 # ``1 == rowsum(B) + indicator`` for reasons that predate specials entirely.
+#
+# This is a NECESSARY condition only, not a guard on the ordered-row build: the
+# constant is generically outside a centered block's span however that block was
+# centered, so full rank also holds for the rejected build (spline over all rows
+# with a fabricated coordinate for the specials, zeroed afterwards). The
+# discriminating property is the one below —
+# ``test_identifiability_constraint_holds_on_the_ordered_rows``, which the
+# rejected build fails outright.
 def test_assembled_design_with_intercept_is_full_rank():
     frame = _fit_frame()
     spec = _oc()
@@ -283,12 +337,16 @@ def test_identifiability_constraint_holds_on_the_ordered_rows():
     np.testing.assert_allclose(centered[ordered].sum(axis=0), 0.0, atol=1e-8)
 
 
-def test_ssp_gram_is_normalised_by_the_ordered_row_weight_sum():
-    # False today: GroupInfo has no basis_rows field, and the SSP Gram for the
-    # spline block is divided by the ALL-ROW weight sum while only the ordered
-    # rows contribute. With a special carrying ~90% of the exposure the
-    # normalised Gram comes out ~6x the identity instead of ~I, which is the
-    # fixed 1e-8 ridge becoming relatively large on the same term.
+def test_ssp_gram_of_the_zero_filled_block_is_on_the_all_row_scale():
+    # The SSP contract (compute_R_inv's docstring) is X'WX / sum(sample_weight)
+    # ~ I over EVERY row, and it is what puts each block of the assembled normal
+    # equations on one common scale. A zero-filled block satisfies it without
+    # help: its zero rows contribute nothing to X'WX but do contribute to the
+    # normaliser, exactly as for any block whose basis is small on some rows.
+    # Normalising this block by its own rows' weight sum instead would rescale
+    # it by the special's exposure share (~6x here) against every other column,
+    # so both halves below are asserted: the contract, and scale parity with an
+    # ordinary full-support block fitted on the same weights.
     from superglm.dm_builder import _process_info
 
     frame = _fit_frame(n=6000, seed=17)
@@ -298,18 +356,19 @@ def test_ssp_gram_is_normalised_by_the_ordered_row_weight_sum():
 
     spec = _oc()
     spline_info, _ = spec.build(band, weight)
-    assert spline_info.basis_rows is not None
-    np.testing.assert_array_equal(spline_info.basis_rows, ~is_special)
 
     gm, _, _ = _process_info(spline_info, sample_weight=weight, lambda2=0.0)
     X = np.asarray(gm.toarray(), dtype=np.float64)
     assert np.allclose(X[is_special], 0.0)
 
-    w_ordered = weight[~is_special]
-    X_ordered = X[~is_special]
-    gram = X_ordered.T @ (w_ordered[:, None] * X_ordered) / w_ordered.sum()
+    gram = X.T @ (weight[:, None] * X)
     # atol is loose against the 1e-8 ridge's imprint (it lifts the identity by
-    # 1e-8 / smallest Gram eigenvalue) and tight against the defect, which is a
-    # pure scale error of total/ordered ~ 6x on every diagonal entry.
-    np.testing.assert_allclose(gram, np.eye(gram.shape[0]), atol=1e-3)
-    assert 0.99 < float(np.mean(np.diag(gram))) < 1.01
+    # 1e-8 / smallest Gram eigenvalue) and tight against a normalisation by the
+    # ordered-row weight sum, which is a pure scale error of ~6x throughout.
+    np.testing.assert_allclose(gram / weight.sum(), np.eye(gram.shape[0]), atol=1e-3)
+
+    full_support = Spline(kind="ps", k=8).build(np.linspace(0.0, 1.0, len(band)))
+    gm_ref, _, _ = _process_info(full_support, sample_weight=weight, lambda2=0.0)
+    X_ref = np.asarray(gm_ref.toarray(), dtype=np.float64)
+    gram_ref = X_ref.T @ (weight[:, None] * X_ref)
+    np.testing.assert_allclose(np.diag(gram), np.diag(gram_ref), rtol=1e-3)

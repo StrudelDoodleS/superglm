@@ -178,11 +178,6 @@ class GroupInfo:
     factor_smooth_transform: NDArray | None = None
     factor_smooth_levels: tuple[Any, ...] | None = None
     repeated_penalty_components: tuple[tuple[str, NDArray], ...] | None = None
-    # Rows the basis was actually built on.  A block built on a subset of rows
-    # and row-expanded with zeros (the OrderedCategorical spline beside free
-    # levels) sets this so the SSP normalisation uses the weight sum over those
-    # rows rather than over every row.  None means "every row contributes".
-    basis_rows: NDArray[np.bool_] | None = None
 
     def __post_init__(self):
         if self.columns is None:
