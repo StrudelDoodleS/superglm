@@ -54,6 +54,7 @@ def collapsed_feature_spec(
             existing,
             _displayed_members(term, existing),
         )
+        _require_no_special_members(spec, term.name, selected_originals)
         if not _members_are_contiguous(
             selected_originals,
             _original_level_order(spec, term, existing),
@@ -352,6 +353,7 @@ def _ordered_spec_with_grouping(
     data,
 ) -> OrderedCategorical:
     values, native_base = _ordered_original_values(spec, grouping, data, base)
+    specials = list(getattr(spec, "_specials", ()) or ())
     if spec.basis == "spline":
         basis = (
             copy.deepcopy(spec._spline_obj)
@@ -369,6 +371,7 @@ def _ordered_spec_with_grouping(
             basis=basis,
             base=native_base,
             grouping=grouping,
+            specials=specials or None,
         )
 
     # The user-facing constructor already warned when this legacy step spec was
@@ -478,6 +481,21 @@ def _members_are_contiguous(members: list[str], order: list[str]) -> bool:
         return True
     positions = sorted(order.index(member) for member in members)
     return bool(np.all(np.diff(positions) == 1))
+
+
+def _require_no_special_members(spec, term_name: str, members: list[str]) -> None:
+    """Refuse a collapse selection that contains a free (special) level."""
+    specials = {str(level) for level in getattr(spec, "_specials", ())}
+    if not specials:
+        return
+    selected = [member for member in members if member in specials]
+    if not selected:
+        return
+    joined = ", ".join(repr(member) for member in selected)
+    raise ValueError(
+        f"Ordered categorical collapse for {term_name!r} cannot include free level(s) "
+        f"{joined}: specials are fitted outside the smooth and cannot be grouped."
+    )
 
 
 def _default_group_label(selected_levels: list[str]) -> str:
