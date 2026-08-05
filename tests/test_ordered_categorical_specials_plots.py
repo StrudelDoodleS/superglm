@@ -218,3 +218,37 @@ def test_matplotlib_panel_detaches_the_special_level(specials_model):
     centers = sorted(p.get_x() + p.get_width() / 2 for p in bar_axes[0].patches)
     assert len(centers) == 11
     assert centers[-1] == pytest.approx(float(ticks[10]))
+
+
+@pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
+def test_plotly_panel_renders_the_special_in_markers_bars_and_ticks(specials_model):
+    # False today: level_x is 10 long against 11 levels, so plotly renders
+    # min(len(x), len(y)) and MISSING is silently dropped from the marker trace
+    # (main_effects_plotly.py:1130-1149) and the exposure bars (:1360-1378),
+    # while the tick config (:739-751) zips 10 tickvals against 11 ticktext.
+    model, frame, sample_weight = specials_model
+    fig = model.plot(engine="plotly", X=frame, sample_weight=sample_weight)
+
+    ticktext = list(fig.layout.xaxis.ticktext)
+    tickvals = np.asarray(fig.layout.xaxis.tickvals, dtype=np.float64)
+    assert ticktext == [*BANDS, "MISSING"]
+    assert len(tickvals) == 11
+
+    markers = next(t for t in fig.data if t.type == "scatter" and t.name == "Relativity")
+    free = next(t for t in fig.data if t.type == "scatter" and t.name == "Free levels")
+    assert len(markers.x) == 10
+    assert list(free.hovertext) == ["MISSING"]
+    assert float(free.x[0]) == pytest.approx(float(tickvals[-1]))
+    assert float(free.x[0]) > max(float(v) for v in markers.x)
+    assert len(free.error_y.array) == 1
+    # customdata must travel with the special, not stay behind by the offset
+    assert float(free.customdata[0][0]) == pytest.approx(float(free.y[0]))
+
+    curve = next(t for t in fig.data if t.type == "scatter" and t.name == "Smooth curve")
+    assert max(float(v) for v in curve.x) < float(free.x[0])
+
+    bars = next(t for t in fig.data if t.type == "bar" and t.name == "Exposure")
+    assert len(bars.x) == 11
+    assert float(bars.x[-1]) == pytest.approx(float(tickvals[-1]))
+    assert str(bars.customdata[-1]) == "MISSING"
+    assert float(bars.y[-1]) > 0.0

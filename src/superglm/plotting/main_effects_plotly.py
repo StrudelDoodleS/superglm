@@ -21,6 +21,7 @@ from superglm.plotting.common import (
     _PLOTLY_PANEL,
     _PLOTLY_PW_FILL,
     _PLOTLY_SIM_FILL,
+    _PLOTLY_SPECIAL_COLOR,
     _PLOTLY_TEXT,
     _PW_ALPHA,
     _PW_EDGE_ALPHA,
@@ -31,6 +32,7 @@ from superglm.plotting.common import (
     _apply_plotly_theme,
     _exposure_kde,
     _hex_to_rgba,
+    _level_positions_with_specials,
     _ordered_level_spacing,
 )
 from superglm.plotting.group_display import (
@@ -44,6 +46,7 @@ _SIM_FILL = _PLOTLY_SIM_FILL
 _EXP_FILL = _PLOTLY_EXP_FILL
 _EXP_EDGE = _PLOTLY_EXP_EDGE
 _KNOT_COLOR = _PLOTLY_KNOT_COLOR
+_SPECIAL_COLOR = _PLOTLY_SPECIAL_COLOR
 _CI_LINE_POINTWISE = "rgba(24, 33, 43, 0.58)"
 _CI_LINE_SIMULTANEOUS = "rgba(24, 33, 43, 0.78)"
 _ERROR_BAR_COLOR = "rgba(24, 33, 43, 0.72)"
@@ -57,6 +60,7 @@ def _resolve_plotly_style(style: dict[str, Any] | None) -> dict[str, Any]:
     """Merge plotly explorer style overrides with defaults."""
     defaults = {
         "line_color": _LINE_COLOR,
+        "special_color": _SPECIAL_COLOR,
         "bar_color": _LINE_COLOR,
         "density_fill_color": _EXP_FILL,
         "density_edge_color": _EXP_EDGE,
@@ -738,7 +742,11 @@ def _add_term_traces(
             show_bases=False,  # basis contributions not shown for categoricals
         )
     if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
-        tickvals = np.asarray(ti.smooth_curve.level_x, dtype=np.float64).tolist()
+        tickvals = _level_positions_with_specials(
+            np.asarray(ti.smooth_curve.level_x, dtype=np.float64),
+            ti.level_is_special,
+            len(ti.levels),
+        ).tolist()
         ticktext = [str(level) for level in ti.levels]
         return _XAxisConfig(
             top_x_title=ti.name,
@@ -1101,12 +1109,20 @@ def _add_categorical_term_trace(
             link_err_down = (link_y - ci_lo_link).tolist()
 
     if is_ordered:
-        # OrderedCategorical: markers with error bars + smooth curve overlay
+        # OrderedCategorical: markers with error bars + smooth curve overlay.
+        # Ordered levels sit under the curve; free levels are detached points
+        # past its end — level_x covers the ordered levels only.
+        is_special = (
+            np.asarray(ti.level_is_special, dtype=bool)
+            if ti.level_is_special is not None
+            else np.zeros(len(ti.levels), dtype=bool)
+        )
         level_x = (
             np.asarray(curve.level_x, dtype=np.float64)
             if curve is not None and curve.level_x is not None
-            else np.arange(len(ti.levels), dtype=np.float64)
+            else np.arange(int((~is_special).sum()), dtype=np.float64)
         )
+        x_all = _level_positions_with_specials(level_x, ti.level_is_special, len(ti.levels))
         level_labels = [str(level) for level in ti.levels]
         if ci_lo_resp is not None and ci_hi_resp is not None:
             customdata = np.column_stack([resp_y, ci_lo_resp, ci_hi_resp, ci_lo_link, ci_hi_link])
@@ -1127,36 +1143,57 @@ def _add_categorical_term_trace(
             )
             link_hover = f"{ti.name}: %{{hovertext}}<br>η: %{{y:.4f}}<extra></extra>"
 
-        # Markers trace with error bars
-        fig.add_trace(
-            go.Scatter(
-                x=level_x.tolist(),
-                y=resp_y,
-                mode="markers",
-                name="Relativity",
-                marker=dict(
-                    size=9,
-                    color=style_cfg["line_color"],
-                    line=dict(color=style_cfg["text_outline_color"], width=0.8),
+        # Marker traces with error bars — ordered levels, then free levels
+        marker_specs = (
+            ("Relativity", ~is_special, "circle", style_cfg["line_color"]),
+            ("Free levels", is_special, "diamond", style_cfg["special_color"]),
+        )
+        for trace_name, mask, symbol, marker_color in marker_specs:
+            if not mask.any():
+                continue
+            trace_error_y = None
+            if resp_error_y is not None:
+                trace_error_y = dict(
+                    resp_error_y,
+                    array=resp_error_y["array"][mask],
+                    arrayminus=resp_error_y["arrayminus"][mask],
+                )
+            fig.add_trace(
+                go.Scatter(
+                    x=x_all[mask].tolist(),
+                    y=resp_y[mask],
+                    mode="markers",
+                    name=trace_name,
+                    marker=dict(
+                        size=9,
+                        symbol=symbol,
+                        color=marker_color,
+                        line=dict(color=style_cfg["text_outline_color"], width=0.8),
+                    ),
+                    error_y=trace_error_y,
+                    customdata=customdata[mask],
+                    hovertext=[lab for lab, keep in zip(level_labels, mask) if keep],
+                    legendgroup=f"{ti.name}:markers",
+                    hovertemplate=resp_hover_marker,
                 ),
-                error_y=resp_error_y,
-                customdata=customdata,
-                hovertext=level_labels,
-                legendgroup=f"{ti.name}:markers",
-                hovertemplate=resp_hover_marker,
-            ),
-            row=1,
-            col=1,
-        )
-        entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
-        link_variants.append(
-            _LinkVariant(
-                y=link_y.tolist(),
-                hovertemplate=link_hover,
-                error_y_array=link_err_up,
-                error_y_arrayminus=link_err_down,
+                row=1,
+                col=1,
             )
-        )
+            entries.append(_TraceEntry(term_idx=term_idx, default_visibility=True))
+            link_variants.append(
+                _LinkVariant(
+                    y=link_y[mask].tolist(),
+                    hovertemplate=link_hover,
+                    error_y_array=(
+                        np.asarray(link_err_up)[mask].tolist() if link_err_up is not None else None
+                    ),
+                    error_y_arrayminus=(
+                        np.asarray(link_err_down)[mask].tolist()
+                        if link_err_down is not None
+                        else None
+                    ),
+                )
+            )
 
         # Smooth curve overlay
         resp_curve_y = np.asarray(curve.relativity)
@@ -1358,11 +1395,12 @@ def _add_categorical_density_trace(
 
     if ti.smooth_curve is not None and ti.smooth_curve.level_x is not None:
         level_x = np.asarray(ti.smooth_curve.level_x, dtype=np.float64)
+        x_all = _level_positions_with_specials(level_x, ti.level_is_special, len(levels))
         fig.add_trace(
             go.Bar(
-                x=level_x.tolist(),
+                x=x_all.tolist(),
                 y=weights,
-                width=_ordered_bar_width(level_x),
+                width=_ordered_bar_width(x_all),
                 customdata=np.array(levels, dtype=object),
                 name="Exposure",
                 legendgroup=f"{ti.name}:density",
