@@ -30,7 +30,9 @@ from superglm.plotting.common import (
     _SIM_EDGE_ALPHA,
     _SIM_EDGE_LW,
     _SIM_FILL,
+    _SPECIAL_COLOR,
     _exposure_kde,
+    _level_positions_with_specials,
     _make_continuous_figure,
     _ordered_level_spacing,
 )
@@ -534,19 +536,28 @@ def _plot_ordered_spline_panel(
 ):
     """Render an OrderedCategorical(spline) panel.
 
-    Levels sit at their fitted x-positions (``smooth_curve.level_x``) with
-    the fitted smooth curve drawn through them, plus per-level error bars
-    and sample_weight bars.  This is the same curve the plotly backend
-    draws in ``_add_categorical_term_trace``.
+    Ordered levels sit at their spline x-positions under the fitted curve.
+    Free (special) levels are detached points past the end of the curve,
+    separated by a visible gap, with their own ticks and exposure bars.
     """
     levels = list(ti.levels)
     level_rel = np.asarray(ti.relativity)
     n_levels = len(levels)
     curve = ti.smooth_curve
-    if curve is not None and curve.level_x is not None:
-        x_pos = np.asarray(curve.level_x, dtype=np.float64)
-    else:
-        x_pos = np.arange(n_levels, dtype=np.float64)
+    is_special = (
+        np.asarray(ti.level_is_special, dtype=bool)
+        if ti.level_is_special is not None
+        else np.zeros(n_levels, dtype=bool)
+    )
+    level_x = (
+        np.asarray(curve.level_x, dtype=np.float64)
+        if curve is not None and curve.level_x is not None
+        # Fallback grid covers the ordered levels only, as level_x itself does.
+        else np.arange(int((~is_special).sum()), dtype=np.float64)
+    )
+    x_pos = _level_positions_with_specials(level_x, ti.level_is_special, n_levels)
+    # Smallest positive gap over the *displayed* positions, so bars sized here
+    # never overlap either the ordered levels or the detached free block.
     spacing = _ordered_level_spacing(x_pos)
 
     # Exposure bars in background
@@ -598,32 +609,48 @@ def _plot_ordered_spline_panel(
             zorder=4,
         )
 
-    # Per-level dots with error bars
+    # Per-level dots with error bars — ordered and free levels drawn separately
+    marker_specs = (
+        ("Relativity", ~is_special, "o", _LINE_COLOR),
+        ("Free levels", is_special, "D", _SPECIAL_COLOR),
+    )
     if interval is not None and ti.ci_lower is not None:
         ci_lo = np.asarray(ti.ci_lower)
         ci_hi = np.asarray(ti.ci_upper)
-        ax.errorbar(
-            x_pos,
-            level_rel,
-            yerr=[level_rel - ci_lo, ci_hi - level_rel],
-            fmt="o",
-            color=_LINE_COLOR,
-            markersize=7,
-            ecolor="#333333",
-            elinewidth=1.2,
-            capsize=4,
-            label="Relativity",
-            zorder=5,
-        )
+        yerr = np.vstack([level_rel - ci_lo, ci_hi - level_rel])
+        for label, mask, marker, color in marker_specs:
+            if not mask.any():
+                continue
+            ax.errorbar(
+                x_pos[mask],
+                level_rel[mask],
+                yerr=yerr[:, mask],
+                fmt=marker,
+                color=color,
+                markersize=7,
+                ecolor="#333333",
+                elinewidth=1.2,
+                capsize=4,
+                label=label,
+                zorder=5,
+            )
     else:
-        ax.scatter(
-            x_pos,
-            level_rel,
-            color=_LINE_COLOR,
-            s=50,
-            zorder=5,
-            label="Relativity",
-        )
+        for label, mask, marker, color in marker_specs:
+            if not mask.any():
+                continue
+            ax.scatter(
+                x_pos[mask],
+                level_rel[mask],
+                color=color,
+                s=50,
+                marker=marker,
+                zorder=5,
+                label=label,
+            )
+
+    if is_special.any() and (~is_special).any():
+        divider = 0.5 * (float(x_pos[~is_special].max()) + float(x_pos[is_special].min()))
+        ax.axvline(divider, linestyle=":", linewidth=_REF_LW, color=_REF_COLOR, zorder=1)
 
     ax.set_xticks(x_pos)
     rot = 45 if n_levels > 8 else 0
