@@ -153,7 +153,7 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
 
     if isinstance(spec, OrderedCategorical):
         if spec.basis == "spline":
-            _apply_projected_term(model, spec, groups, term, _ordered_spline_x(term))
+            _apply_ordered_spline_term(model, spec, groups, term)
         else:
             _apply_ordered_step_term(model, spec, groups, term)
         return
@@ -191,6 +191,51 @@ def _apply_projected_term(
     )
     _adjust_intercept(model, intercept_delta)
     _patch_beta_block(model, groups, beta_new)
+
+
+def _apply_ordered_spline_term(
+    model,
+    spec: OrderedCategorical,
+    groups: list[GroupSlice],
+    term: EditableTerm,
+) -> None:
+    """Project ordered levels onto the spline and assign special levels exactly.
+
+    A special contributes exactly one design row whose spline columns are zero,
+    so its edited effect determines its coefficient outright.  Feeding that row
+    to the least-squares solve instead leaves the intercept and the special
+    coefficient jointly under-determined whenever the constant vector lies in
+    the span of the ordered rows' spline columns -- which is exactly what an
+    unpenalized null-space column (``Spline(select=True)``) puts there -- and the
+    min-norm solution then splits the edit between them, moving the reported
+    intercept and the fitted curve.
+    """
+    x_values = _ordered_spline_x(term)
+    if not spec.has_specials:
+        _apply_projected_term(model, spec, groups, term, x_values)
+        return
+
+    B = _as_dense(spec.transform(x_values))
+    targets = native_log_effect_values(term)
+    weights = _term_weights(term)
+    labels = [str(level) for level in x_values]
+    specials = [str(level) for level in spec._specials]
+    missing = [level for level in specials if level not in labels]
+    if missing:
+        raise ValueError(f"Editable term {term.name!r} has no row for special level(s) {missing}.")
+    row_of = {label: index for index, label in enumerate(labels)}
+    special_rows = np.array([row_of[level] for level in specials], dtype=np.intp)
+    smooth_rows = np.setdiff1d(np.arange(len(labels), dtype=np.intp), special_rows)
+    n_spline = spec._split_beta(np.zeros(B.shape[1], dtype=np.float64))[0].size
+
+    intercept_delta, spline_beta = _solve_with_intercept(
+        B[smooth_rows, :n_spline],
+        targets[smooth_rows],
+        weights[smooth_rows],
+    )
+    special_beta = targets[special_rows] - intercept_delta
+    _adjust_intercept(model, intercept_delta)
+    _patch_beta_block(model, groups, np.concatenate([spline_beta, special_beta]))
 
 
 def _apply_categorical_term(
