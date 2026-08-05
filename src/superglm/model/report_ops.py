@@ -395,14 +395,18 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             handled_ordered_features.add(g.feature_name)
 
             feature_groups = [fg for fg in model._groups if fg.feature_name == g.feature_name]
+            # Mirrors coef_tables: the smooth row describes the spline block,
+            # while reconstruct() still needs the full-width coefficients.
+            smooth_groups = [fg for fg in feature_groups if fg.subgroup_type != "special"]
             beta_combined = np.concatenate([model.result.beta[fg.sl] for fg in feature_groups])
+            beta_smooth = np.concatenate([model.result.beta[fg.sl] for fg in smooth_groups])
             feature_edf = (
-                sum(group_edf.get(fg.name, 0.0) for fg in feature_groups) if group_edf else None
+                sum(group_edf.get(fg.name, 0.0) for fg in smooth_groups) if group_edf else None
             )
             raw = spec.reconstruct(beta_combined)
             if spec.basis == "spline":
                 metadata = spline_group_enrichment(
-                    feature_groups[0].name,
+                    smooth_groups[0].name,
                     spec._spline,
                     group_edf,
                     reml_lambdas,
@@ -414,9 +418,9 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         name=g.feature_name,
                         group=g.feature_name,
                         is_spline=True,
-                        n_params=len(beta_combined),
+                        n_params=len(beta_smooth),
                         active=any(fg.name in selected_names for fg in feature_groups),
-                        group_norm=float(np.linalg.norm(beta_combined)),
+                        group_norm=float(np.linalg.norm(beta_smooth)),
                         subgroup_type="ordered_spline",
                         **metadata,
                     )

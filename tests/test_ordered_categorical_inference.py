@@ -434,3 +434,25 @@ def test_special_level_does_not_change_the_reported_smooth_statistics():
     # whichever block happens to sit first (coef_tables.py:412-415).
     assert row.spline_kind == ref_row.spline_kind
     assert row.smoothing_lambda == pytest.approx(ref_row.smoothing_lambda, rel=1e-12)
+
+
+def test_editor_stale_rows_report_the_spline_block_only():
+    from superglm.model.report_ops import _build_editor_stale_coef_rows
+
+    model, _ = _fit_special_band_model()
+    spline_group = next(g for g in model._groups if g.name == "band")
+    # The free level really does cost a whole degree of freedom.
+    assert model._group_edf["band:special"] == pytest.approx(1.0, abs=0.05)
+
+    rows = _build_editor_stale_coef_rows(model)
+    smooth_row = next(row for row in rows if row.is_spline and row.name == "band")
+
+    # FAILS TODAY: report_ops.py:399-401 sums group_edf over both blocks,
+    # :417 counts len(beta_combined), :419 norms the full-width vector —
+    # so the stale summary shows the free level's edf and its coefficient
+    # inside the smooth row.
+    assert smooth_row.n_params == spline_group.size
+    assert smooth_row.edf == pytest.approx(model._group_edf["band"], rel=1e-12)
+    assert smooth_row.group_norm == pytest.approx(
+        float(np.linalg.norm(model.result.beta[spline_group.sl])), rel=1e-12
+    )
