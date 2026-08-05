@@ -130,3 +130,39 @@ def test_a_special_with_no_editable_row_is_refused(specials_model):
     # the fitted free-level effect instead of refusing the edit.
     with pytest.raises(ValueError, match="MISSING"):
         apply_edits_to_model_copy(model, terms)
+
+
+def _term_and_indices(model, levels):
+    session = EditorSession.from_model(model, terms=["band"])
+    term = session.terms["band"]
+    return term, np.array([term.levels.index(level) for level in levels], dtype=np.intp)
+
+
+def test_collapse_refuses_a_group_that_mixes_a_special_with_ordered_levels(specials_model):
+    from superglm.editor.collapse import collapsed_feature_spec
+
+    model, X, _ = specials_model
+    term, idx = _term_and_indices(model, ["6", "MISSING"])
+
+    # "MISSING" sits last in _ordered_levels, so it is *adjacent* to "6" and the
+    # contiguity check at collapse.py:58-64 waves this selection through today.
+    with pytest.raises(ValueError, match="free level"):
+        collapsed_feature_spec(model, term, idx, X=X)
+
+
+def test_collapsing_ordered_levels_keeps_the_special_free(specials_model):
+    from superglm.editor.collapse import collapsed_feature_spec
+
+    model, X, _ = specials_model
+    term, idx = _term_and_indices(model, ["2", "3"])
+
+    replacement, metadata = collapsed_feature_spec(model, term, idx, X=X)
+
+    assert metadata["group_label"] == "2+3"
+    # _ordered_spec_with_grouping rebuilds the spec from an explicit argument
+    # list (collapse.py:367-372); without specials= the free level is silently
+    # smoothed back into the curve.
+    assert replacement._specials == ["MISSING"]
+    assert replacement._smooth_levels == ["1", "2+3", "4", "5", "6"]
+    assert replacement._ordered_levels == ["1", "2+3", "4", "5", "6", "MISSING"]
+    assert "MISSING" not in replacement._level_to_value
