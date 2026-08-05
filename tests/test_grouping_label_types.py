@@ -1,69 +1,206 @@
-"""Issue #237: a grouping declared with one label spelling against a column that
-renders levels differently (int order, float column) canonicalises both sides
-independently and they never meet."""
+"""One level, two spellings: the declaration's and the data column's.
+
+`OrderedCategorical` is the only feature with two sources for a level's identity
+-- the `order=`/`values=` declaration and the column. `Categorical` takes its
+levels from the data alone, so nothing can disagree; it is covered here as the
+control. When the two sources render a level differently (declared `9` against a
+float column: "9" vs "9.0") every downstream membership test answers no, and it
+has done so as a crash, a silent no-op, a zero-exposure rating row and a guard
+that failed open.
+
+The declaration is canonical. `_declared_matcher` maps the DATA onto it, once, at
+the edge. These tests pin the shapes that mismatch, and the boundaries of the
+matching rule -- which is where the danger is, because a reconciliation that is
+too eager turns a loud "unknown level" error into a silent wrong answer.
+"""
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import OrderedCategorical, Spline, SuperGLM
-from superglm.editor import EditorSession
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 from superglm.features.grouping import collapse_levels
 
+SHAPES = [
+    pytest.param(["1", "2", "3", "9"], np.object_, id="str-decl/str-col"),
+    pytest.param([1, 2, 3, 9], np.int64, id="int-decl/int-col"),
+    pytest.param([1, 2, 3, 9], np.float64, id="int-decl/float-col"),
+    pytest.param([1.0, 2.0, 3.0, 9.0], np.float64, id="float-decl/float-col"),
+    pytest.param([1.0, 2.0, 3.0, 9.0], np.int64, id="float-decl/int-col"),
+    pytest.param(["1", "2", "3", "9"], np.float64, id="str-decl/float-col"),
+]
 
-def _model(order, dtype):
-    rng = np.random.default_rng(4)
-    codes = rng.choice(np.asarray(order, dtype=dtype), 600)
+
+def _fit(order, dtype, *, feature=None, n=600, seed=4):
+    rng = np.random.default_rng(seed)
+    codes = rng.choice(np.asarray(order, dtype=dtype), n)
     X = pd.DataFrame({"band": codes})
-    y = 0.1 * codes.astype(float) + rng.normal(0.0, 0.15, 600)
-    m = SuperGLM(
-        family="gaussian",
-        selection_penalty=0.0,
-        features={"band": OrderedCategorical(order=list(order), basis=Spline(kind="ps", k=5))},
-    )
-    m.fit(X, y)
-    return m, X
+    y = 0.1 * codes.astype(float) + rng.normal(0.0, 0.15, n)
+    spec = feature or OrderedCategorical(order=list(order), basis=Spline(kind="ps", k=5))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(X, y)
+    return model, X
 
 
-def test_collapse_levels_reconciles_declared_labels_with_the_data_spelling():
-    # `order=` and `groups=` are declared as ints; the column is float, so the
-    # data spells the same levels "1.0".."9.0". Both sides were canonicalised
-    # independently and never reconciled.
-    data = np.array([1.0, 2.0, 3.0, 4.0, 9.0, 9.0])
-    g = collapse_levels(data, groups={"2+3": [2, 3]}, order=[1, 2, 3, 4, 9])
-    assert set(g.all_original_levels) == {"1.0", "2.0", "3.0", "4.0", "9.0"}
-    assert g.original_to_group["2.0"] == "2+3"
-    assert g.original_to_group["3.0"] == "2+3"
-    assert g.original_to_group["1.0"] == "1.0"
+# ── The mismatching shapes ────────────────────────────────────────────────────
 
 
-def test_a_genuinely_absent_level_is_still_rejected():
-    # The reconciliation must not become a catch-all: a level that really is not
-    # in the data must still raise, or the check stops meaning anything.
-    data = np.array([1.0, 2.0, 3.0])
-    with pytest.raises(ValueError, match="not found in data"):
-        collapse_levels(data, groups={"g": [7]}, order=[1, 2, 3])
+@pytest.mark.parametrize(("order", "dtype"), SHAPES)
+def test_every_declaration_column_shape_fits_and_predicts(order, dtype):
+    # Three of these six shapes were broken: two reported levels in the declared
+    # spelling while the column used another, and one raised outright.
+    model, X = _fit(order, dtype)
+    eta = np.asarray(model._predict_eta_exact(X))
+    assert np.all(np.isfinite(eta))
+    assert len(model.term_inference("band").levels) == len(order)
 
 
-@pytest.mark.parametrize("dtype", [np.float64, np.int64], ids=["float-col", "int-col"])
-def test_an_ordered_categorical_with_numeric_labels_survives_a_collapse(dtype):
-    # The end-to-end shape from issue #237: numeric bands are a natural way to
-    # declare an ordered factor and collapsing levels is a core editor action.
-    model, X = _model([1, 2, 3, 4, 9], dtype)
+@pytest.mark.parametrize(("order", "dtype"), SHAPES)
+def test_categorical_is_unaffected_in_every_shape(order, dtype):
+    # The control. Categorical derives its levels from the data, so it has one
+    # source of truth and never had this bug -- if a change here breaks it, the
+    # fix has reached somewhere it should not.
+    model, X = _fit(order, dtype, feature=Categorical())
+    assert np.all(np.isfinite(np.asarray(model._predict_eta_exact(X))))
+
+
+@pytest.mark.parametrize(("order", "dtype"), SHAPES)
+def test_a_grouped_refit_survives_every_shape(order, dtype):
+    from superglm.editor import EditorSession
+
+    model, X = _fit(order, dtype)
+    levels = [str(level) for level in model.term_inference("band").levels]
     session = EditorSession.from_model(model, terms=["band"])
-    session.select_levels("band", ["2", "3"])
+    session.select_levels("band", levels[1:3])
     refit = session.replace_with_collapsed_levels("band")
 
-    # A grouped term DISPLAYS expanded back to its original levels, so the merged
-    # label is not in `.levels`. What shows the merge is the grouping itself, and
-    # the two members sharing one fitted effect.
     spec = refit._specs["band"]
     assert spec._grouping is not None
-    merged = [members for members in spec._grouping.group_to_originals.values() if len(members) > 1]
-    assert len(merged) == 1 and len(merged[0]) == 2, spec._grouping.group_to_originals
+    merged = [m for m in spec._grouping.group_to_originals.values() if len(m) > 1]
+    assert len(merged) == 1, spec._grouping.group_to_originals
+    assert np.all(np.isfinite(np.asarray(refit._predict_eta_exact(X))))
 
-    ti = refit.term_inference("band")
-    by_level = dict(zip([str(lv) for lv in ti.levels], np.asarray(ti.log_relativity)))
-    a, b = (str(m) for m in merged[0])
-    assert by_level[a] == pytest.approx(by_level[b]), "collapsed levels must share one effect"
+
+# ── The boundaries of the matching rule ───────────────────────────────────────
+
+
+def test_a_string_level_is_never_matched_numerically():
+    # Zero-padded identifiers are real in pricing data (policy codes, vehicle
+    # groups) and their leading zeros ARE their identity. An earlier attempt at
+    # this fix matched on float() unconditionally, which made
+    # `collapse_levels(["001","002"], groups={"g": [1]})` silently group "001"
+    # instead of raising -- turning a loud error into a wrong answer, which is the
+    # failure mode this whole area keeps producing.
+    with pytest.raises(ValueError, match="not found in data"):
+        collapse_levels(pd.Series(["001", "002"]), groups={"g": [1]})
+
+    # And the same rule at the feature boundary: a str column keeps its identity.
+    model, _ = _fit(["001", "002", "003", "009"], np.object_)
+    assert [str(lv) for lv in model.term_inference("band").levels] == [
+        "001",
+        "002",
+        "003",
+        "009",
+    ]
+
+
+def test_an_unknown_level_is_still_rejected():
+    # The reconciliation must not become a catch-all. If it silently absorbed
+    # unknown levels the validation would stop meaning anything.
+    model, _ = _fit([1, 2, 3, 9], np.float64)
+    spec = model._specs["band"]
+    with pytest.raises(ValueError, match="unseen categorical levels"):
+        spec.transform(np.array([1.0, 77.0], dtype=float))
+
+
+def test_a_declared_level_absent_from_training_still_predicts():
+    # `order=` declares the domain; training data need not exercise all of it.
+    # A level seen only at predict time must map to its declared spelling, or the
+    # fit silently accepts a domain it cannot score.
+    rng = np.random.default_rng(7)
+    codes = rng.choice(np.array([1.0, 2.0, 3.0]), 400)  # 9.0 never observed
+    X = pd.DataFrame({"band": codes})
+    y = 0.1 * codes + rng.normal(0.0, 0.15, 400)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"band": OrderedCategorical(order=[1, 2, 3, 9], basis=Spline(kind="ps", k=5))},
+    )
+    model.fit(X, y)
+    out = model.predict(pd.DataFrame({"band": np.array([9.0])}))
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_two_spellings_of_one_value_in_the_declaration_are_ambiguous():
+    # If the declaration itself contains "1" and 1.0, a column value of 1.0
+    # denotes neither unambiguously. Picking by iteration order would make the
+    # answer depend on declaration order; say so instead.
+    # Raised at CONSTRUCTION: the declaration is self-contradictory regardless of
+    # what data arrives, so there is no reason to wait for a column to prove it.
+    with pytest.raises(ValueError, match="two spellings of the same numeric value"):
+        OrderedCategorical(order=["1", 1.0, 2, 3], basis=Spline(kind="ps", k=5))
+
+
+def test_the_reporting_base_survives_a_spelling_mismatch():
+    # `base=` is declared by the user in their own spelling and compared against
+    # the level list. A mismatch here silently re-bases the whole term, changing
+    # every reported relativity.
+    model, _ = _fit(
+        [1, 2, 3, 9],
+        np.float64,
+        feature=OrderedCategorical(order=[1, 2, 3, 9], base="1", basis=Spline(kind="ps", k=5)),
+    )
+    assert str(model._specs["band"]._base_level) == "1"
+
+
+def test_a_grouping_passed_directly_works_on_a_numeric_column():
+    # The non-editor path: a user builds a grouping themselves and hands it to the
+    # spec. The editor path had its own reconciliation; this one had none, so it
+    # was the site that stayed broken after the first fix.
+    rng = np.random.default_rng(11)
+    codes = rng.choice(np.array([1.0, 2.0, 3.0, 9.0]), 500)
+    X = pd.DataFrame({"band": codes})
+    y = 0.1 * codes + rng.normal(0.0, 0.15, 500)
+    grouping = collapse_levels(X["band"], groups={"2+3": ["2.0", "3.0"]})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(
+                order=[1, 2, 3, 9], grouping=grouping, basis=Spline(kind="ps", k=5)
+            )
+        },
+    )
+    model.fit(X, y)
+    assert np.all(np.isfinite(np.asarray(model._predict_eta_exact(X))))
+
+
+def test_a_numeric_special_survives_a_collapse_of_other_levels():
+    # specials + grouping + numeric labels, the combination none of the three
+    # areas covered on its own. The coverage guard compares the grouping's
+    # spelling against the declared specials, so a mismatch made every collapse of
+    # an unrelated level fail.
+    from superglm.editor import EditorSession
+
+    rng = np.random.default_rng(13)
+    codes = rng.choice(np.array([1.0, 2.0, 3.0, 4.0, 9.0]), 700)
+    X = pd.DataFrame({"band": codes})
+    y = np.where(codes == 9.0, 0.9, 0.1 * codes) + rng.normal(0.0, 0.15, 700)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(
+                order=[1, 2, 3, 4, 9], specials=[9], basis=Spline(kind="ps", k=5)
+            )
+        },
+    )
+    model.fit(X, y)
+    levels = [str(level) for level in model.term_inference("band").levels]
+
+    session = EditorSession.from_model(model, terms=["band"])
+    session.select_levels("band", levels[1:3])
+    refit = session.replace_with_collapsed_levels("band")
     assert np.all(np.isfinite(np.asarray(refit._predict_eta_exact(X))))

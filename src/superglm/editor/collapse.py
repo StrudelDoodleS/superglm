@@ -11,7 +11,7 @@ import numpy as np
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.features.categorical import Categorical
-from superglm.features.grouping import LevelGrouping, _data_spelling, collapse_levels
+from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import Spline
 
@@ -407,12 +407,7 @@ def _ordered_original_values(
     else:
         values = {str(k): float(v) for k, v in spec._level_to_value.items()}
     if grouping is not None:
-        # The grouping speaks the DATA's spelling of each level; `values` was
-        # keyed from the declared labels. On a float column those differ ("1" vs
-        # "1.0"), the map-to-numeric lookup misses, and the spline receives NaN.
-        # Re-key through the same reconciliation collapse_levels uses.
-        respell = _data_spelling(list(grouping.all_original_levels))
-        return {respell(k): v for k, v in values.items()}, base
+        return values, base
 
     native_by_label: dict[str, Any] = {}
     for raw in np.asarray(data, dtype=object).ravel():
