@@ -288,6 +288,7 @@ class ModelSummary:
         _fmt = self._fmt_scalar
         display_rows = self._display_rows
         has_level_groups = bool(self._level_groups)
+        has_level_fit = any(row.level_fit is not None for row in display_rows)
 
         # Compute EDF breakdown from coef rows
         smooth_edf = sum(
@@ -358,7 +359,14 @@ class ModelSummary:
             if has_level_groups
             else 0
         )
-        coef_W = name_w + level_group_w + sum(coef_field_widths) + len(coef_field_widths)
+        level_fit_w = (
+            max(len("Fit"), *(len(row.level_fit or "") for row in display_rows)) + 2
+            if has_level_fit
+            else 0
+        )
+        coef_W = (
+            name_w + level_group_w + level_fit_w + sum(coef_field_widths) + len(coef_field_widths)
+        )
 
         # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
         # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
@@ -416,6 +424,9 @@ class ModelSummary:
             prefix = f"{row.name if name is None else name:<{name_w}s}"
             if has_level_groups:
                 prefix += f"{row.level_group if name is None else '':>{level_group_w}s}"
+            if has_level_fit:
+                fit = (row.level_fit or "") if name is None else ""
+                prefix += f"{fit:>{level_fit_w}s}"
             return prefix
 
         def _coef_fields(
@@ -456,11 +467,11 @@ class ModelSummary:
         lines.append(_mid())
 
         # Coefficient table header
-        hdr_prefix = (
-            f"{'Term':<{name_w}s}{'Level group':>{level_group_w}s}"
-            if has_level_groups
-            else f"{'Term':<{name_w}s}"
-        )
+        hdr_prefix = f"{'Term':<{name_w}s}"
+        if has_level_groups:
+            hdr_prefix += f"{'Level group':>{level_group_w}s}"
+        if has_level_fit:
+            hdr_prefix += f"{'Fit':>{level_fit_w}s}"
         hdr = hdr_prefix + _coef_fields(
             "coef",
             "std err",
@@ -553,12 +564,16 @@ class ModelSummary:
                     pad = max(W - len(prefix) - 4, 0)
                     lines.append(_row(f"{prefix}{'':<{pad}s} {stars:<3s}"))
                     if detail_str:
-                        lines.append(_row(f"{'':<{name_w + level_group_w}s}    {detail_str}"))
+                        lines.append(
+                            _row(f"{'':<{name_w + level_group_w + level_fit_w}s}    {detail_str}")
+                        )
                 elif row.active:
                     spline_text = f"[{kind}, {param_label}, active]"
                     lines.append(_row(f"{_coef_prefix(row)}  {spline_text}"))
                     if detail_str:
-                        lines.append(_row(f"{'':<{name_w + level_group_w}s}    {detail_str}"))
+                        lines.append(
+                            _row(f"{'':<{name_w + level_group_w + level_fit_w}s}    {detail_str}")
+                        )
                 else:
                     spline_text = f"[{kind}, {param_label}, inactive]"
                     lines.append(_row(f"{_coef_prefix(row)}  {spline_text}"))
@@ -740,7 +755,9 @@ class ModelSummary:
         _fmt = self._fmt_scalar
         display_rows = self._display_rows
         has_level_groups = bool(self._level_groups)
-        ncols = 10 if has_level_groups else 9
+        has_level_fit = any(row.level_fit is not None for row in display_rows)
+        extra_cols = int(has_level_groups) + int(has_level_fit)
+        ncols = 9 + extra_cols
 
         css = "border-collapse:collapse;font-family:monospace;font-size:13px;margin:8px 0;"
         cell = "padding:3px 8px;text-align:right;border:none;"
@@ -755,6 +772,11 @@ class ModelSummary:
             if not has_level_groups:
                 return ""
             return f'<td style="{cell_l}">{html_escape(row.level_group)}</td>'
+
+        def _level_fit_cell(row: _CoefRow) -> str:
+            if not has_level_fit:
+                return ""
+            return f'<td style="{cell_l}">{html_escape(row.level_fit or "")}</td>'
 
         parts: list[str] = []
         parts.append(f'<table style="{css}">')
@@ -829,6 +851,8 @@ class ModelSummary:
         col_names = [""]
         if has_level_groups:
             col_names.append("Level group")
+        if has_level_fit:
+            col_names.append("Fit")
         col_names.extend(
             [
                 "coef",
@@ -843,10 +867,9 @@ class ModelSummary:
         )
         parts.append("<tr>")
         parts.append(f'<td style="{hdr_cell_l}">{col_names[0]}</td>')
-        first_numeric = 1
-        if has_level_groups:
-            parts.append(f'<td style="{hdr_cell_l}">{col_names[1]}</td>')
-            first_numeric = 2
+        first_numeric = 1 + extra_cols
+        for cn in col_names[1:first_numeric]:
+            parts.append(f'<td style="{hdr_cell_l}">{cn}</td>')
         for cn in col_names[first_numeric:-1]:
             parts.append(f'<td style="{hdr_cell}">{cn}</td>')
         parts.append(f'<td style="{hdr_cell_l}">{col_names[-1]}</td>')
@@ -886,7 +909,8 @@ class ModelSummary:
                     f"<tr>"
                     f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                     f"{_level_group_cell(row)}"
-                    f'<td colspan="{ncols - 1 - int(has_level_groups)}" '
+                    f"{_level_fit_cell(row)}"
+                    f'<td colspan="{ncols - 1 - extra_cols}" '
                     f'style="{cell_l};color:#666;font-style:italic;">{text}</td>'
                     f"</tr>"
                 )
@@ -948,7 +972,8 @@ class ModelSummary:
                         f"<tr>"
                         f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                         f"{_level_group_cell(row)}"
-                        f'<td colspan="{ncols - 3 - int(has_level_groups)}" '
+                        f"{_level_fit_cell(row)}"
+                        f'<td colspan="{ncols - 3 - extra_cols}" '
                         f'style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td>'
                         f'<td style="{sig_cell}">{stars}</td>'
@@ -961,7 +986,8 @@ class ModelSummary:
                         f"<tr>"
                         f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                         f"{_level_group_cell(row)}"
-                        f'<td colspan="{ncols - 1 - int(has_level_groups)}" '
+                        f"{_level_fit_cell(row)}"
+                        f'<td colspan="{ncols - 1 - extra_cols}" '
                         f'style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td></tr>'
                     )
@@ -971,7 +997,8 @@ class ModelSummary:
                         f"<tr>"
                         f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                         f"{_level_group_cell(row)}"
-                        f'<td colspan="{ncols - 1 - int(has_level_groups)}" '
+                        f"{_level_fit_cell(row)}"
+                        f'<td colspan="{ncols - 1 - extra_cols}" '
                         f'style="{cell_l};color:#666;'
                         f'font-style:italic;">{text}</td></tr>'
                     )
@@ -1024,6 +1051,7 @@ class ModelSummary:
                     f"<tr>"
                     f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                     f"{_level_group_cell(row)}"
+                    f"{_level_fit_cell(row)}"
                     f'<td style="{cell}">0.0000</td>'
                     f'<td style="{cell}">ref</td>'
                     f'<td style="{cell}">---</td>'
@@ -1060,6 +1088,7 @@ class ModelSummary:
                     f"<tr>"
                     f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                     f"{_level_group_cell(row)}"
+                    f"{_level_fit_cell(row)}"
                     f'<td style="{cell}">{row.coef:.4f}</td>'
                     f'<td style="{cell}">{row.se:.4f}</td>'
                     f'<td style="{cell}">{z_text}</td>'
@@ -1076,6 +1105,7 @@ class ModelSummary:
                     f"<tr>"
                     f'<td style="{cell_l}">{html_escape(row.name)}</td>'
                     f"{_level_group_cell(row)}"
+                    f"{_level_fit_cell(row)}"
                     f'<td style="{cell}">{coef_str}</td>'
                     f'<td style="{cell}">---</td>'
                     f'<td style="{cell}">---</td>'
