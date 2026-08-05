@@ -200,6 +200,13 @@ def test_ascii_summary_renders_a_fit_column_only_when_levels_are_marked():
     assert "band[MISSING]*" not in text
     assert "band[MISSING] (free)" not in text
 
+    # The spline's continuation line is indented past the whole row prefix, so
+    # it has to clear the Fit column too. Its 4-space indent lands it 3 columns
+    # left of the right-aligned "coef" header (10-wide field, 4-char label).
+    detail = next(line for line in lines if "rank=5" in line)
+    assert detail.index("rank=5") > header.index("Fit") + len("Fit")
+    assert detail.index("rank=5") == header.index("coef") - 3
+
     plain = str(_summary(with_specials=False))
     plain_header = next(line for line in plain.splitlines() if "std err" in line)
     assert "Fit" not in plain_header
@@ -216,8 +223,14 @@ def test_ascii_fit_column_is_included_in_the_box_width():
     # W and the box loses its single line length.
     text = str(_summary(with_specials=True))
     boxed = [line for line in text.splitlines() if line.startswith(("║", "╠", "╟"))]
+    plain = str(_summary(with_specials=False))
+    plain_boxed = [line for line in plain.splitlines() if line.startswith(("║", "╠", "╟"))]
 
     assert len({len(line) for line in boxed}) == 1
+    assert len({len(line) for line in plain_boxed}) == 1
+    # Uniformity alone is satisfied by *not* rendering the column at all, so
+    # also pin that the marked box actually paid for the extra column.
+    assert len(boxed[0]) > len(plain_boxed[0])
 
 
 def _row_widths(html: str) -> list[int]:
@@ -254,3 +267,120 @@ def test_html_summary_column_grid_absorbs_the_fit_column():
 
     assert set(_row_widths(marked)) == {10}
     assert set(_row_widths(plain)) == {9}
+
+
+def _every_row_kind(*, with_specials: bool) -> list[_CoefRow]:
+    """One row of every kind the HTML renderer emits its own <tr> for.
+
+    The renderer writes the Fit cell at seven independent sites; the three-row
+    fixture above only reaches three of them, so a dropped cell in (say) the
+    ``is_reference`` branch — the base level of every ordered term — renders a
+    short row with no exception. These rows walk all seven.
+    """
+    fit = (lambda marker: marker) if with_specials else (lambda marker: None)
+    return [
+        _CoefRow(name="Intercept", coef=-1.2, se=0.02, z=-60.0, p=0.0, ci_low=-1.24, ci_high=-1.16),
+        # structured_kind branch
+        _CoefRow(
+            name="re",
+            group="re",
+            structured_kind="random_effect",
+            n_params=7,
+            n_levels=7,
+            edf=3.0,
+            smoothing_lambdas=(("re", 1.5),),
+        ),
+        # spline branch, with a whole-smooth Wald test
+        _CoefRow(
+            name="s_test",
+            group="s_test",
+            is_spline=True,
+            n_params=5,
+            active=True,
+            group_norm=1.0,
+            wald_chi2=42.0,
+            wald_p=0.0004,
+            ref_df=4.0,
+            subgroup_type="ordered_spline",
+            edf=3.5,
+            smoothing_lambda=2.0,
+        ),
+        # spline branch, active but untested
+        _CoefRow(
+            name="s_on",
+            group="s_on",
+            is_spline=True,
+            n_params=5,
+            active=True,
+            group_norm=1.0,
+            subgroup_type="spline",
+            edf=2.0,
+            smoothing_lambda=1.0,
+        ),
+        # spline branch, inactive
+        _CoefRow(
+            name="s_off",
+            group="s_off",
+            is_spline=True,
+            n_params=5,
+            active=False,
+            subgroup_type="spline",
+        ),
+        # level branch, reference level
+        _CoefRow(
+            name="band[1]",
+            group="band",
+            coef=0.0,
+            is_reference=True,
+            level_fit=fit("smooth"),
+        ),
+        # level branch, coef + std err
+        _CoefRow(
+            name="band[10]",
+            group="band",
+            coef=0.42,
+            se=0.05,
+            ci_low=0.32,
+            ci_high=0.52,
+            level_fit=fit("smooth"),
+        ),
+        _CoefRow(
+            name="band[MISSING]",
+            group="band",
+            coef=-0.55,
+            se=0.07,
+            ci_low=-0.69,
+            ci_high=-0.41,
+            level_fit=fit("free"),
+        ),
+        # level branch, fallback (coef without a std err)
+        _CoefRow(name="band[X]", group="band", coef=0.1, level_fit=fit("smooth")),
+    ]
+
+
+def test_html_fit_cell_is_emitted_by_every_row_kind():
+    # False today for four of the seven sites: with only three level rows a
+    # missing _level_fit_cell in the is_reference / structured / active-spline
+    # / inactive-spline branch renders a 9-cell row inside a 10-column grid
+    # and every existing assertion still holds.
+    marked = ModelSummary({}, _model_info(), _every_row_kind(with_specials=True))._repr_html_()
+    plain = ModelSummary({}, _model_info(), _every_row_kind(with_specials=False))._repr_html_()
+
+    assert set(_row_widths(marked)) == {10}
+    assert set(_row_widths(plain)) == {9}
+    # Four level rows are marked, so the column carries four cells: one free
+    # level and three smooth ones, the reference row among them.
+    assert marked.count(">free</td>") == 1
+    assert marked.count(">smooth</td>") == 3
+
+
+def test_html_fit_column_grid_holds_on_a_real_fitted_specials_model():
+    # The synthetic fixtures hand-build their rows; this pins the same grid
+    # invariant on the rows a real specials fit actually produces, including
+    # the group-separator rows the fixtures never generate.
+    model, _, _, _ = _specials_model()
+    html = model.summary()._repr_html_()
+
+    assert ">Fit</td>" in html
+    assert html.count(">free</td>") == 1
+    assert set(_row_widths(html)) == {10}
