@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -44,27 +46,36 @@ def specials_model():
     return _fit(*ONE_SPECIAL)
 
 
-@pytest.fixture
-def two_specials_model():
-    return _fit(*TWO_SPECIALS)
-
-
 def _band_blocks(model):
     groups = {str(group.name): group for group in model._groups if group.feature_name == "band"}
     return groups["band"], groups["band:special"]
 
 
-def _edit_special(model, level, delta):
+def _edited_model(model, level, delta):
     session = EditorSession.from_model(model, terms=["band"])
     session.select_levels("band", [level])
     session.shift("band", delta)
-    edited = session.to_model()
+    return session.to_model()
+
+
+def _edit_special(model, level, delta):
+    edited = _edited_model(model, level, delta)
     spline_group, special_group = _band_blocks(edited)
     return (
         float(edited.result.intercept),
         np.asarray(edited.result.beta[spline_group.sl], dtype=np.float64).copy(),
         np.asarray(edited.result.beta[special_group.sl], dtype=np.float64).copy(),
     )
+
+
+def _reported_effects(model):
+    """Level -> reported log-relativity, as the user reads the edited model."""
+    with warnings.catch_warnings():
+        # An edited model warns that its SEs/CIs are reference-only; irrelevant here.
+        warnings.simplefilter("ignore", UserWarning)
+        ti = model.term_inference("band")
+    levels = [str(level) for level in ti.levels]
+    return dict(zip(levels, np.asarray(ti.log_relativity, dtype=np.float64)))
 
 
 # `select=True` is the discriminating shape.  Without it the spline block is
@@ -91,6 +102,21 @@ def test_special_edit_leaves_the_ordered_projection_untouched(select):
 
 
 @pytest.mark.parametrize("select", [False, True])
+def test_editing_a_special_moves_its_reported_effect_by_exactly_the_shift(select):
+    # The differential assertions above are blind to a constant offset in the
+    # special block, which is precisely what the `- intercept_delta` correction
+    # supplies. Pin the absolute value the user reads back instead.
+    model, _, _ = _fit(*ONE_SPECIAL, select=select)
+    before = _reported_effects(model)
+
+    after = _reported_effects(_edited_model(model, "MISSING", 0.7))
+
+    assert after["MISSING"] - before["MISSING"] == pytest.approx(0.7, abs=1e-10)
+    for level in SMOOTH_LEVELS:
+        assert after[level] - before[level] == pytest.approx(0.0, abs=1e-10)
+
+
+@pytest.mark.parametrize("select", [False, True])
 def test_editing_one_special_leaves_the_other_special_coefficient_alone(select):
     model, _, _ = _fit(*TWO_SPECIALS, select=select)
 
@@ -105,6 +131,18 @@ def test_editing_one_special_leaves_the_other_special_coefficient_alone(select):
     # shared intercept column drags it with UNKNOWN's edit.
     np.testing.assert_allclose(small[2][0], large[2][0], atol=1e-12)
     np.testing.assert_allclose(large[2][1] - small[2][1], 1.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("select", [False, True])
+def test_editing_one_special_moves_only_that_special_reported_effect(select):
+    model, _, _ = _fit(*TWO_SPECIALS, select=select)
+    before = _reported_effects(model)
+
+    after = _reported_effects(_edited_model(model, "UNKNOWN", 0.7))
+
+    assert after["UNKNOWN"] - before["UNKNOWN"] == pytest.approx(0.7, abs=1e-10)
+    for level in [*SMOOTH_LEVELS, "MISSING"]:
+        assert after[level] - before[level] == pytest.approx(0.0, abs=1e-10)
 
 
 def test_a_special_with_no_editable_row_is_refused(specials_model):
