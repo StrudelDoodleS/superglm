@@ -1347,6 +1347,125 @@ def test_ordered_spline_workbook_keeps_only_global_inference(tmp_path):
         assert row["Significance"] in (None, "")
 
 
+def _fit_ordered_specials_export_model():
+    rng = np.random.default_rng(20260805)
+    ordered = [f"L{i}" for i in range(7)]
+    codes = np.repeat(np.arange(len(ordered)), 90)
+    band_ordered = np.asarray(ordered, dtype=object)[codes]
+    x = codes / (len(ordered) - 1.0)
+    eta_ordered = -0.8 + 0.9 * x
+    band_missing = np.full(240, "MISSING", dtype=object)
+    eta_missing = np.full(240, -0.8 - 0.5)
+    band = np.concatenate([band_ordered, band_missing])
+    eta = np.concatenate([eta_ordered, eta_missing])
+    region = np.resize(np.array(["N", "S", "E"], dtype=object), band.size)
+    weights = rng.uniform(0.6, 1.8, band.size)
+    y = rng.poisson(np.exp(eta) * weights).astype(float)
+    X = pd.DataFrame({"band": band, "region": region})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(
+                order=ordered,
+                specials=["MISSING"],
+                base="first",
+                basis=Spline(kind="ps", k=5),
+            ),
+            "region": Categorical(base="N"),
+        },
+    )
+    model.fit(X, y, sample_weight=weights)
+    return model, X, y, weights, ordered
+
+
+def test_summary_sheet_marks_a_term_that_contains_free_levels():
+    # False today: a specials term's group row is Kind="smooth", identical to
+    # a term with no specials, so the workbook records nothing about free
+    # levels. Also pins that the Wood note survives the new kind value.
+    model, _, _, _, _ = _fit_ordered_specials_export_model()
+    payload = build_summary_export_payload(model)
+    band_rows = [row for row in payload.terms if row.group == "band"]
+
+    marked = [row for row in band_rows if row.kind == "smooth+free"]
+    assert len(marked) == 1
+    assert marked[0].term == "band"
+    assert isinstance(marked[0].p_value, float)
+    assert not [row for row in band_rows if row.kind == "smooth"]
+    assert "Smooth p-values use Wood (2013) Bayesian tests." in payload.notes
+
+
+def test_summary_sheet_marks_the_free_level_row_itself():
+    # False today: every level row is Kind="level", so the workbook cannot say
+    # WHICH level was fitted free. export/summary.py:301 already emits one row
+    # per level (test_rating_table_export.py:1325-1348 pins that), so this is
+    # the kind string alone — no new column and no rating-sheet change.
+    model, _, _, _, ordered = _fit_ordered_specials_export_model()
+    payload = build_summary_export_payload(model)
+    level_rows = [
+        row for row in payload.terms if row.group == "band" and row.kind in {"level", "free level"}
+    ]
+
+    assert [row.term for row in level_rows] == [f"band[{level}]" for level in [*ordered, "MISSING"]]
+    assert [row.kind for row in level_rows] == ["level"] * len(ordered) + ["free level"]
+    free_row = level_rows[-1]
+    assert free_row.estimate is not None
+    assert free_row.std_error is not None
+    assert free_row.p_value is None
+
+
+def test_summary_sheet_level_kinds_are_unchanged_without_specials():
+    # Guards the width/format contract the other direction: a term with no
+    # specials must keep every level row at Kind="level".
+    model, levels = _fit_ordered_export_model()
+    payload = build_summary_export_payload(model)
+    level_rows = [
+        row for row in payload.terms if row.group == "band" and row.kind in {"level", "free level"}
+    ]
+
+    assert [row.kind for row in level_rows] == ["level"] * len(levels)
+
+
+def test_specials_workbook_keeps_summary_columns_and_rating_block_layout(tmp_path):
+    # False today: nothing exercises a specials model through the workbook, so
+    # neither the fixed Summary header set nor the 3-column rating blocks are
+    # pinned against a marker column creeping onto the rating sheet.
+    model, X, y, weights, _ = _fit_ordered_specials_export_model()
+    output = tmp_path / "specials.xlsx"
+
+    model.export_rating_tables(output, X, y, sample_weight=weights, n_bins=20)
+
+    wb = load_workbook(output, data_only=True)
+    summary_ws = wb["Model Summary"]
+    term_min_col, term_min_row, term_max_col, _ = range_boundaries(
+        summary_ws.tables["TermInference"].ref
+    )
+    term_headers = [
+        summary_ws.cell(row=term_min_row, column=column).value
+        for column in range(term_min_col, term_max_col + 1)
+    ]
+    assert term_headers == EXPECTED_SUMMARY_TERM_HEADERS
+    kinds = {row["Kind"] for row in _table_records(summary_ws, "TermInference")}
+    assert "smooth+free" in kinds
+    assert "free level" in kinds
+
+    rating_ws = wb["Rating Tables"]
+    assert rating_ws["A5"].value == "band"
+    assert [rating_ws.cell(row=7, column=column).value for column in range(1, 4)] == [
+        "band",
+        "Relativity",
+        "Weight",
+    ]
+    # Block 2 must still start at column 4: excel.py:176 keys start_col and
+    # excel.py:186/188 key number formats on a 3-column stride.
+    assert rating_ws["D5"].value == "region"
+    assert [rating_ws.cell(row=7, column=column).value for column in range(4, 7)] == [
+        "region",
+        "Relativity",
+        "Weight",
+    ]
+
+
 def test_excel_workbook_writes_to_binary_stream():
     summary = SummaryExportPayload(
         overview=(SummaryOverviewRow("Fit", "Observations", 12),),
