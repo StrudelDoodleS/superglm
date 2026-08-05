@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import OrderedCategorical, Spline
+from superglm import OrderedCategorical, Spline, SuperGLM
 
 ORDERED = [str(i) for i in range(1, 11)]
 SPECIAL = "MISSING"
@@ -372,3 +372,115 @@ def test_ssp_gram_of_the_zero_filled_block_is_on_the_all_row_scale():
     X_ref = np.asarray(gm_ref.toarray(), dtype=np.float64)
     gram_ref = X_ref.T @ (weight[:, None] * X_ref)
     np.testing.assert_allclose(np.diag(gram), np.diag(gram_ref), rtol=1e-3)
+
+
+# transform() has always returned only the spline's columns, so its width is
+# n_spline_cols today and the assertions below are off by len(specials).
+def test_transform_emits_spline_then_special_columns():
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    probe = np.array(ORDERED + [SPECIAL], dtype=object)
+    out = spec.transform(probe)
+    # transform() emits the basis at the inner spline's current width, which is
+    # the built block's column count until the identifiability reparametrisation
+    # is pushed back in; n_cols is already post-projection, so it is the wrong
+    # yardstick here.
+    n_spline = spline_info.columns.shape[1]
+    assert out.shape == (len(probe), n_spline + special_info.n_cols)
+    # Special rows are zero across the spline block, ordered rows zero across the indicators.
+    assert np.allclose(out[-1, :n_spline], 0.0)
+    assert np.allclose(out[:-1, n_spline:], 0.0)
+    assert out[-1, n_spline] == 1.0
+    assert not np.allclose(out[:-1, :n_spline], 0.0)
+
+
+def test_split_beta_partitions_by_block_width():
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    beta = np.arange(spline_info.n_cols + special_info.n_cols, dtype=np.float64)
+    spline_beta, special_beta = spec._split_beta(beta)
+    assert len(spline_beta) == spline_info.n_cols
+    assert len(special_beta) == special_info.n_cols
+    assert special_beta[0] == beta[-1]
+
+
+def test_a_non_string_special_label_builds_and_transforms():
+    # False today: `specials=[9]` is str-coerced to "9" at construction but
+    # `_special_mask` compares the raw column against "9", so every row of an
+    # integer-labelled column misses the indicator; the special rows then land
+    # in the spline's ordered set and _map_to_numeric emits NaN.
+    spec = OrderedCategorical(order=[1, 2, 3, 4, 5, 9], specials=[9], basis=Spline(kind="ps", k=5))
+    x = np.array([1, 2, 3, 4, 5, 9, 9], dtype=object)
+    spline_info, special_info = spec.build(x, np.ones(len(x)))
+    assert special_info.n_cols == 1
+    indicator = np.asarray(special_info.columns.todense()).ravel()
+    np.testing.assert_array_equal(indicator == 1.0, np.array(x) == 9)
+    out = spec.transform(x)
+    n_spline = spline_info.columns.shape[1]
+    assert out.shape == (len(x), n_spline + 1)
+    np.testing.assert_array_equal(out[:, -1] == 1.0, np.array(x) == 9)
+    assert np.allclose(out[-2:, :n_spline], 0.0)
+
+
+# score() and reconstruct() forward the whole vector to the inner spline today,
+# so with specials present they read special coefficients as spline ones.
+def test_score_uses_the_free_coefficient_on_special_rows():
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    # The spec has not had the identifiability reparametrisation pushed back in,
+    # so the inner spline still expects one coefficient per built column.
+    beta = np.zeros(spline_info.columns.shape[1] + special_info.n_cols)
+    beta[-1] = -0.55
+    scored = spec.score(np.array(["1", SPECIAL], dtype=object), beta)
+    assert scored[1] == pytest.approx(-0.55)
+    # The special's coefficient must not leak into an ordered row.
+    assert scored[0] == pytest.approx(0.0)
+
+
+def test_reconstruct_reports_every_level_and_flags_the_specials():
+    frame = _fit_frame()
+    spec = _oc()
+    spline_info, special_info = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
+    beta = np.zeros(spline_info.columns.shape[1] + special_info.n_cols)
+    beta[-1] = -0.55
+    raw = spec.reconstruct(beta)
+    assert raw["levels"] == ORDERED + [SPECIAL]
+    assert raw["special_levels"] == [SPECIAL]
+    assert set(raw["level_relativities"]) == set(ORDERED + [SPECIAL])
+    assert raw["level_log_relativities"][SPECIAL] == pytest.approx(-0.55)
+    # A special never receives a coordinate on the smooth's axis.
+    assert SPECIAL not in raw["level_values"]
+
+
+# Nothing enforces this today because the feature does not exist. It is the
+# claim the design rests on: a free level effect makes those rows uninformative
+# for every other coefficient, so the fitted curve must not move.
+def test_adding_a_special_does_not_move_the_fitted_curve():
+    frame = _fit_frame(n=8000, seed=3)
+    ordered_only = frame[frame["band"] != SPECIAL].reset_index(drop=True)
+
+    without = SuperGLM(
+        family="poisson",
+        link="log",
+        features={"band": OrderedCategorical(order=list(ORDERED), basis=Spline(kind="ps", k=8))},
+    )
+    without.fit_reml(
+        ordered_only[["band"]],
+        ordered_only["freq"].to_numpy(),
+        sample_weight=ordered_only["exposure"].to_numpy(),
+    )
+
+    with_special = SuperGLM(family="poisson", link="log", features={"band": _oc()})
+    with_special.fit_reml(
+        frame[["band"]], frame["freq"].to_numpy(), sample_weight=frame["exposure"].to_numpy()
+    )
+
+    a = without.term_inference("band", with_se=False)
+    b = with_special.term_inference("band", with_se=False)
+    rel_a = dict(zip([str(v) for v in a.levels], np.asarray(a.relativity, dtype=float)))
+    rel_b = dict(zip([str(v) for v in b.levels], np.asarray(b.relativity, dtype=float)))
+    for lev in ORDERED:
+        assert rel_b[lev] == pytest.approx(rel_a[lev], rel=2e-2)
