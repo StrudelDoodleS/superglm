@@ -640,3 +640,30 @@ def test_a_grouping_that_omits_a_special_is_refused():
     )
     with pytest.raises(ValueError, match="does not cover"):
         _oc(grouping=grouping)
+
+
+def test_a_numerically_equal_special_is_popped_from_a_float_order():
+    # False today. Popping a special out of `order=` compares `str(level)` against
+    # the coerced special set, so `order=[1.0, 2.0, 9.0]` with `specials=[9]`
+    # keeps 9.0 -- "9.0" != "9" -- while `_special_mask` DOES match raw 9.0 rows
+    # numerically. The level is then both smoothed and free: the spline is built
+    # with a phantom position that no row ever occupies, and the same level is
+    # reported twice, once as an unobserved smooth level and once as the free one.
+    #
+    # The str view and the raw view must agree on which levels are special; this
+    # is the one place they disagree.
+    spec = OrderedCategorical(
+        order=[1.0, 2.0, 3.0, 4.0, 9.0], specials=[9], basis=Spline(kind="ps", k=5)
+    )
+    assert spec._specials == ["9"]
+    assert [str(lev) for lev in spec._smooth_levels] == ["1.0", "2.0", "3.0", "4.0"]
+    assert 9.0 not in spec._level_to_value
+    assert "9.0" not in spec._level_to_value
+    assert spec._n_levels == 4
+
+    # And it must still build: every 9.0 row belongs to the free block, and the
+    # smooth carries the other four.
+    x = np.array([1.0, 2.0, 3.0, 4.0, 9.0, 9.0], dtype=float)
+    _, special_info = spec.build(x, np.ones(len(x)))
+    indicator = np.asarray(special_info.columns.todense()).ravel()
+    np.testing.assert_array_equal(indicator == 1.0, x == 9.0)

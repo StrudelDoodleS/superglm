@@ -1670,3 +1670,30 @@ def test_summary_sheet_keeps_a_deselected_smooth_inactive():
     # about the smooth, not about suppressing the one estimate the term made.
     level_rows = [row for row in payload.terms if row.group == "band" and row.kind != "smooth+free"]
     assert any(row.active for row in level_rows)
+
+
+def test_summary_sheet_keeps_dropped_smooth_level_rows_inactive():
+    # The other half of the active-flag fix. Scoping the smooth GROUP row to the
+    # spline block left the LEVEL rows still ORing over every source group, and
+    # `_source_groups_for_row` returns both `band` and `band:special` for a row
+    # like `band[L0]`. So when selection drops the spline, every smoothed level
+    # is still exported active -- inheriting it from the free special, which is
+    # the one part of the term that survived. Only a level actually fitted free
+    # may take its activity from the special block.
+    from tests.test_ordered_categorical_inference import (
+        _fit_deselected_spline_with_live_special,
+    )
+
+    model = _fit_deselected_spline_with_live_special()
+    assert set(model.result.rank_info.selected_group_names) == {"band:special"}
+
+    payload = build_summary_export_payload(model)
+    band = [row for row in payload.terms if row.group == "band"]
+    free = [row for row in band if row.kind == "free level"]
+    smooth_levels = [row for row in band if row.kind == "level"]
+
+    assert free and smooth_levels, "fixture must produce both row kinds"
+    assert all(row.active for row in free), "the special is still fitted"
+    assert not any(row.active for row in smooth_levels), (
+        "smoothed levels are no longer fitted once the spline block is dropped"
+    )

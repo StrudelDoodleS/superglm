@@ -240,10 +240,25 @@ class OrderedCategorical:
             known_special_labels |= set(specials)
 
         if special_set:
+            # Match on BOTH views, because `_special_mask` does. A str-only test
+            # keeps 9.0 in the smooth when the special was declared as 9 ("9.0" !=
+            # "9"), while the mask still claims those rows numerically -- so the
+            # level ends up both smoothed and free: a phantom spline position no
+            # row occupies, and the same level reported twice.
+            raw_specials = list(self._special_raw)
+
+            def _is_special(label: Any) -> bool:
+                if str(label) in special_set:
+                    return True
+                return any(
+                    not isinstance(raw, str) and not isinstance(label, str) and label == raw
+                    for raw in raw_specials
+                )
+
             if values is not None:
-                values = {k: v for k, v in values.items() if str(k) not in special_set}
+                values = {k: v for k, v in values.items() if not _is_special(k)}
             else:
-                order = [lev for lev in order if str(lev) not in special_set]
+                order = [lev for lev in order if not _is_special(lev)]
 
         basis_was_explicit = basis is not None
         shortcut_values = {
