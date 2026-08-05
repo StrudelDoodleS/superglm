@@ -453,6 +453,7 @@ def build_coef_rows(
                 )
 
                 levels = raw["levels"]
+                special_labels = set(spec._specials) if spec.has_specials else None
                 for i, level in enumerate(levels):
                     coef_val = float(raw["level_log_relativities"][level])
                     se_val: float | None = (
@@ -477,6 +478,11 @@ def build_coef_rows(
                             se=se_val,
                             ci_low=level_ci_lo,
                             ci_high=level_ci_hi,
+                            level_fit=(
+                                None
+                                if special_labels is None
+                                else ("free" if level in special_labels else "smooth")
+                            ),
                         )
                     )
             else:

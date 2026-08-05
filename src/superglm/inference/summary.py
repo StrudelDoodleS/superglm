@@ -57,6 +57,10 @@ class _CoefRow:
     quasi_separated: bool = False
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
+    # Per-level fit provenance: "smooth" for a level carried by the spline,
+    # "free" for an OrderedCategorical special, None when the term has no
+    # specials. Drives the optional `fit` column in both renderers.
+    level_fit: str | None = None
     # Summary presentation only. Canonical coefficient builders leave these
     # fields at their defaults.
     level_group: str = ""
