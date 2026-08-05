@@ -430,10 +430,109 @@ def test_special_level_does_not_change_the_reported_smooth_statistics():
     assert row.ref_df == pytest.approx(ref_row.ref_df, rel=1e-2)
     assert row.wald_p == pytest.approx(ref_row.wald_p, rel=1e-2, abs=1e-6)
 
-    # Lambda / knot metadata must come from the spline block, not from
-    # whichever block happens to sit first (coef_tables.py:412-415).
+    # Lambda / knot metadata are read from the spline block by subgroup_type
+    # rather than positionally (coef_tables.py:412-415).  These two assertions
+    # do NOT discriminate that read: while the documented block order holds,
+    # smooth_groups[0] and feature_groups[0] are the same GroupSlice, so the
+    # positional read returns the same metadata.  They pin the values, not the
+    # selection rule; the rule is defensive against a reversed build order,
+    # which _split_beta and transform would reject before this code runs.
     assert row.spline_kind == ref_row.spline_kind
     assert row.smoothing_lambda == pytest.approx(ref_row.smoothing_lambda, rel=1e-12)
+
+
+def test_ordered_spline_ref_df_falls_back_to_the_spline_block_width(monkeypatch):
+    """When the Wood test cannot factorize, ref_df must still exclude the special."""
+    model, _ = _fit_special_band_model()
+    spline_group = next(g for g in model._groups if g.name == "band")
+    special_group = next(g for g in model._groups if g.name == "band:special")
+
+    from superglm.stats import wood_pvalue
+
+    def singular_wood_test(*_args, **_kwargs):
+        raise np.linalg.LinAlgError("singular Wood pseudo-inverse")
+
+    monkeypatch.setattr(wood_pvalue, "wood_test_smooth", singular_wood_test)
+    row = _smooth_row(model.summary())
+
+    assert row.active
+    assert np.isnan(row.wald_chi2)
+    assert row.ref_df == pytest.approx(float(spline_group.size))
+    assert row.ref_df != pytest.approx(float(spline_group.size + special_group.size))
+
+
+def _fit_deselected_spline_with_live_special():
+    """Flat ordered trend beside a large MISSING offset: group selection drops
+    the spline block, while the unpenalized special block always survives."""
+    rng = np.random.default_rng(20260805)
+    levels = [f"L{i}" for i in range(7)]
+    codes = np.tile(np.arange(len(levels)), 180)
+    rng.shuffle(codes)
+    x_ordered = np.asarray(levels, dtype=object)[codes]
+    w_ordered = rng.uniform(0.6, 1.8, len(codes))
+    eta_ordered = np.full(len(codes), -0.8)
+
+    n_special = 200
+    w_special = rng.uniform(0.6, 1.8, n_special)
+    eta_special = np.full(n_special, 1.2)
+
+    band = np.concatenate([x_ordered, np.full(n_special, "MISSING", dtype=object)])
+    weights = np.concatenate([w_ordered, w_special])
+    eta = np.concatenate([eta_ordered, eta_special])
+    y = rng.poisson(np.exp(eta) * weights).astype(float)
+
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=200.0,
+        features={
+            "band": OrderedCategorical(
+                order=levels,
+                specials=["MISSING"],
+                base="first",
+                basis=Spline(kind="ps", k=7, select=True),
+            )
+        },
+    )
+    model.fit(pd.DataFrame({"band": band}), y, sample_weight=weights)
+    return model
+
+
+def test_deselected_spline_reports_inactive_even_though_the_special_survives():
+    model = _fit_deselected_spline_with_live_special()
+    assert set(model.result.rank_info.selected_group_names) == {"band:special"}
+
+    summary = model.summary()
+    row = _smooth_row(summary)
+
+    # The specials block is built unpenalized, so it is never deselected.
+    # Asking "is any block of this feature selected?" would therefore make the
+    # smooth row permanently active while every statistic on it — all of which
+    # now describe the spline block — reports an empty smooth.
+    assert row.active is False
+    assert row.edf == 0.0
+    assert row.group_norm == 0.0
+    assert row.wald_chi2 is None
+    assert row.wald_p is None
+    assert row.ref_df is None
+    assert _compact_summary_row(row)["ref_df"] is None
+    assert "inactive" in str(summary)
+
+    # The free level is still fitted and still has a real standard error: the
+    # smooth row going inactive must not suppress the level table.
+    special_row = next(r for r in _level_rows(summary) if r.name == "band[MISSING]")
+    assert special_row.coef > 1.0
+    assert special_row.se is not None and np.isfinite(special_row.se) and special_row.se > 0.0
+
+
+def test_editor_stale_rows_agree_that_a_deselected_spline_is_inactive():
+    from superglm.model.report_ops import _build_editor_stale_coef_rows
+
+    model = _fit_deselected_spline_with_live_special()
+    rows = _build_editor_stale_coef_rows(model)
+    smooth_row = next(row for row in rows if row.is_spline and row.name == "band")
+
+    assert smooth_row.active is False
+    assert smooth_row.group_norm == pytest.approx(0.0, abs=1e-12)
 
 
 def test_editor_stale_rows_report_the_spline_block_only():
