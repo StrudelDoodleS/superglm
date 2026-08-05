@@ -105,7 +105,7 @@ spline's `R_inv` unchanged.
 
 ### Block order is a contract
 
-**Spline first, specials second.** `coef_tables.py:413` and `report_ops.py:~563`
+**Spline first, specials second.** `coef_tables.py:413` and `report_ops.py:405`
 read `feature_groups[0].name` as "the spline group" for λ and knot metadata, and
 report *absent* metadata with no error if it is not. Both the contract is
 documented on `build()` and those two readers are changed to select by
@@ -184,11 +184,19 @@ its own relativity and exposure weight, and a rater looking it up gets the right
 factor.
 
 The marker goes on the **Summary sheet only**, via the existing `SummaryTermRow`
-kind machinery. Note what this does and does not buy: the Summary sheet carries
-one row per *term*, so the marker there records that a term contains free levels
-— it does not identify *which* levels they are. Per-level provenance in Excel
-would require the rating-sheet column, which is rejected below. The per-level
-`fit` marker lives in the printed and HTML summary only.
+kind machinery, and it goes on at **both** granularities. The Summary sheet does
+not carry one row per term: `export/summary.py:301` iterates `summary._coef_rows`
+and emits a `SummaryTermRow` per *coefficient* row, so every OC level already has
+its own row there — `_canonical_level_row_names` (`228-242`) reads
+`spec._ordered_levels` and therefore picks specials up unchanged, and
+`tests/test_rating_table_export.py:1325-1348` pins one level row per level.
+
+So the term's whole-smooth row is marked `smooth+free`, **and** each special's
+level row is marked `free level` instead of `level`. Per-level provenance costs
+one `kind` string at `export/summary.py:306-310`: no new column, no new sheet,
+and nothing the rating sheet's fixed 3-column blocks ever see. The decision to
+keep the rating sheet unmarked is unchanged and rests on its own reasons below,
+not on any limit of the Summary sheet.
 
 The rating sheet is explicitly **not** given a marker column:
 `excel.py:176` hard-codes `start_col = 1 + idx * 3` with number formats keyed on

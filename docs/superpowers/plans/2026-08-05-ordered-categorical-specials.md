@@ -92,7 +92,7 @@ every existing OrderedCategorical matplotlib figure.
   `grouped_level_exposure(display, X, sample_weight)` (`group_display.py:95-122`).
 - Produces:
   - `superglm.plotting.common._ordered_level_spacing(x: NDArray) -> float`
-  - `_plot_ordered_spline_panel(ax, ti, interval, *, X=None, sample_weight=None, weight_label="Weight", display=None)` — signature unchanged, now draws `ti.smooth_curve` and positions everything at `ti.smooth_curve.level_x`. Task 7 (specials rendering) extends this function and depends on `x_pos` and `spacing` being derived from `level_x`.
+  - `_plot_ordered_spline_panel(ax, ti, interval, *, X=None, sample_weight=None, weight_label="Weight", display=None)` — signature unchanged, now draws `ti.smooth_curve` and positions everything at `ti.smooth_curve.level_x`. Task 8 (specials rendering) replaces this function's body and depends on `x_pos` being derived from `level_x`.
   - `superglm.plotting.group_display._collapsed_smooth_curve(ti: TermInference, groups: list[list[int]]) -> SmoothCurve | None` — **signature change** from `(ti, log_rel, n_levels)`.
   - `_ordered_bar_width(x)` in `main_effects_plotly.py` delegates to `_ordered_level_spacing`.
   - `resolve_grouped_level_display` is **not** changed: `"collapsed"` stays the auto default for OC, and is now safe because the collapsed projection no longer rebuilds the curve.
@@ -547,12 +547,12 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ### Task 2: `specials=` constructor, normalisation and validation
 
 **Files:**
-- Modify: `src/superglm/features/ordered_categorical.py:131-296` (constructor), `:343-362` (`_choose_base`)
+- Modify: `src/superglm/features/ordered_categorical.py:26-47` (module helpers), `:131-296` (constructor), `:343-362` (`_choose_base`)
 - Test: `tests/test_ordered_categorical_specials.py` (create)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `OrderedCategorical(specials=[...])`; `self._specials: list[str]`, `self._smooth_levels: list[str]`, `self._ordered_levels: list[str]` (smooth then specials), `self._level_to_value` over smooth levels only, `self._n_levels == len(self._smooth_levels)`, `self.has_specials -> bool`. `_choose_base` never selects a special.
+- Produces: `OrderedCategorical(specials=[...])`; `self._specials: list[str]`, `self._smooth_levels: list[str]`, `self._ordered_levels: list[str]` (smooth then specials), `self._level_to_value` over smooth levels only, `self._n_levels == len(self._smooth_levels)`, `self.has_specials -> bool`; module helpers `_require_two_smooth_levels(smooth_levels, special_set)` and `_require_no_grouped_specials(grouping, special_set)`. `_choose_base` never selects a special.
 
 - [ ] **Step 1: Write the failing test for the basic split**
 
@@ -730,24 +730,91 @@ def test_specials_with_step_basis_is_rejected():
 def test_explicit_special_base_is_rejected():
     with pytest.raises(ValueError, match="reporting base"):
         _oc(base=SPECIAL)
+
+
+def test_grouping_that_merges_a_special_is_rejected():
+    # The spec's validation table forbids mixing a special with ordered levels
+    # in one group, but only the editor's collapse path enforces it. Built
+    # directly, the special is silently smoothed inside group "6+MISSING"
+    # while `_specials` still lists it as free — an inconsistent spec state
+    # with no error anywhere.
+    from superglm.features.grouping import collapse_levels
+
+    grouping = collapse_levels(
+        np.array(ORDERED + [SPECIAL], dtype=object),
+        groups={"6+MISSING": ["6", SPECIAL]},
+        order=ORDERED + [SPECIAL],
+    )
+    with pytest.raises(ValueError, match="free level"):
+        _oc(grouping=grouping)
+
+
+def test_grouping_that_collapses_every_ordered_level_is_rejected():
+    # The at-least-two-smooth-levels check runs on the pre-grouping level list,
+    # so a grouping that leaves one smooth level reaches the spline build with
+    # a single distinct position.
+    from superglm.features.grouping import collapse_levels
+
+    grouping = collapse_levels(
+        np.array(ORDERED + [SPECIAL], dtype=object),
+        groups={"all": list(ORDERED)},
+        order=ORDERED + [SPECIAL],
+    )
+    with pytest.raises(ValueError, match="at least two"):
+        _oc(grouping=grouping)
 ```
 
 - [ ] **Step 6: Run them to verify they fail**
 
-Run: `uv run pytest tests/test_ordered_categorical_specials.py -v -k "popped or duplicate or fewer or step_basis or special_base"`
-Expected: FAIL — `test_duplicate_special_is_rejected`, `test_fewer_than_two_smooth_levels_is_rejected`, `test_specials_with_step_basis_is_rejected` and `test_explicit_special_base_is_rejected` all fail with `Failed: DID NOT RAISE`. (The two `popped` tests pass already from Step 3 — keep them, they pin the normalisation.)
+Run: `uv run pytest tests/test_ordered_categorical_specials.py -v -k "popped or duplicate or fewer or step_basis or special_base or grouping_that"`
+Expected: FAIL — `test_duplicate_special_is_rejected`, `test_fewer_than_two_smooth_levels_is_rejected`, `test_specials_with_step_basis_is_rejected`, `test_explicit_special_base_is_rejected`, `test_grouping_that_merges_a_special_is_rejected` and `test_grouping_that_collapses_every_ordered_level_is_rejected` all fail with `Failed: DID NOT RAISE`. (The two `popped` tests pass already from Step 3 — keep them, they pin the normalisation.)
 
 - [ ] **Step 7: Add the remaining validation**
 
-After the `special_set` normalisation added in Step 3, add the smooth-level-count check. Place it after the level derivation, immediately before `self._grouping = grouping` (line 246):
+Add two module-level helpers after `_spline_kind_name` (which ends at line 47), so the
+pre-grouping and post-grouping paths raise the same message rather than two drifting copies:
 
 ```python
-        if special_set and len(self._smooth_levels) < 2:
+def _require_two_smooth_levels(smooth_levels: list[str], special_set: set[str]) -> None:
+    """Both level-derivation paths must leave at least two levels to smooth."""
+    if special_set and len(smooth_levels) < 2:
+        raise ValueError(
+            "OrderedCategorical needs at least two non-special levels to fit a "
+            f"smooth; got {smooth_levels!r} after removing {sorted(special_set)!r}. "
+            "Use Categorical(...) for independent level effects."
+        )
+
+
+def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
+    """Refuse a grouping that merges a special into any other level.
+
+    Merging a special into an ordered group would smooth it after all, while
+    ``_specials`` still reports it free — an inconsistent spec with no error.
+    Merging two specials is refused for the same reason the editor refuses it
+    (``_require_no_special_members``): the group label would have to replace
+    both members in ``specials=``.
+    """
+    if not special_set or grouping is None:
+        return
+    for label, originals in grouping.group_to_originals.items():
+        members = [str(member) for member in originals]
+        if len(members) < 2:
+            continue
+        merged = [member for member in members if member in special_set]
+        if merged:
+            joined = ", ".join(repr(member) for member in merged)
             raise ValueError(
-                "OrderedCategorical needs at least two non-special levels to fit a "
-                f"smooth; got {self._smooth_levels!r} after removing {sorted(special_set)!r}. "
-                "Use Categorical(...) for independent level effects."
+                f"OrderedCategorical grouping merges free level(s) {joined} into group "
+                f"{label!r}. Specials are fitted outside the smooth and may not be "
+                "grouped; group the ordered levels only."
             )
+```
+
+After the `special_set` normalisation added in Step 3, add the smooth-level-count check. Place it
+after the level derivation, immediately before `self._grouping = grouping` (line 246):
+
+```python
+        _require_two_smooth_levels(self._smooth_levels, special_set)
 ```
 
 In the step-mode guard block, extend the existing `select` check at lines 223-224:
@@ -762,9 +829,15 @@ In the step-mode guard block, extend the existing `select` check at lines 223-22
             )
 ```
 
-Add the base check immediately after `self._ordered_levels` / `self._n_levels` are set:
+Add the base check and the two grouping-aware checks immediately after `self._ordered_levels` /
+`self._n_levels` are set (the grouping branch has just recomputed `_smooth_levels`, so the
+level-count check has to run again here — the pre-grouping copy sees the ungrouped list and a
+grouping that collapses every ordered level into one would otherwise reach the spline build with
+a single distinct position):
 
 ```python
+        _require_no_grouped_specials(grouping, special_set)
+        _require_two_smooth_levels(self._smooth_levels, special_set)
         if base in special_set:
             raise ValueError(
                 f"OrderedCategorical reporting base {base!r} is a special level. The base "
@@ -776,7 +849,7 @@ Add the base check immediately after `self._ordered_levels` / `self._n_levels` a
 - [ ] **Step 8: Run the tests**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials.py -v`
-Expected: PASS (all eight)
+Expected: PASS (all ten)
 
 - [ ] **Step 9: Write the failing test for base selection**
 
@@ -855,11 +928,13 @@ most exposed level on a real book."
 
 **Files:**
 - Modify: `src/superglm/features/ordered_categorical.py:366-392` (`build`, `_build_spline`)
+- Modify: `src/superglm/types.py:180` (`GroupInfo.basis_rows`)
+- Modify: `src/superglm/dm_builder.py:89-136` (both SSP helpers), `:139` (new `_basis_weight_sum`), `:605`, `:645` (call sites)
 - Test: `tests/test_ordered_categorical_specials.py`
 
 **Interfaces:**
 - Consumes: `self._specials`, `self._smooth_levels`, `self._level_to_value`, `self.has_specials` (Task 2).
-- Produces: `build()` returns `[spline_info, special_info]` when `has_specials`, in that order; `special_info.subgroup_name == "special"`, `penalized=False`, `penalty_matrix=None`, `projection=None`, `reparametrize=False`; a declared-but-unobserved special raises `ValueError` at fit time.
+- Produces: `build()` returns `[spline_info, special_info]` when `has_specials`, in that order; `special_info.subgroup_name == "special"`, `penalized=False`, `penalty_matrix=None`, `projection=None`, `reparametrize=False`; a declared-but-unobserved special raises `ValueError` at fit time; `GroupInfo.basis_rows: NDArray[np.bool_] | None` set on the spline block, and `compute_R_inv`/`compute_projected_R_inv` accepting `weight_sum=`.
 
 - [ ] **Step 1: Write the failing test for the two-block shape**
 
@@ -1013,29 +1088,238 @@ def test_assembled_design_with_intercept_is_full_rank():
 Run: `uv run pytest tests/test_ordered_categorical_specials.py::test_assembled_design_with_intercept_is_full_rank -v`
 Expected: PASS — no code change needed; this pins the construction's central claim so a later change to the identifiability path cannot silently break it.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Write the failing SSP conditioning test for a high-exposure special**
+
+Spec §Risks: `compute_projected_R_inv` (`src/superglm/dm_builder.py:114-136`) normalises the Gram
+by `float(np.sum(sample_weight))` over all `n` rows, while a zero-filled spline block is nonzero
+on the ordered rows alone. The Gram therefore comes out scaled by
+`ordered_exposure / total_exposure`, and the fixed `1e-8·I` ridge grows relative to it exactly
+when a special carries material exposure. The SSP contract (`compute_R_inv`'s docstring) is
+`X'WX / weight_sum ≈ I` regardless of λ, so a weight-share mis-normalisation is directly
+assertable.
+
+Append to `tests/test_ordered_categorical_specials.py`:
+
+```python
+def test_ssp_gram_is_normalised_by_the_ordered_row_weight_sum():
+    # False today: GroupInfo has no basis_rows field, and the SSP Gram for the
+    # spline block is divided by the ALL-ROW weight sum while only the ordered
+    # rows contribute. With a special carrying ~90% of the exposure the
+    # normalised Gram comes out ~6x the identity instead of ~I, which is the
+    # fixed 1e-8 ridge becoming relatively large on the same term.
+    from superglm.dm_builder import _process_info
+
+    frame = _fit_frame(n=6000, seed=17)
+    band = frame["band"].to_numpy()
+    is_special = band == SPECIAL
+    weight = np.where(is_special, 50.0, 1.0)  # the special dominates exposure
+
+    spec = _oc()
+    spline_info, _ = spec.build(band, weight)
+    assert spline_info.basis_rows is not None
+    np.testing.assert_array_equal(spline_info.basis_rows, ~is_special)
+
+    gm, _, _ = _process_info(spline_info, sample_weight=weight, lambda2=0.0)
+    X = np.asarray(gm.toarray(), dtype=np.float64)
+    assert np.allclose(X[is_special], 0.0)
+
+    w_ordered = weight[~is_special]
+    X_ordered = X[~is_special]
+    gram = X_ordered.T @ (w_ordered[:, None] * X_ordered) / w_ordered.sum()
+    # atol is loose against the 1e-8 ridge's imprint (it lifts the identity by
+    # 1e-8 / smallest Gram eigenvalue) and tight against the defect, which is a
+    # pure scale error of total/ordered ~ 6x on every diagonal entry.
+    np.testing.assert_allclose(gram, np.eye(gram.shape[0]), atol=1e-3)
+    assert 0.99 < float(np.mean(np.diag(gram))) < 1.01
+```
+
+- [ ] **Step 8: Run it to verify it fails**
+
+Run: `uv run pytest tests/test_ordered_categorical_specials.py::test_ssp_gram_is_normalised_by_the_ordered_row_weight_sum -v`
+Expected: FAIL — `AttributeError: 'GroupInfo' object has no attribute 'basis_rows'`. Deleting that
+assertion locally and re-running shows the substantive failure: `gram` is roughly
+`(total_weight / ordered_weight) · I ≈ 6·I` (the special is 1 row in 11 at 50x weight), not the
+identity.
+
+- [ ] **Step 9: Normalise the SSP Gram by the rows the basis was built on**
+
+Add the field to `GroupInfo` in `src/superglm/types.py`, immediately after
+`repeated_penalty_components` (line 180) and before `__post_init__`:
+
+```python
+    # Rows the basis was actually built on.  A block built on a subset of rows
+    # and row-expanded with zeros (the OrderedCategorical spline beside free
+    # levels) sets this so the SSP normalisation uses the weight sum over those
+    # rows rather than over every row.  None means "every row contributes".
+    basis_rows: NDArray[np.bool_] | None = None
+```
+
+In `_expand_rows` (added in Step 3), record it:
+
+```python
+        return dataclasses.replace(
+            info, columns=expanded.tocsr(), basis_rows=np.asarray(ordered_mask, dtype=bool)
+        )
+```
+
+In `src/superglm/dm_builder.py`, give both SSP helpers an optional override. `compute_R_inv`
+(lines 89-111):
+
+```python
+def compute_R_inv(
+    B: sp.spmatrix | NDArray,
+    omega: NDArray,
+    sample_weight: NDArray,
+    lambda2: float | dict,
+    weight_sum: float | None = None,
+) -> NDArray:
+    """Compute SSP reparametrisation matrix R_inv without forming B @ R_inv.
+
+    Wood (2011) Section 3.1 / Section 5: absorb penalty into parameterization.
+    R = chol(B'WB/n + λΩ + εI)^T, then R_inv = R^{-1} so that the SSP basis
+    X_ssp = B @ R_inv has near-identity X'WX regardless of λ.
+
+    ``weight_sum`` overrides the normalising total. It defaults to the sum over
+    every row, which is right whenever every row carries basis mass; a block
+    built on a subset of rows and zero-filled elsewhere passes that subset's
+    weight sum, so the fixed ``1e-8`` ridge does not grow relative to the Gram.
+    """
+    lam2 = _resolve_lambda2(lambda2)
+    total = float(np.sum(sample_weight)) if weight_sum is None else float(weight_sum)
+    if total <= 0.0:
+        G = np.zeros((omega.shape[0], omega.shape[0]), dtype=np.float64)
+    elif sp.issparse(B):
+        G = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
+    else:
+        G = (B * sample_weight[:, None]).T @ B / total
+    M = G + lam2 * omega + np.eye(omega.shape[0]) * 1e-8
+    R = np.linalg.cholesky(M).T
+    return np.linalg.inv(R)
+```
+
+`compute_projected_R_inv` (lines 114-136) takes the same parameter; note its sparse branch
+currently recomputes `np.sum(sample_weight)` inline instead of reusing the local, so both
+branches must move to `total`:
+
+```python
+def compute_projected_R_inv(
+    B: sp.spmatrix | NDArray,
+    projection: NDArray,
+    penalty_sub: NDArray,
+    sample_weight: NDArray,
+    lambda2: float | dict,
+    weight_sum: float | None = None,
+) -> NDArray:
+    """Compute SSP R_inv within a projected subspace (linear-split range space).
+
+    ``weight_sum`` overrides the normalising total; see ``compute_R_inv``.
+    """
+    lam2 = _resolve_lambda2(lambda2)
+    total = float(np.sum(sample_weight)) if weight_sum is None else float(weight_sum)
+    if total <= 0.0:
+        G_full = np.zeros((projection.shape[0], projection.shape[0]), dtype=np.float64)
+    elif sp.issparse(B):
+        G_full = np.asarray((B.multiply(sample_weight[:, None]).T @ B).todense()) / total
+    else:
+        G_full = (B * sample_weight[:, None]).T @ B / total
+    G_sub = projection.T @ G_full @ projection
+    n_sub = penalty_sub.shape[0]
+    M_sub = G_sub + lam2 * penalty_sub + np.eye(n_sub) * 1e-8
+    R_sub = np.linalg.cholesky(M_sub).T
+    return np.linalg.inv(R_sub)
+```
+
+Add the resolver beside them (after `compute_projected_R_inv`, before `should_discretize` at
+line 139):
+
+```python
+def _basis_weight_sum(info: GroupInfo, weights: NDArray, use_discrete: bool) -> float | None:
+    """Weight total over the rows a block's basis was built on, else None.
+
+    Returns None under discretisation, where ``weights`` is the per-bin
+    aggregate rather than one entry per row; no restricted-row block takes
+    that path (``should_discretize`` requires a ``_SplineBase`` spec).
+    """
+    if info.basis_rows is None or use_discrete:
+        return None
+    return float(np.sum(np.asarray(weights)[np.asarray(info.basis_rows, dtype=bool)]))
+```
+
+Then pass it at the two `_process_info` call sites. Line 605:
+
+```python
+            R_inv_local = compute_projected_R_inv(
+                B_for,
+                P,
+                info.penalty_matrix,
+                exp_for,
+                lambda2,
+                weight_sum=_basis_weight_sum(info, exp_for, use_discrete),
+            )
+```
+
+and line 645:
+
+```python
+        R_inv = compute_R_inv(
+            B_for,
+            info.penalty_matrix,
+            exp_for,
+            lambda2,
+            weight_sum=_basis_weight_sum(info, exp_for, use_discrete),
+        )
+```
+
+Every existing block leaves `basis_rows` at `None`, so `_basis_weight_sum` returns `None` and both
+helpers keep their current normalisation byte-for-byte.
+
+- [ ] **Step 10: Run the conditioning test and the design-matrix suites**
+
+Run: `uv run pytest tests/test_ordered_categorical_specials.py -v && uv run pytest tests/test_ssp_audit.py tests/test_spline_weight_geometry.py tests/test_ordered_categorical.py -q`
+Expected: PASS — the new test passes and nothing else moves, because no other `GroupInfo` sets
+`basis_rows`.
+
+- [ ] **Step 11: Commit**
 
 ```bash
-git add src/superglm/features/ordered_categorical.py tests/test_ordered_categorical_specials.py
+git add src/superglm/features/ordered_categorical.py src/superglm/types.py \
+        src/superglm/dm_builder.py tests/test_ordered_categorical_specials.py
 git commit -m "feat: build the OrderedCategorical smooth on ordered rows beside a free-level block
 
 The spline is built on the ordered rows only and row-expanded with zeros,
 because build_identifiability_projection forms its constraint as a column
 sum over the rows present. Building over all rows and zeroing afterwards
-breaks 1'(B@Z)=0 and lets a fabricated coordinate reach knot placement."
+breaks 1'(B@Z)=0 and lets a fabricated coordinate reach knot placement.
+
+GroupInfo.basis_rows records which rows the basis was built on, so the SSP
+normalisation divides by the ordered-row weight sum rather than the total.
+Without it a high-exposure special shrinks the block's Gram by its exposure
+share and the fixed 1e-8 ridge grows relative to it."
 ```
 
 ---
 
 ### Task 4: `transform` widening and the in-term coefficient split
 
+This task also owns the read-back seam in `inference/_term_ops.py`. From Step 7 onward
+`reconstruct()` returns specials in `raw["levels"]`, while `_term_ops.py:226` and `:252` build
+`level_x` by looking **every** level up in `raw["level_values"]` — which is deliberately
+smooth-only. Any `term_inference` call on a specials model therefore raises
+`KeyError('MISSING')`, and behind it the curve-SE call at `:228-240` raises `IndexError` inside
+`_spline_se`. Both are fixed here, in Steps 9-13, before this task's own invariance test runs.
+The plotting task consumes `TermInference.level_is_special` but no longer introduces it.
+
 **Files:**
-- Modify: `src/superglm/features/ordered_categorical.py:448-470` (`transform`), `:472-494` (`score`), `:498-503` (`_base_log_effect`), `:512-535` (`_reconstruct_spline`), `:559-563` (`set_reparametrisation`)
+- Modify: `src/superglm/features/ordered_categorical.py:448-470` (`transform`), `:472-494` (`score`), `:498-503` (`_base_log_effect`), `:512-535` (`_reconstruct_spline`)
+- Modify: `src/superglm/inference/_term_types.py:49` (`level_x` comment), `:96-97` (`level_is_special`)
+- Modify: `src/superglm/inference/_term_ops.py:202-206`, `:225-226`, `:228-240`, `:251-252`, `:262-279`
+- Verified no change needed: `src/superglm/features/ordered_categorical.py:559-563` (`set_reparametrisation`) — `dm_builder.py:1032-1033`/`:1055` collects `r_inv` from reparametrized groups only, and the special block is not one, so the spline's `R_inv` arrives unchanged.
+- Create: `tests/test_ordered_categorical_specials_plots.py`
 - Test: `tests/test_ordered_categorical_specials.py`
 
 **Interfaces:**
 - Consumes: `self._specials`, `self._smooth_levels`, `self.has_specials`, `self._special_mask` (Tasks 2-3).
-- Produces: `self._split_beta(beta) -> (spline_beta, special_beta)`; `transform(x)` returns `[spline columns | special indicators]`; `score`, `_base_log_effect` and `reconstruct` handle the full-width vector; `reconstruct()` output gains `special_levels: list[str]` and its `levels`/`level_log_relativities`/`level_relativities` cover specials.
+- Produces: `self._split_beta(beta) -> (spline_beta, special_beta)`; `transform(x)` returns `[spline columns | special indicators]`; `score`, `_base_log_effect` and `reconstruct` handle the full-width vector; `reconstruct()` output gains `special_levels: list[str]` and its `levels`/`level_log_relativities`/`level_relativities` cover specials; `TermInference.level_is_special: NDArray[np.bool_] | None`; `SmoothCurve.level_x` guaranteed smooth-levels-only.
 
 - [ ] **Step 1: Write the failing test for the split and transform width**
 
@@ -1253,7 +1537,251 @@ Note `level_values` stays keyed on the smooth levels only — a special never re
 Run: `uv run pytest tests/test_ordered_categorical_specials.py -v`
 Expected: PASS (all)
 
-- [ ] **Step 9: Write the failing end-to-end invariance test**
+- [ ] **Step 9: Write the failing inference-plumbing test**
+
+Create `tests/test_ordered_categorical_specials_plots.py` — the plotting task appends to this
+file, but the two tests that pin the read-back seam belong here, because Step 7 is what breaks it.
+
+```python
+"""Plot rendering of OrderedCategorical special (free) levels, both backends."""
+
+import importlib.util
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from superglm import Numeric, OrderedCategorical, Spline, SuperGLM
+
+PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
+
+BANDS = [str(i) for i in range(1, 11)]
+
+
+@pytest.fixture
+def specials_model():
+    """Ten ordered bands on a saturating curve plus an 18% free MISSING level."""
+    rng = np.random.default_rng(20260805)
+    n = 4000
+    band = rng.choice([*BANDS, "MISSING"], n, p=[0.082] * 10 + [0.18])
+    idx = np.array([BANDS.index(b) if b in BANDS else -1 for b in band], dtype=np.float64)
+    log_effect = np.where(
+        idx >= 0, 0.6 * np.sqrt(np.maximum(idx, 0.0) / 9.0), np.log(0.577)
+    )
+    x = rng.normal(size=n)
+    sample_weight = rng.uniform(0.5, 1.0, n)
+    mu = np.exp(-2.0 + log_effect + 0.1 * x)
+    y = rng.poisson(mu * sample_weight).astype(float)
+    frame = pd.DataFrame({"band": band, "x": x})
+    model = SuperGLM(
+        features={
+            "band": OrderedCategorical(
+                order=BANDS, specials=["MISSING"], basis=Spline(kind="ps", k=6)
+            ),
+            "x": Numeric(),
+        }
+    )
+    model.fit(frame, y, sample_weight=sample_weight)
+    return model, frame, sample_weight
+
+
+def test_term_inference_marks_specials_and_keeps_level_x_smooth_only(specials_model):
+    # False today: TermInference has no level_is_special at all, and _term_ops.py:226
+    # builds level_x by looking every level up in raw["level_values"], which has no
+    # entry for MISSING — so today this raises KeyError before any figure exists.
+    model, _, _ = specials_model
+    ti = model.term_inference("band")
+
+    assert list(ti.levels) == [*BANDS, "MISSING"]
+    assert ti.level_is_special is not None
+    np.testing.assert_array_equal(ti.level_is_special, [False] * 10 + [True])
+    assert len(ti.relativity) == 11
+    assert len(ti.smooth_curve.level_x) == 10
+    # with_se defaults to True (api.py:1017) and both plot backends need the band:
+    # the curve SE must exist and be finite, not silently vanish or crash.
+    assert ti.smooth_curve.se_log_relativity is not None
+    assert np.all(np.isfinite(ti.smooth_curve.se_log_relativity))
+    assert len(ti.smooth_curve.se_log_relativity) == len(ti.smooth_curve.x)
+
+
+def test_term_inference_level_is_special_is_none_without_specials():
+    # False today: the attribute does not exist, so this is an AttributeError.
+    rng = np.random.default_rng(7)
+    n = 1500
+    band = rng.choice(BANDS, n)
+    idx = np.array([BANDS.index(b) for b in band], dtype=np.float64)
+    sample_weight = rng.uniform(0.5, 1.0, n)
+    y = rng.poisson(np.exp(-2.0 + 0.4 * idx / 9.0) * sample_weight).astype(float)
+    frame = pd.DataFrame({"band": band})
+    model = SuperGLM(
+        features={"band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", k=5))}
+    )
+    model.fit(frame, y, sample_weight=sample_weight)
+
+    ti = model.term_inference("band")
+    assert ti.level_is_special is None
+    assert len(ti.smooth_curve.level_x) == 10
+```
+
+- [ ] **Step 10: Run the test to verify it fails**
+
+Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -v`
+Expected: FAIL — `KeyError: 'MISSING'` raised from `superglm/inference/_term_ops.py:226`
+(`level_x = np.array([raw["level_values"][lv] for lv in levels])`) for the first test, and
+`AttributeError: 'TermInference' object has no attribute 'level_is_special'` for the second.
+The `KeyError` hides a second crash one line later: with both blocks' groups passed to
+`_spline_se`, `active_cols` spans `p + s` indices against a `p`-column `M` and raises
+`IndexError` at `_term_helpers.py:127`. Step 12 fixes both.
+
+- [ ] **Step 11: Add the `level_is_special` field to `TermInference`**
+
+In `src/superglm/inference/_term_types.py:96-97`, replace:
+
+```python
+    # Smooth curve for plotting (OrderedCategorical spline mode)
+    smooth_curve: SmoothCurve | None = None
+```
+
+with:
+
+```python
+    # Smooth curve for plotting (OrderedCategorical spline mode)
+    smooth_curve: SmoothCurve | None = None
+
+    # Free (unpenalised) levels held out of the smooth: parallel to ``levels``.
+    # None when the term has no specials, so existing terms are unchanged.
+    level_is_special: NDArray[np.bool_] | None = None
+```
+
+Also extend the `SmoothCurve.level_x` comment at `_term_types.py:49`:
+
+```python
+    level_x: NDArray | None = None  # numeric x positions of the K *smooth* levels
+```
+
+- [ ] **Step 12: Populate the mask, keep `level_x` smooth-only, and scope the curve SE**
+
+In `src/superglm/inference/_term_ops.py:202-206`, replace:
+
+```python
+            inner = spec._spline
+            raw = spec.reconstruct(beta_combined)
+            levels = raw["levels"]
+            level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
+            level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
+```
+
+with:
+
+```python
+            inner = spec._spline
+            raw = spec.reconstruct(beta_combined)
+            levels = raw["levels"]
+            level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
+            level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
+
+            # Specials are free levels with no position on the spline axis: they
+            # stay out of level_x and are flagged for the renderers instead.
+            special_labels = set(spec._specials) if spec.has_specials else set()
+            level_is_special = (
+                np.array([lv in special_labels for lv in levels], dtype=bool)
+                if special_labels
+                else None
+            )
+            smooth_levels = [lv for lv in levels if lv not in special_labels]
+```
+
+Then at `_term_ops.py:225-226`, replace:
+
+```python
+                # Continuous curve for plotting
+                level_x = np.array([raw["level_values"][lv] for lv in levels])
+```
+
+with:
+
+```python
+                # Continuous curve for plotting (ordered levels only)
+                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
+```
+
+Next, the curve-SE call at `_term_ops.py:227-240`. `_spline_se` (`_term_helpers.py:88-135`)
+computes `active_cols` as `arange(g.start, g.end) - feature_groups[0].start` over the feature's
+groups and slices `M = inner.transform(raw["x"])`, which has the spline block's `p` columns only.
+Passing the special block leaves `active_cols` running to `p + s` and `M[:, active_cols]` raises
+`IndexError`; the covariance block `Cov_g` comes out `(p+s, p+s)` against a `p`-column `M` as
+well. Both are fixed by handing `_spline_se` the smooth blocks alone — `covariance.py:524-536`
+copies `subgroup_type` onto the re-indexed active groups, so the same filter works on either
+list. Replace:
+
+```python
+                assert active_groups_cov is not None
+                curve_se = _spline_se(
+                    inner,
+                    name,
+                    result.beta,
+                    feature_groups,
+                    active_groups_cov,
+                    Cov_active,
+```
+
+with:
+
+```python
+                assert active_groups_cov is not None
+                # The curve is a statement about the spline block alone; its SE
+                # must be too.  feature_se_from_cov's level SEs are unaffected —
+                # that path transforms through the OC spec at full p+s width.
+                smooth_feature_groups = [
+                    fg for fg in feature_groups if fg.subgroup_type != "special"
+                ]
+                smooth_active_cov = [
+                    ag
+                    for ag in active_groups_cov
+                    if not (ag.feature_name == name and ag.subgroup_type == "special")
+                ]
+                curve_se = _spline_se(
+                    inner,
+                    name,
+                    result.beta,
+                    smooth_feature_groups,
+                    smooth_active_cov,
+                    Cov_active,
+```
+
+(the `x_eval` / `reference_x` keywords that close the call are unchanged.)
+
+At `_term_ops.py:251-252`, replace:
+
+```python
+                # No SEs requested but still provide the curve shape
+                level_x = np.array([raw["level_values"][lv] for lv in levels])
+```
+
+with:
+
+```python
+                # No SEs requested but still provide the curve shape
+                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
+```
+
+Finally, in the `TermInference(...)` call at `_term_ops.py:262-279`, add the field after
+`smooth_curve=curve,`:
+
+```python
+                smooth_curve=curve,
+                level_is_special=level_is_special,
+                spline=spline_meta,
+```
+
+- [ ] **Step 13: Run the inference-plumbing tests**
+
+Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -v`
+Expected: PASS (both tests). A remaining `IndexError` inside `_spline_se` means one of the two
+filters in Step 12 was dropped; a `ValueError` about `level_x` width means the smooth-only
+`level_x` edits were applied to only one of the two branches.
+
+- [ ] **Step 14: Write the failing end-to-end invariance test**
 
 This is the spike's finding turned into a regression test — the central claim of the feature.
 
@@ -1291,77 +1819,64 @@ def test_adding_a_special_does_not_move_the_fitted_curve():
         assert rel_b[lev] == pytest.approx(rel_a[lev], rel=2e-2)
 ```
 
-- [ ] **Step 10: Run it**
+- [ ] **Step 15: Run it**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials.py::test_adding_a_special_does_not_move_the_fitted_curve -v`
 Expected: PASS. If it fails, the spline is not being built on the ordered rows alone — go back to Task 3 Step 3 rather than loosening the tolerance.
 
-- [ ] **Step 11: Run the full suite**
+- [ ] **Step 16: Run the full suite**
 
 Run: `uv run pytest tests/ -q -m "not slow"` then `uv run ruff check src/ tests/` and `uv run ruff format --check src/ tests/`
 Expected: PASS
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 17: Commit**
 
 ```bash
-git add src/superglm/features/ordered_categorical.py tests/test_ordered_categorical_specials.py
+git add src/superglm/features/ordered_categorical.py \
+        src/superglm/inference/_term_types.py src/superglm/inference/_term_ops.py \
+        tests/test_ordered_categorical_specials.py \
+        tests/test_ordered_categorical_specials_plots.py
 git commit -m "feat: split OrderedCategorical coefficients inside the term
 
 Roughly fifteen call sites concatenate a feature's GroupSlices and hand the
 full-width vector to reconstruct/score/_base_log_effect, and model/base.py
 enforces that width. So the split lives here rather than at the call sites,
-and transform widens to match the documented block order."
+and transform widens to match the documented block order.
+
+term_inference lands in the same commit because reconstruct() returning
+specials breaks it: level_x is built from the smooth-only level_values map,
+and the curve SE re-indexes the feature's groups against the inner spline's
+columns. SmoothCurve.level_x now covers the ordered levels only, and
+TermInference carries a mask parallel to .levels."
 ```
 
 ---
 
-### Task 5: block-order contract and the positional metadata readers
+### Task 5: block-order contract on `build()`
+
+The two positional metadata readers the spec names (§Block order is a contract) are **not**
+converted here. `coef_tables.py:412-415` and `report_ops.py:405` are converted exactly once, in
+Task 6 Steps 6 and 11, as part of the same restructure that filters the smooth row to the spline
+block — converting them twice would leave Task 6's quoted anchors unmatchable. Note the spec's
+`report_ops.py:~563` citation is wrong for the tree at `7109e7f`: line ~563 is `knot_summary`, a
+`_SplineBase`-only builder. The ordered-categorical positional read is `report_ops.py:405`.
+
+What is left here is the half that has no other home: the contract itself, written where an
+implementer will read it.
 
 **Files:**
-- Modify: `src/superglm/inference/coef_tables.py:413`, `src/superglm/model/report_ops.py` (the `feature_groups[0]` read, around 563)
-- Test: `tests/test_ordered_categorical_specials.py`
+- Modify: `src/superglm/features/ordered_categorical.py:371` (`build` docstring)
 
 **Interfaces:**
 - Consumes: `build()` block order and `subgroup_name == "special"` (Task 3).
-- Produces: λ and knot metadata selected by `subgroup_type` rather than by position.
+- Produces: the documented block-order contract on `build()`. λ and knot metadata selection by `subgroup_type` is Task 6's.
 
 - [ ] **Step 1: Locate the positional reads**
 
 Run: `rg -n "feature_groups\[0\]" src/superglm/`
-Expected: two hits — `inference/coef_tables.py` and `model/report_ops.py`. Read fifteen lines around each to see which metadata is taken from the group (λ, knot count) and what the code does when it is absent.
+Expected: two hits — `inference/coef_tables.py:413` and `model/report_ops.py:405`. Read fifteen lines around each to see which metadata is taken from the group (λ, knot count) and that it is reported as *absent* with no error when the group has none. That silence is why the contract is documented and why Task 6 converts both sites rather than one.
 
-- [ ] **Step 2: Write the failing test**
-
-```python
-# Both readers take feature_groups[0] as "the spline group". They report absent
-# metadata with no error, so a reversed block order degrades silently rather
-# than failing — this test is the only thing that would catch it.
-def test_smooth_metadata_is_selected_by_subgroup_not_position():
-    frame = _fit_frame(n=6000, seed=5)
-    model = SuperGLM(family="poisson", link="log", features={"band": _oc()})
-    model.fit_reml(
-        frame[["band"]], frame["freq"].to_numpy(), sample_weight=frame["exposure"].to_numpy()
-    )
-    row = next(
-        r for r in model.summary().tables["coefficients"]
-        if getattr(r, "subgroup_type", None) == "ordered_spline"
-    )
-    assert row.lambda_ is not None
-    assert row.edf is not None and row.edf > 0
-```
-
-Adjust the accessor names in the assertion to match what `model.summary()` actually exposes — read `src/superglm/inference/summary.py` for the row type before writing the final form.
-
-- [ ] **Step 3: Run it**
-
-Run: `uv run pytest tests/test_ordered_categorical_specials.py::test_smooth_metadata_is_selected_by_subgroup_not_position -v`
-Expected: PASS with the current block order (spline first). It is a guard, not a red test — it fails only if a later change reverses the order.
-
-- [ ] **Step 4: Make both readers select by subgroup**
-
-At each of the two sites, replace the positional read with a search for the group whose `subgroup_type` is `None` (the spline block), falling back to the first group when a feature has only one. Keep the existing behaviour byte-for-byte for features without specials.
-
-- [ ] **Step 5: Document the contract on `build()`**
+- [ ] **Step 2: Document the contract on `build()`**
 
 Add to the `build` docstring in `src/superglm/features/ordered_categorical.py:371`:
 
@@ -1373,17 +1888,17 @@ Add to the `build` docstring in `src/superglm/features/ordered_categorical.py:37
         both assume it.
 ```
 
-- [ ] **Step 6: Run the suite and commit**
+- [ ] **Step 3: Run the suite and commit**
 
 ```bash
 uv run pytest tests/ -q -m "not slow"
-git add src/superglm/inference/coef_tables.py src/superglm/model/report_ops.py \
-        src/superglm/features/ordered_categorical.py tests/test_ordered_categorical_specials.py
-git commit -m "refactor: select ordered-smooth metadata by subgroup rather than position
+git add src/superglm/features/ordered_categorical.py
+git commit -m "docs: document the OrderedCategorical block-order contract on build()
 
-Both readers took feature_groups[0] as the spline group and reported absent
-metadata without erroring, so a reversed block order would have degraded
-silently."
+The spline block comes first and the special-indicator block second.
+_split_beta and transform both assume it, and the metadata readers that
+take feature_groups[0] report absent metadata without erroring, so a
+reversed order would degrade silently."
 ```
 
 ---
@@ -1394,6 +1909,8 @@ silently."
 `coef_tables.py:340` selects an OC feature's groups with `[fg for fg in groups if fg.feature_name == g.feature_name]` and no subgroup filter. Once `build()` emits a second `GroupSlice` (`band:special`) under the same `feature_name`, lines 386-397 concatenate both blocks into `active_indices`, so `X_j`, `V_b_j`, `beta_active` and `edf1_j` all carry the special column: the reported p-value silently becomes a joint test of "curve is flat **and** every special offset is zero". `feature_edf` (343-347), `ref_df` (374) and `n_params` (421) inflate by the free level's ~1.0 edf / 1 column. `report_ops.py:397-419` is the editor's stale-summary twin of the same code and inflates `edf`, `n_params` and `group_norm` identically.
 
 The `_SplineBase` branch at `coef_tables.py:492-533` already shows the shape the codebase uses for this: it selects on `g.subgroup_type` (line 493) and takes its Wood inputs from a single `ag.sl` (523-524). Per the design spec (§Reporting → Summary) the OC term keeps **one** group row restricted to the spline block, and **no** sibling row is emitted for the specials block.
+
+This task is also the **sole** conversion of the two positional `feature_groups[0]` metadata readers the spec names (§Block order is a contract): `coef_tables.py:412-415` in Step 6 and `report_ops.py:405` in Step 11. Task 5 documents the contract and changes no reader, so both anchors below still match the tree as fitted.
 
 **Files:**
 - Modify: `src/superglm/inference/coef_tables.py:340-347`
@@ -1752,7 +2269,11 @@ Nothing in `coef_tables.py`, `summary.py` or `summary_levels.py` consumes `TermI
 
 The level label column stays the raw lookup key — no asterisk, no decoration. The `fit` column is present only on terms that have specials, so no existing OC output changes width.
 
-**Excel scope note:** the marker on the Excel Summary sheet goes on the term's group row via the existing `SummaryTermRow.kind` machinery, so it records **that** a term contains free levels, not **which** ones. Do not attempt per-level provenance there. The Excel **rating** sheet must not change: `excel.py:176` hard-codes `start_col = 1 + idx * 3` with number formats keyed on `cell.column % 3` (`excel.py:186,188`), and `tests/test_rating_table_export.py:1309-1319` pins block 2 to columns 4-6.
+**Excel scope note:** the Summary sheet gets provenance at **both** levels of granularity. The term's group row is marked through the existing `SummaryTermRow.kind` machinery (`"smooth+free"`), and each special's *level* row is marked `"free level"` instead of `"level"`.
+
+Per-level provenance costs nothing here, contrary to the design doc's original justification: `export/summary.py:301` iterates `summary._coef_rows`, so every OC level row is *already* emitted as its own `SummaryTermRow` (`_canonical_level_row_names`, `export/summary.py:228-242`, reads `spec._ordered_levels` and therefore picks specials up unchanged), and `tests/test_rating_table_export.py:1325-1348` already pins one Summary row per level. No new column, no new sheet, no rating-sheet change — only the `kind` string chosen at `export/summary.py:306-310`. The spec's §Export section is corrected to match.
+
+The Excel **rating** sheet still must not change — that decision stands: `excel.py:176` hard-codes `start_col = 1 + idx * 3` with number formats keyed on `cell.column % 3` (`excel.py:186,188`), and `tests/test_rating_table_export.py:1309-1319` pins block 2 to columns 4-6. A fourth column would overwrite the next block's name column and desync formatting for every later block.
 
 **Files:**
 - Create: `tests/test_ordered_categorical_specials_summary.py`
@@ -1761,13 +2282,14 @@ The level label column stays the raw lookup key — no asterisk, no decoration. 
 - Modify: `src/superglm/model/report_ops.py:423-430` (same, editor-stale row builder)
 - Modify: `src/superglm/inference/summary.py:285-286,341-357,411-415,455-459,552,557` (ASCII `Fit` column)
 - Modify: `src/superglm/inference/summary.py:737-756,840-849,881-888,943-973,1018-1084` (HTML `Fit` column)
-- Modify: `src/superglm/export/summary.py:266-274,359-364` (Summary-sheet term marker)
+- Modify: `src/superglm/export/summary.py:266-274` (Summary-sheet term marker), `:290-310` (per-level `kind`), `:359-364` (Wood note guard)
+- Modify: `docs/guide/features.md:137-166` (OrderedCategorical section)
 - Test: `tests/test_ordered_categorical_specials_summary.py`
 - Test: `tests/test_rating_table_export.py`
 
 **Interfaces:**
-- Consumes: `OrderedCategorical(order=..., specials=[...], base=..., basis=Spline(...))`; `spec._specials: list[str]`; `spec._ordered_levels: list[str]`; `spec.has_specials -> bool`; `spec.reconstruct(beta)` with `raw["levels"] == spec._ordered_levels`; `feature_se_from_cov(...)` returning `len(spec._ordered_levels)` entries (`_term_covariance.py:96-105` passes `x_eval=np.array(spec._ordered_levels, dtype=object)`).
-- Produces: `_CoefRow.level_fit: str | None = None` with values `"smooth"` / `"free"` / `None`; ASCII and HTML `Fit` columns keyed off it; `_group_test_kind` returning `"smooth+free"` for a spline OC with specials.
+- Consumes: `OrderedCategorical(order=..., specials=[...], base=..., basis=Spline(...))`; `spec._specials: list[str]`; `spec._ordered_levels: list[str]`; `spec.has_specials -> bool`; `spec.reconstruct(beta)` with `raw["levels"] == spec._ordered_levels`; `feature_se_from_cov(...)` returning `len(spec._ordered_levels)` entries (`_term_covariance.py:96-105` passes `x_eval=np.array(spec._ordered_levels, dtype=object)`); `TermInference` for a specials term already being buildable (Task 4), which `export_rating_tables` needs at `export/rating_tables.py:152-171`.
+- Produces: `_CoefRow.level_fit: str | None = None` with values `"smooth"` / `"free"` / `None`; ASCII and HTML `Fit` columns keyed off it; `_group_test_kind` returning `"smooth+free"` for a spline OC with specials; `export/summary._level_row_kind` returning `"free level"` for a special's level row.
 
 ---
 
@@ -2460,12 +2982,40 @@ def test_summary_sheet_marks_a_term_that_contains_free_levels():
     assert marked[0].term == "band"
     assert isinstance(marked[0].p_value, float)
     assert not [row for row in band_rows if row.kind == "smooth"]
-    # Per-TERM marker only: the level rows stay plain "level" rows.
-    level_rows = [row for row in band_rows if row.kind == "level"]
+    assert "Smooth p-values use Wood (2013) Bayesian tests." in payload.notes
+
+
+def test_summary_sheet_marks_the_free_level_row_itself():
+    # False today: every level row is Kind="level", so the workbook cannot say
+    # WHICH level was fitted free. export/summary.py:301 already emits one row
+    # per level (test_rating_table_export.py:1325-1348 pins that), so this is
+    # the kind string alone — no new column and no rating-sheet change.
+    model, _, _, _, ordered = _fit_ordered_specials_export_model()
+    payload = build_summary_export_payload(model)
+    level_rows = [
+        row for row in payload.terms if row.group == "band" and row.kind in {"level", "free level"}
+    ]
+
     assert [row.term for row in level_rows] == [
         f"band[{level}]" for level in [*ordered, "MISSING"]
     ]
-    assert "Smooth p-values use Wood (2013) Bayesian tests." in payload.notes
+    assert [row.kind for row in level_rows] == ["level"] * len(ordered) + ["free level"]
+    free_row = level_rows[-1]
+    assert free_row.estimate is not None
+    assert free_row.std_error is not None
+    assert free_row.p_value is None
+
+
+def test_summary_sheet_level_kinds_are_unchanged_without_specials():
+    # Guards the width/format contract the other direction: a term with no
+    # specials must keep every level row at Kind="level".
+    model, levels = _fit_ordered_export_model()
+    payload = build_summary_export_payload(model)
+    level_rows = [
+        row for row in payload.terms if row.group == "band" and row.kind in {"level", "free level"}
+    ]
+
+    assert [row.kind for row in level_rows] == ["level"] * len(levels)
 
 
 def test_specials_workbook_keeps_summary_columns_and_rating_block_layout(tmp_path):
@@ -2487,7 +3037,9 @@ def test_specials_workbook_keeps_summary_columns_and_rating_block_layout(tmp_pat
         for column in range(term_min_col, term_max_col + 1)
     ]
     assert term_headers == EXPECTED_SUMMARY_TERM_HEADERS
-    assert "smooth+free" in {row["Kind"] for row in _table_records(summary_ws, "TermInference")}
+    kinds = {row["Kind"] for row in _table_records(summary_ws, "TermInference")}
+    assert "smooth+free" in kinds
+    assert "free level" in kinds
 
     rating_ws = wb["Rating Tables"]
     assert rating_ws["A5"].value == "band"
@@ -2506,12 +3058,12 @@ def test_specials_workbook_keeps_summary_columns_and_rating_block_layout(tmp_pat
     ]
 ```
 
-- [ ] **Step 22: Run the test to verify it fails**
+- [ ] **Step 22: Run the tests to verify they fail**
 
-Run: `uv run pytest tests/test_rating_table_export.py -k specials -v`
-Expected: FAIL — `test_summary_sheet_marks_a_term_that_contains_free_levels` fails at `assert len(marked) == 1` with `0 == 1` (the row is still `kind="smooth"`).
+Run: `uv run pytest tests/test_rating_table_export.py -k "specials or level_kinds" -v`
+Expected: FAIL — `test_summary_sheet_marks_a_term_that_contains_free_levels` fails at `assert len(marked) == 1` with `0 == 1` (the row is still `kind="smooth"`), and `test_summary_sheet_marks_the_free_level_row_itself` fails at the kind list with `['level', ..., 'level'] != ['level', ..., 'free level']`. `test_summary_sheet_level_kinds_are_unchanged_without_specials` passes already — it is the guard on the other direction.
 
-- [ ] **Step 23: Emit the term marker through the existing `kind` machinery**
+- [ ] **Step 23: Emit the term and level markers through the existing `kind` machinery**
 
 In `src/superglm/export/summary.py`, `_group_test_kind` at lines 266-274 currently reads:
 
@@ -2528,9 +3080,35 @@ Replace the OC branch with:
 def _group_test_kind(model: SuperGLM, row, groups: tuple[Any, ...]) -> str:
     spec = _source_spec(model, groups)
     if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
-        # Per-term marker: the Summary sheet has one row per term, so this
-        # records that the term contains free levels, not which ones.
+        # Per-term marker: the term's whole-smooth row records that the term
+        # contains free levels.  Which ones is recorded on the level rows.
         return "smooth+free" if spec.has_specials else "smooth"
+```
+
+Add the per-level classifier immediately after `_group_test_kind`:
+
+```python
+def _level_row_kind(row) -> str:
+    """Per-level provenance for a level row.
+
+    The Summary sheet emits one row per coefficient row, so an
+    OrderedCategorical special already has its own row here; it only needs a
+    kind that says so.  ``level_fit`` is set by both level-row builders
+    (``coef_tables.build_coef_rows`` and
+    ``report_ops._build_editor_stale_coef_rows``), so the edited-model path
+    carries the marker too.
+    """
+    return "free level" if getattr(row, "level_fit", None) == "free" else "level"
+```
+
+and use it in `_term_rows` (lines 290-310), replacing the `kind = (...)` expression:
+
+```python
+        kind = (
+            _group_test_kind(model, row, source_groups)
+            if is_group_row
+            else (_level_row_kind(row) if row.name in level_names else "coefficient")
+        )
 ```
 
 Then `_summary_notes` at lines 359-364 currently reads:
@@ -2563,283 +3141,109 @@ Expected: PASS.
 
 ```bash
 git add src/superglm/export/summary.py tests/test_rating_table_export.py
-git commit -m "feat(export): mark ordered-categorical terms that carry free levels on the summary sheet"
+git commit -m "feat(export): mark ordered-categorical free levels on the summary sheet
+
+The term's whole-smooth row becomes kind='smooth+free' and each special's
+level row becomes kind='free level'. The Summary sheet already emits one
+row per level, so per-level provenance needs no new column and the rating
+sheet's 3-column block stride is untouched."
+```
+
+- [ ] **Step 27: Document `specials=` and the intercept shift in the feature guide**
+
+The reported intercept **moves** when a special is added to or removed from an existing model,
+because the identifiability constraint is a column sum over the rows present
+(`_spline_identifiability.py:23-29`) and the spline is now built on the ordered rows alone. Spec
+§Risks requires this to be "documented rather than hidden", and it is editor-visible: an analyst
+who adds `specials=["MISSING"]` to a fitted model sees a different `Intercept` row in the summary
+even though nothing about the ordered levels changed. Nothing else in this plan says so anywhere
+a user will look.
+
+In `docs/guide/features.md`, after the paragraph ending "...not the whole-smooth p-value." (line
+161) and before "This interpretation depends on the numeric positions..." (line 163), insert:
+
+````markdown
+### Free levels (`specials=`)
+
+Some levels do not belong on the ordering at all — a `MISSING` band, a
+structural zero. Listing them in `specials=` holds them out of the smooth and
+fits each one as a free, unpenalized level effect:
+
+```python
+OrderedCategorical(
+    order=["1", "2", "3", "4", "5", "6"],
+    specials=["MISSING"],
+    basis=Spline(kind="ps", k=6),
+)
+```
+
+The smooth then spans the ordered levels only, and the special reports its own
+base-relative relativity beside them. Use this for levels that are
+*structurally* different, never for merely sparse ones: the penalty already
+handles a sparse band better than a free level does.
+
+The summary marks each level in a `Fit` column reading `smooth` or `free`, and
+the exported workbook records the term as `smooth+free` with the special's own
+row as a `free level`. Plots draw the fitted curve across the ordered levels
+and place free levels as detached points past its end.
+
+**The reported intercept changes when you add or remove a special.** The
+smooth's identifiability constraint is taken over the rows it is built on, so
+with `specials=` the intercept is the baseline of the *ordered* rows alone;
+without it, the special's rows are inside that baseline. Level relativities are
+reported against the base level and are unaffected, but do not compare
+intercepts across two models that differ in `specials=`.
+
+A special must be present in the training data (an all-zero indicator column
+has no identifiable coefficient), may not be the reporting `base=`, and may not
+be merged into a level group. `specials=` requires `basis=Spline(...)`;
+interactions and PSST screening on a term with specials are not supported yet
+and are reported as deferred rather than silently skipped.
+````
+
+- [ ] **Step 28: Check the docs build inputs and commit**
+
+Run: `rg -n "specials" docs/guide/features.md` and confirm the fenced Python block inside the new
+subsection renders (the surrounding section already uses the same ```` ```python ```` fences).
+
+```bash
+git add docs/guide/features.md
+git commit -m "docs: document OrderedCategorical specials= and the intercept shift
+
+Restricting the identifiability constraint to the ordered rows moves the
+reported intercept when a special is added or removed. The spec requires
+that to be documented rather than hidden."
 ```
 
 ---
 
 ### Task 8: Render special levels in both plotting backends
 
+The inference half of this work landed in Task 4: `TermInference.level_is_special` exists,
+`SmoothCurve.level_x` is already smooth-levels-only, and `term_inference` on a specials model
+already returns without raising. What is left is display — turning that mask plus the smooth-only
+`level_x` into one x-position per displayed level, and drawing free levels as detached points in
+both backends rather than letting plotly truncate them away at `min(len(x), len(y))`.
+
+Grouped expansion (`_term_helpers._expand_grouped_term`) is **not** touched here: nothing in this
+task's tests exercises it, and a term that has both a grouping and specials cannot exist until
+Task 10's collapse work. Task 10 Step 14 rewrites that function once, against the unmodified file.
 
 **Files:**
-- Create: `tests/test_ordered_categorical_specials_plots.py`
-- Modify: `src/superglm/inference/_term_types.py:96-97`
-- Modify: `src/superglm/inference/_term_ops.py:202-206`, `src/superglm/inference/_term_ops.py:225-226`, `src/superglm/inference/_term_ops.py:250-258`, `src/superglm/inference/_term_ops.py:262-279`
-- Modify: `src/superglm/inference/_term_helpers.py:172-186`, `src/superglm/inference/_term_helpers.py:188-234`, `src/superglm/inference/_term_helpers.py:236-259`
 - Modify: `src/superglm/plotting/common.py:24-26`, `src/superglm/plotting/common.py:66-67`
 - Modify: `src/superglm/plotting/data.py:11-14`, `src/superglm/plotting/data.py:125-131`
-- Modify: `src/superglm/plotting/group_display.py:54-71`, `src/superglm/plotting/group_display.py:155-160`
+- Modify: `src/superglm/plotting/group_display.py:54-71`, `src/superglm/plotting/group_display.py:155-184`
 - Modify: `src/superglm/plotting/main_effects.py:16-35`, `src/superglm/plotting/main_effects.py:524-634`
 - Modify: `src/superglm/plotting/main_effects_plotly.py:14-34`, `:57-69`, `:739-755`, `:1102-1158`, `:1356-1387`
-- Test: `tests/test_ordered_categorical_specials_plots.py`
+- Test: `tests/test_ordered_categorical_specials_plots.py` (created in Task 4, appended to here)
 
 **Interfaces:**
-- Consumes: `OrderedCategorical._specials: list[str]`, `OrderedCategorical.has_specials -> bool`, `spec._ordered_levels == _smooth_levels + _specials`; `spec.reconstruct(beta)` with `raw["levels"]` K+S long, `raw["level_log_relativities"]` / `raw["level_relativities"]` keyed on all levels, `raw["level_values"]` keyed on smooth levels only; the prerequisite commit's `_plot_ordered_spline_panel`, which draws `ti.smooth_curve` instead of a PCHIP through level relativities.
-- Produces: `TermInference.level_is_special: NDArray[np.bool_] | None`; `SmoothCurve.level_x` guaranteed smooth-levels-only; `superglm.plotting.common._ordered_level_step`, `._special_level_positions`, `._level_positions_with_specials`, `._SPECIAL_COLOR`, `._PLOTLY_SPECIAL_COLOR`; `superglm.plotting.group_display._collapse_special_mask`; plotly style key `"special_color"`; the matplotlib container label and plotly trace name `"Free levels"`; `plot_data` payload column `x_position` covering all K+S rows.
+- Consumes: `OrderedCategorical._specials: list[str]`, `OrderedCategorical.has_specials -> bool`, `spec._ordered_levels == _smooth_levels + _specials`; `TermInference.level_is_special: NDArray[np.bool_] | None` and the smooth-only `SmoothCurve.level_x`, both landed in Task 4; the prerequisite commit's `_plot_ordered_spline_panel`, which draws `ti.smooth_curve` instead of a PCHIP through level relativities, and its `_collapsed_smooth_curve(ti, groups)` signature.
+- Produces: `superglm.plotting.common._ordered_level_step`, `._special_level_positions`, `._level_positions_with_specials`, `._SPECIAL_COLOR`, `._PLOTLY_SPECIAL_COLOR`; `superglm.plotting.group_display._collapse_special_mask` and a `_collapsed_smooth_curve` that drops all-special display groups; plotly style key `"special_color"`; the matplotlib container label and plotly trace name `"Free levels"`; `plot_data` payload column `x_position` covering all K+S rows.
 
 ---
 
-- [ ] **Step 1: Write the failing inference-plumbing test**
-
-Create `tests/test_ordered_categorical_specials_plots.py`:
-
-```python
-"""Plot rendering of OrderedCategorical special (free) levels, both backends."""
-
-import importlib.util
-
-import numpy as np
-import pandas as pd
-import pytest
-
-from superglm import Numeric, OrderedCategorical, Spline, SuperGLM
-
-PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
-
-BANDS = [str(i) for i in range(1, 11)]
-
-
-@pytest.fixture
-def specials_model():
-    """Ten ordered bands on a saturating curve plus an 18% free MISSING level."""
-    rng = np.random.default_rng(20260805)
-    n = 4000
-    band = rng.choice([*BANDS, "MISSING"], n, p=[0.082] * 10 + [0.18])
-    idx = np.array([BANDS.index(b) if b in BANDS else -1 for b in band], dtype=np.float64)
-    log_effect = np.where(
-        idx >= 0, 0.6 * np.sqrt(np.maximum(idx, 0.0) / 9.0), np.log(0.577)
-    )
-    x = rng.normal(size=n)
-    sample_weight = rng.uniform(0.5, 1.0, n)
-    mu = np.exp(-2.0 + log_effect + 0.1 * x)
-    y = rng.poisson(mu * sample_weight).astype(float)
-    frame = pd.DataFrame({"band": band, "x": x})
-    model = SuperGLM(
-        features={
-            "band": OrderedCategorical(
-                order=BANDS, specials=["MISSING"], basis=Spline(kind="ps", k=6)
-            ),
-            "x": Numeric(),
-        }
-    )
-    model.fit(frame, y, sample_weight=sample_weight)
-    return model, frame, sample_weight
-
-
-def test_term_inference_marks_specials_and_keeps_level_x_smooth_only(specials_model):
-    # False today: TermInference has no level_is_special at all, and _term_ops.py:226
-    # builds level_x by looking every level up in raw["level_values"], which has no
-    # entry for MISSING — so today this raises KeyError before any figure exists.
-    model, _, _ = specials_model
-    ti = model.term_inference("band")
-
-    assert list(ti.levels) == [*BANDS, "MISSING"]
-    assert ti.level_is_special is not None
-    np.testing.assert_array_equal(ti.level_is_special, [False] * 10 + [True])
-    assert len(ti.relativity) == 11
-    assert len(ti.smooth_curve.level_x) == 10
-
-
-def test_term_inference_level_is_special_is_none_without_specials():
-    # False today: the attribute does not exist, so this is an AttributeError.
-    rng = np.random.default_rng(7)
-    n = 1500
-    band = rng.choice(BANDS, n)
-    idx = np.array([BANDS.index(b) for b in band], dtype=np.float64)
-    sample_weight = rng.uniform(0.5, 1.0, n)
-    y = rng.poisson(np.exp(-2.0 + 0.4 * idx / 9.0) * sample_weight).astype(float)
-    frame = pd.DataFrame({"band": band})
-    model = SuperGLM(
-        features={"band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", k=5))}
-    )
-    model.fit(frame, y, sample_weight=sample_weight)
-
-    ti = model.term_inference("band")
-    assert ti.level_is_special is None
-    assert len(ti.smooth_curve.level_x) == 10
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -v`
-Expected: FAIL — `KeyError: 'MISSING'` raised from `superglm/inference/_term_ops.py:226` (`level_x = np.array([raw["level_values"][lv] for lv in levels])`) for the first test, and `AttributeError: 'TermInference' object has no attribute 'level_is_special'` for the second.
-
-- [ ] **Step 3: Add the `level_is_special` field to `TermInference`**
-
-In `src/superglm/inference/_term_types.py:96-97`, replace:
-
-```python
-    # Smooth curve for plotting (OrderedCategorical spline mode)
-    smooth_curve: SmoothCurve | None = None
-```
-
-with:
-
-```python
-    # Smooth curve for plotting (OrderedCategorical spline mode)
-    smooth_curve: SmoothCurve | None = None
-
-    # Free (unpenalised) levels held out of the smooth: parallel to ``levels``.
-    # None when the term has no specials, so existing terms are unchanged.
-    level_is_special: NDArray[np.bool_] | None = None
-```
-
-Also extend the `SmoothCurve.level_x` comment at `_term_types.py:49`:
-
-```python
-    level_x: NDArray | None = None  # numeric x positions of the K *smooth* levels
-```
-
-- [ ] **Step 4: Populate the mask and keep `level_x` smooth-only in `_term_ops`**
-
-In `src/superglm/inference/_term_ops.py:202-206`, replace:
-
-```python
-            inner = spec._spline
-            raw = spec.reconstruct(beta_combined)
-            levels = raw["levels"]
-            level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
-            level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
-```
-
-with:
-
-```python
-            inner = spec._spline
-            raw = spec.reconstruct(beta_combined)
-            levels = raw["levels"]
-            level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
-            level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
-
-            # Specials are free levels with no position on the spline axis: they
-            # stay out of level_x and are flagged for the renderers instead.
-            special_labels = set(spec._specials) if spec.has_specials else set()
-            level_is_special = (
-                np.array([lv in special_labels for lv in levels], dtype=bool)
-                if special_labels
-                else None
-            )
-            smooth_levels = [lv for lv in levels if lv not in special_labels]
-```
-
-Then at `_term_ops.py:225-226`, replace:
-
-```python
-                # Continuous curve for plotting
-                level_x = np.array([raw["level_values"][lv] for lv in levels])
-```
-
-with:
-
-```python
-                # Continuous curve for plotting (ordered levels only)
-                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
-```
-
-and at `_term_ops.py:251-252`, replace:
-
-```python
-                # No SEs requested but still provide the curve shape
-                level_x = np.array([raw["level_values"][lv] for lv in levels])
-```
-
-with:
-
-```python
-                # No SEs requested but still provide the curve shape
-                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
-```
-
-Finally, in the `TermInference(...)` call at `_term_ops.py:262-279`, add the field after `smooth_curve=curve,`:
-
-```python
-                smooth_curve=curve,
-                level_is_special=level_is_special,
-                spline=spline_meta,
-```
-
-- [ ] **Step 5: Thread the mask through the grouped-term expansion**
-
-`_expand_grouped_term` (`src/superglm/inference/_term_helpers.py:158-259`) hand-lists every `TermInference` field, so a new one vanishes silently. After `indices = ...` at `_term_helpers.py:173`, insert:
-
-```python
-    special_mask = (
-        np.asarray(ti.level_is_special, dtype=bool)[indices]
-        if ti.level_is_special is not None
-        else None
-    )
-    smooth_rows = (
-        ~special_mask if special_mask is not None else np.ones(len(expanded_levels), dtype=bool)
-    )
-```
-
-In the curve rebuild, replace `_term_helpers.py:195-204`:
-
-```python
-        if original_level_values is not None:
-            expanded_level_x = np.array([original_level_values[lev] for lev in expanded_levels])
-        else:
-            grouped_lx = np.asarray(curve.level_x)
-            n_expanded = len(expanded_levels)
-            expanded_level_x = (
-                np.linspace(float(grouped_lx.min()), float(grouped_lx.max()), n_expanded)
-                if n_expanded > 1
-                else grouped_lx[indices]
-            )
-```
-
-with:
-
-```python
-        smooth_expanded = [lev for lev, keep in zip(expanded_levels, smooth_rows) if keep]
-        if original_level_values is not None:
-            expanded_level_x = np.array([original_level_values[lev] for lev in smooth_expanded])
-        else:
-            grouped_lx = np.asarray(curve.level_x)
-            n_expanded = len(smooth_expanded)
-            expanded_level_x = (
-                np.linspace(float(grouped_lx.min()), float(grouped_lx.max()), n_expanded)
-                if n_expanded > 1
-                else grouped_lx[np.asarray(indices)[smooth_rows]]
-            )
-```
-
-and replace the interpolation zip at `_term_helpers.py:210`:
-
-```python
-        for xi, yi in zip(expanded_level_x, log_rel):
-```
-
-with:
-
-```python
-        for xi, yi in zip(expanded_level_x, np.asarray(log_rel)[smooth_rows]):
-```
-
-Then add the field to the rebuilt term at `_term_helpers.py:255`:
-
-```python
-        smooth_curve=curve,
-        level_is_special=special_mask,
-        monotone=ti.monotone,
-```
-
-- [ ] **Step 6: Run the inference tests**
-
-Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -v`
-Expected: PASS (both tests).
-
-- [ ] **Step 7: Write the failing test for the shared position helpers**
+- [ ] **Step 1: Write the failing test for the shared position helpers**
 
 Append to `tests/test_ordered_categorical_specials_plots.py`:
 
@@ -2886,12 +3290,12 @@ def test_level_positions_without_specials_is_the_identity():
     np.testing.assert_allclose(_level_positions_with_specials(level_x, None, 3), level_x)
 ```
 
-- [ ] **Step 8: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -k position -v`
 Expected: FAIL — `ImportError: cannot import name '_level_positions_with_specials' from 'superglm.plotting.common'`.
 
-- [ ] **Step 9: Add the position helpers to `plotting/common.py`**
+- [ ] **Step 3: Add the position helpers to `plotting/common.py`**
 
 In `src/superglm/plotting/common.py`, add the two colour constants — after `_CAT_BAR_COLOR = "#006FDD"` at line 25:
 
@@ -2967,12 +3371,12 @@ def _level_positions_with_specials(
     return positions
 ```
 
-- [ ] **Step 10: Run the helper tests**
+- [ ] **Step 4: Run the helper tests**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -k position -v`
 Expected: PASS (4 tests).
 
-- [ ] **Step 11: Write the failing tests for the plot-data payload and the display mask**
+- [ ] **Step 5: Write the failing tests for the plot-data payload and the display mask**
 
 Append to `tests/test_ordered_categorical_specials_plots.py`:
 
@@ -3004,12 +3408,12 @@ def test_collapse_special_mask_marks_only_all_special_groups():
     assert _collapse_special_mask(None, [[0], [1]]) is None
 ```
 
-- [ ] **Step 12: Run the tests to verify they fail**
+- [ ] **Step 6: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -k "plot_data or collapse_special" -v`
 Expected: FAIL — `KeyError: 'x_position'` from `effect["x_position"]` (the column is absent) and `ImportError: cannot import name '_collapse_special_mask' from 'superglm.plotting.group_display'`.
 
-- [ ] **Step 13: Fix the plot-data payload and the display projection**
+- [ ] **Step 7: Fix the plot-data payload and the display projection**
 
 In `src/superglm/plotting/data.py:13`, extend the import:
 
@@ -3066,34 +3470,81 @@ def _collapse_special_mask(mask: NDArray | None, groups: list[list[int]]) -> NDA
     return np.asarray([bool(arr[indices].all()) for indices in groups], dtype=bool)
 ```
 
-and thread it into the display term at `group_display.py:61-71`, adding one keyword to the `replace(...)` call after `spline=None,`:
+and thread it into the display term at `group_display.py:61-71`, adding one keyword to the `replace(...)` call after `spline=None,`. The `smooth_curve=` line is quoted as the **prerequisite commit** left it (Task 1 Step 6 changed the signature to `(ti, group_indices)`); add only the `level_is_special=` keyword:
 
 ```python
         spline=None,
         level_is_special=_collapse_special_mask(ti.level_is_special, group_indices),
-        smooth_curve=_collapsed_smooth_curve(ti, log_rel, len(display_levels)),
+        smooth_curve=_collapsed_smooth_curve(ti, group_indices),
 ```
 
-- [ ] **Step 14: Run the tests**
+Then `_collapsed_smooth_curve` itself (`group_display.py:162-184` after Task 1) must stop indexing
+`level_x` with display-level indices. Post-Task-4 `level_x` covers the **smooth** levels only,
+while `groups` indexes all K+S display levels, so a term with both a grouping and specials — the
+state Task 10's collapse produces, and `"collapsed"` is the OC auto default
+(`group_display.py:92`) — raises `IndexError` on the last group. Replace the body:
+
+```python
+def _collapsed_smooth_curve(
+    ti: TermInference,
+    groups: list[list[int]],
+) -> SmoothCurve | None:
+    """Keep the fitted curve and move each marker to its group's mean position.
+
+    The curve itself is never rebuilt: collapsing levels is a display
+    operation, and re-interpolating through the collapsed markers would
+    draw a shape the model never fitted.
+
+    ``level_x`` covers the smoothed levels only, so an all-special group has no
+    position on the curve's axis and is dropped here rather than indexed into
+    ``level_x``.  The renderers place those markers from ``level_is_special``,
+    which ``_collapse_special_mask`` keeps parallel to the display levels.
+    """
+    curve = ti.smooth_curve
+    if curve is None or curve.level_x is None:
+        return curve
+    level_x = np.asarray(curve.level_x, dtype=np.float64)
+    n_levels = len(ti.levels or [])
+    special = (
+        np.asarray(ti.level_is_special, dtype=bool)
+        if ti.level_is_special is not None
+        else np.zeros(n_levels, dtype=bool)
+    )
+    # Position of each smooth display level within level_x.
+    smooth_pos = np.cumsum(~special) - 1
+    collapsed: list[float] = []
+    for indices in groups:
+        idx = np.asarray(indices, dtype=np.intp)
+        smooth_idx = idx[~special[idx]]
+        if smooth_idx.size == 0:
+            continue  # an all-free group has no place on the fitted curve
+        collapsed.append(float(np.mean(level_x[smooth_pos[smooth_idx]])))
+    return replace(curve, level_x=np.asarray(collapsed, dtype=np.float64))
+```
+
+With no specials `special` is all-False, `smooth_pos == arange(n_levels)`, no group is dropped and
+the result is the previous mean-position array unchanged.
+
+- [ ] **Step 8: Run the tests**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -v`
-Expected: PASS (8 tests).
+Expected: PASS (8 tests — the two inference-plumbing tests from Task 4 plus the six added here).
 
-- [ ] **Step 15: Commit the inference and payload plumbing**
+- [ ] **Step 9: Commit the payload and display plumbing**
 
 ```bash
-git add src/superglm/inference/_term_types.py src/superglm/inference/_term_ops.py \
-        src/superglm/inference/_term_helpers.py src/superglm/plotting/common.py \
-        src/superglm/plotting/data.py src/superglm/plotting/group_display.py \
+git add src/superglm/plotting/common.py src/superglm/plotting/data.py \
+        src/superglm/plotting/group_display.py \
         tests/test_ordered_categorical_specials_plots.py
-git commit -m "feat(inference): carry level_is_special and keep level_x to the smooth levels
+git commit -m "feat(plotting): position free levels off the end of the fitted curve
 
-SmoothCurve.level_x now covers the ordered levels only, and TermInference
-carries a mask parallel to .levels so renderers can place free levels off the
-curve instead of silently truncating to min(len(x), len(y))."
+_level_positions_with_specials turns the smooth-only level_x plus the
+level_is_special mask into one position per displayed level, so plot_data
+keeps x_position for the whole term instead of dropping the column, and the
+collapsed display projection stops indexing level_x with display indices."
 ```
 
-- [ ] **Step 16: Write the failing matplotlib test**
+- [ ] **Step 10: Write the failing matplotlib test**
 
 Append to `tests/test_ordered_categorical_specials_plots.py`:
 
@@ -3134,14 +3585,26 @@ def test_matplotlib_panel_detaches_the_special_level(specials_model):
     assert centers[-1] == pytest.approx(float(ticks[10]))
 ```
 
-- [ ] **Step 17: Run the test to verify it fails**
+- [ ] **Step 11: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -k matplotlib -v`
 Expected: FAIL — `ValueError: 'x' and 'y' must have the same first dimension, but have shapes (10,) and (11,)` raised from the `ax.errorbar(...)` call in `_plot_ordered_spline_panel`; if the prerequisite left the panel on `np.arange(n_levels)` positions instead, `AssertionError: assert 'Free levels' in {'Relativity': ...}`.
 
-- [ ] **Step 18: Rewrite `_plot_ordered_spline_panel`**
+- [ ] **Step 12: Rewrite `_plot_ordered_spline_panel`**
 
 Extend the common import block in `src/superglm/plotting/main_effects.py:16-35` with `_SPECIAL_COLOR`, `_level_positions_with_specials` and `_ordered_level_step` (alphabetical: `_SPECIAL_COLOR` after `_SIM_FILL`; `_level_positions_with_specials` after `_exposure_kde`; `_ordered_level_step` after `_make_continuous_figure`).
+
+**Also delete `_ordered_level_spacing` from that same import block.** Task 1 added it for the one
+call in `_plot_ordered_spline_panel`, and the replacement body below uses `_ordered_level_step`
+instead; leaving the import in place fails `ruff` F401 at Step 20's gate. `_ordered_level_spacing`
+stays in `plotting/common.py` — `main_effects_plotly._ordered_bar_width` still delegates to it
+(Task 1 Step 8), so it is not dead code, only unused *here*.
+
+Two near-duplicate spacing helpers therefore ship: `_ordered_level_spacing` (minimum positive gap,
+sizing bars) and `_ordered_level_step` (median positive gap, laying out the special block). That
+is deliberate — the median is what places specials evenly when the ordered levels are unequally
+spaced, and the minimum is what keeps bars from overlapping — but it is a real duplication and is
+called out here rather than discovered later.
 
 Replace the body of `_plot_ordered_spline_panel` (`main_effects.py:524-634`) with:
 
@@ -3283,12 +3746,12 @@ def _plot_ordered_spline_panel(
     ax.spines["right"].set_visible(False)
 ```
 
-- [ ] **Step 19: Run the matplotlib tests**
+- [ ] **Step 13: Run the matplotlib tests**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -k matplotlib -v && uv run pytest tests/test_plot_api.py -q`
 Expected: PASS — the new test passes and `tests/test_plot_api.py` stays green (it pins the plotly OC panel, not the matplotlib one).
 
-- [ ] **Step 20: Commit the matplotlib panel**
+- [ ] **Step 14: Commit the matplotlib panel**
 
 ```bash
 git add src/superglm/plotting/main_effects.py tests/test_ordered_categorical_specials_plots.py
@@ -3298,7 +3761,7 @@ The fitted curve spans the ordered levels only; specials get their own marker,
 tick, exposure bar and a divider, two level-steps clear of the curve."
 ```
 
-- [ ] **Step 21: Write the failing plotly test**
+- [ ] **Step 15: Write the failing plotly test**
 
 Append to `tests/test_ordered_categorical_specials_plots.py`:
 
@@ -3337,12 +3800,12 @@ def test_plotly_panel_renders_the_special_in_markers_bars_and_ticks(specials_mod
     assert float(bars.y[-1]) > 0.0
 ```
 
-- [ ] **Step 22: Run the test to verify it fails**
+- [ ] **Step 16: Run the test to verify it fails**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -k plotly -v`
 Expected: FAIL — `StopIteration` from `next(t for t in fig.data if t.type == "scatter" and t.name == "Free levels")`; the marker trace is 10 long with MISSING silently absent.
 
-- [ ] **Step 23: Split the plotly marker trace and add the style key**
+- [ ] **Step 17: Split the plotly marker trace and add the style key**
 
 Extend the common import block at `main_effects_plotly.py:14-34` with `_PLOTLY_SPECIAL_COLOR` (after `_PLOTLY_SIM_FILL`) and `_level_positions_with_specials` (after `_hex_to_rgba`), and add the module alias beside `_KNOT_COLOR = _PLOTLY_KNOT_COLOR` at line 45:
 
@@ -3437,7 +3900,7 @@ Then in `_add_categorical_term_trace`, replace the position/marker block at `mai
 
 The "Smooth curve" overlay at `:1160-1177` is unchanged — it already draws `curve.x`, which spans the ordered levels only.
 
-- [ ] **Step 24: Widen the plotly exposure bars and tick config**
+- [ ] **Step 18: Widen the plotly exposure bars and tick config**
 
 In `_add_categorical_density_trace`, replace `main_effects_plotly.py:1358-1364`:
 
@@ -3484,17 +3947,17 @@ with:
         ticktext = [str(level) for level in ti.levels]
 ```
 
-- [ ] **Step 25: Run the plotly tests**
+- [ ] **Step 19: Run the plotly tests**
 
 Run: `uv run pytest tests/test_ordered_categorical_specials_plots.py -v`
 Expected: PASS (10 tests).
 
-- [ ] **Step 26: Run the surrounding suites and the linters**
+- [ ] **Step 20: Run the surrounding suites and the linters**
 
 Run: `uv run pytest tests/test_plot_api.py tests/test_plot_comparison.py tests/test_interaction_plots.py tests/test_ordered_categorical_inference.py -q && uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/`
 Expected: PASS — no failures, `All checks passed!`, and no formatting diff. `test_plotly_ordered_categorical_spline_uses_numeric_axis` still finds the first `name="Relativity"` scatter at the midpoint positions, because a term with no specials produces exactly one marker trace.
 
-- [ ] **Step 27: Commit the plotly panel**
+- [ ] **Step 21: Commit the plotly panel**
 
 ```bash
 git add src/superglm/plotting/main_effects_plotly.py tests/test_ordered_categorical_specials_plots.py
@@ -4469,14 +4932,45 @@ def test_specials_term_round_trips_through_a_level_collapse(specials_model):
     np.testing.assert_array_equal(
         ti.level_is_special, [False, False, False, False, False, False, True]
     )
+
+
+def test_collapsed_display_of_a_grouped_specials_term_keeps_level_x_smooth_only(specials_model):
+    # This is the only place grouping and specials coexist, and "collapsed" is
+    # the auto display default for OrderedCategorical (group_display.py:92), so
+    # this is what the default plot path does. level_x covers the smoothed
+    # levels only while the display groups span all K+S levels, so a naive
+    # mean-position calculation indexes past the end of level_x.
+    from superglm.plotting.group_display import project_grouped_term_for_display
+
+    model, _, _ = specials_model
+    session = EditorSession.from_model(model, terms=["band"])
+    session.select_levels("band", ["2", "3"])
+    refit = session.replace_with_collapsed_levels("band")
+
+    display = project_grouped_term_for_display(refit, refit.term_inference("band"), "collapsed")
+
+    assert display.collapsed
+    assert display.term.levels == ["1", "2+3", "4", "5", "6", "MISSING"]
+    np.testing.assert_array_equal(
+        display.term.level_is_special, [False, False, False, False, False, True]
+    )
+    # One position per SMOOTH display group: the free level has none.
+    smooth_count = int((~np.asarray(display.term.level_is_special)).sum())
+    assert len(display.term.smooth_curve.level_x) == smooth_count == 5
 ```
 
 - [ ] **Step 13: Run the tests to verify they fail**
 
-Run: `uv run pytest tests/test_ordered_categorical_specials_editor.py -v -k "grouped or round_trips"`
-Expected: FAIL — `assert expanded.level_is_special is not None` fails for the first, and `KeyError: 'MISSING'` from `_term_helpers.py:196` for the other two (the round-trip reaches it through `replace_in_force_model` → `term_inference`).
+Run: `uv run pytest tests/test_ordered_categorical_specials_editor.py -v -k "grouped or round_trips or collapsed_display"`
+Expected: FAIL — `assert expanded.level_is_special is not None` fails for the first, and `KeyError: 'MISSING'` from `_term_helpers.py:196` for the other three (the round-trip and the display projection both reach it through `replace_in_force_model` → `term_inference`). `test_collapsed_display_of_a_grouped_specials_term_keeps_level_x_smooth_only` is the regression the plotting task's `_collapsed_smooth_curve` rewrite (Task 8 Step 7) exists for: with that rewrite reverted it fails instead with `IndexError` out of `level_x`.
 
 - [ ] **Step 14: Rebuild the expanded term with `replace` and expand the marker**
+
+This is the **only** task that edits `_expand_grouped_term`: the plotting task's grouped-expansion
+step was dropped (nothing in it exercised grouped expansion, and a grouped specials term cannot
+exist before this task's collapse work). So lines 188-259 still read exactly as they do on
+`origin/master` — no insertions to reconcile, and no leftover locals for `ruff` F841 to catch at
+Step 16.
 
 In `src/superglm/inference/_term_helpers.py`, replace the curve block and the hand-listed constructor (lines 188-259) with:
 
@@ -4564,8 +5058,8 @@ In `src/superglm/inference/_term_helpers.py`, replace the curve block and the ha
 
 - [ ] **Step 15: Run the tests**
 
-Run: `uv run pytest tests/test_ordered_categorical_specials_editor.py tests/test_term_inference.py tests/test_summary_level_display.py tests/test_plot_api.py -q`
-Expected: PASS (the grouped-expansion path for OC terms without specials keeps `expanded_special is None`, so `smooth_mask` is all-True and the curve rebuild is byte-for-byte the previous one).
+Run: `uv run pytest tests/test_ordered_categorical_specials_editor.py tests/test_term_inference.py tests/test_summary_level_display.py tests/test_plot_api.py tests/test_relativities.py -q`
+Expected: PASS (the grouped-expansion path for OC terms without specials keeps `expanded_special is None`, so `smooth_mask` is all-True and the curve rebuild is byte-for-byte the previous one). `tests/test_relativities.py` is in the list because `test_collapsed_display_of_a_grouped_specials_term_keeps_level_x_smooth_only` exercises the same collapsed-display path as `test_plotly_collapsed_ordered_categorical_suppresses_stale_knot_diagnostics` (`tests/test_relativities.py:602-655`), on a term without specials.
 
 - [ ] **Step 16: Run the full gate and commit**
 
@@ -4580,6 +5074,12 @@ git commit -m "fix(inference): keep the special marker and smooth-only level_x t
 ---
 
 ## Appendix: drafter concerns
+
+> **Adjudicated 2026-08-05.** Every concern below has been reviewed against the
+> real source and either applied to the task bodies above or rejected. The task
+> bodies are authoritative wherever they disagree with this appendix — several
+> entries describe a sequencing or a file state that the applied edits have
+> since changed.
 
 Each task section above was drafted against the real code by an agent that also
 recorded where the code contradicted the spec. These are unresolved inputs to
