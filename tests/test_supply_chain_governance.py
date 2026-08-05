@@ -1,4 +1,5 @@
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,22 @@ def _read(path: str) -> str:
 
 def _workflow_header(workflow: str) -> str:
     return workflow.split("jobs:", maxsplit=1)[0]
+
+
+def _required_uv_version() -> str:
+    """Return the exact uv version pyproject requires.
+
+    Derived rather than hard-coded: the release job installs a pinned uv, and
+    ``uv build`` refuses to run when that pin disagrees with
+    ``[tool.uv] required-version``. A literal here goes stale silently the
+    moment the floor moves, and the first symptom is a release tag that fails
+    after it has already been pushed.
+    """
+    pyproject = tomllib.loads(_read("pyproject.toml"))
+    required = pyproject["tool"]["uv"]["required-version"]
+    match = re.fullmatch(r"==(\d+\.\d+\.\d+)", required)
+    assert match, f"expected an exact uv pin in pyproject, got {required!r}"
+    return match.group(1)
 
 
 def test_security_workflow_runs_on_master_prs_and_schedule():
@@ -78,7 +95,7 @@ def test_release_workflow_publishes_checked_artifacts_from_version_tags():
     assert "name: Publish release" in workflow
     assert 'tags: ["v*.*.*"]' in workflow
     assert "workflow_dispatch:" not in workflow
-    assert 'version: "0.11.29"' in workflow
+    assert f'version: "{_required_uv_version()}"' in workflow
     assert "Verify release tag and source version" in workflow
     assert 'expected_tag = f"v{project_version}"' in workflow
     assert "source_version != project_version" in workflow
