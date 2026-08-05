@@ -264,6 +264,24 @@ def _expand_grouped_term(
     )
 
 
+def spline_groups(feature_groups: list[GroupSlice]) -> list[GroupSlice]:
+    """The blocks of a feature that make up its smooth, dropping any free-level block.
+
+    An OrderedCategorical with ``specials=`` owns two GroupSlices under one
+    feature name: the penalized spline block and an unpenalized indicator block.
+    Everything that describes THE SMOOTH -- edf, the Wald test, ref_df, n_params,
+    group_norm, the curve and its SE band, and whether the smooth survived
+    selection -- is a statement about the spline block alone.
+
+    This lives in one place because the filter was previously re-derived at each
+    call site, and three separate review passes each found a different site that
+    had been missed. A caller that wants the whole feature (the level table, where
+    a free special keeps a real standard error even when the curve is dropped)
+    should use ``feature_groups`` directly and say why.
+    """
+    return [g for g in feature_groups if g.subgroup_type != "special"]
+
+
 def _compute_term_edf(
     name: str,
     feature_groups: list[GroupSlice],

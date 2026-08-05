@@ -555,3 +555,34 @@ def test_editor_stale_rows_report_the_spline_block_only():
     assert smooth_row.group_norm == pytest.approx(
         float(np.linalg.norm(model.result.beta[spline_group.sl])), rel=1e-12
     )
+
+
+def test_term_inference_edf_agrees_with_the_summary_smooth_row():
+    # False today. `_compute_term_edf` sums per-group edf over EVERY group of the
+    # feature, including the unpenalized `band:special` block (~1.0 edf per
+    # special). `coef_tables` and `report_ops` both scope the same quantity to the
+    # spline block, so one fitted term reports two different edfs depending on
+    # which surface you read -- and TermInference.edf is the one that reaches the
+    # editor's context bar and the plot data.
+    #
+    # This PR's contract is that everything describing the smooth is the spline
+    # block, and the edf sits beside a curve that IS the spline.
+    model = _fit_special_band_model()[0]
+    summary_edf = _smooth_row(model.summary()).edf
+    assert summary_edf is not None
+
+    assert model.term_inference("band").edf == pytest.approx(summary_edf)
+
+
+def test_a_deselected_spline_does_not_present_an_active_smooth_curve():
+    # False today. When selection drops the spline but keeps the unpenalized
+    # special, the outer `active` flag stays true (correctly -- the free level IS
+    # still fitted), and the curve branch then runs with every spline group
+    # filtered out. `_spline_se` returns all-zero SEs and a SmoothCurve is emitted
+    # anyway, so a plot renders an active-looking smooth with zero-width bands for
+    # a block that was deselected.
+    model = _fit_deselected_spline_with_live_special()
+    assert set(model.result.rank_info.selected_group_names) == {"band:special"}
+
+    ti = model.term_inference("band")
+    assert ti.smooth_curve is None, "no spline block survived, so there is no curve"
