@@ -667,3 +667,29 @@ def test_a_numerically_equal_special_is_popped_from_a_float_order():
     _, special_info = spec.build(x, np.ones(len(x)))
     indicator = np.asarray(special_info.columns.todense()).ravel()
     np.testing.assert_array_equal(indicator == 1.0, x == 9.0)
+
+
+def test_a_raw_matched_special_reports_the_label_its_domain_uses():
+    # False today. With `order=[1.0, 2.0, 9.0]` and `specials=[9]`, the fit
+    # correctly claims the 9.0 rows as the free level -- but `reconstruct()`
+    # reports that level as the coerced string "9" while every smooth level is
+    # reported with its raw domain label (1.0, 2.0, ...). Rating tables, editor
+    # weights and plot exposure bars aggregate row weights by the column's own
+    # labels and then look them up by these reported levels, so the special comes
+    # back with zero weight and zero exposure -- silently wrong about the one
+    # level the feature exists to fit.
+    #
+    # The reported label must follow the same convention as its neighbours.
+    spec = OrderedCategorical(
+        order=[1.0, 2.0, 3.0, 4.0, 9.0], specials=[9], basis=Spline(kind="ps", k=5)
+    )
+    x = np.array([1.0, 2.0, 3.0, 4.0, 9.0, 9.0], dtype=float)
+    spline_info, special_info = spec.build(x, np.ones(len(x)))
+    n = spline_info.columns.shape[1] + special_info.n_cols
+    raw = spec.reconstruct(np.zeros(n, dtype=np.float64))
+
+    assert raw["special_levels"] == [9.0]
+    assert raw["levels"][-1] == 9.0
+    assert 9.0 in raw["level_relativities"]
+    # And every level in the report is a label the raw column actually contains.
+    assert set(raw["levels"]) <= set(x.tolist())

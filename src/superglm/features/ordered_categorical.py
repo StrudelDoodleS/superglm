@@ -231,6 +231,10 @@ class OrderedCategorical:
                     raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
                 self._specials.append(lev)
                 self._special_raw.append(raw_lev)
+        # How each special is REPORTED: the label its domain spells it with, so it
+        # sits in the same namespace as the smooth levels. Defaults to the raw
+        # declaration and is refined below if the domain names it differently.
+        self._special_display: list[Any] = list(self._special_raw)
         special_set = set(self._specials)
         # Ungrouped OrderedCategorical validates raw column labels, so a special
         # declared as `9` must be admissible in both the raw and the string form
@@ -254,6 +258,25 @@ class OrderedCategorical:
                     not isinstance(raw, str) and not isinstance(label, str) and label == raw
                     for raw in raw_specials
                 )
+
+            # Report a special under the label its DOMAIN uses, not the coerced
+            # string. Smooth levels are reported with their raw `order=`/`values=`
+            # labels, and rating tables, editor weights and exposure bars aggregate
+            # row weights by the column's own labels before looking them up by the
+            # reported level -- so a special reported as "9" beside neighbours
+            # reported as 1.0, 2.0 comes back with zero weight and zero exposure.
+            domain = list(values) if values is not None else list(order)
+            for matched in domain:
+                if not _is_special(matched):
+                    continue
+                for j, coerced in enumerate(self._specials):
+                    if coerced == str(matched) or (
+                        not isinstance(self._special_raw[j], str)
+                        and not isinstance(matched, str)
+                        and matched == self._special_raw[j]
+                    ):
+                        self._special_display[j] = matched
+                        break
 
             if values is not None:
                 values = {k: v for k, v in values.items() if not _is_special(k)}
@@ -848,14 +871,16 @@ class OrderedCategorical:
         raw["log_relativity"] = raw["log_relativity"] - base_shift
         raw["relativity"] = np.exp(raw["log_relativity"])
 
-        all_levels = list(self._smooth_levels) + list(self._specials)
+        # Report specials under their domain labels so every entry in `levels` is
+        # in the same namespace as the smooth levels and as the raw column.
+        all_levels = list(self._smooth_levels) + list(self._special_display)
         all_log_rels = np.concatenate(
             [level_log_rels, np.asarray(special_beta, dtype=np.float64) - base_shift]
         )
 
         raw["base_level"] = self._base_level
         raw["levels"] = all_levels
-        raw["special_levels"] = list(self._specials)
+        raw["special_levels"] = list(self._special_display)
         # Keyed on the smooth levels only — a special never receives a coordinate
         # on the spline's axis.
         raw["level_values"] = dict(zip(self._smooth_levels, level_values.tolist()))

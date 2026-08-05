@@ -16,6 +16,7 @@ from superglm.inference._term_helpers import (
     _recenter_term,
     _resolve_term_lambda,
     _spline_se,
+    spline_groups,
 )
 from superglm.inference._term_interactions import _interaction_inference
 from superglm.inference._term_types import (
@@ -136,18 +137,26 @@ def term_inference(
     if spec is None:
         raise KeyError(f"Feature not found: {name}")
 
-    # Check active
+    # Check active. Deliberately FEATURE-wide, unlike the smooth-row `active` in
+    # coef_tables and the export: this one gates the level table, and a free
+    # special is genuinely still fitted when the spline block is dropped. The
+    # smooth's own survival is `smooth_active` below.
     beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
     selected_names = selected_group_name_set(result, groups)
     active = any(group.name in selected_names for group in feature_groups)
+    smooth_active = any(group.name in selected_names for group in spline_groups(feature_groups))
 
     # Covariance (lazy, only if needed)
     Cov_active = active_groups_cov = None
     if with_se and active:
         Cov_active, active_groups_cov = covariance_fn()
 
-    # Per-group edf
-    edf = _compute_term_edf(name, feature_groups, group_edf)
+    # Per-group edf, over the SMOOTH's blocks. coef_tables and report_ops both
+    # scope this quantity the same way, and TermInference.edf is the copy that
+    # reaches the editor context bar and the plot data -- so summing the free
+    # block in here as well made one fitted term report two different edfs
+    # depending on which surface you read it from.
+    edf = _compute_term_edf(name, spline_groups(feature_groups), group_edf)
 
     # Per-group lambda
     lam = _resolve_term_lambda(name, feature_groups, reml_lambdas, lambda2)
@@ -218,6 +227,20 @@ def term_inference(
             # Per-level SEs (at K category positions)
             se = ci_lo = ci_hi = None
             curve = None
+            # `active` gates the LEVEL table (a free special is still fitted when
+            # the curve is gone); `smooth_active` gates the CURVE. Without the
+            # second, dropping the spline block while the unpenalized special
+            # survives left every spline group filtered out of the SE call, so
+            # `_spline_se` returned zeros and a SmoothCurve was emitted anyway --
+            # a plot then renders an active-looking smooth, with zero-width bands,
+            # for a block that selection removed.
+            # `active` gates the LEVEL table (a free special is still fitted when
+            # the curve is gone); `smooth_active` gates the CURVE. Without the
+            # second, dropping the spline block while the unpenalized special
+            # survives leaves every spline group filtered out of the SE call, so
+            # `_spline_se` returns zeros and a SmoothCurve is emitted anyway -- a
+            # plot then renders an active-looking smooth, with zero-width bands,
+            # for a block that selection removed.
             if with_se and active and Cov_active is not None:
                 assert active_groups_cov is not None
                 se = feature_se_from_cov(
@@ -232,43 +255,50 @@ def term_inference(
                 ci_lo = _safe_exp(level_log_rels - z_alpha * se)
                 ci_hi = _safe_exp(level_log_rels + z_alpha * se)
 
-                # Continuous curve for plotting (ordered levels only)
-                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
-                assert active_groups_cov is not None
-                # The curve is a statement about the spline block alone; its SE
-                # must be too.  feature_se_from_cov's level SEs are unaffected —
-                # that path transforms through the OC spec at full p+s width.
-                smooth_feature_groups = [
-                    fg for fg in feature_groups if fg.subgroup_type != "special"
-                ]
-                smooth_active_cov = [
-                    ag
-                    for ag in active_groups_cov
-                    if not (ag.feature_name == name and ag.subgroup_type == "special")
-                ]
-                curve_se = _spline_se(
-                    inner,
-                    name,
-                    result.beta,
-                    smooth_feature_groups,
-                    smooth_active_cov,
-                    Cov_active,
-                    x_eval=raw["x"],
-                    reference_x=np.array(
-                        [raw["level_values"][spec._base_level]],
-                        dtype=np.float64,
-                    ),
-                )
-                curve = SmoothCurve(
-                    x=raw["x"],
-                    log_relativity=raw["log_relativity"],
-                    relativity=raw["relativity"],
-                    level_x=level_x,
-                    se_log_relativity=curve_se,
-                    ci_lower=_maybe_array(_safe_exp(raw["log_relativity"] - z_alpha * curve_se)),
-                    ci_upper=_maybe_array(_safe_exp(raw["log_relativity"] + z_alpha * curve_se)),
-                )
-            elif active:
+                # Continuous curve for plotting (ordered levels only), emitted
+                # only if the SPLINE block survived selection. Otherwise every
+                # spline group is filtered out of the SE call below, _spline_se
+                # returns zeros, and the curve renders as an active-looking smooth
+                # with zero-width bands for a block that was dropped.
+                if smooth_active:
+                    level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
+                    assert active_groups_cov is not None
+                    # The curve is a statement about the spline block alone; its SE
+                    # must be too.  feature_se_from_cov's level SEs are unaffected —
+                    # that path transforms through the OC spec at full p+s width.
+                    smooth_feature_groups = spline_groups(feature_groups)
+                    smooth_active_cov = [
+                        ag
+                        for ag in active_groups_cov
+                        if not (ag.feature_name == name and ag.subgroup_type == "special")
+                    ]
+                    curve_se = _spline_se(
+                        inner,
+                        name,
+                        result.beta,
+                        smooth_feature_groups,
+                        smooth_active_cov,
+                        Cov_active,
+                        x_eval=raw["x"],
+                        reference_x=np.array(
+                            [raw["level_values"][spec._base_level]],
+                            dtype=np.float64,
+                        ),
+                    )
+                    curve = SmoothCurve(
+                        x=raw["x"],
+                        log_relativity=raw["log_relativity"],
+                        relativity=raw["relativity"],
+                        level_x=level_x,
+                        se_log_relativity=curve_se,
+                        ci_lower=_maybe_array(
+                            _safe_exp(raw["log_relativity"] - z_alpha * curve_se)
+                        ),
+                        ci_upper=_maybe_array(
+                            _safe_exp(raw["log_relativity"] + z_alpha * curve_se)
+                        ),
+                    )
+            elif smooth_active:
                 # No SEs requested but still provide the curve shape
                 level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
                 curve = SmoothCurve(
@@ -312,6 +342,13 @@ def term_inference(
             rels = np.array([raw["relativities"][lv] for lv in levels])
 
             se = ci_lo = ci_hi = None
+            # `active` gates the LEVEL table (a free special is still fitted when
+            # the curve is gone); `smooth_active` gates the CURVE. Without the
+            # second, dropping the spline block while the unpenalized special
+            # survives left every spline group filtered out of the SE call, so
+            # `_spline_se` returned zeros and a SmoothCurve was emitted anyway --
+            # a plot then renders an active-looking smooth, with zero-width bands,
+            # for a block that selection removed.
             if with_se and active and Cov_active is not None:
                 assert active_groups_cov is not None
                 se = feature_se_from_cov(
