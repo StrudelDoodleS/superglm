@@ -37,42 +37,6 @@ class LevelGrouping:
     grouped_levels: list[str]
 
 
-def _data_spelling(unique_levels: list[str]):
-    """Return a function re-spelling a caller's level label the way the data does.
-
-    Levels are compared as strings, but a caller and a column can render the same
-    level differently: ``order=[1, 2, 9]`` against a float column spells them
-    ``"1"`` and ``"1.0"``, and those never match. The declared labels then form a
-    namespace of their own, the grouping is built in it, and every row of the
-    column looks like an unseen level (issue #237).
-
-    Falls back to the label unchanged when it is already present verbatim, when it
-    is not numeric, or when no numeric level in the data equals it -- so a level
-    that genuinely is not in the data still fails the caller's own check rather
-    than being quietly renamed into one that is.
-    """
-    present = set(unique_levels)
-    by_value: dict[float, str] = {}
-    for level in unique_levels:
-        try:
-            value = float(level)
-        except (TypeError, ValueError):
-            continue
-        by_value.setdefault(value, level)
-
-    def respell(label) -> str:
-        text = str(label)
-        if text in present:
-            return text
-        try:
-            value = float(text)
-        except (TypeError, ValueError):
-            return text
-        return by_value.get(value, text)
-
-    return respell
-
-
 def collapse_levels(
     data: pd.Series | NDArray | list[str],
     *,
@@ -128,20 +92,10 @@ def collapse_levels(
     else:
         unique_levels = list(set(str(v) for v in data))
 
-    # Re-spell the caller's labels the way the data does before anything compares
-    # them; otherwise `order`/`groups` build a namespace of their own and every
-    # row of the column reads as an unseen level (issue #237).
-    respell = _data_spelling(unique_levels)
     if order is not None:
-        all_levels = [respell(level) for level in order]
+        all_levels = list(order)
     else:
         all_levels = sorted(unique_levels)
-    if groups is not None:
-        groups = {label: [respell(m) for m in members] for label, members in groups.items()}
-    if from_level is not None:
-        from_level = respell(from_level)
-    if below is not None:
-        below = respell(below)
 
     level_set = set(all_levels)
 

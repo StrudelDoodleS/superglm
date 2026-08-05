@@ -167,10 +167,14 @@ def _expand_grouped_term(
     if ti.levels is None:
         raise ValueError("Grouped term expansion requires categorical levels.")
     grouped_levels = list(ti.levels)
-    group_idx = {lev: i for i, lev in enumerate(grouped_levels)}
+    # Join on text. A LevelGrouping is string-keyed by construction, while a
+    # term's reported levels carry the declaration's own types -- an ordered
+    # categorical declared `order=[1, 2, 9]` reports ints. Matching those
+    # directly raises KeyError on the first level whose spellings differ.
+    group_idx = {str(lev): i for i, lev in enumerate(grouped_levels)}
 
     expanded_levels = grouping.all_original_levels
-    indices = [group_idx[grouping.original_to_group[lev]] for lev in expanded_levels]
+    indices = [group_idx[str(grouping.original_to_group[lev])] for lev in expanded_levels]
 
     log_rel = np.asarray(ti.log_relativity)[indices]
     rel = np.asarray(ti.relativity)[indices]

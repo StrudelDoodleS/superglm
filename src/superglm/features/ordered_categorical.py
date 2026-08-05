@@ -49,6 +49,117 @@ def _spline_kind_name(spline: Any) -> str:
     return type(spline).__name__
 
 
+def _declared_matcher(declared_levels: list[Any]):
+    """Return a function mapping a raw column value onto the level it denotes.
+
+    An ``OrderedCategorical`` has TWO sources for a level's identity -- the
+    ``order=``/``values=`` declaration and the data column -- and they need not
+    spell it the same way. Declared ``9`` against a float column is ``"9"`` on one
+    side and ``"9.0"`` on the other, and those never compare equal. Every site
+    that then asks "is this level known / special / the base" answers no, in a
+    different way each time: a crash, a silent no-op, a guard that fails open.
+
+    The declaration is canonical. This maps the DATA onto it, once, at the edge,
+    so no site downstream has to know two spellings exist.
+
+    Numeric matching applies only when the raw value is not a string. That is the
+    line between ``9.0`` (a number the column happens to store as a float, which
+    denotes declared ``9``) and ``"001"`` (a string whose leading zeros are part
+    of its identity, and which must NOT be matched by declared ``1``). Zero-padded
+    identifiers are common enough in pricing data that collapsing them would be a
+    worse bug than the one this fixes.
+    """
+    by_text: dict[str, Any] = {}
+    for level in declared_levels:
+        by_text.setdefault(str(level), level)
+
+    def _spellings(raw: Any) -> list[str]:
+        """The renderings a numeric value can plausibly appear under."""
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return []
+        out = [repr(value), str(value)]
+        if value.is_integer():
+            out.append(str(int(value)))
+        return out
+
+    def match(raw: Any) -> Any:
+        text = str(raw)
+        if text in by_text:
+            return by_text[text]
+        # Only a rendering of the SAME number counts. "9" and 9.0 render each
+        # other ("9" -> {"9.0", "9"}), so they match; "001" renders {"1.0", "1"},
+        # which is not "001", so a declared 1 can never claim it. That asymmetry
+        # is the whole safety property -- leading zeros are identity in a policy
+        # or vehicle code, and collapsing them would be a worse bug than the one
+        # this fixes.
+        for candidate in _spellings(raw):
+            if candidate in by_text:
+                return by_text[candidate]
+        return raw
+
+    return match
+
+
+def _require_unambiguous_levels(declared_levels: list[Any]) -> None:
+    """Refuse a declaration that spells one numeric value more than one way."""
+    by_value: dict[float, Any] = {}
+    for level in declared_levels:
+        try:
+            value = float(level)
+        except (TypeError, ValueError):
+            continue
+        clash = by_value.get(value)
+        if clash is not None and str(clash) != str(level):
+            raise ValueError(
+                f"OrderedCategorical levels {clash!r} and {level!r} are two spellings of "
+                f"the same numeric value ({value}); a column value could denote either. "
+                "Declare the levels consistently."
+            )
+        by_value[value] = level
+
+
+def _regroup_to_declared(grouping: Any, declared_levels: list[Any]):
+    """Return ``grouping`` with its ORIGINAL levels re-spelled as declared.
+
+    Group LABELS are new names the caller chose and are left alone; only the
+    original levels are references to levels this spec already knows.
+    """
+    if grouping is None:
+        return None
+    from dataclasses import replace as _replace
+
+    match = _declared_matcher(declared_levels)
+
+    def respell(level: Any) -> str:
+        return str(match(level))
+
+    def respell_label(label: Any, members: list) -> str:
+        """A group LABEL is a new name the caller chose -- unless the group is the
+        identity, in which case the label IS the level and shares its spelling."""
+        if [str(m) for m in members] == [str(label)]:
+            return respell(label)
+        return str(label)
+
+    labels = {
+        label: respell_label(label, members)
+        for label, members in grouping.group_to_originals.items()
+    }
+    return _replace(
+        grouping,
+        original_to_group={
+            respell(k): labels.get(v, v) for k, v in grouping.original_to_group.items()
+        },
+        group_to_originals={
+            labels.get(label, label): [respell(m) for m in members]
+            for label, members in grouping.group_to_originals.items()
+        },
+        all_original_levels=[respell(level) for level in grouping.all_original_levels],
+        grouped_levels=[labels.get(label, label) for label in grouping.grouped_levels],
+    )
+
+
 def _require_two_smooth_levels(smooth_levels: list[str], special_set: set[str]) -> None:
     """The final smooth-level list must retain at least two levels to smooth."""
     if special_set and len(smooth_levels) < 2:
@@ -403,8 +514,24 @@ class OrderedCategorical:
             self._level_to_value = dict(zip(order, vals.tolist()))
         self._ordered_levels = list(self._smooth_levels)
 
-        # Grouping: validate and store
+        # A declaration that spells one numeric value two ways cannot be resolved:
+        # a column value of 1.0 would denote either, and picking by iteration order
+        # would make the answer depend on how the levels were listed.
+        _require_unambiguous_levels(self._ordered_levels + list(self._specials))
+
+        # Grouping: validate and store. A grouping is built FROM DATA, so its
+        # labels are in the column's spelling while everything here is in the
+        # declaration's. Re-spell it once, so the whole spec lives in one
+        # namespace and no downstream site has to reconcile them again -- the
+        # editor previously carried its own copy of this, and the direct
+        # `grouping=` path carried none.
+        grouping = _regroup_to_declared(grouping, self._ordered_levels + list(self._specials))
         self._grouping = grouping
+        # Before the numeric-position check below: a grouping that merges or
+        # renames a special is wrong for a specific, explainable reason, and
+        # that reason is more useful than the generic 'no numeric position'
+        # symptom it would otherwise produce first.
+        _require_no_grouped_specials(grouping, special_set)
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
             # Preserve original level→value mapping for plot expansion
@@ -415,15 +542,35 @@ class OrderedCategorical:
             # so we average them per group. When order= was used, orig_ltv
             # keys are already the grouped level names — use them directly
             # if the group name matches, otherwise average originals.
+            # A LevelGrouping is string-keyed by construction, while `values=`/
+            # `order=` keys are the declared objects (ints, floats). Join on text
+            # so `order=[1, 2, 3]` meets a grouping spelling them "1", "2", "3";
+            # a plain `in` test silently found nothing and left the map empty,
+            # which surfaced much later as "Array must not contain infs or nans".
+            by_text = {str(k): v for k, v in orig_ltv.items()}
             grouped_ltv = {}
             for glev in grouping.grouped_levels:
-                if glev in orig_ltv:
-                    grouped_ltv[glev] = orig_ltv[glev]
+                if str(glev) in by_text:
+                    grouped_ltv[glev] = by_text[str(glev)]
                 else:
                     originals = grouping.group_to_originals[glev]
-                    vals = [orig_ltv[o] for o in originals if o in orig_ltv]
+                    vals = [by_text[str(o)] for o in originals if str(o) in by_text]
                     if vals:
                         grouped_ltv[glev] = float(np.mean(vals))
+            # Specials are exempt by construction: a free level never receives a
+            # coordinate on the spline's axis, so having no numeric position is
+            # correct for them and only for them.
+            missing = [
+                g
+                for g in grouping.grouped_levels
+                if g not in grouped_ltv and str(g) not in special_set
+            ]
+            if missing:
+                raise ValueError(
+                    f"OrderedCategorical grouping produced level(s) {missing!r} with no "
+                    f"numeric position; known levels are {sorted(by_text)}. The grouping "
+                    "and the declaration disagree about how levels are named."
+                )
             self._level_to_value = grouped_ltv
             self._smooth_levels = [lev for lev in grouping.grouped_levels if lev not in special_set]
             # _known_levels includes all *original* levels (for predict-time validation)
@@ -433,7 +580,6 @@ class OrderedCategorical:
         self._ordered_levels = list(self._smooth_levels) + list(self._special_display)
         self._n_levels = len(self._smooth_levels)
 
-        _require_no_grouped_specials(grouping, special_set)
         _require_two_smooth_levels(self._smooth_levels, special_set)
         if str(base) in special_set:
             raise ValueError(
@@ -553,14 +699,34 @@ class OrderedCategorical:
             self._base_level = self._smooth_levels[0]
         elif self.base == "first":
             self._base_level = self._smooth_levels[0]
-        elif self.base in self._smooth_levels:
-            self._base_level = self.base
         else:
-            raise ValueError(f"Base '{self.base}' not found in levels: {self._smooth_levels}")
+            # `base=` is the user's own spelling of a level and need not match the
+            # declaration's: `base="1"` against `order=[1, 2, 3]` is the same seam
+            # as everywhere else. Left unreconciled it does not raise loudly in
+            # every path -- the collapse path silently re-bases to another group,
+            # which changes every reported relativity.
+            resolved = _declared_matcher(list(self._smooth_levels))(self.base)
+            if resolved in self._smooth_levels:
+                self._base_level = resolved
+            else:
+                raise ValueError(f"Base '{self.base}' not found in levels: {self._smooth_levels}")
 
         self._non_base = [lev for lev in self._smooth_levels if lev != self._base_level]
 
     # ── Build ──────────────────────────────────────────────────────
+
+    def _canonical(self, x: NDArray) -> NDArray:
+        """Map raw column values onto the declared levels they denote.
+
+        The single point where the data's spelling of a level meets the
+        declaration's. Everything downstream -- validation, the numeric map, the
+        special mask, the grouping, the base -- then works in one namespace.
+        """
+        declared: list[Any] = list(self._ordered_levels)
+        if self._grouping is not None:
+            declared = list(self._grouping.all_original_levels) + declared
+        match = _declared_matcher(declared)
+        return np.array([match(value) for value in x], dtype=object)
 
     def build(
         self,
@@ -575,7 +741,7 @@ class OrderedCategorical:
         the order is part of the contract — ``_split_beta`` and ``transform``
         both assume it.
         """
-        x = np.asarray(x).ravel()
+        x = self._canonical(np.asarray(x).ravel())
 
         if self._grouping is not None:
             x = _grouping_labels(x)
@@ -787,7 +953,7 @@ class OrderedCategorical:
 
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix for new data using learned parameters."""
-        x = np.asarray(x).ravel()
+        x = self._canonical(np.asarray(x).ravel())
         if self._grouping is not None:
             x = _grouping_labels(x)
             valid_levels = self._known_levels | set(self._grouping.grouped_levels)
@@ -819,7 +985,7 @@ class OrderedCategorical:
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted ordered-categorical contribution directly on new data."""
-        x = np.asarray(x).ravel()
+        x = self._canonical(np.asarray(x).ravel())
         if self._grouping is not None:
             x = _grouping_labels(x)
             valid_levels = self._known_levels | set(self._grouping.grouped_levels)
