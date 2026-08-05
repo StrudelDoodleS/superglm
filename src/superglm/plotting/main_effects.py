@@ -32,6 +32,7 @@ from superglm.plotting.common import (
     _SIM_FILL,
     _exposure_kde,
     _make_continuous_figure,
+    _ordered_level_spacing,
 )
 from superglm.plotting.group_display import (
     GroupedTermDisplay,
@@ -533,14 +534,20 @@ def _plot_ordered_spline_panel(
 ):
     """Render an OrderedCategorical(spline) panel.
 
-    Levels at evenly-spaced integer positions with a smooth PCHIP
-    interpolation through the fitted relativities, plus per-level
-    error bars and sample_weight bars.
+    Levels sit at their fitted x-positions (``smooth_curve.level_x``) with
+    the fitted smooth curve drawn through them, plus per-level error bars
+    and sample_weight bars.  This is the same curve the plotly backend
+    draws in ``_add_categorical_term_trace``.
     """
     levels = list(ti.levels)
     level_rel = np.asarray(ti.relativity)
     n_levels = len(levels)
-    x_pos = np.arange(n_levels, dtype=float)
+    curve = ti.smooth_curve
+    if curve is not None and curve.level_x is not None:
+        x_pos = np.asarray(curve.level_x, dtype=np.float64)
+    else:
+        x_pos = np.arange(n_levels, dtype=np.float64)
+    spacing = _ordered_level_spacing(x_pos)
 
     # Exposure bars in background
     if sample_weight is not None and X is not None and ti.name in X.columns:
@@ -561,7 +568,7 @@ def _plot_ordered_spline_panel(
         ax2.bar(
             x_pos,
             exp_vals,
-            width=0.6,
+            width=spacing * 0.6,
             color=_EXP_FILL,
             edgecolor=_EXP_EDGE,
             linewidth=_EXP_EDGE_LW,
@@ -580,15 +587,11 @@ def _plot_ordered_spline_panel(
 
     ax.axhline(1.0, linestyle="--", linewidth=_REF_LW, color=_REF_COLOR, zorder=0)
 
-    # Smooth interpolation through level relativities (PCHIP)
-    if n_levels >= 2:
-        from scipy.interpolate import PchipInterpolator
-
-        pchip = PchipInterpolator(x_pos, level_rel)
-        x_fine = np.linspace(x_pos[0], x_pos[-1], 200)
+    # Fitted smooth curve (never an interpolation through the markers)
+    if curve is not None:
         ax.plot(
-            x_fine,
-            pchip(x_fine),
+            np.asarray(curve.x, dtype=np.float64),
+            np.asarray(curve.relativity, dtype=np.float64),
             color=_LINE_COLOR,
             linewidth=_LINE_WIDTH,
             alpha=0.6,
@@ -626,7 +629,7 @@ def _plot_ordered_spline_panel(
     rot = 45 if n_levels > 8 else 0
     ha = "right" if rot else "center"
     ax.set_xticklabels(levels, rotation=rot, ha=ha, fontsize=8)
-    ax.set_xlim(-0.5, n_levels - 0.5)
+    ax.set_xlim(float(x_pos.min()) - spacing / 2.0, float(x_pos.max()) + spacing / 2.0)
     ax.set_ylabel("Relativity")
     ax.set_title(ti.name, fontweight="bold")
     ax.grid(alpha=0.22)

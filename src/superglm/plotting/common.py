@@ -65,6 +65,23 @@ _PLOTLY_DENSITY_SCALE = [
 ]
 
 
+def _ordered_level_spacing(x: NDArray) -> float:
+    """Smallest positive gap between ordered-category level positions.
+
+    Used by both backends to size exposure bars and axis padding when
+    ``SmoothCurve.level_x`` places levels at their fitted x-positions
+    rather than at consecutive integers.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.size <= 1:
+        return 1.0
+    diffs = np.diff(np.sort(x))
+    diffs = diffs[diffs > 0]
+    if diffs.size == 0:
+        return 1.0
+    return float(diffs.min())
+
+
 def _exposure_kde(x_vals, sample_weight, grid, bw_factor=0.03):
     """Weighted KDE for sample_weight distribution, returned on *grid*."""
     bw = bw_factor * (grid[-1] - grid[0])

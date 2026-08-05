@@ -31,6 +31,7 @@ from superglm.plotting.common import (
     _apply_plotly_theme,
     _exposure_kde,
     _hex_to_rgba,
+    _ordered_level_spacing,
 )
 from superglm.plotting.group_display import (
     grouped_level_exposure,
@@ -1686,14 +1687,7 @@ def _basis_colors(n: int) -> list[str]:
 
 def _ordered_bar_width(x: NDArray) -> float:
     """Reasonable bar width for ordered-category numeric positions."""
-    x = np.asarray(x, dtype=np.float64)
-    if x.size <= 1:
-        return 0.6
-    diffs = np.diff(np.sort(x))
-    diffs = diffs[diffs > 0]
-    if diffs.size == 0:
-        return 0.6
-    return float(np.min(diffs) * 0.72)
+    return _ordered_level_spacing(x) * 0.72
 
 
 def _resolve_categorical_display(mode: str, n_levels: int) -> str:

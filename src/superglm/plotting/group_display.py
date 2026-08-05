@@ -67,7 +67,7 @@ def project_grouped_term_for_display(
         ci_lower=_collapse_array(ti.ci_lower, group_indices),
         ci_upper=_collapse_array(ti.ci_upper, group_indices),
         spline=None,
-        smooth_curve=_collapsed_smooth_curve(ti, log_rel, len(display_levels)),
+        smooth_curve=_collapsed_smooth_curve(ti, group_indices),
     )
     return GroupedTermDisplay(
         term=display_term,
@@ -161,24 +161,19 @@ def _collapse_array(values: NDArray | None, groups: list[list[int]]) -> NDArray 
 
 def _collapsed_smooth_curve(
     ti: TermInference,
-    log_rel: NDArray | None,
-    n_levels: int,
+    groups: list[list[int]],
 ) -> SmoothCurve | None:
-    if ti.smooth_curve is None or log_rel is None or n_levels < 2:
-        return None
+    """Keep the fitted curve and move each marker to its group's mean position.
 
-    from scipy.interpolate import PchipInterpolator
-
-    level_x = np.arange(n_levels, dtype=np.float64)
-    curve_x = np.linspace(float(level_x[0]), float(level_x[-1]), 200)
-    pchip = PchipInterpolator(level_x, log_rel)
-    curve_log = pchip(curve_x)
-    return SmoothCurve(
-        x=curve_x,
-        log_relativity=curve_log,
-        relativity=np.exp(curve_log),
-        level_x=level_x,
-        se_log_relativity=None,
-        ci_lower=None,
-        ci_upper=None,
+    The curve itself is never rebuilt: collapsing levels is a display
+    operation, and re-interpolating through the collapsed markers would
+    draw a shape the model never fitted.
+    """
+    curve = ti.smooth_curve
+    if curve is None or curve.level_x is None:
+        return curve
+    level_x = np.asarray(curve.level_x, dtype=np.float64)
+    collapsed_x = np.asarray(
+        [float(np.mean(level_x[indices])) for indices in groups], dtype=np.float64
     )
+    return replace(curve, level_x=collapsed_x)
