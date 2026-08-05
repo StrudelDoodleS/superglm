@@ -199,6 +199,12 @@ def _ordered_spline_base_shift(model, spec: OrderedCategorical, groups: list[Gro
     Read before the block is patched: this is the constant the base-relative
     targets have already had removed, and it has to go back into the intercept so
     an edit moves only what the user selected.
+
+    A model with neither result attribute raises rather than returning 0.0.
+    Unreachable today -- the caller only runs on a fitted model -- but 0.0 is
+    exactly the value this function exists to stop being used: it is what the
+    bug looked like before the shift was added, and it moves every prediction by
+    f(base) while leaving the relativities right, so nothing downstream notices.
     """
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)
@@ -206,7 +212,10 @@ def _ordered_spline_base_shift(model, spec: OrderedCategorical, groups: list[Gro
             continue
         beta = np.concatenate([np.asarray(result.beta)[group.sl] for group in groups])
         return spec._base_log_effect(beta)
-    return 0.0
+    raise RuntimeError(
+        "Cannot read the pre-edit base shift: the model has neither `_result` nor "
+        "`_solver_result`. Editing an ordered spline term requires fitted coefficients."
+    )
 
 
 def _apply_ordered_spline_term(
@@ -244,7 +253,12 @@ def _apply_ordered_spline_term(
     targets = native_log_effect_values(term)
     weights = _term_weights(term)
     labels = [str(level) for level in x_values]
-    specials = [str(level) for level in spec._specials]
+    # Match on the DISPLAY namespace, which is what `x_values` carries. `_specials`
+    # holds the str-coerced declaration, so on a float domain
+    # (`order=[1.0, 2.0, 9.0]`, `specials=[9]`) it spells the level "9" while the
+    # term's own rows spell it "9.0" -- the level is then reported missing and the
+    # edit is refused on data that plainly contains it.
+    specials = [str(level) for level in spec._special_display]
     missing = [level for level in specials if level not in labels]
     if missing:
         raise ValueError(f"Editable term {term.name!r} has no row for special level(s) {missing}.")

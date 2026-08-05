@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from superglm.inference._term_helpers import spline_group_enrichment
+from superglm.inference._term_helpers import spline_group_enrichment, spline_groups
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
@@ -397,7 +397,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             feature_groups = [fg for fg in model._groups if fg.feature_name == g.feature_name]
             # Mirrors coef_tables: the smooth row describes the spline block,
             # while reconstruct() still needs the full-width coefficients.
-            smooth_groups = [fg for fg in feature_groups if fg.subgroup_type != "special"]
+            smooth_groups = spline_groups(feature_groups)
             beta_combined = np.concatenate([model.result.beta[fg.sl] for fg in feature_groups])
             beta_smooth = np.concatenate([model.result.beta[fg.sl] for fg in smooth_groups])
             feature_edf = (
@@ -425,7 +425,11 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         **metadata,
                     )
                 )
-                special_labels = set(spec._specials) if spec.has_specials else None
+                # Mirrors coef_tables: match on the labels `reconstruct`
+                # exported, not the string-coerced `spec._specials`, or a
+                # non-str special (`specials=[9]` -> "9" vs level 9) reads
+                # "smooth" on the editor-stale path too.
+                special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
                 for level in raw["levels"]:
                     rows.append(
                         _CoefRow(

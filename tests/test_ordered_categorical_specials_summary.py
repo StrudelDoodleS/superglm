@@ -196,13 +196,26 @@ def test_ascii_summary_renders_a_fit_column_only_when_levels_are_marked():
     assert "Fit" in header
     assert re.search(r"band\[10\]\s+smooth\s", text)
     assert re.search(r"band\[MISSING\]\s+free\s", text)
-    # The BASE level too -- the most common row in a real specials summary, and
-    # the one the other assertions here miss. It takes the zero-coefficient
-    # branch (0.0000 with no standard error), not the ordinary estimated-level
-    # branch that band[10] exercises. The box-width test cannot cover it either,
-    # because `_row()` pads to a fixed width regardless, so a Fit cell dropped
-    # on this row misaligns silently rather than changing any line length.
-    # Verified to bind: blanking the Fit cell for zero-coefficient rows fails it.
+    # A row with NO standard error, which reaches the renderer's fallback
+    # branch (summary.py:683) rather than the estimated-level branch band[10]
+    # exercises.
+    #
+    # Note what this row is NOT: it is not the base level as a real fit
+    # produces one. This fixture row is `se=None`, and that is the only reason
+    # it lands in the fallback. A real base level comes out of
+    # `coef_tables.py:477-478` with `se=0.0` and `ci_low == ci_high == coef`,
+    # which satisfies the MIDDLE branch's second disjunct
+    # (`row.p is None and row.ci_low is not None and row.ci_high is not None`,
+    # summary.py:633-640) -- the same branch as band[10]. So the base level is
+    # already covered above; what is covered here is the no-standard-error
+    # fallback.
+    #
+    # Per-branch coverage matters much less in ASCII than in HTML anyway: all
+    # three branches emit the Fit cell from the single shared `_coef_prefix`
+    # helper, so one of them cannot lose the column while the others keep it.
+    # The box-width test does not cover this row either -- `_row()` pads to a
+    # fixed width regardless, so a dropped Fit cell misaligns silently rather
+    # than changing any line length.
     assert re.search(r"band\[1\]\s+smooth\s+0\.0000\s", text)
     # The raw lookup key is undecorated: no asterisk, no suffix on the label.
     assert "band[MISSING]*" not in text

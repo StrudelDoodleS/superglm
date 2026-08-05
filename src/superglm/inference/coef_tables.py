@@ -85,6 +85,7 @@ def build_coef_rows(
     from superglm.inference._term_helpers import (
         _resolve_group_lambda,
         spline_group_enrichment,
+        spline_groups,
     )
 
     beta = result.beta
@@ -351,7 +352,7 @@ def build_coef_rows(
             # same feature_name.  ``reconstruct`` needs the full-width vector,
             # but every statistic reported on the smooth row — edf, the Wood
             # test, ref_df, n_params — is a statement about the spline block.
-            smooth_groups = [fg for fg in feature_groups if fg.subgroup_type != "special"]
+            smooth_groups = spline_groups(feature_groups)
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
             # Two notions of "active" for a specials term.  ``feature_active``
             # asks whether *any* block survived selection and gates the level
@@ -462,7 +463,11 @@ def build_coef_rows(
                 )
 
                 levels = raw["levels"]
-                special_labels = set(spec._specials) if spec.has_specials else None
+                # `raw["special_levels"]`, not `spec._specials`: the latter is
+                # string-coerced, so for `specials=[9]` the free level is 9 in
+                # `levels` and "9" here, `9 in {"9"}` is False, and the Fit
+                # column silently reports the free level as "smooth".
+                special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
                 for i, level in enumerate(levels):
                     coef_val = float(raw["level_log_relativities"][level])
                     se_val: float | None = (

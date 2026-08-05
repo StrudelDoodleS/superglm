@@ -216,7 +216,14 @@ def term_inference(
 
             # Specials are free levels with no position on the spline axis: they
             # stay out of level_x and are flagged for the renderers instead.
-            special_labels = set(spec._specials) if spec.has_specials else set()
+            #
+            # Match on the labels `reconstruct` itself exported, NOT on
+            # `spec._specials`: the latter is string-coerced at construction, so
+            # for `order=[1, ..., 9], specials=[9]` it holds "9" while `levels`
+            # holds 9. `9 in {"9"}` is False, every level then reads
+            # not-special, and `raw["level_values"][9]` -- keyed on the smooth
+            # levels alone -- raises KeyError three lines further down.
+            special_labels = set(raw.get("special_levels") or ())
             level_is_special = (
                 np.array([lv in special_labels for lv in levels], dtype=bool)
                 if special_labels
