@@ -9,6 +9,7 @@ from superglm.dm_builder import (
     should_discretize_spline_categorical_interaction,
     should_discretize_tensor_interaction,
 )
+from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.ordered_categorical import (
     OrderedCategorical,
@@ -489,3 +490,89 @@ def test_classifier_decision_function_resolves_oc_interaction_parents():
     np.testing.assert_allclose(
         clf.decision_function(df), np.log(proba / (1.0 - proba)), rtol=1e-9, atol=1e-9
     )
+
+
+def _specials_frame(n=3000, seed=0):
+    rng = np.random.default_rng(seed)
+    band = rng.choice(BANDS, n)
+    band = np.where(rng.random(n) < 0.18, "MISSING", band)
+    df = pd.DataFrame(
+        {
+            "age_band": band,
+            "region": rng.choice(list("ABCD"), n),
+            "power": rng.uniform(20.0, 200.0, n),
+        }
+    )
+    y = rng.poisson(np.exp(-1.5 + 0.002 * df["power"])).astype(np.float64)
+    return df, y
+
+
+def _oc_specials():
+    return OrderedCategorical(
+        order=BANDS,
+        specials=["MISSING"],
+        basis=Spline(kind="ps", n_knots=4),
+    )
+
+
+def test_resolver_rejects_a_specials_parent():
+    """FALSE TODAY: the resolver has no specials rule, so it validates MISSING
+    as a known level and returns NaN scores from _map_to_numeric instead."""
+    spec = _oc_specials()
+    with pytest.raises(NotImplementedError, match="specials"):
+        resolve_interaction_parent(spec, np.array(["18-25", "MISSING"], dtype=object))
+
+
+def test_specials_parent_is_rejected_where_the_interaction_is_declared():
+    """FALSE TODAY: the declaration guard only knows about basis='step', so a
+    specials pair registers and fails much later, mid design-matrix build."""
+    df, y = _specials_frame()
+
+    with pytest.raises(NotImplementedError, match="age_band.*specials"):
+        SuperGLM(
+            family="poisson",
+            features={"age_band": _oc_specials(), "region": Categorical()},
+            interactions=[("age_band", "region")],
+        ).fit_reml(df, y)
+
+    # ... and through the incremental API, with the OC in either position
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
+    )
+    with pytest.raises(NotImplementedError, match=r"\('power', 'age_band'\)"):
+        model._add_interaction("power", "age_band")
+    assert model._interaction_specs == {}  # nothing was half-registered
+
+
+def test_an_explicit_interaction_spec_cannot_smuggle_a_specials_parent_past_it():
+    """FALSE TODAY: base.py:805-811 deep-copies anything carrying .parent_names
+    and .name straight into _interaction_specs without calling add_interaction,
+    so the declaration guard never runs for an explicit spec object.  Nothing
+    then refuses the pair -- it reaches the build with the special's score NaN.
+    The resolver guard at dm_builder.py:1071 is what stops this form."""
+    df, y = _specials_frame()
+    ti = TensorInteraction("age_band", "power")
+    ti.name = "age_band:power"
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
+        interactions=[ti],
+    )
+    with pytest.raises(NotImplementedError, match="specials"):
+        model.fit_reml(df, y)
+
+
+def test_a_specials_term_may_still_be_a_factor_smooth_group():
+    """Pins the EXEMPTION, so the refusal cannot be widened by accident: a
+    FactorSmooth reads its group column as labels, never as scores, and
+    resolve_interaction_parent_of hands it both columns untouched.  This fails
+    if the guard is put in resolve_interaction_parent_of instead."""
+    df, y = _specials_frame()
+    model = SuperGLM(
+        family="poisson",
+        features={"age_band": _oc_specials(), "power": Spline(kind="ps", n_knots=4)},
+        interactions=[FactorSmooth(variable="power", group="age_band")],
+    )
+    model.fit_reml(df, y)
+    assert np.isfinite(model._result.effective_df)

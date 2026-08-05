@@ -820,6 +820,9 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
     the same grouping, level validation, and score mapping its own
     ``build``/``transform`` apply.  Step-mode OC cannot parent an
     interaction: the deprecated one-hot geometry has no marginal smooth.
+    Neither can a term carrying ``specials=``: a special is a free level with
+    no position on the spline axis, so there is no single marginal smooth to
+    cross with.
     """
     if not isinstance(spec, OrderedCategorical):
         return spec, x
@@ -828,6 +831,14 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
             "OrderedCategorical with basis='step' is deprecated and cannot parent "
             "an interaction; use basis=Spline(...) for a smoothed ordinal parent "
             "or a Categorical feature for unsmoothed level effects."
+        )
+    if spec.has_specials:
+        raise NotImplementedError(
+            f"OrderedCategorical with specials={spec._specials!r} cannot parent an "
+            "interaction: a special is a free level with no position on the spline "
+            "axis, so the term has no single marginal smooth to cross with; drop "
+            "specials= to interact the smoothed ordinal parent, or use a Categorical "
+            "feature for unsmoothed level effects."
         )
     x = np.asarray(x).ravel()
     if spec._grouping is not None:

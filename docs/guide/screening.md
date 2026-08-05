@@ -81,9 +81,13 @@ penalized level curves; see [Interactions](interactions.md).
 
 **What gets swept.** `candidates=None` pairs every eligible fitted feature:
 splines, spline-mode `OrderedCategorical`, `Categorical` and `Numeric`.
-`Polynomial`, `RandomEffect` and
-step-mode `OrderedCategorical` have no screenable
-margin. A `Categorical` carrying a `grouping=` is eligible too: screening and
+`Polynomial`, `RandomEffect`, step-mode `OrderedCategorical` and any
+`OrderedCategorical` carrying `specials=` have no screenable margin — a
+special is a free level with no position on the spline axis, so the pair
+would need a composite margin. Each of them is reported in
+`table.attrs["deferred_features"]`, a `{feature: reason}` mapping, and naming
+one in `candidates` raises with that same reason. A `Categorical` carrying a
+`grouping=` is eligible too: screening and
 the confirmatory interaction refit both validate original labels and apply the
 same grouping once. Spline x numeric has both margins but no refit target yet,
 and is deferred until a varying-coefficient term exists.
