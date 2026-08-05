@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
 from dataclasses import replace
 from typing import Any, cast
 
@@ -264,7 +264,7 @@ def _expand_grouped_term(
     )
 
 
-def spline_groups(feature_groups: list[GroupSlice]) -> list[GroupSlice]:
+def spline_groups(feature_groups: Sequence[GroupSlice]) -> list[GroupSlice]:
     """The blocks of a feature that make up its smooth, dropping any free-level block.
 
     An OrderedCategorical with ``specials=`` owns two GroupSlices under one
@@ -278,6 +278,18 @@ def spline_groups(feature_groups: list[GroupSlice]) -> list[GroupSlice]:
     had been missed. A caller that wants the whole feature (the level table, where
     a free special keeps a real standard error even when the curve is dropped)
     should use ``feature_groups`` directly and say why.
+
+    The attribute is read directly rather than through a defaulting
+    ``getattr(g, "subgroup_type", None)``. That form fails OPEN: rename the
+    field and ``None != "special"`` holds for every group, so the filter becomes
+    a silent no-op and every smoothed level goes back to inheriting the
+    special block's activity -- the exact regression review found twice at the
+    export site, restored by a rename with no test failure. A plain attribute
+    read turns that rename into an AttributeError instead.
+
+    Takes a ``Sequence`` so tuple-holding callers (the export payload keeps its
+    source groups as a tuple) can pass theirs without a round trip; the return
+    is always a fresh list, so callers needing a tuple wrap the result.
     """
     return [g for g in feature_groups if g.subgroup_type != "special"]
 

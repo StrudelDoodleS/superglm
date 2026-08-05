@@ -492,7 +492,12 @@ def _require_no_special_members(
     spec: OrderedCategorical, term_name: str, members: list[str]
 ) -> None:
     """Refuse a collapse selection that contains a free (special) level."""
+    # Both namespaces: `members` arrive in the DISPLAY spelling, so matching only
+    # the str-coerced `_specials` leaves this guard INERT on a float domain
+    # ("9" vs "9.0") -- and a guard that fails open here silently smooths a level
+    # that `specials=` still reports as free.
     specials = {str(level) for level in spec._specials}
+    specials |= {str(level) for level in spec._special_display}
     if not specials:
         return
     selected = [member for member in members if member in specials]

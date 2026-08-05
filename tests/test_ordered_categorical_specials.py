@@ -693,3 +693,63 @@ def test_a_raw_matched_special_reports_the_label_its_domain_uses():
     assert 9.0 in raw["level_relativities"]
     # And every level in the report is a label the raw column actually contains.
     assert set(raw["levels"]) <= set(x.tolist())
+
+
+def test_ordered_levels_and_reconstruct_levels_share_one_namespace():
+    # `_ordered_levels` is what `export/summary._canonical_level_row_names`
+    # spells row names from, while the coefficient rows are named from
+    # `reconstruct()["levels"]`. They are joined on string equality, so a
+    # special spelled "9" in one and 9.0 in the other silently drops the free
+    # level's row out of the level-row set and it is exported as an ordinary
+    # "coefficient". Pin that the two agree ELEMENTWISE, for both a domain that
+    # renders the special differently from its coerced form (float) and one
+    # that does not (int).
+    for domain in ([1, 2, 3, 4, 5, 9], [1.0, 2.0, 3.0, 9.0]):
+        spec = OrderedCategorical(order=list(domain), specials=[9], basis=Spline(kind="ps", k=5))
+        x = np.array(domain + [domain[-1]], dtype=object)
+        spline_info, special_info = spec.build(x, np.ones(len(x)))
+        n = spline_info.columns.shape[1] + special_info.n_cols
+        raw = spec.reconstruct(np.zeros(n, dtype=np.float64))
+
+        assert spec._ordered_levels == raw["levels"]
+        # Not just equal-as-lists: the labels have to survive the f-string that
+        # builds every row name, which is where "9" and 9.0 come apart.
+        assert [f"band[{lev}]" for lev in spec._ordered_levels] == [
+            f"band[{lev}]" for lev in raw["levels"]
+        ]
+        assert spec._ordered_levels[-1] == domain[-1]
+
+
+def test_spline_groups_accepts_a_tuple_of_groups():
+    # The export site holds its source groups as a tuple; widening the signature
+    # to Sequence is what lets it call the shared helper instead of re-deriving
+    # the filter locally. A list-only annotation is not enforced at runtime, so
+    # assert the CONTENT round-trips rather than that the call returned.
+    from superglm.inference._term_helpers import spline_groups
+
+    class _Block:
+        def __init__(self, subgroup_type):
+            self.subgroup_type = subgroup_type
+
+    smooth, special = _Block(None), _Block("special")
+    assert spline_groups((smooth, special)) == [smooth]
+
+
+def test_numerically_equal_specials_spelled_differently_are_rejected():
+    # `specials=[9, 9.0]` passes the string-form duplicate check ("9" != "9.0"),
+    # but `_special_mask` matches a non-str special on RAW equality as well and
+    # 9 == 9.0 -- so both indicator columns claim exactly the same rows. Two
+    # collinear unpenalized coefficients: the pair is unidentifiable however the
+    # solve splits it, and nothing downstream reports the ambiguity.
+    with pytest.raises(ValueError, match="compare equal"):
+        OrderedCategorical(order=[1, 2, 3, 9], specials=[9, 9.0], basis=Spline(kind="ps", k=5))
+
+    # The check must not swallow the plain string-form duplicate, which keeps
+    # its own (more specific) message.
+    with pytest.raises(ValueError, match="Duplicate special level"):
+        OrderedCategorical(order=[1, 2, 3, 9], specials=[9, 9], basis=Spline(kind="ps", k=5))
+
+    # And two genuinely different specials still build.
+    spec = OrderedCategorical(order=[1, 2, 3, 8, 9], specials=[8, 9], basis=Spline(kind="ps", k=5))
+    assert spec._specials == ["8", "9"]
+    assert spec._ordered_levels == [1, 2, 3, 8, 9]

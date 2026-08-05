@@ -11,6 +11,7 @@ from superglm.features.categorical import Categorical
 from superglm.features.interaction import SplineCategorical, TensorInteraction
 from superglm.features.ordered_categorical import OrderedCategorical
 from superglm.features.spline import _SplineBase
+from superglm.inference._term_helpers import spline_groups
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
@@ -348,14 +349,16 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
         #
         # Only a level actually fitted free may take its activity from the special
         # block -- that one really is still estimated when the curve is gone.
+        #
+        # Through ``spline_groups`` rather than a local
+        # ``getattr(group, "subgroup_type", None) != "special"``: the defaulting
+        # form fails OPEN under a rename (``None != "special"`` keeps every
+        # group) and the filter would silently become a no-op here, which is the
+        # regression this comment describes.
         inherits_from_special = kind == "free level"
         active_groups = source_groups
         if not inherits_from_special:
-            active_groups = tuple(
-                group
-                for group in source_groups
-                if getattr(group, "subgroup_type", None) != "special"
-            )
+            active_groups = tuple(spline_groups(source_groups))
         terms.append(
             SummaryTermRow(
                 term=str(row.name),

@@ -1697,3 +1697,46 @@ def test_summary_sheet_keeps_dropped_smooth_level_rows_inactive():
     assert not any(row.active for row in smooth_levels), (
         "smoothed levels are no longer fitted once the spline block is dropped"
     )
+
+
+def test_summary_sheet_level_activity_filter_fails_closed_on_a_renamed_field():
+    # The test above pins the BEHAVIOUR; this pins that the behaviour cannot be
+    # undone silently. The filter used to read
+    # `getattr(group, "subgroup_type", None) != "special"`, which fails OPEN:
+    # rename the field and `None != "special"` holds for every group, so the
+    # filter becomes a no-op and every smoothed level row goes straight back to
+    # inheriting activity from the special block -- the regression above,
+    # restored by a rename, with the suite still green.
+    #
+    # Simulate the rename by hiding the attribute on the model's groups and
+    # assert the export REFUSES rather than quietly reverting. The compact
+    # summary is built first, off the untouched model, so only the level-row
+    # activity filter sees the renamed groups.
+    from superglm.export.summary import _adapt_compact_summary, _term_rows
+    from tests.test_ordered_categorical_inference import (
+        _fit_deselected_spline_with_live_special,
+    )
+
+    model = _fit_deselected_spline_with_live_special()
+    source = _adapt_compact_summary(model.summary(detail="compact"))
+
+    class _Renamed:
+        """A GroupSlice whose `subgroup_type` has been renamed away."""
+
+        def __init__(self, group):
+            self._group = group
+            self.block_type = group.subgroup_type
+
+        def __getattr__(self, name):
+            if name == "subgroup_type":
+                raise AttributeError(name)
+            return getattr(self._group, name)
+
+    # Sanity: the untouched model does produce inactive smoothed level rows, so
+    # a silent revert really would be visible here.
+    baseline = _term_rows(model, source)
+    assert not any(row.active for row in baseline if row.group == "band" and row.kind == "level")
+
+    model._groups = [_Renamed(group) for group in model._groups]
+    with pytest.raises(AttributeError, match="subgroup_type"):
+        _term_rows(model, source)

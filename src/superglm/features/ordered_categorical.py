@@ -229,6 +229,19 @@ class OrderedCategorical:
                 lev = str(raw_lev)
                 if lev in self._specials:
                     raise ValueError(f"Duplicate special level {lev!r} in 'specials'.")
+                # The string forms of 9 and 9.0 differ ("9" vs "9.0"), so the
+                # check above lets both through -- but `_special_mask` matches a
+                # non-str special on RAW equality too, and 9 == 9.0, so both
+                # indicator columns claim exactly the same rows. That is two
+                # collinear unpenalized coefficients, and the pair is
+                # unidentifiable however the solve resolves it.
+                clash = next((prev for prev in self._special_raw if prev == raw_lev), None)
+                if clash is not None:
+                    raise ValueError(
+                        f"Special level {raw_lev!r} in 'specials' duplicates {clash!r}: they "
+                        "are spelled differently but compare equal, so both would claim the "
+                        "same rows and their free coefficients would be unidentifiable."
+                    )
                 self._specials.append(lev)
                 self._special_raw.append(raw_lev)
         # How each special is REPORTED: the label its domain spells it with, so it
@@ -370,7 +383,13 @@ class OrderedCategorical:
         self.degree = resolved_degree
         self.n_knots = resolved_n_knots
         self._smooth_levels: list[str] = []
-        self._ordered_levels: list[str] = []
+        # Levels as REPORTED, in block order: the smooth levels under their
+        # `order=`/`values=` labels, then the specials under `_special_display`
+        # (the domain's own label, not the string-coerced `_specials`). One
+        # namespace, because `reconstruct()["levels"]` is spelled the same way
+        # and every downstream row name, weight lookup and membership test joins
+        # the two lists on equality.
+        self._ordered_levels: list[Any] = []
 
         # Derive smooth levels and numeric values
         if values is not None:
@@ -411,7 +430,7 @@ class OrderedCategorical:
             self._known_levels = set(grouping.all_original_levels) | known_special_labels
         else:
             self._known_levels = set(self._smooth_levels) | known_special_labels
-        self._ordered_levels = list(self._smooth_levels) + list(self._specials)
+        self._ordered_levels = list(self._smooth_levels) + list(self._special_display)
         self._n_levels = len(self._smooth_levels)
 
         _require_no_grouped_specials(grouping, special_set)
@@ -872,8 +891,12 @@ class OrderedCategorical:
         raw["relativity"] = np.exp(raw["log_relativity"])
 
         # Report specials under their domain labels so every entry in `levels` is
-        # in the same namespace as the smooth levels and as the raw column.
-        all_levels = list(self._smooth_levels) + list(self._special_display)
+        # in the same namespace as the smooth levels and as the raw column. Read
+        # `_ordered_levels` rather than re-deriving the concatenation: the two
+        # lists are joined on equality downstream (canonical row names come from
+        # one, coefficient row names from the other), and re-deriving is how they
+        # came to be spelled differently in the first place.
+        all_levels = list(self._ordered_levels)
         all_log_rels = np.concatenate(
             [level_log_rels, np.asarray(special_beta, dtype=np.float64) - base_shift]
         )

@@ -378,3 +378,29 @@ def test_the_collapse_clone_keeps_a_special_s_raw_label():
 
     assert clone._specials == ["9"]
     assert 9 in clone._special_raw, "the clone dropped the raw label and can only match str"
+
+
+def test_base_shift_refuses_a_model_with_no_fitted_coefficients(specials_model):
+    # `_ordered_spline_base_shift` used to fall through to `return 0.0` when the
+    # model exposed neither `_result` nor `_solver_result`. That is unreachable
+    # from the editor today -- but 0.0 is precisely the value the function
+    # exists to stop being used: it is what the code did BEFORE the base shift
+    # was added, and it shifts every prediction by f(base) while leaving the
+    # relativities correct, so no relativity assertion anywhere would notice.
+    # Fail loudly instead.
+    from superglm.editor.apply import _ordered_spline_base_shift
+
+    model = specials_model[0]
+    spec = model._specs["band"]
+    groups = [g for g in model._groups if g.feature_name == "band"]
+
+    class _Unfitted:
+        """A model object carrying neither result attribute."""
+
+    with pytest.raises(RuntimeError, match="neither `_result` nor `_solver_result`"):
+        _ordered_spline_base_shift(_Unfitted(), spec, groups)
+
+    # And the happy path still returns the real shift, so the guard has not
+    # simply been made unreachable in the other direction.
+    shift = _ordered_spline_base_shift(model, spec, groups)
+    assert np.isfinite(shift)
