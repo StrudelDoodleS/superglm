@@ -301,3 +301,136 @@ def test_inactive_metrics_feature_se_keeps_ordered_level_schema() -> None:
     assert list(result["levels"]) == levels
     assert result["base_level"] == model._specs["band"]._base_level
     np.testing.assert_array_equal(result["se_log_relativity"], np.zeros(len(levels)))
+
+
+def _special_band_data():
+    """Ordered bands on a smooth trend plus a structurally different MISSING band."""
+    rng = np.random.default_rng(20260805)
+    levels = [f"L{i}" for i in range(7)]
+    codes = np.tile(np.arange(len(levels)), 180)
+    rng.shuffle(codes)
+    x_ordered = np.asarray(levels, dtype=object)[codes]
+    x_numeric = codes / (len(levels) - 1)
+    w_ordered = rng.uniform(0.6, 1.8, len(codes))
+    eta_ordered = -0.8 + 0.9 * x_numeric + 0.15 * np.sin(2.0 * np.pi * x_numeric)
+
+    n_special = 90
+    w_special = rng.uniform(0.6, 1.8, n_special)
+    eta_special = np.full(n_special, 0.9)
+
+    band = np.concatenate([x_ordered, np.full(n_special, "MISSING", dtype=object)])
+    weights = np.concatenate([w_ordered, w_special])
+    eta = np.concatenate([eta_ordered, eta_special])
+    y = rng.poisson(np.exp(eta) * weights).astype(float)
+    ordered_mask = np.asarray(band != "MISSING", dtype=bool)
+    return pd.DataFrame({"band": band}), y, weights, ordered_mask, levels
+
+
+def _fit_special_band_model():
+    """Fit the specials term. Poisson keeps the scale known, so the Wood test
+    uses res_df = -1 and no dispersion estimate enters the comparison."""
+    frame, y, weights, _, levels = _special_band_data()
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        tol=1e-10,
+        max_iter=200,
+        features={
+            "band": OrderedCategorical(
+                order=levels,
+                specials=["MISSING"],
+                base="first",
+                basis=Spline(kind="ps", k=7),
+            )
+        },
+    )
+    model.fit(frame, y, sample_weight=weights)
+    return model, levels
+
+
+def test_whole_smooth_test_sees_only_the_spline_block(monkeypatch):
+    model, _ = _fit_special_band_model()
+    spline_group = next(g for g in model._groups if g.name == "band")
+    special_group = next(g for g in model._groups if g.name == "band:special")
+    assert special_group.size == 1
+    assert special_group.subgroup_type == "special"
+
+    from superglm.stats import wood_pvalue
+
+    real_wood_test = wood_pvalue.wood_test_smooth
+    calls = []
+
+    def recording_wood_test(beta_j, X_j, V_b_j, edf1_j, res_df=-1.0):
+        calls.append((np.shape(beta_j), np.shape(X_j), np.shape(V_b_j)))
+        return real_wood_test(beta_j, X_j, V_b_j, edf1_j, res_df)
+
+    monkeypatch.setattr(wood_pvalue, "wood_test_smooth", recording_wood_test)
+    summary = model.summary()
+
+    # FAILS TODAY: coef_tables.py:340 selects every GroupSlice whose
+    # feature_name is "band", so active_indices (386-388) spans the spline
+    # block AND the special column.  beta_j / X_j / V_b_j therefore come in
+    # one column too wide and the p-value tests "curve is flat AND the
+    # MISSING offset is zero".
+    assert len(calls) == 1
+    beta_shape, x_shape, v_shape = calls[0]
+    assert beta_shape == (spline_group.size,)
+    assert x_shape[1] == spline_group.size
+    assert v_shape == (spline_group.size, spline_group.size)
+
+    # The specials block gets no sibling smooth row: one group row per term.
+    smooth_rows = [row for row in summary._coef_rows if row.is_spline and row.group == "band"]
+    assert [row.name for row in smooth_rows] == ["band"]
+    # FAILS TODAY: n_params is len(beta_combined) at coef_tables.py:421.
+    assert smooth_rows[0].n_params == spline_group.size
+
+
+def _fit_ordered_only_reference():
+    """The same model with the special rows removed instead of held out."""
+    frame, y, weights, ordered_mask, levels = _special_band_data()
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        tol=1e-10,
+        max_iter=200,
+        features={
+            "band": OrderedCategorical(
+                order=levels,
+                base="first",
+                basis=Spline(kind="ps", k=7),
+            )
+        },
+    )
+    model.fit(
+        frame.loc[ordered_mask].reset_index(drop=True),
+        y[ordered_mask],
+        sample_weight=weights[ordered_mask],
+    )
+    return model
+
+
+def test_special_level_does_not_change_the_reported_smooth_statistics():
+    with_special, _ = _fit_special_band_model()
+    reference = _fit_ordered_only_reference()
+
+    row = _smooth_row(with_special.summary())
+    ref_row = _smooth_row(reference.summary())
+
+    assert row.subgroup_type == "ordered_spline"
+    assert row.active
+
+    # FAILS TODAY, all four:
+    #   n_params  -> spline size + 1   (coef_tables.py:421)
+    #   edf       -> spline edf + ~1.0 (coef_tables.py:343-347)
+    #   wald_chi2 -> joint test including the large MISSING offset
+    #   ref_df    -> driven by edf1 summed over the special column too
+    assert row.n_params == ref_row.n_params
+    assert row.edf == pytest.approx(ref_row.edf, rel=1e-3)
+    assert row.wald_chi2 == pytest.approx(ref_row.wald_chi2, rel=1e-2)
+    assert row.ref_df == pytest.approx(ref_row.ref_df, rel=1e-2)
+    assert row.wald_p == pytest.approx(ref_row.wald_p, rel=1e-2, abs=1e-6)
+
+    # Lambda / knot metadata must come from the spline block, not from
+    # whichever block happens to sit first (coef_tables.py:412-415).
+    assert row.spline_kind == ref_row.spline_kind
+    assert row.smoothing_lambda == pytest.approx(ref_row.smoothing_lambda, rel=1e-12)
