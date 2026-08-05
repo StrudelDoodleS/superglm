@@ -481,8 +481,56 @@ class OrderedCategorical:
     ) -> GroupInfo | list[GroupInfo]:
         """Spline mode: map to numeric, delegate to internal Spline."""
         self._choose_base(x, sample_weight)
-        x_numeric = self._map_to_numeric(x)
-        return self._spline.build(x_numeric)
+        if not self.has_specials:
+            return self._spline.build(self._map_to_numeric(x))
+
+        special_mask = self._special_mask(x)
+        ordered_mask = ~special_mask.any(axis=1)
+        missing = [lev for j, lev in enumerate(self._specials) if not special_mask[:, j].any()]
+        if missing:
+            raise ValueError(
+                f"Special level(s) {missing!r} were never observed in the training data. "
+                "A special with no rows has an all-zero indicator column and an "
+                "unidentifiable coefficient; remove it from specials= or supply data "
+                "containing it."
+            )
+
+        # The identifiability constraint is a column sum over the rows present, so
+        # the spline must be built on exactly the rows its block is nonzero on.
+        # Building over all rows would break 1'(B@Z) = 0 once the special rows are
+        # zeroed, and would let a fabricated coordinate reach knot placement.
+        ordered_numeric = self._map_to_numeric(x[ordered_mask])
+        spline_info = self._spline.build(ordered_numeric)
+        spline_info = self._expand_rows(spline_info, ordered_mask)
+
+        indicators = sp.csr_matrix(special_mask.astype(np.float64))
+        special_info = GroupInfo(
+            columns=indicators,
+            n_cols=len(self._specials),
+            penalty_matrix=None,
+            reparametrize=False,
+            penalized=False,
+            subgroup_name="special",
+            projection=None,
+        )
+        return [spline_info, special_info]
+
+    def _special_mask(self, x: NDArray) -> NDArray[np.bool_]:
+        """(n, n_specials) boolean membership matrix, column j == self._specials[j]."""
+        return np.column_stack([np.asarray(x == lev) for lev in self._specials])
+
+    @staticmethod
+    def _expand_rows(info: GroupInfo, ordered_mask: NDArray[np.bool_]) -> GroupInfo:
+        """Re-embed an ordered-row basis into full-length rows, zero elsewhere."""
+        import dataclasses
+
+        n = len(ordered_mask)
+        compact = info.columns
+        expanded = sp.lil_matrix((n, compact.shape[1]), dtype=np.float64)
+        expanded[np.flatnonzero(ordered_mask)] = compact
+        return dataclasses.replace(
+            info, columns=expanded.tocsr(), basis_rows=np.asarray(ordered_mask, dtype=bool)
+        )
 
     def _build_step(self, x: NDArray, sample_weight: NDArray | None) -> GroupInfo:
         """Step mode: one-hot with first-difference penalty."""
