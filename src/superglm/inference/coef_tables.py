@@ -344,10 +344,19 @@ def build_coef_rows(
             # test, ref_df, n_params — is a statement about the spline block.
             smooth_groups = [fg for fg in feature_groups if fg.subgroup_type != "special"]
             beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
+            # Two notions of "active" for a specials term.  ``feature_active``
+            # asks whether *any* block survived selection and gates the level
+            # table, because a free special keeps its own real standard error
+            # even when the curve is dropped.  ``smooth_active`` asks about the
+            # spline block alone and gates everything printed on the smooth
+            # row: an unpenalized specials block is always selected, so testing
+            # the whole feature there would make the row permanently "active"
+            # while advertising zero edf and a NaN Wald test.
             feature_active = any(fg.name in selected_names for fg in feature_groups)
+            smooth_active = any(fg.name in selected_names for fg in smooth_groups)
             feature_edf = (
                 sum(_get_group_edf_map().get(fg.name, 0.0) for fg in smooth_groups)
-                if feature_active
+                if smooth_active
                 else 0.0
             )
 
@@ -424,11 +433,11 @@ def build_coef_rows(
                         group=feature_label,
                         is_spline=True,
                         n_params=sum(fg.size for fg in smooth_groups),
-                        active=feature_active,
+                        active=smooth_active,
                         group_norm=float(np.linalg.norm(beta_active)),
-                        wald_chi2=stat if feature_active else None,
-                        wald_p=p_val if feature_active else None,
-                        ref_df=ref_df if feature_active else None,
+                        wald_chi2=stat if smooth_active else None,
+                        wald_p=p_val if smooth_active else None,
+                        ref_df=ref_df if smooth_active else None,
                         curve_se_min=curve_se_min,
                         curve_se_max=curve_se_max,
                         subgroup_type="ordered_spline",

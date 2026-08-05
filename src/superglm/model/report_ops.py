@@ -419,7 +419,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         group=g.feature_name,
                         is_spline=True,
                         n_params=len(beta_smooth),
-                        active=any(fg.name in selected_names for fg in feature_groups),
+                        active=any(fg.name in selected_names for fg in smooth_groups),
                         group_norm=float(np.linalg.norm(beta_smooth)),
                         subgroup_type="ordered_spline",
                         **metadata,
