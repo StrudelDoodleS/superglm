@@ -8,6 +8,30 @@ Nothing here modifies superglm. It times the public entry points, reads the
 timing breakdown superglm already records for REML, and probes the model two
 ways the breakdown cannot: which FEATURE costs the most, and how the cost grows
 with ROWS.
+
+ALREADY HAVE A FRAME AND A CV ROUTINE?
+--------------------------------------
+`load_data()` just returns what you already have::
+
+    def load_data():
+        return my_X, my_y, my_weights, None
+
+`build_model()` must return ONE **unfitted** model -- this script does the
+fitting itself, repeatedly, and a function that fits internally would measure
+the wrong thing. If your current function runs k-fold CV, split it in two: the
+part that declares `features=` / `family=` moves here, and the fold loop stays
+where it is. Typically that means changing::
+
+    def build_and_cv(X, y):                 def make_spec():
+        model = SuperGLM(features=..., ...)     return SuperGLM(features=..., ...)
+        for train, test in folds: ...       # fold loop stays in your code
+
+then `build_model()` is `return make_spec()`.
+
+Set `N_FOLDS` below to whatever your CV uses. It changes no measurement -- it
+only multiplies the single-fit timings out so they can be compared against the
+wall time you actually observe around your CV loop. A 5-fold run costs five
+fits, which is the usual reason a "slow" model is not actually slow.
 """
 
 from __future__ import annotations
@@ -24,8 +48,12 @@ import pandas as pd
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 
 # ─────────────────────────────────────────────────────────────────────
-# EDIT THESE TWO FUNCTIONS
+# EDIT THESE TWO FUNCTIONS (and N_FOLDS if you cross-validate)
 # ─────────────────────────────────────────────────────────────────────
+
+# Folds in your CV loop. 1 = you fit once. Only affects the reported
+# projection, never a measurement.
+N_FOLDS = 1
 
 
 def load_data() -> tuple[pd.DataFrame, np.ndarray, np.ndarray | None, np.ndarray | None]:
@@ -128,6 +156,16 @@ def main():
             f"coefficients: p={max(g.end for g in m_reml._groups)} across "
             f"{len(m_reml._groups)} groups"
         )
+        if N_FOLDS > 1:
+            # Each fold trains on (k-1)/k of the rows, and cost is close to linear
+            # in rows, so k folds cost about (k-1) full fits -- not k.
+            print(f"\nprojected over {N_FOLDS} folds -- compare THIS to the time you observe:")
+            print(f"  fit()       {t_fit * (N_FOLDS - 1):8.3f}s")
+            print(f"  fit_reml()  {t_reml * (N_FOLDS - 1):8.3f}s")
+            print(
+                f"  (each fold trains on {N_FOLDS - 1}/{N_FOLDS} of the rows, so {N_FOLDS} folds"
+                f" cost about {N_FOLDS - 1} full fits, not {N_FOLDS})"
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"fit_reml()  FAILED: {type(exc).__name__}: {exc}")
         d, t_reml, m_reml = {}, None, None
