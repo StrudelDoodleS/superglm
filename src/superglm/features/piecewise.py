@@ -395,33 +395,64 @@ class Piecewise:
                 f"{_format_values(mass)}."
             )
 
+        # Rules 9 and 11 count IN-RANGE support only.  `_segment_index` clamps a
+        # row outside [t_0, t_{J+1}] into the nearest boundary segment, which is
+        # right for evaluating the basis -- that clamp is what continues the
+        # boundary line -- and wrong for counting support: a row at x = 95 is not
+        # evidence about the segment [45, 50].  Binning the clamped index lets a
+        # rated range holding no observation at all pass both rules while the
+        # message reports full weight, so the extrapolating rows are separated
+        # out here and reported rather than credited.
+        n_seg = t.size - 1
+        inside = (x >= t[0]) & (x <= t[-1])
+        seg_weight = np.bincount(
+            self._segment_index(x[inside]), weights=weights[inside], minlength=n_seg
+        )
+        extrapolating = float(weights[~inside].sum())
+        tails = (
+            ""
+            if extrapolating <= 0.0
+            else (
+                f" A further {extrapolating:.10g} of weight lies outside "
+                f"[{t[0]:.10g}, {t[-1]:.10g}]; those rows load the boundary segments' "
+                "slopes but support no segment, so they are excluded from the counts above."
+            )
+        )
+
         # Rule 9 -- a segment bracketing no data.  This is a DATA-SUPPORT rule,
         # not an identifiability rule: it rates a distinction the data cannot
         # support.  Positive weight per segment is *not* sufficient for
         # identifiability -- that is what rule 10 is for.
-        seg = self._segment_index(x)
-        n_seg = t.size - 1
-        seg_weight = np.bincount(seg, weights=weights, minlength=n_seg)
         starved = np.flatnonzero(seg_weight <= 0.0)
         if starved.size:
             edges = ", ".join(f"[{t[j]:.10g}, {t[j + 1]:.10g}]" for j in starved)
             raise ValueError(
-                f"Piecewise segment(s) {edges} carry no weight, so the term rates a "
+                f"Piecewise segment(s) {edges} carry no in-range weight, so the term rates a "
                 "distinction the data cannot support. Per-segment weight over segments "
-                f"{_format_values(t)}: {_format_values(seg_weight)}."
+                f"{_format_values(t)}: {_format_values(seg_weight)}.{tails}"
             )
 
         # Rule 10 -- the rule that actually catches degeneracy.  Rules 8 and 9
         # both pass on configurations whose retained columns are still rank
         # deficient (one distinct x per segment, for instance).
+        #
+        # The rank is taken on ALL J+2 weighted hat columns, not on the J+1
+        # retained ones, because the intercept is part of the matrix the fit
+        # inverts and the dropped hat is what makes room for it.  The hats are a
+        # partition of unity, so the weighted intercept column sqrt(w) is exactly
+        # their row sum: rank(sqrt(w) H) == rank([sqrt(w) 1, sqrt(w) H_retained]).
+        # Checking only the retained columns misses the very degeneracy this rule
+        # was added for -- one distinct x per segment gives J+1 independent
+        # retained columns that are still collinear with the intercept.
         n_cols = self._non_base_indices.size
-        scaled = np.sqrt(weights)[:, None] * H[:, self._non_base_indices]
+        scaled = np.sqrt(weights)[:, None] * H
         rank = int(np.linalg.matrix_rank(scaled))
-        if rank < n_cols:
+        if rank < n_cols + 1:
             raise ValueError(
-                f"Piecewise design is rank deficient: rank {rank} of {n_cols} retained "
-                f"columns (deficiency {n_cols - rank}). The knots ask for more distinct "
-                f"positions than x supplies. Knots: {_format_values(t)}."
+                f"Piecewise design is rank deficient against the intercept: rank {rank} of "
+                f"{n_cols + 1} ({n_cols} retained column(s) plus the intercept they are "
+                f"identified against, deficiency {n_cols + 1 - rank}). The knots ask for more "
+                f"distinct positions than x supplies. Knots: {_format_values(t)}."
             )
 
         # Rule 11 -- positive but thin. A warning, not an error: it is the
@@ -434,9 +465,9 @@ class Piecewise:
             edges = ", ".join(f"[{t[j]:.10g}, {t[j + 1]:.10g}]" for j in thin)
             warnings.warn(
                 f"Piecewise segment(s) {edges} carry under "
-                f"{_SMALL_SEGMENT_WEIGHT_FRACTION:.1%} of the total weight. "
+                f"{_SMALL_SEGMENT_WEIGHT_FRACTION:.1%} of the in-range weight. "
                 f"Per-segment weight over segments {_format_values(t)}: "
-                f"{_format_values(seg_weight)}.",
+                f"{_format_values(seg_weight)}.{tails}",
                 UserWarning,
                 stacklevel=3,
             )
@@ -454,8 +485,9 @@ class Piecewise:
         because several rules fire together on a degenerate input: (1) finite x,
         (2) non-empty breaks, (3) known strategy, (4) increasing sequence breaks,
         (6a) lower < upper, (5) int-mode placement, (6b) breaks strictly inside,
-        (7) base resolves to one knot, (8) no zero-mass knot, (9) no empty
-        segment, (10) full column rank, (11) thin-segment warning.
+        (7) base resolves to one knot, (8) no zero-mass knot, (9) no in-range
+        empty segment, (10) full column rank against the intercept, (11)
+        thin-segment warning.
         """
         x = _finite_x(x)
         weights = _conforming_weights(sample_weight, x.size)
@@ -485,6 +517,14 @@ class Piecewise:
         # Derived, not fitted: the slopes carry no independent p-value.
         slopes = np.diff(log_rel) / np.diff(t)
         return {
+            # "x" is the generic contract key every x-bearing spec returns, and
+            # the dispatchers that render a fitted curve -- `model.relativities()`
+            # above all -- are if/elif chains with no else, so a spec that omits
+            # it is dropped from the output with no error and no warning.
+            # "knots" is the same vector under the name that means something
+            # here; both are exported so neither caller has to know about the
+            # other.
+            "x": t.copy(),
             "knots": t.copy(),
             "base_knot": float(t[self._base_index]),
             "base_index": int(self._base_index),

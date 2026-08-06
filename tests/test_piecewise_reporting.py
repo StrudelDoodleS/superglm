@@ -272,6 +272,138 @@ class TestSummaryRows:
         assert "[piecewise, 4 params" in text
         assert "[spline, 4 params" not in text
 
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_the_summary_names_the_base_knot_in_a_reference_row(self, case_name):
+        """Every coefficient is a contrast against a knot the summary must name.
+
+        The workbook prints all ``J + 2`` knots and the editor puts a handle on
+        each, so without this row the summary is the one surface of the three
+        that never states the reference -- and with ``breaks=int`` the knot
+        vector is not printed either, so it cannot be inferred by elimination.
+        """
+        model, _ = _fit(case_name)
+        spec = _piecewise_spec(model)
+        base_row = f"x[{float(spec._knots[spec._base_index]):.10g}]"
+
+        text = str(model.summary())
+        assert base_row in text
+        # Rendered as a reference, not as an estimate of zero.
+        line = next(line for line in text.splitlines() if base_row in line)
+        assert "ref" in line
+
+        # Knot order, not "the non-base knots then the base".
+        rendered = [
+            row.name
+            for row in model.summary()._display_rows
+            if row.group == "x" and row.name.startswith("x[")
+        ]
+        assert rendered == [f"x[{float(knot):.10g}]" for knot in spec._knots]
+
+    def test_the_reference_row_stays_out_of_the_canonical_coefficient_rows(self):
+        """It carries no coefficient, so nothing that counts parameters may see it.
+
+        ``Categorical`` synthesises its reference row on the same display-only
+        path for the same reason; putting it in ``_coef_rows`` would add a
+        phantom row to the exported Summary sheet and to every edf bucket.
+        """
+        model, _ = _fit("interior_base")
+        spec = _piecewise_spec(model)
+        base_row = f"x[{float(spec._knots[spec._base_index]):.10g}]"
+
+        assert all(row.name != base_row for row in model.summary()._coef_rows)
+        payload = build_summary_export_payload(model)
+        assert all(row.term != base_row for row in payload.terms)
+
+
+class TestDegreesOfFreedomAttribution:
+    def test_the_fixed_df_is_not_reported_as_smooth_df(self):
+        """§4: edf is J+1 exactly, not an estimated trace, and the test is not Wood's.
+
+        ``is_spline`` is only what routes the row through the group-test
+        renderer.  Read as "this term was smoothed" it put four parametric df in
+        the header's smooth bucket and printed the Wood footnote over a model
+        with no smooth in it.
+        """
+        model, _ = _fit("interior_base")
+        text = str(model.summary())
+
+        assert "(0 smooth)" in text
+        assert "Wood (2013)" not in text
+        assert "Parametric p-values are Wald approximations." in text
+        # Total df is unaffected: intercept + 4 knots + 2 region + 1 density.
+        assert "8.000 (0 smooth)" in text
+
+    def test_a_real_smooth_in_the_same_model_still_reports_as_smooth(self):
+        """The exclusion is scoped to the piecewise row, not to the bucket itself."""
+        case = make_case("interior_base")
+        model = SuperGLM(
+            features={
+                "x": case.spec,
+                "density": Spline(n_knots=6),
+                "region": Categorical(base="first"),
+            },
+        )
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        text = str(model.summary())
+
+        assert "(0 smooth)" not in text
+        assert "Wood (2013)" in text
+
+
+class TestRelativities:
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_relativities_carries_the_piecewise_term(self, case_name):
+        """`relativities()` dispatches on an if/elif chain with no else branch.
+
+        A spec whose ``reconstruct()`` names none of ``x`` / ``levels`` /
+        ``relativity_per_unit`` is dropped from the documented "relativity
+        DataFrames for all features" silently -- a tariff built off it ships one
+        factor short, with no error and no warning.
+        """
+        model, _ = _fit(case_name)
+        spec = _piecewise_spec(model)
+        tables = model.relativities()
+
+        assert list(tables) == list(model._feature_order)
+        frame = tables["x"]
+        np.testing.assert_allclose(frame["x"].to_numpy(), spec._knots, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            frame["log_relativity"].to_numpy(),
+            model.term_inference("x").log_relativity,
+            rtol=0.0,
+            atol=_RECONSTRUCTION_RTOL,
+        )
+        assert float(frame["relativity"].to_numpy()[spec._base_index]) == 1.0
+
+    def test_relativities_with_se_reports_one_standard_error_per_knot(self):
+        model, _ = _fit("interior_base")
+        spec = _piecewise_spec(model)
+        frame = model.relativities(with_se=True)["x"]
+
+        assert len(frame) == spec._knots.size
+        se = frame["se_log_relativity"].to_numpy()
+        assert se[spec._base_index] == 0.0
+        assert np.all(se[[j for j in range(se.size) if j != spec._base_index]] > 0.0)
+
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_feature_se_is_labelled_by_knot_like_every_other_piecewise_surface(self, case_name):
+        """The unlabelled ``{"se": diag}`` fallback is off by one from the base on.
+
+        It returns the J+1 per-coefficient values with no knot vector beside
+        them, so a caller zipping them against the term's knots pairs the knot
+        after the base with the base's SE, and so on to the end.
+        """
+        model, case = _fit(case_name)
+        spec = _piecewise_spec(model)
+        metrics = model.metrics(case.X, case.y, sample_weight=case.sample_weight)
+        out = metrics.feature_se("x")
+
+        assert set(out) == {"x", "se_log_relativity"}
+        np.testing.assert_array_equal(out["x"], spec._knots)
+        se = out["se_log_relativity"]
+        assert se.shape == (spec._knots.size,)
+        assert se[spec._base_index] == 0.0
+
     def test_the_four_condition_comment_is_present_at_the_reporting_site(self):
         """The reporting contract's conditions live in code, not only in a design doc."""
         from pathlib import Path

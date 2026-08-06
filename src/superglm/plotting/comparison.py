@@ -13,6 +13,7 @@ from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.plotting.common import _exposure_kde
@@ -30,7 +31,12 @@ def _comparison_family(spec) -> str | None:
     """Map a feature spec to its comparison family."""
     if isinstance(spec, Categorical | OrderedCategorical):
         return "level"
-    if isinstance(spec, Numeric | Polynomial | _SplineBase):
+    # Piecewise belongs here: the continuous path evaluates `spec.score` on a
+    # shared grid, which a piecewise term answers exactly (and past both
+    # boundary knots).  Left out, the term was reported as "missing or
+    # unsupported in one or more models" even when both models declared it
+    # identically, sending the reader after a column that is not absent.
+    if isinstance(spec, Numeric | Piecewise | Polynomial | _SplineBase):
         return "continuous"
     return None
 

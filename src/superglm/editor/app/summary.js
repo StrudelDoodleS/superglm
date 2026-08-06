@@ -733,6 +733,11 @@ function renderSummaryFact(label, value) {
   `;
 }
 
+// Row kinds that name a whole-term group test rather than a coefficient. The
+// label is rendered from the kind itself so a new group-row type only has to be
+// added here, instead of silently rendering as a spline or as nothing at all.
+const GROUP_ROW_KINDS = new Set(["spline", "piecewise"]);
+
 function renderSummaryRow(row, hasLevelGroups) {
   // SE cell color is data-driven from Python's significance class. The browser
   // never infers significance from display text.
@@ -744,7 +749,7 @@ function renderSummaryRow(row, hasLevelGroups) {
     <tr class="summary-row ${sigClass}">
       <td class="summary-term">
         <span>${escapeHTML(row.name || "")}</span>
-        ${row.kind === "spline" ? '<em>spline</em>' : ""}
+        ${GROUP_ROW_KINDS.has(row.kind) ? `<em>${escapeHTML(row.kind)}</em>` : ""}
       </td>
       ${levelGroupCell}
       ${renderNumberCell(row.edf, "summary-edf")}

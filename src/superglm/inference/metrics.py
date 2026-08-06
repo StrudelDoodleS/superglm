@@ -1154,6 +1154,7 @@ class ModelMetrics:
         from superglm.features.categorical import Categorical
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
+        from superglm.features.piecewise import Piecewise
         from superglm.features.spline import _SplineBase
         from superglm.inference._term_covariance import feature_se_from_cov
 
@@ -1195,6 +1196,11 @@ class ModelMetrics:
                     "base_level": spec._base_level,
                     "se_log_relativity": np.zeros(len(spec._non_base)),
                 }
+            elif isinstance(spec, Piecewise):
+                return {
+                    "x": spec._knots.copy(),
+                    "se_log_relativity": np.zeros(spec._knots.size),
+                }
             else:
                 return {"se_coef": 0.0}
 
@@ -1211,6 +1217,11 @@ class ModelMetrics:
                     "levels": spec._non_base,
                     "base_level": spec._base_level,
                     "se_log_relativity": np.zeros(len(spec._non_base)),
+                }
+            elif isinstance(spec, Piecewise):
+                return {
+                    "x": spec._knots.copy(),
+                    "se_log_relativity": np.zeros(spec._knots.size),
                 }
             else:
                 return {"se_coef": 0.0}
@@ -1236,6 +1247,20 @@ class ModelMetrics:
                 "base_level": spec._base_level,
                 "se_log_relativity": se,
             }
+
+        elif isinstance(spec, Piecewise):
+            # One SE per KNOT with a hard zero at the base -- the same shape,
+            # order and labelling as `term_inference(...).se_log_relativity` and
+            # the workbook's knot rows.  The unlabelled `{"se": diag}` fallback
+            # below returns the J+1 per-coefficient values with no knot vector
+            # beside them, so a caller zipping them against the term's knots
+            # pairs every knot from the base onward with the wrong SE.
+            M = np.asarray(spec._raw_basis_matrix(spec._knots), dtype=np.float64)[
+                :, spec._non_base_indices
+            ]
+            Q = M @ Cov_g
+            se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+            return {"x": spec._knots.copy(), "se_log_relativity": se}
 
         elif isinstance(spec, Numeric):
             return {"se_coef": float(np.sqrt(max(Cov_g[0, 0], 0.0)))}
