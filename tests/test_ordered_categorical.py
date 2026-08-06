@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, OrderedCategorical, PSpline, SuperGLM
+from superglm import Categorical, Constraint, OrderedCategorical, PSpline, Spline, SuperGLM
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -75,6 +75,29 @@ class TestConstructor:
     def test_step_select_raises(self):
         with pytest.raises(ValueError, match="select=True is not supported"):
             OrderedCategorical(order=["A", "B", "C"], basis="step", select=True)
+
+    @pytest.mark.parametrize("shortcut", ["kind", "n_knots", "degree", "select", "penalty"])
+    def test_spline_object_in_shortcut_names_the_swap(self, shortcut):
+        """A Spline belongs in `basis=`; every shortcut takes a scalar. Name both
+        parameters at the boundary, whichever one caught the object.
+
+        Unguarded, each shortcut failed in its own unhelpful way. `kind` reached
+        the private spline factory and surfaced as "Unknown spline kind
+        CubicRegressionSpline(n_knots=1)" -- an internal class repr against a
+        list of string kinds, naming neither the parameter at fault nor the one
+        to use. `n_knots` raised a TypeError from an unrelated comparison, and
+        `degree`, `select` and `penalty` swallowed the object silently and built
+        a smooth configured by nothing the caller wrote.
+        """
+        with pytest.raises(ValueError, match=rf"`{shortcut}=`.*basis=Spline"):
+            OrderedCategorical(order=["A", "B", "C"], **{shortcut: Spline(kind="cr", k=3)})
+
+    def test_valid_kind_shortcut_still_builds(self):
+        """The guard must reject objects only -- the deprecated string shortcut
+        keeps working until it is removed."""
+        with pytest.warns(FutureWarning):
+            spec = OrderedCategorical(order=["A", "B", "C", "D"], kind="cr")
+        assert spec.kind == "cr"
 
 
 # ── Spline Mode: Build / Transform / Reconstruct ─────────────────

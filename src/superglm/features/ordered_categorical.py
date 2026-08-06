@@ -448,6 +448,23 @@ class OrderedCategorical:
         }
         used_shortcuts = [name for name, value in shortcut_values.items() if value is not None]
 
+        # Every shortcut takes a scalar; `basis` is the one parameter that takes
+        # a Spline. Catch the swap here or it travels on unchecked: `kind` reaches
+        # the private spline factory, which rejects the object against its list of
+        # string kinds and names neither the parameter at fault nor the one to
+        # use, while `degree`, `select` and `penalty` are never read as anything
+        # but scalars and so configure the smooth with silent nonsense.
+        misplaced = [
+            name for name, value in shortcut_values.items() if isinstance(value, _SplineBase)
+        ]
+        if misplaced:
+            name = misplaced[0]
+            raise ValueError(
+                f"OrderedCategorical received a Spline object as `{name}=`, which takes "
+                f"a scalar. Pass the smooth as `basis=Spline(...)` instead: "
+                f"OrderedCategorical(..., basis={shortcut_values[name]!r})."
+            )
+
         resolved_basis = "spline" if basis is None else basis
         resolved_kind = "ps" if kind is None else kind
         resolved_n_knots = 5 if n_knots is None else n_knots
