@@ -1062,6 +1062,7 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         fit_mode: str = "fit",
+        search_fit_mode: str | None = None,
         phi_method: str = "mle",
         method: str = "auto",
         ci_alpha: float | None = None,
@@ -1084,7 +1085,23 @@ class SuperGLM:
         offset : array-like, optional
             Offset added to the linear predictor.
         fit_mode : {"fit", "reml", "inherit"}
-            Fitting regime for each candidate ``p`` evaluation.
+            Fitting regime for the published final fit, and by default for each
+            candidate ``p`` evaluation too.
+        search_fit_mode : {"fit", "reml", "inherit"}, optional
+            Fitting regime for the candidate ``p`` evaluations alone, when it
+            should differ from the regime the final fit is published under. The
+            default ``None`` searches under ``fit_mode``.
+
+            ``fit_mode="reml", search_fit_mode="fit"`` selects ``p`` under
+            ordinary ML and then publishes one REML fit at the selected ``p``,
+            which is the cost of a single smoothing-parameter search rather than
+            one per candidate. Dispersion is re-profiled against the published
+            fit, so the returned estimates describe the model you get back.
+            Selecting ``p`` under a different objective than the one that
+            publishes it is an approximation: measure it on your own data before
+            relying on it. Likelihood-ratio confidence intervals are refused for
+            a decoupled run, because the interval inverts the profile that was
+            searched and no longer describes the published fit.
         phi_method : {"pearson", "mle"}
             How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
             ``"mle"`` (default) maximizes the likelihood in ``phi``; the joint
@@ -1113,6 +1130,7 @@ class SuperGLM:
             sample_weight,
             offset,
             fit_mode=fit_mode,
+            search_fit_mode=search_fit_mode,
             phi_method=phi_method,
             method=method,
             ci_alpha=ci_alpha,

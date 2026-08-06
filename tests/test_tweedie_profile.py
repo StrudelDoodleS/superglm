@@ -3245,6 +3245,137 @@ class TestEstimatePFitMode:
         np.testing.assert_allclose(result_fit.p_hat, result_reml.p_hat, atol=0.3)
 
 
+class TestDecoupledSearchFitMode:
+    """The power search and the published fit can use different regimes."""
+
+    @staticmethod
+    def _reml_model():
+        return SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=4)},
+        )
+
+    def test_ml_search_publishes_a_reml_fit_without_searching_under_reml(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        result = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+        )
+
+        # `reml_converged` is only ever set by a REML-mode search, so `None`
+        # here is the evidence that no REML fit was paid for during the search.
+        assert result.reml_converged is None
+        assert result.search_fit_mode == "fit"
+        assert result.fit_mode == "fit_reml"
+        # The publication is nonetheless a REML fit.
+        assert model.reml_diagnostics()["converged"] is True
+        assert model.reml_diagnostics()["lambdas"]
+
+    def test_published_dispersion_matches_the_returned_estimate(self):
+        """The result must describe the model it published, not the search."""
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        result = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+        )
+
+        assert model.result.phi == pytest.approx(result.phi_hat)
+        assert model.family.p == pytest.approx(result.p_hat)
+
+    def test_decoupled_dispersion_is_reprofiled_off_the_published_fit(self):
+        """Carrying the ML search's phi across the mode switch would be wrong."""
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+
+        searched = self._reml_model().estimate_p(
+            X, y, sample_weight=sample_weight, offset=offset, fit_mode="fit"
+        )
+        decoupled = self._reml_model().estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+        )
+
+        assert decoupled.p_hat == pytest.approx(searched.p_hat)
+        assert decoupled.phi_hat != pytest.approx(searched.phi_hat, rel=1e-12)
+
+    def test_default_leaves_the_coupled_reml_path_unchanged(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        kwargs = {"sample_weight": sample_weight, "offset": offset, "fit_mode": "reml"}
+
+        coupled = self._reml_model().estimate_p(X, y, **kwargs)
+        defaulted = self._reml_model().estimate_p(X, y, search_fit_mode=None, **kwargs)
+
+        assert defaulted.p_hat == pytest.approx(coupled.p_hat, rel=1e-12)
+        assert defaulted.phi_hat == pytest.approx(coupled.phi_hat, rel=1e-12)
+        assert defaulted.search_fit_mode == "fit_reml"
+
+    def test_decoupled_search_rejects_likelihood_ratio_ci(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        with pytest.raises(RuntimeError, match="profile searched"):
+            model.estimate_p(
+                X,
+                y,
+                sample_weight=sample_weight,
+                offset=offset,
+                fit_mode="reml",
+                search_fit_mode="fit",
+                ci_alpha=0.05,
+            )
+
+    def test_invalid_search_fit_mode_is_rejected(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        with pytest.raises(ValueError, match="search_fit_mode"):
+            model.estimate_p(
+                X, y, sample_weight=sample_weight, offset=offset, search_fit_mode="nonsense"
+            )
+
+    def test_lazy_ci_on_a_decoupled_result_is_refused(self):
+        """Blocking ci_alpha up front is not enough; the result stays callable."""
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        result = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+        )
+
+        with pytest.raises(RuntimeError, match="inverts the profile searched"):
+            result.ci(alpha=0.05)
+
+    def test_lazy_ci_still_works_when_search_and_publication_agree(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
+        lower, upper = result.ci(alpha=0.05)
+
+        assert lower < result.p_hat < upper
+
+
 # =====================================================================
 # Search methods
 # =====================================================================
@@ -5696,6 +5827,37 @@ class TestDensityProvenance:
             interval = restored.ci()
         assert interval[0] < restored.p_hat < interval[1]
         assert restored._emitted_ci_density_warning_signatures == {"saddle:warning"}
+
+    def test_pre_search_provenance_pickle_restores_method_and_fit_modes(self):
+        """A v0.19.0 pickle predates these fields; ci() must not trip over them."""
+        result = tweedie_module.TweedieProfileResult(
+            p_hat=1.5,
+            phi_hat=1.0,
+            nll=0.0,
+            n_evaluations=1,
+            converged=True,
+            method="brent",
+            phi_method="mle",
+            search_trace=pd.DataFrame({"p": [1.5], "nll": [0.0]}),
+            n_positive=10,
+            n_saddlepoint=0,
+            _objective=_legacy_pickle_profile_objective,
+            _ll_scale=1.0,
+            _ci_p_range=(1.1, 1.9),
+            _ci_seed_points=(1.5, 1.55, 1.85),
+            _evaluation_record=_legacy_pickle_evaluation_record,
+        )
+        for name in ("requested_method", "fit_mode", "search_fit_mode"):
+            delattr(result, name)
+
+        restored = pickle.loads(pickle.dumps(result))
+
+        assert restored.requested_method == "brent"
+        assert restored.fit_mode == "fit"
+        assert restored.search_fit_mode == "fit"
+        with pytest.warns(UserWarning, match="evaluated LR region"):
+            interval = restored.ci()
+        assert interval[0] < restored.p_hat < interval[1]
 
     def test_origin_master_pickle_restores_missing_ci_details_cache(self):
         result = tweedie_module.TweedieProfileResult(

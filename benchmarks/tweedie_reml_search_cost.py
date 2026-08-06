@@ -42,6 +42,7 @@ N_ROWS = 96_743
 REFERENCE = {
     "estimate_p_reml": {"p_hat": 1.5746132307, "phi_hat": 42.052},
     "two_step": {"p_hat": 1.5745815576, "phi_hat": 42.054},
+    "decoupled_search": {"p_hat": 1.5745815576, "phi_hat": 42.054},
 }
 P_TOL = 1e-4
 PHI_TOL = 5e-2
@@ -192,7 +193,27 @@ def main() -> None:
             "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
         }
 
-    # 3. One REML fit, to show the search cost is the multiplier, not the fit.
+    # 3. The same trade made inside the library: search under ML, publish REML.
+    def _decoupled():
+        model = _model(oc_levels)
+        r = model.estimate_p(
+            frame,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+        )
+        return {
+            "p_hat": float(r.p_hat),
+            "phi_hat": float(r.phi_hat),
+            "power_steps": int(r.n_evaluations),
+            "phi_evals": int(r.phi_n_evaluations),
+            "method": str(r.method),
+            "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
+        }
+
+    # 4. One REML fit, to show the search cost is the multiplier, not the fit.
     def _single_reml():
         model = _model(oc_levels)
         model.fit_reml(frame, y, sample_weight=weights, offset=offset)
@@ -210,23 +231,25 @@ def main() -> None:
     print(f"rows={len(y):,}  features={len(CAT_LEVELS) + len(OC_LEVELS)}\n")
     t_search = _run("estimate_p_reml", _reml_search, results)
     t_two = _run("two_step", _two_step, results)
+    t_decoupled = _run("decoupled_search", _decoupled, results)
     t_one = _run("single_fit_reml", _single_reml, results)
 
-    search = results["estimate_p_reml"]
-    two = results["two_step"]
+    for label, caption in (
+        ("estimate_p_reml", "estimate_p(fit_mode='reml')"),
+        ("two_step", "two-step (fit -> fit_reml)"),
+        ("decoupled_search", "search_fit_mode='fit'"),
+    ):
+        row = results[label]
+        print(
+            f"{caption:<28}{row['seconds']:7.2f}s  steps={row['power_steps']:>2} "
+            f"phi_evals={row['phi_evals']:>3}  p={row['p_hat']:.5f} phi={row['phi_hat']:.2f}"
+        )
     print(
-        f"estimate_p(fit_mode='reml')  {t_search:7.2f}s  steps={search['power_steps']:>2} "
-        f"phi_evals={search['phi_evals']:>3}  p={search['p_hat']:.5f} phi={search['phi_hat']:.2f}"
-    )
-    print(
-        f"two-step (fit -> fit_reml)   {t_two:7.2f}s  steps={two['power_steps']:>2} "
-        f"phi_evals={two['phi_evals']:>3}  p={two['p_hat']:.5f} phi={two['phi_hat']:.2f}"
-    )
-    print(
-        f"single fit_reml              {t_one:7.2f}s  "
+        f"{'single fit_reml':<28}{t_one:7.2f}s  "
         f"n_reml_iter={results['single_fit_reml']['n_reml_iter']}"
     )
     print(f"\nsearch / two-step ratio      {t_search / t_two:7.2f}x")
+    print(f"search / decoupled ratio     {t_search / t_decoupled:7.2f}x")
     print(f"search / single fit ratio    {t_search / t_one:7.2f}x")
 
     print("\nper-fit phase breakdown (single fit_reml):")
@@ -236,8 +259,10 @@ def main() -> None:
     # Full precision, so a drift smaller than the printed table can still be
     # read off two runs by eye rather than being rounded into agreement.
     print("\nfull-precision estimates:")
-    for label in ("estimate_p_reml", "two_step"):
-        print(f"  {label:<20}p_hat={results[label]['p_hat']!r}  phi_hat={results[label]['phi_hat']!r}")
+    for label in ("estimate_p_reml", "two_step", "decoupled_search"):
+        print(
+            f"  {label:<20}p_hat={results[label]['p_hat']!r}  phi_hat={results[label]['phi_hat']!r}"
+        )
 
     print("\nanswer check vs reference:")
     drifted = False
