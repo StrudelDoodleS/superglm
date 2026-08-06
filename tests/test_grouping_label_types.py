@@ -137,10 +137,30 @@ def test_two_spellings_of_one_value_in_the_declaration_are_ambiguous():
     # If the declaration itself contains "1" and 1.0, a column value of 1.0
     # denotes neither unambiguously. Picking by iteration order would make the
     # answer depend on declaration order; say so instead.
-    # Raised at CONSTRUCTION: the declaration is self-contradictory regardless of
-    # what data arrives, so there is no reason to wait for a column to prove it.
-    with pytest.raises(ValueError, match="two spellings of the same numeric value"):
-        OrderedCategorical(order=["1", 1.0, 2, 3], basis=Spline(kind="ps", k=5))
+    # NOT raised at construction. `order=["1", "1.0", ...]` are perfectly
+    # fittable levels: each is reachable by its own exact spelling, and rejecting
+    # the declaration outright refuses a valid model. An earlier attempt did
+    # exactly that.
+    spec = OrderedCategorical(order=["1", "1.0", "2", "3", "4", "5"], basis=Spline(kind="ps", k=5))
+    probe = np.array(["1", "1.0", "2", "3", "4", "5"], dtype=object)
+    spec.build(probe, np.ones(len(probe)))
+    out = spec.transform(probe)
+    assert out.shape[0] == 6
+
+    # Ambiguity bites only for a raw value that matches NEITHER spelling exactly
+    # yet equals both numerically. Asserted on the matcher itself, because the
+    # ordinary float and int spellings all hit an exact match first -- so a test
+    # driving this through `transform` with 1.0 would pass without ever reaching
+    # the branch it names.
+    from decimal import Decimal
+
+    from superglm.features.ordered_categorical import _declared_matcher
+
+    match = _declared_matcher(["1", "1.0", "2"])
+    assert match("1") == "1"  # exact spellings still resolve
+    assert match("1.0") == "1.0"
+    with pytest.raises(ValueError, match="ambiguous"):
+        match(Decimal("1.000"))
 
 
 def test_the_reporting_base_survives_a_spelling_mismatch():
@@ -204,3 +224,56 @@ def test_a_numeric_special_survives_a_collapse_of_other_levels():
     session.select_levels("band", levels[1:3])
     refit = session.replace_with_collapsed_levels("band")
     assert np.all(np.isfinite(np.asarray(refit._predict_eta_exact(X))))
+
+
+# ── Review round two: the boundaries of the matching rule, again ──────────────
+
+
+def test_a_padded_string_is_not_claimed_by_a_numeric_declaration():
+    # The regression the FIRST version of this test failed to catch. It declared
+    # `order=["001", ...]`, so the exact-match branch answered before the numeric
+    # one was reached -- the dangerous path (numeric declaration, padded string in
+    # the data) was never exercised, and `"001"` was silently scored as level 1.
+    spec = OrderedCategorical(order=[1, 2, 3, 4, 5, 6], basis=Spline(kind="ps", k=5))
+    assert list(spec._canonical(np.array(["001", "2"], dtype=object))) == ["001", 2]
+
+
+def test_two_levels_with_the_same_text_are_refused():
+    # Everything downstream joins on str(), so `order=[1, "1"]` cannot be
+    # represented: one wins every lookup and the other can never be fitted.
+    with pytest.raises(ValueError, match="appear more than once"):
+        OrderedCategorical(order=[1, "1", 2, 3, 4, 5], basis=Spline(kind="ps", k=5))
+
+
+def test_a_group_label_colliding_with_a_respelled_level_is_refused():
+    # Re-spelling can make an identity label "1.0" become "1" while the caller
+    # already named a group "1". Silently, one entry is lost and every original
+    # maps to the survivor -- folding level 1 into the 2+3 group.
+    data = np.array([1.0, 2.0, 3.0, 9.0] * 30)
+    grouping = collapse_levels(pd.Series(data), groups={"1": ["2.0", "3.0"]})
+    with pytest.raises(ValueError, match="collide"):
+        OrderedCategorical(order=[1, 2, 3, 9], grouping=grouping, basis=Spline(kind="ps", k=5))
+
+
+def test_the_direct_grouping_path_survives_term_inference():
+    # The first direct-grouping regression only exercised predict(), so it missed
+    # that `_original_level_to_value` was still keyed by the declared objects
+    # while the grouping had been re-spelled -- KeyError out of the public
+    # inference path, which is where a user meets it.
+    rng = np.random.default_rng(11)
+    codes = rng.choice(np.array([1.0, 2.0, 3.0, 9.0]), 500)
+    X = pd.DataFrame({"band": codes})
+    y = 0.1 * codes + rng.normal(0.0, 0.15, 500)
+    grouping = collapse_levels(X["band"], groups={"2+3": ["2.0", "3.0"]})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "band": OrderedCategorical(
+                order=[1, 2, 3, 9], grouping=grouping, basis=Spline(kind="ps", k=5)
+            )
+        },
+    )
+    model.fit(X, y)
+    ti = model.term_inference("band")
+    assert [str(level) for level in ti.levels] == ["1", "2", "3", "9"]

@@ -49,7 +49,7 @@ def _spline_kind_name(spline: Any) -> str:
     return type(spline).__name__
 
 
-def _declared_matcher(declared_levels: list[Any]):
+def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = False):
     """Return a function mapping a raw column value onto the level it denotes.
 
     An ``OrderedCategorical`` has TWO sources for a level's identity -- the
@@ -70,8 +70,18 @@ def _declared_matcher(declared_levels: list[Any]):
     worse bug than the one this fixes.
     """
     by_text: dict[str, Any] = {}
+    by_value: dict[float, Any] = {}
+    ambiguous: set[float] = set()
     for level in declared_levels:
         by_text.setdefault(str(level), level)
+        try:
+            value = float(level)
+        except (TypeError, ValueError):
+            continue
+        prior = by_value.get(value)
+        if prior is not None and str(prior) != str(level):
+            ambiguous.add(value)
+        by_value.setdefault(value, level)
 
     def _spellings(raw: Any) -> list[str]:
         """The renderings a numeric value can plausibly appear under."""
@@ -88,36 +98,38 @@ def _declared_matcher(declared_levels: list[Any]):
         text = str(raw)
         if text in by_text:
             return by_text[text]
+        if isinstance(raw, str) and not numeric_strings:
+            # A raw STRING is its own identity. "001" must never be claimed by a
+            # declared 1: leading zeros are meaningful in a policy or vehicle
+            # code. Only the grouping path opts in, because a LevelGrouping's
+            # labels are stringified DATA rather than user-authored strings.
+            return raw
         # Only a rendering of the SAME number counts. "9" and 9.0 render each
         # other ("9" -> {"9.0", "9"}), so they match; "001" renders {"1.0", "1"},
         # which is not "001", so a declared 1 can never claim it. That asymmetry
         # is the whole safety property -- leading zeros are identity in a policy
         # or vehicle code, and collapsing them would be a worse bug than the one
         # this fixes.
-        for candidate in _spellings(raw):
-            if candidate in by_text:
-                return by_text[candidate]
-        return raw
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return raw
+        if value not in by_value:
+            return raw
+        # Only now is ambiguity a problem: `order=["1", "1.0"]` are distinct
+        # labels and both are reachable by their exact spellings. It is a raw
+        # value that matches NEITHER exactly, yet equals both numerically, that
+        # cannot be resolved -- so refuse then, rather than refusing the
+        # declaration outright and rejecting models that are perfectly fittable.
+        if value in ambiguous:
+            raise ValueError(
+                f"Level {raw!r} is ambiguous: the declared levels spell the value {value} "
+                "more than one way and this value matches neither exactly. Declare the "
+                "levels consistently, or supply the level under one of its exact spellings."
+            )
+        return by_value[value]
 
     return match
-
-
-def _require_unambiguous_levels(declared_levels: list[Any]) -> None:
-    """Refuse a declaration that spells one numeric value more than one way."""
-    by_value: dict[float, Any] = {}
-    for level in declared_levels:
-        try:
-            value = float(level)
-        except (TypeError, ValueError):
-            continue
-        clash = by_value.get(value)
-        if clash is not None and str(clash) != str(level):
-            raise ValueError(
-                f"OrderedCategorical levels {clash!r} and {level!r} are two spellings of "
-                f"the same numeric value ({value}); a column value could denote either. "
-                "Declare the levels consistently."
-            )
-        by_value[value] = level
 
 
 def _regroup_to_declared(grouping: Any, declared_levels: list[Any]):
@@ -130,7 +142,7 @@ def _regroup_to_declared(grouping: Any, declared_levels: list[Any]):
         return None
     from dataclasses import replace as _replace
 
-    match = _declared_matcher(declared_levels)
+    match = _declared_matcher(declared_levels, numeric_strings=True)
 
     def respell(level: Any) -> str:
         return str(match(level))
@@ -146,6 +158,17 @@ def _regroup_to_declared(grouping: Any, declared_levels: list[Any]):
         label: respell_label(label, members)
         for label, members in grouping.group_to_originals.items()
     }
+    # Re-spelling can make two group labels collide -- an identity level "1.0"
+    # becomes "1" while the caller already named a group "1". Left alone, the
+    # dict comprehensions below drop one entry and every original silently maps
+    # to the survivor, folding a level into a group it was never in.
+    collisions = [v for v in set(labels.values()) if list(labels.values()).count(v) > 1]
+    if collisions:
+        raise ValueError(
+            f"OrderedCategorical grouping label(s) {sorted(collisions)!r} collide once level "
+            "names are matched against the declaration. Rename the group so it does not "
+            "clash with a level label."
+        )
     return _replace(
         grouping,
         original_to_group={
@@ -514,10 +537,19 @@ class OrderedCategorical:
             self._level_to_value = dict(zip(order, vals.tolist()))
         self._ordered_levels = list(self._smooth_levels)
 
-        # A declaration that spells one numeric value two ways cannot be resolved:
-        # a column value of 1.0 would denote either, and picking by iteration order
-        # would make the answer depend on how the levels were listed.
-        _require_unambiguous_levels(self._ordered_levels + list(self._specials))
+        # Level labels must be distinct AS STRINGS. The grouping layer is
+        # string-keyed by construction and every report joins on str(), so
+        # `order=[1, "1", 2]` cannot be represented: one of the two silently wins
+        # every lookup and the other can never be fitted or scored. Refuse rather
+        # than pick.
+        _texts = [str(level) for level in self._ordered_levels]
+        _dupes = sorted({t for t in _texts if _texts.count(t) > 1})
+        if _dupes:
+            raise ValueError(
+                f"OrderedCategorical level label(s) {_dupes!r} appear more than once once "
+                "rendered as text. Levels are matched and reported by their string form, so "
+                "two levels cannot share one; declare them with distinct labels."
+            )
 
         # Grouping: validate and store. A grouping is built FROM DATA, so its
         # labels are in the column's spelling while everything here is in the
@@ -535,7 +567,15 @@ class OrderedCategorical:
         self._original_level_to_value: dict[str, float] | None = None
         if grouping is not None:
             # Preserve original level→value mapping for plot expansion
-            orig_ltv = dict(self._level_to_value)
+            # Keyed the same way as the regrouped levels. `_expand_grouped_term`
+            # indexes this map with the grouping's (string) level names for the
+            # smooth-curve expansion, so leaving it on the declared objects
+            # raises KeyError out of the public term_inference path -- which the
+            # direct-grouping regression missed by only exercising predict().
+            _match = _declared_matcher(
+                self._ordered_levels + list(self._specials), numeric_strings=True
+            )
+            orig_ltv = {str(_match(k)): v for k, v in self._level_to_value.items()}
             self._original_level_to_value = orig_ltv
             # Build level_to_value for grouped levels.
             # When values= was used, orig_ltv keys are original level names
