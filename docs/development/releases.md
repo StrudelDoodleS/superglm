@@ -52,6 +52,21 @@ release-bearing pull request leaves master carrying a version that is not on
 PyPI, and the next release-bearing pull request either waits for it to publish
 or, as here, supersedes it.
 
+`0.19.0` was prepared as a standalone release pull request, PR #240, which is
+not the shape this page describes. PR #235 added
+`OrderedCategorical(specials=...)`, and PR #238 changed how a declared level's
+identity is matched against the spelling in the column. Both are material, and
+neither declared an impact or carried a version bump, so master reached three
+publishable changes while still reading `0.18.0`.
+
+A catch-up release pull request is the recovery, not an alternative route. It
+is permitted only when master already carries unpublished material change, its
+diff touches nothing but the version markers, and no unpublished candidate
+occupies the version it claims. The cost it does not recover is the review
+itself: impact is judged against a diff that no longer contains the behavior,
+so the reviewer has to reconstruct materiality from merged history. Declare the
+impact on the pull request that makes the change.
+
 ## Invoke the specialist
 
 The release specialist is a spawned Codex subagent. It does not replace the
