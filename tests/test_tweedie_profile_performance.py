@@ -958,3 +958,56 @@ def test_fit_stat_pair_passes_strict_general_power_series_budget(monkeypatch) ->
     assert np.all(np.isfinite(null))
     assert budgets and all(budget is not None for budget in budgets)
     assert max(budgets) <= 4_096
+
+
+class TestREMLProfileSearchOverhead:
+    """The REML power search must not re-pay published-model bookkeeping per step."""
+
+    @staticmethod
+    def _model_and_data():
+        rng = np.random.default_rng(11)
+        n = 4000
+        levels = [f"L{j:02d}" for j in range(8)]
+        idx = rng.integers(0, len(levels), n)
+        frame = pd.DataFrame({"band": np.array(levels)[idx], "z": rng.uniform(0, 10, n)})
+        weights = rng.uniform(0.2, 1.0, n)
+        mu = np.exp(-1.0 + 0.06 * idx)
+        y = np.where(rng.random(n) < 0.6, 0.0, rng.gamma(1.5, mu, n))
+        from superglm.features.categorical import Categorical
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            features={"band": Categorical(), "z": Spline(kind="ps", k=6)},
+        )
+        return model, frame, y, weights
+
+    def test_search_fits_skip_published_parity_validation(self):
+        """Every power step ran the post-fit parity check, which certifies the
+        PUBLISHED runtime state. Search fits are thrown away -- only the final
+        refit is published -- so paying it per step is pure overhead. On a real
+        8-feature model this was 31.3s of a 119.3s run.
+        """
+        import superglm.model.runtime_canonicalize as canon
+
+        model, frame, y, weights = self._model_and_data()
+        calls: list[bool] = []
+        original = canon.canonicalize_fitted_model
+
+        def counting(model_arg, *args, validate=True, **kw):
+            calls.append(bool(validate))
+            return original(model_arg, *args, validate=validate, **kw)
+
+        with patch.object(canon, "canonicalize_fitted_model", counting):
+            result = model.estimate_p(frame, y, sample_weight=weights, fit_mode="reml")
+
+        assert result.p_hat > 1.0
+        validated = sum(calls)
+        assert len(calls) > 2, "expected several fits (search steps plus the final refit)"
+        assert validated == 1, (
+            f"{validated} of {len(calls)} canonicalisations validated; only the published "
+            "final refit should validate, not each search step"
+        )
+        # The saving must come from the throwaway fits, never from the model the
+        # caller keeps: that one is published and still has to be certified.
+        assert calls[-1] is True, "the final published refit must still validate"
+        assert not any(calls[:-1]), "no search step should validate"

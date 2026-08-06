@@ -4126,7 +4126,7 @@ class TestImmutableProfileEvaluations:
             result = None
             _reml_result = None
 
-            def fit_reml(self, X, y_arg, *, sample_weight=None, offset=None):
+            def fit_reml(self, X, y_arg, *, sample_weight=None, offset=None, **_kwargs):
                 p = round(float(self.family.p), 1)
                 fit_calls.append(p)
                 values = case._CANDIDATES[p]
@@ -4271,7 +4271,7 @@ class TestImmutableProfileEvaluations:
             result = None
             _reml_result = None
 
-            def fit_reml(self, X, y_arg, *, sample_weight=None, offset=None):
+            def fit_reml(self, X, y_arg, *, sample_weight=None, offset=None, **_kwargs):
                 p = float(self.family.p)
                 fit_calls.append(p)
                 index = candidate_index(p)
@@ -5064,7 +5064,7 @@ class TestOuterSearchHonesty:
             result = None
             _reml_result = None
 
-            def fit_reml(self, X, y, *, sample_weight=None, offset=None):
+            def fit_reml(self, X, y, *, sample_weight=None, offset=None, **_kwargs):
                 self._fit_mu = np.ones(len(y))
                 self.result = SimpleNamespace(effective_df=1.0, converged=solver_converged)
                 self._reml_result = (
@@ -5131,7 +5131,7 @@ class TestOuterSearchHonesty:
             result = None
             _reml_result = None
 
-            def fit_reml(self, X, y, *, sample_weight=None, offset=None):
+            def fit_reml(self, X, y, *, sample_weight=None, offset=None, **_kwargs):
                 self._fit_mu = np.ones(len(y))
                 self.result = SimpleNamespace(effective_df=1.0)
                 self._reml_result = SimpleNamespace(n_reml_iter=1, objective_history=[])
