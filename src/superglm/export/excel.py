@@ -29,6 +29,21 @@ _TERM_NUMERIC_COLUMNS = frozenset(
     {"Estimate", "Std Error", "Statistic", "P Value", "CI Lower", "CI Upper", "EDF", "Lambda"}
 )
 
+# Main-effect blocks sit on a fixed three-column stride and the number-format
+# loop below keys on ``cell.column % 3``.  Both are named here rather than
+# repeated as bare 3s so a future widening has one place to change.
+_MAIN_EFFECT_BLOCK_STRIDE = 3
+_MAIN_EFFECT_TITLE_ROW = 5
+_MAIN_EFFECT_NOTE_ROW = 6
+_MAIN_EFFECT_HEADER_ROW = 7
+
+# The piecewise block's two numeric columns are re-formatted after the global
+# loop.  ``Log relativity`` lands on ``column % 3 == 0`` and would otherwise
+# render at two decimal places: the value stored in the cell stays exact, but a
+# human reading or copy-pasting the sheet would see ``0.00``, which defeats the
+# entire purpose of publishing that column.
+_PIECEWISE_NUMBER_FORMAT = "0.000000000000"
+
 
 def _resolve_workbook_target(
     target: str | PathLike[str] | BinaryIO,
@@ -138,6 +153,61 @@ def _write_dataframe(ws, df: pd.DataFrame, start_row: int, start_col: int) -> tu
     return start_row + len(df), start_col + len(df.columns) - 1
 
 
+def _piecewise_interpolation_note(table: pd.DataFrame) -> str:
+    """The interpolation and extrapolation rule for one piecewise block.
+
+    Derived from the block's own printed columns, so a reader can check the
+    stated slopes against the two end rows rather than take them on trust.
+
+    The slopes are written at full round-trip precision on purpose.  The whole
+    claim of a piecewise rating table is that the workbook reproduces the model
+    exactly; a boundary slope rounded for readability would put a small,
+    silent discrepancy back into the tariff at exactly the rows -- the ones
+    outside the rated range -- where nobody would look for it.
+
+    Extending the boundary segments is a choice, not a self-evident one:
+    holding flat beyond the outermost knots is the established alternative, and
+    this library's splines already extrapolate linearly, so the rule is stated
+    here rather than assumed.  What ``lower``/``upper`` buy is that the knots
+    sit where the tariff's rated range says they should.
+    """
+    knots = [float(value) for value in table.iloc[:, 0]]
+    log_relativity = [float(value) for value in table["Log relativity"]]
+    slope_low = (log_relativity[1] - log_relativity[0]) / (knots[1] - knots[0])
+    slope_high = (log_relativity[-1] - log_relativity[-2]) / (knots[-1] - knots[-2])
+    return (
+        "Interpolate linearly on Log relativity (equivalently, geometrically on "
+        "Relativity). Beyond the tabulated range the boundary segments continue: "
+        f"below {knots[0]} use slope {slope_low}; "
+        f"above {knots[-1]} use slope {slope_high}."
+    )
+
+
+def _annotate_piecewise_blocks(ws, main_effects) -> None:
+    """Re-format the piecewise cells and write each block's interpolation note.
+
+    Runs *after* the global ``column % 3`` format loop and touches nothing
+    else: the block placement and the format loop stay exactly as they were, so
+    every other block keeps its coordinates and its formats.
+    """
+    for idx, block in enumerate(main_effects):
+        if block.kind != "piecewise":
+            continue
+        start_col = 1 + idx * _MAIN_EFFECT_BLOCK_STRIDE
+        first_row = _MAIN_EFFECT_HEADER_ROW + 1
+        for row in range(first_row, first_row + len(block.table)):
+            for offset in (1, 2):
+                cell = ws.cell(row=row, column=start_col + offset)
+                cell.number_format = _PIECEWISE_NUMBER_FORMAT
+        # Row 6 sits between the block title and the dataframe header and is
+        # otherwise unused, so the note needs no layout change to land in.
+        ws.cell(
+            row=_MAIN_EFFECT_NOTE_ROW,
+            column=start_col,
+            value=_piecewise_interpolation_note(block.table),
+        )
+
+
 def _autosize(ws) -> None:
     from openpyxl.utils import get_column_letter
 
@@ -173,10 +243,10 @@ def write_rating_table_workbook(
 
     max_main_row = 8
     for idx, block in enumerate(payload.main_effects):
-        start_col = 1 + idx * 3
-        title_cell = ws.cell(row=5, column=start_col, value=block.name)
+        start_col = 1 + idx * _MAIN_EFFECT_BLOCK_STRIDE
+        title_cell = ws.cell(row=_MAIN_EFFECT_TITLE_ROW, column=start_col, value=block.name)
         title_cell.font = Font(bold=True)
-        end_row, _ = _write_dataframe(ws, block.table, 7, start_col)
+        end_row, _ = _write_dataframe(ws, block.table, _MAIN_EFFECT_HEADER_ROW, start_col)
         max_main_row = max(max_main_row, end_row)
 
     for row in ws.iter_rows():
@@ -187,6 +257,8 @@ def write_rating_table_workbook(
                 cell.number_format = "0.000000"
             if cell.column % 3 == 0:
                 cell.number_format = "#,##0.00"
+
+    _annotate_piecewise_blocks(ws, payload.main_effects)
 
     interaction_row = max_main_row + 3
     for block in payload.interactions:

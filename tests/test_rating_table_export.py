@@ -1189,6 +1189,68 @@ def test_rating_table_payload_passes_offset_to_discretization_impact(monkeypatch
         np.testing.assert_allclose(seen, offset)
 
 
+def test_main_effect_blocks_keep_a_three_column_stride_and_their_number_formats(tmp_path):
+    """Characterization test for the main-effects layout, written before it moved.
+
+    ``write_rating_table_workbook`` places main-effect blocks at
+    ``start_col = 1 + idx * 3`` and then applies number formats *globally* by
+    ``cell.column % 3``.  Both are load-bearing and neither is announced by a
+    named constant, so a block wider than three columns would silently overwrite
+    its right-hand neighbour and take that neighbour's formats.
+
+    This pins the layout as it stands so the piecewise block added afterwards can
+    be shown not to have disturbed it: it must pass identically before and after
+    that change.
+    """
+    stride = 3
+    title_row = 5
+    header_row = 7
+
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, n_bins=20)
+    output = tmp_path / "characterization.xlsx"
+    _write_workbook(payload, output)
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+
+    assert [(block.name, block.kind) for block in payload.main_effects] == [
+        ("age", "continuous"),
+        ("region", "categorical"),
+        ("score", "numeric"),
+    ]
+
+    for idx, block in enumerate(payload.main_effects):
+        start_col = 1 + idx * stride
+        assert list(block.table.columns) == [block.name, "Relativity", "Weight"]
+
+        title = ws.cell(row=title_row, column=start_col)
+        assert title.value == block.name
+        assert title.font.bold
+
+        headers = [
+            ws.cell(row=header_row, column=start_col + offset).value
+            for offset in range(len(block.table.columns))
+        ]
+        assert headers == list(block.table.columns)
+
+        # Every data row, not just the first: the format loop walks cells, so a
+        # partial reformat is a real failure mode.
+        for row in range(header_row + 1, header_row + 1 + len(block.table)):
+            assert ws.cell(row=row, column=start_col + 1).number_format == "0.000000"
+            assert ws.cell(row=row, column=start_col + 2).number_format == "#,##0.00"
+
+        # Nothing is written in the gap the piecewise note later occupies.
+        assert ws.cell(row=title_row + 1, column=start_col).value is None
+
+    # The stride itself, stated as a relation between neighbouring blocks rather
+    # than as three hard-coded column letters.
+    title_columns = [
+        cell.column
+        for cell in ws[title_row]
+        if cell.value in {block.name for block in payload.main_effects}
+    ]
+    assert title_columns == [1 + idx * stride for idx in range(len(payload.main_effects))]
+
+
 def test_excel_workbook_layout(tmp_path):
     model, X, y, w = _fit_export_model()
     output = tmp_path / "tables.xlsx"
