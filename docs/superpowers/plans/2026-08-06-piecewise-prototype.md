@@ -901,3 +901,196 @@ drop the 1-w term                   :: 18 failed :: incl. the partition-of-unity
   exact — verified by `test_hat_basis_at_the_knots_is_exactly_the_identity`.
 - `_editor_wants_all_handles` is **not** set on `Piecewise`; stage 3 adds it with the
   `controls.py` opt-in, as scoped.
+
+---
+
+# Stage 2 narrative — completed 2026-08-06
+
+**Status: complete.** A `Piecewise` term reports `J+1` per-knot Wald rows and one `J+1`-df
+whole-term chi-square, reports its *measured* edf (which equals `J+1` on an unshrunk fit),
+and exports a `kind="piecewise"` rating-table block that reproduces `model.predict` from the
+workbook alone. 55 new tests, every one with recorded sabotage evidence.
+
+Files: `inference/_term_ops.py`, `inference/_term_covariance.py`, `inference/_term_types.py`,
+`inference/coef_tables.py`, `inference/summary.py` (one extra site, below),
+`export/rating_tables.py`, `export/excel.py`, `tests/test_piecewise_reporting.py` (new),
+`tests/test_rating_table_export.py` (characterization test).
+
+### Measured results
+
+```
+uv run pytest tests/test_piecewise_reporting.py -q      -> 53 passed
+uv run pytest tests/test_rating_table_export.py -q      -> 61 passed (60 existing + 1 new)
+uv run pytest tests/ -q -m "not slow"                   -> 6427 passed, 195 skipped,
+                                                           137 deselected, 0 FAILED  (261s)
+uv run ruff check src/ tests/                           -> All checks passed!
+uv run ruff format --check src/ tests/                  -> 431 files already formatted
+uv lock --check / uv pip check                          -> clean
+```
+
+6427 = stage 1's 6372 + the 55 new tests, with **zero** failures.
+
+**The stage-1 baseline failure did not reproduce.** A full-suite run on the stage-1 commit at
+the start of this stage gave `6373 passed, 195 skipped, 137 deselected` with **zero**
+failures, and `test_structured_screening.py::test_a_thin_level_does_not_cost_the_pair_a_
+degree_of_freedom[1.0]` also passes in isolation. It is order- or thread-sensitive, not
+deterministic as the plan's baseline note assumed. Nothing was changed to make that happen.
+
+### Deviations
+
+**DEVIATION 2 (measured edf) — implemented, and now backed by measurement rather than
+assertion.** `test_the_measured_edf_equals_j_plus_one_on_an_unshrunk_fit` measures `J+1` to
+`1e-9` on all eight fixture cases. `test_a_shrunk_fit_reports_less_than_j_plus_one` is the
+other half and it is the one that settles the design question: under
+`selection_penalty="auto"` the same `interior_base` term measures **edf = 3.622**, not 4.
+Hardcoding `J+1` would have over-reported that fit's degrees of freedom by 10%.
+
+**DEVIATION 3 (why the Wald rows are valid) — implemented as the four-condition comment** at
+the `coef_tables.py` Piecewise branch, with condition 3 (breakpoints are fixed inputs) named
+as the load-bearing one and the design's own "because the df is fixed and known" explicitly
+corrected. The comment is pinned by a test that reads the source, and the sabotage for it
+deletes the **whole 28-line block** — replacing only its first line leaves the other three
+conditions standing and the sabotage measured INERT, which is exactly the trap the plan's
+sabotage rules describe.
+
+**DEVIATION 4 (`_continuous_features` unchanged) — implemented and confirmed necessary.**
+Sabotage `RATING _continuous_features admits Piecewise` takes amendment 7 literally and fails
+6 tests: `discretization_impact`'s continuity gate rejects the spec. The Piecewise routing
+sits before the `selected.tables` branch instead, and the impact sheet correctly carries no
+row for the term (asserted against a model that *also* contains a spline, so the sheet is
+genuinely populated and the assertion cannot pass for the wrong reason).
+
+### Smaller decisions, each measured
+
+- **The block is three columns and the note lives in row 6.** Both are pinned by the
+  characterization test, which passes byte-identically before and after `excel.py` changed.
+  Sabotaging the stride to `idx * 4` fails it, and so does flipping the global format loop's
+  residue — the second is extra, since the brief only required the first.
+- **Boundary slopes are printed at full round-trip precision**, not at `:.10g`. Measured:
+  `.10g` breaks the exactness test on `pinned_narrower` (the extrapolating rows pick up a
+  ~1e-10 relative error), which is precisely the silent model-versus-tariff discrepancy this
+  feature exists to remove. Recorded as sabotage `EXCEL note slopes rounded to 10 significant
+  figures`.
+- **`inference/summary.py` gained one `elif` in each of its two renderers** so the whole-term
+  row prints `[piecewise, 4 params, ...]` rather than `[spline, ...]`. The group row has to
+  set `is_spline=True` to be classified as a chi-square group test, and both renderers label
+  every such row "spline" unless `subgroup_type` says otherwise. Not in the brief's file list,
+  but calling a piecewise term a spline in the console summary is the kind of small lie this
+  repository does not ship. The new branch fires only on `subgroup_type == "piecewise"`.
+- **`_piecewise_block` reads `term_inference`**, mirroring `_categorical_block`, so the
+  workbook cell and the summary row are the same number by construction rather than by
+  agreement between two derivations. The note's boundary slopes are derived in `excel.py`
+  from the block's own printed columns for the same reason.
+- **`_piecewise_features()` was not added.** The plan lists it, but with `isinstance` routing
+  in the main-effects loop it would have no caller.
+- **edf is reported on the whole-term row only, not also on the first knot row.** The plan
+  said to mirror `Categorical`, which puts edf on its first level row -- but it does that
+  because a categorical term has no term-level row to put it on. This one has. Carrying it
+  twice reads as two numbers about one term and lands the same degrees of freedom in the
+  summary's parametric bucket *and* its smooth bucket. The ordered-spline branch already does
+  it this way. Pinned by an assertion that exactly one row in the term carries edf, with the
+  sabotage `COEF edf reported twice`.
+
+### Measured round-trip error
+
+```
+interior_base    n_extrapolating = 0     max relative error = 6.64e-16
+pinned_narrower  n_extrapolating = 226   max relative error = 5.27e-16
+```
+
+The test's tolerance is derived (`32 * eps = 7.1e-15`, a flop count over both compared paths)
+and is asserted to sit inside the design's `1e-12`, so both bars are pinned.
+
+### Sabotage evidence
+
+29 sabotages, each one exact text edit, each run against
+`tests/test_piecewise_reporting.py` + `tests/test_rating_table_export.py` and then reverted;
+the campaign was re-run in full against the **final** source so the evidence certifies the
+committed bytes. **0 inert.** All 55 new tests fail under at least one sabotage. Driver and
+raw JSON: `scratchpad/sabotage_stage2.py`, `scratchpad/sabotage_stage2_results.json` (session
+scratch, not committed).
+
+```
+TERM_OPS kind is no longer 'piecewise'                    :: 16 failed
+TERM_OPS x drops the knot vector                          :: 20 failed
+TERM_OPS edf hardcodes the nominal J+1                    ::  1 failed (only the shrunk-fit test)
+TERM_OPS branch removed (Unknown feature type)            :: 32 failed
+TERM_OPS base knot loses its exact zero                   :: 10 failed
+TERM_COV piecewise SE branch removed                      :: 26 failed
+TERM_COV inactive early return back to zeros(1)           ::  1 failed (only its own test)
+TERM_TYPES to_dataframe drops 'piecewise'                 ::  8 failed
+COEF piecewise branch removed (one-row fallback)          :: 11 failed
+COEF whole-term row is not a group test                   :: 10 failed
+COEF ref_df is not J+1                                    ::  8 failed
+COEF four-condition comment block deleted                 ::  1 failed (only its own test)
+COEF edf reported twice (also on the first knot row)      ::  8 failed
+COEF group row no longer labelled piecewise               ::  1 failed
+COEF per-knot rows named from column order                ::  8 failed
+COEF per-knot CIs collapse onto the estimate              ::  8 failed
+RATING write path rounds Log relativity to 4 dp           ::  3 failed  <- the required write-path sabotage
+RATING piecewise routing removed (block omitted)          ::  6 failed
+RATING _continuous_features admits Piecewise              ::  6 failed
+RATING block emits a Weight column instead of the log     ::  5 failed
+EXCEL main-effect stride widened to 4                     ::  8 failed  <- the required characterization sabotage
+EXCEL global format loop keys on the wrong residue        ::  1 failed
+EXCEL piecewise annotation pass never runs                ::  4 failed
+EXCEL note slopes rounded to 10 significant figures       ::  2 failed
+EXCEL log-relativity column left at the global 2 dp       ::  1 failed
+EXCEL note written over the block title row               ::  3 failed
+PIECEWISE reconstruct forgets the segment width           ::  8 failed
+DM_BUILDER discretizes a Piecewise term                   ::  1 failed
+CASES pinned_narrower stops extrapolating                 ::  1 failed (the fixture guard)
+```
+
+### `.test_durations` had to be extended — a real failure stage 1 nearly caused
+
+`tests/test_ci_contracts.py::test_duration_manifest_covers_the_non_browser_suite` requires the
+committed pytest-split duration manifest to cover **95%** of the collected non-browser suite.
+Stage 1's 50 new tests took it to `6331/6634 = 0.9543`; stage 2's 55 took it to
+`6331/6689 = 0.9465` and it **failed**. Fixed by measuring the three touched test files and
+merging only the **111 node ids not already present** into `.test_durations`, so every
+pre-existing entry keeps its recorded value byte for byte (the diff removes exactly one line,
+the closing brace). Whoever adds tests in stage 3 must do the same:
+
+```
+uv run pytest <new files> -q --store-durations --durations-path /tmp/new.json
+# then merge only the keys absent from .test_durations, and re-sort
+```
+
+A blanket `--store-durations` over the whole suite would rewrite all 6374 existing values and
+bury the real change.
+
+### Findings for stage 3
+
+- **`plotting/data.py:213` is a SECOND plotting site the plan's task 3.4 does not list.**
+  `_main_effect_density_dataframe` dispatches on `ti.kind in ("spline", "polynomial")` then
+  `"numeric"`, then falls through to `list(ti.levels)` — which is `None` for a piecewise term
+  and raises `TypeError`. It needs the same one-word addition as
+  `main_effects_plotly.py:629`. Before this stage `term_inference` raised on a Piecewise spec,
+  so neither site was reachable; they are reachable now.
+- **`editor/summaries.py:235` labels any `is_spline` row `"spline"`** in the editor's summary
+  payload, the same way `inference/summary.py` did. Stage 3 owns the editor; the fix mirrors
+  the `subgroup_type == "piecewise"` branch added here.
+- **The console summary's "smooth p-values use Wood (2013)" note fires for any `is_spline`
+  row**, so a model whose only group-test row is a Piecewise term prints it. This is
+  pre-existing (a `PolynomialCategorical` term does the same) and was left alone rather than
+  changed as a side effect of this stage. The *export* payload is already correct: it keys on
+  `kind.startswith("smooth")`, and the piecewise row's kind is `"group"`.
+- `spec._knots`, `spec._base_index` and `spec._non_base_indices` live on `model._specs[name]`,
+  as stage 1 recorded. `term_inference(name).x` is now the knot vector, which is the input
+  stage 3's editor handles need.
+
+### Stage 2 acceptance criteria — all met
+
+- [x] `term_inference` returns `kind="piecewise"` with `J+2` knots and a zero at the base
+      index; `to_dataframe()` returns the x-bearing shape.
+- [x] `summary()` shows `J+1` per-knot rows plus one chi-square group row; no
+      `TypeError: Unknown feature type`.
+- [x] The four-condition comment is present at the `coef_tables.py` branch and is pinned by a
+      test whose sabotage deletes the whole block.
+- [x] Round-trip exactness holds on `interior_base` and `pinned_narrower`, measured at
+      ~6e-16 against a derived tolerance asserted to be inside `1e-12`.
+- [x] The characterization test passes before and after the `excel.py` change.
+- [x] The impact sheet has no Piecewise row; `_continuous_features` unchanged.
+- [x] `ruff check` and `ruff format --check` clean.
+- [x] Sabotage evidence recorded for all 55 new tests; 29 sabotages, 0 inert.

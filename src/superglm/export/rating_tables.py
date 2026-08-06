@@ -16,6 +16,7 @@ from superglm.export.summary import SummaryExportPayload, build_summary_export_p
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.inference._ordered_reference import ordered_reference_intercept
@@ -166,6 +167,41 @@ def _categorical_block(
                 name: levels,
                 "Relativity": np.asarray(ti.relativity, dtype=np.float64),
                 "Weight": _weights_by_level(X, name, levels, sample_weight),
+            }
+        ),
+    )
+
+
+def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlock:
+    """One row per knot: the knot value, its relativity, and its log relativity.
+
+    No binning, because there is nothing to bin -- a piecewise-linear function
+    *is* a rating table, so the numbers here are the numbers the model fitted.
+
+    Exactly three columns, and that is a constraint rather than a preference:
+    the Excel renderer lays main-effect blocks on a fixed three-column stride
+    and applies number formats globally by column index, so a fourth column
+    would overwrite the neighbouring block.  ``Weight`` is the column that gets
+    left out, and it is the right one to lose: a per-knot weight is not a
+    rating-table quantity, and per-segment weight is already reported by the
+    small-segment warning at ``build()``.
+
+    ``Log relativity`` is the exact column.  The model is linear in log
+    relativity between knots, so a consumer who interpolates the ``Relativity``
+    column linearly gets numbers close to but not equal to the model -- second
+    order in the segment width, worst mid-segment on the steepest segment.
+    Emitting both, and stating the rule in the sheet, puts that choice in the
+    consumer's hands instead of hiding it.
+    """
+    ti = model.term_inference(name, with_se=False, centering=centering)
+    return RatingTableBlock(
+        name=name,
+        kind="piecewise",
+        table=pd.DataFrame(
+            {
+                name: np.asarray(ti.x, dtype=np.float64),
+                "Relativity": np.asarray(ti.relativity, dtype=np.float64),
+                "Log relativity": np.asarray(ti.log_relativity, dtype=np.float64),
             }
         ),
     )
@@ -585,7 +621,17 @@ def build_rating_table_payload(
     main_effects: list[RatingTableBlock] = []
     for name in model._feature_order:
         spec = model._specs[name]
-        if selected is not None and name in selected.tables:
+        # Piecewise is tested FIRST and deliberately does not join
+        # ``_continuous_features``.  That list is what gets handed to
+        # ``discretization_impact``, whose continuity gate raises for anything
+        # that is not a spline or a polynomial; and every name it returns is
+        # routed to the BINNED ``_continuous_block`` below, which is the lossy
+        # path this feature exists to remove.  A piecewise term therefore also
+        # contributes no row to the impact sheet -- correctly, since its export
+        # has no discretisation error to measure.
+        if isinstance(spec, Piecewise):
+            main_effects.append(_piecewise_block(model, name, centering))
+        elif selected is not None and name in selected.tables:
             main_effects.append(_continuous_block(name, selected.tables[name]))
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))

@@ -63,11 +63,11 @@ class TermInference:
 
     # Identity
     name: str
-    kind: str  # "spline", "categorical", "numeric", "polynomial"
+    kind: str  # "spline", "categorical", "numeric", "polynomial", "piecewise"
     active: bool
 
     # Curve / levels / slope
-    x: NDArray | None = None  # grid for spline/polynomial, None otherwise
+    x: NDArray | None = None  # grid for spline/polynomial, knots for piecewise
     levels: list[str] | None = None  # for categorical
     log_relativity: NDArray | None = None
     relativity: NDArray | None = None
@@ -109,7 +109,10 @@ class TermInference:
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to a tidy DataFrame for plotting or export."""
-        if self.kind in ("spline", "polynomial"):
+        # "piecewise" belongs with the x-bearing kinds, not with the numeric
+        # fallback: its values are indexed by knot position, so dropping x would
+        # leave J+2 log-relativities with nothing saying where they sit.
+        if self.kind in ("spline", "polynomial", "piecewise"):
             d: dict[str, Any] = {
                 "x": self.x,
                 "log_relativity": self.log_relativity,

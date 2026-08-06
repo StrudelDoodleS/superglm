@@ -528,6 +528,8 @@ class ModelSummary:
                     kind = "linear"
                 elif row.subgroup_type == "ordered_spline":
                     kind = "ordered spline"
+                elif row.subgroup_type == "piecewise":
+                    kind = "piecewise"
                 else:
                     kind = "spline"
                 param_label = f"{row.n_params} params"
@@ -928,6 +930,8 @@ class ModelSummary:
                     kind = "linear"
                 elif row.subgroup_type == "ordered_spline":
                     kind = "ordered spline"
+                elif row.subgroup_type == "piecewise":
+                    kind = "piecewise"
                 else:
                     kind = "spline"
                 param_label = f"{row.n_params} params"
