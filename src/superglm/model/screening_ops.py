@@ -92,6 +92,7 @@ from superglm.features.ordered_categorical import (
     OrderedCategorical,
     resolve_interaction_parent,
 )
+from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
@@ -300,6 +301,12 @@ def _deferral_reason(spec) -> str:
         return (
             "OrderedCategorical is deferred: no inner spline was built, so the term "
             "has no marginal smooth to cross with"
+        )
+    if isinstance(spec, Piecewise):
+        return (
+            "Piecewise margins are deferred: the hat basis is not a penalized marginal "
+            "smooth, so no interaction class refits the pair. A per-level piecewise "
+            "(Piecewise x Categorical) is the natural extension and is not built yet"
         )
     if isinstance(spec, Polynomial):
         return (

@@ -1094,3 +1094,236 @@ bury the real change.
 - [x] The impact sheet has no Piecewise row; `_continuous_features` unchanged.
 - [x] `ruff check` and `ruff format --check` clean.
 - [x] Sabotage evidence recorded for all 55 new tests; 29 sabotages, 0 inert.
+
+---
+
+# Stage 3 narrative — completed 2026-08-06
+
+**Status: complete.** A `Piecewise` term has one editor handle per knot, sitting exactly on
+the knot and carrying exactly the coefficient; edits are exact, local and free of #236; the
+term plots on both engines; PSST reports a bespoke deferral. 71 new tests, every one covered
+by at least one sabotage, **zero inert sabotages**.
+
+Files: `editor/terms.py`, `editor/controls.py`, `editor/session.py`, `editor/payloads.py`,
+`editor/apply.py`, `features/piecewise.py`, `plotting/main_effects_plotly.py`,
+`plotting/data.py`, `plotting/main_effects.py` (the last two outside the plan's list — see
+below), `model/screening_ops.py`, `tests/test_piecewise_editor.py` (new), `.test_durations`.
+
+### Measured results
+
+```
+uv run pytest tests/test_piecewise_editor.py -q  -> 70 passed, 1 skipped (plotly absent)
+                                                 -> 71 passed with the plotting extra installed
+uv run pytest tests/ -q -m "not slow"            -> 6497 passed, 196 skipped, 137 deselected,
+                                                    0 FAILED  (261s)
+uv run ruff check src/ tests/                    -> All checks passed!
+uv run ruff format --check src/ tests/           -> 432 files already formatted
+uv lock --check / uv pip check                   -> clean
+```
+
+6497 = stage 2's 6427 + the 70 that run without plotly. 196 skips = 195 + the plotly test.
+Version untouched at `0.19.0`. The plan's recorded baseline failure did not reproduce in this
+stage either, exactly as stage 2 found.
+
+### Two things the plan told me to measure first, and both came out against its wording
+
+**1. Locality is a property of the basis COLUMN, not of the two adjacent knot intervals.**
+`_segment_index` clamps, so a row outside `[lower, upper]` is evaluated in the outer segment
+and the hats at `t_1` and `t_J` keep non-zero entries out in the linear tail. Measured on
+`pinned_narrower` (knots `[20, 40, 60, 80]`, data on `[0, 100]`): moving the handle at
+`t_J = 60` changes predictions for rows above 80 by **2.2e-01**. The interval form of the
+claim — "rows outside `(t_{j-1}, t_{j+1})` are bit-identical" — is therefore **false** on a
+fixture the plan itself requires. Every locality assertion takes its support from
+`spec._raw_basis_matrix(x)[:, j] != 0.0`, and
+`test_a_hat_next_to_the_boundary_keeps_support_out_in_the_linear_tail` pins the discrepancy
+itself: `support ⊋ interval`, every extra row sits at or above `upper`, and the reverse
+containment still holds.
+
+**2. The base-handle re-base keeps predictions local to ROUND-OFF, not to the bit.** The
+plan's algebra is right — `f'(x) = f(x) + d·h_r(x)` — but the cancellation runs through
+`Σ_j h_j = 1`, which is not exactly 1 in binary. Measured across all eight cases, base
+handle dragged by `d = 0.4`:
+
+```
+case             beta shift   intercept shift   max rel move OFF the base hat
+interior_base    -0.4 exact   +0.4 exact        5.39e-16
+end_base_lower   -0.4 exact   +0.4 exact        4.73e-16
+end_base_upper   -0.4 exact   +0.4 exact        4.26e-16
+unequal_widths   -0.4 exact   +0.4 exact        3.12e-16
+pinned_wider     -0.4 exact   +0.4 exact        5.33e-16
+pinned_narrower  -0.4 exact   +0.4 exact        2.07e-16
+heaped_int_x     -0.4 exact   +0.4 exact        0.00e+00
+many_knots       -0.4 exact   +0.4 exact        5.28e-16
+```
+
+Worst 5.4e-16, about 2.4 eps. So the assertion written is the one measured: predictions equal
+`before * exp(d * h_r(x))` to a tolerance derived from the flop count, and off the base hat
+they move by less than that tolerance — **not** `assert_array_equal`. A **non-base** handle
+move *is* bit-identical off its support, because there every other coefficient is untouched
+and the hat is exactly `0.0`; that asymmetry is real and both halves are asserted.
+
+### DEVIATION 5 (the three gates) — implemented as the plan corrected it
+
+`term_type_from_spec` returns `"piecewise"`; `_require_control_term` and `_controls_payload`
+both test membership of a new `controls.CONTROL_HANDLE_TERM_TYPES = ("spline", "piecewise")`
+rather than carrying two literals that can drift. Sabotaging either caller back to
+`!= "spline"` fails 12 and 1 tests respectively, so the plan's claim that both are real
+blockers is now measured, not asserted.
+
+### NEW DEVIATION 5a — the matplotlib engine needed the same fix, and it is the default
+
+The plan's task 3.4 names `main_effects_plotly.py:629`. Two more sites are reachable and one
+of them is worse:
+
+* `plotting/data.py:213` (`_main_effect_density_dataframe`) — stage 2 already flagged it;
+  falls through to `list(ti.levels)` and raises `TypeError`.
+* `plotting/main_effects.py` at three sites — **the matplotlib engine, which is the default
+  and the only one installed by `--extra dev`.** Measured before the fix: `model.plot()`
+  drew the piecewise panel as `ax.set_visible(False)` — 0 lines, 0 patches, 0 collections, no
+  title — and `model.plot("x")` produced a figure whose only content was the text
+  `Unknown term kind: 'piecewise'`. A plot that silently omits a fitted term is exactly the
+  class of defect this repository keeps writing memory notes about, so the one-word fix went
+  in at all three: the single-term dispatch, the grid panel dispatch, and `_CONTINUOUS_KINDS`
+  (which decides whether the lower density-strip row is laid out at all).
+
+That third one is the trap: with a Numeric or Spline also in the model, another term keeps
+the strip row alive and reverting `_CONTINUOUS_KINDS` changes nothing observable. It gets a
+dedicated test whose model has exactly one continuous term, and the sabotage confirms the
+test is the only thing that notices.
+
+### The plotly test is guarded, and the guard was verified by installing the extra
+
+`plotly` is an optional extra and is **not** in `--extra dev`, so
+`test_the_plotly_figure_draws_the_piecewise_curve` skips locally — and a skipped test cannot
+carry sabotage evidence. `dev-ci.yml` does install `--extra plotting` for the Python-floor
+job, so the test does run somewhere. To produce real evidence the extra was installed with
+`uv pip install "plotly>=5.24"` (verified not to touch `uv.lock` or `pyproject.toml`), the
+whole campaign was re-run — the plotly sabotage then failed exactly its own test — and the
+environment was restored with `uv sync --python 3.13 --extra dev`, which uninstalled plotly
+again. The reported full-suite numbers are from the restored environment.
+
+### The session-level null edit does not reach the apply branch
+
+`apply_edits_to_model_copy_with_data` filters out any term whose edited values still match
+its originals, so a genuinely null session never calls `_apply_term_edit` at all. The
+brief's null-edit test therefore measures a *different* property from the one the design
+means by #236, and it is split in two rather than left to look like one:
+
+* `test_closing_a_session_with_no_edits_returns_an_untouched_copy` — the user-visible half.
+  It asserts the returned model is a **distinct object** as well as bit-identical, so an
+  aliasing copy cannot pass it for the wrong reason (sabotage `APPLY the editor copy aliases
+  the source model` fails all 8 of its cases).
+* `test_the_apply_path_moves_nothing_when_the_targets_are_the_fitted_values` — the #236
+  property proper. It perturbs `original_log_effect` alone so the term registers as changed
+  while the *targets*, read from `edited_log_effect`, stay at the fitted knot values. That is
+  the only way to drive the branch with a null edit, and it is what makes the required
+  sabotage (`target[0]` instead of `target[base_index]`) bite: 35 tests fail under it.
+
+### Handles: the opt-in, and the cap that is asserted rather than pretended away
+
+`raw_control_components` gains three lines: when `n_handles is None` and the spec exposes a
+truthy `_editor_wants_all_handles`, default to `basis.shape[1]`. `Piecewise` sets it. Both
+halves are pinned — `_control_handle_count(15, None) == 12` (the default the opt-in
+overrides) and `controls["x"].size == 15` — so removing the opt-in from either side fails 3
+tests.
+
+The hard cap of 24 stays and is measured, not assumed: a locally built 31-knot term gets
+**24** handles, all of them still exactly on knots, and the `Piecewise` docstring says so.
+`many_knots` (15 knots) is above the 12-handle default but below the cap, so it could not
+have exercised the cap on its own; the wide fixture is local to the editor test file rather
+than added to `CASES`, so the stage-1 and stage-2 sweeps are not silently re-parametrized.
+
+### Smaller decisions
+
+* **`_apply_piecewise_term` guards the grid length.** `_patch_beta_block` would already
+  refuse a wrong-sized block, but its message talks about a projected beta; this one names
+  the actual cause (the editor grid is not the knot vector). One test, one sabotage.
+* **`_most_balanced_non_base_knot`** picks the moved handle per fixture instead of hard-coding
+  an index, and every locality test asserts both halves of the split are non-empty. A
+  locality assertion whose complement is empty passes while measuring nothing.
+* **The screening deferral names the missing feature, not just the class.** It says the hat
+  basis is not a penalized marginal smooth *and* that `Piecewise × Categorical` is the
+  natural extension that does not exist yet, so the report tells a user what to ask for.
+  Both the table's `deferred_features` attr and the `candidates=` error path are tested.
+
+### Sabotage evidence
+
+19 sabotages, each one exact text edit, each run against `tests/test_piecewise_editor.py`
+and then reverted with a byte-equality assert. **0 inert**, 0 anchor failures, and all 71
+tests fail under at least one. Driver and raw JSON: `scratchpad/sabotage_stage3.py`,
+`scratchpad/sabotage_stage3_results.json` (session scratch, not committed).
+
+```
+APPLY base_value reads knot 0 instead of the base knot     :: 35 failed  <- required
+APPLY routed through the least-squares projection          :: 33 failed  <- required
+APPLY intercept is never adjusted                          :: 16 failed
+APPLY knot-vector size guard removed                       ::  1 failed
+APPLY the editor copy aliases the source model             ::  8 failed
+CONTROLS all-handles opt-in removed                        ::  3 failed  <- required
+CONTROLS gate no longer admits piecewise                   :: 12 failed
+CONTROLS gate opened to every term type                    ::  1 failed
+PIECEWISE spec stops asking for every handle               ::  3 failed
+PIECEWISE hat weight clipped, killing the linear tails     ::  1 failed
+TERMS term_type_from_spec no longer says piecewise         :: 13 failed
+SESSION control-term gate back to spline only              :: 12 failed
+PAYLOADS controls gate back to spline only                 ::  1 failed
+MPL single-term kind tuple reverted                        ::  1 failed
+MPL grid panel kind tuple reverted                         ::  2 failed
+MPL grid continuous-kinds tuple reverted                   ::  1 failed
+PLOT DATA density kind tuple reverted                      ::  1 failed
+PLOTLY continuous kind tuple reverted                      ::  1 failed  <- required
+SCREENING bespoke piecewise reason removed                 ::  2 failed
+```
+
+Two sabotages were revised after being measured INERT, which is the discipline working:
+
+* `CONTROLS gate opened to every term type` first opened the tuple to `"categorical"` and
+  failed nothing, because `_require_control_term`'s levels guard refuses a categorical term
+  before the type gate is ever consulted. The test was rewritten to use a **Polynomial**
+  term — an x grid, no levels, so only the gate can refuse it — and the sabotage now bites.
+  The original test was measuring the levels guard while claiming to measure the gate.
+* `PLOTLY continuous kind tuple reverted` was inert only because the extra was missing; see
+  above.
+
+### `.test_durations`
+
+Same procedure as stage 2: measure the new file alone, merge only the **71 node ids absent**
+from the manifest, re-sort. `git diff --stat` shows `71 insertions(+)` and **no deletions**,
+so every pre-existing value survives byte for byte.
+`tests/test_ci_contracts.py::test_duration_manifest_covers_the_non_browser_suite` passes.
+
+### Stretch goals and deferrals — reported, not dropped
+
+* **`docs/guide/features.md` was NOT written.** Still the prototype's declared stretch goal,
+  now carried through all three stages. The material for it is in the plan's deferral table.
+* **Knot markers / segment styling in `main_effects_plotly`** — NOT done, stretch. The
+  correctness fix at `:629` did ship, along with the four sibling sites the plan did not list.
+* **`editor/summaries.py:235` still labels the piecewise group row `"spline"`** in the
+  editor's compact summary payload. Measured and deliberately left: the fix is not the
+  one-line `subgroup_type` branch stage 2 used for the console, because
+  `editor/app/summary.js:747` renders the marker only for `kind === "spline"`, so changing
+  the payload alone would silently *remove* the marker rather than correct it. It needs the
+  Python and the JS together plus a browser test, which is a larger change than this stage
+  should make on its way past. The number in the row is right; only the word is wrong, and
+  the console summary — the surface actually read — was corrected in stage 2.
+* **The plot density strip for a piecewise term is drawn on the knot grid** (J+2 points),
+  because `ti.x` *is* the knot vector. It renders, but a 5-point KDE is coarse. Not a defect
+  in this stage's code, and left alone deliberately; a follow-up would give the density its
+  own grid.
+* `model.plot_main_effects()` does not exist — the acceptance criterion's method is spelled
+  `model.plot()` / `model.plot_data()`. Both are tested.
+
+### Stage 3 acceptance criteria
+
+- [x] `EditorSession.control_points` returns `J+2` handles exactly on the knots
+      (`assert_allclose(..., atol=0.0)`), with `log_effect` equal to the reported knot
+      log-relativities and a hard zero at the base.
+- [x] Null edit bit-identical (both halves, split as described); single non-base handle edit
+      exact and local; base-handle edit re-bases with the **measured** prediction behaviour
+      asserted and the measurement recorded above.
+- [x] `model.plot()` completes **and draws** for a Piecewise term, on matplotlib and plotly.
+- [x] PSST screening reports a bespoke Piecewise deferral string.
+- [x] The full fixture matrix is swept by the stage-1/2 property tests and by every stage-3
+      null-edit, locality and re-base test.
+- [x] `ruff check` and `ruff format --check` clean; the suite shows **no** failure.
+- [x] Sabotage evidence recorded for every new test; 19 sabotages, 0 inert.

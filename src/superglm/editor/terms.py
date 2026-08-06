@@ -55,6 +55,7 @@ def term_type_from_spec(spec) -> str:
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
     from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
 
@@ -64,6 +65,8 @@ def term_type_from_spec(spec) -> str:
         return "ordered categorical"
     if isinstance(spec, Categorical):
         return "categorical"
+    if isinstance(spec, Piecewise):
+        return "piecewise"
     if isinstance(spec, Polynomial):
         return "polynomial"
     if isinstance(spec, Numeric):

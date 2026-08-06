@@ -16,7 +16,7 @@ from superglm.editor.collapse import (
     collapsed_feature_spec,
     ungrouped_feature_spec,
 )
-from superglm.editor.controls import control_curve_after_move
+from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES, control_curve_after_move
 from superglm.editor.controls import control_points as _control_points
 from superglm.editor.evaluation import coerce_evaluation_data, default_metrics_dataset
 from superglm.editor.evaluation_cache import EditMaterializationRequest
@@ -1221,7 +1221,7 @@ class EditorSession:
         editable = self._require_term(term)
         if editable.x is None or editable.levels is not None:
             raise TypeError(f"Term {term!r} does not expose spline control handles.")
-        if str(editable.metadata.get("term_type", editable.kind)) != "spline":
+        if str(editable.metadata.get("term_type", editable.kind)) not in CONTROL_HANDLE_TERM_TYPES:
             raise TypeError(f"Term {term!r} does not expose spline control handles.")
         return editable
 
