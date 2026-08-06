@@ -24,9 +24,11 @@ from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
+    ObservedModeNotCertifiedError,
     ObservedREMLGeometry,
     build_observed_reml_geometry,
     classify_reml_curvature,
+    mode_certification_hint,
     observed_penalized_mode_score,
     validate_observed_derivative_capability,
 )
@@ -51,6 +53,11 @@ from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.structured import resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
+
+# Observed geometry differentiates implicitly through the penalized mode, so it
+# needs a tighter solve than the caller may have asked for, and a fixed bar to
+# judge the result against. Both derive from this one ceiling.
+_OBSERVED_PIRLS_TOL_CEILING = 1e-10
 
 
 def optimize_direct_reml(
@@ -159,11 +166,20 @@ def optimize_direct_reml(
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None
-    observed_pirls_tol = min(pirls_tol, 1e-10) if use_observed_geometry else pirls_tol
+    observed_pirls_tol = (
+        min(pirls_tol, _OBSERVED_PIRLS_TOL_CEILING) if use_observed_geometry else pirls_tol
+    )
+    # Derived from the fixed ceiling, NOT from `observed_pirls_tol`. The bar
+    # certifies that the mode is accurate enough to implicitly differentiate
+    # through; that is a property of the derivative, not of how hard the caller
+    # asked PIRLS to work. Scaling it with the caller's `tol` made the knob
+    # self-defeating: the natural response to a certification failure is to
+    # tighten the solve, which tightened the bar by the same factor, and
+    # `tol=1e-14` could fail a fit that passed at every looser setting.
     # Floored at 100*eps, so unlike the SCOP certification bar
     # (reml/scop_efs.py) the tolerance arm here is live -- do not
     # generalise the #184 deletion to this expression.
-    observed_mode_tol = max(10.0 * observed_pirls_tol, 100.0 * np.finfo(float).eps)
+    observed_mode_tol = max(10.0 * _OBSERVED_PIRLS_TOL_CEILING, 100.0 * np.finfo(float).eps)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     # estimated_mask[i] = True  => component i is free to be optimized
@@ -479,10 +495,10 @@ def optimize_direct_reml(
                 mode_score.relative_max,
             )
             if mode_score.relative_max > observed_mode_tol:
-                raise RuntimeError(
-                    "observed REML geometry requires a converged penalized mode "
-                    f"(relative score={mode_score.relative_max:.3e}, "
-                    f"tolerance={observed_mode_tol:.3e})"
+                raise ObservedModeNotCertifiedError(
+                    mode_score.relative_max,
+                    observed_mode_tol,
+                    hint=mode_certification_hint(distribution),
                 )
 
         _t0 = _time.perf_counter()

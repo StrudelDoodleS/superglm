@@ -680,6 +680,62 @@ class ObservedModeScore:
     relative_max: float
 
 
+class ObservedModeNotCertifiedError(RuntimeError):
+    """The penalized mode is not accurate enough to differentiate through.
+
+    Raised where observed REML geometry needs implicit differentiation and the
+    achieved mode score misses the certification bar. This is a statement about
+    one ``(data, power, lambda)`` point, not about the model: a power search can
+    meet the bar comfortably across most of its range and miss it near a bound
+    where the working weights are worse conditioned. Callers that evaluate many
+    such points should treat it as an infeasible point rather than a failure,
+    which is why it is distinguishable from a bare ``RuntimeError``.
+
+    Subclasses ``RuntimeError`` so existing handlers keep working.
+    """
+
+    def __init__(self, relative_max: float, tolerance: float, *, hint: str = "") -> None:
+        self.relative_max = float(relative_max)
+        self.tolerance = float(tolerance)
+        self.hint = hint
+        # The body stays family-agnostic. Observed geometry is the DEFAULT here
+        # -- only canonical-link pairs take the Fisher branch -- so this reaches
+        # gamma/log, gaussian/log, poisson/sqrt, nb2/log, binomial/probit and
+        # every custom link. Advice naming one family's parameters would be
+        # wrong for most callers who see it, so a family-specific `hint` is
+        # supplied by the raise site, which holds the distribution.
+        #
+        # Deliberately absent everywhere: "loosen or tighten `tol`". The achieved
+        # score is set by conditioning and does not move with it, and tightening
+        # used to make matters strictly worse by raising this bar in step.
+        message = (
+            "REML could not certify the penalized coefficient mode: score "
+            f"{self.relative_max:.3e} exceeds the {self.tolerance:.3e} needed to "
+            "differentiate the Laplace determinant through it.\n"
+            "  This reflects how this data and parameterisation condition the "
+            "penalized fit, not a solver setting -- changing `tol` does not move it."
+        )
+        if hint:
+            message = f"{message}\n  {hint}"
+        super().__init__(message)
+
+
+def mode_certification_hint(distribution: Any) -> str:
+    """Name a parameterisation the caller chose and could change, if one exists.
+
+    Returns empty for families with no such knob. A caller staring at a
+    conditioning failure is better served by silence than by a plausible remedy
+    that has not been shown to work.
+    """
+    if isinstance(distribution, Tweedie):
+        return (
+            "Tweedie conditioning worsens as p approaches 2. `estimate_p()` scores "
+            "uncertifiable powers infeasible and searches the rest, rather than "
+            "requiring a workable p to be found by hand."
+        )
+    return ""
+
+
 def _stable_signed_sum(values: NDArray) -> float:
     """Sum signed finite rows without cancellation or intermediate overflow."""
     scale = float(np.max(np.abs(values), initial=0.0))
