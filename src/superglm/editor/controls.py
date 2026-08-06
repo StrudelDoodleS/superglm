@@ -7,6 +7,12 @@ from numpy.typing import NDArray
 
 from superglm.editor._types import EditableTerm
 
+# Term types whose control handles are recovered from a fitted basis rather than
+# drawn as a display-only fallback.  Kept here, where the recovery lives, so the
+# two callers that gate on it (`EditorSession._require_control_term` and
+# `payloads._controls_payload`) cannot drift apart.
+CONTROL_HANDLE_TERM_TYPES = ("spline", "piecewise")
+
 
 def control_points(model, term: EditableTerm, n_handles: int | None = None) -> dict:
     # Prefer the fitted spline basis when it is available. Moving one displayed
@@ -99,6 +105,14 @@ def raw_control_components(
     x_ctrl = _basis_support_centers(basis, term)
     if x_ctrl is None:
         x_ctrl = _greville_abscissae(spec, basis.shape[1], term)
+    if n_handles is None and getattr(spec, "_editor_wants_all_handles", False):
+        # Opt-in: one handle per basis column instead of the 12-handle default.
+        # A spec sets this when every column is a reported coefficient rather
+        # than one sample of a dense curve -- subsampling would then hide model
+        # parameters from the editor, not just thin the display. The hard cap in
+        # `_control_handle_limits` still applies, so a spec with more than 24
+        # columns does subsample and has to say so.
+        n_handles = basis.shape[1]
     basis_indices = _control_basis_indices(basis.shape[1], n_handles=n_handles)
     return basis, basis_indices, x_ctrl[basis_indices], np.asarray(coeff, dtype=np.float64)
 

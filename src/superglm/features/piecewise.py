@@ -114,7 +114,20 @@ class Piecewise:
     *stated*: ``lower`` / ``upper`` pin where the boundary segments start and
     the exported table prints the two boundary slopes, so the rule outside the
     tabulated range is reproducible by hand.
+
+    In the editor the term gets one control handle per knot -- the handle *is*
+    the coefficient, because the raw basis evaluated at the knots is the
+    identity.  The editor's hard cap of 24 handles still applies, so a term
+    with more than 24 knots displays a subsampled set of them and the knots
+    without a handle cannot be dragged.  State fewer breakpoints if every knot
+    has to be editable.
     """
+
+    # Opt out of the editor's 12-handle default (see `editor/controls.py`).
+    # Every column here is a reported coefficient with a knot to sit on, so
+    # thinning the handles would drop model parameters out of the editor rather
+    # than thin a redundant display grid.
+    _editor_wants_all_handles = True
 
     def __init__(
         self,

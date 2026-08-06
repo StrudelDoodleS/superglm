@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
 from superglm.editor.group_display import build_group_display
 from superglm.editor.terms import term_from_inference
 
@@ -249,7 +250,7 @@ def _controls_payload(
     term,
     n_handles: int | None = None,
 ) -> dict[str, Any] | None:
-    if str(term.metadata.get("term_type", term.kind)) != "spline":
+    if str(term.metadata.get("term_type", term.kind)) not in CONTROL_HANDLE_TERM_TYPES:
         return None
     if term.x is None or term.levels is not None:
         return None

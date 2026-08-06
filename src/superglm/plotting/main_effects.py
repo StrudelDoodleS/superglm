@@ -368,7 +368,7 @@ def plot_term(
         display = project_grouped_term_for_display(model, ti, grouped_level_display)
         ti = display.term
 
-    if ti.kind in ("spline", "polynomial"):
+    if ti.kind in ("spline", "polynomial", "piecewise"):
         needs_strip = has_density and ti.name in frame.columns
         fig, ax, ax_den = _make_continuous_figure(needs_strip, figsize)
 
@@ -796,7 +796,7 @@ def _plot_relativities_new(
     nrows = math.ceil(n / ncols)
 
     has_density = show_exposure and X is not None and sample_weight is not None
-    _CONTINUOUS_KINDS = ("spline", "polynomial", "numeric")
+    _CONTINUOUS_KINDS = ("spline", "polynomial", "piecewise", "numeric")
     any_density = has_density and any(
         ti.kind in _CONTINUOUS_KINDS and ti.name in X.columns for ti in terms
     )
@@ -862,7 +862,7 @@ def _plot_relativities_new(
             display = project_grouped_term_for_display(model, ti, grouped_level_display)
             display_ti = display.term
 
-        if display_ti.kind in ("spline", "polynomial"):
+        if display_ti.kind in ("spline", "polynomial", "piecewise"):
             _plot_spline_panel(ax, display_ti, interval, show_knots)
             if idx % ncols == 0:
                 ax.set_ylabel("Relativity")

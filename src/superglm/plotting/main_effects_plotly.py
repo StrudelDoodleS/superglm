@@ -626,7 +626,7 @@ def _add_term_traces(
 ) -> _XAxisConfig:
     """Append all traces for one term (response Y) and collect link variants."""
 
-    if ti.kind in ("spline", "polynomial"):
+    if ti.kind in ("spline", "polynomial", "piecewise"):
         _add_continuous_term_traces(
             fig,
             ti,
