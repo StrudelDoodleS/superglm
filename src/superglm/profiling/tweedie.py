@@ -3074,6 +3074,12 @@ class TweedieProfileResult:
         Whether the winning profiled objective is finite and valid.
     phi_converged : bool
         Whether the winning inner dispersion profile converged.
+    fit_mode : {"fit", "fit_reml"}
+        Regime the published fit was estimated under.
+    search_fit_mode : {"fit", "fit_reml"}
+        Regime each candidate ``p`` was evaluated under. Differs from
+        ``fit_mode`` only when the caller decoupled the search from the
+        publication via ``estimate_p(search_fit_mode=...)``.
     """
 
     p_hat: float
@@ -3112,12 +3118,28 @@ class TweedieProfileResult:
     density_warning_severity: _DensityWarningSeverity = field(default="none", kw_only=True)
     near_power_boundary: bool = field(default=False, kw_only=True)
     requested_method: str = field(default="", kw_only=True)
+    fit_mode: str = field(default="fit", kw_only=True)
+    search_fit_mode: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
         self._ensure_density_compat_state()
+        self._ensure_search_provenance_state()
+
+    def _ensure_search_provenance_state(self) -> None:
+        """Restore provenance fields absent from legacy construction or pickle state.
+
+        These carry class-level defaults, so a pickle written before they
+        existed restores `fit_mode` as ``"fit"`` but `search_fit_mode` as the
+        empty string. Left alone that reads as a decoupled run and the CI guard
+        refuses an interval the legacy result is perfectly entitled to.
+        """
         if not self.requested_method:
             self.requested_method = self.method
+        if not self.fit_mode:
+            self.fit_mode = "fit"
+        if not self.search_fit_mode:
+            self.search_fit_mode = self.fit_mode
 
     def _ensure_density_compat_state(self) -> None:
         """Restore density fields absent from legacy construction or pickle state."""
@@ -3158,6 +3180,7 @@ class TweedieProfileResult:
         """Restore compatibility fields absent from legacy pickle state."""
         self.__dict__.update(state)
         self._ensure_density_compat_state()
+        self._ensure_search_provenance_state()
         if "_ci_details_cache" not in self.__dict__:
             self._ci_details_cache = {}
 
@@ -3224,6 +3247,24 @@ class TweedieProfileResult:
                 "Pearson plug-in profiles."
             )
 
+    def _validate_ci_search_mode(self) -> None:
+        """Refuse to invert a profile the published estimates do not lie on.
+
+        A decoupled run profiles ``p`` under one regime and reports the fit and
+        dispersion of another. The cached objective is still the searched one,
+        so inverting it would compare this result's ``nll`` against a curve it
+        was never evaluated on -- which surfaces as a spurious negative
+        likelihood ratio and a "rerun/expand search" complaint that points at
+        the wrong thing entirely.
+        """
+        if self.search_fit_mode != self.fit_mode:
+            raise RuntimeError(
+                f"A likelihood-ratio profile CI inverts the profile searched "
+                f"(search_fit_mode={self.search_fit_mode!r}), which does not describe this "
+                f"model published under fit_mode={self.fit_mode!r}; re-estimate with the "
+                f"search and publication in the same regime to obtain an interval."
+            )
+
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
         """Profile likelihood confidence interval for Tweedie p.
 
@@ -3233,6 +3274,7 @@ class TweedieProfileResult:
         Its finite max-gap scan can miss a narrower unsampled LR island.
         """
         self._validate_ci_phi_method()
+        self._validate_ci_search_mode()
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
             self.p_hat,
             self.nll,
@@ -5323,12 +5365,12 @@ def estimate_tweedie_p(
     if method == "auto":
         resolved_method = "joint_ml" if fit_mode == "fit" and phi_method == "mle" else "brent"
     if resolved_method == "brent":
-        return _search_brent(ctx, p_bounds, xatol, maxiter)
-    if resolved_method == "grid":
-        return _search_grid(ctx, p_bounds, n_grid, grid)
-    if resolved_method == "grid_refine":
-        return _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
-    if resolved_method == "joint_ml":
+        result = _search_brent(ctx, p_bounds, xatol, maxiter)
+    elif resolved_method == "grid":
+        result = _search_grid(ctx, p_bounds, n_grid, grid)
+    elif resolved_method == "grid_refine":
+        result = _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
+    elif resolved_method == "joint_ml":
         if isinstance(ctx, _ProfileContextREML):
             # Not conservatism -- the identity the fast path rests on does not
             # hold here. Its Newton step drives `gradient_p` to zero, and that
@@ -5349,9 +5391,16 @@ def estimate_tweedie_p(
                     result.outer_message,
                 )
             )
-            return result
-        return _search_joint_ml(ctx, p_bounds, xatol, maxiter)
-    return _search_profile_opt(ctx, p_bounds, optimizer, xatol, maxiter)
+        else:
+            result = _search_joint_ml(ctx, p_bounds, xatol, maxiter)
+    else:
+        result = _search_profile_opt(ctx, p_bounds, optimizer, xatol, maxiter)
+
+    # The regime every candidate p was evaluated under. `estimate_p` may
+    # publish under a different one, and overwrites `fit_mode` when it does.
+    result.fit_mode = fit_mode
+    result.search_fit_mode = fit_mode
+    return result
 
 
 # ---------------------------------------------------------------------------

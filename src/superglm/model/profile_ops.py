@@ -22,6 +22,7 @@ def estimate_p(
     offset=None,
     *,
     fit_mode="fit",
+    search_fit_mode=None,
     phi_method="mle",
     method="auto",
     ci_alpha=None,
@@ -39,13 +40,30 @@ def estimate_p(
     from superglm.profiling.tweedie import _validate_profile_ci_alpha, estimate_tweedie_p
 
     resolved_mode = _resolve_profile_fit_mode(model, fit_mode)
+    resolved_search_mode = (
+        resolved_mode
+        if search_fit_mode is None
+        else _resolve_profile_fit_mode(model, search_fit_mode, parameter="search_fit_mode")
+    )
+    decoupled = resolved_search_mode != resolved_mode
     _validate_profile_selection_mode(model, resolved_mode)
+    _validate_profile_selection_mode(model, resolved_search_mode)
     resolved_ci_alpha = None if ci_alpha is None else _validate_profile_ci_alpha(ci_alpha)
     if resolved_ci_alpha is not None and phi_method == "pearson":
         raise RuntimeError(
             "Tweedie likelihood-ratio profile CI requires exact MLE dispersion "
             "profiling (phi_method='mle'); use bootstrap/sandwich inference for "
             "Pearson plug-in profiles."
+        )
+    if resolved_ci_alpha is not None and decoupled:
+        # The interval inverts the profile that was actually searched. Handing
+        # one back for a fit published under a different regime would attach a
+        # correct-looking number to a curve the published model never traced.
+        raise RuntimeError(
+            f"A likelihood-ratio profile CI describes the profile searched "
+            f"(search_fit_mode={search_fit_mode!r}), so it cannot be reported for a "
+            f"model published under fit_mode={fit_mode!r}; request the interval from a "
+            f"run whose search and publication agree, or drop ci_alpha."
         )
 
     X_ref = X
@@ -74,11 +92,12 @@ def estimate_p(
         y,
         sample_weight=sample_weight,
         offset=offset,
-        fit_mode=resolved_mode,
+        fit_mode=resolved_search_mode,
         phi_method=phi_method,
         method=method,
         **kwargs,
     )
+    result.fit_mode = resolved_mode
     del profile_workspace
     if progress_callback is not None:
         progress_callback("best_found", {"profile_estimate": _tweedie_estimate_payload(result)})
@@ -130,7 +149,13 @@ def estimate_p(
         )
 
     final_model = final_workspace.model
-    _synchronize_tweedie_profile_refit(final_model, y, result)
+    _synchronize_tweedie_profile_refit(
+        final_model,
+        y,
+        result,
+        reprofile_phi=decoupled,
+        phi_method=phi_method,
+    )
     if not model._retain_fit_state:
         final_model._retain_fit_state = False
         fit_ops._maybe_release_fit_state(final_model)
@@ -214,7 +239,52 @@ def _replace_pirls_phi(result, phi):
     return _replace_dataclass_preserving_dynamic_attributes(result, phi=float(phi))
 
 
-def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
+def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, phi_method) -> None:
+    """Re-profile dispersion against the published fit after a decoupled search.
+
+    The search profiled phi at its own mode's fitted mean. When the publication
+    runs under a different regime that mean no longer exists in the model being
+    returned, so carrying the search's phi across would hand back a dispersion
+    estimated from coefficients the caller never receives. Re-profile at the
+    published mean instead, and move the objective with it so the reported
+    likelihood still refers to the reported estimates.
+    """
+    from superglm.profiling.tweedie import _profile_phi_detailed
+
+    edf = float(getattr(model.result, "effective_df", 0.0) or 0.0)
+    phi_result = _profile_phi_detailed(
+        y_arr,
+        mu,
+        float(profile_result.p_hat),
+        weights=weights,
+        df_resid=max(float(len(y_arr)) - edf, 1.0),
+        phi_method=phi_method,
+        phi_start=float(profile_result.phi_hat),
+    )
+    profile_result.phi_hat = float(phi_result.phi)
+    profile_result.nll = float(phi_result.nll)
+    profile_result.objective_finite = bool(phi_result.objective_finite)
+    profile_result.phi_converged = bool(phi_result.converged)
+    profile_result.phi_optimizer = str(phi_result.optimizer)
+    profile_result.phi_score = phi_result.score
+    profile_result.phi_used_fallback = bool(phi_result.used_fallback)
+    profile_result.phi_fallback_reason = phi_result.fallback_reason
+    profile_result.phi_branch_switch_detected = bool(phi_result.branch_switch_detected)
+    profile_result.phi_message = str(phi_result.message)
+    profile_result.phi_n_evaluations += phi_result.n_evaluations
+    profile_result.phi_n_score_evaluations += phi_result.n_score_evaluations
+    profile_result.phi_n_value_only_evaluations += phi_result.n_value_only_evaluations
+    profile_result.phi_n_fallback_evaluations += phi_result.n_fallback_evaluations
+
+
+def _synchronize_tweedie_profile_refit(
+    model,
+    y,
+    profile_result,
+    *,
+    reprofile_phi: bool = False,
+    phi_method: str = "mle",
+) -> None:
     """Atomically synchronize a retained final refit to the profiled dispersion."""
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
@@ -237,6 +307,8 @@ def _synchronize_tweedie_profile_refit(model, y, profile_result) -> None:
         eta = eta + offset_arr
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), distribution)
+    if reprofile_phi:
+        _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, phi_method)
     null_mu = _compute_null_mu(y_arr, weights, offset_arr, distribution, model._link)
     fit_stats = _compute_fit_stats(
         y_arr,
@@ -403,12 +475,12 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
     return public_result
 
 
-def _resolve_profile_fit_mode(model, fit_mode: str) -> str:
+def _resolve_profile_fit_mode(model, fit_mode: str, *, parameter: str = "fit_mode") -> str:
     """Resolve public profile fit mode to an internal final-refit method."""
     valid_fit_modes = {"fit", "reml", "inherit"}
     if fit_mode not in valid_fit_modes:
         raise ValueError(
-            f"fit_mode={fit_mode!r} is not valid, expected one of {sorted(valid_fit_modes)}"
+            f"{parameter}={fit_mode!r} is not valid, expected one of {sorted(valid_fit_modes)}"
         )
     if fit_mode == "reml":
         return "fit_reml"

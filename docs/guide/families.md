@@ -215,6 +215,36 @@ With `fit_mode="reml"`, REML selects spline smoothing penalties within each
 candidate fit. The *p*/φ profile is then evaluated conditionally; it does not jointly estimate *p* and φ
 using an mgcv-style REML objective.
 
+### Searching and publishing under different regimes
+
+A REML-mode search runs a full smoothing-parameter selection inside every
+candidate *p* evaluation, so its cost is roughly the number of search steps
+times the cost of one `fit_reml`. `search_fit_mode` decouples the two: select
+*p* under ordinary ML, then publish one REML fit at the selected *p*.
+
+```python
+result = model.estimate_p(
+    df,
+    y,
+    sample_weight=exposure,
+    fit_mode="reml",        # what gets published
+    search_fit_mode="fit",  # what selects p
+)
+```
+
+Dispersion is re-profiled against the published fit, so `result.phi_hat`
+describes the model you get back rather than the fits the search discarded.
+
+This is an approximation, not a free speedup: *p* is chosen under a different
+objective than the one that publishes it. On a 96,743-row model with 8 features
+it ran about 6× faster and moved *p̂* by 3.2e-5, but that number is a property
+of that surface, not a guarantee — compare against `fit_mode="reml"` alone on
+your own data before adopting it.
+
+Likelihood-ratio confidence intervals are refused for a decoupled run, eagerly
+via `ci_alpha` and lazily via `result.ci()`. The interval inverts the profile
+that was searched, and that profile is not the one the published fit lies on.
+
 ### Profile confidence interval
 
 ```python
