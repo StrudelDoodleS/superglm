@@ -8,9 +8,12 @@ Run before and after any change:
 
     uv run python benchmarks/tweedie_reml_search_cost.py
 
-The correctness bar is not "it got faster". Any change MUST leave p_hat and
-phi_hat unchanged to the tolerances printed at the end -- the search result is
-the product, and a faster search that moves the answer is a regression.
+The correctness bar is not "it got faster". This benchmark fails closed: it
+exits non-zero if p_hat or phi_hat drifts past tolerance, and *also* if any
+leg reports non-convergence, a non-finite objective, a boundary-pinned
+optimum, a density warning, or any Python warning. A search that gives up
+early is fast for the wrong reason, and a timing table that cannot tell that
+apart from a real speedup is not evidence.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -32,7 +36,13 @@ N_ROWS = 96_743
 
 # Reference values on this fixture, from origin/master + the parity-skip fix.
 # A change that alters these has changed the answer, not just the speed.
-REFERENCE = {"p_hat": 1.57461, "phi_hat": 42.05}
+# `estimate_p_reml` and `two_step` are different estimators (REML-mode search
+# versus ML-mode search), so each carries its own reference rather than being
+# held to the other's.
+REFERENCE = {
+    "estimate_p_reml": {"p_hat": 1.5746132307, "phi_hat": 42.052},
+    "two_step": {"p_hat": 1.5745815576, "phi_hat": 42.054},
+}
 P_TOL = 1e-4
 PHI_TOL = 5e-2
 
@@ -74,6 +84,76 @@ def _model(oc_levels):
     return SuperGLM(family=families.tweedie(p=1.5), features=build_features(oc_levels))
 
 
+# ---------------------------------------------------------------------------
+# Honesty gates
+# ---------------------------------------------------------------------------
+
+
+def profile_complaints(result) -> list[str]:
+    """Name every way a power-search result admits it did not do its job.
+
+    A search that returns unconverged, lands on a configured bound, or profiles
+    a non-finite objective is not a cheaper answer to the same question. Each
+    flag below is one the search itself sets, so leaving them unchecked means
+    the benchmark reports a speedup the search has already disclaimed.
+    """
+    complaints: list[str] = []
+    for flag in (
+        "converged",
+        "outer_converged",
+        "fit_converged",
+        "solver_converged",
+        "objective_finite",
+        "phi_converged",
+    ):
+        if getattr(result, flag, True) is False:
+            complaints.append(f"{flag}=False")
+    # None means "REML did not run here", which is legitimate under fit mode.
+    if getattr(result, "reml_converged", None) is False:
+        complaints.append("reml_converged=False")
+    boundary = getattr(result, "outer_boundary", None)
+    if boundary:
+        complaints.append(f"outer_boundary={boundary!r} (p_hat pinned to a configured bound)")
+    severity = getattr(result, "density_warning_severity", "none")
+    if severity not in ("none", "label"):
+        complaints.append(f"density_warning_severity={severity!r}")
+    if getattr(result, "near_power_boundary", False):
+        complaints.append("near_power_boundary=True")
+    if getattr(result, "phi_used_fallback", False):
+        complaints.append(f"phi_used_fallback=True ({result.phi_fallback_reason})")
+    for message in getattr(result, "warnings", None) or []:
+        complaints.append(f"result warning: {message}")
+    return complaints
+
+
+def model_complaints(model, label: str) -> list[str]:
+    """Name every way a published fit admits it did not converge."""
+    complaints: list[str] = []
+    result = getattr(model, "result", None)
+    if result is not None and getattr(result, "converged", True) is False:
+        complaints.append(f"{label}: result.converged=False")
+    try:
+        diagnostics = model.reml_diagnostics()
+    except Exception:  # not a REML fit; nothing further to check
+        return complaints
+    if diagnostics.get("converged") is False:
+        complaints.append(f"{label}: reml_diagnostics converged=False")
+    return complaints
+
+
+def _run(label: str, fn, results: dict) -> float:
+    """Time one leg, capturing any Python warning it raises as a complaint."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        start = time.perf_counter()
+        payload = fn()
+        elapsed = time.perf_counter() - start
+    complaints = list(payload.pop("complaints", []))
+    complaints += [f"python warning: {w.category.__name__}: {w.message}" for w in caught]
+    results[label] = {"seconds": elapsed, "complaints": complaints, **payload}
+    return elapsed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rows", type=int, default=N_ROWS)
@@ -82,13 +162,6 @@ def main() -> None:
 
     frame, y, weights, offset, oc_levels = build_fixture(args.rows)
     results: dict[str, dict] = {}
-
-    def run(label: str, fn):
-        t0 = time.perf_counter()
-        out = fn()
-        elapsed = time.perf_counter() - t0
-        results[label] = {"seconds": elapsed, **out}
-        return elapsed
 
     # 1. The slow path under investigation.
     def _reml_search():
@@ -102,9 +175,10 @@ def main() -> None:
             "phi_evals": int(r.phi_n_evaluations),
             "method": str(r.method),
             "phi_optimizer": str(r.phi_optimizer),
+            "complaints": profile_complaints(r),
         }
 
-    # 2. The alternative that already exists.
+    # 2. The alternative that already exists, spelled out at the call site.
     def _two_step():
         r = _model(oc_levels).estimate_p(frame, y, sample_weight=weights, offset=offset)
         model = SuperGLM(family=families.tweedie(p=r.p_hat), features=build_features(oc_levels))
@@ -114,33 +188,40 @@ def main() -> None:
             "phi_hat": float(r.phi_hat),
             "power_steps": int(r.n_evaluations),
             "phi_evals": int(r.phi_n_evaluations),
+            "method": str(r.method),
+            "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
         }
 
     # 3. One REML fit, to show the search cost is the multiplier, not the fit.
     def _single_reml():
         model = _model(oc_levels)
         model.fit_reml(frame, y, sample_weight=weights, offset=offset)
-        diag = model.reml_diagnostics()
+        diagnostics = model.reml_diagnostics()
         return {
-            "n_reml_iter": diag.get("n_reml_iter"),
+            "n_reml_iter": diagnostics.get("n_reml_iter"),
             "profile": {
                 k: round(v, 4)
-                for k, v in (diag.get("profile") or {}).items()
+                for k, v in (diagnostics.get("profile") or {}).items()
                 if k.endswith("_s") and isinstance(v, (int, float))
             },
+            "complaints": model_complaints(model, "single fit_reml"),
         }
 
     print(f"rows={len(y):,}  features={len(CAT_LEVELS) + len(OC_LEVELS)}\n")
-    t_search = run("estimate_p_reml", _reml_search)
-    t_two = run("two_step", _two_step)
-    t_one = run("single_fit_reml", _single_reml)
+    t_search = _run("estimate_p_reml", _reml_search, results)
+    t_two = _run("two_step", _two_step, results)
+    t_one = _run("single_fit_reml", _single_reml, results)
 
-    s = results["estimate_p_reml"]
+    search = results["estimate_p_reml"]
+    two = results["two_step"]
     print(
-        f"estimate_p(fit_mode='reml')  {t_search:7.2f}s  steps={s['power_steps']:>2} "
-        f"phi_evals={s['phi_evals']:>3}  p={s['p_hat']:.5f} phi={s['phi_hat']:.2f}"
+        f"estimate_p(fit_mode='reml')  {t_search:7.2f}s  steps={search['power_steps']:>2} "
+        f"phi_evals={search['phi_evals']:>3}  p={search['p_hat']:.5f} phi={search['phi_hat']:.2f}"
     )
-    print(f"two-step (fit -> fit_reml)   {t_two:7.2f}s  p={results['two_step']['p_hat']:.5f}")
+    print(
+        f"two-step (fit -> fit_reml)   {t_two:7.2f}s  steps={two['power_steps']:>2} "
+        f"phi_evals={two['phi_evals']:>3}  p={two['p_hat']:.5f} phi={two['phi_hat']:.2f}"
+    )
     print(
         f"single fit_reml              {t_one:7.2f}s  "
         f"n_reml_iter={results['single_fit_reml']['n_reml_iter']}"
@@ -152,17 +233,38 @@ def main() -> None:
     for k, v in sorted(results["single_fit_reml"]["profile"].items(), key=lambda kv: -kv[1])[:8]:
         print(f"  {k:<36}{v:8.3f}s")
 
-    dp = abs(s["p_hat"] - REFERENCE["p_hat"])
-    dphi = abs(s["phi_hat"] - REFERENCE["phi_hat"])
-    ok = dp <= P_TOL and dphi <= PHI_TOL
-    print(
-        f"\nanswer check vs reference: p delta={dp:.2e} (tol {P_TOL:.0e}), "
-        f"phi delta={dphi:.2e} (tol {PHI_TOL:.0e}) -> {'OK' if ok else 'CHANGED -- REGRESSION'}"
-    )
+    # Full precision, so a drift smaller than the printed table can still be
+    # read off two runs by eye rather than being rounded into agreement.
+    print("\nfull-precision estimates:")
+    for label in ("estimate_p_reml", "two_step"):
+        print(f"  {label:<20}p_hat={results[label]['p_hat']!r}  phi_hat={results[label]['phi_hat']!r}")
+
+    print("\nanswer check vs reference:")
+    drifted = False
+    for label, reference in REFERENCE.items():
+        dp = abs(results[label]["p_hat"] - reference["p_hat"])
+        dphi = abs(results[label]["phi_hat"] - reference["phi_hat"])
+        ok = dp <= P_TOL and dphi <= PHI_TOL
+        drifted |= not ok
+        print(
+            f"  {label:<20}p delta={dp:.2e} (tol {P_TOL:.0e})  "
+            f"phi delta={dphi:.2e} (tol {PHI_TOL:.0e})  -> {'OK' if ok else 'CHANGED -- REGRESSION'}"
+        )
+
+    all_complaints = [(label, c) for label, r in results.items() for c in r["complaints"]]
+    print("\nconvergence check:")
+    if all_complaints:
+        for label, complaint in all_complaints:
+            print(f"  {label:<20}{complaint}")
+    else:
+        print("  all legs converged, no warnings")
 
     if args.json:
         print("\n" + json.dumps(results, indent=2, default=str))
-    raise SystemExit(0 if ok else 1)
+
+    if drifted or all_complaints:
+        print("\nFAILED: the timings above are not usable evidence.")
+    raise SystemExit(1 if (drifted or all_complaints) else 0)
 
 
 if __name__ == "__main__":
