@@ -20,7 +20,7 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.features.categorical import _grouping_labels, _validate_categorical_levels
-from superglm.types import GroupInfo
+from superglm.types import GroupInfo, LinearConstraintSet
 
 if TYPE_CHECKING:  # Spline imports this module at runtime; keep the cycle type-only.
     from superglm.features.spline import _SplineBase
@@ -688,6 +688,24 @@ class OrderedCategorical:
                 "this attribute is only available in spline mode."
             )
         return spline
+
+    def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
+        """Forward the inner spline's raw monotone geometry to the builder.
+
+        ``build`` delegates to the inner spline, so the ``GroupInfo`` that comes
+        back is stamped ``monotone_engine="qp"`` by the SPLINE. The builder then
+        asks for the matching raw geometry off the FEATURE spec -- the same
+        object for a plain ``Spline``, this wrapper for an ``OrderedCategorical``
+        -- and without this forward it finds nothing and reports the geometry as
+        unavailable. Only the QP bases (``cr``, ``bs``) were affected: ``ps``
+        routes through SCOP and never takes that branch.
+
+        The constraint is stated in the inner spline's own coefficient space,
+        which is the space the returned design lives in, so it needs no
+        remapping. Level scores ascend with level order by construction, so
+        "increasing" means increasing across the declared levels.
+        """
+        return self._basis_spline._build_monotone_constraints_raw()
 
     def __repr__(self) -> str:
         n = self._n_levels
