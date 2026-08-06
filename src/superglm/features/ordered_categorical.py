@@ -127,7 +127,15 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
                 "more than one way and this value matches neither exactly. Declare the "
                 "levels consistently, or supply the level under one of its exact spellings."
             )
-        return by_value[value]
+        matched = by_value[value]
+        # float() is lossy past 2**53, so two distinct integers can land on one
+        # value. When both sides are real numbers, confirm the match in their own
+        # domain -- Python compares int to float exactly, so this costs one
+        # comparison and makes the rule exact rather than approximate. A
+        # string-mediated match (a grouping label) has only the float to go on.
+        if not isinstance(raw, str) and not isinstance(matched, str) and raw != matched:
+            return raw
+        return matched
 
     return match
 

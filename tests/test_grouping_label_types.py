@@ -277,3 +277,16 @@ def test_the_direct_grouping_path_survives_term_inference():
     model.fit(X, y)
     ti = model.term_inference("band")
     assert [str(level) for level in ti.levels] == ["1", "2", "3", "9"]
+
+
+def test_a_large_integer_level_is_matched_exactly():
+    # float() is lossy past 2**53, so two distinct integers can land on the same
+    # value and one would be scored as the other. Confirming the match in the
+    # numbers' own domain costs one comparison.
+    from superglm.features.ordered_categorical import _declared_matcher
+
+    match = _declared_matcher([9007199254740993, 2, 3])
+    assert match(9007199254740993) == 9007199254740993
+    assert match(9007199254740992) == 9007199254740992  # unmatched, not folded
+    # and the ordinary case is untouched
+    assert _declared_matcher([1, 2, 3])(1.0) == 1
