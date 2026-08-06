@@ -640,6 +640,53 @@ class TestSplineObjectBasis:
         assert spec._spline.monotone == "increasing"
         assert spec._spline.monotone_mode == "fit"
 
+    @pytest.mark.parametrize("kind", ["cr", "bs"])
+    @pytest.mark.parametrize("direction", ["increasing", "decreasing"])
+    def test_fit_time_monotone_on_qp_bases(self, ordinal_data, kind, direction):
+        """A fit-time monotone constraint must work on the QP bases, not just ps.
+
+        `OrderedCategorical.build()` delegates to its inner spline, and that
+        spline stamps ``monotone_engine="qp"`` on the GroupInfo it returns. The
+        builder then asked the OUTER spec -- the OrderedCategorical -- for the
+        raw constraint geometry, which only the inner spline owns, and died with
+        "its raw constraint geometry is unavailable". `ps` masked this because it
+        routes through SCOP instead and never takes the QP branch.
+        """
+        from superglm.features.spline import Spline
+
+        X, y, sample_weight, levels = ordinal_data
+        spec = OrderedCategorical(
+            order=levels,
+            basis=Spline(kind=kind, k=5, constraint=getattr(Constraint.fit, direction)),
+        )
+        model = SuperGLM(family="poisson", features={"risk": spec}, selection_penalty=0.0)
+        model.fit(X, y, sample_weight=sample_weight)
+        assert model.result.converged
+
+        rels = model.reconstruct_feature("risk")["level_log_relativities"]
+        steps = np.diff([rels[lev] for lev in levels])
+        if direction == "increasing":
+            assert np.all(steps >= -1e-8), f"not increasing: {steps}"
+        else:
+            assert np.all(steps <= 1e-8), f"not decreasing: {steps}"
+
+    def test_fit_time_monotone_on_qp_bases_under_reml(self, ordinal_data):
+        """`model/reml_setup.py` restores QP constraints through a second, separate
+        lookup of the same raw geometry, so REML pins its own call site."""
+        from superglm.features.spline import Spline
+
+        X, y, sample_weight, levels = ordinal_data
+        spec = OrderedCategorical(
+            order=levels,
+            basis=Spline(kind="cr", k=5, constraint=Constraint.fit.increasing),
+        )
+        model = SuperGLM(family="poisson", features={"risk": spec})
+        model.fit_reml(X, y, sample_weight=sample_weight)
+
+        rels = model.reconstruct_feature("risk")["level_log_relativities"]
+        steps = np.diff([rels[lev] for lev in levels])
+        assert np.all(steps >= -1e-8), f"not increasing: {steps}"
+
     def test_spline_object_overrides_string_params(self, age_band_data):
         """When Spline object is passed, kind/n_knots/etc are ignored."""
         from superglm.features.spline import Spline
