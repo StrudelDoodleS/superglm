@@ -236,10 +236,10 @@ Dispersion is re-profiled against the published fit, so `result.phi_hat`
 describes the model you get back rather than the fits the search discarded.
 
 This is an approximation, not a free speedup: *p* is chosen under a different
-objective than the one that publishes it. On a 96,743-row model with 8 features
-it ran about 6× faster and moved *p̂* by 3.2e-5, but that number is a property
-of that surface, not a guarantee — compare against `fit_mode="reml"` alone on
-your own data before adopting it.
+objective than the one that publishes it. On the synthetic benchmark fixture in
+`benchmarks/tweedie_reml_search_cost.py` it ran about 6× faster and moved *p̂*
+by 3.2e-5, but that is a property of that surface, not a guarantee — compare
+against `fit_mode="reml"` alone on your own data before adopting it.
 
 Likelihood-ratio confidence intervals are refused for a decoupled run, eagerly
 via `ci_alpha` and lazily via `result.ci()`. The interval inverts the profile

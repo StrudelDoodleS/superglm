@@ -1,8 +1,9 @@
 """Canonical benchmark for the Tweedie REML power-search cost.
 
-Reproduces the shape of a reported production model: 96,743 rows, 8 features
-(6 Categorical, 2 OrderedCategorical with small cr bases), Tweedie/log with an
-offset and a wide weight range.
+A synthetic Tweedie/log fixture sized to make the power-search cost visible:
+~100k rows, 8 features (6 Categorical, 2 OrderedCategorical with small cr
+bases), an offset, and a wide weight range. The dimensions below are chosen to
+exercise the search, not to replicate any particular dataset.
 
 Run before and after any change:
 
@@ -28,7 +29,8 @@ import pandas as pd
 
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
 
-# Level counts taken from the reported model.
+# Level counts spanning the small-to-moderate range where the per-candidate
+# REML fit is cheap enough that the search multiplier dominates the total.
 CAT_LEVELS = {"f0": 6, "f1": 9, "f2": 4, "f3": 11, "f4": 13, "f5": 11}
 OC_LEVELS = {"f6": 16, "f7": 24}
 OC_KNOTS = {"f6": 2, "f7": 1}
