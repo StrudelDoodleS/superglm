@@ -109,6 +109,7 @@ def term_inference(
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
     from superglm.features.polynomial import Polynomial
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
@@ -585,6 +586,57 @@ def term_inference(
                 absorbs_intercept=False,
                 centering_mode="none",
                 edf=edf,
+                smoothing_lambda=lam,
+                alpha=alpha,
+            ),
+            centering,
+        )
+
+    # ── Piecewise ────────────────────────────────────────────────
+    elif isinstance(spec, Piecewise):
+        raw = spec.reconstruct(beta_combined)
+        knots = raw["knots"]
+        log_rel = raw["log_relativity"]
+
+        se = ci_lo = ci_hi = None
+        if with_se and active and Cov_active is not None:
+            assert active_groups_cov is not None
+            se = feature_se_from_cov(
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            )
+            ci_lo = _safe_exp(log_rel - z_alpha * se)
+            ci_hi = _safe_exp(log_rel + z_alpha * se)
+
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="piecewise",
+                active=active,
+                # x is the knot vector itself, not a display grid: a piecewise
+                # term is exactly determined by its values at the knots, so the
+                # curve, the editor handles and the workbook rows are the same
+                # J+2 points rather than three resamplings of one function.
+                x=knots,
+                log_relativity=log_rel,
+                relativity=_maybe_array(_safe_exp(log_rel)),
+                se_log_relativity=se,
+                ci_lower=_maybe_array(ci_lo),
+                ci_upper=_maybe_array(ci_hi),
+                absorbs_intercept=False,
+                centering_mode="base_knot",
+                # Report the MEASURED edf, not the nominal J+1.  The design
+                # states edf is fixed at J+1; that holds only while the group
+                # carries no shrinkage, and GroupInfo.penalized is True here, so
+                # a selection_penalty does shrink this block.  Measuring keeps
+                # the claim true where it applies and honest where it does not;
+                # the J+1 fallback is for callers that asked for no edf at all.
+                edf=edf if edf is not None else float(spec._non_base_indices.size),
                 smoothing_lambda=lam,
                 alpha=alpha,
             ),

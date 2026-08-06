@@ -73,6 +73,7 @@ def build_coef_rows(
     )
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
     from superglm.features.polynomial import Polynomial
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
@@ -921,6 +922,95 @@ def build_coef_rows(
                     ci_low=ci_lo,
                     ci_high=ci_hi,
                     estimable=bool(coefficient_estimable[g.start]),
+                )
+            )
+
+        elif isinstance(spec, Piecewise):
+            # Per-knot Wald rows, their CIs, and edf = J+1 are valid only when
+            # ALL FOUR of these hold:
+            #   1. the term is unpenalized -- the slope penalty the design defers
+            #      is deferred precisely because it forfeits the fixed-df
+            #      contract (an L1 slope-change penalty on this model class is
+            #      k=1 trend filtering, whose df is E[#knots] + k + 1, i.e.
+            #      data-dependent);
+            #   2. the group carries no selection shrinkage -- GroupInfo.penalized
+            #      is True for a Piecewise group, so a group-lasso
+            #      selection_penalty shrinks this block and breaks both the Wald
+            #      rows and the fixed edf;
+            #   3. the breakpoints are FIXED INPUTS, not selected on the response
+            #      from the same data.  When a breakpoint is data-chosen the
+            #      statistic converges to a supremum of a nonstandard Gaussian
+            #      process and nominal Wald calibration fails, even though df is
+            #      still nominally J+1.  breaks=int quantile placement is
+            #      materially milder: it looks only at x, never at y.  Reading
+            #      kinks off a fitted Spline and refitting them here on the same
+            #      data is the real offender;
+            #   4. the term is unconstrained -- under an active monotone
+            #      constraint the effective df becomes the size of the active
+            #      face, which is data-dependent.
+            # Withdraw the per-coefficient p-values if any of these stops holding.
+            #
+            # Condition 3 is the load-bearing one and it is NOT "because the df
+            # is fixed and known": df stays nominally J+1 under response-selected
+            # breaks while the p-values go wrong.  Validity rests on the
+            # breakpoints being inputs.
+            knots = spec._knots
+            pw_edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
+            for i, knot_index in enumerate(spec._non_base_indices):
+                coef_val = float(b_g[i])
+                se_val = float(se_g[i]) if len(se_g) > i else 0.0
+                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{float(knots[knot_index]):.10g}]",
+                        group=g.name,
+                        coef=coef_val,
+                        se=se_val,
+                        z=z,
+                        p=p,
+                        ci_low=ci_lo,
+                        ci_high=ci_hi,
+                    )
+                )
+
+            # edf is carried by the whole-term row below and by nothing else.
+            # Categorical puts it on its first level row because a categorical
+            # term has no term-level row to put it on; this one does, and
+            # reporting it twice would both read as two numbers about one term
+            # and land the same degrees of freedom in the summary's parametric
+            # and smooth buckets at once.  Ordered-spline rows do it this way.
+            #
+            # Whole-term test: a J+1 df chi-square on all coefficients jointly,
+            # testing that the term is flat.  Deliberately not a Wood smooth
+            # test -- there is no smoothing parameter to have been estimated.
+            stat = float("nan")
+            p_val = float("nan")
+            ref_df = float(g.size)
+            if active:
+                from scipy.stats import chi2 as chi2_dist
+
+                ag = next(a for a in active_groups if a.name == g.name)
+                V_b_j = _augmented_group_block(ag)
+                try:
+                    stat = float(b_g @ np.linalg.solve(V_b_j, b_g))
+                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                except np.linalg.LinAlgError:
+                    pass
+            rows.append(
+                _CoefRow(
+                    name=g.name,
+                    group=feature_label,
+                    is_spline=True,
+                    n_params=g.size,
+                    active=active,
+                    group_norm=float(np.linalg.norm(b_g)) if active else 0.0,
+                    wald_chi2=stat if active else None,
+                    wald_p=p_val if active else None,
+                    ref_df=ref_df if active else None,
+                    # Names the row for what it is in both renderers, which
+                    # otherwise label every group-test row "spline".
+                    subgroup_type="piecewise",
+                    edf=pw_edf,
                 )
             )
 

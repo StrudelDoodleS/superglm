@@ -86,6 +86,7 @@ def feature_se_from_cov(
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
     from superglm.features.polynomial import Polynomial
     from superglm.features.random_effect import RandomEffect
     from superglm.features.spline import _SplineBase
@@ -131,6 +132,12 @@ def feature_se_from_cov(
             return np.zeros(len(spec._levels))
         if isinstance(spec, RandomEffect):
             return np.zeros(len(spec._levels))
+        if isinstance(spec, Piecewise):
+            # One SE per KNOT, base included -- the same length as the term's
+            # log_relativity vector.  The zeros(1) fallback below would leave a
+            # dropped piecewise term's CI arrays a different length from its
+            # values, which every downstream renderer zips against.
+            return np.zeros(spec._knots.size)
         return np.zeros(1)
 
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
@@ -168,6 +175,16 @@ def feature_se_from_cov(
                 idx = spec._non_base.index(lev)
                 se_all[i] = se_nonbase[idx]
         return se_all
+
+    if isinstance(spec, Piecewise):
+        # ``_raw_basis_matrix`` at the knots is the identity, so restricting it
+        # to the retained columns is the identity padded with a zero row at the
+        # base knot.  Going through the basis rather than indexing the diagonal
+        # keeps this branch a plain quadratic form: the base knot's SE is 0
+        # because its contrast against itself is, not because it was special-cased.
+        M = spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices]
+        Q = M @ Cov_g
+        return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
 
     if isinstance(spec, Numeric):
         return np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
