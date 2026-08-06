@@ -28,18 +28,24 @@ came out against the plan's phrasing:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal
 
+import superglm.editor
 from superglm import Categorical, Numeric, Polynomial, Spline, SuperGLM
 from superglm.editor import EditorSession
 from superglm.editor.apply import _apply_term_edit, apply_edits_to_model_copy_with_data
 from superglm.editor.controls import _control_handle_count, _control_handle_limits
 from superglm.editor.payloads import session_payload
-from superglm.editor.terms import term_type_from_spec
+from superglm.editor.summaries import _compact_summary_row
+from superglm.editor.terms import term_type_from_spec, term_weights_from_data
+from superglm.export.summary import build_summary_export_payload
 from superglm.features.piecewise import Piecewise
+from superglm.plotting.comparison import _build_term_comparison_data, _resolve_comparable_terms
 from tests._piecewise_cases import CASE_NAMES, PiecewiseCase, make_case
 
 _EPS = float(np.finfo(np.float64).eps)
@@ -455,6 +461,185 @@ class TestBaseHandleRebase:
         np.testing.assert_allclose(after, before * np.exp(delta * column), rtol=rtol, atol=0.0)
         np.testing.assert_allclose(after[~support], before[~support], rtol=rtol, atol=0.0)
         assert np.max(np.abs(after[support] / before[support] - 1.0)) > rtol
+
+
+# ══════════════════════════════════════════════════════════════════
+# Surfaces an edit reaches after the edit
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestEditedModelReporting:
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_the_edited_summary_still_reports_every_knot(self, case_name):
+        """The edited knot values are the numbers an actuary files.
+
+        The edited model's rows come from a second builder
+        (``report_ops._build_editor_stale_coef_rows``), and its generic tail is
+        the spline fallback: the per-knot rows disappear, the surviving row is
+        labelled a spline, and the whole point of the edit becomes invisible on
+        the console and in the exported Summary sheet.
+        """
+        model, case = _fitted(case_name)
+        spec = _spec(model)
+        knot_index = _most_balanced_non_base_knot(model, case)
+
+        session = EditorSession.from_model(model, terms=["x"])
+        controls = session.control_points("x")
+        session.move_control_point("x", knot_index, float(controls["log_effect"][knot_index]) + 0.4)
+        edited = apply_edits_to_model_copy_with_data(model, session.terms)
+
+        text = str(edited.summary())
+        for knot in spec._knots:
+            assert f"x[{float(knot):.10g}]" in text
+        assert "[piecewise, " in text
+        assert "[spline, " not in text
+
+        payload = build_summary_export_payload(edited)
+        rows = [row for row in payload.terms if row.group == "x"]
+        coefficients = [row for row in rows if row.kind == "coefficient"]
+        assert [row.term for row in coefficients] == [
+            f"x[{float(spec._knots[j]):.10g}]" for j in spec._non_base_indices
+        ]
+        assert [row.kind for row in rows if row.kind == "group"] == ["group"]
+        # The edited coefficient really is the value the handle was moved to.
+        moved = next(
+            row for row in coefficients if row.term == f"x[{float(spec._knots[knot_index]):.10g}]"
+        )
+        assert moved.estimate == pytest.approx(float(controls["log_effect"][knot_index]) + 0.4)
+
+    def test_the_edited_summary_reports_no_smoothing_parameter(self):
+        """§4 makes this term unpenalized; the fallback printed the global ridge.
+
+        ``spline_group_enrichment`` reads ``fitted_lambda2(model)`` for any group
+        it is handed, so the fallback published ``lambda = 0.1`` in an exported
+        workbook for a term whose ``GroupInfo.penalty_matrix`` is ``None``.
+        """
+        model, case = _fitted("interior_base")
+        knot_index = _most_balanced_non_base_knot(model, case)
+
+        session = EditorSession.from_model(model, terms=["x"])
+        controls = session.control_points("x")
+        session.move_control_point("x", knot_index, float(controls["log_effect"][knot_index]) + 0.4)
+        edited = apply_edits_to_model_copy_with_data(model, session.terms)
+
+        assert "lam=" not in str(edited.summary())
+        payload = build_summary_export_payload(edited)
+        group_row = next(row for row in payload.terms if row.group == "x" and row.kind == "group")
+        assert group_row.smoothing_lambda is None
+
+    def test_the_browser_payload_calls_the_group_row_piecewise(self):
+        """The console renderer was fixed to say "piecewise"; this one said "spline".
+
+        Two summary surfaces disagreeing about what the term is, for the one
+        term type where smooth-versus-not is the entire point of the feature.
+        """
+        model, _ = _fitted("interior_base")
+        rows = [_compact_summary_row(row) for row in model.summary()._display_rows]
+
+        group_row = next(row for row in rows if row["name"] == "x" and row["stat_label"] == "chi2")
+        assert group_row["kind"] == "piecewise"
+        # The JS renders the label from the kind rather than hard-coding
+        # "spline", so an unlisted kind would print nothing at all instead of
+        # the wrong word.  Both halves have to move together.
+        source = (Path(superglm.editor.__file__).parent / "app" / "summary.js").read_text()
+        listed = source.split("const GROUP_ROW_KINDS = ", 1)[1].split(";", 1)[0]
+        assert '"piecewise"' in listed and '"spline"' in listed
+        assert "GROUP_ROW_KINDS.has(row.kind)" in source
+
+
+class TestOffsetAndExposure:
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_the_editor_offset_reproduces_the_term_outside_the_knot_span(self, case_name):
+        """``refit_with_edited_offset`` must condition on the term that was edited.
+
+        ``term_offset_values`` interpolates over the editor grid with
+        ``left=``/``right=`` clamping, which holds the term FLAT past the
+        boundary knots -- contradicting ``Piecewise.score``, the plotted curve
+        and the boundary slopes the exported workbook publishes. ``Piecewise``
+        is the first spec whose grid is deliberately allowed to be narrower than
+        the data, so the shared helper's clamp is newly load-bearing here.
+        """
+        model, case = _fitted(case_name)
+        spec = _spec(model)
+        session = EditorSession.from_model(model, terms=["x"])
+
+        offset = np.asarray(session.edited_offset(["x"], X=case.X), dtype=np.float64).ravel()
+        expected = spec.score(case.X["x"].to_numpy(dtype=np.float64), _beta(model))
+
+        np.testing.assert_allclose(
+            offset, expected, rtol=0.0, atol=_prediction_rtol(spec._non_base_indices.size)
+        )
+
+    def test_the_narrower_pin_really_does_put_rows_outside_the_knot_span(self):
+        """Guard: on a fixture whose grid spans the data the clamp is invisible."""
+        model, case = _fitted("pinned_narrower")
+        spec = _spec(model)
+        x_values = case.X["x"].to_numpy(dtype=np.float64)
+
+        outside = (x_values < spec._knots[0]) | (x_values > spec._knots[-1])
+        assert int(np.count_nonzero(outside)) > 100
+
+    def test_the_exposure_layer_keeps_the_weight_behind_the_boundary_segments(self):
+        """``np.histogram`` drops anything outside the outermost grid edge.
+
+        On the narrower pin that silently deleted a fifth of total exposure --
+        and precisely the fifth sitting behind the two boundary segments, which
+        is what a user is looking at when deciding whether to drag ``t_0`` or
+        ``t_{J+1}``.
+        """
+        model, case = _fitted("pinned_narrower")
+        session = EditorSession.from_model(model, terms=["x"])
+
+        weights = term_weights_from_data(case.X, case.sample_weight, "x", session.terms["x"])
+
+        assert float(np.sum(weights)) == pytest.approx(float(np.sum(case.sample_weight)), rel=1e-12)
+
+
+class TestModelComparison:
+    def test_a_piecewise_term_is_comparable_across_two_models(self):
+        """``_comparison_family`` admitted only Numeric / Polynomial / spline.
+
+        The term was reported as "missing or unsupported in one or more models"
+        while present and identically specified in both, sending the reader
+        after a column that is not absent.
+        """
+        first, case = _fitted("interior_base")
+        second_case = make_case("interior_base")
+        second = SuperGLM(
+            features={
+                "x": second_case.spec,
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+        )
+        second.fit(
+            second_case.X,
+            second_case.y * 0 + np.roll(second_case.y, 3),
+            sample_weight=second_case.sample_weight,
+        )
+
+        terms, skipped = _resolve_comparable_terms({"a": first, "b": second})
+
+        assert "x" in terms
+        assert "x" not in skipped
+
+        payload = _build_term_comparison_data(
+            models={"a": first, "b": second},
+            terms=["x"],
+            X=case.X,
+            sample_weight=case.sample_weight,
+        )
+        entry = next(term for term in payload["terms"] if term["name"] == "x")
+        assert entry["family"] == "continuous"
+        # The continuous path scores through `spec.score`, which a piecewise term
+        # answers exactly, so the overlay is the fitted function and not a resample.
+        grid = np.asarray(entry["domain"]["x"], dtype=np.float64)
+        np.testing.assert_allclose(
+            np.asarray(entry["series"]["a"]["link"], dtype=np.float64),
+            _spec(first).score(grid, _beta(first)),
+            rtol=0.0,
+            atol=1e-12,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -45,6 +45,70 @@ def validate_level_display(value: object) -> LevelDisplay:
     return cast(LevelDisplay, value)
 
 
+def _with_piecewise_reference_rows(
+    rows: list[_CoefRow],
+    *,
+    specs: Mapping[str, Any],
+    groups: Sequence[GroupSlice],
+) -> list[_CoefRow]:
+    """Give a ``Piecewise`` term the base row a ``Categorical`` already displays.
+
+    Every coefficient in a piecewise block is a contrast against the base knot,
+    and without a row naming that knot the summary is the only surface that
+    never says which one it is: the workbook prints all ``J + 2`` knots and the
+    editor shows a handle at each, so the three surfaces the design promises to
+    keep identical would differ by exactly one row.  With ``breaks=int`` the
+    knot vector is not printed either, so the base cannot even be inferred by
+    elimination.
+
+    Display-only, and built here rather than in ``coef_tables`` for the same
+    reason the categorical reference row is: it carries no coefficient, so it
+    must not reach ``_coef_rows``, which is what the export payload, the edf
+    buckets and every consumer that counts fitted parameters read.
+    """
+    from superglm.features.piecewise import Piecewise
+
+    out = list(rows)
+    for feature, spec in specs.items():
+        if not isinstance(spec, Piecewise) or spec._knots.size == 0:
+            continue
+        feature_groups = [group for group in groups if group.feature_name == feature]
+        if not feature_groups:
+            continue
+        term_prefix = feature_groups[0].name
+        knot_name = {
+            index: f"{term_prefix}[{float(spec._knots[index]):.10g}]"
+            for index in range(spec._knots.size)
+        }
+        base_index = int(spec._base_index)
+        if any(row.name == knot_name[base_index] and row.group == term_prefix for row in out):
+            continue
+        # `_non_base_indices` is ascending and the coefficient rows are emitted in
+        # that order, so the k-th matched position is the k-th non-base knot and
+        # the base row belongs at position `base_index` among them -- which puts
+        # it in knot order however far in or out the base sits.
+        non_base_names = {knot_name[int(index)] for index in spec._non_base_indices}
+        positions = [
+            i
+            for i, row in enumerate(out)
+            if row.group == term_prefix and row.name in non_base_names
+        ]
+        if not positions:
+            continue
+        insert_at = positions[base_index] if base_index < len(positions) else positions[-1] + 1
+        out.insert(
+            insert_at,
+            _CoefRow(
+                name=knot_name[base_index],
+                group=term_prefix,
+                coef=0.0,
+                is_reference=True,
+                active=True,
+            ),
+        )
+    return out
+
+
 def build_summary_level_display(
     coef_rows: Sequence[_CoefRow],
     *,
@@ -54,7 +118,7 @@ def build_summary_level_display(
 ) -> SummaryLevelDisplay:
     """Build summary-only rows without mutating canonical coefficient rows."""
     mode = validate_level_display(level_display)
-    rows = list(coef_rows)
+    rows = _with_piecewise_reference_rows(list(coef_rows), specs=specs, groups=groups)
     legends: list[LevelGroupLegend] = []
 
     from superglm.features.categorical import Categorical

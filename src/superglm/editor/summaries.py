@@ -232,7 +232,19 @@ def _compact_summary_row(row) -> dict[str, Any]:
         "name": str(row.name),
         "group": str(row.group or ""),
         "level_group": str(getattr(row, "level_group", "") or ""),
-        "kind": "reference" if is_reference else ("spline" if row.is_spline else "coef"),
+        # A group row's kind comes from `subgroup_type`, not from `is_spline`.
+        # `is_spline` only says the row is a group-level Wald test rendered
+        # without a coefficient cell; on the one term type where the smooth /
+        # not-smooth distinction is the whole point of the feature, reading it as
+        # the term's kind made this payload contradict the console renderer,
+        # which was fixed to say "piecewise" in the same change that added it.
+        "kind": (
+            "reference"
+            if is_reference
+            else ("piecewise" if row.subgroup_type == "piecewise" else "spline")
+            if row.is_spline
+            else "coef"
+        ),
         "coef": _finite_float(row.coef),
         "se": None if row.is_spline or is_reference else _finite_float(row.se),
         "se_label": "ref" if is_reference else ("curve" if row.is_spline else ""),

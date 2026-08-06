@@ -363,6 +363,7 @@ def feature_groups(model, name: str) -> list[GroupSlice]:
 def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
     from superglm.features.interaction import PolynomialCategorical, SplineCategorical
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
     from superglm.inference._ordered_reference import ordered_reference_intercept
 
     intercept = ordered_reference_intercept(
@@ -477,6 +478,42 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                     group_norm=norm,
                     subgroup_type=g.subgroup_type,
                     **metadata,
+                )
+            )
+            continue
+
+        if isinstance(spec, Piecewise):
+            # Mirrors the `coef_tables` branch: one row per non-base knot, then
+            # one whole-term row.  Without it the term falls to the generic tail
+            # below, which is the spline fallback: every per-knot row disappears,
+            # the surviving row is labelled "spline", and `spline_group_enrichment`
+            # attaches `fitted_lambda2(model)` -- the global ridge -- as a
+            # smoothing parameter on a term that has no penalty matrix at all.
+            # The edited knot values are the whole point of an editor edit, and
+            # they are exactly what that fallback drops from the console summary
+            # and from the exported Summary sheet.
+            knots = spec._knots
+            for i, knot_index in enumerate(spec._non_base_indices):
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.name}[{float(knots[knot_index]):.10g}]",
+                        group=g.name,
+                        coef=float(beta_g[i]),
+                    )
+                )
+            rows.append(
+                _CoefRow(
+                    name=g.name,
+                    group=g.feature_name,
+                    is_spline=True,
+                    n_params=g.size,
+                    active=active,
+                    group_norm=norm,
+                    # Same reason as in `coef_tables`: this names the row for what
+                    # it is in both renderers, and keeps its fixed J+1 df out of
+                    # the summary header's smooth bucket.
+                    subgroup_type="piecewise",
+                    edf=edf,
                 )
             )
             continue
