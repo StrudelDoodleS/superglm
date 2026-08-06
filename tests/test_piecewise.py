@@ -13,6 +13,8 @@ bar the design asks for, and the observed error on every case is 0.0.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -74,11 +76,37 @@ class TestHatBasis:
         assert info.reparametrize is False
         assert info.penalized is True
 
-    def test_transform_equals_build_columns(self):
-        x = np.linspace(0.0, 10.0, 41)
-        spec = Piecewise([1.0, 4.0], lower=0.0, upper=10.0)
-        info = spec.build(x)
-        np.testing.assert_array_equal(spec.transform(x), info.columns)
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_transform_equals_build_columns(self, case_name):
+        """Section 9 property 2 in its load-bearing form: fit and predict share columns.
+
+        Swept over the whole matrix rather than run on one convenient shape.  A
+        ``build``/``transform`` disagreement about WHICH hat is dropped is
+        invisible wherever the base resolves to knot 0, and that disagreement is
+        exactly what makes ``model.predict`` score through a different basis than
+        the fit used -- the deviance is unchanged, the coefficients stop meaning
+        ``f(t_j) - f(t_base)``, and predictions move by more than 100%.
+        """
+        case = make_case(case_name)
+        x = case.X["x"].to_numpy()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            info = case.spec.build(x, sample_weight=case.sample_weight)
+        np.testing.assert_array_equal(case.spec.transform(x), info.columns)
+
+    def test_the_case_matrix_moves_the_base_off_column_zero(self):
+        """Guard for the sweep above: on a base at knot 0 that property is vacuous."""
+        indices = set()
+        for case_name in CASE_NAMES:
+            case = make_case(case_name)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                case.spec.build(case.X["x"].to_numpy(), sample_weight=case.sample_weight)
+            indices.add(int(case.spec._base_index))
+        assert indices - {0}, (
+            "every fixture resolved its base to knot 0, so a build/transform "
+            f"disagreement about the dropped hat would pass unseen. Base indices: {indices}"
+        )
 
     def test_score_equals_transform_at_beta(self):
         x = np.linspace(0.0, 10.0, 41)
@@ -230,9 +258,44 @@ class TestValidationRules:
             Piecewise([2.0]).build(np.array([1.0, 1.0, 3.0, 3.0]))
 
     def test_rule_9_a_segment_with_no_weight_raises_and_reports_every_segment(self):
-        with pytest.raises(ValueError, match="carry no weight") as excinfo:
+        with pytest.raises(ValueError, match="carry no in-range weight") as excinfo:
             Piecewise([1.0, 2.0], lower=0.0, upper=3.0).build(np.array([0.5, 0.5, 2.5, 2.5]))
         assert "Per-segment weight" in str(excinfo.value)
+
+    def test_rule_9_does_not_credit_a_segment_with_rows_from_outside_the_range(self):
+        """A rated range bracketing no observation at all must not build.
+
+        ``_segment_index`` clamps out-of-range rows into the boundary segments,
+        which is what continues the boundary line; counting those clamped rows
+        as support is what let ``[45, 55]`` pass on data living entirely in
+        ``[0, 10] u [90, 100]``.
+        """
+        x = np.concatenate([np.linspace(0.0, 10.0, 300), np.linspace(90.0, 100.0, 300)])
+        with pytest.raises(ValueError, match="carry no in-range weight") as excinfo:
+            Piecewise([50.0], lower=45.0, upper=55.0, base="first").build(x)
+        message = str(excinfo.value)
+        # Both segments are named, and the clamped weight is reported as what it
+        # is rather than folded into the per-segment counts.
+        assert "[45, 50]" in message and "[50, 55]" in message
+        assert "[0, 0]" in message
+        assert "lies outside [45, 55]" in message
+
+    def test_rule_11_counts_only_in_range_weight_for_a_boundary_segment(self):
+        """The thin-segment diagnostic must see through the clamp too.
+
+        A boundary segment holding two in-range rows is credited with the whole
+        out-of-range tail unless the clamped rows are excluded, which silences
+        the warning about the segment whose slope those rows actually set.
+        """
+        x = np.concatenate(
+            [np.full(400, 5.0), np.array([26.0, 27.0]), np.linspace(30.0, 60.0, 600)]
+        )
+        with pytest.warns(UserWarning, match="of the in-range weight") as record:
+            Piecewise([30.0], lower=25.0, upper=60.0, base="first").build(x)
+        message = str(record[0].message)
+        assert "[25, 30]" in message
+        assert "[2, 600]" in message
+        assert "lies outside [25, 60]" in message
 
     def test_rule_10_rank_deficiency_is_caught_where_rules_8_and_9_stay_silent(self):
         """The discriminating fixture: every column has mass, every segment has data."""
@@ -248,9 +311,27 @@ class TestValidationRules:
         with pytest.raises(ValueError, match="rank deficient"):
             spec.build(x)
 
+    def test_rule_10_measures_the_retained_columns_against_the_intercept(self):
+        """One distinct x per segment: the exact degeneracy the rule exists for.
+
+        The retained columns are independent OF EACH OTHER here, so a rank check
+        confined to them passes; it is the intercept they are collinear with.
+        Fitting this design reports a coefficient with an SE of order 1e13.
+        """
+        x = np.concatenate([np.full(50, 0.5), np.full(50, 1.5)])
+        spec = Piecewise([1.0], lower=0.0, upper=2.0, base="first")
+        probe = Piecewise([1.0], lower=0.0, upper=2.0, base="first")
+        probe._knots = np.array([0.0, 1.0, 2.0])
+        probe._non_base_indices = np.array([1, 2], dtype=np.intp)
+        retained = probe._hat_basis(x)[:, probe._non_base_indices]
+        assert np.linalg.matrix_rank(retained) == retained.shape[1]
+        assert np.linalg.matrix_rank(np.column_stack([np.ones(x.size), retained])) == 2
+        with pytest.raises(ValueError, match="rank deficient against the intercept"):
+            spec.build(x)
+
     def test_rule_11_a_thin_segment_warns_and_reports_every_segment(self):
         x = np.concatenate([np.array([0.5]), np.linspace(1.01, 2.0, 1000)])
-        with pytest.warns(UserWarning, match="of the total weight") as record:
+        with pytest.warns(UserWarning, match="of the in-range weight") as record:
             Piecewise([1.0], lower=0.0, upper=2.0).build(x)
         assert "Per-segment weight" in str(record[0].message)
 

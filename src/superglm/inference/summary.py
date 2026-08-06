@@ -141,6 +141,20 @@ _EDITOR_STALE_NOTE = (
 )
 
 
+def _is_smooth_group_row(row: _CoefRow) -> bool:
+    """Whether a group row's df is smooth df and its p-value a Wood (2013) test.
+
+    ``is_spline`` is the flag that routes a row through the group-test renderer
+    -- the ``[kind, n params, chi2(df)]`` line -- and setting it is not a claim
+    that anything was smoothed.  A ``Piecewise`` whole-term row uses that
+    renderer but has no penalty, no estimated smoothing parameter and a df fixed
+    at ``J + 1``; its test is a plain Wald chi-square.  Counting it as smooth put
+    its parametric df in the header's smooth bucket and printed the Wood
+    footnote over a model containing no smooth at all.
+    """
+    return bool(row.is_spline) and row.subgroup_type != "piecewise"
+
+
 def _qs_diagnostic_label(row: _CoefRow) -> str:
     """Label fitted-group diagnostics without attributing them to one member."""
     if row.level_group:
@@ -294,12 +308,12 @@ class ModelSummary:
         smooth_edf = sum(
             r.edf
             for r in self._coef_rows
-            if (r.is_spline or r.structured_kind is not None) and r.edf is not None
+            if (_is_smooth_group_row(r) or r.structured_kind is not None) and r.edf is not None
         )
         parametric_edf = sum(
             r.edf
             for r in self._coef_rows
-            if not r.is_spline and r.structured_kind is None and r.edf is not None
+            if not _is_smooth_group_row(r) and r.structured_kind is None and r.edf is not None
         )
         total_edf = info["effective_df"]
         edf_str = _fmt(total_edf)
@@ -723,7 +737,7 @@ class ModelSummary:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
         for note in _editor_notes(info):
             lines.append(note)
-        has_smooth = any(r.is_spline for r in self._coef_rows)
+        has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
             if has_smooth:
                 lines.append(_WALD_NOTE)
@@ -794,7 +808,7 @@ class ModelSummary:
         smooth_edf_html = sum(
             r.edf
             for r in self._coef_rows
-            if (r.is_spline or r.structured_kind is not None) and r.edf is not None
+            if (_is_smooth_group_row(r) or r.structured_kind is not None) and r.edf is not None
         )
         total_edf_html = info["effective_df"]
         edf_str_html = _fmt(total_edf_html)
@@ -1156,7 +1170,7 @@ class ModelSummary:
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#8a4b00;font-style:italic;border:none;">{note}</td></tr>'
             )
-        has_smooth = any(r.is_spline for r in self._coef_rows)
+        has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
         if not info.get("editor_inference_stale", False):
             if has_smooth:
                 note_text = _WALD_NOTE
