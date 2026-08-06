@@ -210,7 +210,7 @@ def _main_effect_density_dataframe(
     if X is None or sample_weight is None or ti.name not in X.columns:
         return None
 
-    if ti.kind in ("spline", "polynomial"):
+    if ti.kind in ("spline", "polynomial", "piecewise"):
         x_grid = np.asarray(ti.x, dtype=np.float64)
         x_vals = X.column_array(ti.name, dtype=np.float64)
         density = _exposure_kde(x_vals, sample_weight, x_grid)

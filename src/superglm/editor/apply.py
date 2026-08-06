@@ -12,6 +12,7 @@ from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
@@ -162,6 +163,10 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
         _apply_categorical_term(model, spec, groups, term)
         return
 
+    if isinstance(spec, Piecewise):
+        _apply_piecewise_term(model, spec, groups, term)
+        return
+
     if isinstance(spec, Numeric):
         _patch_beta_block(model, groups, native_log_effect_values(term))
         return
@@ -291,6 +296,41 @@ def _apply_categorical_term(
         [float(target[str(level)]) - base_value for level in spec._non_base],
         dtype=np.float64,
     )
+    _adjust_intercept(model, base_value)
+    _patch_beta_block(model, groups, beta_new)
+
+
+def _apply_piecewise_term(
+    model,
+    spec: Piecewise,
+    groups: list[GroupSlice],
+    term: EditableTerm,
+) -> None:
+    """Assign knot values straight into the coefficient block -- no least squares.
+
+    ``term.x`` is the knot vector, so the editable targets are already one
+    value per coefficient and the projection every other continuous term needs
+    would be an identity solve computed the slow, inexact way.
+
+    It also keeps the ``Categorical`` path's freedom from #236 for free.  The
+    targets are base-relative, so a projection's implied intercept is short by
+    exactly ``f(base)``; here ``target[base] == 0`` holds by construction, a
+    null edit therefore yields ``base_value == 0`` and ``_adjust_intercept``
+    returns without touching anything.  Dragging the base handle to ``d`` is
+    the one edit that moves every coefficient: it re-bases the term, shifting
+    each coefficient by ``-d`` and the intercept by ``+d``.  Predictions stay
+    local even then, because the hats are a partition of unity and the two
+    shifts cancel to ``d * h_base(x)``.
+    """
+    target = native_log_effect_values(term)
+    knots = spec._knots
+    if target.size != knots.size:
+        raise ValueError(
+            f"Editable term {term.name!r} carries {target.size} value(s) but its spec has "
+            f"{knots.size} knots; the editor grid must be the knot vector."
+        )
+    base_value = float(target[spec._base_index])
+    beta_new = np.asarray(target[spec._non_base_indices] - base_value, dtype=np.float64)
     _adjust_intercept(model, base_value)
     _patch_beta_block(model, groups, beta_new)
 
