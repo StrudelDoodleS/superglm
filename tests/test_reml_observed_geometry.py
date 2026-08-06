@@ -2420,3 +2420,165 @@ def test_fit_reml_rejects_invalid_w_correction_order_before_fitting(order) -> No
         model.fit_reml(X, y, w_correction_order=order)
 
     assert model._fit_state is None
+
+
+class TestModeCertificationRecovery:
+    """The mode-score gate must not be self-defeating, nor fatal to a search."""
+
+    @staticmethod
+    def _tweedie_fixture(n=600, seed=20260807):
+        import pandas as pd
+
+        rng = np.random.default_rng(seed)
+        x = np.linspace(0.0, 1.0, n)
+        band = np.array([f"{j:02d}" for j in range(12)])[rng.integers(0, 12, n)]
+        eta = -0.5 + 0.8 * np.sin(2.0 * np.pi * x)
+        y = np.where(rng.random(n) < 0.7, 0.0, rng.gamma(1.4, np.exp(eta) * 40.0, n))
+        weights = rng.uniform(1e-3, 1.0, n)
+        return pd.DataFrame({"x": x, "band": band}), y, weights
+
+    @staticmethod
+    def _model(p=1.5, **kwargs):
+        from superglm import SuperGLM
+        from superglm.features.spline import Spline
+
+        return SuperGLM(
+            family=Tweedie(p=p),
+            selection_penalty=0,
+            features={"x": Spline(kind="cr", n_knots=4)},
+            **kwargs,
+        )
+
+    def test_certification_bar_does_not_tighten_with_solver_tolerance(self, monkeypatch):
+        """Asking PIRLS to work harder must not raise the bar it is judged against."""
+        import superglm.reml.direct as direct_module
+
+        X, y, weights = self._tweedie_fixture()
+        # A mode that is good enough for the documented 1e-9 bar, but far above
+        # the 1e-13 bar that a tight `tol` used to impose.
+        monkeypatch.setattr(
+            direct_module,
+            "observed_penalized_mode_score",
+            lambda **kwargs: SimpleNamespace(relative_max=5.0e-10),
+        )
+
+        loose = self._model()
+        loose.fit_reml(X, y, sample_weight=weights)
+
+        tight = self._model(tol=1.0e-14)
+        tight.fit_reml(X, y, sample_weight=weights)
+
+        assert loose.reml_diagnostics()["converged"] is True
+        assert tight.reml_diagnostics()["converged"] is True
+
+    def test_uncertifiable_candidate_is_infeasible_not_fatal(self, monkeypatch):
+        """One bad candidate p must not abort the whole power search."""
+        import superglm.reml.direct as direct_module
+
+        X, y, weights = self._tweedie_fixture()
+        seen = []
+
+        def flaky_score(**kwargs):
+            # Certification fails only in the upper power region, exactly the
+            # shape observed on real data: feasible below a ceiling, not above.
+            failing = any(getattr(g, "p", 0.0) > 1.6 for g in (kwargs.get("distribution"),))
+            seen.append(failing)
+            return SimpleNamespace(relative_max=1.0e-3 if failing else 1.0e-12)
+
+        monkeypatch.setattr(direct_module, "observed_penalized_mode_score", flaky_score)
+
+        result = self._model().estimate_p(
+            X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
+        )
+
+        assert any(seen), "the fixture never entered the uncertifiable region"
+        assert 1.05 <= result.p_hat <= 1.6
+        assert np.isfinite(result.nll)
+
+    def test_infeasible_powers_do_not_poison_the_optimizer_arithmetic(self, monkeypatch):
+        """An infeasible score must stay finite: inf-inf is NaN inside Brent."""
+        import warnings as _warnings
+
+        import superglm.reml.direct as direct_module
+
+        X, y, weights = self._tweedie_fixture()
+        monkeypatch.setattr(
+            direct_module,
+            "observed_penalized_mode_score",
+            lambda **kwargs: SimpleNamespace(
+                relative_max=(
+                    1.0e-3
+                    if any(getattr(g, "p", 0.0) > 1.6 for g in (kwargs.get("distribution"),))
+                    else 1.0e-12
+                )
+            ),
+        )
+
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            self._model().estimate_p(
+                X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
+            )
+
+        numeric = [w for w in caught if "invalid value" in str(w.message)]
+        assert not numeric, f"infeasible scores reached the optimizer as non-finite: {numeric}"
+
+    def test_all_powers_infeasible_reports_the_range_not_a_keyerror(self, monkeypatch):
+        """If nothing is certifiable, say so; do not fail looking up a cache."""
+        import superglm.reml.direct as direct_module
+
+        X, y, weights = self._tweedie_fixture()
+        monkeypatch.setattr(
+            direct_module,
+            "observed_penalized_mode_score",
+            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
+        )
+
+        with pytest.raises(RuntimeError, match="could not certify"):
+            self._model().estimate_p(
+                X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
+            )
+
+    def test_message_does_not_offer_one_family_s_remedy_to_another(self, monkeypatch):
+        """Observed geometry is the default branch, so this reaches many families."""
+        import pandas as pd
+
+        import superglm.reml.direct as direct_module
+        from superglm import SuperGLM
+        from superglm.features.spline import Spline
+
+        monkeypatch.setattr(
+            direct_module,
+            "observed_penalized_mode_score",
+            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
+        )
+        rng = np.random.default_rng(20260807)
+        x = np.linspace(0.1, 1.0, 300)
+        X = pd.DataFrame({"x": x})
+        y = rng.gamma(3.0, np.exp(0.4 + 0.6 * x) / 3.0, 300)
+
+        # Gamma/log is non-canonical, so it takes the observed branch too.
+        gamma_model = SuperGLM(
+            family=Gamma(), link="log", selection_penalty=0, features={"x": Spline(n_knots=4)}
+        )
+        with pytest.raises(RuntimeError) as gamma_error:
+            gamma_model.fit_reml(X, y)
+
+        message = str(gamma_error.value)
+        assert "could not certify" in message
+        assert "does not move it" in message
+        assert "Tweedie" not in message
+        assert "estimate_p" not in message
+
+    def test_tweedie_message_names_the_parameter_the_caller_can_change(self, monkeypatch):
+        import superglm.reml.direct as direct_module
+
+        X, y, weights = self._tweedie_fixture()
+        monkeypatch.setattr(
+            direct_module,
+            "observed_penalized_mode_score",
+            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
+        )
+
+        with pytest.raises(RuntimeError, match="p approaches 2"):
+            self._model(p=1.7).fit_reml(X, y, sample_weight=weights)

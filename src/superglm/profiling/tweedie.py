@@ -52,6 +52,7 @@ from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.penalties.base import penalty_has_targets
+from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 
@@ -4151,6 +4152,14 @@ def _build_profile_context(
 # ---------------------------------------------------------------------------
 
 
+# Score for a power with no computable objective. Large enough that no real
+# mean NLL approaches it, and finite on purpose: `inf` is never selected either,
+# but Brent's parabolic step forms differences of objective values, so a pair of
+# infinite candidates yields `inf - inf` -> NaN and a numeric warning from
+# inside the optimizer. Squaring this stays far below overflow.
+_INFEASIBLE_PROFILE_NLL = 1e50
+
+
 @dataclass
 class _ProfileContextREML:
     """Per-evaluation logic for profile p estimation (REML path).
@@ -4173,6 +4182,11 @@ class _ProfileContextREML:
 
     # Complete candidate cache; insertion order is the immutable search trace.
     _evaluation_cache: dict[float, _ProfileEvaluation] = field(default_factory=dict, repr=False)
+    # Powers whose penalized mode could not be certified, and why. Kept out of
+    # the evaluation cache on purpose: they have no objective, so they must not
+    # be selectable, but the caller still needs to know part of the range was
+    # unreachable rather than merely unattractive.
+    _infeasible_powers: dict[float, str] = field(default_factory=dict, repr=False)
 
     @property
     def n_evals(self) -> int:
@@ -4206,13 +4220,32 @@ class _ProfileContextREML:
         # observe. It also does not auto-skip here -- the threshold is 100k rows,
         # and a search runs the same fit ten-plus times below that. Measured at
         # 31.3s of a 119.3s eight-feature profile, or 42% of every search fit.
-        self.model.fit_reml(
-            self.X,
-            self.y,
-            sample_weight=self.sample_weight,
-            offset=self.offset,
-            runtime_validation="skip",
-        )
+        try:
+            self.model.fit_reml(
+                self.X,
+                self.y,
+                sample_weight=self.sample_weight,
+                offset=self.offset,
+                runtime_validation="skip",
+            )
+        except ObservedModeNotCertifiedError as exc:
+            # This power has no REML objective we are entitled to report: the
+            # penalized mode missed the bar for differentiating through it. That
+            # is a property of this one power, and the conditioning that causes
+            # it worsens monotonically toward p=2, so a search whose optimum sits
+            # well inside the feasible region would otherwise be killed by a
+            # bound it never needed to visit. Score the point infeasible and let
+            # the outer search route around it; `finalize` cannot select it,
+            # because no record is cached.
+            self._infeasible_powers[key] = (
+                f"penalized mode not certifiable (relative score={exc.relative_max:.3e}, "
+                f"tolerance={exc.tolerance:.3e})"
+            )
+            logger.info(
+                f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  INFEASIBLE  "
+                f"mode score={exc.relative_max:.3e} > {exc.tolerance:.3e}"
+            )
+            return _INFEASIBLE_PROFILE_NLL
 
         fit_mu = getattr(self.model, "_fit_mu", None)
         if (
@@ -4383,11 +4416,34 @@ def _best_finite_profile_record(
         record for record in ctx._evaluation_cache.values() if _profile_record_is_selectable(record)
     ]
     if not selectable:
+        # Blaming the objective is only right when an objective was computed.
+        # If every power was refused before that, say which wall was hit and
+        # what moves it, rather than listing criteria none of them reached.
+        infeasible = getattr(ctx, "_infeasible_powers", None) or {}
+        if infeasible and not ctx._evaluation_cache:
+            powers = ", ".join(f"{p:g}" for p in sorted(infeasible))
+            raise RuntimeError(
+                f"Tweedie profile method={method!r} could not certify a penalized "
+                f"coefficient mode at any power it tried over "
+                f"{_format_profile_range(searched_bounds)} (tried: {powers}).\n"
+                "  Every candidate was refused before an objective existed, so this "
+                "is not a search failure.\n"
+                "  Tweedie conditioning worsens toward p=2: narrowing p_bounds "
+                "downward often finds a certifiable region. Alternatively "
+                "search_fit_mode='fit' selects p without building REML geometry "
+                "at each candidate, and publishes one REML fit at the winner."
+            )
         raise RuntimeError(
             f"Tweedie profile method={method!r} produced no valid result from "
             f"{len(ctx._evaluation_cache)} evaluations over p range "
             f"{_format_profile_range(searched_bounds)}; candidates require finite p/NLL, "
             "finite positive phi, and objective_finite=True."
+            + (
+                f" A further {len(infeasible)} power(s) could not certify a penalized "
+                "coefficient mode and were skipped."
+                if infeasible
+                else ""
+            )
         )
     return min(selectable, key=lambda record: record.nll)
 
