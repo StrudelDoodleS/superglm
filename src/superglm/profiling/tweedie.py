@@ -4148,7 +4148,20 @@ class _ProfileContextREML:
 
         _t0 = _time.perf_counter()
         self.model.family = Tweedie(p=p)
-        self.model.fit_reml(self.X, self.y, sample_weight=self.sample_weight, offset=self.offset)
+        # Search fits are thrown away: only their NLL survives, and the model the
+        # caller keeps comes from the separate final refit in `estimate_p`. The
+        # post-fit parity check certifies the PUBLISHED runtime state against the
+        # fitted one, so paying it per power step certifies models nobody can
+        # observe. It also does not auto-skip here -- the threshold is 100k rows,
+        # and a search runs the same fit ten-plus times below that. Measured at
+        # 31.3s of a 119.3s eight-feature profile, or 42% of every search fit.
+        self.model.fit_reml(
+            self.X,
+            self.y,
+            sample_weight=self.sample_weight,
+            offset=self.offset,
+            runtime_validation="skip",
+        )
 
         fit_mu = getattr(self.model, "_fit_mu", None)
         if (
