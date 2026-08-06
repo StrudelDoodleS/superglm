@@ -5156,6 +5156,69 @@ class TestOuterSearchHonesty:
         assert not result.fit_converged
         assert not result.converged
 
+    def test_bounds_fallback_reports_the_method_that_actually_ran(self):
+        """A diagnosed fast-path exit must not sign Brent's work as joint_ml."""
+        X, y, _ = _tweedie_data(n=400, p_true=1.5, seed=1741)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            # Outside the stable joint range, so the fast path declines.
+            p_bounds=(1.02, 1.98),
+            xatol=1.0e-3,
+        )
+
+        assert result.method == "brent"
+        assert result.requested_method == "joint_ml"
+        assert "fell back" in result.outer_message.lower()
+
+    def test_reml_fallback_reports_the_method_that_actually_ran(self):
+        """fit_reml always runs Brent; the result must say so."""
+        X, y, _ = _tweedie_data(n=400, p_true=1.5, seed=1742)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            features={"x1": Spline(n_knots=4)},
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            fit_mode="fit_reml",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-3,
+        )
+
+        assert result.method == "brent"
+        assert result.requested_method == "joint_ml"
+        assert "fell back" in result.outer_message.lower()
+
+    def test_requested_method_defaults_to_the_method_that_ran(self):
+        """No fallback means the two agree, so callers can read either."""
+        X, y, _ = _tweedie_data(n=400, p_true=1.5, seed=1743)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        )
+
+        result = estimate_tweedie_p(
+            model, X, y, method="brent", phi_method="mle", p_bounds=(1.1, 1.9), xatol=1.0e-3
+        )
+
+        assert result.method == "brent"
+        assert result.requested_method == "brent"
+
 
 # =====================================================================
 # Search trace

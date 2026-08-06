@@ -3038,7 +3038,13 @@ class TweedieProfileResult:
     converged : bool
         Whether the search converged.
     method : str
-        Search method used (``"brent"``, ``"grid"``, etc.).
+        Search method that actually ran (``"brent"``, ``"grid"``, etc.). A
+        diagnosed fast-path exit reports the method that produced the estimate,
+        not the one that was asked for; compare against ``requested_method`` to
+        detect a fallback.
+    requested_method : str
+        Search method the caller asked for, before any diagnosed fallback.
+        Equal to ``method`` when no fallback occurred.
     phi_method : str
         How phi was profiled (``"pearson"`` or ``"mle"``).
     search_trace : DataFrame
@@ -3105,10 +3111,13 @@ class TweedieProfileResult:
     density_exact: bool | None = field(default=None, kw_only=True)
     density_warning_severity: _DensityWarningSeverity = field(default="none", kw_only=True)
     near_power_boundary: bool = field(default=False, kw_only=True)
+    requested_method: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
         self._ensure_density_compat_state()
+        if not self.requested_method:
+            self.requested_method = self.method
 
     def _ensure_density_compat_state(self) -> None:
         """Restore density fields absent from legacy construction or pickle state."""
@@ -4781,7 +4790,7 @@ def _joint_ml_fallback_to_brent(
     ctx._exact_failure_cache.clear()
 
     result = _search_brent(ctx, p_bounds, xatol, maxiter)
-    result.method = "joint_ml"
+    result.requested_method = "joint_ml"
     prefix = f"Exact joint fast path fell back to Brent: {reason}."
     result.outer_message = " ".join(part for part in (prefix, result.outer_message) if part)
     return result
@@ -4868,7 +4877,13 @@ def _search_joint_ml(
     xatol: float,
     maxiter: int,
 ) -> TweedieProfileResult:
-    """Safeguarded exact power-score solve with fixed-power profile validation."""
+    """Safeguarded exact power-score solve with fixed-power profile validation.
+
+    Requires an unpenalized ML context: the power score is differentiated at
+    fixed ``mu``, which is the total derivative only where ``mu`` is a free ML
+    maximum. See the REML branch of ``estimate_tweedie_p`` for why a penalized
+    mode breaks that and must not be routed here.
+    """
     lo, hi = p_bounds
     if not np.isfinite(lo) or not np.isfinite(hi) or not 1.0 < lo < hi < 2.0:
         raise ValueError("p_bounds must be finite, increasing, and strictly inside (1, 2)")
@@ -5315,8 +5330,18 @@ def estimate_tweedie_p(
         return _search_grid_refine(ctx, p_bounds, n_grid_coarse, xatol, maxiter)
     if resolved_method == "joint_ml":
         if isinstance(ctx, _ProfileContextREML):
+            # Not conservatism -- the identity the fast path rests on does not
+            # hold here. Its Newton step drives `gradient_p` to zero, and that
+            # is the NLL partial at *fixed* mu, which equals the total dF/dp
+            # only where mu is a free ML maximum so the dmu/dp term vanishes by
+            # the envelope theorem. Under REML mu(p) is a penalized mode, the
+            # term survives, and the solve converges on the wrong stationarity
+            # condition: measured against Brent on 18 fixtures it landed at a
+            # worse profile NLL on 16 of them and up to 1065x farther from an
+            # independent reference optimum, while running ~1.9x faster. Speed
+            # bought with the wrong root is not a speedup; do not re-enable.
             result = _search_brent(ctx, p_bounds, xatol, maxiter)
-            result.method = "joint_ml"
+            result.requested_method = "joint_ml"
             result.outer_message = " ".join(
                 (
                     "Exact joint fast path fell back to Brent because fit_reml requires "
