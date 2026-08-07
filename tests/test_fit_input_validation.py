@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import datetime
 import pickle
+import sys
 
 import numpy as np
 import pandas as pd
@@ -17,6 +19,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm._frame import as_eager_frame
 from superglm.distributions import (
     Binomial,
     Gamma,
@@ -26,7 +29,7 @@ from superglm.distributions import (
     Tweedie,
     validate_response,
 )
-from superglm.model.input_validation import validate_fit_input
+from superglm.model.input_validation import validate_fit_input, validate_x_columns
 from superglm.model.reml_setup import scop_group_spec
 from superglm.types import GroupSlice
 
@@ -350,6 +353,165 @@ def test_fit_entrypoints_reject_array_valued_cells_before_feature_build(
 
     with pytest.raises(ValueError, match="X column 'x' must contain only scalar values"):
         _call_entrypoint(_model(), entrypoint, X, np.array([0.0, 1.0]))
+
+
+class _UnhashableStr(str):
+    """A `str` that cannot be a level, though pandas still infers the column as `string`."""
+
+    __hash__ = None
+
+
+class _UnhashableBytes(bytes):
+    """A `bytes` that cannot be a level, though pandas still infers the column as `bytes`."""
+
+    __hash__ = None
+
+
+class _UnhashableDate(datetime.date):
+    """A `date` that cannot be a level, though pandas still infers the column as `date`."""
+
+    __hash__ = None
+
+
+class _UnhashableInt(int):
+    """An `int` that cannot be a level. `np.isscalar` calls it a scalar anyway."""
+
+    __hash__ = None
+
+
+def _object_column(*values) -> pd.DataFrame:
+    """Build a one-column frame holding exactly the given objects."""
+    column = np.empty(len(values), dtype=object)
+    for position, value in enumerate(values):
+        column[position] = value
+    return pd.DataFrame({"x": column})
+
+
+@pytest.mark.parametrize(
+    "X",
+    [
+        _object_column("a", ["b"], "c"),
+        _object_column("a", {"b": 1}, "c"),
+        _object_column("a", {"b"}, "c"),
+        _object_column("a", bytearray(b"b"), "c"),
+        _object_column(1.0, np.array([2.0]), 3.0),
+        _object_column(1, [2], 3),
+        _object_column(1, 2.0, np.array([3.0])),
+        _object_column(True, [False], True),
+        _object_column(b"a", [b"b"], b"c"),
+        _object_column(np.nan, ["b"], None),
+        _object_column(1.0 + 1.0j, [2.0j], 3.0j),
+        _object_column(("a", 1), ("b", [2])),
+    ],
+)
+def test_x_columns_reject_containers_hidden_among_scalars(X: pd.DataFrame) -> None:
+    """A container anywhere in an object column is rejected, whatever surrounds it.
+
+    Every case mixes one unhashable value into a column whose other entries are
+    scalars of a single type, which is the arrangement a column-wide shortcut
+    would be most tempted to wave through. The last case is the one the error
+    message names: a tuple of scalars is a legal level, a tuple nesting a list
+    is not, and no amount of column-level inference can tell them apart.
+    """
+    with pytest.raises(ValueError, match="X column 'x' must contain only scalar values"):
+        validate_x_columns(as_eager_frame(X), ("x",))
+
+
+@pytest.mark.parametrize(
+    "X",
+    [
+        _object_column("a", _UnhashableStr("b"), "c"),
+        _object_column(_UnhashableStr("a"), _UnhashableStr("b")),
+        _object_column(b"a", _UnhashableBytes(b"b")),
+        _object_column(datetime.date(2020, 1, 1), _UnhashableDate(2020, 1, 2)),
+    ],
+)
+def test_x_columns_reject_scalar_subclasses_that_refuse_to_hash(X: pd.DataFrame) -> None:
+    """Rejection follows hashability, not the dtype label pandas puts on the column.
+
+    `infer_dtype` classifies by `isinstance`, so each of these columns is
+    labelled with a plain scalar type -- `string`, `bytes`, `date` -- while
+    holding a subclass that sets `__hash__ = None`. A validator that trusted
+    the label would pass them through to feature construction, where they die
+    on set insertion with a bare `TypeError` instead of this module's message.
+    """
+    with pytest.raises(ValueError, match="X column 'x' must contain only scalar values"):
+        validate_x_columns(as_eager_frame(X), ("x",))
+
+
+@pytest.mark.parametrize(
+    "X",
+    [
+        _object_column("a", None, "b"),
+        _object_column("a", np.nan, "b"),
+        _object_column("a", pd.NA, "b"),
+        _object_column("a", pd.NaT, "b"),
+        _object_column(("a", 1), ("b", 2)),
+        _object_column(datetime.date(2020, 1, 1), datetime.date(2020, 1, 2)),
+    ],
+)
+def test_x_columns_accept_hashable_levels_and_missing_markers(X: pd.DataFrame) -> None:
+    """Missing markers and tuple levels stay valid.
+
+    The scan this replaced skipped `None` and `pd.NA` before testing anything,
+    so the replacement has to hash them rather than skip them. All four missing
+    markers are hashable, but that is a fact about them and not an assumption
+    worth leaving untested on the path every categorical fit takes.
+    """
+    validate_x_columns(as_eager_frame(X), ("x",))
+
+
+def test_x_columns_reject_unhashable_numbers_that_np_isscalar_calls_scalar() -> None:
+    """A deliberate widening: `numbers.Number` no longer buys an exemption.
+
+    The scan this replaced skipped anything `np.isscalar` accepted, and that
+    includes every registered `numbers.Number` -- so an `int`, `Decimal` or
+    `Fraction` subclass with `__hash__ = None` used to pass validation and then
+    fail in the encoder. Testing hashability directly closes that, which is a
+    strictly narrower accept set and the direction this module should err in.
+    """
+    X = _object_column(1, _UnhashableInt(2), 3)
+
+    with pytest.raises(ValueError, match="X column 'x' must contain only scalar values"):
+        validate_x_columns(as_eager_frame(X), ("x",))
+
+
+def _python_calls_while_validating(n_rows: int) -> int:
+    """Count Python-level calls made while validating one object column of n_rows."""
+    frame = as_eager_frame(pd.DataFrame({"x": np.array(["a", "b"] * n_rows, dtype=object)}))
+    frame.column_array("x")  # warm any per-frame materialization
+    calls = 0
+
+    def _record(_frame, event, _arg) -> None:
+        nonlocal calls
+        if event == "call":
+            calls += 1
+
+    previous = sys.getprofile()
+    sys.setprofile(_record)
+    try:
+        validate_x_columns(frame, ("x",))
+    finally:
+        sys.setprofile(previous)
+    return calls
+
+
+def test_object_column_validation_runs_no_python_code_per_element() -> None:
+    """Validation cost per object column is flat in the number of rows.
+
+    Asserting the shape rather than naming a helper is what keeps this honest:
+    any implementation that runs Python bytecode per element fails it however
+    that element is examined, and no rename or local import can make it pass
+    vacuously. On the power-search path this validator re-walks every
+    configured column once per candidate fit, so per-row Python here is
+    multiplied by the whole search.
+    """
+    small = _python_calls_while_validating(50)
+    large = _python_calls_while_validating(5_000)
+
+    # Guards the guard: a profiler that recorded nothing would make this vacuous.
+    assert small > 0
+    assert large == small
 
 
 def test_hashable_tuple_categorical_levels_fit_and_predict() -> None:
