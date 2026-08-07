@@ -36,6 +36,7 @@ fits, which is the usual reason a "slow" model is not actually slow.
 
 from __future__ import annotations
 
+import copy
 import cProfile
 import io
 import pstats
@@ -96,7 +97,8 @@ def _fit(method: str, X, y, w, offset, subset=None, drop=None, profiler=None):
         # variant that silently loses configuration times a different model.
         # `_config.constructor_kwargs()` is the one complete record of that
         # contract (it is what `clone_unfitted` reconstructs from).
-        kwargs = model._config.constructor_kwargs()
+        cfg = model._config
+        kwargs = cfg.constructor_kwargs()
         kwargs["features"] = {k: v for k, v in dict(kwargs["features"]).items() if k != drop}
         interactions = kwargs.get("interactions")
         if interactions:
@@ -104,7 +106,31 @@ def _fit(method: str, X, y, w, offset, subset=None, drop=None, profiler=None):
                 ia for ia in interactions if not (isinstance(ia, tuple) and drop in ia)
             ]
         model = SuperGLM(**kwargs)
-    cols = [c for c in X.columns if c in model.features]
+
+        def _touches_drop(name, spec):
+            parents = tuple(getattr(spec, "parent_names", None) or str(name).split(":"))
+            return drop in parents
+
+        # constructor_kwargs() carries only pending tuple interactions;
+        # explicit interaction OBJECTS live in interaction_templates and are
+        # restored by clone_unfitted() after construction. Mirror that here,
+        # minus anything touching the dropped feature, so interactions
+        # unrelated to the drop keep being part of what gets timed.
+        keep = [
+            (name, spec)
+            for name, spec in cfg.interaction_templates
+            if not _touches_drop(name, spec)
+        ]
+        if keep or cfg.interaction_templates:
+            model._interaction_specs = {name: copy.deepcopy(spec) for name, spec in keep}
+            kept_names = {name for name, _ in keep}
+            model._interaction_order = [n for n in cfg.interaction_order if n in kept_names]
+            model._config = type(cfg).capture(model)
+    features = model.features
+    # With `features=None`/`splines=` configurations the spec dict is empty
+    # until fitting auto-detects features; filtering columns against it
+    # would time an intercept-only model. Pass the full frame in that case.
+    cols = [c for c in X.columns if c in features] if features else list(X.columns)
     Xs, ys = X[cols], y
     ws, os_ = w, offset
     if subset is not None:
@@ -174,15 +200,22 @@ def main():
             f"{len(m_reml._groups)} groups"
         )
         if N_FOLDS > 1:
-            # Each fold trains on (k-1)/k of the rows, and cost is close to linear
-            # in rows, so k folds cost about (k-1) full fits -- not k.
+            # A fold trains on (k-1)/k of the rows. Whether that costs
+            # (k-1)/k of a full fit (row-bound) or nearly a full fit
+            # (coefficient/setup-bound) depends on the model, so MEASURE one
+            # fold-sized fit per entry point instead of assuming
+            # row-linearity.
+            k_rows = max(1, int(len(y) * (N_FOLDS - 1) / N_FOLDS))
+            fold_idx = np.random.default_rng(1).choice(len(y), k_rows, replace=False)
+            t_fold_fit, _ = best_of("fit", X, y, w, offset, repeat=2, subset=fold_idx)
             print(f"\nprojected over {N_FOLDS} folds -- compare THIS to the time you observe:")
-            print(f"  fit()       {t_fit * (N_FOLDS - 1):8.3f}s")
-            print(f"  fit_reml()  {t_reml * (N_FOLDS - 1):8.3f}s")
-            print(
-                f"  (each fold trains on {N_FOLDS - 1}/{N_FOLDS} of the rows, so {N_FOLDS} folds"
-                f" cost about {N_FOLDS - 1} full fits, not {N_FOLDS})"
-            )
+            print(f"  fit()       {t_fold_fit * N_FOLDS:8.3f}s")
+            try:
+                t_fold_reml, _ = best_of("fit_reml", X, y, w, offset, repeat=1, subset=fold_idx)
+                print(f"  fit_reml()  {t_fold_reml * N_FOLDS:8.3f}s")
+            except Exception:  # noqa: BLE001
+                print("  fit_reml()    failed on the fold-sized subset")
+            print(f"  ({N_FOLDS} folds, each measured at its true size of {k_rows:,} rows)")
     except Exception as exc:  # noqa: BLE001
         print(f"fit_reml()  FAILED: {type(exc).__name__}: {exc}")
         d, t_reml, m_reml = {}, None, None
@@ -265,10 +298,16 @@ def main():
         tf_full, _ = best_of("fit", X, y, w, offset, repeat=2)
         growth = tf_full / max(t0, 1e-9)
         rows_growth = n / max(k0, 1)
-        print(
-            f"\n{rows_growth:.1f}x the rows cost {growth:.1f}x the time "
-            f"-> {'row-bound (linear-ish)' if growth < 1.5 * rows_growth else 'super-linear, look at coefficient count'}"
-        )
+        # Three-way: sub-linear growth means fixed/coefficient cost
+        # dominates and MORE rows are nearly free -- calling that
+        # "row-bound" would reverse the section's answer.
+        if growth < 0.5 * rows_growth:
+            verdict = "sub-linear: fixed/coefficient cost dominates, rows are cheap"
+        elif growth < 1.5 * rows_growth:
+            verdict = "row-bound (linear-ish)"
+        else:
+            verdict = "super-linear, look at coefficient count"
+        print(f"\n{rows_growth:.1f}x the rows cost {growth:.1f}x the time -> {verdict}")
 
     # ── 5. hot functions ──
     section("5. HOT FUNCTIONS INSIDE fit_reml()  (cumulative)")

@@ -676,6 +676,11 @@ class TestSplineObjectBasis:
         model = SuperGLM(family="poisson", features={"risk": spec}, selection_penalty=0.0)
         model.fit(X, y, sample_weight=sample_weight)
         assert model.result.converged
+        # A monotone curve alone cannot prove the QP path engaged -- postfit
+        # repair or SCOP could produce one too. Pin the dispatch this fix
+        # delegates: the fitted group must carry the QP engine stamp.
+        engines = {g.monotone_engine for g in model._groups if g.feature_name == "risk"}
+        assert "qp" in engines and "scop" not in engines, engines
 
         rels = model.reconstruct_feature("risk")["level_log_relativities"]
         curve = np.array([rels[lev] for lev in levels], dtype=float)
@@ -708,6 +713,8 @@ class TestSplineObjectBasis:
         )
         model = SuperGLM(family="poisson", features={"risk": spec})
         model.fit_reml(X, y, sample_weight=sample_weight)
+        engines = {g.monotone_engine for g in model._groups if g.feature_name == "risk"}
+        assert "qp" in engines and "scop" not in engines, engines
 
         rels = model.reconstruct_feature("risk")["level_log_relativities"]
         curve = np.array([rels[lev] for lev in levels], dtype=float)
@@ -738,6 +745,11 @@ class TestSplineObjectBasis:
         model = SuperGLM(family="poisson", features={"risk": spec}, selection_penalty=0.0)
         model.fit(X, y, sample_weight=sample_weight)
         assert model.result.converged
+        # A monotone curve alone cannot prove the QP path engaged -- postfit
+        # repair or SCOP could produce one too. Pin the dispatch this fix
+        # delegates: the fitted group must carry the QP engine stamp.
+        engines = {g.monotone_engine for g in model._groups if g.feature_name == "risk"}
+        assert "qp" in engines and "scop" not in engines, engines
 
         rels = model.reconstruct_feature("risk")["level_log_relativities"]
         curve = np.array([rels[lev] for lev in levels], dtype=float)
