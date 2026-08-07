@@ -419,9 +419,7 @@ class TestPublicationDispersion:
 
         rng = np.random.default_rng(11)
         n = 4_000
-        frame = pd.DataFrame(
-            {"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)}
-        )
+        frame = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)})
         eta = 0.4 * np.sin(4.0 * frame["x1"].to_numpy()) + 0.3 * frame["x2"].to_numpy() - 0.6
         y = np.where(rng.random(n) < 0.5, 0.0, rng.gamma(1.4, np.exp(eta) * 3.0, n))
 
@@ -587,9 +585,7 @@ class TestPublicationDispersion:
 
         frame, y, weights, offset, features = _flat_lambda_fixture(n=6_000)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(
-            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
-        )
+        result = model.estimate_p(frame, y, sample_weight=weights, offset=offset, fit_mode="reml")
 
         mu = np.asarray(model.predict(frame, offset=offset), dtype=float)
         edf = float(model.result.effective_df)

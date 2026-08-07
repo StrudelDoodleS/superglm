@@ -3050,9 +3050,7 @@ def test_profile_options_forward_search_fit_mode():
     """A client asking for the decoupled search must not be silently coupled."""
     from superglm.editor.server import _profile_options
 
-    options = _profile_options(
-        {"fit_mode": "reml", "search_fit_mode": "fit", "junk": "dropped"}
-    )
+    options = _profile_options({"fit_mode": "reml", "search_fit_mode": "fit", "junk": "dropped"})
 
     assert options["search_fit_mode"] == "fit"
     assert options["fit_mode"] == "reml"

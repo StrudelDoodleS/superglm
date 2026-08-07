@@ -153,9 +153,7 @@ def model_complaints(model, label: str) -> list[str]:
         complaints.append(f"{label}: reml_diagnostics enabled={diagnostics.get('enabled')!r}")
         return complaints
     if diagnostics.get("converged") is not True:
-        complaints.append(
-            f"{label}: reml_diagnostics converged={diagnostics.get('converged')!r}"
-        )
+        complaints.append(f"{label}: reml_diagnostics converged={diagnostics.get('converged')!r}")
     return complaints
 
 
