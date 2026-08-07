@@ -4920,6 +4920,54 @@ class TestSearchMethods:
         assert joint.phi_hat == pytest.approx(brent.phi_hat, rel=2.0e-4)
         assert joint.nll == pytest.approx(brent.nll, abs=2.0e-8)
 
+    def test_joint_ml_falls_back_to_brent_on_a_penalized_context(self):
+        """The envelope argument needs mu to be a free ML maximum.
+
+        A lambda2-smoothed spline makes mu a penalized mode, the dmu/dp term
+        survives, and the joint solve converges on the wrong stationarity
+        condition -- measured 5.8e-4 in p_hat on a flat-lambda synthetic
+        stress design, six times the benchmark's own answer tolerance.
+        """
+        X, y, _ = _tweedie_data(n=240, p_true=1.45, seed=1729)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=5, penalty="ssp")},
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="joint_ml",
+            phi_method="mle",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-4,
+        )
+
+        assert result.method == "brent"
+        assert result.requested_method == "joint_ml"
+        assert "penalized" in result.outer_message
+
+    def test_auto_keeps_the_joint_path_only_for_an_unpenalized_context(self):
+        X, y, _ = _tweedie_data(n=240, p_true=1.45, seed=1729)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5), selection_penalty=0, features={"x1": Numeric()}
+        )
+
+        result = estimate_tweedie_p(
+            model,
+            X,
+            y,
+            method="auto",
+            phi_method="mle",
+            p_bounds=(1.1, 1.9),
+            xatol=1.0e-4,
+        )
+
+        assert result.method == "joint_ml"
+        assert result.requested_method == "auto"
+
     def test_joint_ml_validation_failure_discards_fast_cache(self, monkeypatch):
         X, y, _ = _tweedie_data(n=160, p_true=1.45, seed=1730)
         model = SuperGLM(
