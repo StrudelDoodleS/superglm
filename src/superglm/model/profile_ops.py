@@ -67,12 +67,22 @@ def _publication_mode_failure(exc, *, parameter, value, decoupled) -> Publicatio
                 f"The search certified {parameter}={value:.6g}, but the publication refit "
                 f"-- which runs at the final smoothing parameters -- cannot ({achieved})."
             )
-        options = (
-            "  Options: fit_mode='reml' searches only certifiable points (it may warn "
-            "that the optimum is boundary-censored); fit_mode='fit' publishes the ML "
-            f"fit at the selected {parameter}; or restrict p_bounds away from the "
-            "failing region."
-        )
+        if decoupled:
+            options = (
+                "  Options: fit_mode='reml' searches only certifiable points (it may "
+                "warn that the optimum is boundary-censored); fit_mode='fit' publishes "
+                f"the ML fit at the selected {parameter}; or restrict p_bounds away "
+                "from the failing region."
+            )
+        else:
+            # A coupled caller already passed fit_mode='reml'; the search
+            # certified this point and the publication refit still cannot, so
+            # recommending the coupled search again would recommend the
+            # configuration that just failed.
+            options = (
+                f"  Options: fit_mode='fit' publishes the ML fit at the selected "
+                f"{parameter}; or restrict p_bounds away from the failing region."
+            )
     return PublicationModeError(f"{how}\n{region}{options}")
 
 
@@ -341,9 +351,24 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
         profile_result.search_nll = float(profile_result.nll)
         # Stash the searched winner's certification flags with it: the CI
         # inverts the searched curve, so its guard must judge these after
-        # the overwrite below repoints the live flags at the re-profile.
+        # the overwrite below repoints the live flags at the publication.
         profile_result.search_objective_finite = bool(profile_result.objective_finite)
         profile_result.search_phi_converged = bool(profile_result.phi_converged)
+        profile_result.search_fit_converged = bool(profile_result.fit_converged)
+    # The fit flags become the PUBLICATION refit's own. Candidates run at the
+    # loose search bar and the publication runs tight, so they can disagree
+    # on exactly the flat-lambda designs the split was built for; a decoupled
+    # run's candidates are ML fits with no REML story at all, while what it
+    # publishes is a REML fit.
+    solver_result = model._solver_pirls_result()
+    reml_result = getattr(model, "_reml_result", None)
+    publication_solver_converged = bool(solver_result.converged)
+    publication_reml_converged = None if reml_result is None else bool(reml_result.converged)
+    profile_result.solver_converged = publication_solver_converged
+    profile_result.reml_converged = publication_reml_converged
+    profile_result.fit_converged = bool(
+        publication_solver_converged and publication_reml_converged is not False
+    )
     profile_result.phi_hat = float(phi_result.phi)
     profile_result.nll = float(phi_result.nll)
     profile_result.objective_finite = bool(phi_result.objective_finite)

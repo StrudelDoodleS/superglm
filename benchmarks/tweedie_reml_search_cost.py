@@ -106,6 +106,7 @@ def profile_complaints(result) -> list[str]:
     the benchmark reports a speedup the search has already disclaimed.
     """
     complaints: list[str] = []
+    _missing = object()
     for flag in (
         "converged",
         "outer_converged",
@@ -114,7 +115,12 @@ def profile_complaints(result) -> list[str]:
         "objective_finite",
         "phi_converged",
     ):
-        if getattr(result, flag, True) is False:
+        value = getattr(result, flag, _missing)
+        # Fail closed on a renamed or removed flag: a default of True would
+        # read "fine" forever after the field stopped existing.
+        if value is _missing:
+            complaints.append(f"{flag} missing from the result")
+        elif value is False:
             complaints.append(f"{flag}=False")
     # None means "REML did not run here", which is legitimate under fit mode.
     if getattr(result, "reml_converged", None) is False:
@@ -196,19 +202,23 @@ def main() -> None:
     frame, y, weights, offset, oc_levels = build_fixture(args.rows)
     results: dict[str, dict] = {}
 
-    # 1. The slow path under investigation.
+    # 1. The slow path under investigation. The headline leg publishes a
+    # fit_reml like the others, so it gets the same published-fit gate:
+    # discarding the model here would leave the coupled leg's publication
+    # with no convergence check at all.
     def _reml_search():
-        r = _model(oc_levels).estimate_p(
-            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
-        )
+        model = _model(oc_levels)
+        r = model.estimate_p(frame, y, sample_weight=weights, offset=offset, fit_mode="reml")
         return {
             "p_hat": float(r.p_hat),
             "phi_hat": float(r.phi_hat),
+            "published_deviance": float(model.result.deviance),
+            "backend": published_backend(model),
             "power_steps": int(r.n_evaluations),
             "phi_evals": int(r.phi_n_evaluations),
             "method": str(r.method),
             "phi_optimizer": str(r.phi_optimizer),
-            "complaints": profile_complaints(r),
+            "complaints": profile_complaints(r) + model_complaints(model, "published fit_reml"),
         }
 
     # 2. The alternative that already exists, spelled out at the call site.

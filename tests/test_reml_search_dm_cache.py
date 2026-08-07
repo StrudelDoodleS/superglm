@@ -172,3 +172,31 @@ class TestCacheScope:
             estimate_tweedie_p(model, frame, y, fit_mode="fit_reml", maxiter=6)
 
         assert not hasattr(model, "_profile_design_cache")
+
+
+class TestConstrainedGroupsDisableTheCache:
+    def test_a_constrained_search_never_serves_from_the_cache(self, monkeypatch):
+        """GroupSlice objects are mutated in place by the constrained REML
+        path (strip_qp_constraints / restore_qp_constraints recompose against
+        the current group matrix), and the fixed-probe check certifies only
+        the design's matvec -- it cannot see a mutated group. Until the
+        bitwise-equivalence evidence covers constrained fixtures, the cache
+        stands down and every candidate builds fresh."""
+        calls = _count_builds(monkeypatch)
+        rng = np.random.default_rng(5)
+        n = 900
+        x = rng.uniform(0.0, 1.0, n)
+        eta = 0.8 * x - 0.6
+        y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
+        frame = pd.DataFrame({"x": x})
+        from superglm import Constraint
+
+        features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
+
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.estimate_p(frame, y, fit_mode="reml", maxiter=8)
+
+        # One build per candidate fit plus the publication: strictly more
+        # than the cached search's two, proving no candidate was served a
+        # possibly-mutated design.
+        assert len(calls) > 2

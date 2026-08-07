@@ -100,6 +100,12 @@ def _small_search_fixture(n: int = 1_200, seed: int = 7):
     return frame, y, features
 
 
+def _replace_dc(instance, **changes):
+    from dataclasses import replace
+
+    return replace(instance, **changes)
+
+
 class TestPublishedFitDetermination:
     def test_default_fit_publishes_determined_standard_errors(self):
         """A converged default fit's SEs must match a tight fit's to <0.5%.
@@ -497,6 +503,47 @@ class TestPublicationDispersion:
         assert model._fit_stats.explained_deviance == pytest.approx(
             oracle.explained_deviance, rel=1e-12
         )
+
+    def test_the_aggregate_judges_the_publication_refit_not_the_candidate(self, monkeypatch):
+        """fit/solver/reml convergence on the result must describe the
+        publication refit. Candidates run at the loose search bar and the
+        publication runs tight, so the two can disagree on exactly the
+        flat-lambda designs the tolerance split was built for -- and the
+        candidate's green flags must not mask a stalled publication."""
+
+        from superglm.model import profile_ops
+
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(frame, y, fit_mode="reml")
+        assert result.converged and result.fit_converged
+        assert result.search_fit_converged is True
+
+        model._reml_result = _replace_dc(model._reml_result, converged=False)
+        mu = np.asarray(model.predict(frame), dtype=float)
+        profile_ops._reprofile_published_dispersion(
+            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
+        )
+
+        assert result.reml_converged is False
+        assert result.fit_converged is False
+        assert result.converged is False
+        # The searched winner's flag survives for the CI guard.
+        assert result.search_fit_converged is True
+
+    def test_a_decoupled_publication_reports_its_reml_convergence(self):
+        """The docstring promises fit_converged covers REML and solver
+        convergence for a REML publication. A decoupled run's search is ML
+        (reml_converged=None there), but it publishes a REML fit -- the
+        published flags must describe that fit, not the ML candidates."""
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
+
+        assert result.reml_converged is True
+        assert result.fit_converged is True
+        assert result.search_fit_converged is True
+        assert result.converged is True
 
     def test_a_troubled_reprofile_is_disclosed_on_the_result(self, monkeypatch):
         """A boundary, fallback, or non-convergent published re-profile must

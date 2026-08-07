@@ -3115,6 +3115,8 @@ class TweedieProfileResult:
     reml_converged: bool | None = None
     objective_finite: bool = True
     phi_converged: bool = True
+    # The phi_n_* counters accumulate across the search AND the publication
+    # re-profile: the published total is search work plus one re-profile.
     phi_n_evaluations: int = 0
     phi_n_score_evaluations: int = 0
     phi_n_value_only_evaluations: int = 0
@@ -3145,6 +3147,7 @@ class TweedieProfileResult:
     # them, and the live flags are still the searched values.
     search_objective_finite: bool | None = field(default=None, kw_only=True)
     search_phi_converged: bool | None = field(default=None, kw_only=True)
+    search_fit_converged: bool | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
@@ -3165,12 +3168,11 @@ class TweedieProfileResult:
             self.fit_mode = "fit"
         if not self.search_fit_mode:
             self.search_fit_mode = self.fit_mode
-        if not hasattr(self, "search_nll"):
-            self.search_nll = None
-        if not hasattr(self, "search_objective_finite"):
-            self.search_objective_finite = None
-        if not hasattr(self, "search_phi_converged"):
-            self.search_phi_converged = None
+        # The search_* fields need no restore branch here: their dataclass
+        # defaults are class attributes, so a pre-0.20 pickle that lacks the
+        # instance attribute still reads the correct None through the class.
+        # (Do not copy the `search_fit_mode` pattern above for a new field
+        # unless its class default is genuinely wrong for legacy results.)
 
     def _profile_reference_nll(self) -> float:
         """The objective value every profile comparison must be measured against.
@@ -3289,7 +3291,7 @@ class TweedieProfileResult:
         """
         checks = (
             ("objective_finite", self.search_objective_finite, self.objective_finite),
-            ("fit_converged", None, self.fit_converged),
+            ("fit_converged", self.search_fit_converged, self.fit_converged),
             ("phi_converged", self.search_phi_converged, self.phi_converged),
         )
         for name, searched, live in checks:
@@ -5615,16 +5617,20 @@ def estimate_tweedie_p(
     # publish under a different one, and overwrites `fit_mode` when it does.
     result.fit_mode = fit_mode
     result.search_fit_mode = fit_mode
-    # The censoring test compares the gap to the search's ACTUAL resolution:
-    # a pure grid search resolves p only to its spacing, so judging its
-    # boundary distance against Brent's xatol would silence every warning.
-    if resolved_method == "grid":
-        if grid is not None and len(np.asarray(grid)) > 1:
-            search_resolution = float(np.max(np.diff(np.sort(np.asarray(grid, dtype=float)))))
-        else:
-            search_resolution = (p_bounds[1] - p_bounds[0]) / max(int(n_grid) - 1, 1)
-    else:
-        search_resolution = xatol
+    # The censoring test compares the gap to the resolution the WINNING
+    # record was actually located to -- a pure grid search resolves p only to
+    # its spacing, so judging its boundary distance against Brent's xatol
+    # would silence every warning.
+    winner_record = ctx.evaluation_record(float(result.p_hat))
+    search_resolution = _censoring_search_resolution(
+        resolved_method,
+        grid,
+        p_bounds,
+        n_grid,
+        n_grid_coarse,
+        xatol,
+        None if winner_record is None else winner_record.source,
+    )
     censoring = _boundary_censoring_message(
         float(result.p_hat), getattr(ctx, "_infeasible_powers", None), xatol=search_resolution
     )
@@ -5637,6 +5643,34 @@ def estimate_tweedie_p(
         result.warnings = list(result.warnings) + [censoring]
         _warnings.warn(censoring, UserWarning, stacklevel=2)
     return result
+
+
+def _censoring_search_resolution(
+    resolved_method: str,
+    grid,
+    p_bounds: tuple[float, float],
+    n_grid: int,
+    n_grid_coarse: int,
+    xatol: float,
+    winner_source: str | None,
+) -> float:
+    """The resolution the winning record was actually located to.
+
+    A pure grid winner is resolved to the grid's spacing. A grid_refine
+    winner is normally the Brent refinement (xatol) -- but when the refined
+    candidate is invalid and a coarse-stage point wins the global selection,
+    that winner was resolved only to the coarse spacing, and judging its
+    boundary distance at xatol would silence the censoring warning the same
+    way the pure-grid bug did.
+    """
+    if resolved_method == "grid":
+        if grid is not None and len(np.asarray(grid)) > 1:
+            return float(np.max(np.diff(np.sort(np.asarray(grid, dtype=float)))))
+        return (p_bounds[1] - p_bounds[0]) / max(int(n_grid) - 1, 1)
+    if resolved_method == "grid_refine" and winner_source == "grid_coarse":
+        coarse_step = (p_bounds[1] - p_bounds[0]) / max(int(n_grid_coarse) - 1, 1)
+        return max(float(xatol), coarse_step)
+    return float(xatol)
 
 
 def _boundary_censoring_message(

@@ -192,6 +192,44 @@ class TestInitializationSearchesRouteAroundInfeasiblePoints:
 class TestPublicationModeFailure:
     """A publish refit that cannot certify must explain itself."""
 
+    def test_the_typed_error_is_public_api(self):
+        """The docstrings and the guide promise a typed routable error; a
+        caller must be able to import it without reaching into a private
+        module path."""
+        import superglm
+        from superglm.model import profile_ops
+
+        assert superglm.PublicationModeError is profile_ops.PublicationModeError
+        assert "PublicationModeError" in superglm.__all__
+
+    def test_the_coupled_failure_does_not_recommend_itself(self):
+        """A coupled caller already passed fit_mode='reml'; the options list
+        must offer only the ways out that remain, while the decoupled branch
+        keeps recommending the coupled search."""
+        from superglm.model import profile_ops
+
+        coupled = str(
+            profile_ops._publication_mode_failure(
+                RuntimeError("score 3.9e-8 exceeds bar"),
+                parameter="p",
+                value=1.61,
+                decoupled=False,
+            )
+        )
+        assert "fit_mode='reml' searches only certifiable points" not in coupled
+        assert "fit_mode='fit'" in coupled
+        assert "p_bounds" in coupled
+
+        decoupled = str(
+            profile_ops._publication_mode_failure(
+                RuntimeError("score 3.9e-8 exceeds bar"),
+                parameter="p",
+                value=1.61,
+                decoupled=True,
+            )
+        )
+        assert "fit_mode='reml' searches only certifiable points" in decoupled
+
     def test_publish_failure_names_the_power_and_the_options(self, monkeypatch):
         from superglm.model import fit_ops
         from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
@@ -343,6 +381,27 @@ class TestBoundaryCensoringWarning:
         assert result.outer_converged
         assert forced in result.outer_message
         assert any(forced in warning for warning in result.warnings)
+
+    def test_the_resolution_follows_the_winning_records_own_stage(self):
+        """grid_refine normally resolves to Brent's xatol -- but when the
+        refined candidate is invalid and the coarse-stage point wins, that
+        winner was resolved only to the coarse spacing, and judging its
+        boundary distance at xatol silences the warning the same way the
+        pure-grid bug did."""
+        from superglm.profiling.tweedie import _censoring_search_resolution
+
+        bounds = (1.05, 1.95)
+        assert (
+            _censoring_search_resolution("grid_refine", None, bounds, 20, 10, 1e-3, "brent_refine")
+            == 1e-3
+        )
+        assert _censoring_search_resolution(
+            "grid_refine", None, bounds, 20, 10, 1e-3, "grid_coarse"
+        ) == pytest.approx((1.95 - 1.05) / 9.0)
+        assert _censoring_search_resolution(
+            "grid", None, bounds, 20, 10, 1e-3, "grid"
+        ) == pytest.approx((1.95 - 1.05) / 19.0)
+        assert _censoring_search_resolution("brent", None, bounds, 20, 10, 1e-3, "brent") == 1e-3
 
     def test_routed_around_endpoints_do_not_warn_end_to_end(self, recwarn):
         """The k-sweep fixture routes around p=1.95; its p_hat sits far away.
