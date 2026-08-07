@@ -54,20 +54,21 @@ def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str 
     # Missing values are checked before the level scan: a NaN beside strings is
     # a broken column, not an unseen level, and it should say so.
     #
-    # `pd.isna` is a C-level scan and is true for everything this check owns
-    # (None, float NaN) plus a wider family it does not -- pd.NA, pd.NaT, a NaN
-    # that is not a Python float. Those are unseen LEVELS, and the report has to
-    # name them rather than blame the column, so pd.isna cannot be the answer.
-    # As a pre-filter it is exact for every value pandas recognises as null: a
-    # vector pandas calls clean proves the narrow test below is clean too, and
-    # only a column that actually holds something null pays for the per-element
-    # scan that keeps the boundary where it is. The gap is a value pandas does
-    # not recognise -- it asks `v != v`, so a float subclass that compares equal
-    # to itself is a NaN the narrow test would have caught and the pre-filter
-    # skips. Nothing that reads a real column produces one.
-    if np.asarray(pd.isna(x)).any() and any(
-        v is None or (isinstance(v, float) and np.isnan(v)) for v in x
-    ):
+    # This scan stays exact and per-element on purpose. `pd.isna` is a C-level
+    # test and reads as the obvious pre-filter, but it is not a superset of the
+    # question asked here: pandas decides nullness by asking `v != v`, so a
+    # float subclass that compares equal to itself is a NaN this check owns and
+    # `pd.isna` calls clean. Short-circuiting on it therefore turns a rejected
+    # column into an accepted one whenever that value is also a fitted level --
+    # a validation surface quietly widening, which is not a trade worth 0.08s
+    # per search. The narrow test below is the boundary, so the narrow test is
+    # what runs.
+    #
+    # `pd.isna` is wrong as the answer too, for the opposite reason: it is true
+    # for a wider family this check does NOT own (pd.NA, pd.NaT, a NaN that is
+    # not a Python float). Those are unseen LEVELS and the report has to name
+    # them rather than blame the column.
+    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in x):
         msg = "Categorical column contains missing values (NaN or None)."
         if context:
             msg = f"[{context}] {msg}"
