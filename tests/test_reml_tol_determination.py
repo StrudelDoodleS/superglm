@@ -453,6 +453,51 @@ class TestPublicationDispersion:
 
         assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
 
+    def test_discrete_publication_stats_describe_the_public_mean(self):
+        """One published fit, one mean: the summary statistics must be
+        computed at the same public mean the published dispersion was
+        profiled at, not left as a hybrid of public-mean phi inside
+        binned-mean likelihood/deviance."""
+        from superglm import Spline as _Spline
+        from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
+
+        rng = np.random.default_rng(11)
+        n = 4_000
+        frame = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)})
+        eta = 0.4 * np.sin(4.0 * frame["x1"].to_numpy()) + 0.3 * frame["x2"].to_numpy() - 0.6
+        y = np.where(rng.random(n) < 0.5, 0.0, rng.gamma(1.4, np.exp(eta) * 3.0, n))
+
+        model = SuperGLM(
+            family=families.tweedie(p=1.5),
+            selection_penalty=0,
+            discrete=True,
+            n_bins=64,
+            features={"x1": _Spline(kind="cr", n_knots=8), "x2": _Spline(kind="cr", n_knots=8)},
+        )
+        result = model.estimate_p(frame, y, fit_mode="reml")
+
+        mu_pub = np.asarray(model.predict(frame), dtype=float)
+        y_arr = np.asarray(y, dtype=float)
+        ones = np.ones(n)
+        null_mu = _compute_null_mu(y_arr, ones, None, model._distribution, model._link)
+        oracle = _compute_fit_stats(
+            y_arr,
+            mu_pub,
+            ones,
+            None,
+            model._distribution,
+            model._link,
+            float(result.phi_hat),
+            null_mu=null_mu,
+        )
+
+        np.testing.assert_allclose(model._fit_mu, mu_pub, rtol=0, atol=0)
+        assert model._fit_stats.log_likelihood == pytest.approx(oracle.log_likelihood, rel=1e-12)
+        assert model._fit_stats.pearson_chi2 == pytest.approx(oracle.pearson_chi2, rel=1e-12)
+        assert model._fit_stats.explained_deviance == pytest.approx(
+            oracle.explained_deviance, rel=1e-12
+        )
+
     def test_a_troubled_reprofile_is_disclosed_on_the_result(self, monkeypatch):
         """A boundary, fallback, or non-convergent published re-profile must
         not hide behind the search's clean record."""
@@ -665,3 +710,20 @@ class TestSearchPublishSplit:
         result.search_phi_converged = False
         with pytest.raises(RuntimeError, match="phi_converged"):
             result.ci(alpha=0.10)
+
+
+class TestCertificationBar:
+    def test_the_bar_is_one_fixed_number_with_nothing_to_move_it(self):
+        """The certification bar must be the same fixed number at the
+        candidate gate and the terminal publication refit. The error message
+        promises that changing `tol` cannot move the bar; a terminal
+        expression reading min(pirls_tol, ceiling) breaks that promise below
+        the ceiling, where a point that certified as a candidate at 1e-9
+        fails publication solely because the caller tightened pirls_tol."""
+        import inspect
+
+        from superglm.reml.observed_geometry import observed_mode_certification_bar
+
+        bar = observed_mode_certification_bar()
+        assert bar == max(1e-9, 100.0 * np.finfo(float).eps)
+        assert not inspect.signature(observed_mode_certification_bar).parameters

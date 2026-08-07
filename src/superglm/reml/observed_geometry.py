@@ -680,6 +680,30 @@ class ObservedModeScore:
     relative_max: float
 
 
+# Observed geometry differentiates implicitly through the penalized mode, so
+# it needs a tighter solve than the caller may have asked for, and a fixed bar
+# to judge the result against. Both derive from this one ceiling.
+OBSERVED_PIRLS_TOL_CEILING = 1e-10
+
+
+def observed_mode_certification_bar() -> float:
+    """The fixed bar an observed-geometry penalized mode must meet.
+
+    10x the ceiling PIRLS solves to under observed geometry, floored at
+    100*eps. Deliberately a constant with no tolerance parameter: the
+    achieved score is set by conditioning, and ``ObservedModeNotCertifiedError``
+    promises that changing ``tol`` cannot move the bar -- a promise that must
+    hold at the candidate gate and the terminal publication refit alike, or a
+    point that certified as a candidate fails publication solely because the
+    caller tightened ``pirls_tol`` below the ceiling.
+
+    Floored at 100*eps, so unlike the SCOP certification bar
+    (reml/scop_efs.py) the floor arm here is live -- do not generalise the
+    #184 deletion to this expression.
+    """
+    return max(10.0 * OBSERVED_PIRLS_TOL_CEILING, 100.0 * np.finfo(float).eps)
+
+
 class ObservedModeNotCertifiedError(RuntimeError):
     """The penalized mode is not accurate enough to differentiate through.
 

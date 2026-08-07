@@ -25,6 +25,7 @@ from superglm.reml.observed_geometry import (
     build_observed_reml_geometry,
     classify_reml_curvature,
     mode_certification_hint,
+    observed_mode_certification_bar,
     observed_penalized_mode_score,
 )
 from superglm.reml.penalty_algebra import (
@@ -561,13 +562,10 @@ def finalize_reml_fit(
             lambdas=lambdas if structured_linear_state is not None else None,
             reml_penalties=reml_penalties if structured_linear_state is not None else None,
         )
-        # Floored at 100*eps, so unlike the SCOP certification bar
-        # (reml/scop_efs.py) the tolerance arm here is live -- do not
-        # generalise the #184 deletion to this expression.
-        terminal_mode_tolerance = max(
-            10.0 * min(pirls_tol, 1e-10),
-            100.0 * np.finfo(float).eps,
-        )
+        # The same fixed bar the candidate gate uses: a point that certified
+        # during the search cannot fail publication because the caller
+        # tightened pirls_tol below the observed-geometry ceiling.
+        terminal_mode_tolerance = observed_mode_certification_bar()
         profile["reml_terminal_observed_mode_residual"] = mode_score.relative_max
         if mode_score.relative_max > terminal_mode_tolerance:
             # Typed for the same reason as the candidate-fit gate in

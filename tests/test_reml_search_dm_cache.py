@@ -121,3 +121,54 @@ class TestCacheMechanism:
         model.family = families.tweedie(p=1.7)
         model.fit_reml(frame, y, runtime_validation="skip")
         assert float(model._distribution.p) == pytest.approx(1.7)
+
+
+class TestCacheScope:
+    def test_direct_public_search_does_not_hijack_a_later_refit(self):
+        """The exported search must not leave its design cache on the model.
+
+        A leaked cache is not a stale attribute, it is a wrong answer: the
+        next fit_reml sees a nonempty cache, probe-verifies the cached
+        design against itself -- the probe certifies integrity, not input
+        identity -- and silently fits the search's dataset instead of the
+        one the caller just passed.
+        """
+        from superglm.profiling.tweedie import estimate_tweedie_p
+
+        frame1, y1, features = _search_fixture(n=900, seed=3)
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        estimate_tweedie_p(model, frame1, y1, fit_mode="fit_reml", maxiter=6)
+
+        assert not hasattr(model, "_profile_design_cache")
+
+        frame2, y2, _ = _search_fixture(n=1_300, seed=11)
+        model.fit_reml(frame2, y2, runtime_validation="skip")
+        assert len(model._fit_weights) == len(y2)
+
+        reference = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        reference.fit_reml(frame2, y2, runtime_validation="skip")
+        np.testing.assert_allclose(
+            np.asarray(model.result.beta, dtype=float),
+            np.asarray(reference.result.beta, dtype=float),
+            rtol=1e-10,
+            atol=0,
+        )
+        assert float(model.result.intercept) == pytest.approx(
+            float(reference.result.intercept), rel=1e-10
+        )
+
+    def test_an_abandoned_search_still_removes_the_cache(self, monkeypatch):
+        """Cleanup must survive a search that dies mid-candidate."""
+        import superglm.profiling.tweedie as tweedie_module
+        from superglm.profiling.tweedie import estimate_tweedie_p
+
+        def exploding(*args, **kwargs):
+            raise RuntimeError("forced mid-search failure")
+
+        monkeypatch.setattr(tweedie_module, "_search_brent", exploding)
+        frame, y, features = _search_fixture(n=900, seed=3)
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        with pytest.raises(RuntimeError, match="forced mid-search failure"):
+            estimate_tweedie_p(model, frame, y, fit_mode="fit_reml", maxiter=6)
+
+        assert not hasattr(model, "_profile_design_cache")

@@ -1260,7 +1260,14 @@ class TestMultiPenaltyPostFitInference:
             },
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(X, y, sample_weight=w, max_reml_iter=30)
+        # The shared-block tensor penalties leave a flat log-lambda direction
+        # whose Newton endgame at the tight 1e-9 default is BLAS-kernel
+        # dependent: one platform stops cleanly at 18 iterations, another
+        # stalls its line search and honestly reports converged=False. This
+        # test asserts multi-penalty S propagation, not lambda determination,
+        # so it pins the step-grade bar; the endgame classification itself is
+        # the criterion-redesign follow-up.
+        model.fit_reml(X, y, sample_weight=w, max_reml_iter=30, reml_tol=1e-6)
         assert model._reml_result.converged
         assert model._reml_penalties is not None
         # Tensor creates shared-block components (margin_x1, margin_x2)
