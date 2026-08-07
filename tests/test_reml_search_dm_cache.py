@@ -16,7 +16,6 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
-from superglm.model import fit_ops
 
 
 def _search_fixture(n: int = 1_200, seed: int = 7):

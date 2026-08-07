@@ -312,9 +312,7 @@ class TestBoundaryCensoringWarning:
         from superglm.profiling.tweedie import _boundary_censoring_message
 
         spacing = (1.95 - 1.05) / 19.0
-        message = _boundary_censoring_message(
-            1.6184, {1.6658: "not certifiable"}, xatol=spacing
-        )
+        message = _boundary_censoring_message(1.6184, {1.6658: "not certifiable"}, xatol=spacing)
         assert message is not None
         assert "censored" in message
 
@@ -335,13 +333,8 @@ class TestBoundaryCensoringWarning:
         so promotion must not depend on outer_converged being False."""
         import superglm.profiling.tweedie as tweedie_module
 
-        forced = (
-            "FORCED: p_hat sits against the certifiable-region boundary "
-            "(censored estimate)."
-        )
-        monkeypatch.setattr(
-            tweedie_module, "_boundary_censoring_message", lambda *a, **k: forced
-        )
+        forced = "FORCED: p_hat sits against the certifiable-region boundary (censored estimate)."
+        monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", lambda *a, **k: forced)
         frame, y, weights, offset, features = _fixture(3_000)
         result = _model(features).estimate_p(
             frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
