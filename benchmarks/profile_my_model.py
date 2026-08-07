@@ -86,16 +86,24 @@ def build_model() -> SuperGLM:
 RULE = "=" * 72
 
 
-def _fit(method: str, X, y, w, offset, subset=None, drop=None):
+def _fit(method: str, X, y, w, offset, subset=None, drop=None, profiler=None):
     """Build a fresh model and fit it; return (seconds, model)."""
     model = build_model()
     if drop is not None:
-        model = SuperGLM(
-            family=model.family,
-            link=model.link,
-            features={k: v for k, v in model.features.items() if k != drop},
-            selection_penalty=model.selection_penalty,
-        )
+        # Rebuild from the model's own captured constructor contract so the
+        # drop-one variant keeps EVERY configured setting (interactions,
+        # discretization, penalties, ...), not a cherry-picked subset -- a
+        # variant that silently loses configuration times a different model.
+        # `_config.constructor_kwargs()` is the one complete record of that
+        # contract (it is what `clone_unfitted` reconstructs from).
+        kwargs = model._config.constructor_kwargs()
+        kwargs["features"] = {k: v for k, v in dict(kwargs["features"]).items() if k != drop}
+        interactions = kwargs.get("interactions")
+        if interactions:
+            kwargs["interactions"] = [
+                ia for ia in interactions if not (isinstance(ia, tuple) and drop in ia)
+            ]
+        model = SuperGLM(**kwargs)
     cols = [c for c in X.columns if c in model.features]
     Xs, ys = X[cols], y
     ws, os_ = w, offset
@@ -104,7 +112,16 @@ def _fit(method: str, X, y, w, offset, subset=None, drop=None):
         ws = None if w is None else w[subset]
         os_ = None if offset is None else offset[subset]
     t0 = time.perf_counter()
-    getattr(model, method)(Xs, ys, sample_weight=ws, offset=os_)
+    # The profiler brackets exactly what the wall clock brackets: the fit
+    # call. Enabling it around construction as well would bill build_model()
+    # and column selection to a section titled "inside fit_reml()".
+    if profiler is not None:
+        profiler.enable()
+    try:
+        getattr(model, method)(Xs, ys, sample_weight=ws, offset=os_)
+    finally:
+        if profiler is not None:
+            profiler.disable()
     return time.perf_counter() - t0, model
 
 
@@ -216,9 +233,9 @@ def main():
             dt, _ = best_of("fit", X, y, w, offset, repeat=2, drop=name)
             saved = t_fit - dt
             costs.append((name, saved))
-            print(f"  {name:<18}{dt:9.3f}s{saved:9.3f}s{100 * saved / t_fit:8.1f}%")
+            print(f"  {str(name):<18}{dt:9.3f}s{saved:9.3f}s{100 * saved / t_fit:8.1f}%")
         except Exception as exc:  # noqa: BLE001
-            print(f"  {name:<18}  failed: {type(exc).__name__}")
+            print(f"  {str(name):<18}  failed: {type(exc).__name__}")
     if costs:
         worst = max(costs, key=lambda kv: kv[1])
         if worst[1] > 0.35 * t_fit:
@@ -256,12 +273,10 @@ def main():
     # ── 5. hot functions ──
     section("5. HOT FUNCTIONS INSIDE fit_reml()  (cumulative)")
     pr = cProfile.Profile()
-    pr.enable()
     try:
-        _fit("fit_reml", X, y, w, offset)
+        _fit("fit_reml", X, y, w, offset, profiler=pr)
     except Exception:  # noqa: BLE001
-        _fit("fit", X, y, w, offset)
-    pr.disable()
+        _fit("fit", X, y, w, offset, profiler=pr)
     buf = io.StringIO()
     pstats.Stats(pr, stream=buf).sort_stats("cumulative").print_stats(60)
     shown = 0

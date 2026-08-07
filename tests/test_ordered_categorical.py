@@ -89,8 +89,22 @@ class TestConstructor:
         `degree`, `select` and `penalty` swallowed the object silently and built
         a smooth configured by nothing the caller wrote.
         """
-        with pytest.raises(ValueError, match=rf"`{shortcut}=`.*basis=Spline"):
+        with pytest.raises(ValueError, match=rf"`{shortcut}=`.*basis="):
             OrderedCategorical(order=["A", "B", "C"], **{shortcut: Spline(kind="cr", k=3)})
+
+    def test_two_misplaced_shortcuts_are_both_named(self):
+        """The guard lists every offending parameter at once, matching the
+        adjacent deprecation code's convention, so a caller with two swapped
+        arguments does not pay a second round-trip. The message names the
+        object's class instead of interpolating its repr: the repr drops
+        `constraint=` and `penalty=`, so a copy-pasteable replacement would
+        silently discard exactly what the caller configured."""
+        with pytest.raises(ValueError, match=r"`kind=` and `n_knots=`.*CubicRegressionSpline"):
+            OrderedCategorical(
+                order=["A", "B", "C"],
+                kind=Spline(kind="cr", k=3),
+                n_knots=Spline(kind="cr", k=3),
+            )
 
     def test_valid_kind_shortcut_still_builds(self):
         """The guard must reject objects only -- the deprecated string shortcut
@@ -664,11 +678,23 @@ class TestSplineObjectBasis:
         assert model.result.converged
 
         rels = model.reconstruct_feature("risk")["level_log_relativities"]
-        steps = np.diff([rels[lev] for lev in levels])
+        curve = np.array([rels[lev] for lev in levels], dtype=float)
+        steps = np.diff(curve)
+        # Feasibility slack derived from dtype epsilon and the output's own
+        # scale, not a hard-coded absolute (AGENTS numerical test policy).
+        slack = np.finfo(float).eps ** 0.5 * max(1.0, float(np.max(np.abs(curve))))
         if direction == "increasing":
-            assert np.all(steps >= -1e-8), f"not increasing: {steps}"
+            assert np.all(steps >= -slack), f"not increasing: {steps}"
+            # One-sided monotonicity alone is satisfied by an all-zero
+            # collapsed block, so a reversed constraint direction would still
+            # pass. The fixture's true effect rises 0 -> 0.8: pin that the
+            # constrained fit RECOVERS the rise.
+            assert curve[-1] - curve[0] > 0.1, f"no material rise: {curve}"
         else:
-            assert np.all(steps <= 1e-8), f"not decreasing: {steps}"
+            assert np.all(steps <= slack), f"not decreasing: {steps}"
+            # Against rising truth a decreasing-constrained fit can at best
+            # go flat; a material rise here means the constraint was dropped.
+            assert curve[-1] - curve[0] < 0.05, f"constraint not binding: {curve}"
 
     def test_fit_time_monotone_on_qp_bases_under_reml(self, ordinal_data):
         """`model/reml_setup.py` restores QP constraints through a second, separate
@@ -684,8 +710,42 @@ class TestSplineObjectBasis:
         model.fit_reml(X, y, sample_weight=sample_weight)
 
         rels = model.reconstruct_feature("risk")["level_log_relativities"]
-        steps = np.diff([rels[lev] for lev in levels])
-        assert np.all(steps >= -1e-8), f"not increasing: {steps}"
+        curve = np.array([rels[lev] for lev in levels], dtype=float)
+        steps = np.diff(curve)
+        slack = np.finfo(float).eps ** 0.5 * max(1.0, float(np.max(np.abs(curve))))
+        assert np.all(steps >= -slack), f"not increasing: {steps}"
+        assert curve[-1] - curve[0] > 0.1, f"no material rise: {curve}"
+
+    def test_fit_time_monotone_composes_with_specials(self, ordinal_data):
+        """`specials=` is the one delegation shape the wrapper reshapes: the
+        build returns two GroupInfos and row-expands the spline block, so the
+        forwarded raw constraint -- stated in the inner spline's coefficient
+        space -- meets a design whose rows and columns the wrapper rearranged.
+        The identifiability projection is built on the ordered rows only and
+        the special block is unpenalized, so the composition holds; this pins
+        it against future changes to either block."""
+        from superglm.features.spline import Spline
+
+        X, y, sample_weight, levels = ordinal_data
+        X = X.copy()
+        special_rows = np.arange(len(X)) % 10 == 0
+        X.loc[special_rows, "risk"] = "MISSING"
+        spec = OrderedCategorical(
+            order=levels,
+            specials=["MISSING"],
+            basis=Spline(kind="cr", k=5, constraint=Constraint.fit.increasing),
+        )
+        model = SuperGLM(family="poisson", features={"risk": spec}, selection_penalty=0.0)
+        model.fit(X, y, sample_weight=sample_weight)
+        assert model.result.converged
+
+        rels = model.reconstruct_feature("risk")["level_log_relativities"]
+        curve = np.array([rels[lev] for lev in levels], dtype=float)
+        steps = np.diff(curve)
+        slack = np.finfo(float).eps ** 0.5 * max(1.0, float(np.max(np.abs(curve))))
+        assert np.all(steps >= -slack), f"not increasing: {steps}"
+        assert curve[-1] - curve[0] > 0.1, f"no material rise: {curve}"
+        assert "MISSING" in rels
 
     def test_spline_object_overrides_string_params(self, age_band_data):
         """When Spline object is passed, kind/n_knots/etc are ignored."""
