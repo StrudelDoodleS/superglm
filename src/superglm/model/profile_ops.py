@@ -261,6 +261,13 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
         phi_method=phi_method,
         phi_start=float(profile_result.phi_hat),
     )
+    # Keep the searched objective's value at `p_hat` before moving `nll` onto
+    # the published fit's curve. The CI, the profile plot and the deviance
+    # curve all measure searched values against it; without it they would
+    # subtract this published number and report a likelihood ratio that is
+    # negative at the search's own optimum.
+    if profile_result.search_nll is None:
+        profile_result.search_nll = float(profile_result.nll)
     profile_result.phi_hat = float(phi_result.phi)
     profile_result.nll = float(phi_result.nll)
     profile_result.objective_finite = bool(phi_result.objective_finite)

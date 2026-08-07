@@ -3121,6 +3121,10 @@ class TweedieProfileResult:
     requested_method: str = field(default="", kw_only=True)
     fit_mode: str = field(default="fit", kw_only=True)
     search_fit_mode: str = field(default="", kw_only=True)
+    # The searched objective's own value at `p_hat`. Only set when publication
+    # re-profiles dispersion and moves `nll` off the curve the search walked;
+    # `None` means `nll` is still that value. See `_profile_reference_nll`.
+    search_nll: float | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
@@ -3141,6 +3145,27 @@ class TweedieProfileResult:
             self.fit_mode = "fit"
         if not self.search_fit_mode:
             self.search_fit_mode = self.fit_mode
+        if not hasattr(self, "search_nll"):
+            self.search_nll = None
+
+    def _profile_reference_nll(self) -> float:
+        """The objective value every profile comparison must be measured against.
+
+        `self._objective` and `search_trace` both hold values of the *searched*
+        profile. `self.nll` does not always: a decoupled publication re-profiles
+        dispersion against the fit it returns, which moves `nll` onto a
+        different curve. Subtracting it from searched values then reports a
+        likelihood ratio that is wrong by the gap between the two regimes --
+        negative near `p_hat`, which surfaces as the search being blamed for
+        having "found a better profile value".
+
+        `search_nll` records the searched value at `p_hat` before publication
+        moves it, so this is the reference for the CI, the profile plot and the
+        deviance curve alike. It falls back to `nll` for a coupled run, where
+        nothing was re-profiled and the two are the same number.
+        """
+        reference = self.search_nll
+        return float(self.nll if reference is None else reference)
 
     def _ensure_density_compat_state(self) -> None:
         """Restore density fields absent from legacy construction or pickle state."""
@@ -3249,21 +3274,29 @@ class TweedieProfileResult:
             )
 
     def _validate_ci_search_mode(self) -> None:
-        """Refuse to invert a profile the published estimates do not lie on.
+        """Require a reference that lies on the curve being inverted.
 
-        A decoupled run profiles ``p`` under one regime and reports the fit and
-        dispersion of another. The cached objective is still the searched one,
-        so inverting it would compare this result's ``nll`` against a curve it
-        was never evaluated on -- which surfaces as a spurious negative
-        likelihood ratio and a "rerun/expand search" complaint that points at
-        the wrong thing entirely.
+        A decoupled run searches ``p`` under one regime and publishes the fit
+        and dispersion of another, which once looked like a reason to refuse an
+        interval outright. It is not: ``p_hat`` is the searched objective's own
+        argmin, so inverting that objective around its own value there is the
+        standard construction and is internally consistent. The interval it
+        yields describes the regime named by ``search_fit_mode``, and is
+        narrower than a coupled one by whatever the two regimes differ by.
+
+        What genuinely cannot be inverted is a result whose reference was moved
+        off the searched curve and not recorded -- publication re-profiled
+        dispersion, so ``nll`` describes the published fit, and ``search_nll``
+        is missing. Every result this version produces records it; only a
+        pickle from a build that re-profiled without recording can land here.
         """
-        if self.search_fit_mode != self.fit_mode:
+        if self.search_fit_mode != self.fit_mode and self.search_nll is None:
             raise RuntimeError(
-                f"A likelihood-ratio profile CI inverts the profile searched "
-                f"(search_fit_mode={self.search_fit_mode!r}), which does not describe this "
-                f"model published under fit_mode={self.fit_mode!r}; re-estimate with the "
-                f"search and publication in the same regime to obtain an interval."
+                f"This result searched under search_fit_mode="
+                f"{self.search_fit_mode!r} and published under fit_mode={self.fit_mode!r}, "
+                f"but does not carry the searched objective's value at p_hat, so there is "
+                f"nothing to measure the likelihood ratio against. Re-run estimate_p() to "
+                f"obtain an interval."
             )
 
     def ci(self, alpha: float = 0.05) -> tuple[float, float]:
@@ -3276,9 +3309,10 @@ class TweedieProfileResult:
         """
         self._validate_ci_phi_method()
         self._validate_ci_search_mode()
+        reference_nll = self._profile_reference_nll()
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
             self.p_hat,
-            self.nll,
+            reference_nll,
             self._ll_scale,
             alpha,
             self._ci_p_range,
@@ -3294,7 +3328,7 @@ class TweedieProfileResult:
         details = _profile_ci_p_detailed(
             self._objective,
             self.p_hat,
-            self.nll,
+            reference_nll,
             self._ll_scale,
             alpha=alpha_value,
             p_range=self._ci_p_range,
@@ -3331,7 +3365,7 @@ class TweedieProfileResult:
         self._validate_ci_phi_method()
         alpha_value, _, _, _, _ = _validate_profile_ci_inputs(
             self.p_hat,
-            self.nll,
+            self._profile_reference_nll(),
             self._ll_scale,
             alpha,
             self._ci_p_range,
@@ -3377,7 +3411,9 @@ class TweedieProfileResult:
         finite_nll = trace_nll[finite]
         order = np.argsort(finite_p, kind="stable")
         plotted_p = finite_p[order]
-        plotted_difference = 2.0 * self._ll_scale * (finite_nll[order] - self.nll)
+        plotted_difference = (
+            2.0 * self._ll_scale * (finite_nll[order] - self._profile_reference_nll())
+        )
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -3489,7 +3525,7 @@ class TweedieProfileResult:
         p_grid = np.linspace(grid_lo, grid_hi, n_points)
 
         nll_values = np.array([self._objective(p) for p in p_grid])
-        deviance = 2.0 * self._ll_scale * (nll_values - self.nll)
+        deviance = 2.0 * self._ll_scale * (nll_values - self._profile_reference_nll())
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(6, 4))
@@ -3501,7 +3537,7 @@ class TweedieProfileResult:
         # Mark search evaluation points from trace
         if len(trace_ps) > 0:
             trace_nll = self.search_trace["nll"].values
-            trace_dev = 2.0 * self._ll_scale * (trace_nll - self.nll)
+            trace_dev = 2.0 * self._ll_scale * (trace_nll - self._profile_reference_nll())
             ax.scatter(
                 trace_ps,
                 trace_dev,

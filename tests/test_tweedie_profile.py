@@ -3349,8 +3349,15 @@ class TestDecoupledSearchFitMode:
                 X, y, sample_weight=sample_weight, offset=offset, search_fit_mode="nonsense"
             )
 
-    def test_lazy_ci_on_a_decoupled_result_is_refused(self):
-        """Blocking ci_alpha up front is not enough; the result stays callable."""
+    def test_lazy_ci_on_a_decoupled_result_is_refused_only_without_a_reference(self):
+        """The blanket refusal is gone; the narrow one that replaced it remains.
+
+        A decoupled result is entitled to an interval -- see
+        `TestDecoupledSearchConfidenceInterval`. What cannot be inverted is a
+        result whose reference was moved onto the published fit's curve without
+        the searched value being recorded, which is what `search_nll` carries.
+        Stripping it reproduces that state.
+        """
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
         model = self._reml_model()
 
@@ -3363,7 +3370,12 @@ class TestDecoupledSearchFitMode:
             search_fit_mode="fit",
         )
 
-        with pytest.raises(RuntimeError, match="inverts the profile searched"):
+        lower, upper = result.ci(alpha=0.05)
+        assert lower < result.p_hat < upper
+
+        result.search_nll = None
+        result._ci_cache.clear()
+        with pytest.raises(RuntimeError, match="does not carry the searched objective"):
             result.ci(alpha=0.05)
 
     def test_lazy_ci_still_works_when_search_and_publication_agree(self):
@@ -3374,6 +3386,118 @@ class TestDecoupledSearchFitMode:
         lower, upper = result.ci(alpha=0.05)
 
         assert lower < result.p_hat < upper
+
+
+class TestDecoupledSearchConfidenceInterval:
+    """A decoupled run can still be inverted -- against the profile it searched.
+
+    The refusal this replaces was over-broad. ``p_hat`` comes from the search,
+    so inverting the search's own objective around its own value at ``p_hat``
+    is the standard construction and is internally consistent. What was broken
+    was the reference: ``_reprofile_published_dispersion`` moves ``nll`` to the
+    published fit's value, and every consumer then subtracted that published
+    number from searched-objective values.
+    """
+
+    @staticmethod
+    def _reml_model():
+        return SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Spline(n_knots=4)},
+        )
+
+    def _decoupled(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+        result = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+        )
+        return result
+
+    def test_a_decoupled_search_still_yields_an_interval(self):
+        result = self._decoupled()
+
+        lower, upper = result.ci(alpha=0.05)
+
+        assert lower < result.p_hat < upper
+
+    def test_the_interval_inverts_the_profile_that_produced_p_hat(self):
+        """The reference must be the searched objective at ``p_hat``, not the
+        published dispersion's likelihood.
+
+        Subtracting the published value is what produced the negative
+        likelihood ratio that motivated the original refusal: the search's own
+        minimum then appears to sit *above* the reference, and the interval
+        code reports "found a better profile value" against a search that did
+        nothing wrong.
+        """
+        result = self._decoupled()
+
+        reference = result._profile_reference_nll()
+        at_optimum = float(result._objective(float(result.p_hat)))
+
+        # The reference IS the searched objective's value at p_hat, so the
+        # likelihood ratio there is zero rather than negative.
+        assert at_optimum == pytest.approx(reference, rel=1e-12)
+        assert 2.0 * result._ll_scale * (at_optimum - reference) >= -1e-9
+
+    def test_the_published_dispersion_is_still_reported_separately(self):
+        """Fixing the CI reference must not silently restore the search's phi."""
+        result = self._decoupled()
+
+        assert result._profile_reference_nll() != result.nll
+
+    def test_a_coupled_search_is_unaffected(self):
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
+
+        # Nothing was re-profiled, so the reference is the published value.
+        assert result._profile_reference_nll() == result.nll
+
+    def test_a_pre_reference_pickle_falls_back_to_the_published_value(self):
+        """A result pickled before this field existed must still invert."""
+        result = self._decoupled()
+        state = result.__dict__.copy()
+        state.pop("search_nll", None)
+        restored = TweedieProfileResult.__new__(TweedieProfileResult)
+        restored.__setstate__(state)
+
+        assert restored._profile_reference_nll() == restored.nll
+
+    def test_the_trace_plot_measures_the_searched_curve_against_its_own_optimum(self):
+        """The plotted deviance is the same subtraction the CI makes.
+
+        `trace_plot` draws searched trace values minus a reference. Against the
+        published `nll` the whole curve is displaced by the gap between the two
+        regimes, which puts the search's own optimum below zero -- a likelihood
+        ratio that cannot happen.
+        """
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = self._decoupled()
+
+        fig, ax = plt.subplots()
+        try:
+            result.trace_plot(ax=ax)
+            plotted = np.concatenate(
+                [np.asarray(line.get_ydata(), dtype=float) for line in ax.get_lines()]
+            )
+        finally:
+            plt.close(fig)
+
+        finite = plotted[np.isfinite(plotted)]
+        assert finite.size > 0
+        assert finite.min() >= -1e-6
 
 
 # =====================================================================
