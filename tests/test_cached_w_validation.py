@@ -249,7 +249,10 @@ class TestExactVsDiscreteAgreement:
         assert profile["reml_n_analytical_iters"] > 0
         assert profile["reml_n_linesearch_full_evals"] > 0
         assert profile["reml_n_outer_iter"] == result.n_reml_iter
-        assert 1 <= result.n_reml_iter <= 15
+        # 17 noise features leave near-flat lambdas the tight publication
+        # default walks further than the loose bar did; the oracle-agreement
+        # bars below are unaffected.
+        assert 1 <= result.n_reml_iter <= 25
 
         assert model.result.deviance == pytest.approx(oracle_exact["deviance"], rel=1e-3)
         assert model.result.effective_df == pytest.approx(oracle_exact["effective_df"], abs=0.25)
@@ -513,7 +516,12 @@ class TestLargeNStability:
             discrete=True,
             n_bins=128,
         )
-        top3.fit_reml(X_train, y_train, offset=off_train, max_reml_iter=20)
+        # Explicit loose tolerance: the tensor components' flat lambda
+        # directions stall the Newton endgame above the tight publication bar
+        # (see #17); the subject is that stacked tensor interactions do not
+        # blow up, and the termination assert below needs the criterion that
+        # can actually trigger.
+        top3.fit_reml(X_train, y_train, offset=off_train, max_reml_iter=20, reml_tol=1e-6)
         assert top3.result.converged
         assert top3._reml_result.converged
         assert top3._reml_result.termination_reason == "score_objective_tolerance"

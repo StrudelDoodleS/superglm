@@ -523,7 +523,7 @@ class SuperGLM:
         offset: NDArray | None = None,
         *,
         max_reml_iter: int = 20,
-        reml_tol: float = 1e-6,
+        reml_tol: float | None = None,
         pirls_tol: float | None = None,
         max_pirls_iter: int | None = None,
         lambda2_init: float | None = None,
@@ -560,8 +560,25 @@ class SuperGLM:
             Offset term.
         max_reml_iter : int
             Maximum REML outer iterations (default 20).
-        reml_tol : float
-            Convergence tolerance on log-lambda (default 1e-6).
+        reml_tol : float, optional
+            Stopping tolerance for the smoothing-parameter optimizer. Unset,
+            it resolves per engine: 1e-9 for the Newton engines (exact and
+            discrete), 1e-6 for the EFS-family engines (SCOP and fits with an
+            L1 component). An explicit value reaches the engine verbatim.
+
+            The Newton engines stop when the projected log-lambda gradient
+            and the objective change both fall below
+            ``reml_tol * (1 + |objective|)``. That bar grows with the
+            objective's magnitude while the gradient along a flat log-lambda
+            direction does not, so loose values leave smoothing parameters --
+            and the standard errors computed from them -- underdetermined
+            long before predictions are affected: at 1e-6, a converged fit on
+            a synthetic 12k-row stress design publishes a worst-coefficient
+            SE 92% away from the determined answer; 1e-9 pins it to ~0.01%
+            for a handful of extra quadratically-convergent iterations. The
+            EFS-family engines stop on a per-step lambda-change bound, which
+            has no such scale dependence; tightening them buys no
+            determination at linear-rate cost, so their default stays 1e-6.
         pirls_tol : float, optional
             Inner PIRLS/IRLS convergence tolerance. Defaults to
             constructor ``tol`` (1e-6). Pass explicitly to override.

@@ -777,7 +777,7 @@ class TestREMLSelectTrue:
             selection_penalty=0.0,
             features={"x1": Spline(n_knots=8, penalty="ssp", select=True)},
         )
-        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=15)
+        model.fit_reml(X[["x1"]], y, sample_weight=w, max_reml_iter=30)
         assert model._reml_result.converged
         # Both null and wiggle components should have REML lambdas
         assert "x1:null" in model._reml_lambdas
@@ -1891,7 +1891,7 @@ class TestMultiPenaltyTensorREML:
             },
         )
 
-        model.fit_reml(X, y, sample_weight=w, max_reml_iter=15)
+        model.fit_reml(X, y, sample_weight=w, max_reml_iter=30)
         assert model._reml_result.converged
 
         # No margin keys — only single-penalty groups
@@ -1934,7 +1934,13 @@ class TestComponentNamedLambda2LegacyAssembly:
             },
             interactions=[("x1", "x2")],
         )
-        model.fit_reml(X, y, max_reml_iter=30)
+        # The subject downstream is penalty ASSEMBLY equivalence, compared at
+        # rtol 1e-6. The tight publication default walks the null direction to
+        # lambdas where the known ~1e-8-relative canonicalization difference
+        # between the two assembly paths is amplified onto near-zero entries;
+        # the loose bar keeps the fit off that regime without weakening the
+        # assembly comparison.
+        model.fit_reml(X, y, max_reml_iter=30, reml_tol=1e-6)
         assert model._reml_penalties is not None
         return model, X, y
 
