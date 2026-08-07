@@ -9,6 +9,7 @@ _ATTEMPT_RUNTIME_OPTIONS = (
     "_max_analytical_per_w",
     "_select_snap",
     "_suppress_reporting_support",
+    "_retain_fit_mu",
 )
 _SUBCLASS_STATE_NAMES = "_fit_workspace_subclass_state_names"
 
