@@ -720,6 +720,34 @@ class ObservedModeNotCertifiedError(RuntimeError):
         super().__init__(message)
 
 
+class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
+    """PIRLS reached no penalized mode at all at this point.
+
+    The sibling condition to certification failure: there is nothing to
+    certify. To a power search the two are one situation -- this point has no
+    usable penalized mode -- so this subclasses the certification error and
+    every handler that routes the parent around routes this too. It is NOT a
+    plain ``RuntimeError`` sibling, deliberately: ``optimize_direct_reml``
+    raises bare ``RuntimeError`` for genuine invariant violations that must
+    propagate, so no caller should ever be tempted into a blanket catch.
+    """
+
+    def __init__(self, message: str = "", *, hint: str = "") -> None:
+        # No mode exists, so no score was achieved. The attributes exist so
+        # parent-typed handlers can format them; non-finite is the signal to
+        # describe the condition rather than quote a score.
+        self.relative_max = float("inf")
+        self.tolerance = float("nan")
+        self.hint = hint
+        body = message or (
+            "observed REML requires a converged penalized coefficient mode "
+            "and PIRLS did not reach one at this point."
+        )
+        if hint:
+            body = f"{body}\n  {hint}"
+        RuntimeError.__init__(self, body)
+
+
 def mode_certification_hint(distribution: Any) -> str:
     """Name a parameterisation the caller chose and could change, if one exists.
 

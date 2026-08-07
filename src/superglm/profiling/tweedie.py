@@ -4266,21 +4266,27 @@ class _ProfileContextREML:
             )
         except ObservedModeNotCertifiedError as exc:
             # This power has no REML objective we are entitled to report: the
-            # penalized mode missed the bar for differentiating through it. That
-            # is a property of this one power, and the conditioning that causes
-            # it worsens monotonically toward p=2, so a search whose optimum sits
-            # well inside the feasible region would otherwise be killed by a
-            # bound it never needed to visit. Score the point infeasible and let
-            # the outer search route around it; `finalize` cannot select it,
+            # penalized mode missed the bar for differentiating through it --
+            # or, for the ObservedModeNotConvergedError subclass, PIRLS found
+            # no mode at all, at the candidate fit or the terminal refit. All
+            # are a property of this one power; the conditioning that causes
+            # them worsens toward p=2, so a search whose optimum sits well
+            # inside the feasible region would otherwise be killed by a bound
+            # it never needed to visit. Score the point infeasible and let the
+            # outer search route around it; `finalize` cannot select it,
             # because no record is cached.
-            self._infeasible_powers[key] = (
-                f"penalized mode not certifiable (relative score={exc.relative_max:.3e}, "
-                f"tolerance={exc.tolerance:.3e})"
-            )
-            logger.info(
-                f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  INFEASIBLE  "
-                f"mode score={exc.relative_max:.3e} > {exc.tolerance:.3e}"
-            )
+            score = getattr(exc, "relative_max", float("inf"))
+            if np.isfinite(score):
+                reason = (
+                    f"penalized mode not certifiable (relative score={score:.3e}, "
+                    f"tolerance={exc.tolerance:.3e})"
+                )
+                detail = f"mode score={score:.3e} > {exc.tolerance:.3e}"
+            else:
+                reason = "no converged penalized mode (PIRLS found no mode to certify)"
+                detail = "no converged penalized mode"
+            self._infeasible_powers[key] = reason
+            logger.info(f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  INFEASIBLE  {detail}")
             return _INFEASIBLE_PROFILE_NLL
 
         fit_mu = getattr(self.model, "_fit_mu", None)
@@ -5492,7 +5498,43 @@ def estimate_tweedie_p(
     # publish under a different one, and overwrites `fit_mode` when it does.
     result.fit_mode = fit_mode
     result.search_fit_mode = fit_mode
+    censoring = _boundary_censoring_message(
+        float(result.p_hat), getattr(ctx, "_infeasible_powers", None), xatol=xatol
+    )
+    if censoring:
+        result.outer_message = " ".join(part for part in (result.outer_message, censoring) if part)
+        _warnings.warn(censoring, UserWarning, stacklevel=2)
     return result
+
+
+def _boundary_censoring_message(
+    p_hat: float, infeasible_powers: dict[float, str] | None, *, xatol: float
+) -> str | None:
+    """Disclose an optimum pinned against the certifiable-region boundary.
+
+    The search scores uncertifiable powers infeasible and routes around them,
+    which is correct -- but when the selected optimum lands adjacent to one,
+    the profile may still have been falling into the excluded region, and the
+    returned ``p_hat`` is then a censored estimate, not an interior optimum.
+    Measured on a simulated book with a known true power of 1.7, exactly this
+    shape returned 1.615 with every convergence flag green; the silence, not
+    the routing, was the defect. Distance is the trigger: a wall several
+    widths of the search's own resolution away cannot be pinning anything,
+    which also keeps routine endpoint probes (p=1.05, p=1.95) silent.
+    """
+    if not infeasible_powers:
+        return None
+    gap, boundary = min((abs(power - p_hat), power) for power in infeasible_powers)
+    if gap > 5.0 * xatol:
+        return None
+    return (
+        f"The selected power p_hat={p_hat:.6g} sits against the certifiable-region "
+        f"boundary: the penalized mode is uncertifiable at p={boundary:.6g}, "
+        f"{gap:.2g} away against a search resolution of {xatol:g}. The profile "
+        "optimum may lie beyond the boundary, making this a censored estimate. "
+        "search_fit_mode='fit' selects p without this constraint; compare "
+        "against it before trusting p_hat."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -10,8 +10,46 @@ import numpy as np
 
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.profiling._reporting import cached_tweedie_profile_ci
+from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
 logger = logging.getLogger(__name__)
+
+
+def _publication_mode_failure(exc, *, parameter, value, decoupled) -> RuntimeError:
+    """Turn a mode-certification failure at the publish refit into guidance.
+
+    The search either never evaluated REML at the selected point (decoupled) or
+    evaluated it under trial smoothing parameters that differ from the final
+    ones, so publication is where this can first surface. Left untranslated,
+    the caller gets an internal certification message with no mention of which
+    point failed or what to do about it.
+    """
+    score = getattr(exc, "relative_max", float("inf"))
+    achieved = (
+        f"relative mode score {score:.3e} against a bar of {exc.tolerance:.3e}"
+        if np.isfinite(score)
+        else "PIRLS found no converged penalized mode"
+    )
+    if decoupled:
+        how = (
+            f"The ML search selected {parameter}={value:.6g} without evaluating REML "
+            "certifiability, and the REML publication refit cannot certify a "
+            f"penalized mode there ({achieved})."
+        )
+    else:
+        how = (
+            f"The search certified {parameter}={value:.6g}, but the publication refit "
+            f"-- which runs at the final smoothing parameters -- cannot ({achieved})."
+        )
+    return RuntimeError(
+        f"{how}\n"
+        "  The certifiable region is a property of this data; its boundary moves "
+        "with the realisation and cannot be widened by solver settings.\n"
+        "  Options: fit_mode='reml' searches only certifiable points (it may warn "
+        "that the optimum is boundary-censored); fit_mode='fit' publishes the ML "
+        f"fit at the selected {parameter}; or restrict p_bounds away from the "
+        "failing region."
+    )
 
 
 def estimate_p(
@@ -116,20 +154,25 @@ def estimate_p(
     )
     debug_recorder = None
     if resolved_mode == "fit_reml":
-        debug_recorder = fit_ops._fit_reml_in_workspace(
-            final_workspace.model,
-            X,
-            y,
-            sample_weight,
-            offset,
-            X_ref=X_ref,
-            y_ref=y_ref,
-            sample_weight_ref=sample_weight_ref,
-            offset_ref=offset_ref,
-            pirls_tol=final_workspace.model._tol,
-            max_pirls_iter=final_workspace.model._max_iter,
-            durable_retain_fit_state=bool(model._retain_fit_state),
-        )
+        try:
+            debug_recorder = fit_ops._fit_reml_in_workspace(
+                final_workspace.model,
+                X,
+                y,
+                sample_weight,
+                offset,
+                X_ref=X_ref,
+                y_ref=y_ref,
+                sample_weight_ref=sample_weight_ref,
+                offset_ref=offset_ref,
+                pirls_tol=final_workspace.model._tol,
+                max_pirls_iter=final_workspace.model._max_iter,
+                durable_retain_fit_state=bool(model._retain_fit_state),
+            )
+        except ObservedModeNotCertifiedError as exc:
+            raise _publication_mode_failure(
+                exc, parameter="p", value=float(result.p_hat), decoupled=decoupled
+            ) from exc
     else:
         fit_ops._fit_in_workspace(
             final_workspace.model,
@@ -419,20 +462,25 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
     )
     debug_recorder = None
     if resolved_mode == "fit_reml":
-        debug_recorder = fit_ops._fit_reml_in_workspace(
-            final_workspace.model,
-            X,
-            y,
-            sample_weight,
-            offset,
-            X_ref=X_ref,
-            y_ref=y_ref,
-            sample_weight_ref=sample_weight_ref,
-            offset_ref=offset_ref,
-            pirls_tol=final_workspace.model._tol,
-            max_pirls_iter=final_workspace.model._max_iter,
-            durable_retain_fit_state=bool(model._retain_fit_state),
-        )
+        try:
+            debug_recorder = fit_ops._fit_reml_in_workspace(
+                final_workspace.model,
+                X,
+                y,
+                sample_weight,
+                offset,
+                X_ref=X_ref,
+                y_ref=y_ref,
+                sample_weight_ref=sample_weight_ref,
+                offset_ref=offset_ref,
+                pirls_tol=final_workspace.model._tol,
+                max_pirls_iter=final_workspace.model._max_iter,
+                durable_retain_fit_state=bool(model._retain_fit_state),
+            )
+        except ObservedModeNotCertifiedError as exc:
+            raise _publication_mode_failure(
+                exc, parameter="theta", value=float(result.theta_hat), decoupled=False
+            ) from exc
     else:
         fit_ops._fit_in_workspace(
             final_workspace.model,
