@@ -695,7 +695,14 @@ def _maybe_release_fit_state(model) -> None:
     model._dm = None
     model._fit_weights = None
     model._fit_offset = None
-    model._fit_mu = None
+    # `_retain_fit_mu` is a hand-off, not a wider compact footprint. Only a
+    # caller that reads the fitted mean immediately after the fit sets it, and
+    # that caller clears the attribute again on both sides of its next fit, so
+    # the released model still keeps no row-scale state between uses. Without
+    # the hand-off the only route back to a mean this fit has just computed is
+    # to re-score every row through the public prediction plan.
+    if not getattr(model, "_retain_fit_mu", False):
+        model._fit_mu = None
     model._fit_null_mu = None
     model._fit_X_ref = None
     model._fit_y_ref = None
