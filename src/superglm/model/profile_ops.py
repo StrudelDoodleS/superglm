@@ -98,6 +98,7 @@ def estimate_p(
     phi_method="mle",
     method="auto",
     ci_alpha=None,
+    max_reml_iter=None,
     progress_callback=None,
     **kwargs,
 ):
@@ -120,6 +121,15 @@ def estimate_p(
     decoupled = resolved_search_mode != resolved_mode
     _validate_profile_selection_mode(model, resolved_mode)
     _validate_profile_selection_mode(model, resolved_search_mode)
+    # The budget names the REML publication refit; candidate search fits keep
+    # their own loose-bar budget. Refusing it under a pure-ML publication is
+    # deliberate: a mode-scoped parameter that silently no-ops is how inert
+    # knobs are born.
+    if max_reml_iter is not None and resolved_mode != "fit_reml":
+        raise ValueError(
+            "max_reml_iter controls the REML publication refit and requires "
+            "fit_mode='reml'; the ML publication path has no REML iteration to budget"
+        )
     resolved_ci_alpha = None if ci_alpha is None else _validate_profile_ci_alpha(ci_alpha)
     if resolved_ci_alpha is not None and phi_method == "pearson":
         raise RuntimeError(
@@ -199,6 +209,7 @@ def estimate_p(
                 y_ref=y_ref,
                 sample_weight_ref=sample_weight_ref,
                 offset_ref=offset_ref,
+                max_reml_iter=20 if max_reml_iter is None else int(max_reml_iter),
                 pirls_tol=final_workspace.model._tol,
                 max_pirls_iter=final_workspace.model._max_iter,
                 durable_retain_fit_state=bool(model._retain_fit_state),

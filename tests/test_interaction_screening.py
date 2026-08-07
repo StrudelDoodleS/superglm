@@ -339,6 +339,15 @@ def test_screening_is_invariant_to_the_units_of_a_numeric_margin():
     unambiguously 1, rescaling from ``+-1`` turned ``statistic=397, edf0=1``
     into an all-NaN row.  1e4 is kept below because a moment matrix carries the
     square of the covariate's scale, so it is already 1e16 in the joint.
+
+    The 1e-5 bar, measured 2026-08-08: ``x`` has no true effect, so its
+    smoothing parameter is a flat direction the mains fit now freezes
+    mid-transition (cross-scale spread 1e-9) instead of marching deep into
+    the edf flat-tail (spread 3.6e-4, hidden to 2e-7 by the tail's zero
+    slope). At the freeze point the probe's scale-squared-conditioned
+    moments register at 1.5e-6 on ``(g, x)``'s edf0 -- real sensitivity the
+    tail masked, orders below anything the equilibration guard exists to
+    catch.
     """
     import pandas as pd
 
@@ -395,8 +404,8 @@ def test_screening_is_invariant_to_the_units_of_a_numeric_margin():
             assert k2 == kind, (pair, scale)
             assert np.isnan(e) == np.isnan(e2), (pair, scale, e, e2)
             if not np.isnan(e):
-                assert e2 == pytest.approx(e, rel=1e-6), (pair, scale, e, e2)
-                assert z2 == pytest.approx(z, rel=1e-6, abs=1e-9), (pair, scale, z, z2)
+                assert e2 == pytest.approx(e, rel=1e-5), (pair, scale, e, e2)
+                assert z2 == pytest.approx(z, rel=1e-5, abs=1e-9), (pair, scale, z, z2)
 
 
 def test_a_block_of_pure_cancellation_cannot_score_competitively():
