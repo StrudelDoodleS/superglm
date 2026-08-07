@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import threading
 import time
 import warnings
 
@@ -169,25 +171,65 @@ def published_backend(model) -> str:
     return str(getattr(solver, "direct_backend", None) or "unknown")
 
 
+class _RssSampler:
+    """Sample this process's VmRSS during one leg so each leg gets its OWN
+    peak. ru_maxrss is a process-wide high-water mark: after the expensive
+    first leg every later leg inherits its value and even a large memory
+    regression stays invisible. Sampling misses sub-interval spikes, which
+    the printed label discloses; /proc-less platforms fall back to the
+    monotone counter with the fallback disclosed the same way."""
+
+    def __init__(self) -> None:
+        self.peak_kb = 0.0
+        self.sampled = os.path.exists("/proc/self/status")
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _vm_rss_kb() -> float:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1])
+        return 0.0
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self.peak_kb = max(self.peak_kb, self._vm_rss_kb())
+            self._stop.wait(0.002)
+
+    def __enter__(self) -> _RssSampler:
+        if self.sampled:
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=1.0)
+            self.peak_kb = max(self.peak_kb, self._vm_rss_kb())
+        else:
+            import resource
+
+            self.peak_kb = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+
+
 def _run(label: str, fn, results: dict) -> float:
     """Time one leg, capturing any Python warning it raises as a complaint."""
-    import resource
-
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        start = time.perf_counter()
-        payload = fn()
-        elapsed = time.perf_counter() - start
+        with _RssSampler() as sampler:
+            start = time.perf_counter()
+            payload = fn()
+            elapsed = time.perf_counter() - start
     complaints = list(payload.pop("complaints", []))
     complaints += [f"python warning: {w.category.__name__}: {w.message}" for w in caught]
-    # Process high-water mark: monotone across legs, so only growth at the
-    # leg that first reaches it is attributable -- recorded so a memory
-    # regression is at least visible, never silently absorbed.
-    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     results[label] = {
         "seconds": elapsed,
         "complaints": complaints,
-        "peak_rss_mb": peak_rss_mb,
+        "peak_rss_mb": sampler.peak_kb / 1024.0,
+        "peak_rss_sampled": sampler.sampled,
         **payload,
     }
     return elapsed
@@ -317,7 +359,13 @@ def main() -> None:
             f"  {label:<20}p_hat={results[label]['p_hat']!r}  phi_hat={results[label]['phi_hat']!r}"
         )
 
-    print("\nbackend and memory (peak RSS is a process high-water mark, monotone across legs):")
+    all_sampled = all(row.get("peak_rss_sampled") for row in results.values())
+    rss_caveat = (
+        "per-leg sampled maximum; sub-2ms spikes not captured"
+        if all_sampled
+        else "no /proc: process high-water mark, monotone across legs"
+    )
+    print(f"\nbackend and memory (peak RSS: {rss_caveat}):")
     for label, row in results.items():
         line = f"  {label:<20}peak_rss={row.get('peak_rss_mb', 0.0):8.1f}MB"
         if row.get("backend"):
@@ -330,6 +378,14 @@ def main() -> None:
         results["single_fit_reml"]["complaints"].append(
             f"published REML legs ran on different solver backends: {backends}"
         )
+    # "unknown" means the solver result lost its dispatch provenance; four
+    # matching unknowns would pass an equality-only gate while validating
+    # nothing, so unknown itself is a failure.
+    for label, backend in backends.items():
+        if backend == "unknown":
+            results[label]["complaints"].append(
+                "published fit lost its solver backend provenance (direct_backend missing)"
+            )
 
     # The two-step leg and the decoupled leg publish the same model up to the
     # search's p resolution, so their published deviances must agree; their

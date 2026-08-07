@@ -80,6 +80,43 @@ class TestSearchBuildsOnce:
         assert list(cached_result.search_trace["nll"]) == list(uncached_result.search_trace["nll"])
         assert np.array_equal(cached_beta, uncached_beta)
 
+    def test_cached_search_matches_uncached_on_a_tensor_interaction(self, monkeypatch):
+        """Interaction specs are taught at build time like main-effect specs;
+        a cache hit that restores only _specs hands later candidates fresh
+        untaught interaction templates -- measured as a KeyError('x1:x2') at
+        the second candidate, while the uncached search completes."""
+        rng = np.random.default_rng(21)
+        n = 700
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.3, np.exp(eta), n))
+        frame = pd.DataFrame({"x1": x1, "x2": x2})
+
+        def run():
+            model = SuperGLM(
+                family=families.tweedie(p=1.5),
+                features={
+                    "x1": Spline(kind="cr", n_knots=5),
+                    "x2": Spline(kind="cr", n_knots=5),
+                },
+                interactions=[("x1", "x2")],
+            )
+            result = model.estimate_p(frame, y, fit_mode="reml", maxiter=6)
+            return result, np.asarray(model.result.beta, dtype=float).copy()
+
+        cached_result, cached_beta = run()
+
+        import superglm.profiling.tweedie as tweedie_module
+
+        monkeypatch.setattr(tweedie_module, "_SEARCH_DM_CACHE", False)
+        uncached_result, uncached_beta = run()
+
+        assert float(cached_result.p_hat) == float(uncached_result.p_hat)
+        assert float(cached_result.phi_hat) == float(uncached_result.phi_hat)
+        assert list(cached_result.search_trace["nll"]) == list(uncached_result.search_trace["nll"])
+        assert np.array_equal(cached_beta, uncached_beta)
+
 
 class TestCacheMechanism:
     def test_repeat_fits_are_served_from_the_cache(self, monkeypatch):

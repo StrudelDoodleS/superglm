@@ -556,10 +556,12 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
             model._groups = cache["groups"]
             model._dm = dm
             # The build also teaches the spec objects (seen levels, spline
-            # reparametrisations) and resolves pending interactions; a fresh
-            # workspace materializes untaught specs, so restore the taught
-            # ones alongside the design they describe.
+            # reparametrisations, tensor marginal geometry) and resolves
+            # pending interactions; a fresh workspace materializes untaught
+            # constructor templates, so restore the taught specs -- main
+            # effects AND interactions -- alongside the design they describe.
             model._specs = cache["specs"]
+            model._interaction_specs = cache["interaction_specs"]
             model._interaction_order = cache["interaction_order"]
             model._pending_interactions = ()
             allow_wide_design(dm.p)
@@ -585,6 +587,7 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
         dm=model._dm,
         groups=model._groups,
         specs=model._specs,
+        interaction_specs=model._interaction_specs,
         interaction_order=model._interaction_order,
         y=np.array(y_out, copy=True),
         sample_weight=np.array(w_out, copy=True),
