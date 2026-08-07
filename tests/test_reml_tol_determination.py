@@ -1,0 +1,194 @@
+"""The published REML fit must be lambda-determined; searches may run looser.
+
+Wood's compound stopping criterion accepts when the projected gradient and the
+objective change both fall below ``reml_tol * (1 + |objective|)``. That bar
+scales with the magnitude of the REML objective -- which grows with the data --
+while the gradient along a flat log-lambda direction does not. At the
+historical default of 1e-6 a fit can stop with ``converged=True`` while the
+smoothing parameter, and with it every published standard error, is still
+moving: on the fixture below the worst coefficient SE shifts by ~92% between
+the default fit and a tight one, with predictions essentially unchanged.
+
+The resolution is engine-scoped. The Newton engines (exact and discrete
+cached-W) use the compound bar and get a tight default. The EFS-family engines
+(the step-criterion loops in efs.py / runner.py / scop_efs.py) already stop on
+a lambda-change bound -- tightening them buys no determination and their
+linear convergence would pay heavily -- so their default stays put. Power
+search candidate fits only rank powers (their objective is determined to ~1e-8
+even at the loose bar), so they keep the loose tolerance explicitly and the
+publication refit repays determination once.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
+from superglm.model import state_ops
+
+CAT_LEVELS = {"f0": 6, "f1": 9, "f2": 4, "f3": 11, "f4": 13, "f5": 11}
+OC_LEVELS = {"f6": 16, "f7": 24}
+
+
+def _flat_lambda_fixture(n: int = 12_000, seed: int = 4):
+    """Tweedie frame whose saturated cr terms leave log-lambda nearly flat.
+
+    On this realisation the exact-Newton optimizer at reml_tol=1e-6 stops five
+    iterations before the tight answer, moving a published SE by ~92%.
+    """
+    rng = np.random.default_rng(seed)
+    cols: dict[str, np.ndarray] = {}
+    eta = np.full(n, -1.0)
+    for name, k in CAT_LEVELS.items():
+        levels = [f"{name}_{j:02d}" for j in range(k)]
+        idx = rng.integers(0, k, n)
+        cols[name] = np.array(levels)[idx]
+        eta += rng.normal(0, 0.2, k)[idx]
+    orders: dict[str, list[str]] = {}
+    for name, k in OC_LEVELS.items():
+        levels = [f"{name}_{j:02d}" for j in range(k)]
+        idx = rng.integers(0, k, n)
+        cols[name] = np.array(levels)[idx]
+        eta += 0.02 * (idx - k / 2)
+        orders[name] = levels
+    frame = pd.DataFrame(cols)
+    weights = rng.uniform(1.19e-5, 1.0, n)
+    offset = np.where(rng.random(n) < 0.35, 0.0, 1.0986)
+    y = np.where(rng.random(n) < 0.83, 0.0, rng.gamma(1.5, np.exp(eta) * 900, n))
+    features: dict = {name: Categorical() for name in CAT_LEVELS}
+    for name, k in OC_LEVELS.items():
+        features[name] = OrderedCategorical(order=orders[name], basis=Spline(kind="cr", k=k))
+    return frame, y, weights, offset, features
+
+
+def _standard_errors(model: SuperGLM) -> np.ndarray:
+    cov = state_ops.coef_covariance(model)
+    cov = cov[0] if isinstance(cov, tuple) else cov
+    return np.sqrt(np.clip(np.diag(np.asarray(cov, dtype=float)), 0.0, None))
+
+
+def _spy_optimizer_tols(monkeypatch) -> list[float]:
+    """Record the reml_tol every Newton-engine invocation actually receives."""
+    from superglm.model import reml_ops
+
+    real = reml_ops.optimize_direct_reml
+    seen: list[float] = []
+
+    def wrapper(*args, **kwargs):
+        seen.append(float(kwargs["reml_tol"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(reml_ops, "optimize_direct_reml", wrapper)
+    return seen
+
+
+def _small_search_fixture(n: int = 1_200, seed: int = 7):
+    rng = np.random.default_rng(seed)
+    cat_levels = [f"c{j}" for j in range(4)]
+    cat = np.array(cat_levels)[rng.integers(0, 4, n)]
+    oc_levels = [f"o{j:02d}" for j in range(8)]
+    oc_idx = rng.integers(0, 8, n)
+    eta = 0.3 * (cat == "c1") + 0.05 * (oc_idx - 4) - 0.5
+    y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
+    frame = pd.DataFrame({"c": cat, "o": np.array(oc_levels)[oc_idx]})
+    features = {
+        "c": Categorical(),
+        "o": OrderedCategorical(order=oc_levels, basis=Spline(kind="cr", k=8)),
+    }
+    return frame, y, features
+
+
+class TestPublishedFitDetermination:
+    def test_default_fit_publishes_determined_standard_errors(self):
+        """A converged default fit's SEs must match a tight fit's to <0.5%.
+
+        At reml_tol=1e-6 this fixture publishes a worst-coefficient SE 92%
+        away from the tight answer, converged=True. The default must sit past
+        the determination elbow (1e-9 measures 0.011% here).
+        """
+        frame, y, weights, offset, features = _flat_lambda_fixture()
+
+        default_fit = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        default_fit.fit_reml(
+            frame, y, sample_weight=weights, offset=offset, runtime_validation="skip"
+        )
+        tight = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        tight.fit_reml(
+            frame,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            runtime_validation="skip",
+            reml_tol=1e-11,
+        )
+
+        assert default_fit._reml_result.converged
+        assert tight._reml_result.converged
+        se_default = _standard_errors(default_fit)
+        se_tight = _standard_errors(tight)
+        worst = float(np.max(np.abs(se_default - se_tight) / np.maximum(se_tight, 1e-300)))
+        assert worst < 5e-3
+
+
+class TestEngineScopedTolerance:
+    def test_resolver_maps_the_sentinel_per_engine(self):
+        from superglm.model.reml_execute import (
+            NEWTON_REML_TOL_DEFAULT,
+            STEP_REML_TOL_DEFAULT,
+            resolve_reml_tol,
+        )
+
+        assert NEWTON_REML_TOL_DEFAULT == 1e-9
+        assert STEP_REML_TOL_DEFAULT == 1e-6
+        assert resolve_reml_tol(None, engine="newton") == NEWTON_REML_TOL_DEFAULT
+        assert resolve_reml_tol(None, engine="step") == STEP_REML_TOL_DEFAULT
+        assert resolve_reml_tol(2.5e-7, engine="newton") == 2.5e-7
+        assert resolve_reml_tol(2.5e-7, engine="step") == 2.5e-7
+        with pytest.raises(ValueError):
+            resolve_reml_tol(None, engine="brent")
+
+    def test_newton_engine_receives_the_tight_default(self, monkeypatch):
+        seen = _spy_optimizer_tols(monkeypatch)
+        frame, y, features = _small_search_fixture()
+
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.fit_reml(frame, y, runtime_validation="skip")
+
+        assert seen == [1e-9]
+
+    def test_an_explicit_tolerance_is_honored_verbatim(self, monkeypatch):
+        seen = _spy_optimizer_tols(monkeypatch)
+        frame, y, features = _small_search_fixture()
+
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=2.5e-7)
+
+        assert seen == [2.5e-7]
+
+
+class TestSearchPublishSplit:
+    def test_coupled_candidates_run_loose_and_the_publication_runs_tight(self, monkeypatch):
+        """Candidate fits rank powers; only the published refit pays for
+        determination. Every optimizer call before the last must carry the
+        loose search tolerance, and the last -- the publication fit at p_hat
+        -- the tight default."""
+        seen = _spy_optimizer_tols(monkeypatch)
+        frame, y, features = _small_search_fixture()
+
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.estimate_p(frame, y, fit_mode="reml")
+
+        assert len(seen) >= 3
+        assert set(seen[:-1]) == {1e-6}
+        assert seen[-1] == 1e-9
+
+    def test_decoupled_publication_is_the_only_reml_fit_and_is_tight(self, monkeypatch):
+        seen = _spy_optimizer_tols(monkeypatch)
+        frame, y, features = _small_search_fixture()
+
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit")
+
+        assert seen == [1e-9]

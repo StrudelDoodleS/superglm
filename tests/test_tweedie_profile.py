@@ -3090,7 +3090,10 @@ class TestEstimatePFitMode:
         assert not result.phi_used_fallback
         winning_row = result.search_trace.iloc[result.search_trace["nll"].to_numpy().argmin()]
         assert winning_row["p"] == pytest.approx(result.p_hat)
-        assert winning_row["edf"] == pytest.approx(model.result.effective_df, rel=1e-8, abs=1e-8)
+        # The trace row describes the search-tolerance candidate fit; the
+        # published model is the tight publication refit at p_hat. Their edf
+        # gap is the smoothing determination the publication repays.
+        assert winning_row["edf"] == pytest.approx(model.result.effective_df, abs=0.05)
         assert model.result.phi == pytest.approx(result.phi_hat, rel=1e-12, abs=1e-12)
         assert result.density_exact
         assert result.n_saddlepoint == 0
@@ -3752,7 +3755,9 @@ class TestProfileFitParity:
     def test_reml_profile_custom_tensor_matches_independent_fixed_p_fit(self):
         X, y = self._custom_tensor_problem()
         independent = self._custom_tensor_model()
-        independent.fit_reml(X, y)
+        # Candidate evaluations run at the search tolerance; a 1e-8 parity
+        # claim against them requires the independent fit at the same bar.
+        independent.fit_reml(X, y, reml_tol=tweedie_module._SEARCH_REML_TOL)
         independent_edf, independent_phi, independent_nll = self._fixed_p_metrics(
             independent,
             y,
@@ -4035,7 +4040,9 @@ class TestProfileFitParity:
         )
 
         independent = SuperGLM(**model_kwargs)
-        independent.fit_reml(X, y, offset=offset)
+        # Grid-mode phi/nll describe search-tolerance fits; parity at 1e-9
+        # requires the independent fit at the same bar.
+        independent.fit_reml(X, y, offset=offset, reml_tol=tweedie_module._SEARCH_REML_TOL)
         independent_mu = independent._fit_mu
         assert independent_mu is not None
         independent_edf = float(independent.result.effective_df)

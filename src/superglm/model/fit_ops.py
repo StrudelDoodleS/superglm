@@ -486,7 +486,7 @@ def _make_reml_debug_recorder(
     has_qp_constraints: bool,
     has_scop_constraints: bool,
     max_reml_iter: int,
-    reml_tol: float,
+    reml_tol: float | None,
     pirls_tol: float,
     max_pirls_iter: int,
 ):
@@ -517,7 +517,8 @@ def _make_reml_debug_recorder(
             "has_qp_constraints": bool(has_qp_constraints),
             "has_scop_constraints": bool(has_scop_constraints),
             "max_reml_iter": int(max_reml_iter),
-            "reml_tol": float(reml_tol),
+            # None = engine default; the resolved value is an engine concern.
+            "reml_tol": None if reml_tol is None else float(reml_tol),
             "pirls_tol": float(pirls_tol),
             "max_pirls_iter": int(max_pirls_iter),
         }
@@ -1112,7 +1113,7 @@ def fit_reml(
     offset=None,
     *,
     max_reml_iter=20,
-    reml_tol=1e-6,
+    reml_tol=None,
     pirls_tol=1e-6,
     max_pirls_iter=100,
     lambda2_init=None,
@@ -1195,7 +1196,7 @@ def _fit_reml_in_workspace(
     sample_weight_ref,
     offset_ref,
     max_reml_iter=20,
-    reml_tol=1e-6,
+    reml_tol=None,
     pirls_tol=1e-6,
     max_pirls_iter=100,
     lambda2_init=None,

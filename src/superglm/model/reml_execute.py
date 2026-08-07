@@ -13,6 +13,29 @@ from superglm.links import stabilize_eta
 from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.solvers.irls_direct import fit_irls_direct
 
+# The two optimizer families interpret reml_tol against different criteria, so
+# an unset tolerance resolves per engine rather than to one number. The Newton
+# engines (exact and discrete cached-W) stop on Wood's compound bar,
+# ``reml_tol * (1 + |objective|)``, which scales with the objective's
+# magnitude: at 1e-6 a fit on a flat log-lambda direction stops with
+# converged=True while published standard errors are still tens of percent
+# from the determined answer; 1e-9 pins them to ~0.01% for at most a few
+# extra quadratically-convergent iterations. The EFS-family engines
+# (efs.py / runner.py / scop_efs.py) stop on a per-step lambda-change bound
+# with no such scale dependence, and their linear convergence would pay
+# heavily for a tighter bar that buys no determination -- they keep 1e-6.
+NEWTON_REML_TOL_DEFAULT = 1e-9
+STEP_REML_TOL_DEFAULT = 1e-6
+
+
+def resolve_reml_tol(reml_tol: float | None, *, engine: str) -> float:
+    """Resolve the public ``reml_tol`` sentinel to the engine's default."""
+    if engine not in ("newton", "step"):
+        raise ValueError(f"unknown REML engine {engine!r}; expected 'newton' or 'step'")
+    if reml_tol is not None:
+        return float(reml_tol)
+    return NEWTON_REML_TOL_DEFAULT if engine == "newton" else STEP_REML_TOL_DEFAULT
+
 
 def _trace_rows_enabled(debug_recorder) -> bool:
     """Return whether detailed JSONL trace rows should be emitted."""
@@ -195,7 +218,7 @@ def run_scop_efs_reml(
     lam_init: float,
     reml_penalties: list[Any],
     max_reml_iter: int,
-    reml_tol: float,
+    reml_tol: float | None,
     pirls_tol: float,
     max_pirls_iter: int,
     verbose: bool,
@@ -205,6 +228,7 @@ def run_scop_efs_reml(
     debug_recorder=None,
 ):
     """Run the SCOP EFS REML path and update the model in place."""
+    reml_tol = resolve_reml_tol(reml_tol, engine="step")
     promote_estimated_scop_lambdas(
         model._groups,
         model._specs,
@@ -276,7 +300,7 @@ def optimize_reml_best(
     penalty_ranks,
     lambdas: dict[str, float],
     max_reml_iter: int,
-    reml_tol: float,
+    reml_tol: float | None,
     verbose: bool,
     penalty_caches,
     profile: dict[str, Any],
@@ -290,6 +314,7 @@ def optimize_reml_best(
     debug_recorder=None,
 ):
     """Run the appropriate REML optimizer and return its best result object."""
+    reml_tol = resolve_reml_tol(reml_tol, engine="newton" if use_direct else "step")
     trace_run = getattr(debug_recorder, "trace_run", None)
     if not estimated_names:
         if use_direct:

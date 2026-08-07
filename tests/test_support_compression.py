@@ -418,7 +418,13 @@ def test_compression_does_not_change_fitted_results(monkeypatch):
             features={"age": Spline(kind="ps", k=10), "bm": Spline(kind="ps", k=10)},
         )
         model._add_interaction("age", "bm")
-        return model.fit_reml(frame, response, sample_weight=weights)
+        # Explicit loose tolerance: compression only reorders floating-point
+        # accumulation, but under the tight publication bar the optimizer
+        # walks the flat tensor direction long enough for that reordering to
+        # separate the two lambda paths at ~1e-7 in coefficients. The gate's
+        # subject is that compression is storage-only along a matched
+        # optimizer path, which the loose bar keeps matched.
+        return model.fit_reml(frame, response, sample_weight=weights, reml_tol=1e-6)
 
     compressed = fit()
     monkeypatch.setattr(_group_matrix_support, "detect_row_support", lambda *a, **k: None)

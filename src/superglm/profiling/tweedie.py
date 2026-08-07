@@ -433,6 +433,11 @@ _FIT_STATS_SERIES_MAX_TOTAL_TERMS = 4_096
 _SERIES_FIRST_MIN_ROWS = 32
 _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = 1.0e6
 _JOINT_SAFE_POWER_BOUNDS = (1.05, 1.95)
+# Candidate REML fits only rank powers: their profile objective is determined
+# to ~1e-8 relative at this bar while the smoothing parameters it leaves
+# underdetermined never leave the search. The published refit at p_hat runs at
+# the tight publication default and repays lambda determination exactly once.
+_SEARCH_REML_TOL = 1e-6
 
 
 def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
@@ -4263,6 +4268,7 @@ class _ProfileContextREML:
                 sample_weight=self.sample_weight,
                 offset=self.offset,
                 runtime_validation="skip",
+                reml_tol=_SEARCH_REML_TOL,
             )
         except ObservedModeNotCertifiedError as exc:
             # This power has no REML objective we are entitled to report: the
