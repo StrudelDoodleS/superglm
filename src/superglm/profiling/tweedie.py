@@ -6260,7 +6260,11 @@ def _profile_ci_p_detailed(
                     feasible_lo = previous
                     wall_p = current.p
                     crossing = None
-                    while wall_p - feasible_lo.p > _CI_ROOT_XTOL:
+                    # Unsigned distance: powers DECREASE toward a lower wall,
+                    # so a signed comparison would never enter the loop and
+                    # the censored endpoint would sit at a coarse scan
+                    # candidate instead of at the wall.
+                    while abs(wall_p - feasible_lo.p) > _CI_ROOT_XTOL:
                         mid = 0.5 * (feasible_lo.p + wall_p)
                         mid_point = evaluate(mid)
                         if infeasible_reason(mid):
