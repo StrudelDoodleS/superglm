@@ -571,6 +571,15 @@ def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
         cache.clear()
 
     y_out, w_out, off_out = model_build_design_matrix(model, X, y, sample_weight, offset)
+    has_constrained_group, _, _ = constraint_engine_flags(model._groups)
+    if has_constrained_group:
+        # The constrained REML path mutates GroupSlice objects in place
+        # (strip_qp_constraints / restore_qp_constraints recompose against
+        # the current group matrix), and the fixed-probe check certifies only
+        # the design's matvec -- it cannot see a mutated group. Until the
+        # bitwise-equivalence evidence covers constrained fixtures, the cache
+        # stands down and every candidate builds fresh.
+        return y_out, w_out, off_out
     probe = np.random.default_rng(0x5D).standard_normal(model._dm.p)
     cache.update(
         dm=model._dm,

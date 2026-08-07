@@ -73,6 +73,7 @@ from superglm.links import (
     SqrtLink,
 )
 from superglm.model import PathResult, SuperGLM
+from superglm.model.profile_ops import PublicationModeError
 from superglm.model_selection import CrossValidationResult, cross_validate
 from superglm.penalties.flavors import Adaptive
 from superglm.penalties.group_elastic_net import GroupElasticNet
@@ -122,6 +123,7 @@ __all__ = [
     "families",
     "SuperGLM",
     "PathResult",
+    "PublicationModeError",
     "DiscretizationResult",
     "discretization_impact",
     "export_rating_tables",

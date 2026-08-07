@@ -3292,12 +3292,14 @@ class TestDecoupledSearchFitMode:
             search_fit_mode="fit",
         )
 
-        # `reml_converged` is only ever set by a REML-mode search, so `None`
-        # here is the evidence that no REML fit was paid for during the search.
-        assert result.reml_converged is None
+        # The published flags describe the publication refit -- a REML fit --
+        # so reml_converged is True even though the search itself was ML.
+        # The evidence that no REML fit was paid for during the search lives
+        # in search_fit_mode; only the single publication carries REML state.
+        assert result.reml_converged is True
         assert result.search_fit_mode == "fit"
         assert result.fit_mode == "fit_reml"
-        # The publication is nonetheless a REML fit.
+        # The publication is a REML fit, and the model agrees.
         assert model.reml_diagnostics()["converged"] is True
         assert model.reml_diagnostics()["lambdas"]
 

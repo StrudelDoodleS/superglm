@@ -1140,8 +1140,8 @@ class SuperGLM:
             search also never meets the certifiable-region boundary a coupled
             REML search must route around (a coupled run warns when its optimum
             is pinned against that boundary), at the price that the publication
-            refit may instead fail at the selected ``p`` with a typed error
-            naming the ways out. Likelihood-ratio confidence intervals remain
+            refit may instead fail at the selected ``p`` with a typed
+            ``superglm.PublicationModeError`` naming the ways out. Likelihood-ratio confidence intervals remain
             available either way; they invert the searched profile, so they
             describe the regime named by ``search_fit_mode``.
         phi_method : {"pearson", "mle"}

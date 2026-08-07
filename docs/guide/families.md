@@ -264,9 +264,10 @@ wrong on the way:
   routes around them and warns when the selected optimum sits against that
   boundary, since the true optimum may lie beyond it (a censored estimate).
   A decoupled search never meets that wall — but its single REML publication
-  can then fail at the selected *p*, with a typed error that reports the
-  certifiability score and names the ways out: search under
-  `fit_mode="reml"`, publish the ML fit, or restrict `p_bounds`.
+  can then fail at the selected *p*, with a typed
+  `superglm.PublicationModeError` that reports the certifiability score and
+  names the ways out: search under `fit_mode="reml"`, publish the ML fit, or
+  restrict `p_bounds`.
 
 Likelihood-ratio confidence intervals remain available for either coupling,
 eagerly via `ci_alpha` or lazily via `result.ci()`. The interval inverts the
