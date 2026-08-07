@@ -1936,10 +1936,12 @@ class TestComponentNamedLambda2LegacyAssembly:
         )
         # The subject downstream is penalty ASSEMBLY equivalence, compared at
         # rtol 1e-6. The tight publication default walks the null direction to
-        # lambdas where the known ~1e-8-relative canonicalization difference
-        # between the two assembly paths is amplified onto near-zero entries;
-        # the loose bar keeps the fit off that regime without weakening the
-        # assembly comparison.
+        # lambdas where the ~1e-8-relative canonicalization difference between
+        # the two assembly paths lands as ~1e-4 indefinite entries on
+        # near-zero diagonals -- verified benign on this fixture (no consumer
+        # factorizes the legacy assembly), not a general guarantee. The loose
+        # bar keeps the fit off that regime without weakening the assembly
+        # comparison.
         model.fit_reml(X, y, max_reml_iter=30, reml_tol=1e-6)
         assert model._reml_penalties is not None
         return model, X, y

@@ -168,6 +168,143 @@ class TestEngineScopedTolerance:
         assert seen == [2.5e-7]
 
 
+class TestCandidateGradePaths:
+    """Every candidate-grade fit runs at the search tolerance, not the default.
+
+    interaction_mode='fast_candidate' caps outer iterations at 5 and exists to
+    rank interaction candidates; under that cap the tight publication default
+    cannot buy determination -- it only burns an extra Newton iteration and
+    flips converged flags in screening logs.
+    """
+
+    @staticmethod
+    def _interaction_fixture(n: int = 800, seed: int = 3):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.3 * np.sin(6.0 * frame["x1"].to_numpy()) + 0.2 * frame["x2"].to_numpy()
+        y = rng.poisson(np.exp(eta)).astype(float)
+        return frame, y
+
+    def test_fast_candidate_screening_runs_at_search_tolerance(self, monkeypatch):
+        from superglm import Spline as _Spline
+
+        seen = _spy_optimizer_tols(monkeypatch)
+        frame, y = self._interaction_fixture()
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x1": _Spline(kind="cr", n_knots=6), "x2": _Spline(kind="cr", n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(frame, y, interaction_mode="fast_candidate", runtime_validation="skip")
+
+        assert seen == [1e-6]
+
+    def test_fast_candidate_honors_an_explicit_tolerance(self, monkeypatch):
+        from superglm import Spline as _Spline
+
+        seen = _spy_optimizer_tols(monkeypatch)
+        frame, y = self._interaction_fixture()
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            features={"x1": _Spline(kind="cr", n_knots=6), "x2": _Spline(kind="cr", n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(
+            frame, y, interaction_mode="fast_candidate", runtime_validation="skip", reml_tol=3e-8
+        )
+
+        assert seen == [3e-8]
+
+
+class TestRunnerPathSentinel:
+    """The single-pass runner wrapper implements the None convention too.
+
+    No live caller reaches it today, but it is a public-adjacent seam
+    (SuperGLM._run_reml_once) and runner.py compares max_change < reml_tol,
+    which raises TypeError on None if the sentinel is forwarded verbatim.
+    """
+
+    def test_model_run_reml_once_resolves_the_sentinel_per_engine(self, monkeypatch):
+        import types
+
+        from superglm.model import reml_ops
+
+        captured: list[float] = []
+
+        def fake_run_reml_once(*args, **kwargs):
+            captured.append(kwargs["reml_tol"])
+            return "RESULT", "DM"
+
+        monkeypatch.setattr(reml_ops, "run_reml_once", fake_run_reml_once)
+        monkeypatch.setattr(reml_ops, "configured_penalty", lambda model: None)
+        model = types.SimpleNamespace(
+            _dm="DM0",
+            _distribution=None,
+            _link=None,
+            _groups=[],
+            _active_set=None,
+            _direct_solve="auto",
+            _reml_penalties=None,
+        )
+        for use_direct, reml_tol, expected in (
+            (True, None, 1e-9),
+            (False, None, 1e-6),
+            (True, 3e-7, 3e-7),
+        ):
+            reml_ops.model_run_reml_once(
+                model,
+                None,
+                None,
+                None,
+                [],
+                {},
+                {},
+                max_reml_iter=1,
+                reml_tol=reml_tol,
+                verbose=False,
+                use_direct=use_direct,
+            )
+        assert captured == [1e-9, 1e-6, 3e-7]
+
+
+class TestPublicationDispersion:
+    def test_coupled_publication_profiles_phi_against_the_published_fit(self):
+        """The published phi must describe the published fit, not the candidate.
+
+        Candidates run at the search tolerance; the publication refit runs
+        tight. Carrying the candidate's phi onto the tight refit scales every
+        published SE by sqrt(phi) of the wrong fit (4.7e-6 here, 2.3e-3 on the
+        12k stress realisation).
+        """
+        from superglm.profiling.tweedie import _profile_phi_detailed
+
+        frame, y, weights, offset, features = _flat_lambda_fixture(n=6_000)
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(
+            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
+        )
+
+        mu = np.asarray(model.predict(frame, offset=offset), dtype=float)
+        edf = float(model.result.effective_df)
+        oracle = _profile_phi_detailed(
+            np.asarray(y, dtype=float),
+            mu,
+            float(result.p_hat),
+            weights=np.asarray(weights, dtype=float),
+            df_resid=max(float(len(y)) - edf, 1.0),
+            phi_method="mle",
+            phi_start=float(result.phi_hat),
+        )
+
+        assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
+        # The searched objective's value survives for the CI and the plots,
+        # and the published nll refers to the published dispersion.
+        assert result.search_nll is not None
+        assert model.result.phi == pytest.approx(float(result.phi_hat), rel=1e-12)
+
+
 class TestSearchPublishSplit:
     def test_coupled_candidates_run_loose_and_the_publication_runs_tight(self, monkeypatch):
         """Candidate fits rank powers; only the published refit pays for

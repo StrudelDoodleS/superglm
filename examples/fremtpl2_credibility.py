@@ -348,7 +348,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260724)
     parser.add_argument("--n-bins", type=int, default=256)
     parser.add_argument("--max-reml-iter", type=int, default=12)
-    parser.add_argument("--reml-tol", type=float, default=1.0e-6)
+    # None defers to the engine default (1e-9 on the Newton engines).
+    parser.add_argument("--reml-tol", type=float, default=None)
     parser.add_argument(
         "--variants",
         nargs="+",
