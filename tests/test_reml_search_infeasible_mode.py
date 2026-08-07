@@ -578,3 +578,36 @@ class TestStaleInfeasibilityMarkers:
 
         assert np.isfinite(value) and value < 1e49
         assert p_bad not in walls
+
+
+class TestSCOPModeFailuresAreRoutable:
+    def test_a_scop_constrained_profile_search_completes(self):
+        """SCOP mode failures now raise the routable typed family instead of
+        bare RuntimeError, so a coupled search over a SCOP-constrained model
+        scores a failing candidate infeasible rather than dying. The healthy
+        path is pinned end-to-end here; the routing of the typed family is
+        pinned by the injection tests above."""
+        from superglm import Constraint
+
+        rng = np.random.default_rng(31)
+        n = 900
+        x = rng.uniform(0.0, 1.0, n)
+        eta = 0.9 * x - 0.6
+        y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
+        frame = pd.DataFrame({"x": x})
+        features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
+
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(frame, y, fit_mode="reml", maxiter=8)
+
+        assert 1.05 < float(result.p_hat) < 1.95
+        assert np.isfinite(float(result.phi_hat))
+
+    def test_the_scop_certification_raise_is_typed_and_scored(self):
+        """The SCOP latent-mode certification failure carries its achieved
+        score like the observed-geometry gates, so a search formats a real
+        infeasibility reason instead of 'no mode found'."""
+        import superglm.reml.scop_efs as scop_module
+        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+
+        assert scop_module.ObservedModeNotCertifiedError is ObservedModeNotCertifiedError

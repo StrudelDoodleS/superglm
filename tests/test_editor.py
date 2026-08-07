@@ -3050,11 +3050,39 @@ def test_profile_options_forward_search_fit_mode():
     """A client asking for the decoupled search must not be silently coupled."""
     from superglm.editor.server import _profile_options
 
-    options = _profile_options({"fit_mode": "reml", "search_fit_mode": "fit", "junk": "dropped"})
+    options = _profile_options(
+        {
+            "parameter": "tweedie_p",
+            "fit_mode": "reml",
+            "search_fit_mode": "fit",
+            "junk": "dropped",
+        }
+    )
 
     assert options["search_fit_mode"] == "fit"
     assert options["fit_mode"] == "reml"
     assert "junk" not in options
+
+
+def test_profile_options_filter_tweedie_only_keys_for_theta():
+    """search_fit_mode is Tweedie-only: estimate_nb_theta has no decoupled
+    search, so a client that retains options while switching parameters must
+    not crash the theta profile with an unexpected keyword. Unknown or empty
+    parameters strip it too -- fail safe, never fail loud downstream."""
+    from superglm.editor.server import _profile_options
+
+    for parameter in ("nb2_theta", "theta", "nb2", ""):
+        options = _profile_options(
+            {"parameter": parameter, "fit_mode": "reml", "search_fit_mode": "fit"}
+        )
+        assert "search_fit_mode" not in options
+        assert options["fit_mode"] == "reml"
+
+    for parameter in ("tweedie", "tweedie_p", "p"):
+        options = _profile_options(
+            {"parameter": parameter, "fit_mode": "reml", "search_fit_mode": "fit"}
+        )
+        assert options["search_fit_mode"] == "fit"
 
 
 def test_reprofile_distribution_parameter_dispatches_to_model(

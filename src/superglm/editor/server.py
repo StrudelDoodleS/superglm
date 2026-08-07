@@ -349,6 +349,12 @@ def _bound_local_socket() -> socket.socket:
 
 
 def _profile_options(payload: dict[str, Any]) -> dict[str, Any]:
+    # search_fit_mode is a Tweedie-only option: estimate_nb_theta has no
+    # decoupled search, so a generic client that retains options while
+    # switching parameters must not crash the theta profile with an
+    # unexpected keyword.
+    tweedie_only = {"search_fit_mode"}
+    parameter = str(payload.get("parameter", ""))
     allowed = {
         "fit_mode",
         "search_fit_mode",
@@ -366,6 +372,9 @@ def _profile_options(payload: dict[str, Any]) -> dict[str, Any]:
         "verbose",
     }
     options = {key: value for key, value in payload.items() if key in allowed}
+    if parameter not in {"tweedie", "tweedie_p", "p"}:
+        for key in tweedie_only:
+            options.pop(key, None)
     for key in ("p_bounds", "theta_bounds"):
         if key in options and isinstance(options[key], list):
             options[key] = tuple(options[key])
