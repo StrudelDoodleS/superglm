@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -55,6 +56,35 @@ def _finite_vector(
     return normalized
 
 
+def _reject_unhashable_values(name: object, values: NDArray) -> None:
+    """Raise unless every element of an object column can serve as a level.
+
+    Everything downstream keys on these values -- level tables, encoders,
+    interaction keys -- so "does it hash" is the whole question, and asking it
+    with `hash` itself is the only answer that cannot drift from what those
+    callers will do. Column-wide dtype inference is not a substitute: pandas
+    labels by `isinstance`, so a `string` column may still hold a `str`
+    subclass that sets `__hash__ = None`, and a tuple of scalars may still
+    nest an unhashable member.
+
+    How the answer is collected is what makes it affordable. `deque(...,
+    maxlen=0)` drives the map in C and discards each result, so a column costs
+    one `hash` call per element and runs no Python bytecode at all, where the
+    scan this replaced ran a Python-level predicate per row. A power search
+    re-validates every configured column on every candidate fit, which is
+    enough repetition for that difference to outweigh the fits it guards.
+    """
+    try:
+        deque(map(hash, values), maxlen=0)
+    except (TypeError, ValueError) as exc:
+        # `hash` reports refusal as TypeError for the unhashable types and as
+        # ValueError for the few objects that hash conditionally, such as a
+        # memoryview over a writable buffer. Both mean the same thing here.
+        raise ValueError(
+            f"X column {name!r} must contain only scalar values or hashable tuple levels"
+        ) from exc
+
+
 def validate_x_columns(frame: EagerFrame, columns: Iterable[object]) -> None:
     """Validate configured model columns before feature construction or scoring."""
     for name in tuple(dict.fromkeys(columns)):
@@ -63,19 +93,7 @@ def validate_x_columns(frame: EagerFrame, columns: Iterable[object]) -> None:
         inferred_dtype = ""
         object_has_complex = False
         if dtype_kind == "O":
-            invalid_nested_value = False
-            for value in values:
-                if value is None or value is pd.NA or np.isscalar(value):
-                    continue
-                try:
-                    hash(value)
-                except TypeError:
-                    invalid_nested_value = True
-                    break
-            if invalid_nested_value:
-                raise ValueError(
-                    f"X column {name!r} must contain only scalar values or hashable tuple levels"
-                )
+            _reject_unhashable_values(name, values)
             inferred_dtype = pd.api.types.infer_dtype(values, skipna=True)
             object_has_complex = inferred_dtype == "complex" or (
                 inferred_dtype.startswith("mixed")
