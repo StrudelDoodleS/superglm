@@ -458,11 +458,20 @@ class OrderedCategorical:
             name for name, value in shortcut_values.items() if isinstance(value, _SplineBase)
         ]
         if misplaced:
-            name = misplaced[0]
+            names = " and ".join(f"`{name}=`" for name in misplaced)
+            noun = "a scalar" if len(misplaced) == 1 else "scalars"
+            kinds = ", ".join(sorted({type(shortcut_values[name]).__name__ for name in misplaced}))
+            # Name the object instead of interpolating its repr: the repr
+            # renders only a subset of the configuration (spline.py drops
+            # `constraint=` and `penalty=`), so presenting it as a
+            # copy-pasteable replacement would silently discard exactly the
+            # arguments the caller was trying to pass.
             raise ValueError(
-                f"OrderedCategorical received a Spline object as `{name}=`, which takes "
-                f"a scalar. Pass the smooth as `basis=Spline(...)` instead: "
-                f"OrderedCategorical(..., basis={shortcut_values[name]!r})."
+                f"OrderedCategorical received a Spline object in {names}, which "
+                f"take{'s' if len(misplaced) == 1 else ''} {noun}. `basis=` is the "
+                f"parameter that takes the smooth: move the {kinds} you built -- "
+                f"with every argument you configured on it -- to "
+                f"OrderedCategorical(..., basis=...)."
             )
 
         resolved_basis = "spline" if basis is None else basis
