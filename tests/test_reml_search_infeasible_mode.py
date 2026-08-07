@@ -149,6 +149,46 @@ class TestTypedModeFailureContract:
         assert float(result.p_hat) < 1.9
 
 
+class TestInitializationSearchesRouteAroundInfeasiblePoints:
+    """grid_refine and profile_opt read every initialization record back.
+
+    An uncertifiable initialization power leaves no evaluation record, so an
+    unconditional cache read raises KeyError and kills the search that was
+    designed to route around exactly this.
+    """
+
+    @pytest.mark.parametrize(
+        ("method", "p_bounds"),
+        [("grid_refine", (1.05, 1.95)), ("profile_opt", (1.05, 1.95))],
+    )
+    def test_infeasible_initialization_points_are_routed_around(
+        self, monkeypatch, method, p_bounds
+    ):
+        from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+
+        frame, y, weights, offset, features = _fixture(3_000)
+        real_fit_reml = SuperGLM.fit_reml
+
+        def failing_above_19(self, X, yv, **kwargs):
+            if float(getattr(self.family, "p", 0.0)) > 1.9:
+                raise ObservedModeNotConvergedError()
+            return real_fit_reml(self, X, yv, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", failing_above_19)
+
+        result = _model(features).estimate_p(
+            frame,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            fit_mode="reml",
+            method=method,
+            p_bounds=p_bounds,
+        )
+
+        assert p_bounds[0] < float(result.p_hat) < 1.9
+
+
 class TestPublicationModeFailure:
     """A publish refit that cannot certify must explain itself."""
 
@@ -179,6 +219,60 @@ class TestPublicationModeFailure:
         assert "search_fit_mode" in message or "fit_mode='fit'" in message
         assert "p_bounds" in message
 
+    def test_publish_failure_is_a_typed_routable_error(self, monkeypatch):
+        """Callers route the recoverable certifiability condition by type.
+
+        RuntimeError compatibility is kept for pre-existing broad handlers,
+        and the certification detail that caused the failure stays chained.
+        """
+        from superglm.model import fit_ops, profile_ops
+        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+
+        frame, y, weights, offset, features = _fixture(3_000)
+
+        def refuse(*args, **kwargs):
+            raise ObservedModeNotCertifiedError(3.9e-8, 1e-9)
+
+        monkeypatch.setattr(fit_ops, "_fit_reml_in_workspace", refuse)
+
+        with pytest.raises(profile_ops.PublicationModeError) as excinfo:
+            _model(features).estimate_p(
+                frame,
+                y,
+                sample_weight=weights,
+                offset=offset,
+                fit_mode="reml",
+                search_fit_mode="fit",
+            )
+
+        assert isinstance(excinfo.value, RuntimeError)
+        assert isinstance(excinfo.value.__cause__, ObservedModeNotCertifiedError)
+
+    def test_theta_publish_failure_names_theta_controls(self, monkeypatch):
+        """The theta search is alternating ML fits, not REML certification;
+        its failure guidance must name theta's actual controls, not p's."""
+        from superglm.distributions import NegativeBinomial
+        from superglm.model import fit_ops
+        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+
+        frame, _, weights, offset, features = _fixture(3_000)
+        rng = np.random.default_rng(9)
+        counts = rng.poisson(1.2, len(frame)).astype(float)
+
+        def refuse(*args, **kwargs):
+            raise ObservedModeNotCertifiedError(3.9e-8, 1e-9)
+
+        monkeypatch.setattr(fit_ops, "_fit_reml_in_workspace", refuse)
+
+        model = SuperGLM(family=NegativeBinomial(theta="auto"), features=features)
+        with pytest.raises(RuntimeError) as excinfo:
+            model.estimate_theta(frame, counts, fit_mode="reml")
+
+        message = str(excinfo.value)
+        assert "theta=" in message
+        assert "theta_bounds" in message
+        assert "p_bounds" not in message
+
 
 class TestBoundaryCensoringWarning:
     """A p_hat pinned against the certifiable boundary is disclosed."""
@@ -192,6 +286,37 @@ class TestBoundaryCensoringWarning:
         assert message is not None
         assert "censored" in message
         assert "search_fit_mode" in message
+
+    def test_grid_censoring_uses_grid_spacing_as_resolution(self, monkeypatch):
+        """method='grid' resolves p only to its spacing, so censoring must be
+        judged against that spacing, not against Brent's xatol."""
+        import superglm.profiling.tweedie as tweedie_module
+
+        captured = {}
+        real = tweedie_module._boundary_censoring_message
+
+        def spy(p_hat, infeasible, *, xatol):
+            captured["resolution"] = xatol
+            return real(p_hat, infeasible, xatol=xatol)
+
+        monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", spy)
+        frame, y, weights, offset, features = _fixture(3_000)
+
+        _model(features).estimate_p(
+            frame, y, sample_weight=weights, offset=offset, fit_mode="reml", method="grid"
+        )
+
+        assert captured["resolution"] == pytest.approx((1.95 - 1.05) / 19.0)
+
+    def test_a_grid_step_gap_warns_at_grid_resolution(self):
+        from superglm.profiling.tweedie import _boundary_censoring_message
+
+        spacing = (1.95 - 1.05) / 19.0
+        message = _boundary_censoring_message(
+            1.6184, {1.6658: "not certifiable"}, xatol=spacing
+        )
+        assert message is not None
+        assert "censored" in message
 
     def test_a_distant_boundary_stays_silent(self):
         from superglm.profiling.tweedie import _boundary_censoring_message

@@ -4785,7 +4785,13 @@ def _search_grid_refine(
     p_coarse = np.linspace(p_bounds[0], p_bounds[1], n_grid_coarse)
     for p in p_coarse:
         ctx.evaluate(p, source="grid_coarse")
-    coarse_records = [ctx._evaluation_cache[float(p)] for p in p_coarse]
+    # Uncertifiable powers leave no record on purpose; the coarse stage must
+    # route around them like every other search, not KeyError on read-back.
+    coarse_records = [
+        record
+        for record in (ctx._evaluation_cache.get(float(p)) for p in p_coarse)
+        if record is not None
+    ]
     selectable = [record for record in coarse_records if _profile_record_is_selectable(record)]
     if selectable:
         p_best = min(selectable, key=lambda record: record.nll).p
@@ -4859,7 +4865,13 @@ def _search_profile_opt(
     init_ps = [lo + 0.1 * (hi - lo), 0.5 * (lo + hi), hi - 0.1 * (hi - lo)]
     for p in init_ps:
         ctx.evaluate(p, source="init")
-    init_records = [ctx._evaluation_cache[float(p)] for p in init_ps]
+    # Uncertifiable powers leave no record on purpose; initialization must
+    # route around them like every other search, not KeyError on read-back.
+    init_records = [
+        record
+        for record in (ctx._evaluation_cache.get(float(p)) for p in init_ps)
+        if record is not None
+    ]
     selectable = [record for record in init_records if _profile_record_is_selectable(record)]
     if selectable:
         best_init = min(selectable, key=lambda record: record.nll).p
@@ -5560,8 +5572,18 @@ def estimate_tweedie_p(
     # publish under a different one, and overwrites `fit_mode` when it does.
     result.fit_mode = fit_mode
     result.search_fit_mode = fit_mode
+    # The censoring test compares the gap to the search's ACTUAL resolution:
+    # a pure grid search resolves p only to its spacing, so judging its
+    # boundary distance against Brent's xatol would silence every warning.
+    if resolved_method == "grid":
+        if grid is not None and len(np.asarray(grid)) > 1:
+            search_resolution = float(np.max(np.diff(np.sort(np.asarray(grid, dtype=float)))))
+        else:
+            search_resolution = (p_bounds[1] - p_bounds[0]) / max(int(n_grid) - 1, 1)
+    else:
+        search_resolution = xatol
     censoring = _boundary_censoring_message(
-        float(result.p_hat), getattr(ctx, "_infeasible_powers", None), xatol=xatol
+        float(result.p_hat), getattr(ctx, "_infeasible_powers", None), xatol=search_resolution
     )
     if censoring:
         result.outer_message = " ".join(part for part in (result.outer_message, censoring) if part)

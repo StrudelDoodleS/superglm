@@ -158,6 +158,37 @@ class TestEngineScopedTolerance:
 
         assert seen == [1e-9]
 
+    def test_discrete_engine_floors_explicit_tolerances_at_1e_12(self):
+        """The discrete engine clamps reml_tol at 1e-12 (disclosed in the
+        docstring); pinned here on the real backend, not a wrapper spy."""
+        from superglm import Spline as _Spline
+
+        rng = np.random.default_rng(5)
+        n = 1_500
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.4 * np.sin(5.0 * frame["x1"].to_numpy()) + 0.2 * frame["x2"].to_numpy()
+        y = rng.poisson(np.exp(eta)).astype(float)
+
+        def fit(tol):
+            model = SuperGLM(
+                family="poisson",
+                selection_penalty=0,
+                discrete=True,
+                n_bins=32,
+                features={
+                    "x1": _Spline(kind="cr", n_knots=6),
+                    "x2": _Spline(kind="cr", n_knots=6),
+                },
+            )
+            model.fit_reml(frame, y, runtime_validation="skip", reml_tol=tol)
+            return model._reml_result
+
+        floored = fit(1e-15)
+        at_floor = fit(1e-12)
+
+        assert floored.n_reml_iter == at_floor.n_reml_iter
+        assert floored.lambdas == at_floor.lambdas
+
     def test_an_explicit_tolerance_is_honored_verbatim(self, monkeypatch):
         seen = _spy_optimizer_tols(monkeypatch)
         frame, y, features = _small_search_fixture()
@@ -307,6 +338,40 @@ class TestPublicationDispersion:
         )
 
         assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
+
+    def test_a_troubled_reprofile_is_disclosed_on_the_result(self, monkeypatch):
+        """A boundary, fallback, or non-convergent published re-profile must
+        not hide behind the search's clean record."""
+        from dataclasses import replace as _replace
+
+        import superglm.profiling.tweedie as tweedie_module
+        from superglm.model import profile_ops
+
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(frame, y, fit_mode="reml")
+        baseline = len(result.warnings)
+
+        real = tweedie_module._profile_phi_detailed
+
+        def troubled(*args, **kwargs):
+            return _replace(
+                real(*args, **kwargs),
+                converged=False,
+                used_fallback=True,
+                message="forced for the test",
+            )
+
+        monkeypatch.setattr(tweedie_module, "_profile_phi_detailed", troubled)
+        mu = np.asarray(model.predict(frame), dtype=float)
+        profile_ops._reprofile_published_dispersion(
+            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
+        )
+
+        assert not result.phi_converged
+        assert result.phi_used_fallback
+        assert len(result.warnings) == baseline + 1
+        assert "re-profile" in result.warnings[-1]
 
     def test_coupled_publication_profiles_phi_against_the_published_fit(self):
         """The published phi must describe the published fit, not the candidate.

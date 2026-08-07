@@ -3046,6 +3046,19 @@ def test_save_load_preserves_display_only_level_order(editor_model, tmp_path):
     assert loaded.level_order_changed("region")
 
 
+def test_profile_options_forward_search_fit_mode():
+    """A client asking for the decoupled search must not be silently coupled."""
+    from superglm.editor.server import _profile_options
+
+    options = _profile_options(
+        {"fit_mode": "reml", "search_fit_mode": "fit", "junk": "dropped"}
+    )
+
+    assert options["search_fit_mode"] == "fit"
+    assert options["fit_mode"] == "reml"
+    assert "junk" not in options
+
+
 def test_reprofile_distribution_parameter_dispatches_to_model(
     editor_model, editor_frame, monkeypatch
 ):
