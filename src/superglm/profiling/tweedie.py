@@ -4213,16 +4213,6 @@ class _ProfileContextREML:
 
         _t0 = _time.perf_counter()
         self.model.family = Tweedie(p=p)
-        # The scratch model carries its fitted mean past fit-state release (see
-        # `_build_profile_context_reml`); nothing else clears it. Drop the
-        # previous candidate's mean before this one fits, because the reuse
-        # guard below cannot tell a stale vector from a fresh one -- correctly
-        # shaped, finite and positive either way. Clearing here means a fit path
-        # that ever returned without priming the mean profiles phi at the public
-        # prediction, not silently at the previous power's fit.
-        reuses_fit_mu = getattr(self.model, "_retain_fit_mu", False)
-        if reuses_fit_mu:
-            self.model._fit_mu = None
         # Search fits are thrown away: only their NLL survives, and the model the
         # caller keeps comes from the separate final refit in `estimate_p`. The
         # post-fit parity check certifies the PUBLISHED runtime state against the
@@ -4257,26 +4247,14 @@ class _ProfileContextREML:
             )
             return _INFEASIBLE_PROFILE_NLL
 
-        # Profile phi at the mean this fit converged to, which is what the ML
-        # search context and the published refit already do. Rebuilding it with
-        # `predict` re-evaluates the whole design and re-validates the columns
-        # this same call validated moments earlier, only to land within
-        # canonicalization roundoff of a vector the fit still has in hand.
         fit_mu = getattr(self.model, "_fit_mu", None)
-        if reuses_fit_mu:
-            # Hand-off complete. The record below owns the only surviving copy,
-            # so a model that asked for compact fit state keeps no row-scale
-            # array alive between candidates.
-            self.model._fit_mu = None
         if (
             isinstance(fit_mu, np.ndarray)
             and fit_mu.shape == self.y.shape
             and np.all(np.isfinite(fit_mu))
             and np.all(fit_mu > 0.0)
         ):
-            # `np.maximum` below allocates the working copy, so the fitted
-            # array is never aliased into the record and needs no copy here.
-            mu = fit_mu
+            mu = fit_mu.copy()
         else:
             mu = np.asarray(
                 self.model.predict(self.X, offset=self.offset),
@@ -4387,11 +4365,6 @@ def _build_profile_context_reml(
     # potentially row-scale work while retaining the ordinary release path for
     # their design and fit rows. The final public refit uses a separate model.
     profile_model._suppress_reporting_support = True
-    # Each candidate profiles phi at the mean its own fit converged to. Releasing
-    # fit state discards that mean, and the only way back to it is a full public
-    # prediction over every row. Carry it across the release instead; `evaluate`
-    # clears it on both sides of the fit it belongs to.
-    profile_model._retain_fit_mu = True
     if getattr(model, "_last_fit_meta", None) is not None:
         profile_model._last_fit_meta = dict(model._last_fit_meta)
 
