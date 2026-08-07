@@ -25,6 +25,7 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
     ObservedModeNotCertifiedError,
+    ObservedModeNotConvergedError,
     ObservedREMLGeometry,
     build_observed_reml_geometry,
     classify_reml_curvature,
@@ -452,7 +453,10 @@ def optimize_direct_reml(
         objective_hessian_rank: int | None = None
         if use_observed_geometry:
             if not pirls_result.converged:
-                raise RuntimeError("observed REML requires a converged penalized coefficient mode")
+                # Typed so a power search can score this point infeasible and
+                # route around it, exactly as it does the certification
+                # failure below -- same physical condition, earlier door.
+                raise ObservedModeNotConvergedError(hint=mode_certification_hint(distribution))
             _t0 = _time.perf_counter()
             geometry = build_observed_reml_geometry(
                 dm=dm,

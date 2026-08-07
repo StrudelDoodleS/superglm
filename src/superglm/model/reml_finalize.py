@@ -20,8 +20,11 @@ from superglm.model.reml_setup import restore_qp_constraints
 from superglm.model.reml_state import update_reml_r_inv
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
+    ObservedModeNotCertifiedError,
+    ObservedModeNotConvergedError,
     build_observed_reml_geometry,
     classify_reml_curvature,
+    mode_certification_hint,
     observed_penalized_mode_score,
 )
 from superglm.reml.penalty_algebra import (
@@ -505,7 +508,14 @@ def finalize_reml_fit(
         best.objective = terminal_evaluation.value
     if terminal_curvature == "observed" and not qp_passthrough:
         if not final_pirls.converged:
-            raise RuntimeError("terminal observed REML refit did not converge")
+            # Typed: to a power search this is one more point with no usable
+            # penalized mode. The terminal refit runs at the FINAL lambda,
+            # which differs from every trial lambda, so this door is reachable
+            # even for a point whose candidate fits all certified.
+            raise ObservedModeNotConvergedError(
+                "terminal observed REML refit did not converge to a penalized coefficient mode",
+                hint=mode_certification_hint(model._distribution),
+            )
         S_final = (
             None
             if structured_linear_state is not None
@@ -560,10 +570,13 @@ def finalize_reml_fit(
         )
         profile["reml_terminal_observed_mode_residual"] = mode_score.relative_max
         if mode_score.relative_max > terminal_mode_tolerance:
-            raise RuntimeError(
-                "terminal observed REML refit does not satisfy the penalized mode "
-                f"condition (relative score={mode_score.relative_max:.3e}, "
-                f"tolerance={terminal_mode_tolerance:.3e})"
+            # Typed for the same reason as the candidate-fit gate in
+            # optimize_direct_reml: a power search must be able to score this
+            # point infeasible instead of dying on it.
+            raise ObservedModeNotCertifiedError(
+                mode_score.relative_max,
+                terminal_mode_tolerance,
+                hint=mode_certification_hint(model._distribution),
             )
         final_pirls = replace(
             final_pirls,
