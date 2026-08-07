@@ -232,20 +232,40 @@ result = model.estimate_p(
 )
 ```
 
-Dispersion is re-profiled against the published fit, so `result.phi_hat`
-describes the model you get back rather than the fits the search discarded.
+Whichever coupling you choose, the published fit is publication-grade.
+Candidate fits exist only to rank powers, so they run at a loose smoothing
+tolerance; the published refit runs the tight publication default and
+re-profiles dispersion against its own fitted mean. `result.phi_hat`, the
+coefficients, and their standard errors always describe the model you get
+back, never the fits the search discarded.
 
-This is an approximation, not a free speedup: *p* is chosen under a different
-objective than the one that publishes it. On the synthetic benchmark fixture in
-`benchmarks/tweedie_reml_search_cost.py` it ran about 6× faster and moved *p̂*
-by 3.2e-5, but that is a property of that surface, not a guarantee — compare
-against `fit_mode="reml"` alone on your own data before adopting it.
+The two couplings differ in which objective *chooses* p, and in what can go
+wrong on the way:
 
-Likelihood-ratio confidence intervals remain available for a decoupled run,
-both eagerly via `ci_alpha` and lazily via `result.ci()`. The interval inverts
-the profile that was searched, around that profile's own value at `p_hat` — so
-it describes the regime named by `search_fit_mode`, not the published one. For
-a coupled run the two regimes coincide and the distinction is empty.
+- **Agreement.** Selecting *p* under ML and publishing under REML is an
+  approximation. On the synthetic benchmark fixture in
+  `benchmarks/tweedie_reml_search_cost.py` it moved *p̂* by 3.2e-5 and ran
+  about 5× faster, and across a synthetic sweep spanning a 600× range of
+  fitted penalty strength the mode disagreement was uncorrelated with how
+  strongly REML actually shrinks. That is evidence, not a guarantee —
+  compare against `fit_mode="reml"` alone on your own data before adopting
+  it.
+- **Robustness.** A coupled search evaluates REML at every candidate power,
+  and some powers can have no certifiable penalized mode there; the search
+  routes around them and warns when the selected optimum sits against that
+  boundary, since the true optimum may lie beyond it (a censored estimate).
+  A decoupled search never meets that wall — but its single REML publication
+  can then fail at the selected *p*, with a typed error that reports the
+  certifiability score and names the ways out: search under
+  `fit_mode="reml"`, publish the ML fit, or restrict `p_bounds`.
+
+Likelihood-ratio confidence intervals remain available for either coupling,
+eagerly via `ci_alpha` or lazily via `result.ci()`. The interval inverts the
+profile that was searched, around that profile's own value at `p_hat`
+(recorded as `result.search_nll`), so it describes the regime named by
+`search_fit_mode`; `result.nll` describes the published fit's re-profiled
+dispersion. `trace_plot` and `profile_plot` measure against the same searched
+reference.
 
 ### Profile confidence interval
 

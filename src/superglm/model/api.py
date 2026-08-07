@@ -1120,13 +1120,22 @@ class SuperGLM:
             ``fit_mode="reml", search_fit_mode="fit"`` selects ``p`` under
             ordinary ML and then publishes one REML fit at the selected ``p``,
             which is the cost of a single smoothing-parameter search rather than
-            one per candidate. Dispersion is re-profiled against the published
-            fit, so the returned estimates describe the model you get back.
-            Selecting ``p`` under a different objective than the one that
-            publishes it is an approximation: measure it on your own data before
-            relying on it. Likelihood-ratio confidence intervals are refused for
-            a decoupled run, because the interval inverts the profile that was
-            searched and no longer describes the published fit.
+            one per candidate. In either coupling the published fit is
+            publication-grade: candidate fits only rank powers and run at the
+            loose search tolerance, while the published refit runs the tight
+            publication default and re-profiles dispersion against its own
+            fitted mean, so the returned estimates describe the model you get
+            back. Selecting ``p`` under a different objective than the one that
+            publishes it is an approximation -- on the synthetic benchmark
+            fixture it moved ``p_hat`` by 3.2e-5 while running about 5x faster
+            -- so measure it on your own data before relying on it. A decoupled
+            search also never meets the certifiable-region boundary a coupled
+            REML search must route around (a coupled run warns when its optimum
+            is pinned against that boundary), at the price that the publication
+            refit may instead fail at the selected ``p`` with a typed error
+            naming the ways out. Likelihood-ratio confidence intervals remain
+            available either way; they invert the searched profile, so they
+            describe the regime named by ``search_fit_mode``.
         phi_method : {"pearson", "mle"}
             How to profile out Tweedie dispersion ``phi`` at each candidate ``p``.
             ``"mle"`` (default) maximizes the likelihood in ``phi``; the joint
