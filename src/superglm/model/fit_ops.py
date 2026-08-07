@@ -69,6 +69,10 @@ logger = logging.getLogger(__name__)
 _VALID_REML_INTERACTION_MODES = {"full", "fast_candidate"}
 _VALID_RUNTIME_VALIDATION_MODES = {"auto", "full", "skip"}
 _FAST_CANDIDATE_REML_ITER_CAP = 5
+# Screening candidates are ranked, never published; under the 5-iteration cap
+# the tight publication default cannot buy determination -- it only burns an
+# extra Newton iteration and flips converged flags in screening logs.
+_FAST_CANDIDATE_REML_TOL = 1e-6
 _AUTO_RUNTIME_VALIDATION_MAX_ROWS = 100_000
 
 __all__ = [
@@ -1233,6 +1237,8 @@ def _fit_reml_in_workspace(
     _profile.update(_resolve_interaction_reml_mode(model, interaction_mode, max_reml_iter))
     _validate_runtime_validation_mode(runtime_validation)
     effective_max_reml_iter = _profile["effective_max_reml_iter"]
+    if _profile["interaction_candidate_active"] and reml_tol is None:
+        reml_tol = _FAST_CANDIDATE_REML_TOL
 
     _t0 = _time.perf_counter()
     y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)

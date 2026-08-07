@@ -595,10 +595,19 @@ def _run_end_to_end_profile_once(
     elapsed = time.perf_counter() - started
 
     trace_density_passes = int(result.search_trace["phi_n_evaluations"].sum())
-    assert trace_density_passes == inner_density_passes
+    # Publication re-profiles dispersion against the published refit, so the
+    # instrumented count exceeds the search trace by exactly those passes:
+    # result-level counters hold the winning evaluation plus the reprofile.
+    winning_idx = (result.search_trace["p"] - float(result.p_hat)).abs().idxmin()
+    winning_passes = int(result.search_trace.loc[winning_idx, "phi_n_evaluations"])
+    publication_reprofile_passes = int(result.phi_n_evaluations) - winning_passes
+    assert publication_reprofile_passes >= 0
+    assert trace_density_passes + publication_reprofile_passes == inner_density_passes
     assert len(density_calls) >= inner_density_passes
     if mode == "reference-bounded-inner":
-        assert len(local_optimizer_successes) == result.n_evaluations
+        # One inner solve per search evaluation, plus exactly one more for the
+        # publication's dispersion re-profile against the published refit.
+        assert len(local_optimizer_successes) == result.n_evaluations + 1
         assert not result.search_trace["phi_converged"].any()
         local_inner_optimizer_success = all(local_optimizer_successes)
     else:

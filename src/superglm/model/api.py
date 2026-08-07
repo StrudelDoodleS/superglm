@@ -563,8 +563,12 @@ class SuperGLM:
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
             it resolves per engine: 1e-9 for the Newton engines (exact and
-            discrete), 1e-6 for the EFS-family engines (SCOP and fits with an
-            L1 component). An explicit value reaches the engine verbatim.
+            discrete -- every ``fit_reml`` model without SCOP constraints),
+            1e-6 for the step-criterion engines (the SCOP path). An explicit
+            value reaches the engine verbatim. Candidate-grade fits
+            (``interaction_mode="fast_candidate"`` and power-search
+            candidates inside ``estimate_p``) pin 1e-6 themselves: they are
+            ranked, never published.
 
             The Newton engines stop when the projected log-lambda gradient
             and the objective change both fall below
@@ -574,11 +578,15 @@ class SuperGLM:
             and the standard errors computed from them -- underdetermined
             long before predictions are affected: at 1e-6, a converged fit on
             a synthetic 12k-row stress design publishes a worst-coefficient
-            SE 92% away from the determined answer; 1e-9 pins it to ~0.01%
-            for a handful of extra quadratically-convergent iterations. The
-            EFS-family engines stop on a per-step lambda-change bound, which
-            has no such scale dependence; tightening them buys no
-            determination at linear-rate cost, so their default stays 1e-6.
+            SE 92% away from the determined answer; 1e-9 pins it to ~0.01%,
+            measured at 3->7 extra Newton iterations on a 97k benchmark
+            fixture and 5->13 on that stress design. The SCOP engine stops on
+            a per-step lambda-change bound with no such scale dependence --
+            tightening it buys no determination at linear-rate cost -- and
+            additionally accepts an objective-plateau exit (relative change
+            below 1e-6 with the step below 0.01) that ``reml_tol`` does not
+            govern, so an explicit tight value does not guarantee a tighter
+            SCOP stop.
         pirls_tol : float, optional
             Inner PIRLS/IRLS convergence tolerance. Defaults to
             constructor ``tol`` (1e-6). Pass explicitly to override.

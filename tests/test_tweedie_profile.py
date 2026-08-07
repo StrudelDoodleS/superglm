@@ -2612,16 +2612,19 @@ class TestEstimatePFitMode:
 
         # The returned handle may remain convenient and cache-compatible, but
         # mutating its public estimate fields must not rewrite installed fit
-        # provenance or the model's reporting state.
+        # provenance or the model's reporting state. The installed phi is the
+        # dispersion re-profiled against the published refit, not the stub's
+        # 7.25 -- capture it symbolically rather than pinning the stub value.
+        installed_phi = float(model._tweedie_profile_result.phi_hat)
         returned.p_hat = 1.91
         returned.phi_hat = 91.0
         returned._ci_cache[0.05] = (1.85, 1.95)
         assert model._tweedie_profile_result.p_hat == pytest.approx(1.47)
-        assert model._tweedie_profile_result.phi_hat == pytest.approx(7.25)
+        assert model._tweedie_profile_result.phi_hat == pytest.approx(installed_phi)
         assert model._tweedie_profile_result._ci_cache == {}
         immutable_summary = model.summary()
         assert immutable_summary._info["tweedie_p"] == pytest.approx(1.47)
-        assert immutable_summary._info["tweedie_phi"] == pytest.approx(7.25)
+        assert immutable_summary._info["tweedie_phi"] == pytest.approx(installed_phi)
         assert immutable_summary._info["tweedie_p_ci_status"] == "not computed"
 
     @pytest.mark.parametrize("fit_mode", ["fit", "reml"])
@@ -3092,8 +3095,10 @@ class TestEstimatePFitMode:
         assert winning_row["p"] == pytest.approx(result.p_hat)
         # The trace row describes the search-tolerance candidate fit; the
         # published model is the tight publication refit at p_hat. Their edf
-        # gap is the smoothing determination the publication repays.
-        assert winning_row["edf"] == pytest.approx(model.result.effective_df, abs=0.05)
+        # gap is the smoothing determination the publication repays -- 0.0064
+        # on this fixture, so 0.02 bounds it at ~3x without absorbing a real
+        # edf regression.
+        assert winning_row["edf"] == pytest.approx(model.result.effective_df, abs=0.02)
         assert model.result.phi == pytest.approx(result.phi_hat, rel=1e-12, abs=1e-12)
         assert result.density_exact
         assert result.n_saddlepoint == 0
@@ -3155,6 +3160,14 @@ class TestEstimatePFitMode:
             p_hat = 1.45
             phi_hat = 1.0
             _objective = None
+            # Publication re-profiles dispersion on every estimate_p run, so
+            # the double carries the fields the re-profiler reads and bumps.
+            search_nll = None
+            nll = 0.0
+            phi_n_evaluations = 0
+            phi_n_score_evaluations = 0
+            phi_n_value_only_evaluations = 0
+            phi_n_fallback_evaluations = 0
 
         def fake_estimate_tweedie_p(*args, **kwargs):
             calls.append(kwargs["fit_mode"])
@@ -3441,14 +3454,18 @@ class TestDecoupledSearchConfidenceInterval:
 
         assert result._profile_reference_nll() != result.nll
 
-    def test_a_coupled_search_is_unaffected(self):
+    def test_a_coupled_search_also_reprofiles_against_its_publication(self):
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
         model = self._reml_model()
 
         result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
 
-        # Nothing was re-profiled, so the reference is the published value.
-        assert result._profile_reference_nll() == result.nll
+        # The publication refit runs at the tight publication tolerance while
+        # candidates ran at the search bar, so the published dispersion is
+        # re-profiled in coupled mode too; the searched value stays behind as
+        # the reference the CI and plots measure against.
+        assert result.search_nll is not None
+        assert result._profile_reference_nll() == result.search_nll
 
     def test_a_pre_reference_pickle_falls_back_to_the_published_value(self):
         """A result pickled before this field existed must still invert."""

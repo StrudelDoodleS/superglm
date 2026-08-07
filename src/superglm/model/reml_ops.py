@@ -302,6 +302,12 @@ def model_run_reml_once(
 ):
     """Run a single REML fixed-point outer loop from a chosen initial lambda scale."""
     from superglm.model.base import rebuild_dm_with_lambdas
+    from superglm.model.reml_execute import resolve_reml_tol
+
+    # runner.py compares max_change < reml_tol, so the None sentinel must be
+    # resolved here like every other engine entry -- forwarding it verbatim
+    # would TypeError.
+    reml_tol = resolve_reml_tol(reml_tol, engine="newton" if use_direct else "step")
 
     result, dm = run_reml_once(
         model._dm,

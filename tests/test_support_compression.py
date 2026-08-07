@@ -410,7 +410,7 @@ def test_compression_does_not_change_fitted_results(monkeypatch):
     weights = rng.uniform(0.2, 1.0, n)
     response = rng.poisson(0.2, n) / weights
 
-    def fit():
+    def fit(reml_tol):
         model = SuperGLM(
             family="poisson",
             selection_penalty=None,
@@ -418,17 +418,21 @@ def test_compression_does_not_change_fitted_results(monkeypatch):
             features={"age": Spline(kind="ps", k=10), "bm": Spline(kind="ps", k=10)},
         )
         model._add_interaction("age", "bm")
-        # Explicit loose tolerance: compression only reorders floating-point
-        # accumulation, but under the tight publication bar the optimizer
-        # walks the flat tensor direction long enough for that reordering to
-        # separate the two lambda paths at ~1e-7 in coefficients. The gate's
-        # subject is that compression is storage-only along a matched
-        # optimizer path, which the loose bar keeps matched.
-        return model.fit_reml(frame, response, sample_weight=weights, reml_tol=1e-6)
+        return model.fit_reml(frame, response, sample_weight=weights, reml_tol=reml_tol)
 
-    compressed = fit()
+    # Two regimes, two claims. At a matched loose bar both arms stop on the
+    # same optimizer path, so compression must be coordinate-exact (beta to
+    # 1e-8). At the shipped default the optimizer walks the flat tensor
+    # direction far enough that accumulation-order roundoff separates the two
+    # lambda paths at ~1e-7 in beta -- coordinate agreement structurally
+    # cannot hold there -- but everything the user consumes must still match:
+    # measured gaps at the default are 5.9e-11 (predictions), 8.2e-13
+    # (deviance), 1.4e-9 (edf).
+    compressed = fit(1e-6)
+    compressed_default = fit(None)
     monkeypatch.setattr(_group_matrix_support, "detect_row_support", lambda *a, **k: None)
-    uncompressed = fit()
+    uncompressed = fit(1e-6)
+    uncompressed_default = fit(None)
 
     np.testing.assert_allclose(
         compressed.result.beta, uncompressed.result.beta, rtol=1e-8, atol=1e-8
@@ -438,6 +442,18 @@ def test_compression_does_not_change_fitted_results(monkeypatch):
         compressed.metrics(frame, response, sample_weight=weights).effective_df,
         uncompressed.metrics(frame, response, sample_weight=weights).effective_df,
         rtol=1e-6,
+    )
+
+    np.testing.assert_allclose(
+        compressed_default.predict(frame), uncompressed_default.predict(frame), rtol=5e-9
+    )
+    np.testing.assert_allclose(
+        compressed_default.result.deviance, uncompressed_default.result.deviance, rtol=5e-11
+    )
+    np.testing.assert_allclose(
+        compressed_default.metrics(frame, response, sample_weight=weights).effective_df,
+        uncompressed_default.metrics(frame, response, sample_weight=weights).effective_df,
+        atol=1e-7,
     )
 
 

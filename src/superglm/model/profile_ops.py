@@ -191,7 +191,11 @@ def estimate_p(
         final_model,
         y,
         result,
-        reprofile_phi=decoupled,
+        # Both modes publish a refit whose settings differ from the candidate
+        # fits -- decoupled by regime, coupled by the publication tolerance --
+        # so the published dispersion is profiled against the published mean
+        # in both. search_nll keeps the searched curve for the CI and plots.
+        reprofile_phi=True,
         phi_method=phi_method,
     )
     if not model._retain_fit_state:
@@ -278,14 +282,16 @@ def _replace_pirls_phi(result, phi):
 
 
 def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, phi_method) -> None:
-    """Re-profile dispersion against the published fit after a decoupled search.
+    """Re-profile dispersion against the published fit.
 
-    The search profiled phi at its own mode's fitted mean. When the publication
-    runs under a different regime that mean no longer exists in the model being
-    returned, so carrying the search's phi across would hand back a dispersion
-    estimated from coefficients the caller never receives. Re-profile at the
-    published mean instead, and move the objective with it so the reported
-    likelihood still refers to the reported estimates.
+    The search profiled phi at its own candidate fits' fitted means. The
+    publication refit never reproduces those fits: a decoupled run publishes
+    under a different regime entirely, and a coupled run publishes at the
+    tight publication tolerance while candidates ran at the search bar.
+    Carrying the search's phi across would hand back a dispersion estimated
+    from coefficients the caller never receives. Re-profile at the published
+    mean instead, and move the objective with it so the reported likelihood
+    still refers to the reported estimates.
     """
     from superglm.profiling.tweedie import _profile_phi_detailed
 
