@@ -197,6 +197,9 @@ def estimate_p(
         # in both. search_nll keeps the searched curve for the CI and plots.
         reprofile_phi=True,
         phi_method=phi_method,
+        # The canonical public mean: on discretized models the internal
+        # design's matvec is a binned approximation of it.
+        public_mu=final_model.predict(X, offset=offset),
     )
     if not model._retain_fit_state:
         final_model._retain_fit_state = False
@@ -335,6 +338,7 @@ def _synchronize_tweedie_profile_refit(
     *,
     reprofile_phi: bool = False,
     phi_method: str = "mle",
+    public_mu=None,
 ) -> None:
     """Atomically synchronize a retained final refit to the profiled dispersion."""
     from superglm.distributions import clip_mu
@@ -359,7 +363,14 @@ def _synchronize_tweedie_profile_refit(
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), distribution)
     if reprofile_phi:
-        _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, phi_method)
+        # On a discretized model the internal design's matvec is a binned
+        # approximation of the mean callers get from predict(); the published
+        # dispersion must be profiled at the public mean, so the caller passes
+        # it in. The internal mu remains the fallback for direct invocations.
+        reprofile_mu = mu if public_mu is None else np.asarray(public_mu, dtype=np.float64)
+        _reprofile_published_dispersion(
+            model, y_arr, weights, reprofile_mu, profile_result, phi_method
+        )
     null_mu = _compute_null_mu(y_arr, weights, offset_arr, distribution, model._link)
     fit_stats = _compute_fit_stats(
         y_arr,

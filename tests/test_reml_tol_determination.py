@@ -270,6 +270,44 @@ class TestRunnerPathSentinel:
 
 
 class TestPublicationDispersion:
+    def test_discrete_publication_profiles_phi_at_the_public_mean(self):
+        """On a binned model the internal design's mean is an approximation;
+        the published dispersion must be profiled at the mean callers get
+        from predict(), not at the binned matvec."""
+        from superglm import Spline as _Spline
+        from superglm.profiling.tweedie import _profile_phi_detailed
+
+        rng = np.random.default_rng(11)
+        n = 4_000
+        frame = pd.DataFrame(
+            {"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)}
+        )
+        eta = 0.4 * np.sin(4.0 * frame["x1"].to_numpy()) + 0.3 * frame["x2"].to_numpy() - 0.6
+        y = np.where(rng.random(n) < 0.5, 0.0, rng.gamma(1.4, np.exp(eta) * 3.0, n))
+
+        model = SuperGLM(
+            family=families.tweedie(p=1.5),
+            selection_penalty=0,
+            discrete=True,
+            n_bins=64,
+            features={"x1": _Spline(kind="cr", n_knots=8), "x2": _Spline(kind="cr", n_knots=8)},
+        )
+        result = model.estimate_p(frame, y, fit_mode="reml")
+
+        mu = np.asarray(model.predict(frame), dtype=float)
+        edf = float(model.result.effective_df)
+        oracle = _profile_phi_detailed(
+            np.asarray(y, dtype=float),
+            mu,
+            float(result.p_hat),
+            weights=np.ones(n),
+            df_resid=max(float(n) - edf, 1.0),
+            phi_method="mle",
+            phi_start=float(result.phi_hat),
+        )
+
+        assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
+
     def test_coupled_publication_profiles_phi_against_the_published_fit(self):
         """The published phi must describe the published fit, not the candidate.
 
