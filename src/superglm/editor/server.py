@@ -351,6 +351,7 @@ def _bound_local_socket() -> socket.socket:
 def _profile_options(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "fit_mode",
+        "search_fit_mode",
         "phi_method",
         "method",
         "xatol",

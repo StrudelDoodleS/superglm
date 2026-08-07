@@ -15,13 +15,24 @@ from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 logger = logging.getLogger(__name__)
 
 
-def _publication_mode_failure(exc, *, parameter, value, decoupled) -> RuntimeError:
+class PublicationModeError(RuntimeError):
+    """The publication refit could not certify a penalized coefficient mode.
+
+    Subclasses ``RuntimeError`` so pre-existing broad handlers keep working;
+    the dedicated type lets callers route this recoverable certifiability
+    condition without string matching. The certification failure that caused
+    it is chained as ``__cause__``.
+    """
+
+
+def _publication_mode_failure(exc, *, parameter, value, decoupled) -> PublicationModeError:
     """Turn a mode-certification failure at the publish refit into guidance.
 
-    The search either never evaluated REML at the selected point (decoupled) or
-    evaluated it under trial smoothing parameters that differ from the final
-    ones, so publication is where this can first surface. Left untranslated,
-    the caller gets an internal certification message with no mention of which
+    The search either never evaluated REML at the selected point (a decoupled
+    p search, and every theta search -- alternating ML fits) or evaluated it
+    under trial smoothing parameters that differ from the final ones, so
+    publication is where this can first surface. Left untranslated, the
+    caller gets an internal certification message with no mention of which
     point failed or what to do about it.
     """
     score = getattr(exc, "relative_max", float("inf"))
@@ -30,26 +41,39 @@ def _publication_mode_failure(exc, *, parameter, value, decoupled) -> RuntimeErr
         if np.isfinite(score)
         else "PIRLS found no converged penalized mode"
     )
-    if decoupled:
-        how = (
-            f"The ML search selected {parameter}={value:.6g} without evaluating REML "
-            "certifiability, and the REML publication refit cannot certify a "
-            f"penalized mode there ({achieved})."
-        )
-    else:
-        how = (
-            f"The search certified {parameter}={value:.6g}, but the publication refit "
-            f"-- which runs at the final smoothing parameters -- cannot ({achieved})."
-        )
-    return RuntimeError(
-        f"{how}\n"
+    region = (
         "  The certifiable region is a property of this data; its boundary moves "
         "with the realisation and cannot be widened by solver settings.\n"
-        "  Options: fit_mode='reml' searches only certifiable points (it may warn "
-        "that the optimum is boundary-censored); fit_mode='fit' publishes the ML "
-        f"fit at the selected {parameter}; or restrict p_bounds away from the "
-        "failing region."
     )
+    if parameter == "theta":
+        how = (
+            f"The theta search selected theta={value:.6g} through alternating ML fits "
+            "without evaluating REML certifiability, and the REML publication refit "
+            f"cannot certify a penalized mode there ({achieved})."
+        )
+        options = (
+            "  Options: fit_mode='fit' publishes the ML fit at the selected theta; "
+            "or restrict theta_bounds away from the failing region."
+        )
+    else:
+        if decoupled:
+            how = (
+                f"The ML search selected {parameter}={value:.6g} without evaluating REML "
+                "certifiability, and the REML publication refit cannot certify a "
+                f"penalized mode there ({achieved})."
+            )
+        else:
+            how = (
+                f"The search certified {parameter}={value:.6g}, but the publication refit "
+                f"-- which runs at the final smoothing parameters -- cannot ({achieved})."
+            )
+        options = (
+            "  Options: fit_mode='reml' searches only certifiable points (it may warn "
+            "that the optimum is boundary-censored); fit_mode='fit' publishes the ML "
+            f"fit at the selected {parameter}; or restrict p_bounds away from the "
+            "failing region."
+        )
+    return PublicationModeError(f"{how}\n{region}{options}")
 
 
 def estimate_p(
@@ -325,6 +349,17 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
     profile_result.phi_fallback_reason = phi_result.fallback_reason
     profile_result.phi_branch_switch_detected = bool(phi_result.branch_switch_detected)
     profile_result.phi_message = str(phi_result.message)
+    # The published dispersion is this re-profile, so its status must be the
+    # published status: a boundary hit, a fallback, or a non-convergent
+    # profile here cannot hide behind the search's clean record.
+    from superglm.profiling.tweedie import _phi_boundary_label
+
+    profile_result.phi_boundary = _phi_boundary_label(phi_result)
+    if not phi_result.converged or phi_result.used_fallback:
+        detail = "did not converge" if not phi_result.converged else "used a fallback"
+        profile_result.warnings = list(profile_result.warnings) + [
+            f"published dispersion re-profile {detail}: {phi_result.message}"
+        ]
     profile_result.phi_n_evaluations += phi_result.n_evaluations
     profile_result.phi_n_score_evaluations += phi_result.n_score_evaluations
     profile_result.phi_n_value_only_evaluations += phi_result.n_value_only_evaluations

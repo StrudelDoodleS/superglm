@@ -135,17 +135,35 @@ def model_complaints(model, label: str) -> list[str]:
     result = getattr(model, "result", None)
     if result is not None and getattr(result, "converged", True) is False:
         complaints.append(f"{label}: result.converged=False")
+    # Every model reaching this helper is meant to be a published REML fit,
+    # so a missing or broken diagnostics payload is itself a complaint --
+    # treating it as "not REML" would let a regression that bypasses REML
+    # still present successful timings.
     try:
         diagnostics = model.reml_diagnostics()
-    except Exception:  # not a REML fit; nothing further to check
+    except Exception as exc:
+        complaints.append(f"{label}: reml_diagnostics unavailable ({type(exc).__name__}: {exc})")
         return complaints
-    if diagnostics.get("converged") is False:
-        complaints.append(f"{label}: reml_diagnostics converged=False")
+    if diagnostics.get("enabled") is not True:
+        complaints.append(f"{label}: reml_diagnostics enabled={diagnostics.get('enabled')!r}")
+        return complaints
+    if diagnostics.get("converged") is not True:
+        complaints.append(
+            f"{label}: reml_diagnostics converged={diagnostics.get('converged')!r}"
+        )
     return complaints
+
+
+def published_backend(model) -> str:
+    """The solver backend the published fit actually ran on."""
+    solver = model._solver_pirls_result()
+    return str(getattr(solver, "direct_backend", None) or "unknown")
 
 
 def _run(label: str, fn, results: dict) -> float:
     """Time one leg, capturing any Python warning it raises as a complaint."""
+    import resource
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         start = time.perf_counter()
@@ -153,7 +171,16 @@ def _run(label: str, fn, results: dict) -> float:
         elapsed = time.perf_counter() - start
     complaints = list(payload.pop("complaints", []))
     complaints += [f"python warning: {w.category.__name__}: {w.message}" for w in caught]
-    results[label] = {"seconds": elapsed, "complaints": complaints, **payload}
+    # Process high-water mark: monotone across legs, so only growth at the
+    # leg that first reaches it is attributable -- recorded so a memory
+    # regression is at least visible, never silently absorbed.
+    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    results[label] = {
+        "seconds": elapsed,
+        "complaints": complaints,
+        "peak_rss_mb": peak_rss_mb,
+        **payload,
+    }
     return elapsed
 
 
@@ -189,6 +216,14 @@ def main() -> None:
         return {
             "p_hat": float(r.p_hat),
             "phi_hat": float(r.phi_hat),
+            # The timed operation publishes model.fit_reml, so record what it
+            # publishes. Its dispersion estimator differs from the profile's
+            # (plain fit_reml publishes its solver dispersion, the profile
+            # publishes MLE-profiled phi), so equivalence is gated on the
+            # estimator-free published deviance instead.
+            "published_phi": float(model.result.phi),
+            "published_deviance": float(model.result.deviance),
+            "backend": published_backend(model),
             "power_steps": int(r.n_evaluations),
             "phi_evals": int(r.phi_n_evaluations),
             "method": str(r.method),
@@ -209,6 +244,8 @@ def main() -> None:
         return {
             "p_hat": float(r.p_hat),
             "phi_hat": float(r.phi_hat),
+            "published_deviance": float(model.result.deviance),
+            "backend": published_backend(model),
             "power_steps": int(r.n_evaluations),
             "phi_evals": int(r.phi_n_evaluations),
             "method": str(r.method),
@@ -222,6 +259,7 @@ def main() -> None:
         diagnostics = model.reml_diagnostics()
         return {
             "n_reml_iter": diagnostics.get("n_reml_iter"),
+            "backend": published_backend(model),
             "profile": {
                 k: round(v, 4)
                 for k, v in (diagnostics.get("profile") or {}).items()
@@ -266,17 +304,55 @@ def main() -> None:
             f"  {label:<20}p_hat={results[label]['p_hat']!r}  phi_hat={results[label]['phi_hat']!r}"
         )
 
+    print("\nbackend and memory (peak RSS is a process high-water mark, monotone across legs):")
+    for label, row in results.items():
+        line = f"  {label:<20}peak_rss={row.get('peak_rss_mb', 0.0):8.1f}MB"
+        if row.get("backend"):
+            line += f"  backend={row['backend']}"
+        print(line)
+    backends = {
+        label: results[label]["backend"] for label in results if results[label].get("backend")
+    }
+    if len(set(backends.values())) > 1:
+        results["single_fit_reml"]["complaints"].append(
+            f"published REML legs ran on different solver backends: {backends}"
+        )
+
+    # The two-step leg and the decoupled leg publish the same model up to the
+    # search's p resolution, so their published deviances must agree; their
+    # dispersions legitimately differ by estimator (solver dispersion vs
+    # MLE-profiled), so phi is printed, not gated.
+    dev_two = results["two_step"]["published_deviance"]
+    dev_dec = results["decoupled_search"]["published_deviance"]
+    published_gap = abs(dev_two - dev_dec) / max(abs(dev_dec), 1e-300)
+    print(
+        f"\npublished two-step vs decoupled: deviance rel gap {published_gap:.2e} "
+        f"(gate 1e-4), phi {results['two_step']['published_phi']:.4f} vs "
+        f"{results['decoupled_search']['phi_hat']:.4f} (different estimators, not gated)"
+    )
+    if published_gap > 1e-4:
+        results["two_step"]["complaints"].append(
+            f"published two-step deviance drifts from the decoupled publication "
+            f"by {published_gap:.3e} relative (gate 1e-4)"
+        )
+
     print("\nanswer check vs reference:")
     drifted = False
-    for label, reference in REFERENCE.items():
-        dp = abs(results[label]["p_hat"] - reference["p_hat"])
-        dphi = abs(results[label]["phi_hat"] - reference["phi_hat"])
-        ok = dp <= P_TOL and dphi <= PHI_TOL
-        drifted |= not ok
+    if args.rows != N_ROWS:
         print(
-            f"  {label:<20}p delta={dp:.2e} (tol {P_TOL:.0e})  "
-            f"phi delta={dphi:.2e} (tol {PHI_TOL:.0e})  -> {'OK' if ok else 'CHANGED -- REGRESSION'}"
+            f"  skipped: --rows={args.rows:,} is a different statistical problem than "
+            f"the reference constants (calibrated at {N_ROWS:,} rows)"
         )
+    else:
+        for label, reference in REFERENCE.items():
+            dp = abs(results[label]["p_hat"] - reference["p_hat"])
+            dphi = abs(results[label]["phi_hat"] - reference["phi_hat"])
+            ok = dp <= P_TOL and dphi <= PHI_TOL
+            drifted |= not ok
+            print(
+                f"  {label:<20}p delta={dp:.2e} (tol {P_TOL:.0e})  "
+                f"phi delta={dphi:.2e} (tol {PHI_TOL:.0e})  -> {'OK' if ok else 'CHANGED -- REGRESSION'}"
+            )
 
     all_complaints = [(label, c) for label, r in results.items() for c in r["complaints"]]
     print("\nconvergence check:")
