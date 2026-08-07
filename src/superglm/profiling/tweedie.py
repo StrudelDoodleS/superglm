@@ -4947,7 +4947,6 @@ def _joint_ml_fallback_to_brent(
     ctx._exact_failure_cache.clear()
 
     result = _search_brent(ctx, p_bounds, xatol, maxiter)
-    result.requested_method = "joint_ml"
     prefix = f"Exact joint fast path fell back to Brent: {reason}."
     result.outer_message = " ".join(part for part in (prefix, result.outer_message) if part)
     return result
@@ -5026,6 +5025,37 @@ def _validate_joint_profile_record(
     validated_record = replace(record, phi_result=validated_phi)
     ctx._evaluation_cache[record.p] = validated_record
     return validated_record, None
+
+
+def _ml_context_is_unpenalized(ctx) -> bool:
+    """True only for configurations where mu is a free ML maximum.
+
+    The joint fast path differentiates the power score at fixed mu, which is
+    the total derivative only where the dmu/dp term vanishes by the envelope
+    theorem -- a free ML maximum. Any coefficient penalty breaks that: a
+    lambda2-smoothed term makes mu a penalized mode and the joint solve
+    converges on the wrong stationarity condition (measured 5.8e-4 p_hat
+    drift on a flat-lambda synthetic stress design, 1.0e-5 on the benchmark
+    fixture -- growing with penalty strength). lambda2 only reaches groups
+    that carry smoothing structure, whose marker is the SSP
+    reparametrisation; Numeric and Categorical group matrices have none and
+    are measurably lambda2-inert under ``fit``. Anything with that structure,
+    or an active selection penalty, counts as penalized, so
+    misclassification can only cost speed, never the root.
+    """
+    from superglm.model.base import normalize_selection_penalty
+
+    lam1 = normalize_selection_penalty(getattr(ctx.penalty, "lambda1", None))
+    if lam1 == "auto" or (lam1 is not None and float(lam1) != 0.0):
+        return False
+    lam2 = ctx.lambda2
+    if isinstance(lam2, dict):
+        lam2_active = any(float(v) != 0.0 for v in lam2.values())
+    else:
+        lam2_active = lam2 is not None and float(lam2) != 0.0
+    if not lam2_active:
+        return True
+    return not any(getattr(gm, "R_inv", None) is not None for gm in ctx.dm.group_matrices)
 
 
 def _search_joint_ml(
@@ -5498,7 +5528,6 @@ def estimate_tweedie_p(
             # independent reference optimum, while running ~1.9x faster. Speed
             # bought with the wrong root is not a speedup; do not re-enable.
             result = _search_brent(ctx, p_bounds, xatol, maxiter)
-            result.requested_method = "joint_ml"
             result.outer_message = " ".join(
                 (
                     "Exact joint fast path fell back to Brent because fit_reml requires "
@@ -5506,10 +5535,26 @@ def estimate_tweedie_p(
                     result.outer_message,
                 )
             )
+        elif not _ml_context_is_unpenalized(ctx):
+            # Same identity, same failure: the fixed-mu power score is the
+            # total derivative only at a free ML maximum, and a penalized
+            # term leaves the dmu/dp term alive. See _ml_context_is_unpenalized.
+            result = _search_brent(ctx, p_bounds, xatol, maxiter)
+            result.outer_message = " ".join(
+                (
+                    "Exact joint fast path fell back to Brent because the model is "
+                    "penalized: with smoothed terms mu is a penalized mode, not the "
+                    "free ML maximum the joint power score requires.",
+                    result.outer_message,
+                )
+            )
         else:
             result = _search_joint_ml(ctx, p_bounds, xatol, maxiter)
     else:
         result = _search_profile_opt(ctx, p_bounds, optimizer, xatol, maxiter)
+    # What ran is result.method; what the caller asked for -- "auto"
+    # included -- is preserved verbatim for every dispatch path.
+    result.requested_method = method
 
     # The regime every candidate p was evaluated under. `estimate_p` may
     # publish under a different one, and overwrites `fit_mode` when it does.
