@@ -5662,6 +5662,7 @@ def estimate_tweedie_p(
         n_grid_coarse,
         xatol,
         None if winner_record is None else winner_record.source,
+        winner_p=float(result.p_hat),
     )
     censoring = _boundary_censoring_message(
         float(result.p_hat), getattr(ctx, "_infeasible_powers", None), xatol=search_resolution
@@ -5685,19 +5686,30 @@ def _censoring_search_resolution(
     n_grid_coarse: int,
     xatol: float,
     winner_source: str | None,
+    winner_p: float | None = None,
 ) -> float:
     """The resolution the winning record was actually located to.
 
-    A pure grid winner is resolved to the grid's spacing. A grid_refine
-    winner is normally the Brent refinement (xatol) -- but when the refined
-    candidate is invalid and a coarse-stage point wins the global selection,
-    that winner was resolved only to the coarse spacing, and judging its
-    boundary distance at xatol would silence the censoring warning the same
-    way the pure-grid bug did.
+    A pure grid winner is resolved to the spacing LOCAL to it -- the wider
+    of its two adjacent gaps in the sorted explicit grid. Judging a winner
+    in a finely spaced neighborhood at the grid's global maximum gap would
+    let one large gap elsewhere censor it against walls many local steps
+    away. A grid_refine winner is normally the Brent refinement (xatol) --
+    but when the refined candidate is invalid and a coarse-stage point wins
+    the global selection, that winner was resolved only to the coarse
+    spacing, and judging its boundary distance at xatol would silence the
+    censoring warning the same way the pure-grid bug did.
     """
     if resolved_method == "grid":
         if grid is not None and len(np.asarray(grid)) > 1:
-            return float(np.max(np.diff(np.sort(np.asarray(grid, dtype=float)))))
+            ordered = np.sort(np.asarray(grid, dtype=float))
+            gaps = np.diff(ordered)
+            if winner_p is not None:
+                position = int(np.argmin(np.abs(ordered - float(winner_p))))
+                adjacent = gaps[max(position - 1, 0) : position + 1]
+                if adjacent.size:
+                    return float(np.max(adjacent))
+            return float(np.max(gaps))
         return (p_bounds[1] - p_bounds[0]) / max(int(n_grid) - 1, 1)
     if resolved_method == "grid_refine" and winner_source == "grid_coarse":
         coarse_step = (p_bounds[1] - p_bounds[0]) / max(int(n_grid_coarse) - 1, 1)

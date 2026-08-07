@@ -611,3 +611,31 @@ class TestSCOPModeFailuresAreRoutable:
         from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
         assert scop_module.ObservedModeNotCertifiedError is ObservedModeNotCertifiedError
+
+
+class TestIrregularGridCensoringResolution:
+    def test_resolution_is_local_to_the_winner_not_the_global_max_gap(self):
+        """On a nonuniform explicit grid, one large gap far from the winner
+        must not inflate the censoring resolution: a winner in a finely
+        spaced neighborhood is resolved to ITS spacing, and judging it at
+        the global maximum would censor against walls many local steps
+        away."""
+        from superglm.profiling.tweedie import _censoring_search_resolution
+
+        grid = [1.05, 1.10, 1.12, 1.14, 1.90]
+        bounds = (1.05, 1.95)
+
+        interior = _censoring_search_resolution(
+            "grid", grid, bounds, 20, 10, 1e-3, "grid", winner_p=1.12
+        )
+        assert interior == pytest.approx(0.02)
+
+        endpoint = _censoring_search_resolution(
+            "grid", grid, bounds, 20, 10, 1e-3, "grid", winner_p=1.05
+        )
+        assert endpoint == pytest.approx(0.05)
+
+        wide_side = _censoring_search_resolution(
+            "grid", grid, bounds, 20, 10, 1e-3, "grid", winner_p=1.90
+        )
+        assert wide_side == pytest.approx(0.76)

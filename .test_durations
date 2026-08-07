@@ -4366,6 +4366,7 @@
   "tests/test_reml_search_infeasible_mode.py::TestCIAtTheCertifiabilityWall::test_a_wall_inside_the_lr_region_censors_the_endpoint": 0.8,
   "tests/test_reml_search_infeasible_mode.py::TestInitializationSearchesRouteAroundInfeasiblePoints::test_infeasible_initialization_points_are_routed_around[grid_refine-p_bounds0]": 6.0,
   "tests/test_reml_search_infeasible_mode.py::TestInitializationSearchesRouteAroundInfeasiblePoints::test_infeasible_initialization_points_are_routed_around[profile_opt-p_bounds1]": 6.0,
+  "tests/test_reml_search_infeasible_mode.py::TestIrregularGridCensoringResolution::test_resolution_is_local_to_the_winner_not_the_global_max_gap": 0.05,
   "tests/test_reml_search_infeasible_mode.py::TestPublicationModeFailure::test_publish_failure_is_a_typed_routable_error": 0.6,
   "tests/test_reml_search_infeasible_mode.py::TestPublicationModeFailure::test_the_coupled_failure_does_not_recommend_itself": 0.05,
   "tests/test_reml_search_infeasible_mode.py::TestPublicationModeFailure::test_the_typed_error_is_public_api": 0.05,
