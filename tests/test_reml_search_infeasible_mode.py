@@ -414,3 +414,70 @@ class TestBoundaryCensoringWarning:
         _model(features).estimate_p(frame, y, sample_weight=weights, offset=offset, fit_mode="reml")
 
         assert not [w for w in recwarn.list if "censored" in str(w.message)]
+
+
+class TestCIAtTheCertifiabilityWall:
+    """_profile_ci_p_detailed treats uncertifiable probes as the profile's
+    boundary. Exercised on a synthetic deterministic objective: the REML
+    evaluation stack's candidate-grade nll is warm-start path-dependent at
+    LR scale, so an end-to-end wall fixture is flaky by construction (that
+    determinism defect is the criterion redesign's scope); the wall logic
+    itself is pure and pins exactly here."""
+
+    @staticmethod
+    def _machinery(wall: float):
+        from superglm.profiling.tweedie import _INFEASIBLE_PROFILE_NLL
+
+        infeasible: dict[float, str] = {}
+        p_hat = 1.5
+
+        def objective(p: float) -> float:
+            key = float(p)
+            if key > wall:
+                infeasible[key] = "penalized mode not certifiable"
+                return _INFEASIBLE_PROFILE_NLL
+            # LR = 2 * ll_scale * (nll - nll_hat) crosses the 95% cutoff
+            # (3.841) at |p - p_hat| ~ 0.05 with ll_scale=1000.
+            return 1.0 + 0.768 * (key - p_hat) ** 2
+
+        return p_hat, objective, infeasible
+
+    def test_a_wall_inside_the_lr_region_censors_the_endpoint(self):
+        from superglm.profiling.tweedie import _profile_ci_p_detailed
+
+        p_hat, objective, infeasible = self._machinery(wall=1.52)
+        details = _profile_ci_p_detailed(
+            objective,
+            p_hat,
+            objective(p_hat),
+            1000.0,
+            alpha=0.05,
+            p_range=(1.05, 1.95),
+            infeasible_reason=infeasible.get,
+        )
+
+        assert details.upper.status == "censored"
+        assert 1.52 - 1e-3 <= details.upper.value <= 1.52
+        assert any("censored" in w for w in details.warnings)
+        # The lower side never meets the wall and roots normally.
+        assert details.lower.status == "root_found"
+        assert details.lower.value == pytest.approx(1.45, abs=2e-3)
+
+    def test_a_crossing_before_the_wall_still_roots_normally(self):
+        from superglm.profiling.tweedie import _profile_ci_p_detailed
+
+        p_hat, objective, infeasible = self._machinery(wall=1.60)
+        details = _profile_ci_p_detailed(
+            objective,
+            p_hat,
+            objective(p_hat),
+            1000.0,
+            alpha=0.05,
+            p_range=(1.05, 1.95),
+            infeasible_reason=infeasible.get,
+        )
+
+        assert details.upper.status == "root_found"
+        assert details.upper.value == pytest.approx(1.55, abs=2e-3)
+        assert details.lower.status == "root_found"
+        assert not any("censored" in w for w in details.warnings)
