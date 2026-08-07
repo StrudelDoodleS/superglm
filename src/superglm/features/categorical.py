@@ -49,23 +49,37 @@ def _validate_categorical_levels(x: NDArray, known_levels: set, *, context: str 
     context : str, optional
         Feature name for error message context.
     """
-    # Check for missing values before np.unique — np.unique raises TypeError
-    # on mixed object arrays like ["B", np.nan].
-    if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in x):
+    import pandas as pd
+
+    # Missing values are checked before the level scan: a NaN beside strings is
+    # a broken column, not an unseen level, and it should say so.
+    #
+    # `pd.isna` is a C-level scan and is true for everything this check owns
+    # (None, float NaN) plus a wider family it does not -- pd.NA, pd.NaT, a NaN
+    # that is not a Python float. Those are unseen LEVELS, and the report has to
+    # name them rather than blame the column, so pd.isna cannot be the answer.
+    # As a pre-filter it is exact for every value pandas recognises as null: a
+    # vector pandas calls clean proves the narrow test below is clean too, and
+    # only a column that actually holds something null pays for the per-element
+    # scan that keeps the boundary where it is. The gap is a value pandas does
+    # not recognise -- it asks `v != v`, so a float subclass that compares equal
+    # to itself is a NaN the narrow test would have caught and the pre-filter
+    # skips. Nothing that reads a real column produces one.
+    if np.asarray(pd.isna(x)).any() and any(
+        v is None or (isinstance(v, float) and np.isnan(v)) for v in x
+    ):
         msg = "Categorical column contains missing values (NaN or None)."
         if context:
             msg = f"[{context}] {msg}"
         raise ValueError(msg)
 
-    try:
-        observed = set(np.unique(x).tolist())
-    except TypeError:
-        # np.unique sorts, and an object column holding more than one type has no
-        # order: `["MISSING", 1]` raises TypeError comparing str to int. Membership
-        # is all this function needs, so fall back to a plain set. Kept as a
-        # fallback rather than the default because np.unique is much faster on the
-        # homogeneous columns that are the common case.
-        observed = set(np.asarray(x).ravel().tolist())
+    # Hash, don't sort. Membership is all this function needs, and `np.unique`
+    # buys it with an O(n log n) sort that on an object column runs every
+    # comparison through the interpreter. Hashing also removes the reason the
+    # old sorting path needed a fallback: an object column holding more than one
+    # type has no order (`["MISSING", 1]` raised TypeError comparing str to int)
+    # but it hashes like any other.
+    observed = set(pd.unique(np.asarray(x).ravel()).tolist())
     _validate_observed_categorical_levels(
         observed,
         known_levels,
