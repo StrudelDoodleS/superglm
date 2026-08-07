@@ -24,7 +24,11 @@ from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
-from superglm.reml.observed_geometry import classify_scop_reml_curvature
+from superglm.reml.observed_geometry import (
+    ObservedModeNotCertifiedError,
+    ObservedModeNotConvergedError,
+    classify_scop_reml_curvature,
+)
 from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     compute_logdet_s_derivatives,
@@ -984,11 +988,17 @@ def _fit_scop_reml_mode(
             )
         if require_converged:
             return None
-        raise RuntimeError(
-            "SCOP coefficient mode failed latent penalized-score certification "
-            f"(relative score={mode_score.relative_max:.3e}, "
-            f"relative Newton correction={mode_newton_relative:.3e}, "
-            f"tolerance={mode_tolerance:.3e})"
+        # Typed like the observed-geometry gates: to a power search this is
+        # "no usable penalized mode at this point", an infeasible power to
+        # route around, not a dead search. The SCOP-specific detail rides in
+        # the hint; invariant-violation raises above stay bare RuntimeError.
+        raise ObservedModeNotCertifiedError(
+            mode_score.relative_max,
+            mode_tolerance,
+            hint=(
+                "SCOP latent mode certification: relative Newton correction="
+                f"{mode_newton_relative:.3e}."
+            ),
         )
     if trace_run is not None and trace_run.enabled:
         if result.state_id is None:  # pragma: no cover - trace contract
@@ -1408,7 +1418,9 @@ def fit_fixed_scop_reml(
         require_converged=True,
     )
     if mode is None:
-        raise RuntimeError("fixed-lambda SCOP fit did not converge to a coefficient mode")
+        raise ObservedModeNotConvergedError(
+            "fixed-lambda SCOP fit did not converge to a coefficient mode"
+        )
     result = _finalize_scop_reml_mode(context, mode)
     step_norms = {
         state["group_name"]: float(state.get("last_step_norm", 0.0))
@@ -1657,7 +1669,9 @@ def optimize_scop_efs_reml(
         require_converged=True,
     )
     if boot_mode is None:
-        raise RuntimeError("SCOP REML bootstrap did not converge to a coefficient mode")
+        raise ObservedModeNotConvergedError(
+            "SCOP REML bootstrap did not converge to a coefficient mode"
+        )
     boot_result = boot_mode.result
     boot_scop_states = boot_mode.scop_states
     all_pcs = boot_mode.penalty_components
@@ -1756,7 +1770,9 @@ def optimize_scop_efs_reml(
                     reml_iteration=n_reml_iter,
                 )
                 if rescue is None:
-                    raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
+                    raise ObservedModeNotConvergedError(
+                        "SCOP REML candidate did not converge to a coefficient mode"
+                    )
                 current_mode, lambdas, rescue_alpha = rescue
                 # The failed proposal was never fitted; the history entry for
                 # this step becomes the damped vector actually adopted, so
@@ -1951,7 +1967,9 @@ def optimize_scop_efs_reml(
         # payload row above carries candidate_backoff_alpha and
         # candidate_backoff_endorsed for anyone debugging which stage stalled.
         if rescue_endorsed is False:
-            raise RuntimeError("SCOP REML candidate did not converge to a coefficient mode")
+            raise ObservedModeNotConvergedError(
+                "SCOP REML candidate did not converge to a coefficient mode"
+            )
 
         if not candidate_accepted:
             termination_reason = "line_search_stalled"
@@ -1993,7 +2011,9 @@ def optimize_scop_efs_reml(
                 require_converged=True,
             )
             if final_mode is None:
-                raise RuntimeError("SCOP REML final fit did not converge to a coefficient mode")
+                raise ObservedModeNotConvergedError(
+                    "SCOP REML final fit did not converge to a coefficient mode"
+                )
 
     final_result = _finalize_scop_reml_mode(fit_context, final_mode)
     final_scop_states = final_mode.scop_states
