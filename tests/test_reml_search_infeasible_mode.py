@@ -539,3 +539,42 @@ class TestCIAtTheCertifiabilityWall:
         assert details.lower.status == "root_found"
         assert details.lower.value == pytest.approx(1.45, abs=2e-3)
         assert not any("censored" in w for w in details.warnings)
+
+
+class TestStaleInfeasibilityMarkers:
+    def test_a_successful_retry_clears_the_stale_marker(self, monkeypatch):
+        """An infeasible power leaves a marker but no cached record, so a
+        later evaluation refits; if that retry succeeds under a different
+        warm-start state, the marker must go -- otherwise censoring warns
+        against a now-valid point and the CI treats it as a wall."""
+        from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+
+        frame, y, weights, offset, features = _fixture(3_000)
+        real_fit_reml = SuperGLM.fit_reml
+        failures = {"n": 0}
+
+        def failing_once_below_11(self, X, yv, **kwargs):
+            # The 1.05 bracket endpoint is naturally FEASIBLE on this
+            # fixture (its real walls sit near the upper bound), so the
+            # injected one-shot failure is the only reason for its marker
+            # and the retry genuinely succeeds.
+            if float(getattr(self.family, "p", 0.0)) < 1.1 and failures["n"] == 0:
+                failures["n"] += 1
+                raise ObservedModeNotConvergedError()
+            return real_fit_reml(self, X, yv, **kwargs)
+
+        monkeypatch.setattr(SuperGLM, "fit_reml", failing_once_below_11)
+
+        result = _model(features).estimate_p(
+            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
+        )
+
+        walls = result._infeasible_reason.__self__
+        assert failures["n"] == 1
+        assert min(walls) < 1.1
+        p_bad = min(walls)
+
+        value = float(result._objective(p_bad))
+
+        assert np.isfinite(value) and value < 1e49
+        assert p_bad not in walls

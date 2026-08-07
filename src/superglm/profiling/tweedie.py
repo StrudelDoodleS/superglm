@@ -4416,6 +4416,11 @@ class _ProfileContextREML:
             reml_converged=reml_converged,
         )
         self._evaluation_cache[key] = record
+        # A marker without a record means "the last attempt here failed";
+        # this attempt succeeded (a retry under different warm-start state),
+        # so the stale marker must go -- otherwise censoring warns against a
+        # now-valid point and the CI treats it as a certifiability wall.
+        self._infeasible_powers.pop(key, None)
 
         if self.trace_callback is not None and source:
             self.trace_callback(_materialize_profile_trace_row(record))
