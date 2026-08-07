@@ -481,3 +481,61 @@ class TestCIAtTheCertifiabilityWall:
         assert details.upper.value == pytest.approx(1.55, abs=2e-3)
         assert details.lower.status == "root_found"
         assert not any("censored" in w for w in details.warnings)
+
+    @staticmethod
+    def _lower_machinery(wall: float):
+        from superglm.profiling.tweedie import _INFEASIBLE_PROFILE_NLL
+
+        infeasible: dict[float, str] = {}
+        p_hat = 1.5
+
+        def objective(p: float) -> float:
+            key = float(p)
+            if key < wall:
+                infeasible[key] = "penalized mode not certifiable"
+                return _INFEASIBLE_PROFILE_NLL
+            return 1.0 + 0.768 * (key - p_hat) ** 2
+
+        return p_hat, objective, infeasible
+
+    def test_a_lower_wall_is_bisected_not_left_at_a_scan_point(self):
+        """The feasibility loop must use the unsigned wall distance: powers
+        DECREASE toward a lower wall, and a signed comparison never enters
+        the loop, leaving the censored endpoint at whatever coarse scan
+        candidate preceded the wall instead of at the wall itself."""
+        from superglm.profiling.tweedie import _profile_ci_p_detailed
+
+        p_hat, objective, infeasible = self._lower_machinery(wall=1.48)
+        details = _profile_ci_p_detailed(
+            objective,
+            p_hat,
+            objective(p_hat),
+            1000.0,
+            alpha=0.05,
+            p_range=(1.05, 1.95),
+            infeasible_reason=infeasible.get,
+        )
+
+        assert details.lower.status == "censored"
+        assert 1.48 <= details.lower.value <= 1.48 + 1e-3
+        assert any("censored" in w for w in details.warnings)
+        assert details.upper.status == "root_found"
+        assert details.upper.value == pytest.approx(1.55, abs=2e-3)
+
+    def test_a_crossing_above_a_lower_wall_still_roots_normally(self):
+        from superglm.profiling.tweedie import _profile_ci_p_detailed
+
+        p_hat, objective, infeasible = self._lower_machinery(wall=1.40)
+        details = _profile_ci_p_detailed(
+            objective,
+            p_hat,
+            objective(p_hat),
+            1000.0,
+            alpha=0.05,
+            p_range=(1.05, 1.95),
+            infeasible_reason=infeasible.get,
+        )
+
+        assert details.lower.status == "root_found"
+        assert details.lower.value == pytest.approx(1.45, abs=2e-3)
+        assert not any("censored" in w for w in details.warnings)
