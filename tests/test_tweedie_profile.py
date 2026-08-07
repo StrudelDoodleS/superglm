@@ -3325,21 +3325,6 @@ class TestDecoupledSearchFitMode:
         assert defaulted.phi_hat == pytest.approx(coupled.phi_hat, rel=1e-12)
         assert defaulted.search_fit_mode == "fit_reml"
 
-    def test_decoupled_search_rejects_likelihood_ratio_ci(self):
-        X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        model = self._reml_model()
-
-        with pytest.raises(RuntimeError, match="profile searched"):
-            model.estimate_p(
-                X,
-                y,
-                sample_weight=sample_weight,
-                offset=offset,
-                fit_mode="reml",
-                search_fit_mode="fit",
-                ci_alpha=0.05,
-            )
-
     def test_invalid_search_fit_mode_is_rejected(self):
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
         model = self._reml_model()
@@ -3471,6 +3456,32 @@ class TestDecoupledSearchConfidenceInterval:
         restored.__setstate__(state)
 
         assert restored._profile_reference_nll() == restored.nll
+
+    def test_eager_ci_alpha_matches_the_lazy_interval_on_a_decoupled_run(self):
+        """`ci_alpha=` and `result.ci()` are one computation and must agree.
+
+        7d2f745 withdrew the lazy refusal but the eager gate in
+        `profile_ops.estimate_p` predates it; left in place it refuses at the
+        call site the very interval the returned object hands out. The eager
+        interval is computed after publication records `search_nll`, so it has
+        the same searched reference the lazy path uses.
+        """
+        X, y, sample_weight, offset = _offset_spline_tweedie_data()
+        model = self._reml_model()
+
+        result = model.estimate_p(
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            fit_mode="reml",
+            search_fit_mode="fit",
+            ci_alpha=0.05,
+        )
+
+        lower, upper = result.ci(alpha=0.05)
+        assert lower < result.p_hat < upper
+        assert 0.05 in result._ci_cache
 
     def test_the_trace_plot_measures_the_searched_curve_against_its_own_optimum(self):
         """The plotted deviance is the same subtraction the CI makes.

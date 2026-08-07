@@ -241,9 +241,11 @@ objective than the one that publishes it. On the synthetic benchmark fixture in
 by 3.2e-5, but that is a property of that surface, not a guarantee — compare
 against `fit_mode="reml"` alone on your own data before adopting it.
 
-Likelihood-ratio confidence intervals are refused for a decoupled run, eagerly
-via `ci_alpha` and lazily via `result.ci()`. The interval inverts the profile
-that was searched, and that profile is not the one the published fit lies on.
+Likelihood-ratio confidence intervals remain available for a decoupled run,
+both eagerly via `ci_alpha` and lazily via `result.ci()`. The interval inverts
+the profile that was searched, around that profile's own value at `p_hat` — so
+it describes the regime named by `search_fit_mode`, not the published one. For
+a coupled run the two regimes coincide and the distinction is empty.
 
 ### Profile confidence interval
 

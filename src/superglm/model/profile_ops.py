@@ -55,16 +55,11 @@ def estimate_p(
             "profiling (phi_method='mle'); use bootstrap/sandwich inference for "
             "Pearson plug-in profiles."
         )
-    if resolved_ci_alpha is not None and decoupled:
-        # The interval inverts the profile that was actually searched. Handing
-        # one back for a fit published under a different regime would attach a
-        # correct-looking number to a curve the published model never traced.
-        raise RuntimeError(
-            f"A likelihood-ratio profile CI describes the profile searched "
-            f"(search_fit_mode={search_fit_mode!r}), so it cannot be reported for a "
-            f"model published under fit_mode={fit_mode!r}; request the interval from a "
-            f"run whose search and publication agree, or drop ci_alpha."
-        )
+    # A decoupled run is entitled to an eager interval: `result.ci` inverts the
+    # searched objective around its own recorded value at ``p_hat``
+    # (``search_nll``), and the eager call below runs only after publication
+    # has recorded it. Refusing here while the returned object hands out the
+    # same interval lazily would be a contradiction, not a safeguard.
 
     X_ref = X
     y_ref = y
