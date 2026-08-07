@@ -35,6 +35,22 @@ from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import SymmetricBlockOperator
 from superglm.types import GroupSlice, PenaltyComponent
 
+# The Newton engines' active-set freeze bar never drops below this floor,
+# whatever reml_tol the caller asked for. Freezing classifies GEOMETRY --
+# "is this direction informative at all" -- and an inferentially flat
+# direction stays flat however precisely the informative lambdas are
+# located. Coupling the bar to 0.1*reml_tol alone meant the tight 1e-9
+# default un-froze the null directions the historical 1e-6 default froze at
+# exactly this value; unfrozen, they march geometrically toward the lambda
+# cap, paying 8-15 extra iterations, publishing platform-dependent lambda
+# values, and exhausting the line search at tight tolerances. Calibration,
+# measured at the endgame across three fixtures (2026-08-07 spec): null
+# directions reach |H_ii|/scale <= 3.3e-9; the tightest informative
+# direction (the flat-lambda stress smooths, the very directions the
+# determination work pins) sits at 1.5e-6 -- three orders of magnitude of
+# separation around 1e-7.
+FLAT_DIRECTION_FREEZE_FLOOR = 1e-7
+
 
 @dataclass(frozen=True)
 class REMLObjectiveEvaluation:

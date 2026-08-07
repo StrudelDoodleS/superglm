@@ -25,7 +25,11 @@ from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
+from superglm.reml.objective import (
+    FLAT_DIRECTION_FREEZE_FLOOR,
+    REMLObjectiveEvaluation,
+    reml_laml_objective,
+)
 from superglm.reml.penalty_algebra import (
     build_penalty_context,
     build_penalty_matrix,
@@ -526,6 +530,12 @@ def optimize_discrete_reml_cached_w(
 
     # === POI loop: one PIRLS step + one Newton lambda step ===
     prev_obj = np.inf
+    # Frozen directions from the previous iteration's active-set decision:
+    # the stop criterion judges the ACTIVE set. An inferentially flat frozen
+    # direction keeps a tiny persistent gradient forever (that is what makes
+    # it flat), and counting it would spin the loop doing nothing until
+    # max_reml_iter with every informative direction long determined.
+    stop_criterion_frozen_d = None
     for poi_iter in range(max_reml_iter):
         rho_clipped = np.clip(rho, log_lo, log_hi)
         cand_lambdas = lambdas.copy()
@@ -726,11 +736,16 @@ def optimize_discrete_reml_cached_w(
             log_lower=log_lo,
             log_upper=log_hi,
         )
+        stop_grad_d = (
+            proj_grad_d
+            if stop_criterion_frozen_d is None
+            else np.where(stop_criterion_frozen_d, 0.0, proj_grad_d)
+        )
         candidate_convergence = evaluate_reml_candidate(
             iteration=poi_iter,
             objective=obj,
             previous_objective=prev_obj,
-            projected_gradient=proj_grad_d,
+            projected_gradient=stop_grad_d,
             tolerance=_tol,
         )
         score_scale_d = candidate_convergence.score_scale
@@ -768,8 +783,11 @@ def optimize_discrete_reml_cached_w(
             tensor_pair_evaluations=cand_tensor_pair_evals,
         )
 
-        # Active-set: freeze components with negligible gradient and Hessian
-        freeze_tol_d = 0.1 * _tol
+        # Active-set: freeze components with negligible gradient and Hessian.
+        # The floor keeps the bar a geometric classifier: see its definition.
+        # The discrete engine's 1e-12 tolerance floor made this bar 1e-13 --
+        # three decades below where its own flat directions live.
+        freeze_tol_d = max(0.1 * _tol, FLAT_DIRECTION_FREEZE_FLOOR)
         frozen_d = np.zeros(m, dtype=bool)
         for i in range(m):
             if not estimated_mask[i]:
@@ -781,6 +799,19 @@ def optimize_discrete_reml_cached_w(
             ):
                 frozen_d[i] = True
         active_idx_d = np.where(~frozen_d)[0]
+        stop_criterion_frozen_d = frozen_d.copy()
+        if profile is not None:
+            # The freeze decision separates informative directions from
+            # inferentially flat ones; the per-direction quantities it
+            # judged are the calibration evidence for its bar. Overwritten
+            # each iteration: what survives is the LAST decision.
+            profile["reml_freeze_decision"] = {
+                "names": list(group_names),
+                "proj_grad": [float(abs(v)) for v in proj_grad_d],
+                "hess_diag": [float(hess[i, i]) for i in range(m)],
+                "score_scale": float(score_scale_d),
+                "frozen": [bool(v) for v in frozen_d],
+            }
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
         if active_idx_d.size == 0:

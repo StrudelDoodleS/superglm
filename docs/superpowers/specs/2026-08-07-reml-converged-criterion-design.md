@@ -80,3 +80,53 @@ change); `converged` flips False->True on march-exhaustion
 line_search_failed cases. Every flip gets root-caused individually; py310
 lane check at merge-base. Branch: `reml-converged-criterion`, stacked on
 PR #243's head.
+
+## What shipped (2026-08-08)
+
+The implementation deviated from the sketch in three places, each toward a
+smaller mechanism the endgame measurements justified:
+
+1. **Freeze floor instead of march detection.** Both Newton engines already
+   had the flat-direction freeze (the spec was wrong that direct.py lacked
+   it); the defect was its bar, `0.1 * reml_tol`, which the 1e-9 default
+   dragged to 1e-10 -- un-freezing what the historical 1e-6 default froze.
+   Design item 1's k-consecutive-iteration march detector became a
+   tolerance-independent floor: `freeze_tol = max(0.1 * reml_tol, 1e-7)`
+   (`FLAT_DIRECTION_FREEZE_FLOOR` in objective.py, calibration in its
+   comment). No symmetric lambda->0 clause: no evidence appeared.
+
+2. **Active-set stop by masking, not a new step criterion.** Design item 2's
+   tau_step criterion was unnecessary: masking the previous iteration's
+   frozen directions out of the gradient fed to the existing compound
+   criterion (both Newton engines) stops the loop as soon as the active set
+   is determined. A frozen direction's persistent sub-floor gradient
+   otherwise spins the loop to max_reml_iter doing nothing -- measured 37
+   wasted iterations on the discrete benign fixture.
+
+3. **Endgame classification measures the CURRENT active set only.** A dead
+   feasible line search classifies `converged_at_precision` when every
+   currently-active gradient sits under the floor. The drafted
+   objective-change condition was wrong in principle: the last accepted
+   step belongs to a since-frozen flat direction whenever one just crossed
+   the freeze bar (measured 7.9e-5 on tensor_600 at 1e-11 -- march
+   history, not active-set evidence), and the dead search itself already
+   proves no further objective progress exists.
+
+4. **SCOP plateau gated on contraction stall** (design item 4's
+   measure-then-decide, decided): the plateau exit may fire only after two
+   consecutive iterations fail to contract the max log-lambda step below
+   0.9x the previous one. Measured on the 4000-row monotone fixture, the
+   ungated plateau granted converged=True at iteration 5 with lambda still
+   walking ~1%/iteration and the strict 1e-9 road reachable at iteration
+   15; the noise-floor stall it exists to classify measures ratio ~1.05
+   (400-row variant). The 0.5 ratio first tried was too blunt -- a steady
+   0.6-ratio EFS tail is still buying precision.
+
+5. **Publication budget**: `estimate_p(max_reml_iter=...)` reaches the REML
+   publication refit only; candidate fits keep their budget; a pure-ML
+   publication refuses the parameter rather than hosting an inert knob.
+
+Not shipped here: `lambda2_init` is silently discarded by the SCOP EFS
+bootstrap (measured: identical 16-digit trajectories under None and 1e4) --
+an inert-parameter finding of the same family as the SCOP `convergence`
+parameter, left for its own decision.

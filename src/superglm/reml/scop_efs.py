@@ -69,6 +69,19 @@ _MULTI_SCOP_DISCRETE_LOG_STEP_TOL = 1.0e-3
 _MULTI_SCOP_DISCRETE_MIN_STABLE_ITERS = 3
 _MULTI_SCOP_DISCRETE_ACTIVE_PLATEAU_TOL = 5.0e-3
 _MULTI_SCOP_DISCRETE_OBJ_REL_TOL = 1.0e-6
+# The plateau exit is the step engine's achievable-precision endgame: it may
+# grant convergence only once EFS steps have STOPPED contracting, i.e.
+# further iterations no longer buy precision. While steps still contract,
+# the loop continues toward the strict ``max_change < reml_tol`` road
+# instead of being pre-empted at the plateau's fixed thresholds. Calibration
+# (2026-08-07, monotone PSpline + cr smooth): at the machinery noise floor
+# steps go 1.9e-5 -> 2.0e-5 (ratio 1.05, a genuine stall set by inner-mode
+# noise), while a steadily linear EFS tail contracts at ratio ~0.6 with the
+# lambda still walking one percent per iteration -- so the stall bar sits
+# at 0.9, and two consecutive stalled observations are required so one
+# noisy non-contraction cannot grant convergence mid-progress.
+_SCOP_EFS_PLATEAU_STALL_RATIO = 0.9
+_SCOP_EFS_PLATEAU_MIN_STALLED_ITERS = 2
 _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS = 8
 _SCOP_EFS_MAX_REFLECTED_ATTEMPTS = 4
 
@@ -1756,6 +1769,11 @@ def optimize_scop_efs_reml(
     active_names: set[str] = set(estimated_names)
     frozen_names: set[str] = set()
     stable_counts: dict[str, int] = {name: 0 for name in managed_cleanup_names}
+    # Max accepted log-lambda step of the previous iteration plus a count of
+    # consecutive non-contracting observations: the plateau exit uses them
+    # to tell "still buying precision" from "stalled at the noise floor".
+    prev_accepted_max_change: float | None = None
+    plateau_stall_count = 0
 
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
@@ -1927,10 +1945,25 @@ def optimize_scop_efs_reml(
 
         # Converge on strict lambda tolerance
         strict_converged = candidate_accepted and max_change < reml_tol
+        # An iteration still contracting the step is still buying precision;
+        # the plateau may only classify a stalled endgame, never pre-empt
+        # the strict road. With no previous accepted step there is no stall
+        # evidence, so the plateau stays closed.
+        if candidate_accepted:
+            if (
+                prev_accepted_max_change is not None
+                and max_change >= _SCOP_EFS_PLATEAU_STALL_RATIO * prev_accepted_max_change
+            ):
+                plateau_stall_count += 1
+            else:
+                plateau_stall_count = 0
+            prev_accepted_max_change = max_change
+        steps_stalled = plateau_stall_count >= _SCOP_EFS_PLATEAU_MIN_STALLED_ITERS
         if managed_cleanup_active:
             plateau_converged = (
                 candidate_accepted
                 and n_reml_iter >= 3
+                and steps_stalled
                 and _multi_scop_discrete_plateau_converged(
                     obj_rel_change=obj_rel_change,
                     lambdas_old=lambdas,
@@ -1942,6 +1975,7 @@ def optimize_scop_efs_reml(
             plateau_converged = (
                 candidate_accepted
                 and n_reml_iter >= 3
+                and steps_stalled
                 and obj_rel_change < 1e-6
                 and max_change < 0.01
             )
@@ -1964,6 +1998,7 @@ def optimize_scop_efs_reml(
                     "objective_relative_change": float(obj_rel_change),
                     "strict_converged": bool(strict_converged),
                     "plateau_converged": bool(plateau_converged),
+                    "plateau_steps_stalled": bool(steps_stalled),
                     "candidate_accepted": bool(candidate_accepted),
                     "candidate_backoff_alpha": rescue_alpha,
                     "candidate_backoff_endorsed": rescue_endorsed,

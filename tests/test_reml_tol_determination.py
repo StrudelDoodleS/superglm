@@ -812,3 +812,210 @@ class TestCertificationBar:
         bar = observed_mode_certification_bar()
         assert bar == max(1e-9, 100.0 * np.finfo(float).eps)
         assert not inspect.signature(observed_mode_certification_bar).parameters
+
+
+class TestFreezeDiagnostics:
+    def test_the_profile_records_the_last_freeze_decision(self):
+        """The active-set freeze is the mechanism that separates informative
+        directions from inferentially flat ones; calibrating its bar needs
+        the per-direction gradient and curvature it judged, recorded on the
+        profile the way the resolved tolerance already is."""
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.fit_reml(frame, y, runtime_validation="skip")
+
+        profile = model._reml_profile
+        freeze = profile["reml_freeze_decision"]
+        assert set(freeze) == {"names", "proj_grad", "hess_diag", "score_scale", "frozen"}
+        assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
+        assert len(freeze["frozen"]) == len(freeze["names"])
+        assert float(freeze["score_scale"]) > 0.0
+        assert all(np.isfinite(v) for v in freeze["proj_grad"])
+
+
+class TestFlatDirectionFloor:
+    """The freeze bar classifies geometry, not precision.
+
+    freeze_tol = 0.1 * reml_tol coupled "is this direction informative"
+    (a property of the curvature) to "how precisely locate the optimum".
+    Tightening the default to 1e-9 dragged the bar to 1e-10 and un-froze
+    the inferentially flat directions the historical 1e-6 default froze at
+    1e-7 -- which then march geometrically toward the lambda cap, paying
+    8-15 extra iterations, publishing platform-dependent lambda values, and
+    exhausting the line search at tight tolerances. Measured separation at
+    the endgame: null directions |H_ii|/scale <= 3.3e-9, the tightest
+    informative direction 1.5e-6 -- three orders of magnitude around the
+    1e-7 floor.
+    """
+
+    def test_null_directions_freeze_at_the_default_tolerance(self):
+        """benign_3k's x2 smooth is inferentially null (max SE identical at
+        every tolerance); it must freeze instead of marching to the cap."""
+        rng = np.random.default_rng(5)
+        n = 3_000
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.4 * np.sin(5.0 * frame["x1"].to_numpy()) + 0.2 * frame["x2"].to_numpy()
+        y = rng.poisson(np.exp(eta)).astype(float)
+
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=8),
+                "x2": Spline(kind="cr", n_knots=8),
+            },
+        )
+        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+
+        r = model._reml_result
+        freeze = model._reml_profile["reml_freeze_decision"]
+        frozen = dict(zip(freeze["names"], freeze["frozen"]))
+        assert r.converged
+        assert frozen["x2"], "the null direction must freeze, not march"
+        assert not frozen["x1"]
+        # No march: the loose-default iteration count, not 16+.
+        assert int(r.n_reml_iter) <= 12
+        # The informative lambda is where every tolerance rung puts it.
+        assert float(r.lambdas["x1"]) == pytest.approx(0.0809, rel=0.05)
+
+    def test_the_tensor_endgame_no_longer_exhausts_the_line_search(self):
+        """tensor_600 at reml_tol=1e-11 previously marched its null margins
+        until line_search_failed with converged=False; with the flat
+        directions frozen the active set is determined and the fit
+        converges cleanly."""
+        rng = np.random.default_rng(99)
+        n = 600
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.5 + np.sin(2 * np.pi * x1) + 0.3 * x2
+        y = rng.poisson(np.exp(eta)).astype(float)
+        frame = pd.DataFrame({"x1": x1, "x2": x2})
+
+        model = SuperGLM(
+            family="poisson",
+            features={"x1": Spline(kind="cr", n_knots=6), "x2": Spline(kind="cr", n_knots=6)},
+            interactions=[("x1", "x2")],
+        )
+        model.fit_reml(
+            frame,
+            y,
+            sample_weight=np.ones(n),
+            runtime_validation="skip",
+            reml_tol=1e-11,
+            max_reml_iter=200,
+        )
+
+        r = model._reml_result
+        assert r.converged
+        assert str(getattr(r, "termination_reason", "")) != "line_search_failed"
+
+    def test_informative_slow_directions_do_not_freeze(self):
+        """flat_12k's stress smooths are the tightest informative curvature
+        (|H_ii|/scale ~ 1.5e-6): they are exactly what the determination
+        work exists to pin, and the floor must not freeze them."""
+        frame, y, weights, offset, features = _flat_lambda_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
+
+        r = model._reml_result
+        freeze = model._reml_profile["reml_freeze_decision"]
+        frozen = dict(zip(freeze["names"], freeze["frozen"]))
+        assert r.converged
+        assert not frozen["f6"]
+        assert not frozen["f7"]
+
+
+class TestSCOPPlateauExit:
+    """The EFS plateau exit may not pre-empt an actively contracting fit.
+
+    The plateau road (``obj_rel < 1e-6 and max_change < 0.01``) used fixed
+    thresholds with no notion of progress, so it granted ``converged=True``
+    at the identical point for reml_tol 1e-6 through 1e-11. Measured on the
+    4000-row monotone fixture (2026-08-07): the EFS tail contracts at ratio
+    ~0.6 per iteration with lambda still walking one percent per iteration
+    -- and the plateau fired mid-walk at iteration 5. Its honest role is
+    the step-engine analog of ``converged_at_precision``: classify the
+    endgame where steps have STOPPED contracting (noise-floor stall,
+    measured ratio ~1.05 on the 400-row variant), never an exit taken
+    while iterations are still buying precision.
+    """
+
+    @staticmethod
+    def _monotone_fixture(n):
+        from superglm import Constraint, CubicRegressionSpline
+
+        rng = np.random.default_rng(11)
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = 0.3 + 1.1 * np.log1p(3.0 * x1) + 0.35 * np.sin(2 * np.pi * x2)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        frame = pd.DataFrame({"x1": x1, "x2": x2})
+        features = {
+            "x1": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing),
+            "x2": CubicRegressionSpline(n_knots=8),
+        }
+        return frame, y, features
+
+    def test_the_plateau_does_not_preempt_a_contracting_tail(self):
+        """Pre-fix, this fit exited objective_plateau at iteration 5 with
+        the lambda still moving a percent per iteration; the gated plateau
+        keeps iterating until progress genuinely stops (or the strict road
+        is reached), whichever the machinery supports."""
+        frame, y, features = self._monotone_fixture(4_000)
+        model = SuperGLM(family="poisson", features=features)
+        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-9, max_reml_iter=40)
+
+        r = model._reml_result
+        assert r.converged
+        assert str(r.termination_reason) in {"lambda_tolerance", "objective_plateau"}
+        assert int(r.n_reml_iter) > 6
+
+    def test_the_strict_road_wins_when_the_tolerance_is_reachable(self):
+        """Exit ordering: a reachable reml_tol terminates as lambda_tolerance,
+        not as a plateau classification."""
+        frame, y, features = self._monotone_fixture(400)
+        model = SuperGLM(family="poisson", features=features)
+        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-3)
+
+        r = model._reml_result
+        assert r.converged
+        assert str(r.termination_reason) == "lambda_tolerance"
+
+    def test_an_unreachable_tolerance_classifies_as_plateau(self):
+        """Below the machinery noise floor (steps stall near 2e-5 on this
+        fixture), the honest exit is the plateau classification with
+        converged=True -- the step-engine converged_at_precision."""
+        frame, y, features = self._monotone_fixture(400)
+        model = SuperGLM(family="poisson", features=features)
+        model.fit_reml(frame, y, runtime_validation="skip", reml_tol=1e-11, max_reml_iter=60)
+
+        r = model._reml_result
+        assert r.converged
+        assert str(r.termination_reason) == "objective_plateau"
+
+
+class TestPublicationREMLBudget:
+    """estimate_p owns its publication refit budget.
+
+    The publication REML refit ran at a fixed max_reml_iter=20 no caller
+    could change: passing max_reml_iter into estimate_p died with a
+    TypeError inside the search machinery instead of reaching the refit.
+    The budget routes to the PUBLICATION refit alone -- candidate search
+    fits keep their own loose-bar budget -- and a non-REML publication
+    mode refuses it rather than letting it sit inert.
+    """
+
+    def test_the_budget_reaches_the_publication_refit(self):
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(frame, y, fit_mode="reml", search_fit_mode="fit", max_reml_iter=1)
+
+        # One outer iteration can never satisfy the two-evaluation
+        # convergence contract: the budget provably bound the refit.
+        assert int(model._reml_result.n_reml_iter) == 1
+        assert result.reml_converged is False
+
+    def test_a_pure_ml_publication_refuses_the_reml_budget(self):
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        with pytest.raises(ValueError, match="max_reml_iter"):
+            model.estimate_p(frame, y, fit_mode="fit", max_reml_iter=5)

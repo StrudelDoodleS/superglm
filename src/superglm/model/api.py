@@ -577,21 +577,31 @@ class SuperGLM:
 
             The Newton engines stop when the projected log-lambda gradient
             and the objective change both fall below
-            ``reml_tol * (1 + |objective|)``. That bar grows with the
-            objective's magnitude while the gradient along a flat log-lambda
-            direction does not, so loose values leave smoothing parameters --
-            and the standard errors computed from them -- underdetermined
-            long before predictions are affected: at 1e-6, a converged fit on
-            a synthetic 12k-row stress design publishes a worst-coefficient
-            SE 92% away from the determined answer; 1e-9 pins it to ~0.01%,
-            measured at 3->7 extra Newton iterations on a 97k benchmark
-            fixture and 5->13 on that stress design. The SCOP engine stops on
-            a per-step lambda-change bound with no such scale dependence --
-            tightening it buys no determination at linear-rate cost -- and
-            additionally accepts an objective-plateau exit (relative change
-            below 1e-6 with the step below 0.01) that ``reml_tol`` does not
-            govern, so an explicit tight value does not guarantee a tighter
-            SCOP stop.
+            ``reml_tol * (1 + |objective|)``, judged over the ACTIVE
+            directions: inferentially flat directions -- gradient and
+            curvature both below a fixed 1e-7 noise floor ``reml_tol`` does
+            not drag -- are frozen where they stand rather than marched
+            toward the lambda cap, and the per-direction freeze decision is
+            recorded in ``reml_diagnostics()`` under
+            ``profile["reml_freeze_decision"]``. Loose values still leave
+            the informative smoothing parameters -- and the standard errors
+            computed from them -- underdetermined long before predictions
+            are affected: at 1e-6, a converged fit on a synthetic 12k-row
+            stress design publishes a worst-coefficient SE 92% away from
+            the determined answer; 1e-9 pins it to ~0.01%, measured at 3->7
+            extra Newton iterations on a 97k benchmark fixture and 5->13 on
+            that stress design. A tolerance tighter than the candidate
+            machinery can resolve terminates as
+            ``termination_reason="converged_at_precision"`` (every active
+            gradient under the noise floor, no feasible trial left) with
+            ``converged=True``; ``line_search_failed`` with
+            ``converged=False`` is reserved for genuinely undetermined
+            stalls. The SCOP engine stops on a per-step lambda-change bound
+            against ``reml_tol`` and classifies its endgame as
+            ``objective_plateau`` only once steps have stopped contracting
+            -- while iterations still buy precision it keeps going toward
+            the strict bound, so an unreachable tolerance ends as an honest
+            plateau classification rather than an early grant.
 
             Versions before 0.20.0 defaulted every engine to 1e-6, so a
             default-tolerance fit can publish standard errors that differ
@@ -1102,6 +1112,7 @@ class SuperGLM:
         phi_method: str = "mle",
         method: str = "auto",
         ci_alpha: float | None = None,
+        max_reml_iter: int | None = None,
         **kwargs,
     ):
         """Estimate Tweedie p via profile likelihood, refit, and return result.
@@ -1167,6 +1178,12 @@ class SuperGLM:
             profile confidence interval. For example, ``0.05`` computes a 95%
             interval and caches it for ``model.summary(alpha=0.05)``. The
             default ``None`` performs no confidence-interval evaluations.
+        max_reml_iter : int, optional
+            Outer-iteration budget for the REML *publication* refit alone;
+            candidate search fits keep their own budget. Requires
+            ``fit_mode="reml"`` -- a pure-ML publication has no REML
+            iteration to budget and refuses the parameter. The default
+            ``None`` uses the ``fit_reml`` default of 20.
         """
         return profile_ops.estimate_p(
             self,
@@ -1179,6 +1196,7 @@ class SuperGLM:
             phi_method=phi_method,
             method=method,
             ci_alpha=ci_alpha,
+            max_reml_iter=max_reml_iter,
             **kwargs,
         )
 

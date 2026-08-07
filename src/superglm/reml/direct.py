@@ -22,7 +22,11 @@ from superglm.group_matrix import DesignMatrix
 from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
-from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
+from superglm.reml.objective import (
+    FLAT_DIRECTION_FREEZE_FLOOR,
+    REMLObjectiveEvaluation,
+    reml_laml_objective,
+)
 from superglm.reml.observed_geometry import (
     OBSERVED_PIRLS_TOL_CEILING,
     ObservedModeNotCertifiedError,
@@ -381,6 +385,12 @@ def optimize_direct_reml(
         rho[i] = np.clip(log_target, log_lo, log_hi)
 
     prev_obj = np.inf
+    # Frozen directions from the previous iteration's active-set decision:
+    # the stop criterion judges the ACTIVE set. An inferentially flat frozen
+    # direction keeps a tiny persistent gradient forever (that is what makes
+    # it flat), and counting it would spin the loop doing nothing until
+    # max_reml_iter with every informative direction long determined.
+    stop_criterion_frozen = None
 
     if verbose:
         boot_lam_str = ", ".join(
@@ -660,11 +670,16 @@ def optimize_direct_reml(
             log_lower=log_lo,
             log_upper=log_hi,
         )
+        stop_grad = (
+            proj_grad
+            if stop_criterion_frozen is None
+            else np.where(stop_criterion_frozen, 0.0, proj_grad)
+        )
         candidate_convergence = evaluate_reml_candidate(
             iteration=outer,
             objective=obj,
             previous_objective=prev_obj,
-            projected_gradient=proj_grad,
+            projected_gradient=stop_grad,
             tolerance=_tol,
         )
         proj_grad_norm = candidate_convergence.projected_gradient_norm
@@ -713,8 +728,9 @@ def optimize_direct_reml(
             reml_penalties=penalties,
         )
 
-        # Active-set: freeze components with negligible gradient and Hessian
-        freeze_tol = 0.1 * _tol
+        # Active-set: freeze components with negligible gradient and Hessian.
+        # The floor keeps the bar a geometric classifier: see its definition.
+        freeze_tol = max(0.1 * _tol, FLAT_DIRECTION_FREEZE_FLOOR)
         frozen = np.zeros(m, dtype=bool)
         for i in range(m):
             if not estimated_mask[i]:
@@ -726,6 +742,19 @@ def optimize_direct_reml(
             ):
                 frozen[i] = True
         active_idx = np.where(~frozen)[0]
+        stop_criterion_frozen = frozen.copy()
+        if profile is not None:
+            # The freeze decision separates informative directions from
+            # inferentially flat ones; the per-direction quantities it
+            # judged are the calibration evidence for its bar. Overwritten
+            # each iteration: what survives is the LAST decision.
+            profile["reml_freeze_decision"] = {
+                "names": list(group_names),
+                "proj_grad": [float(abs(v)) for v in proj_grad],
+                "hess_diag": [float(hess[i, i]) for i in range(m)],
+                "score_scale": float(score_scale),
+                "frozen": [bool(v) for v in frozen],
+            }
 
         if active_idx.size == 0:
             rho = rho_clipped
@@ -995,7 +1024,26 @@ def optimize_direct_reml(
                 # criterion can confirm stability without redundant trial fits.
                 continue
             # The fully converged exact objective rejected every feasible
-            # trial. Stop rather than installing an unscored fallback.
+            # trial. If every direction in the CURRENT active set -- the set
+            # this dead step actually moved -- has its gradient below the
+            # geometric noise floor, the optimum is resolved to achievable
+            # precision and the dead line search is the proof, not a
+            # failure: the predicted decrease from a sub-floor gradient is
+            # quadratically below candidate-machinery noise, so the last
+            # decades of an ultra-tight bar do not exist to be closed. The
+            # objective's own history is no veto here: the last accepted
+            # step belongs to a since-frozen flat direction whenever one
+            # just crossed the freeze bar, and a dead feasible search
+            # already states that no further objective progress exists. A
+            # genuinely undetermined stall keeps its active gradient orders
+            # above the floor and stays an honest failure.
+            active_grad_norm = (
+                float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
+            )
+            if active_grad_norm < FLAT_DIRECTION_FREEZE_FLOOR * score_scale:
+                converged = True
+                termination_reason = "converged_at_precision"
+                break
             termination_reason = "line_search_failed"
             break
         _t_linesearch += _time.perf_counter() - _t0
