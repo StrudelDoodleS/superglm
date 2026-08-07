@@ -465,12 +465,13 @@ def test_a_non_string_special_label_builds_on_a_float_column():
 
 def test_numeric_order_with_a_string_special_builds_and_transforms():
     # The commonest real shape of all -- numeric bands beside a labelled special,
-    # `order=[1..6], specials=["MISSING"]` -- and it does not fit today. The
-    # ungrouped path validates raw column labels, and `_validate_categorical_levels`
-    # calls `np.unique`, which SORTS: on an object column holding both ints and
-    # "MISSING" that raises `TypeError: '<' not supported between 'int' and 'str'`
-    # before `_special_mask` ever gets to hold the special out. Nothing about the
-    # domain is actually wrong -- only the validator's insistence on ordering it.
+    # `order=[1..6], specials=["MISSING"]`. The ungrouped path validates raw
+    # column labels, and an object column holding both ints and "MISSING" has no
+    # ordering to offer: anything that reaches for one raises
+    # `TypeError: '<' not supported between 'int' and 'str'` before `_special_mask`
+    # ever gets to hold the special out. Nothing about the domain is wrong, so
+    # `_validate_categorical_levels` asks only for membership and hashes for it.
+    # This test is what keeps a level scan from wanting an order again.
     spec = OrderedCategorical(
         order=[1, 2, 3, 4, 5, 6], specials=["MISSING"], basis=Spline(kind="ps", k=5)
     )
@@ -492,9 +493,10 @@ def test_numeric_order_with_a_string_special_builds_and_transforms():
 def test_an_unseen_level_still_reports_against_a_mixed_type_domain():
     # The other half: the validator must still REJECT genuinely unseen levels when
     # the domain is mixed, and must be able to render the message. Formatting it
-    # sorts both the unseen set and the known domain, which is the same TypeError
-    # one layer down -- so a fix that only stops np.unique sorting turns a clean
-    # ValueError into a TypeError from the error path itself.
+    # sorts both the unseen set and the known domain, which is the same ordering
+    # problem one layer down -- so an order-free level scan is not enough on its
+    # own: without the `key=str` in `_validate_observed_categorical_levels` the
+    # error path turns a clean ValueError into a TypeError of its own.
     spec = OrderedCategorical(
         order=[1, 2, 3, 4, 5, 6], specials=["MISSING"], basis=Spline(kind="ps", k=5)
     )
