@@ -530,6 +530,62 @@ def _make_reml_debug_recorder(
     return recorder
 
 
+def _fetch_or_build_design(model, X, y, sample_weight, offset, cache: dict):
+    """Serve the profile-search design from its cache, or build and fill it.
+
+    The design matrix depends on the frame, the feature specs, and the
+    weights -- never on the family's power -- so candidate fits at different
+    powers share one build. Distribution and link DO depend on the family and
+    are re-resolved on every hit. The cache self-verifies with a fixed-probe
+    matvec: a served design that no longer reproduces its stored probe answer
+    is dropped and rebuilt rather than trusted. Arrays are handed out as
+    copies, matching the fresh arrays an uncached build returns per fit.
+    """
+    from superglm._blas_threads import allow_wide_design
+    from superglm.distributions import resolve_distribution
+    from superglm.links import resolve_link
+    from superglm.model.base import model_build_design_matrix
+    from superglm.model.fit_state import configured_family, configured_link
+
+    if cache:
+        dm = cache["dm"]
+        if np.array_equal(dm.matvec(cache["probe"]), cache["expected_probe"]):
+            distribution = resolve_distribution(configured_family(model))
+            model._distribution = distribution
+            model._link = resolve_link(configured_link(model), distribution)
+            model._groups = cache["groups"]
+            model._dm = dm
+            # The build also teaches the spec objects (seen levels, spline
+            # reparametrisations) and resolves pending interactions; a fresh
+            # workspace materializes untaught specs, so restore the taught
+            # ones alongside the design they describe.
+            model._specs = cache["specs"]
+            model._interaction_order = cache["interaction_order"]
+            model._pending_interactions = ()
+            allow_wide_design(dm.p)
+            return (
+                cache["y"].copy(),
+                cache["sample_weight"].copy(),
+                None if cache["offset"] is None else cache["offset"].copy(),
+            )
+        cache.clear()
+
+    y_out, w_out, off_out = model_build_design_matrix(model, X, y, sample_weight, offset)
+    probe = np.random.default_rng(0x5D).standard_normal(model._dm.p)
+    cache.update(
+        dm=model._dm,
+        groups=model._groups,
+        specs=model._specs,
+        interaction_order=model._interaction_order,
+        y=np.array(y_out, copy=True),
+        sample_weight=np.array(w_out, copy=True),
+        offset=None if off_out is None else np.array(off_out, copy=True),
+        probe=probe,
+        expected_probe=model._dm.matvec(probe),
+    )
+    return y_out, w_out, off_out
+
+
 def _resolve_interaction_reml_mode(model, interaction_mode: str, max_reml_iter: int) -> dict:
     """Return profile metadata and the effective REML iteration limit."""
     if interaction_mode not in _VALID_REML_INTERACTION_MODES:
@@ -1241,7 +1297,13 @@ def _fit_reml_in_workspace(
         reml_tol = _FAST_CANDIDATE_REML_TOL
 
     _t0 = _time.perf_counter()
-    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
+    _design_cache = getattr(model, "_profile_design_cache", None)
+    if isinstance(_design_cache, dict):
+        y, sample_weight, offset = _fetch_or_build_design(
+            model, X, y, sample_weight, offset, _design_cache
+        )
+    else:
+        y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
     _profile["dm_build_s"] = _time.perf_counter() - _t0
 
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
