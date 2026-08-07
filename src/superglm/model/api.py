@@ -589,6 +589,12 @@ class SuperGLM:
             below 1e-6 with the step below 0.01) that ``reml_tol`` does not
             govern, so an explicit tight value does not guarantee a tighter
             SCOP stop.
+
+            Versions before 0.20.0 defaulted every engine to 1e-6, so a
+            default-tolerance fit can publish standard errors that differ
+            from 0.19.x by the full determination gap above. The numbers
+            moved once, to the determined values; pass ``reml_tol=1e-6`` to
+            reproduce the old ones.
         pirls_tol : float, optional
             Inner PIRLS/IRLS convergence tolerance. Defaults to
             constructor ``tol`` (1e-6). Pass explicitly to override.

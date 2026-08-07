@@ -339,6 +339,11 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
     # negative at the search's own optimum.
     if profile_result.search_nll is None:
         profile_result.search_nll = float(profile_result.nll)
+        # Stash the searched winner's certification flags with it: the CI
+        # inverts the searched curve, so its guard must judge these after
+        # the overwrite below repoints the live flags at the re-profile.
+        profile_result.search_objective_finite = bool(profile_result.objective_finite)
+        profile_result.search_phi_converged = bool(profile_result.phi_converged)
     profile_result.phi_hat = float(phi_result.phi)
     profile_result.nll = float(phi_result.nll)
     profile_result.objective_finite = bool(phi_result.objective_finite)
@@ -349,17 +354,51 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
     profile_result.phi_fallback_reason = phi_result.fallback_reason
     profile_result.phi_branch_switch_detected = bool(phi_result.branch_switch_detected)
     profile_result.phi_message = str(phi_result.message)
-    # The published dispersion is this re-profile, so its status must be the
-    # published status: a boundary hit, a fallback, or a non-convergent
-    # profile here cannot hide behind the search's clean record.
-    from superglm.profiling.tweedie import _phi_boundary_label
+    # The published dispersion is this re-profile, so the whole derived
+    # story must be the published story: the boundary label, the density
+    # classification, the phi warnings and the aggregate convergence flag
+    # all describe the re-profile from here on -- a boundary hit, a
+    # fallback, a saddlepoint evaluation or a non-convergent profile here
+    # cannot hide behind the search's clean record, and the search's
+    # troubles cannot outlive the dispersion they described.
+    from superglm.profiling.tweedie import (
+        _build_density_messages,
+        _classify_density_diagnostics,
+        _phi_boundary_label,
+        _warning_describes_winner_phi,
+    )
 
     profile_result.phi_boundary = _phi_boundary_label(phi_result)
+    density = _classify_density_diagnostics(float(profile_result.p_hat), phi_result.diagnostics)
+    profile_result.saddlepoint_fraction = float(density.fraction)
+    profile_result.n_saddlepoint = int(density.n_saddlepoint)
+    profile_result.n_positive = int(density.n_positive)
+    profile_result.density_method = density.method
+    profile_result.density_exact = density.exact
+    profile_result.density_warning_severity = density.severity
+    profile_result.near_power_boundary = bool(density.near_power_boundary)
+
+    kept = [w for w in profile_result.warnings if not _warning_describes_winner_phi(w)]
+    kept.extend(_build_density_messages(float(profile_result.p_hat), density))
     if not phi_result.converged or phi_result.used_fallback:
         detail = "did not converge" if not phi_result.converged else "used a fallback"
-        profile_result.warnings = list(profile_result.warnings) + [
-            f"published dispersion re-profile {detail}: {phi_result.message}"
-        ]
+        kept.append(f"published dispersion re-profile {detail}: {phi_result.message}")
+    if profile_result.phi_boundary:
+        kept.append(
+            f"Published dispersion estimate is at the {profile_result.phi_boundary} "
+            "dispersion boundary."
+        )
+    profile_result.warnings = kept
+    # `converged` aggregates the same components `_finalize_profile_record`
+    # combined, with the phi flags now the published re-profile's: the
+    # aggregate and `phi_converged` cannot disagree on the result callers
+    # actually receive.
+    profile_result.converged = bool(
+        phi_result.objective_finite
+        and profile_result.outer_converged
+        and profile_result.fit_converged
+        and phi_result.converged
+    )
     profile_result.phi_n_evaluations += phi_result.n_evaluations
     profile_result.phi_n_score_evaluations += phi_result.n_score_evaluations
     profile_result.phi_n_value_only_evaluations += phi_result.n_value_only_evaluations

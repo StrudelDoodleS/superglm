@@ -155,6 +155,11 @@ def model_optimize_direct_reml(
     trace_run=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
+    from superglm.model.reml_execute import resolve_reml_tol
+
+    # direct.py stops on Wood's compound bar -- a Newton engine -- so this
+    # seam resolves the public None sentinel to the tight Newton default.
+    reml_tol = resolve_reml_tol(reml_tol, engine="newton")
     result = optimize_direct_reml(
         model._dm,
         model._distribution,
@@ -208,8 +213,13 @@ def model_optimize_discrete_reml_cached_w(
     max_pirls_iter=100,
 ):
     """Cached-W fREML optimizer for the discrete path."""
+    from superglm.model.reml_execute import resolve_reml_tol
     from superglm.reml.discrete import optimize_discrete_reml_cached_w
 
+    # discrete.py floats the tolerance into its compound Newton bar, so a
+    # verbatim None sentinel would TypeError; resolve it to the Newton
+    # default here (the engine still floors explicit values at 1e-12).
+    reml_tol = resolve_reml_tol(reml_tol, engine="newton")
     return optimize_discrete_reml_cached_w(
         model._dm,
         model._distribution,
@@ -252,8 +262,11 @@ def model_optimize_efs_reml(
 ):
     """EFS REML optimizer for the BCD path (lambda1 > 0)."""
     from superglm.model.base import rebuild_dm_with_lambdas
+    from superglm.model.reml_execute import resolve_reml_tol
     from superglm.reml.efs import optimize_efs_reml
 
+    # efs.py stops on the per-step lambda-change bound -- a step engine.
+    reml_tol = resolve_reml_tol(reml_tol, engine="step")
     result, dm = optimize_efs_reml(
         model._dm,
         model._distribution,
@@ -304,10 +317,13 @@ def model_run_reml_once(
     from superglm.model.base import rebuild_dm_with_lambdas
     from superglm.model.reml_execute import resolve_reml_tol
 
-    # runner.py compares max_change < reml_tol, so the None sentinel must be
-    # resolved here like every other engine entry -- forwarding it verbatim
-    # would TypeError.
-    reml_tol = resolve_reml_tol(reml_tol, engine="newton" if use_direct else "step")
+    # runner.py gates on max_change < reml_tol -- a step criterion -- in BOTH
+    # branches; use_direct only selects the inner coefficient solver, not the
+    # stopping rule. The engine classification follows the criterion, so this
+    # seam always resolves the sentinel to the step default: handing the
+    # Newton-grade 1e-9 to a linear-rate fixed point is exactly the
+    # combination the engine scoping exists to prevent.
+    reml_tol = resolve_reml_tol(reml_tol, engine="step")
 
     result, dm = run_reml_once(
         model._dm,

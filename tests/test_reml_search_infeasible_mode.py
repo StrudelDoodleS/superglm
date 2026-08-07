@@ -328,6 +328,29 @@ class TestBoundaryCensoringWarning:
             is None
         )
 
+    def test_a_censored_estimate_lands_in_result_warnings(self, monkeypatch, recwarn):
+        """UserWarnings are routinely filtered, swallowed by catch_warnings
+        blocks, or lost on a notebook re-run; the durable channel the guide
+        points users at is result.warnings. A censored optimum converges,
+        so promotion must not depend on outer_converged being False."""
+        import superglm.profiling.tweedie as tweedie_module
+
+        forced = (
+            "FORCED: p_hat sits against the certifiable-region boundary "
+            "(censored estimate)."
+        )
+        monkeypatch.setattr(
+            tweedie_module, "_boundary_censoring_message", lambda *a, **k: forced
+        )
+        frame, y, weights, offset, features = _fixture(3_000)
+        result = _model(features).estimate_p(
+            frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
+        )
+
+        assert result.outer_converged
+        assert forced in result.outer_message
+        assert any(forced in warning for warning in result.warnings)
+
     def test_routed_around_endpoints_do_not_warn_end_to_end(self, recwarn):
         """The k-sweep fixture routes around p=1.95; its p_hat sits far away.
 

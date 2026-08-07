@@ -3137,6 +3137,14 @@ class TweedieProfileResult:
     # re-profiles dispersion and moves `nll` off the curve the search walked;
     # `None` means `nll` is still that value. See `_profile_reference_nll`.
     search_nll: float | None = field(default=None, kw_only=True)
+    # The searched winner's certification flags, stashed alongside
+    # `search_nll` when publication re-profiles dispersion. The CI inverts
+    # the SEARCHED curve, so its guard judges these -- after the re-profile,
+    # `objective_finite`/`phi_converged` describe the published dispersion,
+    # a fit the interval never touches. `None` means no re-profile moved
+    # them, and the live flags are still the searched values.
+    search_objective_finite: bool | None = field(default=None, kw_only=True)
+    search_phi_converged: bool | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
@@ -3159,6 +3167,10 @@ class TweedieProfileResult:
             self.search_fit_mode = self.fit_mode
         if not hasattr(self, "search_nll"):
             self.search_nll = None
+        if not hasattr(self, "search_objective_finite"):
+            self.search_objective_finite = None
+        if not hasattr(self, "search_phi_converged"):
+            self.search_phi_converged = None
 
     def _profile_reference_nll(self) -> float:
         """The objective value every profile comparison must be measured against.
@@ -3268,9 +3280,20 @@ class TweedieProfileResult:
         return max(0, self.n_total_evaluations - int(self.n_evaluations))
 
     def _validate_ci_winner(self) -> None:
-        """Reject likelihood-ratio inference from an invalid winning record."""
-        for name in ("objective_finite", "fit_converged", "phi_converged"):
-            if not bool(getattr(self, name)):
+        """Reject likelihood-ratio inference from an invalid winning record.
+
+        The interval inverts the SEARCHED curve, so the flags judged here are
+        the searched winner's. After publication re-profiles dispersion,
+        `objective_finite`/`phi_converged` describe the published re-profile;
+        the searched values are stashed as `search_*` and take precedence.
+        """
+        checks = (
+            ("objective_finite", self.search_objective_finite, self.objective_finite),
+            ("fit_converged", None, self.fit_converged),
+            ("phi_converged", self.search_phi_converged, self.phi_converged),
+        )
+        for name, searched, live in checks:
+            if not bool(live if searched is None else searched):
                 raise RuntimeError(
                     f"Tweedie profile CI requires {name}=True for the winning "
                     f"record at p={self.p_hat:g}."
@@ -3657,6 +3680,26 @@ def _build_density_messages(p: float, summary: _DensitySummary) -> list[str]:
     for message in messages:
         _warnings.warn(message, UserWarning, stacklevel=3)
     return messages
+
+
+def _warning_describes_winner_phi(message: str) -> bool:
+    """Match final-record warnings derived from a winning phi profile.
+
+    Publication re-profiles dispersion and rebuilds these entries from its
+    own profile; the patterns here must cover exactly the messages built
+    from `phi_result` and its density summary in `_finalize_profile_record`
+    and `_reprofile_published_dispersion` -- keeping repeated re-profiles
+    idempotent -- and nothing else.
+    """
+    return (
+        message == "Winning inner phi profile did not converge."
+        or message.startswith("Winning phi estimate is at the ")
+        or message.startswith("published dispersion re-profile ")
+        or message.startswith("Published dispersion estimate is at the ")
+        or "density diagnostics at p=" in message
+        or "Saddlepoint approximation used for" in message
+        or "near-power boundary instability region" in message
+    )
 
 
 def _fit_iteration_trace(iteration_log) -> tuple[tuple[int, float], ...]:
@@ -5587,6 +5630,11 @@ def estimate_tweedie_p(
     )
     if censoring:
         result.outer_message = " ".join(part for part in (result.outer_message, censoring) if part)
+        # A censored optimum converges, so `_finalize_profile_record` never
+        # promotes `outer_message` for it; the durable field users are told
+        # to inspect is `warnings`, and a UserWarning alone is routinely
+        # filtered or lost.
+        result.warnings = list(result.warnings) + [censoring]
         _warnings.warn(censoring, UserWarning, stacklevel=2)
     return result
 
