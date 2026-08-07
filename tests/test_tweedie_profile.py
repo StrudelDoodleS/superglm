@@ -3161,9 +3161,16 @@ class TestEstimatePFitMode:
             phi_hat = 1.0
             _objective = None
             # Publication re-profiles dispersion on every estimate_p run, so
-            # the double carries the fields the re-profiler reads and bumps.
+            # the double carries the fields the re-profiler reads and bumps:
+            # the stashed search flags, the components of the rebuilt
+            # aggregate `converged`, and the warnings list it rewrites.
             search_nll = None
             nll = 0.0
+            objective_finite = True
+            phi_converged = True
+            outer_converged = True
+            fit_converged = True
+            warnings = ()
             phi_n_evaluations = 0
             phi_n_score_evaluations = 0
             phi_n_value_only_evaluations = 0

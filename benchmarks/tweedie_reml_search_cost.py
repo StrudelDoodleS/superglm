@@ -41,6 +41,11 @@ N_ROWS = 96_743
 # `estimate_p_reml` and `two_step` are different estimators (REML-mode search
 # versus ML-mode search), so each carries its own reference rather than being
 # held to the other's.
+# These constants predate the engine-scoped reml_tol default (1e-6 -> 1e-9 on
+# Newton engines) and the always-on publication dispersion re-profile; both
+# move phi_hat by up to ~2e-3 relative on this fixture, which PHI_TOL=5e-2
+# absorbs. Agreement within tolerance is the contract, not bit-equality with
+# the numbers the current code produces.
 REFERENCE = {
     "estimate_p_reml": {"p_hat": 1.5746132307, "phi_hat": 42.052},
     "two_step": {"p_hat": 1.5745815576, "phi_hat": 42.054},

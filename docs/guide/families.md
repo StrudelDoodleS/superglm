@@ -239,6 +239,15 @@ re-profiles dispersion against its own fitted mean. `result.phi_hat`, the
 coefficients, and their standard errors always describe the model you get
 back, never the fits the search discarded.
 
+> **Upgrading from 0.19.x:** a default-tolerance `fit_reml` (and therefore
+> every published `estimate_p` fit) now runs the smoothing optimizer to the
+> determined answer (`reml_tol` 1e-6 → 1e-9 on the Newton engines), and
+> `phi_hat` is re-profiled at the published fit. Standard errors on designs
+> with flat log-lambda directions can move by tens of percent relative to
+> 0.19.x — once, to the values the old tolerance had left undetermined.
+> Predictions are essentially unchanged. This is not a regression to file;
+> pass `reml_tol=1e-6` to reproduce the old numbers.
+
 The two couplings differ in which objective *chooses* p, and in what can go
 wrong on the way:
 
