@@ -127,6 +127,13 @@ def profile_complaints(result) -> list[str]:
     # None means "REML did not run here", which is legitimate under fit mode.
     if getattr(result, "reml_converged", None) is False:
         complaints.append("reml_converged=False")
+    # After publication re-profiles dispersion the live flags describe the
+    # published fit; the searched winner's own certification survives in the
+    # search_* stash, and a search that limped must not present clean
+    # timings because its publication came out clean.
+    for flag in ("search_objective_finite", "search_phi_converged", "search_fit_converged"):
+        if getattr(result, flag, None) is False:
+            complaints.append(f"{flag}=False")
     boundary = getattr(result, "outer_boundary", None)
     if boundary:
         complaints.append(f"outer_boundary={boundary!r} (p_hat pinned to a configured bound)")
