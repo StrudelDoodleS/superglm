@@ -471,7 +471,13 @@ def test_numeric_order_with_a_string_special_builds_and_transforms():
     # `TypeError: '<' not supported between 'int' and 'str'` before `_special_mask`
     # ever gets to hold the special out. Nothing about the domain is wrong, so
     # `_validate_categorical_levels` asks only for membership and hashes for it.
-    # This test is what keeps a level scan from wanting an order again.
+    #
+    # This test does NOT forbid ordering the column: a scan that sorts and
+    # recovers through `except TypeError` also passes it, because TypeError is
+    # exactly what int-versus-str raises. What it pins is that this shape stays
+    # buildable. The prohibition lives in
+    # `test_categorical_level_validation.py::test_a_domain_is_never_ordered_to_answer_membership`,
+    # whose domain refuses ordering out of band so no fallback can swallow it.
     spec = OrderedCategorical(
         order=[1, 2, 3, 4, 5, 6], specials=["MISSING"], basis=Spline(kind="ps", k=5)
     )
