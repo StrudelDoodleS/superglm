@@ -105,6 +105,11 @@ def _fit(method: str, X, y, w, offset, subset=None, drop=None, profiler=None):
             kwargs["interactions"] = [
                 ia for ia in interactions if not (isinstance(ia, tuple) and drop in ia)
             ]
+        targeted = kwargs.get("penalty_features")
+        if targeted is not None:
+            names = [targeted] if isinstance(targeted, str) else list(targeted)
+            kept_targets = [f for f in names if f != drop]
+            kwargs["penalty_features"] = kept_targets or None
         model = SuperGLM(**kwargs)
 
         def _touches_drop(name, spec):
@@ -195,27 +200,38 @@ def main():
             f"converged={d.get('converged')} termination={d.get('termination_reason')}"
         )
         print(f"\nratio       {t_reml / t_fit:8.1f}x")
-        print(
-            f"coefficients: p={max(g.end for g in m_reml._groups)} across "
-            f"{len(m_reml._groups)} groups"
-        )
+        if m_reml._groups:
+            print(
+                f"coefficients: p={max(g.end for g in m_reml._groups)} across "
+                f"{len(m_reml._groups)} groups"
+            )
+        else:
+            print("coefficients: intercept-only (no fitted groups)")
         if N_FOLDS > 1:
             # A fold trains on (k-1)/k of the rows. Whether that costs
             # (k-1)/k of a full fit (row-bound) or nearly a full fit
             # (coefficient/setup-bound) depends on the model, so MEASURE one
             # fold-sized fit per entry point instead of assuming
-            # row-linearity.
-            k_rows = max(1, int(len(y) * (N_FOLDS - 1) / N_FOLDS))
-            fold_idx = np.random.default_rng(1).choice(len(y), k_rows, replace=False)
-            t_fold_fit, _ = best_of("fit", X, y, w, offset, repeat=2, subset=fold_idx)
-            print(f"\nprojected over {N_FOLDS} folds -- compare THIS to the time you observe:")
-            print(f"  fit()       {t_fold_fit * N_FOLDS:8.3f}s")
+            # row-linearity. Its own try: a fold subset can be unfittable
+            # (a rare required level missing from the sample), and that must
+            # not misreport the ALREADY-SUCCEEDED headline fits above.
             try:
-                t_fold_reml, _ = best_of("fit_reml", X, y, w, offset, repeat=1, subset=fold_idx)
-                print(f"  fit_reml()  {t_fold_reml * N_FOLDS:8.3f}s")
-            except Exception:  # noqa: BLE001
-                print("  fit_reml()    failed on the fold-sized subset")
-            print(f"  ({N_FOLDS} folds, each measured at its true size of {k_rows:,} rows)")
+                k_rows = max(1, int(len(y) * (N_FOLDS - 1) / N_FOLDS))
+                fold_idx = np.random.default_rng(1).choice(len(y), k_rows, replace=False)
+                t_fold_fit, _ = best_of("fit", X, y, w, offset, repeat=2, subset=fold_idx)
+                print(f"\nprojected over {N_FOLDS} folds -- compare THIS to the time you observe:")
+                print(f"  fit()       {t_fold_fit * N_FOLDS:8.3f}s")
+                try:
+                    t_fold_reml, _ = best_of("fit_reml", X, y, w, offset, repeat=1, subset=fold_idx)
+                    print(f"  fit_reml()  {t_fold_reml * N_FOLDS:8.3f}s")
+                except Exception:  # noqa: BLE001
+                    print("  fit_reml()    failed on the fold-sized subset")
+                print(f"  ({N_FOLDS} folds, each measured at its true size of {k_rows:,} rows)")
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"\nfold projection skipped: {type(exc).__name__} on the "
+                    "fold-sized subset (a rare level missing from the sample?)"
+                )
     except Exception as exc:  # noqa: BLE001
         print(f"fit_reml()  FAILED: {type(exc).__name__}: {exc}")
         d, t_reml, m_reml = {}, None, None
@@ -282,10 +298,23 @@ def main():
     rng = np.random.default_rng(0)
     print(f"{'rows':>10}{'fit()':>10}{'fit_reml()':>13}")
     prev = None
+    seen_k = set()
     for frac in (0.25, 0.5, 1.0):
-        k = max(200, int(n * frac))
+        # Cap at the rows that exist: with n < 200 the floor used to ask for
+        # 200, silently fit ALL rows at every fraction, and grade a scaling
+        # verdict on three identical measurements.
+        k = min(n, max(200, int(n * frac)))
+        if k in seen_k:
+            continue
+        seen_k.add(k)
         idx = rng.choice(n, k, replace=False) if k < n else np.arange(n)
-        tf, _ = best_of("fit", X, y, w, offset, repeat=2, subset=idx)
+        try:
+            tf, _ = best_of("fit", X, y, w, offset, repeat=2, subset=idx)
+        except Exception as exc:  # noqa: BLE001
+            # A random subset can miss a required level (an OC special, a
+            # rare category). Report the point and keep the section alive.
+            print(f"{k:>10,}   failed: {type(exc).__name__} (subset misses a required level?)")
+            continue
         try:
             tr, _ = best_of("fit_reml", X, y, w, offset, repeat=1, subset=idx)
             tr_s = f"{tr:12.3f}s"
