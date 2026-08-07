@@ -2989,7 +2989,10 @@ class TweedieProfileCIEndpoint:
     """One profile-CI endpoint and how it was obtained."""
 
     value: float
-    status: Literal["root_found", "truncated"]
+    # "censored": the outward scan crossed the certifiable-region boundary
+    # before the LR cutoff; the value is the last certifiable power, and the
+    # true endpoint may lie beyond it in the uncertifiable region.
+    status: Literal["root_found", "truncated", "censored"]
     at_range_boundary: bool
     lr_statistic: float
 
@@ -3263,6 +3266,9 @@ class TweedieProfileResult:
     _ci_seed_points: tuple[float, ...] = field(default=(), repr=False)
     _evaluation_count: Any = field(default=None, repr=False)
     _evaluation_record: Any = field(default=None, repr=False)
+    # Callable p -> infeasibility reason (or None); lets the CI treat an
+    # uncertifiable probe as the profile's boundary instead of a dead record.
+    _infeasible_reason: Any = field(default=None, repr=False)
     _emitted_ci_density_warning_signatures: set[str] = field(
         default_factory=set,
         init=False,
@@ -3372,6 +3378,7 @@ class TweedieProfileResult:
             seed_points=self._ci_seed_points,
             evaluation_count=self._evaluation_count,
             evaluation_record=self._evaluation_record,
+            infeasible_reason=self._infeasible_reason,
         )
         density_signatures = dict(
             zip(
@@ -3620,16 +3627,20 @@ class TweedieProfileResult:
             else:
                 interval_kind = "LR interval"
             truncated = []
+            censored = []
             if details is not None:
-                truncated = [
-                    side
-                    for side, endpoint in (("lower", details.lower), ("upper", details.upper))
-                    if endpoint.status == "truncated"
-                ]
+                for side, endpoint in (("lower", details.lower), ("upper", details.upper)):
+                    if endpoint.status == "truncated":
+                        truncated.append(side)
+                    elif endpoint.status == "censored":
+                        censored.append(side)
             truncation_label = ""
             if truncated:
                 sides = " and ".join(truncated)
                 truncation_label = f"; {sides} truncated at configured bound"
+            if censored:
+                sides = " and ".join(censored)
+                truncation_label += f"; {sides} censored at certifiability wall"
             ax.fill_betweenx(
                 [0, cutoff],
                 ci_lo,
@@ -4661,6 +4672,7 @@ def _finalize_profile_record(
         _ci_seed_points=tuple(float(value) for value in trace["p"]),
         _evaluation_count=ctx.evaluation_count,
         _evaluation_record=ctx.evaluation_record,
+        _infeasible_reason=getattr(ctx, "_infeasible_powers", {}).get,
     )
 
 
@@ -5093,13 +5105,19 @@ def _ml_context_is_unpenalized(ctx) -> bool:
     lambda2-smoothed term makes mu a penalized mode and the joint solve
     converges on the wrong stationarity condition (measured 5.8e-4 p_hat
     drift on a flat-lambda synthetic stress design, 1.0e-5 on the benchmark
-    fixture -- growing with penalty strength). lambda2 only reaches groups
-    that carry smoothing structure, whose marker is the SSP
-    reparametrisation; Numeric and Categorical group matrices have none and
-    are measurably lambda2-inert under ``fit``. Anything with that structure,
-    or an active selection penalty, counts as penalized, so
-    misclassification can only cost speed, never the root.
+    fixture -- growing with penalty strength). With lambda2 active, only the
+    exact built types measured lambda2-inert under ``fit`` -- plain Dense and
+    Categorical group matrices -- may stay on the fast path. The check is
+    exact type, not isinstance and not the SSP ``R_inv`` artifact:
+    RandomEffectGroupMatrix subclasses CategoricalGroupMatrix yet carries a
+    live ridge penalty with no reparametrisation, and every structured,
+    SSP, or unknown future type counts as penalized. Misclassification in
+    that direction costs Brent's speed, never the root.
     """
+    from superglm._group_matrix._group_matrix_core import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+    )
     from superglm.model.base import normalize_selection_penalty
 
     lam1 = normalize_selection_penalty(getattr(ctx.penalty, "lambda1", None))
@@ -5112,7 +5130,8 @@ def _ml_context_is_unpenalized(ctx) -> bool:
         lam2_active = lam2 is not None and float(lam2) != 0.0
     if not lam2_active:
         return True
-    return not any(getattr(gm, "R_inv", None) is not None for gm in ctx.dm.group_matrices)
+    inert_types = (DenseGroupMatrix, CategoricalGroupMatrix)
+    return all(type(gm) in inert_types for gm in ctx.dm.group_matrices)
 
 
 def _search_joint_ml(
@@ -5550,6 +5569,14 @@ def estimate_tweedie_p(
             trace_iterations,
         )
     else:
+        from superglm.model.fit_ops import _reject_random_effect_selection_fit
+
+        # The ML search's candidate fits run inside the profile clone and
+        # bypass the public fit() door, so the door's structured-feature
+        # rejection is enforced here: RandomEffect and FactorSmooth are
+        # fit_reml-only, and an ML candidate fit of them is unsupported
+        # regardless of which search method would consume it.
+        _reject_random_effect_selection_fit(model, "fit")
         ctx = _build_profile_context(
             model,
             X,
@@ -6048,6 +6075,7 @@ def _profile_ci_p_detailed(
     seed_points: tuple[float, ...] = (),
     evaluation_count=None,
     evaluation_record=None,
+    infeasible_reason=None,
 ) -> TweedieProfileCIDetails:
     """Compute the connected LR interval with explicit endpoint semantics.
 
@@ -6106,6 +6134,18 @@ def _profile_ci_p_detailed(
             raise _TweedieProfileCIEvaluationValueError(
                 f"Tweedie profile CI objective returned non-finite NLL at p={key:g}."
             )
+        if infeasible_reason is not None and infeasible_reason(key):
+            # The certifiable profile ends here: the probe scored infeasible,
+            # left no evaluation record, and none can exist. The sentinel NLL
+            # makes the LR effectively infinite, so the locators treat this
+            # point as the profile's boundary rather than dead evidence.
+            point = TweedieProfileCIEvaluation(
+                p=key,
+                nll=nll,
+                lr_statistic=float(2.0 * ll_scale * (nll - nll_hat)),
+            )
+            evidence[key] = point
+            return point
         if evaluation_record is not None:
             try:
                 record = evaluation_record(key)
@@ -6209,6 +6249,41 @@ def _profile_ci_p_detailed(
                     lr_statistic=current.lr_statistic,
                 )
             if previous_value < 0.0 < current_value:
+                wall_guard: TweedieProfileCIEvaluation | None = None
+                if infeasible_reason is not None and infeasible_reason(current.p):
+                    # The far bracket end is uncertifiable, so the LR jump
+                    # there is the certification wall, not a likelihood
+                    # crossing. Bisect FEASIBILITY: either a genuine crossing
+                    # exists on the certifiable side (fall through to the
+                    # normal root with a fully feasible bracket), or the
+                    # endpoint is censored at the last certifiable power.
+                    feasible_lo = previous
+                    wall_p = current.p
+                    crossing = None
+                    while wall_p - feasible_lo.p > _CI_ROOT_XTOL:
+                        mid = 0.5 * (feasible_lo.p + wall_p)
+                        mid_point = evaluate(mid)
+                        if infeasible_reason(mid):
+                            wall_p = mid
+                            continue
+                        if criterion(mid_point) > 0.0:
+                            crossing = mid_point
+                            break
+                        feasible_lo = mid_point
+                    if crossing is None:
+                        return TweedieProfileCIEndpoint(
+                            value=feasible_lo.p,
+                            status="censored",
+                            at_range_boundary=False,
+                            lr_statistic=feasible_lo.lr_statistic,
+                        )
+                    current = crossing
+                    current_value = criterion(crossing)
+                    # The crossing sits against the wall's lip; if the root
+                    # below cannot resolve it (near-wall fits are exactly
+                    # the ones certification distrusts), the endpoint is
+                    # censored at the last certifiable sub-cutoff power.
+                    wall_guard = feasible_lo
                 bracket = tuple(sorted((previous.p, current.p)))
                 root = np.nan
                 root_point = None
@@ -6228,6 +6303,13 @@ def _profile_ci_p_detailed(
                     except _TweedieProfileCIEvaluationError:
                         raise
                     except (ValueError, RuntimeError) as exc:
+                        if wall_guard is not None:
+                            return TweedieProfileCIEndpoint(
+                                value=wall_guard.p,
+                                status="censored",
+                                at_range_boundary=False,
+                                lr_statistic=wall_guard.lr_statistic,
+                            )
                         raise RuntimeError(
                             f"Tweedie numerical CI root failed on {side} bracket "
                             f"[{bracket[0]:g}, {bracket[1]:g}]: {exc}"
@@ -6265,6 +6347,13 @@ def _profile_ci_p_detailed(
                     if root_residual <= root_tolerance:
                         break
                     if attempt == 2:
+                        if wall_guard is not None:
+                            return TweedieProfileCIEndpoint(
+                                value=wall_guard.p,
+                                status="censored",
+                                at_range_boundary=False,
+                                lr_statistic=wall_guard.lr_statistic,
+                            )
                         raise RuntimeError(
                             f"Tweedie profile CI has an unresolved or discontinuous LR cutoff "
                             f"on the {side} side at p={root:g} "
@@ -6299,6 +6388,13 @@ def _profile_ci_p_detailed(
                 f"{label} Tweedie profile CI is truncated at the configured p_range "
                 f"boundary p={endpoint.value:g}; the LR cutoff was not reached on the "
                 "connected interval."
+            )
+        elif endpoint.status == "censored":
+            warning_messages.append(
+                f"{label} Tweedie profile CI is censored at the certifiable-region "
+                f"boundary p={endpoint.value:g}: REML could not certify the penalized "
+                "mode beyond it, so the LR cutoff was not reached and the true "
+                "endpoint may lie in the uncertifiable region."
             )
 
     provenance_with_summaries: list[tuple[TweedieProfileCIDensityProvenance, _DensitySummary]] = []

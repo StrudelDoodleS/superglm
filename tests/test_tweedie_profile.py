@@ -4977,6 +4977,63 @@ class TestSearchMethods:
         assert result.method == "joint_ml"
         assert result.requested_method == "auto"
 
+    def test_the_inert_allowlist_is_exact_types_not_subclasses(self):
+        """lambda2-inertness is a property of the exact built type, not the
+        hierarchy: RandomEffectGroupMatrix SUBCLASSES CategoricalGroupMatrix
+        yet carries a live ridge penalty and no SSP R_inv, so testing the
+        reparametrisation artifact -- or isinstance -- would wave a
+        structured penalized group into the envelope-theorem fast path.
+        Anything outside the measured-inert set counts as penalized,
+        costing Brent's speed, never the root."""
+        from types import SimpleNamespace
+
+        from superglm._group_matrix._group_matrix_core import (
+            CategoricalGroupMatrix,
+            DenseGroupMatrix,
+            RandomEffectGroupMatrix,
+        )
+        from superglm.profiling.tweedie import _ml_context_is_unpenalized
+
+        def ctx_with(*matrices):
+            return SimpleNamespace(
+                penalty=SimpleNamespace(lambda1=None),
+                lambda2=0.1,
+                dm=SimpleNamespace(group_matrices=list(matrices)),
+            )
+
+        dense = object.__new__(DenseGroupMatrix)
+        categorical = object.__new__(CategoricalGroupMatrix)
+        assert _ml_context_is_unpenalized(ctx_with(dense, categorical))
+
+        structured = object.__new__(RandomEffectGroupMatrix)
+        assert not _ml_context_is_unpenalized(ctx_with(dense, structured))
+
+    def test_structured_features_cannot_reach_the_ml_search(self):
+        """RandomEffect (and FactorSmooth) are fit_reml-only: the ML
+        candidate fits refuse them before any method dispatch runs, which
+        is the invariant the inert-type predicate's validity rests on. If
+        this pin ever breaks, revisit _ml_context_is_unpenalized before
+        making structured features ML-fittable."""
+        from superglm import RandomEffect
+
+        rng = np.random.default_rng(11)
+        n = 300
+        frame = pd.DataFrame(
+            {
+                "g": np.array([f"g{j}" for j in range(8)])[rng.integers(0, 8, n)],
+                "x": rng.uniform(0, 1, n),
+            }
+        )
+        y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, 2.0, n))
+
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"g": RandomEffect(), "x": Numeric()},
+        )
+        with pytest.raises(NotImplementedError, match="fit_reml"):
+            estimate_tweedie_p(model, frame, y, fit_mode="fit", method="auto")
+
     def test_joint_ml_validation_failure_discards_fast_cache(self, monkeypatch):
         X, y, _ = _tweedie_data(n=160, p_true=1.45, seed=1730)
         model = SuperGLM(
