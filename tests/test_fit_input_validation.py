@@ -426,17 +426,30 @@ def test_x_columns_reject_containers_hidden_among_scalars(X: pd.DataFrame) -> No
         _object_column(datetime.date(2020, 1, 1), _UnhashableDate(2020, 1, 2)),
     ],
 )
-def test_x_columns_reject_scalar_subclasses_that_refuse_to_hash(X: pd.DataFrame) -> None:
-    """Rejection follows hashability, not the dtype label pandas puts on the column.
+def test_x_columns_neutralize_scalar_subclasses_that_refuse_to_hash(X: pd.DataFrame) -> None:
+    """No unhashable subclass survives validation, however pandas labels it.
 
     `infer_dtype` classifies by `isinstance`, so each of these columns is
     labelled with a plain scalar type -- `string`, `bytes`, `date` -- while
     holding a subclass that sets `__hash__ = None`. A validator that trusted
     the label would pass them through to feature construction, where they die
     on set insertion with a bare `TypeError` instead of this module's message.
+
+    The contract asserted here is the invariant, not the mechanism: pandas 3
+    with pyarrow installed coerces `str` subclasses to plain `str` at
+    DataFrame construction, so by the time validation sees such a column the
+    unhashable value no longer exists and there is legitimately nothing to
+    reject. Either the validator raises this module's message, or every value
+    it waves through to feature construction must hash.
     """
-    with pytest.raises(ValueError, match="X column 'x' must contain only scalar values"):
-        validate_x_columns(as_eager_frame(X), ("x",))
+    frame = as_eager_frame(X)
+    try:
+        validate_x_columns(frame, ("x",))
+    except ValueError as exc:
+        assert "X column 'x' must contain only scalar values" in str(exc)
+    else:
+        for value in frame.column_array("x"):
+            hash(value)
 
 
 @pytest.mark.parametrize(

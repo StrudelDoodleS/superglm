@@ -436,19 +436,24 @@ def _synchronize_tweedie_profile_refit(
         eta = eta + offset_arr
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), distribution)
+    published_mu = mu
     if reprofile_phi:
         # On a discretized model the internal design's matvec is a binned
         # approximation of the mean callers get from predict(); the published
         # dispersion must be profiled at the public mean, so the caller passes
         # it in. The internal mu remains the fallback for direct invocations.
-        reprofile_mu = mu if public_mu is None else np.asarray(public_mu, dtype=np.float64)
+        published_mu = mu if public_mu is None else np.asarray(public_mu, dtype=np.float64)
         _reprofile_published_dispersion(
-            model, y_arr, weights, reprofile_mu, profile_result, phi_method
+            model, y_arr, weights, published_mu, profile_result, phi_method
         )
     null_mu = _compute_null_mu(y_arr, weights, offset_arr, distribution, model._link)
+    # One published fit, one mean: the summary statistics describe the same
+    # mean the published dispersion was profiled at. Splitting them would
+    # publish a hybrid -- public-mean phi inside binned-mean likelihood,
+    # Pearson chi-square and explained deviance.
     fit_stats = _compute_fit_stats(
         y_arr,
-        mu,
+        published_mu,
         weights,
         offset_arr,
         distribution,
@@ -472,7 +477,7 @@ def _synchronize_tweedie_profile_refit(
     model._solver_result = replacement_solver
     if reml_result is not None:
         model._reml_result = replacement_reml
-    model._fit_mu = mu
+    model._fit_mu = published_mu
     model._fit_null_mu = null_mu
     model._fit_stats = fit_stats
 
