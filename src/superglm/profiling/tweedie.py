@@ -441,6 +441,10 @@ _JOINT_SAFE_POWER_BOUNDS = (1.05, 1.95)
 # at p_hat runs at the tight publication default with its dispersion
 # re-profiled there, repaying determination exactly once.
 _SEARCH_REML_TOL = 1e-6
+# Candidate design matrices are bit-identical across powers, so the REML
+# profile context shares one build via fit_ops._fetch_or_build_design. The
+# publication refit runs on a model that never carries the cache.
+_SEARCH_DM_CACHE = True
 
 
 def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
@@ -4231,6 +4235,10 @@ class _ProfileContextREML:
     # be selectable, but the caller still needs to know part of the range was
     # unreachable rather than merely unattractive.
     _infeasible_powers: dict[float, str] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if _SEARCH_DM_CACHE:
+            self.model._profile_design_cache = {}
 
     @property
     def n_evals(self) -> int:
