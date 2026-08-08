@@ -721,7 +721,18 @@ def optimize_direct_reml(
         prev_obj = obj
 
         revalidated_hess = None
-        if candidate_convergence.converged:
+        # A loose reml_tol can be satisfied by an iteration whose starved
+        # candidate PIRLS never certified: the compound criterion's
+        # objective and gradient were then measured at a nonstationary
+        # beta and prove nothing about the profile objective -- the same
+        # evidence standard the line search and the all-frozen exit
+        # enforce. Withholding the accept is benign: rho's step is tiny
+        # here, so the following iterations are warm-started PIRLS
+        # settles, and the exit fires once the mode certifies (measured:
+        # one extra outer iteration on the starved fixture, landing
+        # 7e-4 -> 8e-7 off the reference lambdas).
+        mode_certified = trial_counts_as_precision_evidence(pirls_result.converged, obj)
+        if candidate_convergence.converged and mode_certified:
             # The stop mask is iteration k-1's freeze decision intersected
             # with the current gradient arm -- which cannot see a
             # curvature-only re-activation: a masked direction can hold a

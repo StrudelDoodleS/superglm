@@ -998,6 +998,48 @@ class TestFreezeRevalidation:
                 float(reference.lambdas[name]), rel=1e-2
             )
 
+    def test_the_compound_exit_requires_a_certified_candidate_mode(self):
+        """A loose reml_tol can accept an iteration whose starved candidate
+        PIRLS never certified: with max_pirls_iter=1 and pirls_tol below
+        the achievable floor, the objective bar at reml_tol=1e-5 fires
+        while the candidate mode is still uncertified, publishing lambdas
+        measured at a nonstationary beta (7.2e-4 off the reference on this
+        fixture). The gate defers one outer iteration -- a warm-started
+        settle at the same lambdas -- and the honest accept lands within
+        8e-7 of the reference."""
+        rng = np.random.default_rng(9)
+        n = 2_000
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = (
+            0.3
+            + 0.8 * np.sin(4.0 * frame["x1"].to_numpy())
+            + 0.5 * (frame["x2"].to_numpy() - 0.5) ** 2
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+
+        def fit(**kwargs):
+            model = SuperGLM(
+                family="poisson",
+                features={
+                    "x1": Spline(kind="cr", n_knots=8),
+                    "x2": Spline(kind="cr", n_knots=8),
+                },
+            )
+            model.fit_reml(frame, y, runtime_validation="skip", **kwargs)
+            return model._reml_result
+
+        reference = fit()
+        starved = fit(reml_tol=1e-5, max_pirls_iter=1, pirls_tol=1e-15)
+
+        assert starved.converged and reference.converged
+        assert str(starved.termination_reason) == "score_objective_tolerance"
+        # The pre-gate accept published the uncertified iteration's lambdas
+        # (rel err 7.2e-4); the deferred accept certifies and matches.
+        for name in reference.lambdas:
+            assert float(starved.lambdas[name]) == pytest.approx(
+                float(reference.lambdas[name]), rel=1e-5
+            )
+
     def test_a_mixed_policy_fit_records_the_estimated_status(self):
         """A fixed direction freezes definitionally: its recorded gradient
         is projected to zero while its coupled curvature can exceed the
