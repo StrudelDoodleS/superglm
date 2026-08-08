@@ -833,6 +833,39 @@ class TestFreezeDiagnostics:
         assert all(np.isfinite(v) for v in freeze["proj_grad"])
 
 
+class TestAllFixedLambdaDiagnostics:
+    """An all-fixed fit exits before the Newton machinery, but the public
+    contract promises the freeze decision on the profile: fixed lambdas
+    freeze definitionally (the projection zeroes their scores), and the
+    record must exist for that path too."""
+
+    @pytest.mark.parametrize("discrete", [False, True])
+    def test_all_fixed_lambdas_still_record_the_freeze_decision(self, discrete):
+        from superglm import LambdaPolicy
+
+        rng = np.random.default_rng(9)
+        n = 400
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.3 + 0.8 * frame["x"].to_numpy())).astype(float)
+        kwargs = {"discrete": True, "n_bins": 32, "selection_penalty": 0} if discrete else {}
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x": Spline(
+                    kind="cr", n_knots=6, lambda_policy=LambdaPolicy(mode="fixed", value=1.5)
+                )
+            },
+            **kwargs,
+        )
+        model.fit_reml(frame, y, runtime_validation="skip")
+
+        assert model._reml_result.termination_reason == "fixed_lambdas"
+        freeze = model._reml_profile["reml_freeze_decision"]
+        assert set(freeze) == {"names", "proj_grad", "hess_diag", "score_scale", "frozen"}
+        assert freeze["frozen"] == [True] * len(freeze["names"])
+        assert float(freeze["score_scale"]) > 0.0
+
+
 class TestFlatDirectionFloor:
     """The freeze bar classifies geometry, not precision.
 
@@ -990,6 +1023,25 @@ class TestSCOPPlateauExit:
         assert _scop_plateau_remaining_movement_bounded(0.004, 0.9)
         assert not _scop_plateau_remaining_movement_bounded(0.009, 0.9)
 
+    def test_the_stall_verdict_is_a_bounded_noise_band(self):
+        """Two trajectories the consecutive-ratio counter got wrong: an
+        oscillating noise floor (1e-5, 2e-5, 1e-5) resets the counter on
+        every down-leg and never plateaus, exhausting max_reml_iter on a
+        flat fit -- while an expanding tail (0.002, 0.004, 0.008; the
+        same-sign adaptive alpha deliberately grows) counts every ratio
+        above 0.9 as a stall and plateaus while movement accelerates.
+        Stall evidence is a bounded band: the last three accepted steps
+        within 2x of their own minimum, with the geometric tail still
+        gated by the extrapolated remaining movement."""
+        from superglm.reml.scop_efs import _scop_plateau_steps_stalled
+
+        assert _scop_plateau_steps_stalled([1e-5, 2e-5, 1e-5], 0.5)
+        assert not _scop_plateau_steps_stalled([0.002, 0.004, 0.008], 2.0)
+        assert not _scop_plateau_steps_stalled([0.01, 0.006, 0.0036], 0.6)
+        assert not _scop_plateau_steps_stalled([2e-5, 1e-5], 0.5)
+        assert not _scop_plateau_steps_stalled([0.01, 0.0095, 0.009], 0.95)
+        assert _scop_plateau_steps_stalled([0.002, 0.0019, 0.0018], 0.95)
+
     def test_the_plateau_does_not_preempt_a_contracting_tail(self):
         """Pre-fix, this fit exited objective_plateau at iteration 5 with
         the lambda still moving a percent per iteration; the gated plateau
@@ -1054,6 +1106,17 @@ class TestPublicationREMLBudget:
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         with pytest.raises(ValueError, match=r"fit_mode='fit'"):
             model.estimate_p(frame, y, fit_mode="fit", max_reml_iter=5)
+
+    def test_the_budget_rejects_non_integral_counts(self):
+        """int() before validation silently truncated 1.9 to one iteration
+        and accepted True and '5' as budgets -- a shortened publication
+        refit with a changed convergence verdict, not an error. The budget
+        is a non-boolean integer via the integer-index protocol."""
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        for bad in (1.9, True, "5"):
+            with pytest.raises(ValueError, match="max_reml_iter"):
+                model.estimate_p(frame, y, fit_mode="reml", max_reml_iter=bad)
 
     def test_the_budget_rejects_a_nonpositive_iteration_count(self):
         """max_reml_iter=0 slid through int() into the Newton loop and died

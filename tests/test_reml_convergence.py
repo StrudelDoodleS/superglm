@@ -164,6 +164,23 @@ def test_stop_mask_passes_a_reactivated_direction_through() -> None:
     np.testing.assert_array_equal(unmasked, np.array([0.5, 2.0]))
 
 
+def test_dead_feasible_exit_needs_an_evaluated_trial() -> None:
+    """had_feasible_trial only means a rho proposal differed. On the
+    observed-geometry path every trial can be SKIPPED -- PIRLS did not
+    converge, geometry failed, the mode did not certify -- without any
+    objective evaluated. A dead search that evaluated nothing is no proof
+    the optimum is resolved; it stays an honest failure."""
+    starved = classify_dead_feasible_exit(
+        1e-9, objective=1e4, tolerance=1e-6, evaluated_trial=False
+    )
+    evidenced = classify_dead_feasible_exit(
+        1e-9, objective=1e4, tolerance=1e-6, evaluated_trial=True
+    )
+
+    assert starved == "line_search_failed"
+    assert evidenced == "converged_at_precision"
+
+
 def test_dead_feasible_exit_classifies_against_the_resolved_tolerance() -> None:
     """A dead feasible line search at reml_tol=1e-3 with the active
     gradient at 1e-5 of scale has met the precision the caller asked for;

@@ -103,6 +103,7 @@ def classify_dead_feasible_exit(
     *,
     objective: float,
     tolerance: float,
+    evaluated_trial: bool = True,
 ) -> str:
     """Classify a line search whose every feasible trial was rejected.
 
@@ -110,7 +111,15 @@ def classify_dead_feasible_exit(
     below the precision actually asked for: the resolved tolerance, never
     tighter than the achievable-precision floor. Holding a loose-tolerance
     fit to the floor misreported a resolved optimum as line_search_failed.
+
+    The proof requires evidence: at least one trial whose objective was
+    actually evaluated and rejected. On observed-geometry paths every
+    trial can be skipped (PIRLS non-convergence, geometry failure, an
+    uncertified mode) without any objective computed -- a search that
+    evaluated nothing has shown nothing, and stays an honest failure.
     """
+    if not evaluated_trial:
+        return "line_search_failed"
     bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * _score_scale(objective)
     if active_gradient_norm < bar:
         return "converged_at_precision"

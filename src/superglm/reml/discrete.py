@@ -714,6 +714,18 @@ def optimize_discrete_reml_cached_w(
 
         if all_lambdas_fixed:
             rho = rho_clipped
+            if profile is not None:
+                # Fixed lambdas freeze definitionally -- the projection
+                # zeroes their scores -- so the public freeze record exists
+                # for this pre-Newton exit too. The zero derivatives are
+                # the projection's definition, not measurements.
+                profile["reml_freeze_decision"] = {
+                    "names": list(group_names),
+                    "proj_grad": [0.0] * m,
+                    "hess_diag": [0.0] * m,
+                    "score_scale": max(1.0 + abs(obj), 1.0),
+                    "frozen": [True] * m,
+                }
             converged = True
             termination_reason = "fixed_lambdas"
             break
