@@ -80,8 +80,27 @@ _MULTI_SCOP_DISCRETE_OBJ_REL_TOL = 1.0e-6
 # lambda still walking one percent per iteration -- so the stall bar sits
 # at 0.9, and two consecutive stalled observations are required so one
 # noisy non-contraction cannot grant convergence mid-progress.
+#
+# A ratio just under 1 is still a geometric tail: at r=0.95 with max_change
+# at the 0.01 plateau cap, max_change*r/(1-r) says ~19% of the log-lambda
+# movement remains, and a "stalled" verdict there would forfeit it. The
+# remaining-movement bound therefore defers the plateau in the r in
+# [stall_ratio, 1) band until the extrapolated tail is genuinely small.
+# At r >= 1 no geometric extrapolation exists -- non-contracting steps ARE
+# the noise-floor stall the plateau exists to classify.
 _SCOP_EFS_PLATEAU_STALL_RATIO = 0.9
 _SCOP_EFS_PLATEAU_MIN_STALLED_ITERS = 2
+_SCOP_EFS_PLATEAU_REMAINING_MOVEMENT = 0.05
+
+
+def _scop_plateau_remaining_movement_bounded(
+    max_change: float, contraction_ratio: float
+) -> bool:
+    """Geometric-tail bound for the plateau's stalled verdict."""
+    if contraction_ratio >= 1.0:
+        return True
+    remaining = max_change * contraction_ratio / (1.0 - contraction_ratio)
+    return remaining < _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
 _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS = 8
 _SCOP_EFS_MAX_REFLECTED_ATTEMPTS = 4
 
@@ -1774,6 +1793,9 @@ def optimize_scop_efs_reml(
     # to tell "still buying precision" from "stalled at the noise floor".
     prev_accepted_max_change: float | None = None
     plateau_stall_count = 0
+    # No observed contraction yet reads as r >= 1 (no geometric claim);
+    # irrelevant until the stall count can reach the plateau's minimum.
+    step_contraction_ratio = float("inf")
 
     for reml_iter in range(max_reml_iter):
         n_reml_iter = reml_iter + 1
@@ -1957,8 +1979,13 @@ def optimize_scop_efs_reml(
                 plateau_stall_count += 1
             else:
                 plateau_stall_count = 0
+            if prev_accepted_max_change is not None and prev_accepted_max_change > 0.0:
+                step_contraction_ratio = max_change / prev_accepted_max_change
             prev_accepted_max_change = max_change
-        steps_stalled = plateau_stall_count >= _SCOP_EFS_PLATEAU_MIN_STALLED_ITERS
+        steps_stalled = (
+            plateau_stall_count >= _SCOP_EFS_PLATEAU_MIN_STALLED_ITERS
+            and _scop_plateau_remaining_movement_bounded(max_change, step_contraction_ratio)
+        )
         if managed_cleanup_active:
             plateau_converged = (
                 candidate_accepted

@@ -578,11 +578,17 @@ class SuperGLM:
             The Newton engines stop when the projected log-lambda gradient
             and the objective change both fall below
             ``reml_tol * (1 + |objective|)``, judged over the ACTIVE
-            directions: inferentially flat directions -- gradient and
-            curvature both below a fixed 1e-7 noise floor ``reml_tol`` does
-            not drag -- are frozen where they stand rather than marched
-            toward the lambda cap, and the per-direction freeze decision is
-            recorded in ``reml_diagnostics()`` under
+            directions: inferentially flat directions are frozen where they
+            stand rather than marched toward the lambda cap. A direction
+            freezes when its gradient falls below
+            ``max(0.1 * reml_tol, 1e-7) * (1 + |objective|)`` -- a loose
+            tolerance widens that arm; tightening stops at the 1e-7 floor
+            -- and its curvature is negligible relative to the strongest
+            estimated direction (1% of ``max_j |H_jj|``, unit-anchored for
+            all-weak models; judging curvature against the objective's
+            scale instead would freeze informative directions as the row
+            count grows). The per-direction freeze decision is recorded in
+            ``reml_diagnostics()`` under
             ``profile["reml_freeze_decision"]``. Loose values still leave
             the informative smoothing parameters -- and the standard errors
             computed from them -- underdetermined long before predictions
@@ -593,7 +599,8 @@ class SuperGLM:
             that stress design. A tolerance tighter than the candidate
             machinery can resolve terminates as
             ``termination_reason="converged_at_precision"`` (every active
-            gradient under the noise floor, no feasible trial left) with
+            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)``, no
+            feasible trial left) with
             ``converged=True``; ``line_search_failed`` with
             ``converged=False`` is reserved for genuinely undetermined
             stalls. The SCOP engine stops on a per-step lambda-change bound

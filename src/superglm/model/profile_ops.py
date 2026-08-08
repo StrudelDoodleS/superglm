@@ -128,7 +128,13 @@ def estimate_p(
     if max_reml_iter is not None and resolved_mode != "fit_reml":
         raise ValueError(
             "max_reml_iter controls the REML publication refit and requires "
-            "fit_mode='reml'; the ML publication path has no REML iteration to budget"
+            f"fit_mode='reml'; this call publishes with fit_mode={fit_mode!r}, "
+            "which has no REML iteration to budget"
+        )
+    if max_reml_iter is not None and int(max_reml_iter) < 1:
+        raise ValueError(
+            "max_reml_iter must be >= 1: the publication refit needs at least "
+            f"one REML iteration, got {max_reml_iter!r}"
         )
     resolved_ci_alpha = None if ci_alpha is None else _validate_profile_ci_alpha(ci_alpha)
     if resolved_ci_alpha is not None and phi_method == "pearson":

@@ -23,10 +23,14 @@ from superglm.distributions import Gamma, Gaussian, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
-from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
+from superglm.reml.convergence import (
+    evaluate_reml_candidate,
+    freeze_flat_directions,
+    mask_frozen_stop_gradient,
+    project_reml_gradient,
+)
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import (
-    FLAT_DIRECTION_FREEZE_FLOOR,
     REMLObjectiveEvaluation,
     reml_laml_objective,
 )
@@ -736,10 +740,8 @@ def optimize_discrete_reml_cached_w(
             log_lower=log_lo,
             log_upper=log_hi,
         )
-        stop_grad_d = (
-            proj_grad_d
-            if stop_criterion_frozen_d is None
-            else np.where(stop_criterion_frozen_d, 0.0, proj_grad_d)
+        stop_grad_d = mask_frozen_stop_gradient(
+            proj_grad_d, stop_criterion_frozen_d, objective=obj, tolerance=_tol
         )
         candidate_convergence = evaluate_reml_candidate(
             iteration=poi_iter,
@@ -784,27 +786,23 @@ def optimize_discrete_reml_cached_w(
         )
 
         # Active-set: freeze components with negligible gradient and Hessian.
-        # The floor keeps the bar a geometric classifier: see its definition.
-        # The discrete engine's 1e-12 tolerance floor made this bar 1e-13 --
-        # three decades below where its own flat directions live.
-        freeze_tol_d = max(0.1 * _tol, FLAT_DIRECTION_FREEZE_FLOOR)
-        frozen_d = np.zeros(m, dtype=bool)
-        for i in range(m):
-            if not estimated_mask[i]:
-                # Fixed lambda — always freeze
-                frozen_d[i] = True
-            elif (
-                abs(proj_grad_d[i]) < freeze_tol_d * score_scale_d
-                and abs(hess[i, i]) < freeze_tol_d * score_scale_d
-            ):
-                frozen_d[i] = True
+        # The gradient/curvature bars live with the classifier's calibration
+        # in reml/convergence.py. (The discrete engine's 1e-12 tolerance
+        # floor once made a tolerance-coupled bar 1e-13 -- three decades
+        # below where its own flat directions live; the shared floor and
+        # curvature-relative arm close that.)
+        frozen_d = freeze_flat_directions(
+            proj_grad_d, np.diagonal(hess), estimated_mask, objective=obj, tolerance=_tol
+        )
         active_idx_d = np.where(~frozen_d)[0]
         stop_criterion_frozen_d = frozen_d.copy()
         if profile is not None:
             # The freeze decision separates informative directions from
             # inferentially flat ones; the per-direction quantities it
             # judged are the calibration evidence for its bar. Overwritten
-            # each iteration: what survives is the LAST decision.
+            # each iteration: what survives is the LAST decision MADE --
+            # on a tolerance exit that is iteration k-1's, because the
+            # freeze runs after the stop criterion that ended iteration k.
             profile["reml_freeze_decision"] = {
                 "names": list(group_names),
                 "proj_grad": [float(abs(v)) for v in proj_grad_d],
