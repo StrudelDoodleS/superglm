@@ -908,6 +908,26 @@ class TestFlatDirectionFloor:
         assert r.converged
         assert str(getattr(r, "termination_reason", "")) != "line_search_failed"
 
+    def test_large_n_keeps_the_informative_directions_active(self):
+        """score_scale = 1+|objective| grows with the row count while
+        log-lambda curvature saturates (measured f6: 0.25 at 12k, 0.62 at
+        1e6). Judged against score_scale, the old bar froze f7 at 400k rows
+        and everything at 1e6 rows by iteration 3, publishing lambdas a
+        factor e^5.6 from the floor-off optimum with SEs off by up to 87%.
+        The curvature-relative arm keeps the bar n-free."""
+        frame, y, weights, offset, features = _flat_lambda_fixture(400_000)
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        model.fit_reml(
+            frame, y, sample_weight=weights, offset=offset, runtime_validation="skip"
+        )
+
+        r = model._reml_result
+        freeze = model._reml_profile["reml_freeze_decision"]
+        frozen = dict(zip(freeze["names"], freeze["frozen"]))
+        assert r.converged
+        assert not frozen["f6"]
+        assert not frozen["f7"]
+
     def test_informative_slow_directions_do_not_freeze(self):
         """flat_12k's stress smooths are the tightest informative curvature
         (|H_ii|/scale ~ 1.5e-6): they are exactly what the determination
@@ -954,6 +974,21 @@ class TestSCOPPlateauExit:
             "x2": CubicRegressionSpline(n_knots=8),
         }
         return frame, y, features
+
+    def test_the_stall_verdict_bounds_the_extrapolated_remaining_movement(self):
+        """A ratio just under 1 is still a geometric tail: at r=0.95 with
+        max_change at the 0.01 plateau cap, max_change*r/(1-r) says ~19% of
+        the lambda movement remains -- 'stalled' may not forfeit that. The
+        bound only defers the plateau in the r in [0.9, 1) band; at r >= 1
+        no geometric extrapolation exists and the non-contracting steps are
+        the machinery noise floor itself, the plateau's honest target."""
+        from superglm.reml.scop_efs import _scop_plateau_remaining_movement_bounded
+
+        assert _scop_plateau_remaining_movement_bounded(0.009, 1.05)
+        assert not _scop_plateau_remaining_movement_bounded(0.009, 0.95)
+        assert _scop_plateau_remaining_movement_bounded(0.002, 0.95)
+        assert _scop_plateau_remaining_movement_bounded(0.004, 0.9)
+        assert not _scop_plateau_remaining_movement_bounded(0.009, 0.9)
 
     def test_the_plateau_does_not_preempt_a_contracting_tail(self):
         """Pre-fix, this fit exited objective_plateau at iteration 5 with
@@ -1017,5 +1052,16 @@ class TestPublicationREMLBudget:
     def test_a_pure_ml_publication_refuses_the_reml_budget(self):
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        with pytest.raises(ValueError, match="max_reml_iter"):
+        with pytest.raises(ValueError, match=r"fit_mode='fit'"):
             model.estimate_p(frame, y, fit_mode="fit", max_reml_iter=5)
+
+    def test_the_budget_rejects_a_nonpositive_iteration_count(self):
+        """max_reml_iter=0 slid through int() into the Newton loop and died
+        as an internal RuntimeError; the budget's floor is one iteration
+        and the refusal belongs at the API boundary."""
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        with pytest.raises(ValueError, match=r"max_reml_iter.*>= 1"):
+            model.estimate_p(frame, y, fit_mode="reml", max_reml_iter=0)
+        with pytest.raises(ValueError, match=r"max_reml_iter.*>= 1"):
+            model.estimate_p(frame, y, fit_mode="reml", max_reml_iter=-3)

@@ -19,11 +19,16 @@ from numpy.typing import NDArray
 from superglm._fit_trace import TraceRun
 from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DesignMatrix
-from superglm.reml.convergence import evaluate_reml_candidate, project_reml_gradient
+from superglm.reml.convergence import (
+    classify_dead_feasible_exit,
+    evaluate_reml_candidate,
+    freeze_flat_directions,
+    mask_frozen_stop_gradient,
+    project_reml_gradient,
+)
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import (
-    FLAT_DIRECTION_FREEZE_FLOOR,
     REMLObjectiveEvaluation,
     reml_laml_objective,
 )
@@ -670,10 +675,8 @@ def optimize_direct_reml(
             log_lower=log_lo,
             log_upper=log_hi,
         )
-        stop_grad = (
-            proj_grad
-            if stop_criterion_frozen is None
-            else np.where(stop_criterion_frozen, 0.0, proj_grad)
+        stop_grad = mask_frozen_stop_gradient(
+            proj_grad, stop_criterion_frozen, objective=obj, tolerance=_tol
         )
         candidate_convergence = evaluate_reml_candidate(
             iteration=outer,
@@ -729,25 +732,20 @@ def optimize_direct_reml(
         )
 
         # Active-set: freeze components with negligible gradient and Hessian.
-        # The floor keeps the bar a geometric classifier: see its definition.
-        freeze_tol = max(0.1 * _tol, FLAT_DIRECTION_FREEZE_FLOOR)
-        frozen = np.zeros(m, dtype=bool)
-        for i in range(m):
-            if not estimated_mask[i]:
-                # Fixed lambda — always freeze
-                frozen[i] = True
-            elif (
-                abs(proj_grad[i]) < freeze_tol * score_scale
-                and abs(hess[i, i]) < freeze_tol * score_scale
-            ):
-                frozen[i] = True
+        # The gradient/curvature bars live with the classifier's calibration
+        # in reml/convergence.py.
+        frozen = freeze_flat_directions(
+            proj_grad, np.diagonal(hess), estimated_mask, objective=obj, tolerance=_tol
+        )
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
         if profile is not None:
             # The freeze decision separates informative directions from
             # inferentially flat ones; the per-direction quantities it
             # judged are the calibration evidence for its bar. Overwritten
-            # each iteration: what survives is the LAST decision.
+            # each iteration: what survives is the LAST decision MADE --
+            # on a tolerance exit that is iteration k-1's, because the
+            # freeze runs after the stop criterion that ended iteration k.
             profile["reml_freeze_decision"] = {
                 "names": list(group_names),
                 "proj_grad": [float(abs(v)) for v in proj_grad],
@@ -763,7 +761,12 @@ def optimize_direct_reml(
                 # Do not let a deliberately loose tolerance bypass the
                 # two-evaluation convergence contract.
                 continue
-            # All components frozen -- converged
+            # All components frozen -- converged. Usually the compound
+            # criterion fires first (an all-frozen mask zeroes the next
+            # iteration's stop gradient), so this exit needs every
+            # direction to cross the freeze bar in the same iteration
+            # that the objective is still moving -- a genuinely all-flat
+            # model, not the common endgame.
             converged = True
             termination_reason = "active_set_stationary"
             break
@@ -1026,9 +1029,10 @@ def optimize_direct_reml(
             # The fully converged exact objective rejected every feasible
             # trial. If every direction in the CURRENT active set -- the set
             # this dead step actually moved -- has its gradient below the
-            # geometric noise floor, the optimum is resolved to achievable
-            # precision and the dead line search is the proof, not a
-            # failure: the predicted decrease from a sub-floor gradient is
+            # precision actually asked for (the resolved tolerance, never
+            # tighter than the achievable-precision floor), the optimum is
+            # resolved and the dead line search is the proof, not a
+            # failure: the predicted decrease from a sub-bar gradient is
             # quadratically below candidate-machinery noise, so the last
             # decades of an ultra-tight bar do not exist to be closed. The
             # objective's own history is no veto here: the last accepted
@@ -1036,15 +1040,14 @@ def optimize_direct_reml(
             # just crossed the freeze bar, and a dead feasible search
             # already states that no further objective progress exists. A
             # genuinely undetermined stall keeps its active gradient orders
-            # above the floor and stays an honest failure.
+            # above the bar and stays an honest failure.
             active_grad_norm = (
                 float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
             )
-            if active_grad_norm < FLAT_DIRECTION_FREEZE_FLOOR * score_scale:
-                converged = True
-                termination_reason = "converged_at_precision"
-                break
-            termination_reason = "line_search_failed"
+            termination_reason = classify_dead_feasible_exit(
+                active_grad_norm, objective=obj, tolerance=_tol
+            )
+            converged = termination_reason == "converged_at_precision"
             break
         _t_linesearch += _time.perf_counter() - _t0
 

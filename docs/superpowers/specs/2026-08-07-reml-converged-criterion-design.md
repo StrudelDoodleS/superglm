@@ -81,7 +81,7 @@ line_search_failed cases. Every flip gets root-caused individually; py310
 lane check at merge-base. Branch: `reml-converged-criterion`, stacked on
 PR #243's head.
 
-## What shipped (2026-08-08)
+## What shipped (2026-08-07)
 
 The implementation deviated from the sketch in three places, each toward a
 smaller mechanism the endgame measurements justified:

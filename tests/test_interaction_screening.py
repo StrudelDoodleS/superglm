@@ -340,7 +340,7 @@ def test_screening_is_invariant_to_the_units_of_a_numeric_margin():
     into an all-NaN row.  1e4 is kept below because a moment matrix carries the
     square of the covariate's scale, so it is already 1e16 in the joint.
 
-    The 1e-5 bar, measured 2026-08-08: ``x`` has no true effect, so its
+    The 1e-5 bar, measured 2026-08-07: ``x`` has no true effect, so its
     smoothing parameter is a flat direction the mains fit now freezes
     mid-transition (cross-scale spread 1e-9) instead of marching deep into
     the edf flat-tail (spread 3.6e-4, hidden to 2e-7 by the tail's zero
