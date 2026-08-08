@@ -355,6 +355,16 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
         profile_result.search_objective_finite = bool(profile_result.objective_finite)
         profile_result.search_phi_converged = bool(profile_result.phi_converged)
         profile_result.search_fit_converged = bool(profile_result.fit_converged)
+        # And its density provenance: `p_hat` was selected on this curve,
+        # so an approximation-scored search stays visible after the
+        # publication re-profile installs its own density story below.
+        profile_result.search_density_method = profile_result.density_method
+        profile_result.search_density_exact = profile_result.density_exact
+        profile_result.search_saddlepoint_fraction = (
+            None
+            if profile_result.saddlepoint_fraction is None
+            else float(profile_result.saddlepoint_fraction)
+        )
     # The fit flags become the PUBLICATION refit's own. Candidates run at the
     # loose search bar and the publication runs tight, so they can disagree
     # on exactly the flat-lambda designs the split was built for; a decoupled
@@ -405,6 +415,18 @@ def _reprofile_published_dispersion(model, y_arr, weights, mu, profile_result, p
 
     kept = [w for w in profile_result.warnings if not _warning_describes_winner_phi(w)]
     kept.extend(_build_density_messages(float(profile_result.p_hat), density))
+    if profile_result.search_density_exact is False and density.exact:
+        # The rebuild above drops the search's own density warning, but
+        # p_hat was selected on that curve: an exact published re-profile
+        # must not relabel an approximation-based power estimate.
+        fraction = profile_result.search_saddlepoint_fraction
+        detail = "" if fraction is None else f" (saddlepoint fraction {fraction:.2f})"
+        kept.append(
+            "The power search scored its winner with "
+            f"{profile_result.search_density_method} density{detail}; the "
+            "published dispersion re-profile evaluated exactly. p_hat and "
+            "its profile CI come from the searched curve."
+        )
     if not phi_result.converged or phi_result.used_fallback:
         detail = "did not converge" if not phi_result.converged else "used a fallback"
         kept.append(f"published dispersion re-profile {detail}: {phi_result.message}")

@@ -613,6 +613,108 @@ class TestSCOPModeFailuresAreRoutable:
         assert scop_module.ObservedModeNotCertifiedError is ObservedModeNotCertifiedError
 
 
+class TestProfileOptCensoringResolution:
+    """profile_opt gives xatol no physical p meaning: the L-BFGS-B branch
+    never forwards it to SciPy at all, and Powell applies it as xtol in the
+    logit-transformed coordinate, where the p-space step shrinks toward the
+    bounds -- exactly where censoring walls live. The winner is resolved to
+    the spacing of the search's own evaluations around it, walls included:
+    an infeasible probe is an exploration point."""
+
+    def test_resolution_comes_from_the_evaluation_trace_not_xatol(self):
+        from superglm.profiling.tweedie import _censoring_search_resolution
+
+        bounds = (1.05, 1.95)
+        trace = [1.14, 1.5, 1.6, 1.615, 1.617, 1.6658, 1.86]
+
+        resolution = _censoring_search_resolution(
+            "profile_opt",
+            None,
+            bounds,
+            20,
+            10,
+            1e-3,
+            "optimizer",
+            winner_p=1.615,
+            evaluated_powers=trace,
+        )
+        assert resolution == pytest.approx(0.015)
+
+        insensitive = _censoring_search_resolution(
+            "profile_opt",
+            None,
+            bounds,
+            20,
+            10,
+            0.5,
+            "optimizer",
+            winner_p=1.615,
+            evaluated_powers=trace,
+        )
+        assert insensitive == pytest.approx(0.015)
+
+    def test_a_degenerate_trace_falls_back_to_xatol(self):
+        from superglm.profiling.tweedie import _censoring_search_resolution
+
+        bounds = (1.05, 1.95)
+        for degenerate in ([1.5], None):
+            assert (
+                _censoring_search_resolution(
+                    "profile_opt",
+                    None,
+                    bounds,
+                    20,
+                    10,
+                    1e-3,
+                    "optimizer",
+                    winner_p=1.5,
+                    evaluated_powers=degenerate,
+                )
+                == 1e-3
+            )
+
+    @pytest.mark.parametrize("optimizer", ["L-BFGS-B", "Powell"])
+    def test_the_search_judges_censoring_at_its_trace_spacing(self, optimizer, monkeypatch):
+        """End-to-end on both optimizer branches: the resolution handed to
+        the censoring check equals the trace-local spacing at the winner."""
+        import superglm.profiling.tweedie as tweedie_module
+
+        captured = {}
+        real_resolution = tweedie_module._censoring_search_resolution
+
+        def resolution_spy(*args, **kwargs):
+            captured["evaluated_powers"] = kwargs.get("evaluated_powers")
+            return real_resolution(*args, **kwargs)
+
+        real_message = tweedie_module._boundary_censoring_message
+
+        def message_spy(p_hat, infeasible, *, xatol):
+            captured["p_hat"] = p_hat
+            captured["judged_at"] = xatol
+            return real_message(p_hat, infeasible, xatol=xatol)
+
+        monkeypatch.setattr(tweedie_module, "_censoring_search_resolution", resolution_spy)
+        monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", message_spy)
+        frame, y, weights, offset, features = _fixture(3_000)
+
+        _model(features).estimate_p(
+            frame,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            fit_mode="reml",
+            method="profile_opt",
+            optimizer=optimizer,
+        )
+
+        trace = np.sort(np.unique(np.asarray(captured["evaluated_powers"], dtype=float)))
+        assert trace.size > 1
+        position = int(np.argmin(np.abs(trace - captured["p_hat"])))
+        gaps = np.diff(trace)
+        expected = float(np.max(gaps[max(position - 1, 0) : position + 1]))
+        assert captured["judged_at"] == pytest.approx(expected)
+
+
 class TestIrregularGridCensoringResolution:
     def test_resolution_is_local_to_the_winner_not_the_global_max_gap(self):
         """On a nonuniform explicit grid, one large gap far from the winner

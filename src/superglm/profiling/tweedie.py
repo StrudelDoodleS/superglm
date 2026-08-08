@@ -3151,6 +3151,14 @@ class TweedieProfileResult:
     search_objective_finite: bool | None = field(default=None, kw_only=True)
     search_phi_converged: bool | None = field(default=None, kw_only=True)
     search_fit_converged: bool | None = field(default=None, kw_only=True)
+    # The searched winner's density provenance, stashed the same way:
+    # `p_hat` was SELECTED on the searched curve, so a saddlepoint-scored
+    # search must stay visible even when the published re-profile happens
+    # to evaluate exactly -- the live density fields describe the published
+    # dispersion only. `None` means no re-profile moved them.
+    search_density_method: _DensityMethod | None = field(default=None, kw_only=True)
+    search_density_exact: bool | None = field(default=None, kw_only=True)
+    search_saddlepoint_fraction: float | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Derive new density fields for legacy positional construction."""
@@ -5654,6 +5662,10 @@ def estimate_tweedie_p(
     # its spacing, so judging its boundary distance against Brent's xatol
     # would silence every warning.
     winner_record = ctx.evaluation_record(float(result.p_hat))
+    evaluated_powers = sorted(
+        {float(p) for p in getattr(ctx, "_evaluation_cache", {})}
+        | {float(p) for p in (getattr(ctx, "_infeasible_powers", None) or {})}
+    )
     search_resolution = _censoring_search_resolution(
         resolved_method,
         grid,
@@ -5663,6 +5675,7 @@ def estimate_tweedie_p(
         xatol,
         None if winner_record is None else winner_record.source,
         winner_p=float(result.p_hat),
+        evaluated_powers=evaluated_powers,
     )
     censoring = _boundary_censoring_message(
         float(result.p_hat), getattr(ctx, "_infeasible_powers", None), xatol=search_resolution
@@ -5678,6 +5691,21 @@ def estimate_tweedie_p(
     return result
 
 
+def _winner_local_spacing(points, winner_p: float | None) -> float | None:
+    """The wider of the winner's two adjacent gaps among sorted points."""
+    if points is None:
+        return None
+    ordered = np.sort(np.unique(np.asarray(list(points), dtype=float)))
+    if ordered.size < 2:
+        return None
+    gaps = np.diff(ordered)
+    if winner_p is None:
+        return float(np.max(gaps))
+    position = int(np.argmin(np.abs(ordered - float(winner_p))))
+    adjacent = gaps[max(position - 1, 0) : position + 1]
+    return float(np.max(adjacent)) if adjacent.size else None
+
+
 def _censoring_search_resolution(
     resolved_method: str,
     grid,
@@ -5687,6 +5715,7 @@ def _censoring_search_resolution(
     xatol: float,
     winner_source: str | None,
     winner_p: float | None = None,
+    evaluated_powers=None,
 ) -> float:
     """The resolution the winning record was actually located to.
 
@@ -5698,22 +5727,27 @@ def _censoring_search_resolution(
     but when the refined candidate is invalid and a coarse-stage point wins
     the global selection, that winner was resolved only to the coarse
     spacing, and judging its boundary distance at xatol would silence the
-    censoring warning the same way the pure-grid bug did.
+    censoring warning the same way the pure-grid bug did. A profile_opt
+    winner gives xatol no physical p meaning at all -- the L-BFGS-B options
+    never forward it to SciPy, and Powell applies it as xtol in the
+    logit-transformed coordinate, where the p step shrinks toward the
+    bounds -- so it is resolved to the spacing of the search's own
+    evaluations around it, walls included: an infeasible probe is an
+    exploration point.
     """
     if resolved_method == "grid":
         if grid is not None and len(np.asarray(grid)) > 1:
-            ordered = np.sort(np.asarray(grid, dtype=float))
-            gaps = np.diff(ordered)
-            if winner_p is not None:
-                position = int(np.argmin(np.abs(ordered - float(winner_p))))
-                adjacent = gaps[max(position - 1, 0) : position + 1]
-                if adjacent.size:
-                    return float(np.max(adjacent))
-            return float(np.max(gaps))
+            spacing = _winner_local_spacing(grid, winner_p)
+            if spacing is not None:
+                return spacing
         return (p_bounds[1] - p_bounds[0]) / max(int(n_grid) - 1, 1)
     if resolved_method == "grid_refine" and winner_source == "grid_coarse":
         coarse_step = (p_bounds[1] - p_bounds[0]) / max(int(n_grid_coarse) - 1, 1)
         return max(float(xatol), coarse_step)
+    if resolved_method == "profile_opt":
+        spacing = _winner_local_spacing(evaluated_powers, winner_p)
+        if spacing is not None:
+            return spacing
     return float(xatol)
 
 
