@@ -24,6 +24,7 @@ from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
+    direction_penalty_ranks,
     evaluate_reml_candidate,
     freeze_flat_directions,
     mask_frozen_stop_gradient,
@@ -230,20 +231,6 @@ def optimize_discrete_reml_cached_w(
     elif isinstance(distribution, Gamma):
         gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
     group_names = [pc.name for pc in penalties]
-    # Per-direction penalty rank, resolved the same way the bootstrap
-    # resolves it; the freeze classifier judges curvature per dimension.
-    direction_ranks = np.array(
-        [
-            max(
-                pc.rank
-                if pc.rank > 0
-                else (penalty_ranks.get(pc.name, 0.0) if penalty_ranks else 0.0),
-                1.0,
-            )
-            for pc in penalties
-        ],
-        dtype=np.float64,
-    )
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
@@ -738,7 +725,9 @@ def optimize_discrete_reml_cached_w(
                     "proj_grad": [0.0] * m,
                     "hess_diag": [0.0] * m,
                     "row_curvature": [0.0] * m,
-                    "penalty_rank": [float(v) for v in direction_ranks],
+                    "penalty_rank": [
+                        float(v) for v in direction_penalty_ranks(penalties, penalty_ranks)
+                    ],
                     "normalized_curvature": [0.0] * m,
                     "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
@@ -821,6 +810,7 @@ def optimize_discrete_reml_cached_w(
         # floor once made a tolerance-coupled bar 1e-13 -- three decades
         # below where its own flat directions live; the shared floor and
         # curvature-relative arm close that.)
+        direction_ranks = direction_penalty_ranks(penalties, penalty_ranks)
         freeze_decision = freeze_flat_directions(
             proj_grad_d,
             hess,
@@ -845,9 +835,7 @@ def optimize_discrete_reml_cached_w(
                 "hess_diag": [float(hess[i, i]) for i in range(m)],
                 "row_curvature": [float(v) for v in freeze_decision.row_curvature],
                 "penalty_rank": [float(v) for v in freeze_decision.penalty_rank],
-                "normalized_curvature": [
-                    float(v) for v in freeze_decision.normalized_curvature
-                ],
+                "normalized_curvature": [float(v) for v in freeze_decision.normalized_curvature],
                 "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale_d),
                 "frozen": [bool(v) for v in frozen_d],

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-
 # The Newton engines' active-set freeze bar never drops below this floor,
 # whatever reml_tol the caller asked for. Freezing classifies GEOMETRY --
 # "is this direction informative at all" -- and an inferentially flat
@@ -64,6 +63,30 @@ class FlatDirectionDecision:
     penalty_rank: NDArray
     normalized_curvature: NDArray
     curvature_bar: float
+
+
+def direction_penalty_ranks(penalty_components, penalty_ranks) -> NDArray:
+    """Per-direction penalty rank, resolved the way the bootstrap resolves it.
+
+    Computed at the freeze site from the CURRENT penalty context, never
+    hoisted: the discrete engine replaces its penalty components at the
+    bootstrap swap and again after every accepted update, and a rank
+    resolved before those rebuilds normalizes the current Hessian with an
+    obsolete value whenever a near-null eigenvalue crosses the rank
+    threshold as the solver space changes.
+    """
+    return np.array(
+        [
+            max(
+                pc.rank
+                if pc.rank > 0
+                else (penalty_ranks.get(pc.name, 0.0) if penalty_ranks else 0.0),
+                1.0,
+            )
+            for pc in penalty_components
+        ],
+        dtype=np.float64,
+    )
 
 
 def freeze_flat_directions(

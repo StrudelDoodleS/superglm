@@ -1203,7 +1203,10 @@ class TestPublicationREMLBudget:
         is a non-boolean integer via the integer-index protocol."""
         frame, y, features = _small_search_fixture()
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        for bad in (1.9, True, "5"):
+        # np.bool_ is not a Python bool but carries __index__ on the
+        # supported NumPy floor (1.24); it must not become a one-iteration
+        # budget there either.
+        for bad in (1.9, True, "5", np.bool_(True)):
             with pytest.raises(ValueError, match="max_reml_iter"):
                 model.estimate_p(frame, y, fit_mode="reml", max_reml_iter=bad)
 

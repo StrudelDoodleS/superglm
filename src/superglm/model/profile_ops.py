@@ -136,7 +136,9 @@ def estimate_p(
         # Coercing before validating silently accepted non-counts: 1.9
         # truncated to one iteration, True and "5" passed as budgets. An
         # iteration count is a non-boolean integer (integer-index protocol).
-        if isinstance(max_reml_iter, bool):
+        # np.bool_ is not a Python bool but implements __index__ on the
+        # supported NumPy floor (1.24), so it is named explicitly.
+        if isinstance(max_reml_iter, (bool, np.bool_)):
             raise ValueError(
                 f"max_reml_iter must be an integer iteration count, got {max_reml_iter!r}"
             )
