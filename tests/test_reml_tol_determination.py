@@ -890,6 +890,44 @@ class TestFreezeRevalidation:
         assert int(r.n_reml_iter) <= 12
         assert float(r.lambdas["x1"]) == pytest.approx(0.0809, rel=0.05)
 
+    def test_the_published_record_is_the_revalidation_itself(self, monkeypatch):
+        """The revalidation is the last freeze decision made -- the one
+        that authorized score_objective_tolerance -- so the published
+        record must carry ITS quantities, not iteration k-1's."""
+        import superglm.reml.direct as direct_module
+
+        captured = []
+        real = direct_module.freeze_flat_directions
+
+        def spy(*args, **kwargs):
+            decision = real(*args, **kwargs)
+            captured.append(decision)
+            return decision
+
+        monkeypatch.setattr(direct_module, "freeze_flat_directions", spy)
+        rng = np.random.default_rng(5)
+        n = 3_000
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.4 * np.sin(5.0 * frame["x1"].to_numpy()) + 0.2 * frame["x2"].to_numpy()
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=8),
+                "x2": Spline(kind="cr", n_knots=8),
+            },
+        )
+        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+
+        assert model._reml_profile.get("reml_freeze_revalidated") is True
+        freeze = model._reml_profile["reml_freeze_decision"]
+        last = captured[-1]
+        np.testing.assert_array_equal(freeze["frozen"], [bool(v) for v in last.frozen])
+        np.testing.assert_array_equal(
+            freeze["normalized_curvature"], [float(v) for v in last.normalized_curvature]
+        )
+        assert float(freeze["curvature_bar"]) == float(last.curvature_bar)
+
     def test_a_mixed_policy_fit_records_the_estimated_status(self):
         """A fixed direction freezes definitionally: its recorded gradient
         is projected to zero while its coupled curvature can exceed the
