@@ -73,10 +73,11 @@ def test_freeze_judges_curvature_relative_to_the_strongest_direction() -> None:
     saturates, so an absolute curvature bar freezes informative directions
     at large n (measured: the flat-lambda stress design froze f7 at 400k
     rows and everything at 1e6, publishing lambdas a factor e^5.6 off).
-    The curvature arm therefore judges each |H_ii| against the strongest
-    estimated direction, not against the objective's magnitude."""
+    The curvature arm therefore judges each direction's row curvature
+    against the strongest estimated direction, not against the objective's
+    magnitude."""
     tiny = np.full(3, 1e-9)
-    hess = np.array([4.0, 0.03, 0.5])
+    hess = np.diag([4.0, 0.03, 0.5])
     estimated = np.ones(3, dtype=bool)
 
     frozen = freeze_flat_directions(
@@ -94,13 +95,42 @@ def test_freeze_judges_curvature_relative_to_the_strongest_direction() -> None:
     np.testing.assert_array_equal(frozen, small_objective)
 
 
+def test_freeze_sees_coupled_curvature_not_just_the_diagonal() -> None:
+    """REML Hessians carry cross-terms (multi-penalty anisotropy adds them
+    explicitly) and need not be positive definite: a coordinate can hold a
+    small diagonal with large off-diagonal curvature. A [[0, c], [c, 0]]
+    block has zero diagonals yet real curvature in the coupled
+    eigenvector -- judged by the diagonal alone, both directions freeze at
+    tiny gradients and the pair is never solved. The curvature arm judges
+    each direction's row over the estimated block."""
+    tiny = np.full(2, 1e-9)
+    coupled = np.array([[0.0, 0.5], [0.5, 0.0]])
+
+    frozen = freeze_flat_directions(
+        tiny, coupled, np.ones(2, dtype=bool), objective=1e3, tolerance=1e-6
+    )
+
+    np.testing.assert_array_equal(frozen, np.array([False, False]))
+
+    # Coupling to a FIXED direction does not keep a direction alive: the
+    # fixed lambda never moves, so that cross-curvature is not exploitable.
+    fixed_partner = freeze_flat_directions(
+        tiny,
+        np.array([[0.002, 0.5], [0.5, 4.0]]),
+        np.array([True, False]),
+        objective=1e3,
+        tolerance=1e-6,
+    )
+    np.testing.assert_array_equal(fixed_partner, np.array([True, True]))
+
+
 def test_freeze_anchors_the_curvature_scale_when_every_direction_is_weak() -> None:
     """An all-null model has no strong direction to anchor the ratio; the
     absolute anchor bounds its march instead of letting the last null
     direction chase the lambda cap forever."""
     assert FLAT_DIRECTION_CURVATURE_ANCHOR == 1.0
     tiny = np.full(2, 1e-9)
-    hess = np.array([0.004, 0.002])
+    hess = np.diag([0.004, 0.002])
 
     frozen = freeze_flat_directions(
         tiny, hess, np.ones(2, dtype=bool), objective=1e3, tolerance=1e-6
@@ -111,7 +141,7 @@ def test_freeze_anchors_the_curvature_scale_when_every_direction_is_weak() -> No
 
 def test_freeze_requires_the_gradient_arm_and_fixed_lambdas_stay_frozen() -> None:
     gradient = np.array([5.0, 1e-9, 1e-9])
-    hess = np.array([0.004, 0.002, 3.0])
+    hess = np.diag([0.004, 0.002, 3.0])
     estimated = np.array([True, True, False])
 
     frozen = freeze_flat_directions(
@@ -127,7 +157,7 @@ def test_freeze_gradient_arm_still_couples_to_a_loose_tolerance() -> None:
     assert FLAT_DIRECTION_FREEZE_FLOOR == 1e-7
     assert FLAT_DIRECTION_CURVATURE_REL == 1e-2
     gradient = np.array([0.5])
-    hess = np.array([0.002])
+    hess = np.diag([0.002])
     estimated = np.ones(1, dtype=bool)
 
     tight = freeze_flat_directions(

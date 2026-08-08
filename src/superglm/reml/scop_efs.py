@@ -102,6 +102,13 @@ _MULTI_SCOP_DISCRETE_OBJ_REL_TOL = 1.0e-6
 _SCOP_EFS_PLATEAU_MIN_STALLED_ITERS = 2
 _SCOP_EFS_PLATEAU_STALL_BAND = 2.0
 _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT = 0.05
+# Expansion means MATERIAL growth across the window, not any strict
+# increase: an equal-step trajectory carries 1e-16-relative float jitter
+# from the exp/log round-trip that can order itself increasingly, and a
+# jitter-increase must stall, not defer forever. The measured noise stall
+# oscillates within ~5%; the expanding-tail counterexample grows 50% over
+# its window; 1.25 splits the two.
+_SCOP_EFS_PLATEAU_EXPANSION_GROWTH = 1.25
 
 
 def _scop_plateau_remaining_movement_bounded(
@@ -117,12 +124,27 @@ def _scop_plateau_remaining_movement_bounded(
 def _scop_plateau_steps_stalled(
     accepted_changes: list[float], contraction_ratio: float
 ) -> bool:
-    """Stalled: a full window of banded steps with bounded remaining movement."""
+    """Stalled: a banded, non-expanding window with bounded remaining movement.
+
+    A strictly increasing window with material net growth is expansion
+    however tightly banded -- 0.004, 0.005, 0.006 sits inside 2x while
+    movement accelerates -- so it defers the stall until the trajectory
+    turns. Noise that happens to order itself increasingly at the floor
+    is deferred the same single iteration and stalls once it turns;
+    deferral costs an iteration, a wrong plateau forfeits real movement.
+    The growth conjunct keeps 1e-16 exp/log jitter on an equal-step
+    trajectory from reading as an increase that defers forever.
+    """
     if len(accepted_changes) < _SCOP_EFS_PLATEAU_MIN_STALLED_ITERS + 1:
         return False
     window = accepted_changes[-(_SCOP_EFS_PLATEAU_MIN_STALLED_ITERS + 1) :]
     floor = max(min(window), np.finfo(float).tiny)
     if max(window) > _SCOP_EFS_PLATEAU_STALL_BAND * floor:
+        return False
+    expanding = all(
+        later > earlier for earlier, later in zip(window, window[1:], strict=False)
+    ) and window[-1] >= _SCOP_EFS_PLATEAU_EXPANSION_GROWTH * window[0]
+    if expanding:
         return False
     return _scop_plateau_remaining_movement_bounded(window[-1], contraction_ratio)
 _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS = 8
