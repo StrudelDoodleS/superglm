@@ -767,6 +767,21 @@ def optimize_direct_reml(
             )
             if profile is not None:
                 profile["reml_freeze_revalidated"] = True
+                # The revalidation IS the last freeze decision made: when
+                # it authorizes the exit below, the published record must
+                # describe it, not iteration k-1.
+                profile["reml_freeze_decision"] = {
+                    "names": list(group_names),
+                    "proj_grad": [float(abs(v)) for v in proj_grad],
+                    "hess_diag": [float(revalidated_hess[i, i]) for i in range(m)],
+                    "row_curvature": [float(v) for v in revalidation.row_curvature],
+                    "penalty_rank": [float(v) for v in revalidation.penalty_rank],
+                    "normalized_curvature": [float(v) for v in revalidation.normalized_curvature],
+                    "curvature_bar": float(revalidation.curvature_bar),
+                    "score_scale": float(score_scale),
+                    "estimated": [bool(v) for v in estimated_mask],
+                    "frozen": [bool(v) for v in revalidation.frozen],
+                }
             reactivated = (
                 ~np.asarray(revalidation.frozen)
                 & np.asarray(stop_criterion_frozen)
