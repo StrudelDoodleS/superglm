@@ -5,6 +5,7 @@ Wood (2011) Appendix B / Eq 6.2.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -47,7 +48,7 @@ def _same_slice(sl_i: slice, sl_j: slice) -> bool:
 
 
 def reml_direct_gradient(
-    group_matrices: list,
+    group_matrices: Sequence,
     result: PIRLSResult,
     XtWX_S_inv: NDArray | HessianFactor,
     lambdas: dict[str, float],
@@ -96,7 +97,7 @@ def reml_direct_gradient(
 
 
 def reml_direct_hessian(
-    group_matrices: list,
+    group_matrices: Sequence,
     distribution: Any,
     XtWX_S_inv: NDArray | HessianFactor,
     lambdas: dict[str, float],
@@ -108,7 +109,7 @@ def reml_direct_hessian(
     n_obs: int = 0,
     phi_hat: float = 1.0,
     penalty_nullity: float | None = None,
-    dH_extra: dict[int, NDArray | CompactSymmetricOperator] | None = None,
+    dH_extra: Mapping[int, NDArray | CompactSymmetricOperator] | None = None,
     dH2_cross: NDArray | None = None,
     *,
     inverse_phi: float | None = None,
