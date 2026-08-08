@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from superglm.reml.convergence import (
     FLAT_DIRECTION_CURVATURE_ANCHOR,
@@ -80,19 +81,39 @@ def test_freeze_judges_curvature_relative_to_the_strongest_direction() -> None:
     hess = np.diag([4.0, 0.03, 0.5])
     estimated = np.ones(3, dtype=bool)
 
-    frozen = freeze_flat_directions(
-        tiny, hess, estimated, objective=1e7, tolerance=1e-6
+    decision = freeze_flat_directions(
+        tiny, hess, np.ones(3), estimated, objective=1e7, tolerance=1e-6
     )
 
     # Bar = REL * max(|H_jj|) = 0.01 * 4.0: only the 0.03 direction is flat.
     # Under the old absolute bar (1e-7 * 1e7 = 1.0) the 0.5 direction froze.
-    np.testing.assert_array_equal(frozen, np.array([False, True, False]))
+    np.testing.assert_array_equal(decision.frozen, np.array([False, True, False]))
+    assert decision.curvature_bar == pytest.approx(0.04)
 
     # The verdict is invariant to the objective's magnitude.
     small_objective = freeze_flat_directions(
-        tiny, hess, estimated, objective=1e3, tolerance=1e-6
+        tiny, hess, np.ones(3), estimated, objective=1e3, tolerance=1e-6
     )
-    np.testing.assert_array_equal(frozen, small_objective)
+    np.testing.assert_array_equal(decision.frozen, small_objective.frozen)
+
+
+def test_freeze_normalizes_curvature_by_penalty_rank() -> None:
+    """Row curvature scales with penalty rank: a 600-level random effect
+    measures ~255 while an informative low-rank spline measures ~2.5, and
+    the raw ratio-to-strongest bar (1e-2 * 255 = 2.55) froze the spline
+    with real signal (measured on the mixed-rank fixture). Per rank the
+    same directions measure ~0.43 and ~0.82 -- commensurate -- so the
+    curvature arm compares curvature per penalty dimension."""
+    tiny = np.full(2, 1e-9)
+    hess = np.diag([255.0, 2.45])
+    ranks = np.array([600.0, 3.0])
+
+    decision = freeze_flat_directions(
+        tiny, hess, ranks, np.ones(2, dtype=bool), objective=1e5, tolerance=1e-6
+    )
+
+    np.testing.assert_array_equal(decision.frozen, np.array([False, False]))
+    np.testing.assert_allclose(decision.row_curvature, [255.0, 2.45])
 
 
 def test_freeze_sees_coupled_curvature_not_just_the_diagonal() -> None:
@@ -106,71 +127,75 @@ def test_freeze_sees_coupled_curvature_not_just_the_diagonal() -> None:
     tiny = np.full(2, 1e-9)
     coupled = np.array([[0.0, 0.5], [0.5, 0.0]])
 
-    frozen = freeze_flat_directions(
-        tiny, coupled, np.ones(2, dtype=bool), objective=1e3, tolerance=1e-6
+    decision = freeze_flat_directions(
+        tiny, coupled, np.ones(2), np.ones(2, dtype=bool), objective=1e3, tolerance=1e-6
     )
 
-    np.testing.assert_array_equal(frozen, np.array([False, False]))
+    np.testing.assert_array_equal(decision.frozen, np.array([False, False]))
 
     # Coupling to a FIXED direction does not keep a direction alive: the
     # fixed lambda never moves, so that cross-curvature is not exploitable.
     fixed_partner = freeze_flat_directions(
         tiny,
-        np.array([[0.002, 0.5], [0.5, 4.0]]),
+        np.array([[5e-4, 0.5], [0.5, 4.0]]),
+        np.ones(2),
         np.array([True, False]),
         objective=1e3,
         tolerance=1e-6,
     )
-    np.testing.assert_array_equal(fixed_partner, np.array([True, True]))
+    np.testing.assert_array_equal(fixed_partner.frozen, np.array([True, True]))
 
 
 def test_freeze_anchors_the_curvature_scale_when_every_direction_is_weak() -> None:
     """An all-null model has no strong direction to anchor the ratio; the
     absolute anchor bounds its march instead of letting the last null
-    direction chase the lambda cap forever."""
-    assert FLAT_DIRECTION_CURVATURE_ANCHOR == 1.0
+    direction chase the lambda cap forever. In per-rank units the
+    calibrated span is: fully null directions measure <= 6e-5, the
+    tightest informative direction 5.2e-3, so the anchored bar
+    1e-2 * 0.1 = 1e-3 splits them."""
+    assert FLAT_DIRECTION_CURVATURE_ANCHOR == 0.1
     tiny = np.full(2, 1e-9)
-    hess = np.diag([0.004, 0.002])
+    hess = np.diag([4e-4, 2e-4])
 
-    frozen = freeze_flat_directions(
-        tiny, hess, np.ones(2, dtype=bool), objective=1e3, tolerance=1e-6
+    decision = freeze_flat_directions(
+        tiny, hess, np.ones(2), np.ones(2, dtype=bool), objective=1e3, tolerance=1e-6
     )
 
-    np.testing.assert_array_equal(frozen, np.array([True, True]))
+    np.testing.assert_array_equal(decision.frozen, np.array([True, True]))
 
 
 def test_freeze_requires_the_gradient_arm_and_fixed_lambdas_stay_frozen() -> None:
     gradient = np.array([5.0, 1e-9, 1e-9])
-    hess = np.diag([0.004, 0.002, 3.0])
+    hess = np.diag([4e-4, 2e-4, 3.0])
     estimated = np.array([True, True, False])
 
-    frozen = freeze_flat_directions(
-        gradient, hess, estimated, objective=1e3, tolerance=1e-6
+    decision = freeze_flat_directions(
+        gradient, hess, np.ones(3), estimated, objective=1e3, tolerance=1e-6
     )
 
     # A live gradient keeps a weak-curvature direction active; a fixed
     # lambda is frozen whatever its curvature.
-    np.testing.assert_array_equal(frozen, np.array([False, True, True]))
+    np.testing.assert_array_equal(decision.frozen, np.array([False, True, True]))
 
 
 def test_freeze_gradient_arm_still_couples_to_a_loose_tolerance() -> None:
     assert FLAT_DIRECTION_FREEZE_FLOOR == 1e-7
     assert FLAT_DIRECTION_CURVATURE_REL == 1e-2
     gradient = np.array([0.5])
-    hess = np.diag([0.002])
+    hess = np.diag([2e-4])
     estimated = np.ones(1, dtype=bool)
 
     tight = freeze_flat_directions(
-        gradient, hess, estimated, objective=1e3, tolerance=1e-6
+        gradient, hess, np.ones(1), estimated, objective=1e3, tolerance=1e-6
     )
     loose = freeze_flat_directions(
-        gradient, hess, estimated, objective=1e3, tolerance=1e-2
+        gradient, hess, np.ones(1), estimated, objective=1e3, tolerance=1e-2
     )
 
     # freeze_tol = max(0.1*tol, floor): 0.5 is live at 1e-4*scale but
     # under the loose 1e-3*scale bar.
-    np.testing.assert_array_equal(tight, np.array([False]))
-    np.testing.assert_array_equal(loose, np.array([True]))
+    np.testing.assert_array_equal(tight.frozen, np.array([False]))
+    np.testing.assert_array_equal(loose.frozen, np.array([True]))
 
 
 def test_stop_mask_passes_a_reactivated_direction_through() -> None:

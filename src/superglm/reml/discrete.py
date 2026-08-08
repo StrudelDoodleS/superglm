@@ -230,6 +230,20 @@ def optimize_discrete_reml_cached_w(
     elif isinstance(distribution, Gamma):
         gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
     group_names = [pc.name for pc in penalties]
+    # Per-direction penalty rank, resolved the same way the bootstrap
+    # resolves it; the freeze classifier judges curvature per dimension.
+    direction_ranks = np.array(
+        [
+            max(
+                pc.rank
+                if pc.rank > 0
+                else (penalty_ranks.get(pc.name, 0.0) if penalty_ranks else 0.0),
+                1.0,
+            )
+            for pc in penalties
+        ],
+        dtype=np.float64,
+    )
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
@@ -723,6 +737,9 @@ def optimize_discrete_reml_cached_w(
                     "names": list(group_names),
                     "proj_grad": [0.0] * m,
                     "hess_diag": [0.0] * m,
+                    "row_curvature": [0.0] * m,
+                    "penalty_rank": [float(v) for v in direction_ranks],
+                    "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "frozen": [True] * m,
                 }
@@ -803,9 +820,15 @@ def optimize_discrete_reml_cached_w(
         # floor once made a tolerance-coupled bar 1e-13 -- three decades
         # below where its own flat directions live; the shared floor and
         # curvature-relative arm close that.)
-        frozen_d = freeze_flat_directions(
-            proj_grad_d, hess, estimated_mask, objective=obj, tolerance=_tol
+        freeze_decision = freeze_flat_directions(
+            proj_grad_d,
+            hess,
+            direction_ranks,
+            estimated_mask,
+            objective=obj,
+            tolerance=_tol,
         )
+        frozen_d = freeze_decision.frozen
         active_idx_d = np.where(~frozen_d)[0]
         stop_criterion_frozen_d = frozen_d.copy()
         if profile is not None:
@@ -819,6 +842,9 @@ def optimize_discrete_reml_cached_w(
                 "names": list(group_names),
                 "proj_grad": [float(abs(v)) for v in proj_grad_d],
                 "hess_diag": [float(hess[i, i]) for i in range(m)],
+                "row_curvature": [float(v) for v in freeze_decision.row_curvature],
+                "penalty_rank": [float(v) for v in freeze_decision.penalty_rank],
+                "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale_d),
                 "frozen": [bool(v) for v in frozen_d],
             }
