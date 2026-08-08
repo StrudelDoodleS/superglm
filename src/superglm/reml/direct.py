@@ -21,6 +21,7 @@ from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DesignMatrix
 from superglm.reml.convergence import (
     classify_dead_feasible_exit,
+    direction_penalty_ranks,
     evaluate_reml_candidate,
     freeze_flat_directions,
     mask_frozen_stop_gradient,
@@ -190,20 +191,6 @@ def optimize_direct_reml(
     # `tol=1e-14` could fail a fit that passed at every looser setting.
     observed_mode_tol = observed_mode_certification_bar()
     group_names = [pc.name for pc in penalties]
-    # Per-direction penalty rank, resolved the same way the bootstrap
-    # resolves it; the freeze classifier judges curvature per dimension.
-    direction_ranks = np.array(
-        [
-            max(
-                pc.rank
-                if pc.rank > 0
-                else (penalty_ranks.get(pc.name, 0.0) if penalty_ranks else 0.0),
-                1.0,
-            )
-            for pc in penalties
-        ],
-        dtype=np.float64,
-    )
     m = len(group_names)
     # estimated_mask[i] = True  => component i is free to be optimized
     #                     False => component i has a fixed lambda (policy)
@@ -638,7 +625,9 @@ def optimize_direct_reml(
                     "proj_grad": [0.0] * m,
                     "hess_diag": [0.0] * m,
                     "row_curvature": [0.0] * m,
-                    "penalty_rank": [float(v) for v in direction_ranks],
+                    "penalty_rank": [
+                        float(v) for v in direction_penalty_ranks(penalties, penalty_ranks)
+                    ],
                     "normalized_curvature": [0.0] * m,
                     "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
@@ -764,6 +753,7 @@ def optimize_direct_reml(
         # Active-set: freeze components with negligible gradient and Hessian.
         # The gradient/curvature bars live with the classifier's calibration
         # in reml/convergence.py.
+        direction_ranks = direction_penalty_ranks(penalties, penalty_ranks)
         freeze_decision = freeze_flat_directions(
             proj_grad,
             hess,
@@ -788,9 +778,7 @@ def optimize_direct_reml(
                 "hess_diag": [float(hess[i, i]) for i in range(m)],
                 "row_curvature": [float(v) for v in freeze_decision.row_curvature],
                 "penalty_rank": [float(v) for v in freeze_decision.penalty_rank],
-                "normalized_curvature": [
-                    float(v) for v in freeze_decision.normalized_curvature
-                ],
+                "normalized_curvature": [float(v) for v in freeze_decision.normalized_curvature],
                 "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale),
                 "frozen": [bool(v) for v in frozen],
