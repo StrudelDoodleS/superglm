@@ -597,10 +597,14 @@ class SuperGLM:
             the determined answer; 1e-9 pins it to ~0.01%, measured at 3->7
             extra Newton iterations on a 97k benchmark fixture and 5->13 on
             that stress design. A tolerance tighter than the candidate
-            machinery can resolve terminates as
+            machinery can resolve terminates -- on the exact engine, whose
+            line search is where that limit surfaces; the discrete engine's
+            exits are ``score_objective_tolerance``,
+            ``active_set_stationary``, ``fixed_lambdas`` and
+            ``max_reml_iter`` -- as
             ``termination_reason="converged_at_precision"`` (every active
-            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)``, no
-            feasible trial left) with
+            gradient under ``max(1e-7, reml_tol) * (1 + |objective|)``, at
+            least one evaluated trial rejected, none left) with
             ``converged=True``; ``line_search_failed`` with
             ``converged=False`` is reserved for genuinely undetermined
             stalls. The SCOP engine stops on a per-step lambda-change bound

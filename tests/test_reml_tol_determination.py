@@ -1041,6 +1041,18 @@ class TestSCOPPlateauExit:
         assert not _scop_plateau_steps_stalled([2e-5, 1e-5], 0.5)
         assert not _scop_plateau_steps_stalled([0.01, 0.0095, 0.009], 0.95)
         assert _scop_plateau_steps_stalled([0.002, 0.0019, 0.0018], 0.95)
+        # A gradual expander INSIDE the band is still expansion, not noise:
+        # every step grew, so movement is accelerating and the stall is
+        # deferred until the trajectory turns. An increasing noise window
+        # (chance ordering at the floor) is deferred the same single
+        # iteration and stalls once it turns.
+        assert not _scop_plateau_steps_stalled([0.004, 0.005, 0.006], 1.2)
+        assert not _scop_plateau_steps_stalled([1e-5, 1.5e-5, 2e-5], 1.33)
+        assert _scop_plateau_steps_stalled([1.5e-5, 2e-5, 1.9e-5], 0.95)
+        # Equal steps carry 1e-16-relative exp/log jitter that can order
+        # itself increasingly; a jitter-increase is a stall, not expansion.
+        jittered = [0.0049999999999998969, 0.0049999999999999958, 0.0050000000000000582]
+        assert _scop_plateau_steps_stalled(jittered, 1.0)
 
     def test_the_plateau_does_not_preempt_a_contracting_tail(self):
         """Pre-fix, this fit exited objective_plateau at iteration 5 with

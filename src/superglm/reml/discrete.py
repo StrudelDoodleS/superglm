@@ -804,7 +804,7 @@ def optimize_discrete_reml_cached_w(
         # below where its own flat directions live; the shared floor and
         # curvature-relative arm close that.)
         frozen_d = freeze_flat_directions(
-            proj_grad_d, np.diagonal(hess), estimated_mask, objective=obj, tolerance=_tol
+            proj_grad_d, hess, estimated_mask, objective=obj, tolerance=_tol
         )
         active_idx_d = np.where(~frozen_d)[0]
         stop_criterion_frozen_d = frozen_d.copy()

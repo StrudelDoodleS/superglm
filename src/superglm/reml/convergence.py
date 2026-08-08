@@ -49,7 +49,7 @@ def _freeze_gradient_bar(objective: float, tolerance: float) -> float:
 
 def freeze_flat_directions(
     projected_gradient: NDArray,
-    hessian_diagonal: NDArray,
+    hessian: NDArray,
     estimated_mask: NDArray,
     *,
     objective: float,
@@ -59,21 +59,33 @@ def freeze_flat_directions(
 
     The gradient arm is judged against the objective's scale -- both grow
     with the row count, so the comparison is dimensionally sound. The
-    curvature arm is judged against the strongest estimated direction
-    (anchored for all-weak models): |H_ii| is O(1) in n, and an absolute
-    or objective-scaled bar becomes n-dependent. Fixed lambdas are always
-    frozen.
+    curvature arm judges each direction's ROW of the estimated Hessian
+    block, not its diagonal alone: REML Hessians carry cross-terms
+    (multi-penalty anisotropy adds them explicitly) and need not be
+    positive definite, so a coordinate can hold a small diagonal with
+    large off-diagonal curvature -- a [[0, c], [c, 0]] block has zero
+    diagonals yet real curvature in the coupled eigenvector. Coupling to
+    a FIXED direction is excluded: that lambda never moves, so the cross
+    term is not exploitable. Row curvature is judged against the
+    strongest estimated direction (anchored for all-weak models): it is
+    O(1) in n, and an absolute or objective-scaled bar becomes
+    n-dependent. Fixed lambdas are always frozen.
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
-    curvature = np.abs(np.asarray(hessian_diagonal, dtype=np.float64))
+    hess = np.abs(np.asarray(hessian, dtype=np.float64))
     estimated = np.asarray(estimated_mask, dtype=bool)
 
     gradient_bar = _freeze_gradient_bar(objective, tolerance)
-    curvature_anchor = float(curvature[estimated].max()) if estimated.any() else 0.0
+    if estimated.any():
+        row_curvature = hess[:, estimated].max(axis=1)
+        curvature_anchor = float(row_curvature[estimated].max())
+    else:
+        row_curvature = np.zeros(len(gradient))
+        curvature_anchor = 0.0
     curvature_bar = FLAT_DIRECTION_CURVATURE_REL * max(
         curvature_anchor, FLAT_DIRECTION_CURVATURE_ANCHOR
     )
-    return ~estimated | ((gradient < gradient_bar) & (curvature < curvature_bar))
+    return ~estimated | ((gradient < gradient_bar) & (row_curvature < curvature_bar))
 
 
 def mask_frozen_stop_gradient(

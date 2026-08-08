@@ -747,7 +747,7 @@ def optimize_direct_reml(
         # The gradient/curvature bars live with the classifier's calibration
         # in reml/convergence.py.
         frozen = freeze_flat_directions(
-            proj_grad, np.diagonal(hess), estimated_mask, objective=obj, tolerance=_tol
+            proj_grad, hess, estimated_mask, objective=obj, tolerance=_tol
         )
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
