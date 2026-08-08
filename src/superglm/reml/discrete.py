@@ -731,6 +731,7 @@ def optimize_discrete_reml_cached_w(
                     "normalized_curvature": [0.0] * m,
                     "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
+                    "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
                 }
             converged = True
@@ -778,30 +779,89 @@ def optimize_discrete_reml_cached_w(
                 f"  POI iter {poi_iter + 1}  obj={obj:.4f}  "
                 f"|grad|={proj_grad_norm:.6f}  delta_obj={obj_change:.6g}  [{lam_str}]"
             )
+        revalidated_hess = None
         if candidate_convergence.converged:
-            rho = rho_clipped
-            prev_obj = obj
-            converged = True
-            termination_reason = "score_objective_tolerance"
-            _t_newton += _time.perf_counter() - _t0
-            break
+            # Same curvature-only re-activation hole as the exact path: the
+            # stop mask's gradient arm cannot see a masked direction whose
+            # coupled partner raised its row curvature past the bar while
+            # its gradient sits between reml_tol and the freeze floor.
+            # Recompute the freeze decision against the current Hessian
+            # before accepting; skipped when no masked direction holds a
+            # gradient above the tolerance.
+            masked_live = stop_criterion_frozen_d is not None and bool(
+                np.any(
+                    np.asarray(stop_criterion_frozen_d)
+                    & (np.abs(proj_grad_d) >= _tol * score_scale_d)
+                )
+            )
+            if not masked_live:
+                rho = rho_clipped
+                prev_obj = obj
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                _t_newton += _time.perf_counter() - _t0
+                break
+            revalidated_hess = reml_direct_hessian(
+                dm.group_matrices,
+                distribution,
+                XtWX_S_inv,
+                cand_lambdas,
+                gradient=grad,
+                penalty_caches=penalty_caches,
+                pirls_result=pirls_result,
+                n_obs=len(y),
+                phi_hat=phi_hat,
+                inverse_phi=inverse_phi,
+                d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+                penalty_nullity=penalty_nullity if not scale_known else None,
+                reml_penalties=penalties,
+                tensor_pair_evaluations=cand_tensor_pair_evals,
+            )
+            revalidation = freeze_flat_directions(
+                proj_grad_d,
+                revalidated_hess,
+                direction_penalty_ranks(penalties, penalty_ranks),
+                estimated_mask,
+                objective=obj,
+                tolerance=_tol,
+            )
+            if profile is not None:
+                profile["reml_freeze_revalidated"] = True
+            reactivated = (
+                ~np.asarray(revalidation.frozen)
+                & np.asarray(stop_criterion_frozen_d)
+                & (np.abs(proj_grad_d) >= _tol * score_scale_d)
+            )
+            if not bool(np.any(reactivated)):
+                rho = rho_clipped
+                prev_obj = obj
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                _t_newton += _time.perf_counter() - _t0
+                break
+            # Re-activated with a live gradient: keep iterating, reusing
+            # the Hessian just computed.
         prev_obj = obj
 
-        hess = reml_direct_hessian(
-            dm.group_matrices,
-            distribution,
-            XtWX_S_inv,
-            cand_lambdas,
-            gradient=grad,
-            penalty_caches=penalty_caches,
-            pirls_result=pirls_result,
-            n_obs=len(y),
-            phi_hat=phi_hat,
-            inverse_phi=inverse_phi,
-            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
-            penalty_nullity=penalty_nullity if not scale_known else None,
-            reml_penalties=penalties,
-            tensor_pair_evaluations=cand_tensor_pair_evals,
+        hess = (
+            revalidated_hess
+            if revalidated_hess is not None
+            else reml_direct_hessian(
+                dm.group_matrices,
+                distribution,
+                XtWX_S_inv,
+                cand_lambdas,
+                gradient=grad,
+                penalty_caches=penalty_caches,
+                pirls_result=pirls_result,
+                n_obs=len(y),
+                phi_hat=phi_hat,
+                inverse_phi=inverse_phi,
+                d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+                penalty_nullity=penalty_nullity if not scale_known else None,
+                reml_penalties=penalties,
+                tensor_pair_evaluations=cand_tensor_pair_evals,
+            )
         )
 
         # Active-set: freeze components with negligible gradient and Hessian.
@@ -838,6 +898,7 @@ def optimize_discrete_reml_cached_w(
                 "normalized_curvature": [float(v) for v in freeze_decision.normalized_curvature],
                 "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale_d),
+                "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen_d],
             }
 

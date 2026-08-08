@@ -632,6 +632,7 @@ def optimize_direct_reml(
                     "normalized_curvature": [0.0] * m,
                     "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
+                    "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [True] * m,
                 }
             converged = True
@@ -719,10 +720,65 @@ def optimize_direct_reml(
 
         prev_obj = obj
 
+        revalidated_hess = None
         if candidate_convergence.converged:
-            converged = True
-            termination_reason = "score_objective_tolerance"
-            break
+            # The stop mask is iteration k-1's freeze decision intersected
+            # with the current gradient arm -- which cannot see a
+            # curvature-only re-activation: a masked direction can hold a
+            # gradient below the 1e-7 freeze floor yet above the requested
+            # reml_tol while its coupled partner's update raised its row
+            # curvature past the bar. Before accepting, recompute the
+            # freeze decision against the CURRENT Hessian; only masked
+            # directions whose gradient exceeds the tolerance can change
+            # the verdict, so the check is skipped when none do.
+            masked_live = stop_criterion_frozen is not None and bool(
+                np.any(
+                    np.asarray(stop_criterion_frozen) & (np.abs(proj_grad) >= _tol * score_scale)
+                )
+            )
+            if not masked_live:
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                break
+            revalidated_hess = reml_direct_hessian(
+                dm.group_matrices,
+                distribution,
+                reml_inverse,
+                cand_lambdas,
+                gradient=grad_partial,
+                penalty_caches=penalty_caches,
+                pirls_result=pirls_result,
+                n_obs=len(y),
+                phi_hat=phi_hat,
+                inverse_phi=inverse_phi,
+                d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+                penalty_nullity=penalty_nullity if not scale_known else None,
+                dH_extra=dH_extra,
+                dH2_cross=dH2_cross,
+                reml_penalties=penalties,
+            )
+            revalidation = freeze_flat_directions(
+                proj_grad,
+                revalidated_hess,
+                direction_penalty_ranks(penalties, penalty_ranks),
+                estimated_mask,
+                objective=obj,
+                tolerance=_tol,
+            )
+            if profile is not None:
+                profile["reml_freeze_revalidated"] = True
+            reactivated = (
+                ~np.asarray(revalidation.frozen)
+                & np.asarray(stop_criterion_frozen)
+                & (np.abs(proj_grad) >= _tol * score_scale)
+            )
+            if not bool(np.any(reactivated)):
+                converged = True
+                termination_reason = "score_objective_tolerance"
+                break
+            # A re-activated direction with a live gradient: not converged.
+            # Fall through into this iteration's Newton step, reusing the
+            # Hessian just computed.
 
         # Wood outer-Hessian update.  With ``w_correction_order=2`` this
         # includes the exact available second curvature derivatives; the
@@ -733,22 +789,26 @@ def optimize_direct_reml(
         # dH_extra and dH2_cross; using the total gradient here would add the
         # first-order W correction twice on the diagonal.
         _t0 = _time.perf_counter()
-        hess = reml_direct_hessian(
-            dm.group_matrices,
-            distribution,
-            reml_inverse,
-            cand_lambdas,
-            gradient=grad_partial,
-            penalty_caches=penalty_caches,
-            pirls_result=pirls_result,
-            n_obs=len(y),
-            phi_hat=phi_hat,
-            inverse_phi=inverse_phi,
-            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
-            penalty_nullity=penalty_nullity if not scale_known else None,
-            dH_extra=dH_extra,
-            dH2_cross=dH2_cross,
-            reml_penalties=penalties,
+        hess = (
+            revalidated_hess
+            if revalidated_hess is not None
+            else reml_direct_hessian(
+                dm.group_matrices,
+                distribution,
+                reml_inverse,
+                cand_lambdas,
+                gradient=grad_partial,
+                penalty_caches=penalty_caches,
+                pirls_result=pirls_result,
+                n_obs=len(y),
+                phi_hat=phi_hat,
+                inverse_phi=inverse_phi,
+                d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
+                penalty_nullity=penalty_nullity if not scale_known else None,
+                dH_extra=dH_extra,
+                dH2_cross=dH2_cross,
+                reml_penalties=penalties,
+            )
         )
 
         # Active-set: freeze components with negligible gradient and Hessian.
@@ -782,6 +842,7 @@ def optimize_direct_reml(
                 "normalized_curvature": [float(v) for v in freeze_decision.normalized_curvature],
                 "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale),
+                "estimated": [bool(v) for v in estimated_mask],
                 "frozen": [bool(v) for v in frozen],
             }
 
@@ -1082,7 +1143,8 @@ def optimize_direct_reml(
                 active_grad_norm,
                 objective=obj,
                 tolerance=_tol,
-                evaluated_trial=evaluated_feasible_trial,
+                evaluated_trial=evaluated_feasible_trial
+                and trial_counts_as_precision_evidence(pirls_result.converged, obj),
             )
             converged = termination_reason == "converged_at_precision"
             break

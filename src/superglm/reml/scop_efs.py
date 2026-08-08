@@ -106,9 +106,16 @@ _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT = 0.05
 # minimum -- not any strict increase (equal steps carry 1e-16-relative
 # exp/log jitter that can order itself increasingly and must stall) and
 # not only monotone growth (a sawtooth 0.004, 0.0039, 0.006 hides a +54%
-# step behind one down-tick). The measured noise stall oscillates within
-# ~5% of its floor; the expanding counterexamples end 50%+ above theirs;
-# 1.25 splits the two.
+# step behind one down-tick). The threshold sits just above the largest
+# LEGITIMATE stall leg the machinery measures: the 400-row EFS noise
+# floor oscillates within ~5% per step, but the multi-SCOP cleanup
+# endgame stalls in a recurring limit cycle whose growth legs run at
+# ratio 1.199 per step (measured window [1.05e-4, 1.26e-4, 1.51e-4] with
+# a flat objective) -- tightening the bar below that defers a real stall
+# to max_reml_iter. Sustained growth under the 1.25 single-window
+# resolution is therefore indistinguishable from the machinery's own
+# stall vocabulary BY MEASUREMENT; in that band the plateau's
+# remaining-movement cap is the guarantee, not the detector.
 _SCOP_EFS_PLATEAU_EXPANSION_GROWTH = 1.25
 
 

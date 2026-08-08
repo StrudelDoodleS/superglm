@@ -835,6 +835,7 @@ class TestFreezeDiagnostics:
             "normalized_curvature",
             "curvature_bar",
             "score_scale",
+            "estimated",
             "frozen",
         }
         assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
@@ -845,16 +846,79 @@ class TestFreezeDiagnostics:
         assert float(freeze["curvature_bar"]) > 0.0
         assert all(np.isfinite(v) for v in freeze["proj_grad"])
         # The audit reconstructs the verdict from the recorded quantities:
-        # the judged symmetric per-dimension curvature against the bar,
-        # the gradient against scale.
-        for g, norm, fz in zip(
+        # fixed directions freeze definitionally; estimated ones by the
+        # judged symmetric per-dimension curvature against the bar and the
+        # gradient against scale.
+        for g, norm, est, fz in zip(
             freeze["proj_grad"],
             freeze["normalized_curvature"],
+            freeze["estimated"],
             freeze["frozen"],
         ):
             gradient_flat = g < 1e-7 * float(freeze["score_scale"])
             curvature_flat = norm < float(freeze["curvature_bar"])
-            assert fz == (gradient_flat and curvature_flat)
+            assert fz == ((not est) or (gradient_flat and curvature_flat))
+
+
+class TestFreezeRevalidation:
+    def test_the_tolerance_exit_revalidates_a_live_masked_gradient(self):
+        """benign_3k's frozen x2 keeps a raw gradient far above the default
+        reml_tol*scale, so the accepting iteration cannot trust the stale
+        mask blindly: a coupled partner's update can re-activate a masked
+        direction through its CURVATURE, which the mask's gradient arm
+        cannot see. The engine recomputes the freeze decision against the
+        current Hessian before accepting, records that it did, and stops
+        only because the mask survives -- with the calibrated behavior
+        unchanged."""
+        rng = np.random.default_rng(5)
+        n = 3_000
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.4 * np.sin(5.0 * frame["x1"].to_numpy()) + 0.2 * frame["x2"].to_numpy()
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(kind="cr", n_knots=8),
+                "x2": Spline(kind="cr", n_knots=8),
+            },
+        )
+        model.fit_reml(frame, y, runtime_validation="skip", max_reml_iter=200)
+
+        r = model._reml_result
+        assert r.converged
+        assert model._reml_profile.get("reml_freeze_revalidated") is True
+        assert int(r.n_reml_iter) <= 12
+        assert float(r.lambdas["x1"]) == pytest.approx(0.0809, rel=0.05)
+
+    def test_a_mixed_policy_fit_records_the_estimated_status(self):
+        """A fixed direction freezes definitionally: its recorded gradient
+        is projected to zero while its coupled curvature can exceed the
+        bar, so without the estimated flag the published quantities imply
+        it should be active. The record carries the flag and the audit
+        reconstructs the verdict."""
+        from superglm import LambdaPolicy
+
+        rng = np.random.default_rng(9)
+        n = 500
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        eta = 0.3 + 0.6 * frame["x1"].to_numpy() + 0.4 * np.sin(4.0 * frame["x2"].to_numpy())
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "x1": Spline(
+                    kind="cr", n_knots=6, lambda_policy=LambdaPolicy(mode="fixed", value=1.5)
+                ),
+                "x2": Spline(kind="cr", n_knots=6),
+            },
+        )
+        model.fit_reml(frame, y, runtime_validation="skip")
+
+        freeze = model._reml_profile["reml_freeze_decision"]
+        status = dict(zip(freeze["names"], zip(freeze["estimated"], freeze["frozen"])))
+        # The fixed policy attaches to the spline's wiggle component.
+        assert status["x1:wiggle"] == (False, True)
+        assert status["x2"][0] is True
 
 
 class TestAllFixedLambdaDiagnostics:
@@ -894,6 +958,7 @@ class TestAllFixedLambdaDiagnostics:
             "normalized_curvature",
             "curvature_bar",
             "score_scale",
+            "estimated",
             "frozen",
         }
         assert freeze["frozen"] == [True] * len(freeze["names"])
@@ -1124,6 +1189,20 @@ class TestSCOPPlateauExit:
         # A sawtooth expander -- one transient down-step inside the band,
         # then +54% -- is still material recent growth, not a stall.
         assert not _scop_plateau_steps_stalled([0.004, 0.0039, 0.006], 1.54)
+        # Persistent 10%-per-iteration growth (+21% across the window) is
+        # BELOW the single-window resolution limit: the multi-SCOP cleanup
+        # endgame's legitimate limit-cycle stall carries measured growth
+        # legs at ratio 1.199 per step, so a bar tight enough to reject
+        # this trajectory defers that real stall to max_reml_iter. In the
+        # sub-resolution band the remaining-movement cap is the guarantee.
+        assert _scop_plateau_steps_stalled([0.004, 0.0044, 0.00484], 1.1)
+        # The cleanup cycle's measured stalling window -- post-excursion,
+        # growth leg at ratio 1.199 -- stalls; its pure three-leg growth
+        # window (net 1.437) correctly defers within the same cycle.
+        assert _scop_plateau_steps_stalled([2.628e-4, 1.574e-4, 1.887e-4], 1.199)
+        assert not _scop_plateau_steps_stalled([1.054e-4, 1.264e-4, 1.515e-4], 1.199)
+        # A single noise up-leg at the measured 1.05 ratio still stalls.
+        assert _scop_plateau_steps_stalled([1.9e-5, 1.85e-5, 1.95e-5], 1.05)
         # Equal steps carry 1e-16-relative exp/log jitter that can order
         # itself increasingly; a jitter-increase is a stall, not expansion.
         jittered = [0.0049999999999998969, 0.0049999999999999958, 0.0050000000000000582]
