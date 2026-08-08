@@ -35,6 +35,7 @@ from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import SymmetricBlockOperator
 from superglm.types import GroupSlice, PenaltyComponent
 
+
 @dataclass(frozen=True)
 class REMLObjectiveEvaluation:
     """One REML candidate evaluation and its reusable profiled-scale state."""

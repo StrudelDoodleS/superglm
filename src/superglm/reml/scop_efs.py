@@ -112,9 +112,7 @@ _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT = 0.05
 _SCOP_EFS_PLATEAU_EXPANSION_GROWTH = 1.25
 
 
-def _scop_plateau_remaining_movement_bounded(
-    max_change: float, contraction_ratio: float
-) -> bool:
+def _scop_plateau_remaining_movement_bounded(max_change: float, contraction_ratio: float) -> bool:
     """Geometric-tail bound for the plateau's stalled verdict."""
     if contraction_ratio >= 1.0:
         return True
@@ -122,9 +120,7 @@ def _scop_plateau_remaining_movement_bounded(
     return remaining < _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT
 
 
-def _scop_plateau_steps_stalled(
-    accepted_changes: list[float], contraction_ratio: float
-) -> bool:
+def _scop_plateau_steps_stalled(accepted_changes: list[float], contraction_ratio: float) -> bool:
     """Stalled: a banded, non-expanding window with bounded remaining movement.
 
     Material recent growth is expansion however tightly banded, and it
@@ -145,6 +141,8 @@ def _scop_plateau_steps_stalled(
     if window[-1] >= _SCOP_EFS_PLATEAU_EXPANSION_GROWTH * floor:
         return False
     return _scop_plateau_remaining_movement_bounded(window[-1], contraction_ratio)
+
+
 _SCOP_EFS_MAX_BACKTRACK_ATTEMPTS = 8
 _SCOP_EFS_MAX_REFLECTED_ATTEMPTS = 4
 
@@ -2019,9 +2017,7 @@ def optimize_scop_efs_reml(
                 step_contraction_ratio = max_change / accepted_change_window[-1]
             accepted_change_window.append(max_change)
             del accepted_change_window[: -(_SCOP_EFS_PLATEAU_MIN_STALLED_ITERS + 1)]
-        steps_stalled = _scop_plateau_steps_stalled(
-            accepted_change_window, step_contraction_ratio
-        )
+        steps_stalled = _scop_plateau_steps_stalled(accepted_change_window, step_contraction_ratio)
         if managed_cleanup_active:
             plateau_converged = (
                 candidate_accepted
