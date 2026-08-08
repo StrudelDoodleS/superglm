@@ -870,6 +870,20 @@ def optimize_direct_reml(
                 # Do not let a deliberately loose tolerance bypass the
                 # two-evaluation convergence contract.
                 continue
+            if not (
+                trial_counts_as_precision_evidence(pirls_result.converged, obj)
+                and obj_change < _tol * score_scale
+            ):
+                # The Fisher path admits a PIRLS-exhausted candidate, so an
+                # all-frozen verdict can be measured at a nonstationary
+                # beta with the objective still moving. All frozen means
+                # rho stops moving, so deferring is a warm-started PIRLS
+                # settle at the same lambdas -- the stationary exit fires
+                # only for a stationary mode with a stable objective
+                # (measured: warm-start chaining makes the max_iter=1
+                # all-null fixture identical to the reference by the time
+                # this exit fires, so the gate defers nothing there).
+                continue
             # All components frozen -- converged. Usually the compound
             # criterion fires first (an all-frozen mask zeroes the next
             # iteration's stop gradient), so this exit needs every
