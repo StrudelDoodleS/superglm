@@ -958,6 +958,46 @@ class TestFreezeRevalidation:
         assert str(r.termination_reason) == "score_objective_tolerance"
         assert int(r.n_reml_iter) >= 12
 
+    def test_the_exact_stationary_exit_requires_a_stationary_mode(self):
+        """The Fisher path admits a PIRLS-exhausted candidate, so the
+        all-frozen exit could publish converged=True from a nonstationary
+        beta. The gate requires a converged current mode with a stable
+        objective; measured on this all-null fixture, warm-start chaining
+        settles the mode across outer iterations, so even max_iter=1
+        reaches the reference answer and the gated exit fires identically
+        (lambdas match the default-budget run to <0.1%)."""
+        rng = np.random.default_rng(21)
+        n = 1_500
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        y = rng.poisson(1.4, n).astype(float)
+
+        def fit(**kwargs):
+            model = SuperGLM(
+                family="poisson",
+                features={
+                    "x1": Spline(kind="cr", n_knots=8),
+                    "x2": Spline(kind="cr", n_knots=8),
+                },
+                **kwargs,
+            )
+            model.fit_reml(frame, y, runtime_validation="skip")
+            return model._reml_result
+
+        exhausted = fit(max_iter=1)
+        reference = fit()
+
+        assert exhausted.converged and reference.converged
+        # The gate defers the stationary exit until the mode is honest;
+        # here the settle hands the exit to the compound criterion.
+        assert str(exhausted.termination_reason) in {
+            "score_objective_tolerance",
+            "active_set_stationary",
+        }
+        for name in reference.lambdas:
+            assert float(exhausted.lambdas[name]) == pytest.approx(
+                float(reference.lambdas[name]), rel=1e-2
+            )
+
     def test_a_mixed_policy_fit_records_the_estimated_status(self):
         """A fixed direction freezes definitionally: its recorded gradient
         is projected to zero while its coupled curvature can exceed the
