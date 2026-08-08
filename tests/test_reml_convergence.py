@@ -245,9 +245,7 @@ def test_stop_mask_passes_a_reactivated_direction_through() -> None:
     reactivated = mask_frozen_stop_gradient(
         np.array([0.5, 2.0]), previous, objective=1e3, tolerance=1e-6
     )
-    unmasked = mask_frozen_stop_gradient(
-        np.array([0.5, 2.0]), None, objective=1e3, tolerance=1e-6
-    )
+    unmasked = mask_frozen_stop_gradient(np.array([0.5, 2.0]), None, objective=1e3, tolerance=1e-6)
 
     np.testing.assert_array_equal(still_flat, np.array([0.0, 2.0]))
     np.testing.assert_array_equal(reactivated, np.array([0.5, 2.0]))
@@ -290,9 +288,7 @@ def test_dead_feasible_exit_classifies_against_the_resolved_tolerance() -> None:
     holding it to the 1e-7 floor misreported it as line_search_failed."""
     loose = classify_dead_feasible_exit(0.1, objective=1e4, tolerance=1e-3)
     tight = classify_dead_feasible_exit(0.1, objective=1e4, tolerance=1e-11)
-    tight_resolved = classify_dead_feasible_exit(
-        1e-4, objective=1e4, tolerance=1e-11
-    )
+    tight_resolved = classify_dead_feasible_exit(1e-4, objective=1e4, tolerance=1e-11)
 
     assert loose == "converged_at_precision"
     assert tight == "line_search_failed"

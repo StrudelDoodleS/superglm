@@ -984,9 +984,7 @@ class TestFlatDirectionFloor:
         The curvature-relative arm keeps the bar n-free."""
         frame, y, weights, offset, features = _flat_lambda_fixture(400_000)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.fit_reml(
-            frame, y, sample_weight=weights, offset=offset, runtime_validation="skip"
-        )
+        model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
 
         r = model._reml_result
         freeze = model._reml_profile["reml_freeze_decision"]
