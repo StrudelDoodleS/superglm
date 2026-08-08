@@ -685,8 +685,19 @@ def _resolve_profile_fit_mode(model, fit_mode: str, *, parameter: str = "fit_mod
 
 
 def _validate_profile_selection_mode(model, resolved_mode: str) -> None:
-    """Fail REML profile requests before allocating a profile workspace."""
+    """Fail doomed profile requests before allocating a profile workspace.
+
+    Each regime preflights its own final-fit restrictions. The ordinary-fit
+    side matters most for reverse coupling (search REML, publish ML): the
+    features the publication fit rejects (RandomEffect, FactorSmooth,
+    lambda_policy) would otherwise be discovered only after the entire
+    multi-candidate search has run to a guaranteed failure.
+    """
     if resolved_mode != "fit_reml":
+        from superglm.model import fit_ops
+
+        fit_ops._reject_random_effect_selection_fit(model, "fit")
+        fit_ops._reject_lambda_policy_fit(model, "fit")
         return
     from superglm.model.base import validate_selection_penalty_for_reml
     from superglm.model.fit_state import configured_penalty

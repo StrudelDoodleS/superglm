@@ -563,8 +563,11 @@ class SuperGLM:
         reml_tol : float, optional
             Stopping tolerance for the smoothing-parameter optimizer. Unset,
             it resolves per engine: 1e-9 for the Newton engines (exact and
-            discrete -- every ``fit_reml`` model without SCOP constraints),
-            1e-6 for the step-criterion engines (the SCOP path). An explicit
+            discrete), 1e-6 for the step-criterion engines -- the SCOP path,
+            and equally the ``lambda1`` selection-penalty path, which
+            optimizes by EFS steps rather than Newton, stops on a per-step
+            lambda-change bound, and does not carry the Newton engines'
+            determination behavior described below. An explicit
             value reaches the engine verbatim, except that the discrete
             engine floors it at 1e-12, below which its cached-W objective
             differences are numerical noise. Candidate-grade fits

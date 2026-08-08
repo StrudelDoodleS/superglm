@@ -173,6 +173,16 @@ class PathResult:
         return telemetry
 
 
+def _reject_lambda_policy_fit(model, method: str = "fit") -> None:
+    """lambda_policy is only supported in fit_reml(); reject ordinary fits."""
+    for name, spec in model._specs.items():
+        if getattr(spec, "_lambda_policy", None) is not None:
+            raise NotImplementedError(
+                f"lambda_policy on feature '{name}' is only supported with "
+                f"fit_reml(), not {method}(). Use fit_reml() or remove lambda_policy."
+            )
+
+
 def _reject_random_effect_selection_fit(model, method: str) -> None:
     """Keep structured variance components out of selection-penalty fit paths."""
     from superglm.features.factor_smooth import FactorSmooth
@@ -921,15 +931,7 @@ def _fit_in_workspace(
     lambda2 = configured_lambda2(model)
 
     _reject_random_effect_selection_fit(model, "fit")
-
-    # lambda_policy is only supported in fit_reml(); reject here.
-    for name, spec in model._specs.items():
-        lp = getattr(spec, "_lambda_policy", None)
-        if lp is not None:
-            raise NotImplementedError(
-                f"lambda_policy on feature '{name}' is only supported with "
-                f"fit_reml(), not fit(). Use fit_reml() or remove lambda_policy."
-            )
+    _reject_lambda_policy_fit(model, "fit")
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
     _clear_profile_results(model)
