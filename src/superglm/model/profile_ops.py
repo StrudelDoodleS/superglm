@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import operator
 from dataclasses import fields, is_dataclass, replace
 
 import numpy as np
@@ -131,11 +132,25 @@ def estimate_p(
             f"fit_mode='reml'; this call publishes with fit_mode={fit_mode!r}, "
             "which has no REML iteration to budget"
         )
-    if max_reml_iter is not None and int(max_reml_iter) < 1:
-        raise ValueError(
-            "max_reml_iter must be >= 1: the publication refit needs at least "
-            f"one REML iteration, got {max_reml_iter!r}"
-        )
+    if max_reml_iter is not None:
+        # Coercing before validating silently accepted non-counts: 1.9
+        # truncated to one iteration, True and "5" passed as budgets. An
+        # iteration count is a non-boolean integer (integer-index protocol).
+        if isinstance(max_reml_iter, bool):
+            raise ValueError(
+                f"max_reml_iter must be an integer iteration count, got {max_reml_iter!r}"
+            )
+        try:
+            max_reml_iter = operator.index(max_reml_iter)
+        except TypeError:
+            raise ValueError(
+                f"max_reml_iter must be an integer iteration count, got {max_reml_iter!r}"
+            ) from None
+        if max_reml_iter < 1:
+            raise ValueError(
+                "max_reml_iter must be >= 1: the publication refit needs at least "
+                f"one REML iteration, got {max_reml_iter!r}"
+            )
     resolved_ci_alpha = None if ci_alpha is None else _validate_profile_ci_alpha(ci_alpha)
     if resolved_ci_alpha is not None and phi_method == "pearson":
         raise RuntimeError(

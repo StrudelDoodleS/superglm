@@ -614,6 +614,18 @@ def optimize_direct_reml(
             best_lambdas = cand_lambdas.copy()
             best_pirls = pirls_result
             lambda_history.append(cand_lambdas.copy())
+            if profile is not None:
+                # Fixed lambdas freeze definitionally -- the projection
+                # zeroes their scores -- so the public freeze record exists
+                # for this pre-Newton exit too. The zero derivatives are
+                # the projection's definition, not measurements.
+                profile["reml_freeze_decision"] = {
+                    "names": list(group_names),
+                    "proj_grad": [0.0] * m,
+                    "hess_diag": [0.0] * m,
+                    "score_scale": max(1.0 + abs(obj), 1.0),
+                    "frozen": [True] * m,
+                }
             converged = True
             termination_reason = "fixed_lambdas"
             break
@@ -806,6 +818,7 @@ def optimize_direct_reml(
         descent = float(grad @ delta)
         accepted = False
         had_feasible_trial = False
+        evaluated_feasible_trial = False
         for _ls in range(max_ls):
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
             if np.all(np.abs(rho_trial - rho_clipped) <= 1e-12):
@@ -943,6 +956,7 @@ def optimize_direct_reml(
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else float(trial_evaluation)
             )
+            evaluated_feasible_trial = True
 
             armijo_bound = obj + armijo_c * step * descent
             trial_accepted = bool(trial_obj <= armijo_bound)
@@ -1045,7 +1059,10 @@ def optimize_direct_reml(
                 float(np.max(np.abs(np.where(frozen, 0.0, proj_grad)))) if proj_grad.size else 0.0
             )
             termination_reason = classify_dead_feasible_exit(
-                active_grad_norm, objective=obj, tolerance=_tol
+                active_grad_norm,
+                objective=obj,
+                tolerance=_tol,
+                evaluated_trial=evaluated_feasible_trial,
             )
             converged = termination_reason == "converged_at_precision"
             break
