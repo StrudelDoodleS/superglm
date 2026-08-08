@@ -928,6 +928,36 @@ class TestFreezeRevalidation:
         )
         assert float(freeze["curvature_bar"]) == float(last.curvature_bar)
 
+    def test_an_all_null_discrete_fit_settles_before_the_stationary_exit(self):
+        """POI performs one working-model update per outer iteration, so an
+        all-frozen verdict can be measured at a nonstationary coefficient
+        mode. The stationary exit now also requires the objective arm's
+        agreement; on this all-null fixture the settle costs one further
+        iteration and the compound criterion takes the exit honestly
+        (measured: identical lambdas either way; pre-fix stopped
+        active_set_stationary at iteration 11 with the objective still
+        moving)."""
+        rng = np.random.default_rng(21)
+        n = 2_000
+        frame = pd.DataFrame({"x1": rng.uniform(0, 1, n), "x2": rng.uniform(0, 1, n)})
+        y = rng.poisson(1.4, n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0,
+            discrete=True,
+            n_bins=32,
+            features={
+                "x1": Spline(kind="cr", n_knots=8),
+                "x2": Spline(kind="cr", n_knots=8),
+            },
+        )
+        model.fit_reml(frame, y, runtime_validation="skip")
+
+        r = model._reml_result
+        assert r.converged
+        assert str(r.termination_reason) == "score_objective_tolerance"
+        assert int(r.n_reml_iter) >= 12
+
     def test_a_mixed_policy_fit_records_the_estimated_status(self):
         """A fixed direction freezes definitionally: its recorded gradient
         is projected to zero while its coupled curvature can exceed the
