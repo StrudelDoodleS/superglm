@@ -70,9 +70,9 @@ def _prediction_rtol(n_cols: int) -> float:
     return 8 * (n_cols + 2) * _EPS
 
 
-def _fit(case_name: str) -> tuple[SuperGLM, PiecewiseCase]:
+def _fit(case_name: str, extrapolation: str | None = None) -> tuple[SuperGLM, PiecewiseCase]:
     """Fit the named fixture.  Callers only read from it or deep-copy it."""
-    case = make_case(case_name)
+    case = make_case(case_name, extrapolation=extrapolation)
     model = SuperGLM(
         features={
             "x": case.spec,
@@ -84,13 +84,14 @@ def _fit(case_name: str) -> tuple[SuperGLM, PiecewiseCase]:
     return model, case
 
 
-_FITTED: dict[str, tuple[SuperGLM, PiecewiseCase]] = {}
+_FITTED: dict[tuple[str, str | None], tuple[SuperGLM, PiecewiseCase]] = {}
 
 
-def _fitted(case_name: str) -> tuple[SuperGLM, PiecewiseCase]:
-    if case_name not in _FITTED:
-        _FITTED[case_name] = _fit(case_name)
-    return _FITTED[case_name]
+def _fitted(case_name: str, extrapolation: str | None = None) -> tuple[SuperGLM, PiecewiseCase]:
+    key = (case_name, extrapolation)
+    if key not in _FITTED:
+        _FITTED[key] = _fit(case_name, extrapolation=extrapolation)
+    return _FITTED[key]
 
 
 def _spec(model: SuperGLM) -> Piecewise:
@@ -374,12 +375,13 @@ class TestLocality:
         )
 
     def test_a_hat_next_to_the_boundary_keeps_support_out_in_the_linear_tail(self):
-        # MEASURED, and it contradicts the interval form of the locality claim:
-        # with `upper` pinned inside the data, rows above it are clamped into
-        # the last segment, so the hat at t_J still weights them. Locality is a
-        # statement about the basis column; (t_{j-1}, t_{j+1}) is only the same
-        # set while no row extrapolates.
-        model, case = _fitted("pinned_narrower")
+        # MEASURED under extrapolation="extend", and it contradicts the
+        # interval form of the locality claim: with `upper` pinned inside the
+        # data, rows above it are clamped into the last segment, so the hat at
+        # t_J still weights them. Locality is a statement about the basis
+        # column; (t_{j-1}, t_{j+1}) is only the same set while no row
+        # extrapolates.
+        model, case = _fitted("pinned_narrower", extrapolation="extend")
         spec = _spec(model)
         knots = spec._knots
         knot_index = knots.size - 2
@@ -392,6 +394,23 @@ class TestLocality:
         assert np.all(x_values[support & ~interval] >= knots[-1])
         # The reverse containment does hold: nothing inside the two adjacent
         # segments is outside the support.
+        assert not np.any(interval & ~support)
+
+    def test_the_same_hat_is_local_again_under_the_clip_default(self):
+        # The clip twin: rows above `upper` are grouped onto the boundary knot
+        # itself, where the second-to-last hat is exactly zero, so the interval
+        # form of the locality claim is restored.
+        model, case = _fitted("pinned_narrower")
+        assert _spec(model).extrapolation == "clip"
+        spec = _spec(model)
+        knots = spec._knots
+        knot_index = knots.size - 2
+        x_values = np.asarray(case.X["x"], dtype=np.float64)
+
+        support = _hat_column(model, case, knot_index) != 0.0
+        interval = (x_values > knots[knot_index - 1]) & (x_values < knots[knot_index + 1])
+
+        assert not np.any(support & ~interval)
         assert not np.any(interval & ~support)
 
     @pytest.mark.parametrize("case_name", CASE_NAMES)
@@ -548,18 +567,24 @@ class TestEditedModelReporting:
 
 
 class TestOffsetAndExposure:
+    @pytest.mark.parametrize("extrapolation", ["clip", "extend"])
     @pytest.mark.parametrize("case_name", CASE_NAMES)
-    def test_the_editor_offset_reproduces_the_term_outside_the_knot_span(self, case_name):
+    def test_the_editor_offset_reproduces_the_term_outside_the_knot_span(
+        self, case_name, extrapolation
+    ):
         """``refit_with_edited_offset`` must condition on the term that was edited.
 
         ``term_offset_values`` interpolates over the editor grid with
         ``left=``/``right=`` clamping, which holds the term FLAT past the
-        boundary knots -- contradicting ``Piecewise.score``, the plotted curve
-        and the boundary slopes the exported workbook publishes. ``Piecewise``
-        is the first spec whose grid is deliberately allowed to be narrower than
-        the data, so the shared helper's clamp is newly load-bearing here.
+        boundary knots.  Under the clip default that clamp IS the model; under
+        ``extrapolation="extend"`` it contradicts ``Piecewise.score``, the
+        plotted curve and the boundary slopes the exported workbook publishes,
+        so the helper has to switch to the boundary lines.  Both modes are
+        swept: ``Piecewise`` is the first spec whose grid is deliberately
+        allowed to be narrower than the data, so which tail rule the shared
+        helper applies is newly load-bearing here.
         """
-        model, case = _fitted(case_name)
+        model, case = _fitted(case_name, extrapolation=extrapolation)
         spec = _spec(model)
         session = EditorSession.from_model(model, terms=["x"])
 

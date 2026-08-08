@@ -153,6 +153,10 @@ class EditorSession:
                 )
                 EditorSession._attach_native_log_effect(term, native_ti)
             term.metadata["term_type"] = term_type_from_spec(model._specs[name])
+            if term.metadata["term_type"] == "piecewise":
+                # The offset-scoring helper needs to know whether the term
+                # holds flat or continues its end slopes past the knot vector.
+                term.metadata["extrapolation"] = model._specs[name].extrapolation
             term.weights = (
                 term_weights_from_data(train_data.X, train_data.sample_weight, name, term)
                 if train_data is not None
