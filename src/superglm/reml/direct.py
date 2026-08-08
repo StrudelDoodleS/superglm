@@ -740,6 +740,7 @@ def optimize_direct_reml(
                 converged = True
                 termination_reason = "score_objective_tolerance"
                 break
+            _t0 = _time.perf_counter()
             revalidated_hess = reml_direct_hessian(
                 dm.group_matrices,
                 distribution,
@@ -782,6 +783,7 @@ def optimize_direct_reml(
                     "estimated": [bool(v) for v in estimated_mask],
                     "frozen": [bool(v) for v in revalidation.frozen],
                 }
+            _t_hessian += _time.perf_counter() - _t0
             reactivated = (
                 ~np.asarray(revalidation.frozen)
                 & np.asarray(stop_criterion_frozen)
