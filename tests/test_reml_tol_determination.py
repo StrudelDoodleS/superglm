@@ -832,6 +832,7 @@ class TestFreezeDiagnostics:
             "hess_diag",
             "row_curvature",
             "penalty_rank",
+            "normalized_curvature",
             "curvature_bar",
             "score_scale",
             "frozen",
@@ -839,19 +840,20 @@ class TestFreezeDiagnostics:
         assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
         assert len(freeze["frozen"]) == len(freeze["names"])
         assert len(freeze["row_curvature"]) == len(freeze["penalty_rank"]) == len(freeze["names"])
+        assert len(freeze["normalized_curvature"]) == len(freeze["names"])
         assert float(freeze["score_scale"]) > 0.0
         assert float(freeze["curvature_bar"]) > 0.0
         assert all(np.isfinite(v) for v in freeze["proj_grad"])
         # The audit reconstructs the verdict from the recorded quantities:
-        # row curvature per rank against the bar, gradient against scale.
-        for g, row, rank, fz in zip(
+        # the judged symmetric per-dimension curvature against the bar,
+        # the gradient against scale.
+        for g, norm, fz in zip(
             freeze["proj_grad"],
-            freeze["row_curvature"],
-            freeze["penalty_rank"],
+            freeze["normalized_curvature"],
             freeze["frozen"],
         ):
             gradient_flat = g < 1e-7 * float(freeze["score_scale"])
-            curvature_flat = row / max(rank, 1.0) < float(freeze["curvature_bar"])
+            curvature_flat = norm < float(freeze["curvature_bar"])
             assert fz == (gradient_flat and curvature_flat)
 
 
@@ -889,6 +891,7 @@ class TestAllFixedLambdaDiagnostics:
             "hess_diag",
             "row_curvature",
             "penalty_rank",
+            "normalized_curvature",
             "curvature_bar",
             "score_scale",
             "frozen",

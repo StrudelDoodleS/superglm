@@ -584,12 +584,13 @@ class SuperGLM:
             ``max(0.1 * reml_tol, 1e-7) * (1 + |objective|)`` -- a loose
             tolerance widens that arm; tightening stops at the 1e-7 floor
             -- and its row curvature per penalty dimension
-            (``max_j |H_ij|`` over the estimated block, divided by the
-            direction's penalty rank) is under 1% of the strongest
-            estimated direction's, anchored at 0.1 per dimension for
-            all-weak models. Rows rather than diagonals so coupled
-            curvature counts; per rank so a high-rank random effect and a
-            low-rank spline stay commensurate; relative to the strongest
+            (``max_j |H_ij| / sqrt(rank_i * rank_j)`` over the estimated
+            block) is under 1% of the strongest estimated direction's,
+            anchored at 0.1 per dimension for all-weak models. Rows
+            rather than diagonals so coupled curvature counts;
+            symmetrically per rank so a high-rank random effect and a
+            low-rank spline stay commensurate and a shared cross-term
+            reads the same from both ends; relative to the strongest
             direction because judging curvature against the objective's
             scale would freeze informative directions as the row count
             grows. The per-direction freeze decision -- including the

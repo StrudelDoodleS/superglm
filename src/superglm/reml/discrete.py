@@ -739,6 +739,7 @@ def optimize_discrete_reml_cached_w(
                     "hess_diag": [0.0] * m,
                     "row_curvature": [0.0] * m,
                     "penalty_rank": [float(v) for v in direction_ranks],
+                    "normalized_curvature": [0.0] * m,
                     "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "frozen": [True] * m,
@@ -844,6 +845,9 @@ def optimize_discrete_reml_cached_w(
                 "hess_diag": [float(hess[i, i]) for i in range(m)],
                 "row_curvature": [float(v) for v in freeze_decision.row_curvature],
                 "penalty_rank": [float(v) for v in freeze_decision.penalty_rank],
+                "normalized_curvature": [
+                    float(v) for v in freeze_decision.normalized_curvature
+                ],
                 "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale_d),
                 "frozen": [bool(v) for v in frozen_d],

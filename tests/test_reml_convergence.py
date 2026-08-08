@@ -116,6 +116,40 @@ def test_freeze_normalizes_curvature_by_penalty_rank() -> None:
     np.testing.assert_allclose(decision.row_curvature, [255.0, 2.45])
 
 
+def test_freeze_normalizes_coupled_curvature_symmetrically() -> None:
+    """A shared cross-term belongs to BOTH directions: dividing each row
+    by its own rank alone reads H=[[0, .5], [.5, 0]] with ranks [1000, 1]
+    as per-rank [5e-4, 0.5] -- the high-rank half freezes, and the
+    reduced Newton solve on its orphaned partner sees a zero
+    one-dimensional Hessian where the only curvature was joint. The
+    matrix is scaled symmetrically (H_ij / sqrt(r_i * r_j), diagonals
+    unchanged), so a coupled pair freezes together or stays together."""
+    tiny = np.full(2, 1e-9)
+    coupled = np.array([[0.0, 0.5], [0.5, 0.0]])
+    ranks = np.array([1000.0, 1.0])
+
+    decision = freeze_flat_directions(
+        tiny, coupled, ranks, np.ones(2, dtype=bool), objective=1e5, tolerance=1e-6
+    )
+
+    np.testing.assert_array_equal(decision.frozen, np.array([False, False]))
+    # Both halves judge the shared term at the same normalized value.
+    np.testing.assert_allclose(
+        decision.normalized_curvature, [0.5 / np.sqrt(1000.0), 0.5 / np.sqrt(1000.0)]
+    )
+
+    # A genuinely flat coupled pair freezes together, not asymmetrically.
+    weak = freeze_flat_directions(
+        tiny,
+        np.array([[0.0, 3e-3], [3e-3, 0.0]]),
+        ranks,
+        np.ones(2, dtype=bool),
+        objective=1e5,
+        tolerance=1e-6,
+    )
+    np.testing.assert_array_equal(weak.frozen, np.array([True, True]))
+
+
 def test_freeze_sees_coupled_curvature_not_just_the_diagonal() -> None:
     """REML Hessians carry cross-terms (multi-penalty anisotropy adds them
     explicitly) and need not be positive definite: a coordinate can hold a

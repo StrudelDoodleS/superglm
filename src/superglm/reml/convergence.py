@@ -62,6 +62,7 @@ class FlatDirectionDecision:
     frozen: NDArray
     row_curvature: NDArray
     penalty_rank: NDArray
+    normalized_curvature: NDArray
     curvature_bar: float
 
 
@@ -85,11 +86,17 @@ def freeze_flat_directions(
     large off-diagonal curvature -- a [[0, c], [c, 0]] block has zero
     diagonals yet real curvature in the coupled eigenvector. Coupling to
     a FIXED direction is excluded: that lambda never moves, so the cross
-    term is not exploitable. Row curvature is normalized per penalty
-    dimension (raw curvature scales with penalty rank -- see the constants'
-    calibration) and judged against the strongest estimated direction,
-    anchored for all-weak models: per-dimension curvature is O(1) in both
-    the row count and the rank, where an absolute, objective-scaled, or
+    term is not exploitable. Curvature is normalized per penalty
+    dimension SYMMETRICALLY -- the matrix is scaled D^{-1/2} H D^{-1/2}
+    with D = diag(ranks), so a diagonal reads H_ii / r_i and a shared
+    cross-term reads H_ij / sqrt(r_i * r_j), the same value from both
+    ends. Row-asymmetric division read a rank-[1000, 1] coupled pair as
+    per-rank [5e-4, 0.5]: the high-rank half froze and the reduced solve
+    on its orphaned partner saw a zero one-dimensional Hessian where the
+    only curvature was joint. The normalized rows are judged against the
+    strongest estimated direction, anchored for all-weak models (see the
+    constants' calibration): per-dimension curvature is O(1) in both the
+    row count and the rank, where an absolute, objective-scaled, or
     raw-relative bar is not. Fixed lambdas are always frozen.
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
@@ -100,20 +107,23 @@ def freeze_flat_directions(
     gradient_bar = _freeze_gradient_bar(objective, tolerance)
     if estimated.any():
         row_curvature = hess[:, estimated].max(axis=1)
-        per_rank = row_curvature / ranks
-        curvature_anchor = float(per_rank[estimated].max())
+        scale = np.sqrt(ranks)
+        symmetric = hess / np.outer(scale, scale)
+        normalized = symmetric[:, estimated].max(axis=1)
+        curvature_anchor = float(normalized[estimated].max())
     else:
         row_curvature = np.zeros(len(gradient))
-        per_rank = row_curvature
+        normalized = row_curvature
         curvature_anchor = 0.0
     curvature_bar = FLAT_DIRECTION_CURVATURE_REL * max(
         curvature_anchor, FLAT_DIRECTION_CURVATURE_ANCHOR
     )
-    frozen = ~estimated | ((gradient < gradient_bar) & (per_rank < curvature_bar))
+    frozen = ~estimated | ((gradient < gradient_bar) & (normalized < curvature_bar))
     return FlatDirectionDecision(
         frozen=frozen,
         row_curvature=row_curvature,
         penalty_rank=ranks,
+        normalized_curvature=normalized,
         curvature_bar=float(curvature_bar),
     )
 
