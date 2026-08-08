@@ -629,6 +629,55 @@ class TestSCOPModeFailuresAreRoutable:
         assert "4.1e-12" in exc.hint
 
 
+class TestQPModeFailuresAreRoutable:
+    def test_the_qp_infeasibility_raise_is_typed_and_routable(self, monkeypatch):
+        """A QP candidate with no feasible mode (or no complete KKT
+        certificate) is this point's infeasibility, not a dead search:
+        both constraint terminations raise the routable typed family,
+        exactly like the SCOP and observed-geometry gates. A bare
+        RuntimeError here aborted an entire coupled power search on one
+        bad candidate."""
+        from types import SimpleNamespace
+
+        import superglm.model.reml_execute as reml_execute
+        from superglm import Constraint
+        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+
+        rng = np.random.default_rng(3)
+        n = 400
+        x = rng.uniform(0, 1, n)
+        y = rng.poisson(np.exp(0.4 + 0.9 * x)).astype(float)
+        frame = pd.DataFrame({"x": x})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing)},
+        )
+        model.fit_reml(frame, y, runtime_validation="skip")
+        lambdas = {k: float(v) for k, v in model._reml_result.lambdas.items()}
+
+        for reason in ("constraint_infeasible", "constraint_kkt_incomplete"):
+            monkeypatch.setattr(
+                reml_execute,
+                "fit_irls_direct",
+                lambda *a, _reason=reason, **k: (
+                    SimpleNamespace(termination_reason=_reason),
+                    None,
+                ),
+            )
+            with pytest.raises(ObservedModeNotCertifiedError):
+                reml_execute.run_fixed_monotone_reml(
+                    model,
+                    y=np.asarray(y, dtype=float),
+                    sample_weight=np.ones(n),
+                    offset=None,
+                    pirls_tol=1e-8,
+                    max_pirls_iter=50,
+                    lambdas=lambdas,
+                    reml_penalties=getattr(model, "_reml_penalties", None) or [],
+                    compute_fit_stats=lambda *a, **k: None,
+                )
+
+
 class TestProfileOptCensoringResolution:
     """profile_opt gives xatol no physical p meaning: the L-BFGS-B branch
     never forwards it to SciPy at all, and Powell applies it as xtol in the

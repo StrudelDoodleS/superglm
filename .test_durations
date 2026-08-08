@@ -4654,6 +4654,7 @@
     "tests/test_reml_search_infeasible_mode.py::TestPublicationModeFailure::test_the_coupled_failure_does_not_recommend_itself": 0.05,
     "tests/test_reml_search_infeasible_mode.py::TestPublicationModeFailure::test_the_typed_error_is_public_api": 0.05,
     "tests/test_reml_search_infeasible_mode.py::TestPublicationModeFailure::test_theta_publish_failure_names_theta_controls": 1.2,
+    "tests/test_reml_search_infeasible_mode.py::TestQPModeFailuresAreRoutable::test_the_qp_infeasibility_raise_is_typed_and_routable": 0.1520268910098821,
     "tests/test_reml_search_infeasible_mode.py::TestSCOPModeFailuresAreRoutable::test_a_scop_constrained_profile_search_completes": 0.7384364110184833,
     "tests/test_reml_search_infeasible_mode.py::TestSCOPModeFailuresAreRoutable::test_the_certification_failure_reports_the_metric_that_failed": 0.0003080120077356696,
     "tests/test_reml_search_infeasible_mode.py::TestSCOPModeFailuresAreRoutable::test_the_scop_certification_raise_is_typed_and_scored": 0.00037563603837043047,
