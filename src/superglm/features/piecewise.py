@@ -99,21 +99,31 @@ class Piecewise:
     lower, upper : float, optional
         Pin the outermost knots.  Default ``min(x)`` / ``max(x)``.  Pinning
         **wider** than the data states a rated range the tariff must cover.
-        Pinning **narrower** is allowed too, and then rows outside
-        ``[lower, upper]`` load the linear tails: their leverage lands entirely
-        on the two boundary segments and therefore dominates the boundary
-        slopes.  That is a modelling choice, not an error, so it is documented
-        rather than blocked.
+        Pinning **narrower** is allowed too, and what happens to the rows
+        outside ``[lower, upper]`` is the ``extrapolation`` parameter's call:
+        under ``"clip"`` they are grouped onto the boundary knots, so
+        ``Piecewise(breaks, upper=u)`` fits identically to precomputing
+        ``x.clip(max=u)`` -- the tail-grouping idiom stated as a term
+        parameter instead of a preprocessing step; under ``"extend"`` they
+        load the linear tails, and their leverage lands entirely on the two
+        boundary segments' slopes; under ``"error"`` the build refuses.
+    extrapolation : {'clip', 'extend', 'error'}
+        Behaviour outside ``[lower, upper]``, mirroring ``Spline``.  ``"clip"``
+        (default) holds the boundary knot's value.  ``"extend"`` continues the
+        boundary segments at their fitted slopes.  ``"error"`` raises on
+        out-of-range values.  The policy binds at ``build()`` as well as at
+        prediction, so the design that is fitted is the design the tariff
+        states.
 
     Notes
     -----
-    Beyond ``[t_0, t_{J+1}]`` the function continues at the boundary slope.
-    That is not a differentiator over this library's splines, which already
-    extrapolate linearly, and holding flat beyond the boundary is an
-    established alternative.  What ``Piecewise`` adds is that the slope is
-    *stated*: ``lower`` / ``upper`` pin where the boundary segments start and
-    the exported table prints the two boundary slopes, so the rule outside the
-    tabulated range is reproducible by hand.
+    Outside ``[t_0, t_{J+1}]`` the term follows ``extrapolation``, and the
+    default mirrors this library's splines: hold the boundary knot's value
+    flat.  Under ``"extend"`` the boundary segments' slopes continue past the
+    boundary knots -- and the slope is *stated*: ``lower`` / ``upper`` pin
+    where the boundary segments start and the exported table prints the two
+    boundary slopes, so the rule outside the tabulated range is reproducible
+    by hand.  The exported workbook states whichever rule is in force.
 
     In the editor the term gets one control handle per knot -- the handle *is*
     the coefficient, because the raw basis evaluated at the knots is the
@@ -137,12 +147,20 @@ class Piecewise:
         strategy: str = "quantile",
         lower: float | None = None,
         upper: float | None = None,
+        extrapolation: str = "clip",
     ):
+        # Validated here, not in build(): a typo'd mode must fail where it is
+        # written.  The message mirrors Spline's for the same parameter.
+        if extrapolation not in {"clip", "extend", "error"}:
+            raise ValueError(
+                f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
+            )
         self.breaks = breaks
         self.base = base
         self.strategy = strategy
         self.lower = lower
         self.upper = upper
+        self.extrapolation = extrapolation
         # Fitted state, all resolved in build().
         self._knots: NDArray[np.float64] = np.empty(0, dtype=np.float64)
         self._base_index: int = 0
@@ -171,28 +189,56 @@ class Piecewise:
         n_seg = self._knots.size - 1
         return np.clip(np.searchsorted(self._knots, x, side="right") - 1, 0, n_seg - 1)
 
-    def _hat_basis(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Evaluate all ``J+2`` hats at *x* (assumed already finite float64).
+    def _policy_x(self, x: NDArray[np.float64], lo: float, hi: float) -> NDArray[np.float64]:
+        """Apply the extrapolation policy against a resolved ``[lo, hi]`` range.
+
+        Mirrors ``_spline_runtime.prepare_eval_points``: ``clip`` clamps,
+        ``extend`` passes through, ``error`` raises with a scale-aware
+        tolerance so a boundary value reconstructed in floating point does not
+        refuse its own rated range.
+        """
+        if self.extrapolation == "clip":
+            return np.clip(x, lo, hi)
+        if self.extrapolation == "extend":
+            return x
+        scale = max(1.0, abs(lo), abs(hi), abs(hi - lo))
+        tol = 1e-12 * scale
+        if np.any(x < lo - tol) or np.any(x > hi + tol):
+            raise ValueError(
+                f"Piecewise received values outside the rated range "
+                f"[{lo:.6g}, {hi:.6g}] with extrapolation='error'."
+            )
+        return x
+
+    def _hat_values(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Evaluate all ``J+2`` hats at *x*, with the policy already applied.
 
         Three properties this construction is relied on for, all of them tested:
         the rows sum to exactly 1 everywhere *including* outside the knot span,
-        ``_hat_basis(knots)`` is exactly the identity, and outside the span the
-        values continue the boundary segment's line.
+        evaluating at the knots gives exactly the identity, and outside the
+        span the values continue the boundary segment's line -- which is the
+        ``"extend"`` behaviour, and which ``"clip"`` never reaches because its
+        x has already been clamped onto the boundary knots.
         """
-        self._require_fitted()
         t = self._knots
         seg = self._segment_index(x)
         # UNCLIPPED on purpose: w < 0 below t_0 and w > 1 above t_{J+1}.  That is
         # precisely what continues the boundary segment's line past the last
-        # knot; clipping w to [0, 1] would hold the function flat outside the
-        # span instead, and would also make the outer columns of a
-        # narrower-than-the-data pin misreport their support.
+        # knot; clipping w to [0, 1] here would silently re-impose "clip" on a
+        # term whose stated policy is "extend", and would also make the outer
+        # columns of a narrower-than-the-data pin misreport their support.
         w = (x - t[seg]) / (t[seg + 1] - t[seg])
         H = np.zeros((x.size, t.size), dtype=np.float64)
         rows = np.arange(x.size)
         H[rows, seg] = 1.0 - w
         H[rows, seg + 1] = w
         return H
+
+    def _hat_basis(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Evaluate the hats at *x* under the extrapolation policy."""
+        self._require_fitted()
+        t = self._knots
+        return self._hat_values(self._policy_x(x, float(t[0]), float(t[-1])))
 
     def _raw_basis_matrix(self, x: NDArray) -> NDArray[np.float64]:
         """Return the dense ``(n, J+2)`` raw hat basis, base column included.
@@ -211,8 +257,13 @@ class Piecewise:
         x: NDArray[np.float64],
         weights: NDArray[np.float64],
         sample_weight: NDArray | None,
-    ) -> None:
-        """Resolve the knot vector (validation rules 2-6)."""
+    ) -> NDArray[np.float64]:
+        """Resolve the knot vector (validation rules 2-6).
+
+        Returns *x* with the extrapolation policy applied against the resolved
+        range, because the policy binds at build() too: placement, support
+        counting and the basis must all see the same rows the tariff rates.
+        """
         breaks = self.breaks
         int_mode = isinstance(breaks, int | np.integer)
 
@@ -260,6 +311,13 @@ class Piecewise:
             raise ValueError(
                 f"Piecewise needs lower < upper, got lower={lo:.10g}, upper={hi:.10g}."
             )
+
+        # The extrapolation policy binds here, before placement.  Under "clip"
+        # rows outside [lo, hi] are grouped onto the boundary knots, so
+        # Piecewise(breaks, upper=u) fits identically to a precomputed
+        # x.clip(max=u); under "error" a narrower-than-the-data pin refuses
+        # before any downstream rule can report on rows the term will not rate.
+        x = self._policy_x(x, lo, hi)
 
         # Rule 5 -- int mode places breakpoints at exposure-weighted quantiles.
         if int_mode:
@@ -319,6 +377,7 @@ class Piecewise:
             )
 
         self._knots = np.concatenate(([lo], requested, [hi])).astype(np.float64)
+        return x
 
     def _resolve_base(
         self,
@@ -402,7 +461,11 @@ class Piecewise:
         # evidence about the segment [45, 50].  Binning the clamped index lets a
         # rated range holding no observation at all pass both rules while the
         # message reports full weight, so the extrapolating rows are separated
-        # out here and reported rather than credited.
+        # out here and reported rather than credited.  Out-of-range rows exist
+        # only under extrapolation="extend": under "clip" x arrives already
+        # grouped onto the boundary knots -- those rows genuinely support the
+        # boundary values, count as such, and the tails report never fires --
+        # and under "error" the build has already refused them.
         n_seg = t.size - 1
         inside = (x >= t[0]) & (x <= t[-1])
         seg_weight = np.bincount(
@@ -484,22 +547,28 @@ class Piecewise:
         Validation runs in a fixed order, and the order is part of the contract
         because several rules fire together on a degenerate input: (1) finite x,
         (2) non-empty breaks, (3) known strategy, (4) increasing sequence breaks,
-        (6a) lower < upper, (5) int-mode placement, (6b) breaks strictly inside,
-        (7) base resolves to one knot, (8) no zero-mass knot, (9) no in-range
-        empty segment, (10) full column rank against the intercept, (11)
-        thin-segment warning.
+        (6a) lower < upper, then the extrapolation policy binds (clip groups the
+        out-of-range rows onto the boundary knots, error refuses them), (5)
+        int-mode placement, (6b) breaks strictly inside, (7) base resolves to
+        one knot, (8) no zero-mass knot, (9) no in-range empty segment, (10)
+        full column rank against the intercept, (11) thin-segment warning.
         """
         x = _finite_x(x)
         weights = _conforming_weights(sample_weight, x.size)
-        self._resolve_knots(x, weights, sample_weight)
-        H = self._hat_basis(x)
+        x = self._resolve_knots(x, weights, sample_weight)
+        # The policy is already applied to x, so the raw hat evaluation is the
+        # right one here; _hat_basis would just clamp a second time.
+        H = self._hat_values(x)
         self._resolve_base(H, weights, sample_weight)
         self._validate_support(x, H, weights)
         columns = H[:, self._non_base_indices]
         return GroupInfo(columns=columns, n_cols=int(columns.shape[1]))
 
     def transform(self, x: NDArray) -> NDArray[np.float64]:
-        """Evaluate the identifiable ``J+1`` hat columns on new data."""
+        """Evaluate the identifiable ``J+1`` hat columns on new data.
+
+        Out-of-range x follows the term's ``extrapolation`` policy.
+        """
         return self._hat_basis(_finite_x(x))[:, self._non_base_indices]
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -532,4 +601,8 @@ class Piecewise:
             "relativity": np.exp(log_rel),
             "slopes": slopes,
             "boundary_slopes": (float(slopes[0]), float(slopes[-1])),
+            # The out-of-range rule travels with the numbers: the exported
+            # workbook and the editor's offset scoring both need to know
+            # whether the boundary slopes continue or the end values hold.
+            "extrapolation": self.extrapolation,
         }

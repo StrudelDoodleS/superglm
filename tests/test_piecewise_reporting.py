@@ -48,16 +48,17 @@ _RECONSTRUCTION_RTOL = _RECONSTRUCTION_OPS * _EPS
 _EDF_ATOL = 1e-9
 
 _NOTE_SLOPES = re.compile(r"below (\S+) use slope (\S+); above (\S+) use slope (\S+)\.")
+_NOTE_FLAT = re.compile(r"below (\S+) use the (\S+) row; above (\S+) use the (\S+) row\.")
 
 _TITLE_ROW = 5
 _NOTE_ROW = 6
 _HEADER_ROW = 7
 _STRIDE = 3
 
-_FITTED: dict[str, SuperGLM] = {}
+_FITTED: dict[tuple[str, str | None], SuperGLM] = {}
 
 
-def _fit(case_name: str) -> tuple[SuperGLM, object]:
+def _fit(case_name: str, extrapolation: str | None = None) -> tuple[SuperGLM, object]:
     """Fit the named fixture once and reuse it; the tests only read from it.
 
     Every term is exactly tabulable on purpose -- intercept, Piecewise,
@@ -65,8 +66,9 @@ def _fit(case_name: str) -> tuple[SuperGLM, object]:
     A spline in the model would put discretisation error into the comparison
     that has nothing to do with the piecewise block.
     """
-    if case_name not in _FITTED:
-        case = make_case(case_name)
+    key = (case_name, extrapolation)
+    if key not in _FITTED:
+        case = make_case(case_name, extrapolation=extrapolation)
         model = SuperGLM(
             features={
                 "x": case.spec,
@@ -75,8 +77,8 @@ def _fit(case_name: str) -> tuple[SuperGLM, object]:
             },
         )
         model.fit(case.X, case.y, sample_weight=case.sample_weight)
-        _FITTED[case_name] = model
-    return _FITTED[case_name], make_case(case_name)
+        _FITTED[key] = model
+    return _FITTED[key], make_case(case_name, extrapolation=extrapolation)
 
 
 def _piecewise_spec(model: SuperGLM):
@@ -147,18 +149,28 @@ def _predict_from_workbook(ws, X: pd.DataFrame) -> np.ndarray:
     knots = np.array([float(row[0]) for row in piecewise["rows"]], dtype=np.float64)
     log_relativity = np.array([float(row[2]) for row in piecewise["rows"]], dtype=np.float64)
 
-    match = _NOTE_SLOPES.search(str(piecewise["note"]))
-    assert match is not None, piecewise["note"]
-    lower, slope_low, upper, slope_high = (float(value) for value in match.groups())
-    assert lower == knots[0]
-    assert upper == knots[-1]
-
     x = X["x"].to_numpy(dtype=np.float64)
+    # ``np.interp`` clamps to the end values outside the grid, which is
+    # already the flat rule; the slopes rule then overwrites the tails.  The
+    # note is parsed, not the spec: whichever rule the sheet states is the
+    # rule this consumer applies.
     log_effect = np.interp(x, knots, log_relativity)
-    below = x < lower
-    above = x > upper
-    log_effect[below] = log_relativity[0] + slope_low * (x[below] - lower)
-    log_effect[above] = log_relativity[-1] + slope_high * (x[above] - upper)
+    note = str(piecewise["note"])
+    match = _NOTE_SLOPES.search(note)
+    if match is not None:
+        lower, slope_low, upper, slope_high = (float(value) for value in match.groups())
+        assert lower == knots[0]
+        assert upper == knots[-1]
+        below = x < lower
+        above = x > upper
+        log_effect[below] = log_relativity[0] + slope_low * (x[below] - lower)
+        log_effect[above] = log_relativity[-1] + slope_high * (x[above] - upper)
+    else:
+        flat = _NOTE_FLAT.search(note)
+        assert flat is not None, note
+        lower, low_row, upper, high_row = (float(value) for value in flat.groups())
+        assert lower == knots[0] == low_row
+        assert upper == knots[-1] == high_row
 
     lookup = {str(row[0]): float(row[1]) for row in blocks["region"]["rows"]}
     region = np.array([lookup[str(value)] for value in X["region"]], dtype=np.float64)
@@ -571,14 +583,17 @@ class TestDiscreteAndImpact:
 
 class TestWorkbookExactness:
     # ``pinned_narrower`` is not a duplicate of ``interior_base``: its rated
-    # range is inside the data, so a third of its rows sit on the linear tails
-    # and the reconstruction has to use the parsed boundary slopes to reach
-    # them at all.
+    # range is inside the data, so a third of its rows sit beyond the boundary
+    # knots and the reconstruction has to apply the note's stated tail rule --
+    # the parsed boundary slopes under "extend", the end-row clamp under
+    # "clip" -- to reach them at all.  Both modes are swept so neither rule
+    # can silently stand in for the other.
+    @pytest.mark.parametrize("extrapolation", ["clip", "extend"])
     @pytest.mark.parametrize("case_name", ["interior_base", "pinned_narrower"])
-    def test_the_workbook_alone_reproduces_the_predictions(self, case_name):
+    def test_the_workbook_alone_reproduces_the_predictions(self, case_name, extrapolation):
         assert _RECONSTRUCTION_RTOL <= 1e-12
 
-        model, case = _fit(case_name)
+        model, case = _fit(case_name, extrapolation=extrapolation)
         payload = build_rating_table_payload(
             model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
         )
@@ -621,13 +636,14 @@ class TestWorkbookExactness:
             atol=0.0,
         )
 
-    def test_the_sheet_note_states_the_rule_and_both_boundary_slopes(self):
+    def test_the_extend_sheet_note_states_the_rule_and_both_boundary_slopes(self):
         """A consumer outside the tabulated range needs the rule, not just the rows."""
-        model, case = _fit("pinned_narrower")
+        model, case = _fit("pinned_narrower", extrapolation="extend")
         payload = build_rating_table_payload(
             model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
         )
         block = next(b for b in payload.main_effects if b.name == "x")
+        assert block.extrapolation == "extend"
         ws = _workbook_sheet(payload)
         note = str(ws.cell(row=_NOTE_ROW, column=1).value)
 
@@ -648,6 +664,43 @@ class TestWorkbookExactness:
         assert upper == knots[-1]
         assert slope_low == slopes[0]
         assert slope_high == slopes[-1]
+
+    def test_the_default_sheet_note_states_the_flat_rule_and_no_slopes(self):
+        """Clip is the default, so the default workbook must state the flat rule."""
+        model, case = _fit("pinned_narrower")
+        payload = build_rating_table_payload(
+            model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
+        )
+        block = next(b for b in payload.main_effects if b.name == "x")
+        assert block.extrapolation == "clip"
+        ws = _workbook_sheet(payload)
+        note = str(ws.cell(row=_NOTE_ROW, column=1).value)
+
+        assert "Log relativity" in note
+        assert "geometrically on Relativity" in note
+        assert _NOTE_SLOPES.search(note) is None
+        flat = _NOTE_FLAT.search(note)
+        assert flat is not None, note
+        knots = block.table["x"].to_numpy(dtype=np.float64)
+        lower, low_row, upper, high_row = (float(value) for value in flat.groups())
+        assert lower == knots[0] == low_row
+        assert upper == knots[-1] == high_row
+
+    def test_the_error_sheet_note_states_that_out_of_range_is_not_rated(self):
+        """interior_base, because an error-mode pinned_narrower refuses to fit at all."""
+        model, case = _fit("interior_base", extrapolation="error")
+        payload = build_rating_table_payload(
+            model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
+        )
+        block = next(b for b in payload.main_effects if b.name == "x")
+        assert block.extrapolation == "error"
+        ws = _workbook_sheet(payload)
+        note = str(ws.cell(row=_NOTE_ROW, column=1).value)
+
+        assert "not rated" in note
+        assert "extrapolation='error'" in note
+        assert _NOTE_SLOPES.search(note) is None
+        assert _NOTE_FLAT.search(note) is None
 
     def test_the_log_relativity_column_is_not_left_at_two_decimal_places(self):
         """Stored exactly but rendered as 0.00 defeats the column's whole purpose."""
