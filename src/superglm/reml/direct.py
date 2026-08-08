@@ -190,6 +190,20 @@ def optimize_direct_reml(
     # `tol=1e-14` could fail a fit that passed at every looser setting.
     observed_mode_tol = observed_mode_certification_bar()
     group_names = [pc.name for pc in penalties]
+    # Per-direction penalty rank, resolved the same way the bootstrap
+    # resolves it; the freeze classifier judges curvature per dimension.
+    direction_ranks = np.array(
+        [
+            max(
+                pc.rank
+                if pc.rank > 0
+                else (penalty_ranks.get(pc.name, 0.0) if penalty_ranks else 0.0),
+                1.0,
+            )
+            for pc in penalties
+        ],
+        dtype=np.float64,
+    )
     m = len(group_names)
     # estimated_mask[i] = True  => component i is free to be optimized
     #                     False => component i has a fixed lambda (policy)
@@ -623,6 +637,9 @@ def optimize_direct_reml(
                     "names": list(group_names),
                     "proj_grad": [0.0] * m,
                     "hess_diag": [0.0] * m,
+                    "row_curvature": [0.0] * m,
+                    "penalty_rank": [float(v) for v in direction_ranks],
+                    "curvature_bar": 0.0,
                     "score_scale": max(1.0 + abs(obj), 1.0),
                     "frozen": [True] * m,
                 }
@@ -746,9 +763,15 @@ def optimize_direct_reml(
         # Active-set: freeze components with negligible gradient and Hessian.
         # The gradient/curvature bars live with the classifier's calibration
         # in reml/convergence.py.
-        frozen = freeze_flat_directions(
-            proj_grad, hess, estimated_mask, objective=obj, tolerance=_tol
+        freeze_decision = freeze_flat_directions(
+            proj_grad,
+            hess,
+            direction_ranks,
+            estimated_mask,
+            objective=obj,
+            tolerance=_tol,
         )
+        frozen = freeze_decision.frozen
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
         if profile is not None:
@@ -762,6 +785,9 @@ def optimize_direct_reml(
                 "names": list(group_names),
                 "proj_grad": [float(abs(v)) for v in proj_grad],
                 "hess_diag": [float(hess[i, i]) for i in range(m)],
+                "row_curvature": [float(v) for v in freeze_decision.row_curvature],
+                "penalty_rank": [float(v) for v in freeze_decision.penalty_rank],
+                "curvature_bar": float(freeze_decision.curvature_bar),
                 "score_scale": float(score_scale),
                 "frozen": [bool(v) for v in frozen],
             }

@@ -28,14 +28,22 @@ FLAT_DIRECTION_FREEZE_FLOOR = 1e-7
 # factor e^5.6 from the optimum with SEs off by up to 87%. Absolute
 # curvature cannot classify either: a null direction mid-march carries
 # |H_ii| of the same order as an informative endgame (measured 0.056 vs
-# 0.060 at 1e6 rows). What separates the classes at every n is the ratio
-# to the strongest estimated direction: null directions sit 1e-4 .. 1e-2
-# of the strongest, informative ones 0.85+. The anchor keeps the bar
-# meaningful when every direction is weak (an all-null model has no strong
-# direction; without the anchor its last null would chase the lambda cap
-# forever).
+# 0.060 at 1e6 rows).
+#
+# The comparison is per penalty DIMENSION: raw row curvature scales with
+# penalty rank (a random effect measured 112 -> 255 -> 391 across
+# 300 -> 600 -> 1000 levels, ~0.4 per rank, while an informative low-rank
+# spline held ~2.5 raw, ~0.8 per rank), so a raw ratio-to-strongest bar
+# froze a real-signal spline beside a 600-level random effect.
+# Rank-normalized, null directions measure <= 6e-5 per dimension at their
+# freeze states, the tightest informative direction 5.2e-3, and strong
+# ones 0.3 .. 0.8 -- commensurate across rank scales. The anchor keeps
+# the bar meaningful when every direction is weak (an all-null model has
+# no strong direction; without the anchor its last null would chase the
+# lambda cap forever): 1e-2 * 0.1 = 1e-3 per dimension splits the fully
+# null (<= 6e-5) from the tightest informative (5.2e-3).
 FLAT_DIRECTION_CURVATURE_REL = 1e-2
-FLAT_DIRECTION_CURVATURE_ANCHOR = 1.0
+FLAT_DIRECTION_CURVATURE_ANCHOR = 0.1
 
 
 def _score_scale(objective: float) -> float:
@@ -47,14 +55,25 @@ def _freeze_gradient_bar(objective: float, tolerance: float) -> float:
     return freeze_tol * _score_scale(objective)
 
 
+@dataclass(frozen=True)
+class FlatDirectionDecision:
+    """The freeze verdict with the per-direction quantities it judged."""
+
+    frozen: NDArray
+    row_curvature: NDArray
+    penalty_rank: NDArray
+    curvature_bar: float
+
+
 def freeze_flat_directions(
     projected_gradient: NDArray,
     hessian: NDArray,
+    penalty_ranks: NDArray,
     estimated_mask: NDArray,
     *,
     objective: float,
     tolerance: float,
-) -> NDArray:
+) -> FlatDirectionDecision:
     """Active-set freeze: mark directions with negligible gradient and curvature.
 
     The gradient arm is judged against the objective's scale -- both grow
@@ -66,26 +85,37 @@ def freeze_flat_directions(
     large off-diagonal curvature -- a [[0, c], [c, 0]] block has zero
     diagonals yet real curvature in the coupled eigenvector. Coupling to
     a FIXED direction is excluded: that lambda never moves, so the cross
-    term is not exploitable. Row curvature is judged against the
-    strongest estimated direction (anchored for all-weak models): it is
-    O(1) in n, and an absolute or objective-scaled bar becomes
-    n-dependent. Fixed lambdas are always frozen.
+    term is not exploitable. Row curvature is normalized per penalty
+    dimension (raw curvature scales with penalty rank -- see the constants'
+    calibration) and judged against the strongest estimated direction,
+    anchored for all-weak models: per-dimension curvature is O(1) in both
+    the row count and the rank, where an absolute, objective-scaled, or
+    raw-relative bar is not. Fixed lambdas are always frozen.
     """
     gradient = np.abs(np.asarray(projected_gradient, dtype=np.float64))
     hess = np.abs(np.asarray(hessian, dtype=np.float64))
+    ranks = np.maximum(np.asarray(penalty_ranks, dtype=np.float64), 1.0)
     estimated = np.asarray(estimated_mask, dtype=bool)
 
     gradient_bar = _freeze_gradient_bar(objective, tolerance)
     if estimated.any():
         row_curvature = hess[:, estimated].max(axis=1)
-        curvature_anchor = float(row_curvature[estimated].max())
+        per_rank = row_curvature / ranks
+        curvature_anchor = float(per_rank[estimated].max())
     else:
         row_curvature = np.zeros(len(gradient))
+        per_rank = row_curvature
         curvature_anchor = 0.0
     curvature_bar = FLAT_DIRECTION_CURVATURE_REL * max(
         curvature_anchor, FLAT_DIRECTION_CURVATURE_ANCHOR
     )
-    return ~estimated | ((gradient < gradient_bar) & (row_curvature < curvature_bar))
+    frozen = ~estimated | ((gradient < gradient_bar) & (per_rank < curvature_bar))
+    return FlatDirectionDecision(
+        frozen=frozen,
+        row_curvature=row_curvature,
+        penalty_rank=ranks,
+        curvature_bar=float(curvature_bar),
+    )
 
 
 def mask_frozen_stop_gradient(

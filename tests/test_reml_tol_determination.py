@@ -826,11 +826,33 @@ class TestFreezeDiagnostics:
 
         profile = model._reml_profile
         freeze = profile["reml_freeze_decision"]
-        assert set(freeze) == {"names", "proj_grad", "hess_diag", "score_scale", "frozen"}
+        assert set(freeze) == {
+            "names",
+            "proj_grad",
+            "hess_diag",
+            "row_curvature",
+            "penalty_rank",
+            "curvature_bar",
+            "score_scale",
+            "frozen",
+        }
         assert len(freeze["names"]) == len(freeze["proj_grad"]) == len(freeze["hess_diag"])
         assert len(freeze["frozen"]) == len(freeze["names"])
+        assert len(freeze["row_curvature"]) == len(freeze["penalty_rank"]) == len(freeze["names"])
         assert float(freeze["score_scale"]) > 0.0
+        assert float(freeze["curvature_bar"]) > 0.0
         assert all(np.isfinite(v) for v in freeze["proj_grad"])
+        # The audit reconstructs the verdict from the recorded quantities:
+        # row curvature per rank against the bar, gradient against scale.
+        for g, row, rank, fz in zip(
+            freeze["proj_grad"],
+            freeze["row_curvature"],
+            freeze["penalty_rank"],
+            freeze["frozen"],
+        ):
+            gradient_flat = g < 1e-7 * float(freeze["score_scale"])
+            curvature_flat = row / max(rank, 1.0) < float(freeze["curvature_bar"])
+            assert fz == (gradient_flat and curvature_flat)
 
 
 class TestAllFixedLambdaDiagnostics:
@@ -861,7 +883,16 @@ class TestAllFixedLambdaDiagnostics:
 
         assert model._reml_result.termination_reason == "fixed_lambdas"
         freeze = model._reml_profile["reml_freeze_decision"]
-        assert set(freeze) == {"names", "proj_grad", "hess_diag", "score_scale", "frozen"}
+        assert set(freeze) == {
+            "names",
+            "proj_grad",
+            "hess_diag",
+            "row_curvature",
+            "penalty_rank",
+            "curvature_bar",
+            "score_scale",
+            "frozen",
+        }
         assert freeze["frozen"] == [True] * len(freeze["names"])
         assert float(freeze["score_scale"]) > 0.0
 
@@ -960,6 +991,46 @@ class TestFlatDirectionFloor:
         assert r.converged
         assert not frozen["f6"]
         assert not frozen["f7"]
+        # The determined answer, pinned (stock froze f7 at 1.50 -- a
+        # factor e^3.8 from here). Timing/memory/dispatch comparisons
+        # live in the complete-fit baseline (PR record), tested
+        # separately from numerical correctness per the test policy.
+        assert str(r.termination_reason) == "score_objective_tolerance"
+        assert float(r.lambdas["f6"]) == pytest.approx(3.2598, rel=0.05)
+        assert float(r.lambdas["f7"]) == pytest.approx(68.773, rel=0.05)
+        assert int(r.n_reml_iter) <= 25
+
+    def test_a_high_rank_random_effect_does_not_freeze_the_low_rank_spline(self):
+        """Row curvature scales with penalty rank (measured: a random
+        effect's curvature goes 112 -> 255 -> 391 across 300 -> 600 -> 1000
+        levels, ~0.4 per rank, while an informative cr-5 spline holds
+        ~2.5). At 600 levels the raw relative bar swallowed the spline --
+        real signal, frozen. Per-rank judgment keeps the two commensurate
+        at any level count."""
+        from superglm import RandomEffect
+
+        rng = np.random.default_rng(17)
+        n, n_levels = 100_000, 600
+        levels = [f"g{j:03d}" for j in range(n_levels)]
+        idx = rng.integers(0, n_levels, n)
+        re_effects = rng.normal(0.0, 0.3, n_levels)
+        x = rng.uniform(0.0, 1.0, n)
+        eta = -0.2 + re_effects[idx] + 0.5 * np.sin(4.0 * x)
+        y = rng.poisson(np.exp(eta)).astype(float)
+        frame = pd.DataFrame({"g": np.array(levels)[idx], "x": x})
+
+        model = SuperGLM(
+            family="poisson",
+            features={"g": RandomEffect(), "x": Spline(kind="cr", n_knots=5)},
+        )
+        model.fit_reml(frame, y, runtime_validation="skip")
+
+        r = model._reml_result
+        freeze = model._reml_profile["reml_freeze_decision"]
+        frozen = dict(zip(freeze["names"], freeze["frozen"]))
+        assert r.converged
+        assert not frozen["x"]
+        assert float(r.lambdas["x"]) == pytest.approx(0.182, rel=0.25)
 
     def test_informative_slow_directions_do_not_freeze(self):
         """flat_12k's stress smooths are the tightest informative curvature
@@ -1048,7 +1119,10 @@ class TestSCOPPlateauExit:
         # iteration and stalls once it turns.
         assert not _scop_plateau_steps_stalled([0.004, 0.005, 0.006], 1.2)
         assert not _scop_plateau_steps_stalled([1e-5, 1.5e-5, 2e-5], 1.33)
-        assert _scop_plateau_steps_stalled([1.5e-5, 2e-5, 1.9e-5], 0.95)
+        assert _scop_plateau_steps_stalled([2e-5, 1.9e-5, 1.85e-5], 0.97)
+        # A sawtooth expander -- one transient down-step inside the band,
+        # then +54% -- is still material recent growth, not a stall.
+        assert not _scop_plateau_steps_stalled([0.004, 0.0039, 0.006], 1.54)
         # Equal steps carry 1e-16-relative exp/log jitter that can order
         # itself increasingly; a jitter-increase is a stall, not expansion.
         jittered = [0.0049999999999998969, 0.0049999999999999958, 0.0050000000000000582]
