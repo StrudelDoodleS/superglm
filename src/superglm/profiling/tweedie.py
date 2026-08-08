@@ -3165,6 +3165,18 @@ class TweedieProfileResult:
         self._ensure_density_compat_state()
         self._ensure_search_provenance_state()
 
+    def _selection_density_exact(self) -> bool | None:
+        """Density provenance of the curve ``p_hat`` was SELECTED on.
+
+        Publication re-profiles dispersion and repoints the live density
+        fields at itself; the searched story is stashed alongside. ``None``
+        in the stash means no re-profile moved it, and the live field still
+        describes the searched curve.
+        """
+        if self.search_density_exact is not None:
+            return self.search_density_exact
+        return self.density_exact
+
     def _ensure_search_provenance_state(self) -> None:
         """Restore provenance fields absent from legacy construction or pickle state.
 
@@ -3601,11 +3613,12 @@ class TweedieProfileResult:
                 label=f"Evaluations ({len(trace_ps)})",
             )
 
+        selection_density_exact = self._selection_density_exact()
         if not is_mle_profile:
             estimate_label = f"profile estimate = {self.p_hat:.3f}"
-        elif self.density_exact is None:
+        elif selection_density_exact is None:
             estimate_label = f"profile estimate (density provenance unavailable) = {self.p_hat:.3f}"
-        elif self.density_exact is False:
+        elif selection_density_exact is False:
             estimate_label = f"approximation-based profile estimate = {self.p_hat:.3f}"
         else:
             estimate_label = f"MLE = {self.p_hat:.3f}"
@@ -3630,7 +3643,7 @@ class TweedieProfileResult:
             )
             if details is None or details.density_exact is None:
                 interval_kind = "profile interval (density provenance unavailable)"
-            elif self.density_exact is False or details.density_exact is False:
+            elif selection_density_exact is False or details.density_exact is False:
                 interval_kind = "approximation-based LR interval"
             else:
                 interval_kind = "LR interval"

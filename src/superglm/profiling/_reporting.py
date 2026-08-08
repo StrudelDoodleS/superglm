@@ -137,13 +137,24 @@ def _report_value_identity(value: Any) -> tuple[Any, ...]:
 
 
 def _uses_density_approximation(result: Any) -> bool:
-    density_exact = getattr(result, "density_exact", None)
-    if density_exact is None:
-        return False
-    try:
-        return not bool(density_exact)
-    except (TypeError, ValueError):
-        return False
+    """Whether ANY story behind the estimate is approximation-based.
+
+    Publication re-profiles dispersion and repoints the live density
+    fields at itself, stashing the searched story as ``search_density_*``;
+    ``p_hat`` was selected on the searched curve, so a saddlepoint-scored
+    search must qualify the label even under an exact publication -- and
+    a saddlepoint publication must qualify it even after an exact search.
+    """
+    for field in ("density_exact", "search_density_exact"):
+        value = getattr(result, field, None)
+        if value is None:
+            continue
+        try:
+            if not bool(value):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 __all__ = [
