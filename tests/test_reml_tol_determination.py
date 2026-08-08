@@ -609,6 +609,13 @@ class TestPublicationDispersion:
         assert result.search_density_exact is False
         assert result.search_saddlepoint_fraction == pytest.approx(0.4)
         assert any("saddlepoint" in w and "search" in w for w in result.warnings), result.warnings
+        # And reporting CONSUMES it: the method label qualifies the
+        # approximation-selected estimate, and the plot's selection-side
+        # provenance reads the searched story, not the publication's.
+        from superglm.profiling._reporting import tweedie_profile_method_label
+
+        assert "density approximation" in tweedie_profile_method_label(result)
+        assert result._selection_density_exact() is False
 
     def test_a_reprofile_rewrites_the_whole_dispersion_story(self, monkeypatch):
         """The re-profile IS the published dispersion, so the aggregate
