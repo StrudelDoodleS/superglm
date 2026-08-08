@@ -14,6 +14,7 @@ from superglm.reml.convergence import (
     freeze_flat_directions,
     mask_frozen_stop_gradient,
     project_reml_gradient,
+    trial_counts_as_precision_evidence,
 )
 
 
@@ -251,6 +252,19 @@ def test_stop_mask_passes_a_reactivated_direction_through() -> None:
     np.testing.assert_array_equal(still_flat, np.array([0.0, 2.0]))
     np.testing.assert_array_equal(reactivated, np.array([0.5, 2.0]))
     np.testing.assert_array_equal(unmasked, np.array([0.5, 2.0]))
+
+
+def test_precision_evidence_needs_a_converged_finite_trial() -> None:
+    """On the Fisher path an exhausted-PIRLS trial is still scored; its
+    objective sits at a non-stationary beta, so an Armijo rejection of it
+    proves nothing about the true profile objective. Only a converged
+    trial with a finite objective is evidence for the precision exit --
+    the same standard the observed-geometry path enforces by skipping
+    unconverged trials before evaluation."""
+    assert trial_counts_as_precision_evidence(True, 12.5)
+    assert not trial_counts_as_precision_evidence(False, 12.5)
+    assert not trial_counts_as_precision_evidence(True, float("nan"))
+    assert not trial_counts_as_precision_evidence(True, float("inf"))
 
 
 def test_dead_feasible_exit_needs_an_evaluated_trial() -> None:
