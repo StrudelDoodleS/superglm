@@ -612,6 +612,22 @@ class TestSCOPModeFailuresAreRoutable:
 
         assert scop_module.ObservedModeNotCertifiedError is ObservedModeNotCertifiedError
 
+    def test_the_certification_failure_reports_the_metric_that_failed(self):
+        """The failing condition is mode_newton_relative > mode_tolerance,
+        but the exception carried mode_score.relative_max -- a deliberately
+        distinct metric. An ill-conditioned mode can hold a sub-threshold
+        componentwise score with an excessive Newton correction, so the
+        search's infeasibility reason and PublicationModeError claimed a
+        score that never exceeded the bar."""
+        from superglm.reml.scop_efs import _scop_certification_failure
+
+        exc = _scop_certification_failure(3.2e-5, 1e-8, 4.1e-12)
+
+        assert exc.relative_max == pytest.approx(3.2e-5)
+        assert exc.tolerance == pytest.approx(1e-8)
+        assert "componentwise" in exc.hint
+        assert "4.1e-12" in exc.hint
+
 
 class TestProfileOptCensoringResolution:
     """profile_opt gives xatol no physical p meaning: the L-BFGS-B branch

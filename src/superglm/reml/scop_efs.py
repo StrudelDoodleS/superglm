@@ -796,6 +796,31 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode) -> float:
     return float(np.sqrt(max(1, mode.hessian_rank) * np.finfo(np.float64).eps))
 
 
+def _scop_certification_failure(
+    mode_newton_relative: float, mode_tolerance: float, componentwise_score: float
+) -> "ObservedModeNotCertifiedError":
+    """The typed certification failure, carrying the metric that FAILED.
+
+    The failing condition is ``mode_newton_relative > mode_tolerance``, and
+    these metrics are deliberately distinct: an ill-conditioned mode can
+    hold a sub-threshold componentwise score with an excessive Newton
+    correction. Reporting the componentwise score as the achieved value
+    made the infeasibility reason and ``PublicationModeError`` claim a
+    score that never exceeded the bar. Typed like the observed-geometry
+    gates: to a power search this is "no usable penalized mode at this
+    point", an infeasible power to route around, not a dead search; the
+    SCOP-specific detail rides in the hint.
+    """
+    return ObservedModeNotCertifiedError(
+        mode_newton_relative,
+        mode_tolerance,
+        hint=(
+            "SCOP latent mode certification: the relative Newton correction "
+            f"exceeded the bar; componentwise mode score={componentwise_score:.3g}."
+        ),
+    )
+
+
 def _fit_scop_reml_mode(
     context: _SCOPREMLFitContext,
     lambdas: dict[str, float],
@@ -988,17 +1013,8 @@ def _fit_scop_reml_mode(
             )
         if require_converged:
             return None
-        # Typed like the observed-geometry gates: to a power search this is
-        # "no usable penalized mode at this point", an infeasible power to
-        # route around, not a dead search. The SCOP-specific detail rides in
-        # the hint; invariant-violation raises above stay bare RuntimeError.
-        raise ObservedModeNotCertifiedError(
-            mode_score.relative_max,
-            mode_tolerance,
-            hint=(
-                "SCOP latent mode certification: relative Newton correction="
-                f"{mode_newton_relative:.3e}."
-            ),
+        raise _scop_certification_failure(
+            mode_newton_relative, mode_tolerance, mode_score.relative_max
         )
     if trace_run is not None and trace_run.enabled:
         if result.state_id is None:  # pragma: no cover - trace contract

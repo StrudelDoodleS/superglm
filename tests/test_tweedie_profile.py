@@ -3194,6 +3194,33 @@ class TestEstimatePFitMode:
         assert calls == ["fit"]
         assert model._last_fit_meta["method"] == "fit"
 
+    def test_reverse_coupling_preflights_the_publication_regime(self, monkeypatch):
+        """fit_mode='fit' with search_fit_mode='reml' on a model whose
+        features require REML (a lambda_policy here) is a guaranteed
+        publication failure: the ordinary final fit rejects them. That must
+        be refused before the multi-candidate REML search burns its whole
+        budget, not discovered after it."""
+        from superglm import LambdaPolicy, Spline
+
+        def search_must_not_run(*args, **kwargs):
+            raise AssertionError("the REML search ran before the publication preflight")
+
+        monkeypatch.setattr(tweedie_module, "estimate_tweedie_p", search_must_not_run)
+        rng = np.random.default_rng(3)
+        X = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, 200)})
+        y = rng.gamma(1.2, 2.0, 200)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            features={
+                "x1": Spline(
+                    kind="cr", n_knots=5, lambda_policy=LambdaPolicy(mode="fixed", value=1.0)
+                )
+            },
+        )
+
+        with pytest.raises(NotImplementedError, match="lambda_policy"):
+            model.estimate_p(X, y, fit_mode="fit", search_fit_mode="reml")
+
     @pytest.mark.slow
     def test_fit_mode_inherit_from_reml(self):
         """After fit_reml(), inherit should use the REML path."""
