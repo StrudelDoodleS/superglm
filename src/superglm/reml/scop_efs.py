@@ -798,7 +798,7 @@ def _scop_mode_tolerance(mode: _SCOPREMLMode) -> float:
 
 def _scop_certification_failure(
     mode_newton_relative: float, mode_tolerance: float, componentwise_score: float
-) -> "ObservedModeNotCertifiedError":
+) -> ObservedModeNotCertifiedError:
     """The typed certification failure, carrying the metric that FAILED.
 
     The failing condition is ``mode_newton_relative > mode_tolerance``, and
