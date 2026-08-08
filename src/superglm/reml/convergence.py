@@ -173,6 +173,19 @@ def mask_frozen_stop_gradient(
     return np.where(np.asarray(previously_frozen, dtype=bool) & still_flat, 0.0, projected)
 
 
+def trial_counts_as_precision_evidence(converged: bool, objective: float) -> bool:
+    """Whether a rejected line-search trial is evidence for the precision exit.
+
+    On the Fisher path an exhausted-PIRLS trial is still scored; its
+    objective sits at a non-stationary beta, so an Armijo rejection of it
+    proves nothing about the true profile objective. Only a converged
+    trial with a finite objective counts -- the same standard the
+    observed-geometry path enforces by skipping unconverged trials before
+    evaluation.
+    """
+    return bool(converged) and bool(np.isfinite(objective))
+
+
 def classify_dead_feasible_exit(
     active_gradient_norm: float,
     *,

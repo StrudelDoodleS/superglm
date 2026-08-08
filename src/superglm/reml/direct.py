@@ -26,6 +26,7 @@ from superglm.reml.convergence import (
     freeze_flat_directions,
     mask_frozen_stop_gradient,
     project_reml_gradient,
+    trial_counts_as_precision_evidence,
 )
 from superglm.reml.discrete import optimize_discrete_reml_cached_w
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
@@ -974,7 +975,8 @@ def optimize_direct_reml(
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else float(trial_evaluation)
             )
-            evaluated_feasible_trial = True
+            if trial_counts_as_precision_evidence(trial_result.converged, trial_obj):
+                evaluated_feasible_trial = True
 
             armijo_bound = obj + armijo_c * step * descent
             trial_accepted = bool(trial_obj <= armijo_bound)
