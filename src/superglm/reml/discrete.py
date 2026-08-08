@@ -925,6 +925,16 @@ def optimize_discrete_reml_cached_w(
                 # Do not let a deliberately loose tolerance bypass the
                 # two-evaluation convergence contract.
                 continue
+            if not (obj_change < _tol * score_scale_d):
+                # POI performs ONE working-model update per outer
+                # iteration, so an early all-frozen verdict can be
+                # measured at a nonstationary coefficient mode -- the
+                # objective is still moving, and the next W update can
+                # unfreeze what this one froze. All directions frozen
+                # means rho stops moving, so continuing is a pure PIRLS
+                # settle at the same lambdas; grant the exit only once
+                # the objective arm agrees the mode has stabilized.
+                continue
             converged = True
             termination_reason = "active_set_stationary"
             break
