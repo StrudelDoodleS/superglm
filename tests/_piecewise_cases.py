@@ -112,10 +112,13 @@ def pinned_wider() -> PiecewiseCase:
 def pinned_narrower() -> PiecewiseCase:
     """Rated range narrower than the data.
 
-    Rows outside ``[lower, upper]`` load the linear tails: their basis entries
-    exceed 1 on the near knot and go negative on the far one.  This is the case
-    that makes the signed zero-column test a false negative, and the only case
-    in the matrix that exercises extrapolating rows at fit time.
+    Under the default ``extrapolation="clip"`` the rows outside
+    ``[lower, upper]`` are grouped onto the boundary knots at fit time.  Under
+    ``make_case(name, extrapolation="extend")`` they load the linear tails
+    instead: their basis entries exceed 1 on the near knot and go negative on
+    the far one -- the configuration that makes the signed zero-column test a
+    false negative, and the only case in the matrix that exercises
+    extrapolating rows at fit time.
     """
     x = _uniform_x(600, 0.0, 100.0, seed=21)
     X, y, w = _frame(x, seed=22, kink=50.0)
@@ -165,9 +168,27 @@ WARNING_CASES = {"heaped_int_x": "tied weighted quantiles collapse on heaped x"}
 CASE_NAMES = tuple(CASES)
 
 
-def make_case(name: str) -> PiecewiseCase:
-    """Return the named fixture, rebuilt fresh so specs are never shared."""
-    return CASES[name]()
+def make_case(name: str, extrapolation: str | None = None) -> PiecewiseCase:
+    """Return the named fixture, rebuilt fresh so specs are never shared.
+
+    ``extrapolation`` overrides the spec's mode by rebuilding it through
+    ``__init__`` (so the override is validated, not smuggled past it); ``None``
+    keeps the spec's own default.
+    """
+    case = CASES[name]()
+    if extrapolation is not None:
+        spec = case.spec
+        case = case._replace(
+            spec=Piecewise(
+                spec.breaks,
+                base=spec.base,
+                strategy=spec.strategy,
+                lower=spec.lower,
+                upper=spec.upper,
+                extrapolation=extrapolation,
+            )
+        )
+    return case
 
 
 __all__ = ["CASES", "CASE_NAMES", "WARNING_CASES", "PiecewiseCase", "make_case"]

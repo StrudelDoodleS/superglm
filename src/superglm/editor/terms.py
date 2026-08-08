@@ -116,26 +116,42 @@ def term_weights_from_data(X_ref, sample_weight, name: str, term: EditableTerm) 
         return fallback
 
     edges = grid_edges(term.x)
-    if _term_extrapolates_linearly(term):
+    if _grid_is_knot_vector(term):
         # `np.histogram` drops anything outside the outermost edges. For a term
         # whose grid may be narrower than the data that silently deletes the
         # exposure sitting behind the two boundary segments -- measured at 21.7%
         # of total exposure on the shipped narrower-pin fixture -- which is the
         # exposure a user is looking at when deciding whether to drag a boundary
         # handle. Attribute those rows to the end bins instead of losing them.
+        # Right under every extrapolation mode: "clip" grouped those rows onto
+        # the boundary knots at fit time, "extend" rates them off the end bins'
+        # slopes, and "error" admits no such rows in the first place.
         raw_x = np.clip(raw_x, edges[0], edges[-1])
     return np.histogram(raw_x, bins=edges, weights=weights)[0].astype(np.float64)
+
+
+def _grid_is_knot_vector(term: EditableTerm) -> bool:
+    """Whether the editor grid is the model's own knot vector.
+
+    Only true of a piecewise term -- every other continuous term's grid is a
+    dense resampling that already spans the data. Read from ``term_type`` so
+    the helpers here stay in step with ``term_type_from_spec``.
+    """
+    return str(term.metadata.get("term_type", term.kind)) == "piecewise"
 
 
 def _term_extrapolates_linearly(term: EditableTerm) -> bool:
     """Whether the fitted term continues its end slopes past the editor grid.
 
-    Only a piecewise term does, because only its grid is the model's own knot
-    vector rather than a dense resampling that already spans the data. Read from
-    ``term_type`` so the two helpers below stay in step with
-    ``term_type_from_spec``.
+    Only a piecewise term under ``extrapolation="extend"`` does. The mode is
+    stamped into metadata by the session builder; when it is absent the
+    default is the spec's own default, ``"clip"``, which holds the end values
+    flat -- exactly what ``np.interp``'s ``left``/``right`` clamping already
+    produces.
     """
-    return str(term.metadata.get("term_type", term.kind)) == "piecewise"
+    if not _grid_is_knot_vector(term):
+        return False
+    return str(term.metadata.get("extrapolation", "clip")) == "extend"
 
 
 def term_offset_values(term: EditableTerm, values) -> NDArray:
@@ -163,11 +179,14 @@ def term_offset_values(term: EditableTerm, values) -> NDArray:
     scored = np.interp(x_values, x_sorted, y_sorted, left=y_sorted[0], right=y_sorted[-1])
     if _term_extrapolates_linearly(term) and x_sorted.size >= 2:
         # A piecewise term's grid IS its knot vector, and it is the first spec
-        # whose grid is deliberately allowed to be narrower than the data. Past
-        # the boundary knots the fitted term continues at the boundary slope --
-        # that slope is printed in the exported workbook -- so clamping here
-        # would condition `refit_with_edited_offset` on a function that is flat
-        # in exactly the tails the model is not, with no edit applied.
+        # whose grid is deliberately allowed to be narrower than the data.
+        # Under extrapolation="extend" the fitted term continues past the
+        # boundary knots at the boundary slope -- that slope is printed in the
+        # exported workbook -- so clamping here would condition
+        # `refit_with_edited_offset` on a function that is flat in exactly the
+        # tails the model is not, with no edit applied.  Under "clip" (the
+        # default) the interp clamp above already IS the model, and this branch
+        # stays cold.
         scored = np.where(
             x_values < x_sorted[0],
             y_sorted[0]

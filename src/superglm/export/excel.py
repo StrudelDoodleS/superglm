@@ -153,7 +153,7 @@ def _write_dataframe(ws, df: pd.DataFrame, start_row: int, start_col: int) -> tu
     return start_row + len(df), start_col + len(df.columns) - 1
 
 
-def _piecewise_interpolation_note(table: pd.DataFrame) -> str:
+def _piecewise_interpolation_note(table: pd.DataFrame, extrapolation: str) -> str:
     """The interpolation and extrapolation rule for one piecewise block.
 
     Derived from the block's own printed columns, so a reader can check the
@@ -165,21 +165,35 @@ def _piecewise_interpolation_note(table: pd.DataFrame) -> str:
     silent discrepancy back into the tariff at exactly the rows -- the ones
     outside the rated range -- where nobody would look for it.
 
-    Extending the boundary segments is a choice, not a self-evident one:
-    holding flat beyond the outermost knots is the established alternative, and
-    this library's splines already extrapolate linearly, so the rule is stated
-    here rather than assumed.  What ``lower``/``upper`` buy is that the knots
-    sit where the tariff's rated range says they should.
+    The out-of-range rule is the term's ``extrapolation`` parameter, and it is
+    stated here rather than assumed because both directions exist in practice:
+    holding flat beyond the outermost knots is the default (the library's
+    splines hold flat too), extending the boundary segments is the stated
+    alternative.  What ``lower``/``upper`` buy is that the knots sit where the
+    tariff's rated range says they should.
     """
     knots = [float(value) for value in table.iloc[:, 0]]
-    log_relativity = [float(value) for value in table["Log relativity"]]
-    slope_low = (log_relativity[1] - log_relativity[0]) / (knots[1] - knots[0])
-    slope_high = (log_relativity[-1] - log_relativity[-2]) / (knots[-1] - knots[-2])
-    return (
-        "Interpolate linearly on Log relativity (equivalently, geometrically on "
-        "Relativity). Beyond the tabulated range the boundary segments continue: "
-        f"below {knots[0]} use slope {slope_low}; "
-        f"above {knots[-1]} use slope {slope_high}."
+    interpolate = (
+        "Interpolate linearly on Log relativity (equivalently, geometrically on Relativity). "
+    )
+    if extrapolation == "extend":
+        log_relativity = [float(value) for value in table["Log relativity"]]
+        slope_low = (log_relativity[1] - log_relativity[0]) / (knots[1] - knots[0])
+        slope_high = (log_relativity[-1] - log_relativity[-2]) / (knots[-1] - knots[-2])
+        return interpolate + (
+            "Beyond the tabulated range the boundary segments continue: "
+            f"below {knots[0]} use slope {slope_low}; "
+            f"above {knots[-1]} use slope {slope_high}."
+        )
+    if extrapolation == "error":
+        return interpolate + (
+            f"Values outside [{knots[0]}, {knots[-1]}] are not rated: the model "
+            "refuses them (extrapolation='error')."
+        )
+    return interpolate + (
+        "Beyond the tabulated range hold the end rows flat: "
+        f"below {knots[0]} use the {knots[0]} row; "
+        f"above {knots[-1]} use the {knots[-1]} row."
     )
 
 
@@ -204,7 +218,7 @@ def _annotate_piecewise_blocks(ws, main_effects) -> None:
         ws.cell(
             row=_MAIN_EFFECT_NOTE_ROW,
             column=start_col,
-            value=_piecewise_interpolation_note(block.table),
+            value=_piecewise_interpolation_note(block.table, block.extrapolation or "clip"),
         )
 
 

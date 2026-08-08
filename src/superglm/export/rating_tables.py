@@ -33,6 +33,8 @@ class RatingTableBlock:
     name: str
     kind: str
     table: pd.DataFrame
+    # Piecewise only: the out-of-range rule, so the workbook note can state it.
+    extrapolation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +206,7 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
                 "Log relativity": np.asarray(ti.log_relativity, dtype=np.float64),
             }
         ),
+        extrapolation=model._specs[name].extrapolation,
     )
 
 

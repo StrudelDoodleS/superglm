@@ -1,8 +1,10 @@
 """Tests for the Piecewise feature spec: hat basis, validation, coefficient meaning.
 
 Two of the four properties the design rests on are pinned here: the coefficient
-meaning (``v_j == f(t_j) - f(t_r)``) and linear extrapolation past the boundary
-knots.  Export exactness and edit locality belong to the later stages.
+meaning (``v_j == f(t_j) - f(t_r)``) and the extrapolation contract past the
+boundary knots (flat under the ``"clip"`` default, the boundary lines under
+``"extend"``, a refusal under ``"error"``).  Export exactness and edit locality
+belong to the later stages.
 
 Tolerances are derived, not chosen: every quantity compared below comes out of a
 dot product with exactly two non-zero terms (a hat basis row has two non-zero
@@ -32,9 +34,9 @@ def _dot_atol(magnitude: float) -> float:
     return _NONZEROS_PER_ROW * 4.0 * _EPS * max(float(magnitude), 1.0)
 
 
-def _fitted(name: str):
+def _fitted(name: str, extrapolation: str | None = None):
     """Fit one fixture case and return (spec, beta, knots)."""
-    case = make_case(name)
+    case = make_case(name, extrapolation=extrapolation)
     model = SuperGLM(
         features={"x": case.spec, "region": Categorical(base="first")},
     )
@@ -140,12 +142,21 @@ class TestCoefficientMeaning:
         np.testing.assert_allclose(beta, expected, rtol=0.0, atol=atol)
 
 
-class TestLinearExtrapolation:
-    """Spec section 9 property 4: two points a side, so a slope error cannot pass."""
+class TestExtrapolationModes:
+    """Spec section 9 property 4, per mode: two points a side, so a slope error cannot pass."""
+
+    def test_the_default_is_clip_and_a_typo_fails_where_it_is_written(self):
+        assert Piecewise([2.0]).extrapolation == "clip"
+        with pytest.raises(
+            ValueError, match=r"extrapolation must be one of \('clip', 'extend', 'error'\)"
+        ):
+            Piecewise([2.0], extrapolation="linear")
 
     @pytest.mark.parametrize("case_name", CASE_NAMES)
-    def test_predictions_beyond_the_boundary_knots_stay_on_the_boundary_lines(self, case_name):
-        spec, beta, knots = _fitted(case_name)
+    def test_extend_predictions_beyond_the_boundary_knots_stay_on_the_boundary_lines(
+        self, case_name
+    ):
+        spec, beta, knots = _fitted(case_name, extrapolation="extend")
         at_knots = spec.score(knots, beta)
         width_lo = float(knots[1] - knots[0])
         width_hi = float(knots[-1] - knots[-2])
@@ -166,6 +177,77 @@ class TestLinearExtrapolation:
         atol = _dot_atol(4.0 * np.max(np.abs(beta)))
         assert atol <= 1e-12
         np.testing.assert_allclose(got, want, rtol=0.0, atol=atol)
+
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_clip_predictions_beyond_the_boundary_knots_hold_the_boundary_values(self, case_name):
+        """The default: beyond the knot span the term is exactly flat.
+
+        Asserted as exact equality with the boundary-knot scores, not as
+        closeness, because clip evaluates the identical basis row at the
+        identical clamped point -- any difference at all is a policy leak.
+        """
+        spec, beta, knots = _fitted(case_name)
+        assert spec.extrapolation == "clip"
+        at_knots = spec.score(knots, beta)
+        width_lo = float(knots[1] - knots[0])
+        width_hi = float(knots[-1] - knots[-2])
+        below = knots[0] - np.array([0.5, 3.0]) * width_lo
+        above = knots[-1] + np.array([0.5, 3.0]) * width_hi
+        got = spec.score(np.concatenate([below, above]), beta)
+        np.testing.assert_array_equal(got[:2], np.full(2, at_knots[0]))
+        np.testing.assert_array_equal(got[2:], np.full(2, at_knots[-1]))
+
+    def test_clip_and_extend_agree_on_and_inside_the_boundary_knots(self):
+        """The policy is a tail rule only: in-range predictions are mode-independent."""
+        x = np.linspace(0.0, 10.0, 41)
+        beta = np.array([0.4, -0.2, 0.7])
+        clip = _spec_on(x, [1.0, 4.0], lower=0.0, upper=10.0)
+        extend = _spec_on(x, [1.0, 4.0], lower=0.0, upper=10.0, extrapolation="extend")
+        probe = np.array([0.0, 0.5, 1.0, 3.9, 4.0, 9.99, 10.0])
+        np.testing.assert_array_equal(clip.score(probe, beta), extend.score(probe, beta))
+
+    def test_error_mode_refuses_out_of_range_at_transform_and_scores_in_range(self):
+        spec = _spec_on(
+            np.linspace(0.0, 10.0, 41), [1.0, 4.0], lower=0.0, upper=10.0, extrapolation="error"
+        )
+        np.testing.assert_allclose(
+            spec._raw_basis_matrix(np.array([0.0, 10.0])).sum(axis=1),
+            [1.0, 1.0],
+            rtol=0.0,
+            atol=1e-15,
+        )
+        with pytest.raises(
+            ValueError, match=r"outside the rated range \[0, 10\] with extrapolation='error'"
+        ):
+            spec.transform(np.array([5.0, 10.5]))
+
+    def test_error_mode_refuses_a_narrower_pin_at_build(self):
+        """The policy binds at build() too: rows the term will not rate refuse loudly."""
+        with pytest.raises(
+            ValueError, match=r"outside the rated range \[20, 80\] with extrapolation='error'"
+        ):
+            Piecewise([50.0], lower=20.0, upper=80.0, extrapolation="error").build(
+                np.linspace(0.0, 100.0, 201)
+            )
+
+    def test_clip_mode_narrow_pins_fit_identically_to_a_precomputed_clip(self):
+        """``Piecewise(breaks, upper=u)`` IS the tail-grouping idiom under clip.
+
+        Exact equality, not closeness: the policy clamps x before the identical
+        hat arithmetic, so both routes must produce the same bits.  This is the
+        contract that lets a caller delete the ``x.clip(...)`` preprocessing
+        column and state the grouping on the term instead.
+        """
+        x = np.concatenate([np.linspace(0.0, 100.0, 601), [120.0, 140.0, -10.0]])
+        pinned = Piecewise([40.0, 60.0], lower=20.0, upper=80.0)
+        manual = Piecewise([40.0, 60.0], lower=20.0, upper=80.0)
+        info_pinned = pinned.build(x)
+        info_manual = manual.build(np.clip(x, 20.0, 80.0))
+        np.testing.assert_array_equal(pinned._knots, manual._knots)
+        assert pinned._base_index == manual._base_index
+        np.testing.assert_array_equal(info_pinned.columns, info_manual.columns)
+        probe = np.array([-10.0, 20.0, 45.0, 80.0, 140.0])
+        np.testing.assert_array_equal(pinned.transform(probe), manual.transform(probe))
 
 
 class TestValidationRules:
@@ -265,14 +347,15 @@ class TestValidationRules:
     def test_rule_9_does_not_credit_a_segment_with_rows_from_outside_the_range(self):
         """A rated range bracketing no observation at all must not build.
 
-        ``_segment_index`` clamps out-of-range rows into the boundary segments,
-        which is what continues the boundary line; counting those clamped rows
-        as support is what let ``[45, 55]`` pass on data living entirely in
+        Extend mode, because only extend has out-of-range rows at fit time.
+        ``_segment_index`` clamps them into the boundary segments, which is
+        what continues the boundary line; counting those clamped rows as
+        support is what let ``[45, 55]`` pass on data living entirely in
         ``[0, 10] u [90, 100]``.
         """
         x = np.concatenate([np.linspace(0.0, 10.0, 300), np.linspace(90.0, 100.0, 300)])
         with pytest.raises(ValueError, match="carry no in-range weight") as excinfo:
-            Piecewise([50.0], lower=45.0, upper=55.0, base="first").build(x)
+            Piecewise([50.0], lower=45.0, upper=55.0, base="first", extrapolation="extend").build(x)
         message = str(excinfo.value)
         # Both segments are named, and the clamped weight is reported as what it
         # is rather than folded into the per-segment counts.
@@ -280,10 +363,25 @@ class TestValidationRules:
         assert "[0, 0]" in message
         assert "lies outside [45, 55]" in message
 
+    def test_rule_8_catches_the_same_fixture_under_clip_because_grouping_is_real_support(self):
+        """The clip twin of the rule-9 test above, failing for the clip reason.
+
+        Under clip the tail rows are genuinely grouped onto the boundary knots
+        -- they support the boundary values, so neither boundary segment is
+        empty -- and what is actually indefensible about breaks=[50] on data
+        living in ``[0, 10] u [90, 100]`` is that no row is anywhere near 50:
+        the interior knot's column is identically zero.
+        """
+        x = np.concatenate([np.linspace(0.0, 10.0, 300), np.linspace(90.0, 100.0, 300)])
+        with pytest.raises(ValueError, match="carry zero hat mass") as excinfo:
+            Piecewise([50.0], lower=45.0, upper=55.0, base="first").build(x)
+        assert "[50]" in str(excinfo.value)
+
     def test_rule_11_counts_only_in_range_weight_for_a_boundary_segment(self):
         """The thin-segment diagnostic must see through the clamp too.
 
-        A boundary segment holding two in-range rows is credited with the whole
+        Extend mode, because only extend has out-of-range rows at fit time.  A
+        boundary segment holding two in-range rows is credited with the whole
         out-of-range tail unless the clamped rows are excluded, which silences
         the warning about the segment whose slope those rows actually set.
         """
@@ -291,11 +389,27 @@ class TestValidationRules:
             [np.full(400, 5.0), np.array([26.0, 27.0]), np.linspace(30.0, 60.0, 600)]
         )
         with pytest.warns(UserWarning, match="of the in-range weight") as record:
-            Piecewise([30.0], lower=25.0, upper=60.0, base="first").build(x)
+            Piecewise([30.0], lower=25.0, upper=60.0, base="first", extrapolation="extend").build(x)
         message = str(record[0].message)
         assert "[25, 30]" in message
         assert "[2, 600]" in message
         assert "lies outside [25, 60]" in message
+
+    def test_rule_11_stays_silent_on_the_same_fixture_under_clip(self):
+        """The clip twin: grouping the tail onto the boundary knot feeds the segment.
+
+        The 400 rows heaped at 5.0 land on the 25.0 knot, so the ``[25, 30]``
+        segment carries 402 of 1002 rows and there is nothing thin to warn
+        about.  This is the semantic difference between the modes stated as
+        behaviour: clip turns tail exposure into boundary support, extend turns
+        it into boundary-slope leverage.
+        """
+        x = np.concatenate(
+            [np.full(400, 5.0), np.array([26.0, 27.0]), np.linspace(30.0, 60.0, 600)]
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            Piecewise([30.0], lower=25.0, upper=60.0, base="first").build(x)
 
     def test_rule_10_rank_deficiency_is_caught_where_rules_8_and_9_stay_silent(self):
         """The discriminating fixture: every column has mass, every segment has data."""
