@@ -579,6 +579,39 @@ class TestPublicationDispersion:
         assert len(result.warnings) == baseline + 1
         assert "re-profile" in result.warnings[-1]
 
+    def test_the_searched_density_provenance_survives_publication(self):
+        """p_hat, search_nll, plots and the profile CI come from the
+        SEARCHED curve. When the search scored its winner with saddlepoint
+        density but the publication re-profile evaluates exactly, replacing
+        the density story wholesale would label an approximation-based
+        power estimate as exact -- the searched provenance survives beside
+        the published one, disclosed in warnings."""
+        from superglm.model import profile_ops
+
+        frame, y, features = _small_search_fixture()
+        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+        result = model.estimate_p(frame, y, fit_mode="reml")
+
+        # Rewind to first-reprofile state with a saddlepoint-scored search.
+        result.search_nll = None
+        result.density_method = "saddlepoint"
+        result.density_exact = False
+        result.saddlepoint_fraction = 0.4
+        mu = np.asarray(model.predict(frame), dtype=float)
+        profile_ops._reprofile_published_dispersion(
+            model, np.asarray(y, dtype=float), np.ones(len(y)), mu, result, "mle"
+        )
+
+        # The live fields describe the published dispersion...
+        assert result.density_exact is True
+        # ...while the searched story survives beside it.
+        assert result.search_density_method == "saddlepoint"
+        assert result.search_density_exact is False
+        assert result.search_saddlepoint_fraction == pytest.approx(0.4)
+        assert any("saddlepoint" in w and "search" in w for w in result.warnings), (
+            result.warnings
+        )
+
     def test_a_reprofile_rewrites_the_whole_dispersion_story(self, monkeypatch):
         """The re-profile IS the published dispersion, so the aggregate
         convergence flag, the density classification and the phi warnings

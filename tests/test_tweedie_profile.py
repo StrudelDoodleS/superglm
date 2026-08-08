@@ -3170,6 +3170,9 @@ class TestEstimatePFitMode:
             phi_converged = True
             outer_converged = True
             fit_converged = True
+            density_method = "exact"
+            density_exact = True
+            saddlepoint_fraction = 0.0
             warnings = ()
             phi_n_evaluations = 0
             phi_n_score_evaluations = 0
