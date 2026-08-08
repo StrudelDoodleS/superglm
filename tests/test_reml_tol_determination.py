@@ -608,9 +608,7 @@ class TestPublicationDispersion:
         assert result.search_density_method == "saddlepoint"
         assert result.search_density_exact is False
         assert result.search_saddlepoint_fraction == pytest.approx(0.4)
-        assert any("saddlepoint" in w and "search" in w for w in result.warnings), (
-            result.warnings
-        )
+        assert any("saddlepoint" in w and "search" in w for w in result.warnings), result.warnings
 
     def test_a_reprofile_rewrites_the_whole_dispersion_story(self, monkeypatch):
         """The re-profile IS the published dispersion, so the aggregate
