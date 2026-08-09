@@ -37,14 +37,21 @@ class Polynomial:
 
         (1 / sum(w)) * sum_i w_i * phi_j(x_i) * phi_k(x_i) = delta_jk
 
-    i.e. they are orthonormal in the exposure-weighted *mean* empirical
-    inner product, and each is orthogonal to the constant in the same
-    inner product.  Under Gaussian/fixed-weight fitting this makes the
-    per-power coefficient estimates exactly uncorrelated, and it gives the
-    group penalty the within-group orthonormal geometry that the group
-    lasso assumes (Yuan & Lin 2006, JRSS-B 68:49-67; Simon & Tibshirani
-    2012, Statistica Sinica 22(3):983-1001 — orthonormalizing within the
-    group is exactly equivalent to their standardized group lasso).
+    i.e. they are orthonormal in the *mean* empirical inner product of the
+    training ``sample_weight``, and each is orthogonal to the constant in
+    the same inner product.  When exposure enters through an offset (the
+    documented count workflow) ``sample_weight`` stays at ones, so the
+    basis is orthonormalized against the row-count measure.  The weights
+    are followed under every family — including Tweedie, where they are
+    EDM prior weights: orthonormalization is inference/selection geometry
+    (the spanned column space is weight-invariant), not model geometry,
+    so the spline physical-rows rule deliberately does not apply.  Under
+    Gaussian/fixed-weight fitting this makes the per-power coefficient
+    estimates exactly uncorrelated, and it gives the group penalty the
+    within-group orthonormal geometry that the group lasso assumes (Yuan
+    & Lin 2006, JRSS-B 68:49-67; Simon & Tibshirani 2012, Statistica
+    Sinica 22(3):983-1001 — orthonormalizing within the group is exactly
+    equivalent to their standardized group lasso).
 
     The triangular factor of the weighted QR is stored as fitted state
     beside the min/max scaling.  ``transform``/``score`` push new x
@@ -95,6 +102,13 @@ class Polynomial:
     1957; Gautschi 2004, *Orthogonal Polynomials: Computation and
     Approximation*): store the recurrence coefficients instead of the
     triangular factor and evaluate new x by re-running the recurrence.
+
+    The rank guard admits pivots down to 1e-10 of the largest (which is
+    exactly 1 — the constant column under normalized weights), so a build
+    just clearing it has cond(R) near 1e10 and its computed columns are
+    orthonormal only to roughly eps * cond(R) ~ 1e-6: near the guard
+    boundary the orthonormality and uncorrelatedness statements hold to
+    that reduced precision, not machine precision.
     """
 
     def __init__(
@@ -125,6 +139,18 @@ class Polynomial:
             return f"Polynomial(degree={self.degree})"
         return f"Polynomial(powers={list(self.powers)})"
 
+    def __setstate__(self, state: dict) -> None:
+        # Pre-0.22 pickles predate the data-orthogonal basis: no stored
+        # factor, no powers.  Default them so restore succeeds and
+        # _components can refuse with a migration message instead of an
+        # AttributeError.
+        state = dict(state)
+        state.setdefault("_R", None)
+        if "powers" not in state:
+            state["powers"] = tuple(range(1, int(state.get("degree", 3)) + 1))
+        state.setdefault("degree", max(state["powers"]))
+        self.__dict__.update(state)
+
     def _scale(self, x: NDArray) -> NDArray:
         """Scale x to [-1, 1] using stored min/max."""
         span = self._hi - self._lo
@@ -142,8 +168,13 @@ class Polynomial:
         Returns the stated powers' orthonormal components; never
         re-orthogonalizes.  The constant component (column 0) is dropped.
         """
-        if self._R is None:
-            raise ValueError(f"{self!r} is not fitted: call build() before transform()/score().")
+        if getattr(self, "_R", None) is None:
+            raise ValueError(
+                f"{self!r} is not fitted: no stored orthonormalization factor. "
+                "Call build() first — or, if this spec was restored from a model "
+                "fitted before the data-orthogonal basis (0.22.0), refit the "
+                "model to migrate."
+            )
         full = la.solve_triangular(self._R, seed.T, trans="T", lower=False).T
         return np.ascontiguousarray(full[:, list(self.powers)])
 
@@ -177,7 +208,11 @@ class Polynomial:
                 f"identify a degree-{self.degree} orthogonal component."
             )
 
-        self._lo, self._hi = float(x.min()), float(x.max())
+        # Scale bounds come from the positive-weight support only: a
+        # zero-weight outlier must not stretch the [-1, 1] mapping and
+        # degrade the seed's conditioning.
+        x_support = x[w > 0]
+        self._lo, self._hi = float(x_support.min()), float(x_support.max())
         seed = self._seed_basis(self._scale(x))
 
         # Weighted thin QR of the seed under the mean-normalized weights.

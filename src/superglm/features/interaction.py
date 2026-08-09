@@ -984,6 +984,12 @@ class PolynomialInteraction:
     of the two parents' orthonormal components (constant excluded).
     Both margins evaluate through the parents' *stored* factors (deep
     copies of the fitted parent specs) — never re-orthogonalized.
+
+    Note the parents' weight-orthonormality does not transfer to this
+    block: pairwise products of two weight-orthonormal margins are not
+    weight-orthonormal unless the margins are independent under the
+    weights, so the standardized-group-lasso argument is a main-effect
+    property and does not extend to the product columns.
     """
 
     def __init__(self, poly1_name: str, poly2_name: str):

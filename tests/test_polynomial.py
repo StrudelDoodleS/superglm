@@ -422,3 +422,94 @@ class TestPolynomialGuards:
         )
         with pytest.raises(ValueError, match="Feature 'flat'"):
             model.fit(X, y)
+
+
+class TestWeightPolicyAndRestore:
+    """Weight-family policy, support-scoped scaling, and pickle migration."""
+
+    def test_tweedie_basis_orthonormal_under_prior_weights(self):
+        # Deliberate policy pin: unlike spline knot geometry (physical rows
+        # only under Tweedie), the Polynomial standardization follows
+        # sample_weight under EVERY family, Tweedie EDM prior weights
+        # included — orthonormalization is inference/selection geometry,
+        # and the spanned column space is weight-invariant.
+        from superglm import Tweedie
+
+        rng = np.random.default_rng(21)
+        n = 400
+        x = rng.uniform(0.0, 100.0, n)
+        w = np.exp(-x / 25.0) + 0.2 * rng.uniform(0.5, 1.0, n)
+        mu = np.exp(0.3 + 0.004 * x)
+        y = np.where(rng.uniform(size=n) < 0.75, rng.gamma(2.0, mu / 2.0), 0.0)
+
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            selection_penalty=None,
+            features={"x": Polynomial(degree=3)},
+        )
+        model.fit(pd.DataFrame({"x": x}), y, sample_weight=w)
+
+        spec = model._specs["x"]
+        Phi = spec.transform(x)
+        G = (Phi * w[:, None]).T @ Phi / float(w.sum())
+        np.testing.assert_allclose(G, np.eye(3), atol=1e-10)
+
+        # And it is genuinely the prior-weight basis, not the unit-weight one.
+        G_unit = Phi.T @ Phi / n
+        assert np.abs(G_unit - np.eye(3)).max() > 0.05
+        unit_cols = PolynomialDirect(degree=3).build(x).columns
+        assert np.abs(Phi - unit_cols).max() > 1e-3
+
+    def test_zero_weight_outlier_does_not_stretch_scaling(self):
+        x, w = _heaped_exposure(n=600, seed=17)
+        x_out = np.append(x, 1e6)
+        w_out = np.append(w, 0.0)
+
+        ref = PolynomialDirect(degree=4)
+        ref.build(x, sample_weight=w)
+
+        spec = PolynomialDirect(degree=4)
+        info = spec.build(x_out, sample_weight=w_out)
+
+        # Scale bounds ignore the zero-weight outlier ...
+        assert spec._lo == ref._lo
+        assert spec._hi == ref._hi
+        # ... so conditioning and the stored factor are unaffected ...
+        np.testing.assert_allclose(spec._R, ref._R, rtol=1e-10, atol=1e-12)
+        Phi = info.columns
+        total = float(w_out.sum())
+        G = (Phi * w_out[:, None]).T @ Phi / total
+        np.testing.assert_allclose(G, np.eye(4), atol=1e-10)
+        # ... and the outlier's own x still evaluates (plain polynomial
+        # extrapolation on the scaled seed).
+        assert np.all(np.isfinite(spec.transform(np.array([1e6]))))
+
+    def test_sample_weight_length_mismatch_raises(self):
+        with pytest.raises(ValueError, match="length"):
+            PolynomialDirect(degree=2).build(np.linspace(0, 10, 50), sample_weight=np.ones(10))
+
+    def test_powers_non_sequence_raises(self):
+        with pytest.raises(ValueError, match="sequence"):
+            PolynomialDirect(powers=3)
+
+    def test_pre_022_state_restores_and_refuses_with_migration_message(self):
+        # Pre-0.22 pickles restore __dict__ without __init__: no _R, no
+        # powers.  __setstate__ defaults them and transform refuses with
+        # the migration message instead of an AttributeError.
+        old_state = {"degree": 3, "_lo": 0.0, "_hi": 100.0}
+        spec = PolynomialDirect.__new__(PolynomialDirect)
+        spec.__setstate__(old_state)
+        assert spec.powers == (1, 2, 3)
+        assert spec.degree == 3
+        with pytest.raises(ValueError, match="refit"):
+            spec.transform(np.array([1.0, 2.0]))
+
+    def test_fitted_spec_pickle_round_trip(self):
+        import pickle
+
+        x, w = _heaped_exposure(n=400, seed=23)
+        spec = PolynomialDirect(powers=[1, 2, 4])
+        spec.build(x, sample_weight=w)
+        restored = pickle.loads(pickle.dumps(spec))
+        assert restored.powers == (1, 2, 4)
+        np.testing.assert_allclose(restored.transform(x), spec.transform(x), atol=1e-12)
