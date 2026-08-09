@@ -819,8 +819,13 @@ def build_design_matrix(
     from superglm.features.spline import _SplineBase
 
     # Non-Tweedie weights are frequency mass for learned spline geometry.
-    # Tweedie weights are EDM prior weights, so its geometry stays a function
-    # of physical rows only.
+    # Tweedie weights are EDM prior weights, so spline knot placement and
+    # discretized-bin geometry stay functions of physical rows only.  That
+    # physical-rows rule is scoped to _SplineBase geometry: Polynomial
+    # standardization deliberately follows sample_weight under every family,
+    # because orthonormalization is inference/selection geometry (the spanned
+    # column space is weight-invariant; unpenalized fits are identical), not
+    # model geometry like knot placement.
     geometry_weight = None if isinstance(distribution, Tweedie) else sample_weight
 
     group_matrices: list[GroupMatrix] = []
