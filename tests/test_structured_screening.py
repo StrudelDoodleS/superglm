@@ -1819,12 +1819,53 @@ def _resolved_residue_pair(seed, width=2e-3, L=6, reps=12, n_narrow=2):
     )
 
 
-@pytest.mark.parametrize(
-    ("seed", "residue_sign"),
-    [(3, +1.0), (4, -1.0), (7, -1.0)],
-    ids=["positive-residue", "negative-residue", "negative-residue-again"],
-)
-def test_a_resolved_penalty_residue_is_used_rather_than_the_floor(seed, residue_sign):
+def _first_resolved_residue_draw(residue_sign, scan=_FLOOR_SCAN_SEEDS):
+    """The first draw whose RESOLVED residue carries ``residue_sign``.
+
+    The sibling of :func:`_first_exact_zero_draw` for the opposite regime, and
+    scanned for the same reason: which draw shows the phenomenon is a fact
+    about the platform's LAPACK, not about the fixture.
+
+    It is scanned on the SIGN in particular because a null residue is round-off
+    -- there is no sign to pin.  Symmetric QR is accurate to ``O(eps ||S||)``
+    absolutely (Demmel & Veselic 1992), so an eigenvalue at ``1e-17 ||S||`` has
+    no correct digits, its sign among them.  This used to hardcode
+    ``[(3, +1.0), (4, -1.0), (7, -1.0)]``, measured here; on the CI runners for
+    3.12 and 3.14 seed 3 resolves ``-1.679e-17`` and seed 4 ``+1.421e-17``, both
+    within the documented band and both the other way round, so the pinned form
+    went RED ON A CORRECT LIBRARY.  Nor can the value be prescribed instead of
+    drawn: at ``eps ||S_a||`` a perturbation is below the ulp of ``S_a``'s own
+    entries, so it cannot be represented in the standard basis at all.  Only the
+    ORDERING of these quantities is portable, and only orderings are asserted.
+
+    Returns ``(seed, pair, resolved)``, or ``(None, None, resolved)`` where
+    ``resolved`` counts the scanned draws that resolved a nonzero residue at
+    all -- which separates "this platform reports exact zeros here, so the
+    regime is unreachable" from "the regime is reachable and this sign is
+    missing from it", the second of which is a coin flip per draw and so is an
+    assertion rather than a skip.
+    """
+    resolved = 0
+    for seed in range(scan):
+        p = spline_cat_moments(*_structured_inputs(_resolved_residue_pair(seed)))
+        if p.dims[1] != 4:
+            continue
+        sigma = np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))
+        if sigma[0] == 0.0:
+            continue
+        resolved += 1
+        if np.sign(sigma[0]) != residue_sign:
+            continue
+        curvature, reach, _top, floor, dust = _free_direction_curvature(p, _ladder_high_edge(p))
+        if not dust.max() < reach < floor:
+            continue
+        if int((curvature > reach).sum()) - int((curvature > floor).sum()) == 1:
+            return seed, p, resolved
+    return None, None, resolved
+
+
+@pytest.mark.parametrize("residue_sign", [+1.0, -1.0], ids=["positive-residue", "negative-residue"])
+def test_a_resolved_penalty_residue_is_used_rather_than_the_floor(residue_sign):
     """A residue the eigensolver DID resolve is the reach, floor or no floor.
 
     :func:`test_the_penalty_residue_floor_is_pinned_from_both_sides` pins the
@@ -1834,27 +1875,30 @@ def test_a_resolved_penalty_residue_is_used_rather_than_the_floor(seed, residue_
     ``max(residue, _PENALTY_RESIDUE_FLOOR * top)`` and an unconditional
     ``_PENALTY_RESIDUE_FLOOR * top`` -- leave that test, and every other test
     in this file, green while costing a whole degree of freedom here:
-    reverting the line to either one fails exactly the three cases below and
-    nothing else in the three screening suites.
+    reverting the line to either one fails both cases below and nothing else in
+    the three screening suites.
 
     The family is the one the regression was found on: 6 levels, 12 rows in
     every level, unit weights, two levels inside a 2e-3 band of ``x``, a
     ``cr(n_knots=3)`` margin.  ``eigh`` resolves ``sigma_min`` on all twelve
-    seeds scanned, at 0.007 to 0.23 round-off units of ``sigma_max`` -- under
-    the floor every time, so the floor and the measurement disagree -- and one
-    level's free curvature lands between the two on six of them.  There the
+    seeds first scanned, at 0.007 to 0.23 round-off units of ``sigma_max`` --
+    under the floor every time, so the floor and the measurement disagree -- and
+    one level's free curvature lands between the two on six of them.  There the
     reported edf is exactly 1.000000 df apart between the rules, and it is the
-    reach-aware value that is right: an exact-rational oracle puts seeds 3, 4
+    reach-aware value that is right: an exact-rational oracle put seeds 3, 4
     and 7 at 5.006935, 5.399635 and 5.139469, against 5.004628 / 5.284769 /
     5.001895 counted from the residue and 4.004628 / 4.284769 / 4.001895
-    counted from the floor.
+    counted from the floor.  Those are a record of the measurement that
+    established the rule, on this machine; nothing below asserts them, because
+    which seed shows what is not portable -- see
+    :func:`_first_resolved_residue_draw`.
 
-    The sign is asserted rather than assumed because it is what ``np.abs``
-    earns its place for.  A null residue is round-off and comes out either
-    way; on the two negative seeds here, taking ``np.maximum(sigma, 0.0)``
-    instead reports NO residue, hands the floor its case, and costs the same
-    degree of freedom.  On the positive seed that mutation is invisible, which
-    is why more than one sign is parametrized.
+    The sign is PARAMETRIZED, and the draw carrying it is discovered, because
+    it is what ``np.abs`` earns its place for.  Taking ``np.maximum(sigma,
+    0.0)`` instead reports NO residue on a negative draw, hands the floor that
+    case, and costs the same degree of freedom -- while on a positive draw the
+    same mutation is invisible.  So the mutation is only covered if a draw of
+    EACH sign is asserted on, and only if neither is allowed to skip.
 
     Nothing here needs a new oracle: the assertion is that the count KEEPS the
     direction the measured reach leaves free, and both the reach and the
@@ -1867,12 +1911,20 @@ def test_a_resolved_penalty_residue_is_used_rather_than_the_floor(seed, residue_
         structured_ladder,
     )
 
-    p = spline_cat_moments(*_structured_inputs(_resolved_residue_pair(seed)))
-    assert p.dims[1] == 4, p.dims
+    seed, p, resolved = _first_resolved_residue_draw(residue_sign)
+    # Fail-closed on both counts, and they are different facts.  No draw
+    # resolving anything means this platform reports exact zeros here and the
+    # residue branch is unreachable -- worth being told, not skipped past.  The
+    # regime being reachable while this sign never once appeared across
+    # ``resolved`` draws is a 2**-resolved coincidence, not a fixture property.
+    assert resolved, (residue_sign, resolved)
+    assert seed is not None, (residue_sign, resolved)
+
     sigma = np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))
     eps = float(np.finfo(np.float64).eps)
     # RESOLVED, signed, and under the floor: the one regime where substituting
-    # the constant for the measurement is observable.
+    # the constant for the measurement is observable.  The scan selected on the
+    # first two, so only the third constrains anything new here.
     assert sigma[0] != 0.0, sigma
     assert np.sign(sigma[0]) == residue_sign, sigma[0]
     assert abs(sigma[0]) < eps * float(abs(sigma[-1])), (sigma[0], sigma[-1])
