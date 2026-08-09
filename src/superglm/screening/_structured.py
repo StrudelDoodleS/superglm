@@ -564,7 +564,70 @@ def _unpenalized_blocks(p: SplineCatPair) -> NDArray:
     return G
 
 
-def block_ranks(p: SplineCatPair, lam: float) -> NDArray:
+@dataclass(frozen=True)
+class _RankGeometry:
+    """:func:`block_ranks` with the ``lambda`` divided out of it.
+
+    The free set is the SAME at every positive ``lambda``: both sides of
+    ``reach <= _solve_floor(k_a + 1) * top`` carry one factor of it, so it
+    cancels.  Everything the mask then selects is ``lambda``-free too — the
+    projection ``N``, the Schur complement, and the batched eigendecomposition
+    of it, which is the expensive part.  Only the threshold moves, and it moves
+    by a scalar, so a rung reached by bisection can rescale rather than rebuild.
+
+    ``unit_top`` and ``unit_residue`` are the two thresholds at ``lambda = 1``;
+    at any other they are ``lam`` times these.  They are held apart from the
+    eigenvalues for exactly that reason.
+    """
+
+    ranks: NDArray  # (L,)  contrast + the directions the penalty reaches
+    curvature_eigs: NDArray  # (L, d) ascending, the free block's own spectrum
+    dust: NDArray  # (L,)  ``_RCOND`` on the level's raw moments
+    unit_top: float
+    unit_residue: float
+    any_free: bool
+
+
+def _rank_geometry(p: SplineCatPair, all_free: bool = False) -> _RankGeometry:
+    """Build the ``lambda``-free half of :func:`block_ranks` once.
+
+    ``all_free`` is the zero-``lambda`` reading, where no direction is reached
+    at all and the count is the unpenalized block's own rank.  It is a separate
+    argument rather than a ``lambda`` of 0 flowing through the comparison
+    because the two give different masks and only one of them can be cached.
+    """
+    _, k_a = p.dims
+    S_a = 0.5 * (p.S_a + p.S_a.T)
+    sigma, directions = np.linalg.eigh(S_a)
+    unit_reach = np.abs(sigma)
+    unit_top = float(unit_reach.max()) if unit_reach.size else 0.0
+    free = (
+        np.ones(unit_reach.shape, dtype=bool)
+        if all_free
+        else unit_reach <= _solve_floor(k_a + 1) * unit_top
+    )
+    ranks = np.where(p.m > 0.0, 1, 0) + int(np.count_nonzero(~free))
+    if not free.any():
+        empty = np.zeros((p.dims[0], 0), dtype=np.float64)
+        return _RankGeometry(ranks, empty, empty, unit_top, 0.0, False)
+
+    N = directions[:, free]
+    mass = np.where(p.m > 0.0, p.m, 1.0)
+    projected = p.c @ N
+    curvature = np.einsum("ip,lij,jq->lpq", N, p.V, N, optimize=True)
+    curvature -= (projected[:, :, None] * projected[:, None, :]) / mass[:, None, None]
+    curvature = 0.5 * (curvature + np.swapaxes(curvature, -1, -2))
+    return _RankGeometry(
+        ranks,
+        np.linalg.eigvalsh(curvature),
+        _RCOND * (np.einsum("lpp->l", p.V) + p.m),
+        unit_top,
+        float(unit_reach[free].max()),
+        True,
+    )
+
+
+def block_ranks(p: SplineCatPair, lam: float, geometry: _RankGeometry | None = None) -> NDArray:
     """Every level block's rank, counted to AGREE with the inverse at ``lam``.
 
     ``edf`` is ``rank(A) - lambda tr(A^-1 S)`` and the two halves have to be
@@ -729,36 +792,29 @@ def block_ranks(p: SplineCatPair, lam: float) -> NDArray:
     raw moments out of the count at the LOW edge, where the reach is
     negligible and the Schur complement above is a cancelling difference.
     """
-    _, k_a = p.dims
-    S_a = 0.5 * (p.S_a + p.S_a.T)
-    sigma, directions = np.linalg.eigh(S_a)
-    # The penalty each direction actually carries at this lambda.  Written
-    # with the lambda inside so a zero penalty leaves every direction free,
-    # which is the unpenalized block's own rank and what that rung reports.
-    reach = float(lam) * np.abs(sigma)
-    top = float(reach.max()) if reach.size else 0.0
-    free = reach <= _solve_floor(k_a + 1) * top
-    ranks = np.where(p.m > 0.0, 1, 0) + int(np.count_nonzero(~free))
-    if not free.any():
-        return ranks
+    lam = float(lam)
+    # A zero lambda frees EVERY direction rather than the ones the spectrum
+    # picks out -- the unpenalized block's own rank, which is what that rung
+    # reports -- so it is asked for explicitly instead of emerging from a
+    # ``0 <= 0`` comparison, and it never reads a cache built the other way.
+    geometry = (
+        _rank_geometry(p, all_free=lam <= 0.0) if geometry is None or lam <= 0.0 else geometry
+    )
+    if not geometry.any_free:
+        return geometry.ranks
 
-    N = directions[:, free]
-    # ``reach`` is already an absolute value, so it is 0.0 here only where the
-    # eigensolver returned a signed zero for EVERY free direction -- the one
-    # case where it has reported no residue at all rather than a small one.
-    # A comparison against a tolerance would not do: a residue below the
-    # floor is still a MEASUREMENT, and substituting the floor for it is what
-    # loses whole degrees of freedom.  Taking the absolute value first is
-    # equally load bearing, since the residue is signed.
-    residue = float(reach[free].max())
+    # ``unit_reach`` is already an absolute value, so ``residue`` is 0.0 here
+    # only where the eigensolver returned a signed zero for EVERY free
+    # direction -- the one case where it has reported no residue at all rather
+    # than a small one.  A comparison against a tolerance would not do: a
+    # residue below the floor is still a MEASUREMENT, and substituting the
+    # floor for it is what loses whole degrees of freedom.  Taking the absolute
+    # value first is equally load bearing, since the residue is signed.
+    top = lam * geometry.unit_top
+    residue = lam * geometry.unit_residue
     flattened = residue if residue > 0.0 else _PENALTY_RESIDUE_FLOOR * top
-    mass = np.where(p.m > 0.0, p.m, 1.0)
-    projected = p.c @ N
-    curvature = np.einsum("ip,lij,jq->lpq", N, p.V, N, optimize=True)
-    curvature -= (projected[:, :, None] * projected[:, None, :]) / mass[:, None, None]
-    curvature = 0.5 * (curvature + np.swapaxes(curvature, -1, -2))
-    floor = np.maximum(flattened, _RCOND * (np.einsum("lpp->l", p.V) + p.m))
-    return ranks + (np.linalg.eigvalsh(curvature) > floor[:, None]).sum(axis=-1)
+    floor = np.maximum(flattened, geometry.dust)
+    return geometry.ranks + (geometry.curvature_eigs > floor[:, None]).sum(axis=-1)
 
 
 def _pair_arrow(p: SplineCatPair, lam: float, ranks: NDArray | None = None):
@@ -804,6 +860,7 @@ def _evaluate(
     rank_m: int,
     lam: float,
     ranks: NDArray | None = None,
+    geometry: _RankGeometry | None = None,
 ) -> tuple[float, float]:
     """``(T, edf)`` at one lambda, from ONE arrow factorization.
 
@@ -815,7 +872,7 @@ def _evaluate(
     factorization.
     """
     L, k_a = p.dims
-    f = _pair_arrow(p, lam, block_ranks(p, lam) if ranks is None else ranks)
+    f = _pair_arrow(p, lam, block_ranks(p, lam, geometry) if ranks is None else ranks)
     b = np.zeros((L, k_a + 1), dtype=np.float64)
     b[:, :k_a] = U_eff
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
@@ -917,10 +974,15 @@ def structured_ladder(
         return None
 
     U_eff, rank_m = _profile(p)
+    # Built once for the whole ladder.  Every lambda this evaluates is strictly
+    # positive -- the bracket's own low edge is ``1e-10 * scale`` and the
+    # zero-penalty pair returns below without reaching here -- so the cached
+    # free set is the one each rung would have computed for itself.
+    geometry = _rank_geometry(p)
 
     def evaluate(lam: float) -> tuple[float, float] | None:
         try:
-            return _evaluate(p, U_eff, rank_m, lam)
+            return _evaluate(p, U_eff, rank_m, lam, geometry=geometry)
         except _UnstableStructuredEDFError:
             return None
 

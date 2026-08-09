@@ -2244,6 +2244,56 @@ def test_a_multi_null_penalty_is_ranked_against_one_reach_not_per_direction():
     assert structured_ladder(p, budgets=(2.0,))[0].edf0 == edf
 
 
+def test_the_cached_rank_geometry_answers_what_each_lambda_would_have():
+    """The ladder builds the free set ONCE; every rung must still get its own count.
+
+    :func:`~superglm.screening._structured.structured_ladder` computes
+    :func:`~superglm.screening._structured._rank_geometry` a single time and
+    hands it to every evaluation.  That is sound only because the free set is
+    the same at every positive lambda -- both sides of
+    ``reach <= _solve_floor(k_a + 1) * top`` carry one factor of it, so it
+    cancels -- and because the two thresholds are then that lambda times a
+    fixed scalar.  What is asserted is the consequence rather than the algebra:
+    the cached answer equals the one each lambda computes for itself, on the
+    RANKS and not merely on the edf they feed, across sixteen decades and at
+    the ladder's own high edge.
+
+    LAMBDA ZERO IS A DIFFERENT READING AND IS NOT CACHED.  There no direction
+    is reached at all, so the count is the unpenalized block's own rank rather
+    than the one the spectrum picks out, and
+    :func:`~superglm.screening._structured.block_ranks` asks for it explicitly
+    instead of letting a cache built the other way answer it.  The guard is
+    worth 1 to 2 df on every fixture here, which is why the assertion is that
+    zero and the smallest positive lambda representable DISAGREE: were the
+    guard dropped, the cached mask would answer both and they would match.
+    """
+    from superglm.screening._structured import _rank_geometry, block_ranks
+
+    for build in (_thin_level_pair, _vanishing_mass_pair):
+        p = spline_cat_moments(*_structured_inputs(build(0.001)))
+        geometry = _rank_geometry(p)
+        for lam in (1e-12, 1e-6, 1.0, 1e6, 1e12, _ladder_high_edge(p)):
+            fresh, cached = block_ranks(p, lam), block_ranks(p, lam, geometry)
+            assert np.array_equal(fresh, cached), (build.__name__, lam, fresh, cached)
+
+    for build in (_resolved_residue_pair, _multi_null_pair):
+        p = spline_cat_moments(*_structured_inputs(build(3)))
+        geometry = _rank_geometry(p)
+        for lam in (1e-12, 1e-6, 1.0, 1e6, 1e12, _ladder_high_edge(p)):
+            fresh, cached = block_ranks(p, lam), block_ranks(p, lam, geometry)
+            assert np.array_equal(fresh, cached), (build.__name__, lam, fresh, cached)
+
+        # Zero is not the smallest positive lambda, and a supplied geometry
+        # must not make it behave as though it were.
+        at_zero = int(block_ranks(p, 0.0).sum())
+        assert at_zero == int(block_ranks(p, 0.0, geometry).sum())
+        assert at_zero < int(block_ranks(p, 1e-300).sum()), (
+            build.__name__,
+            at_zero,
+            int(block_ranks(p, 1e-300).sum()),
+        )
+
+
 def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
     """The two ladders must agree on the DEGENERATE-penalty predicate too.
 
