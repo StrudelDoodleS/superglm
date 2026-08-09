@@ -1776,3 +1776,40 @@ class TestPolynomialInteractionStoredFactor:
         pi = PolynomialInteraction("a", "b")
         with pytest.raises(ValueError, match="must be built"):
             pi.build(np.linspace(0, 10, 30), np.linspace(0, 5, 30), {"a": p1, "b": p2})
+
+    def test_polynomial_categorical_isolated_from_parent_mutation(self):
+        # The margins-match claim rests on the deep copy: mutating the
+        # original parent spec after build must not move the interaction.
+        x, w = self._heaped(300, 12)
+        rng = np.random.default_rng(13)
+        x_cat = rng.choice(["A", "B"], 300)
+
+        poly_spec = Polynomial(degree=2)
+        cat_spec = Categorical(base="first")
+        poly_spec.build(x, sample_weight=w)
+        cat_spec.build(x_cat)
+
+        pc = PolynomialCategorical("poly", "cat")
+        pc.build(x, x_cat, {"poly": poly_spec, "cat": cat_spec}, sample_weight=w)
+        snapshot = pc.transform(x, x_cat)
+
+        poly_spec._R = poly_spec._R * 2.0
+        np.testing.assert_allclose(pc.transform(x, x_cat), snapshot, atol=1e-14)
+
+    def test_polynomial_interaction_isolated_from_parent_mutation(self):
+        x1, w = self._heaped(300, 14)
+        rng = np.random.default_rng(15)
+        x2 = rng.uniform(0.0, 50.0, 300)
+
+        p1 = Polynomial(degree=2)
+        p2 = Polynomial(degree=2)
+        p1.build(x1, sample_weight=w)
+        p2.build(x2, sample_weight=w)
+
+        pi = PolynomialInteraction("a", "b")
+        pi.build(x1, x2, {"a": p1, "b": p2}, sample_weight=w)
+        snapshot = pi.transform(x1, x2)
+
+        p1._R = p1._R * 2.0
+        p2._R = p2._R * -1.0
+        np.testing.assert_allclose(pi.transform(x1, x2), snapshot, atol=1e-14)
