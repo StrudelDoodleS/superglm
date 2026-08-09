@@ -88,6 +88,29 @@ edge and on 6 of those 11 widths (9 of 11 before the reach-aware count).  The
 invariant :func:`block_ranks` is written to satisfy — count what the inverse
 resolves, no more — is improved, not achieved.
 
+**THAT +3 IS ONE GEOMETRY'S NUMBER AND NOT A BOUND**, so the measured range is
+stated instead.  Over 192 further pipeline configurations (``ps``/``cr``/
+``bs``/``ns`` at 3 to 8 knots, ``L`` in 6 to 20, 3 to 30 rows per level, with
+and without a narrow band, two seeds, two widths) the worst HIGH-edge
+disagreement is also +3; on the four wide pairs of the shape this kernel
+exists for it is +10, +9, +9 and +9 at the lambda each clamps to; and at the
+LOW edge, on pairs carrying levels with fewer distinct covariate values than
+the margin has columns, it reaches +63.
+
+A NONZERO DISAGREEMENT IS NOT BY ITSELF AN EDF ERROR, and on the wide pairs
+the disagreeing count is the accurate one.  ``block_ranks`` enters ``edf``
+only through ``rank_term``, so ``edf`` counted here and ``edf`` counted from
+the inverse's own keep differ by exactly that disagreement.  Against a
+40-digit oracle for ``tr((V_eff + lambda S)^-1 V_eff)`` on the delivered
+moments (108.996797 / 108.998928 / 107.999757 / 109.000276) the four wide
+pairs come back at 108.985705 / 108.997280 / 108.005895 / 109.001261 — inside
+0.012 df — while adopting the inverse's own count would put them 9 to 10 df
+low.  The low-edge disagreement is a different, PRE-EXISTING defect: it is the
+unconditional contrast term ``np.where(p.m > 0.0, 1, 0)`` counting a dimension
+the pair does not have, ``rank(M)`` counts it too so it does not cancel, and
+``origin/master`` reproduces it identically.  It is not this branch's to fix
+and is tracked separately.
+
 The ladder's edf is also not monotone in lambda on that same pair, and that
 predates any of this: walking 81 lambdas across the bracket, the arrow edf
 INCREASES at 14 of the 80 steps, by as much as 47.36 df, identically before
@@ -550,11 +573,29 @@ def block_ranks(p: SplineCatPair, lam: float) -> NDArray:
     offset.  ``_solve_floor`` in :mod:`superglm.screening._arrow` states the
     inverse's side of that bargain; this is the rank's.
 
-    The penalty splits the block.  Where ``S_a`` has a genuine eigenvalue,
-    ``lambda sigma_j`` is above the inverse's own resolution everywhere the
-    ladder brackets, so the inverse resolves that direction and
-    ``tr(A^-1 S)`` subtracts the right share back — it is always counted, and
-    so is the level's own contrast, which cancels against ``rank(M)``.
+    The penalty splits the block.  Where ``S_a`` has a genuine eigenvalue the
+    inverse normally resolves that direction and ``tr(A^-1 S)`` subtracts the
+    right share back, so it is counted — as is the level's own contrast, which
+    cancels against ``rank(M)``.
+
+    NORMALLY, NOT ALWAYS, and the exception is named rather than assumed away.
+    An earlier form of this paragraph claimed ``lambda sigma_j`` was above the
+    inverse's own resolution EVERYWHERE the ladder brackets; it is not, and the
+    counterexample is a level carrying fewer distinct covariate values than the
+    margin has columns.  On ``Categorical() x Spline(kind="ps", n_knots=5)``,
+    8 categorical levels — 7 level blocks after treatment coding — 3 rows in
+    each, 4 of them inside a 1e-3 band of ``x``, unit weights,
+    ``default_rng(3)``, at the ladder's LOW edge:
+    ``lambda min|sigma_genuine|`` is ``4.14e-15`` against
+    :func:`~superglm.screening._arrow._psd_pinv`'s own cut of ``6.28e-15`` to
+    ``7.89e-15`` on the blocks it inverts — BELOW it on all seven levels, and
+    the two counts part, 63 here against 56 there.  Populate the same margin
+    properly (``ps(8)``, 20 levels, 30 rows each) and the claim holds as
+    written: ``2.69e-13`` against cuts of ``8.02e-14`` to ``1.09e-13``.  The
+    low-edge disagreement is not this function's to fix — it is driven by the
+    unconditional contrast term below, ``rank(M)`` counts the same dimension,
+    and ``origin/master`` produces it identically — but it is not covered by
+    the guarantee this paragraph used to state, so the guarantee is withdrawn.
 
     What is left is ``null(S_a)``, and there the RANK is the whole answer,
     because at the ladder's high edge the block's largest eigenvalue is
@@ -574,6 +615,40 @@ def block_ranks(p: SplineCatPair, lam: float) -> NDArray:
     indistinguishable, with twelve orders between them in the quantity that
     decides.  Three such levels bought that pair three degrees of freedom it
     did not have.
+
+    ``reach[free].max()`` IS A SCALAR ON PURPOSE, AND IT IS DECISIVE ONLY
+    ABOVE NULLITY ONE.  Where the free subspace has more than one dimension
+    the free reaches differ, and the whole subspace is still judged against
+    the LARGEST of them rather than each direction against its own.  That is
+    not a coarsening of a finer rule available for free — it is the matching
+    half of the bargain at the top of this docstring.  ``_psd_pinv``'s cut is
+    likewise ONE number per block, relative to that block's own largest
+    eigenvalue, so a per-direction refinement of the rank's side refines
+    against a reference the inverse does not share, and every direction it
+    adds arrives as ``1 - 0``.  Measured on
+    ``Categorical() x Spline(kind="ps", k=5, degree=3, m=3)`` — ``k_a = 4``,
+    nullity 2 — 6 levels, 12 rows in each, two inside a 1e-3 band, over seeds
+    0 to 39 at the ladder's high edge: the arrow inverse resolves 23
+    directions on every one of the 40, this rule counts 23 or 24, and a
+    per-direction rule (each free direction against the reach it carries,
+    i.e. the generalized eigenvalues of ``(curvature_q, diag(reach_free))``
+    above one) counts 24 on all 40 — above what the inverse resolves
+    everywhere.  It disagrees with this rule on 15 of the 40, always by
+    exactly +1.000000 df, and against a 50-digit oracle for
+    ``tr((V_eff + lambda S)^-1 V_eff)`` (cross-checked at 90 digits) it is
+    nearer on 7 of those 15 and farther on 8 — but the split is not luck:
+    on the 5 draws where this rule is already within 0.5 df of the oracle it
+    is farther on 5 of 5, turning 0.059 df of error into 1.059.  Its wins are
+    a fixed +1 partially cancelling the route's OWN error, which on that
+    narrow-band family runs to 8.00 df at the high edge.  Nullity above one is
+    reached by no shipped default — measured on the centered ``S_a`` this
+    receives, nullity is ``m - 1`` for ``ps`` (0, 1, 2, 3 at ``m`` = 1 to 4)
+    and for ``bs`` (``m = 4`` refused, order > degree), but ``cr`` stops at 1
+    (``m = 3`` still gives 1, ``m = 4`` refused) and ``ns`` is 0 until
+    ``m = 4`` — so at the default ``m = 2`` every one of the four is nullity 1
+    or 0 and this collapse is a no-op.  The choice is pinned by
+    ``test_a_multi_null_penalty_is_ranked_against_one_reach_not_per_direction``,
+    which had to reach for ``m = 3`` to test it at all.
 
     ``s`` IS THE EIGENSOLVER'S OWN ANSWER, WHATEVER ITS SIGN.  A spline
     penalty's null space is null in exact arithmetic and round-off in float,
@@ -815,6 +890,22 @@ def structured_ladder(
     1.4% because the machine's load fell between rounds).  A CLAMPED ladder is
     two evaluations whatever it counts, and ``ns`` returns before any of this,
     so the cost lands only where the bisection does.
+
+    **WHICH IS A GEOMETRY THAT HAD TO BE FORCED, AND THE COUNT SAYS SO.**
+    That regression is real but the budgets it needs are not the ones
+    screening uses.  Arrow factorizations for a WHOLE ladder at the default
+    ``(2, 4, 8, 16)``, counted by instrumenting :func:`_pair_arrow`: 2 for
+    each of four wide real pairs (``L = 118``, two-column margin), and 2 for
+    ``ps(8)`` at ``L = 50`` and ``L = 100``, ``cr(6)`` at ``L = 100``,
+    ``bs(6)`` at ``L = 50`` and ``ps(8)`` at ``L = 20``.  Their edf at maximum
+    penalty is 49.00, 99.00 and 108.01 to 109.00 respectively — far above
+    every budget in use, so no rung's target falls inside the bracket and
+    every one of them clamps.  The same ``ps(8)`` ``L = 100`` pair
+    driven at ``(150, 250, 400, 600)``, which is the paragraph above, pays
+    120.  The one margin that searches by default is ``ns``: its penalty is
+    full rank, edf at maximum penalty is 0, and ``L = 100`` pays 106 — but
+    ``free`` is then empty and :func:`block_ranks` returns before any of the
+    work this paragraph is about.
 
     A numerical failure reached while bisecting one target refuses that target,
     not independent targets or already certified edge clamps.  The returned
