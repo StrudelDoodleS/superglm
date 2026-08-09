@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.features._spline_knots import weighted_quantile_knots
@@ -435,7 +436,12 @@ class Piecewise:
         H: NDArray[np.float64],
         weights: NDArray[np.float64],
     ) -> None:
-        """Check the data can carry the knots that were asked for (rules 8-11)."""
+        """Check the data can carry the knots that were asked for (rules 8-11).
+
+        Callers may pass unique x values with per-value aggregated weights:
+        every rule here is linear in the weights, and the rank probe sees the
+        same weighted Gram either way.
+        """
         t = self._knots
 
         # Rule 8 -- a knot whose column is identically zero.  Written with |h_j|
@@ -556,12 +562,24 @@ class Piecewise:
         x = _finite_x(x)
         weights = _conforming_weights(sample_weight, x.size)
         x = self._resolve_knots(x, weights, sample_weight)
-        # The policy is already applied to x, so the raw hat evaluation is the
-        # right one here; _hat_basis would just clamp a second time.
-        H = self._hat_values(x)
-        self._resolve_base(H, weights, sample_weight)
-        self._validate_support(x, H, weights)
-        columns = H[:, self._non_base_indices]
+        # Deduplicate before anything scales with n.  Rating variables are
+        # heaped, so the distinct values are typically dozens; every rule below
+        # is weight-linear, so unique values with per-value aggregated weights
+        # give the same masses, the same segment counts and the same weighted
+        # Gram -- hence the same rank verdict -- as the row-level design.  This
+        # is deduplication, not binning: no discretisation error exists to
+        # introduce.  The policy is already applied to x, so the raw hat
+        # evaluation is the right one here; _hat_basis would just clamp again.
+        x_unique, inverse = np.unique(x, return_inverse=True)
+        w_agg = np.bincount(inverse, weights=weights, minlength=x_unique.size)
+        H_unique = self._hat_values(x_unique)
+        self._resolve_base(H_unique, w_agg, sample_weight)
+        self._validate_support(x_unique, H_unique, w_agg)
+        # Emitted sparse (a hat row has at most two non-zeros) so the builder's
+        # sparse branch can re-detect the repeated rows and store the design
+        # one distinct row deep.  The gather reconstructs the exact per-row
+        # values: equal x means bit-identical hat arithmetic.
+        columns = sp.csr_matrix(H_unique[:, self._non_base_indices])[inverse]
         return GroupInfo(columns=columns, n_cols=int(columns.shape[1]))
 
     def transform(self, x: NDArray) -> NDArray[np.float64]:
