@@ -688,14 +688,20 @@ def build_coef_rows(
                 )
 
         elif isinstance(spec, Polynomial):
-            poly_group = f"{g.name} P({spec.degree})"
+            # Rows are labelled by the stated power, not by column position:
+            # with powers={1, 2, 4} the third row is [P4].
+            powers = spec.powers
+            if powers == tuple(range(1, spec.degree + 1)):
+                poly_group = f"{g.name} P({spec.degree})"
+            else:
+                poly_group = f"{g.name} P({','.join(str(p) for p in powers)})"
             for i in range(g.size):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i]) if len(se_g) > i else 0.0
                 z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 rows.append(
                     _CoefRow(
-                        name=f"{g.name}[P{i + 1}]",
+                        name=f"{g.name}[P{powers[i]}]",
                         group=poly_group,
                         coef=coef_val,
                         se=se_val,
