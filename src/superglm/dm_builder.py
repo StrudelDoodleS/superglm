@@ -994,7 +994,12 @@ def build_design_matrix(
                     )
                 ]
         else:
-            result = spec.build(x_col, sample_weight=spline_geometry_weight)
+            try:
+                result = spec.build(x_col, sample_weight=spline_geometry_weight)
+            except ValueError as err:
+                # Name the failing term: spec-level guards (e.g. Polynomial's
+                # distinct-support and rank checks) cannot know the column name.
+                raise ValueError(f"Feature {name!r}: {err}") from err
             infos = result if isinstance(result, list) else [result]
 
         # Resolve lambda_policies from the spec onto each GroupInfo.

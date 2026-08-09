@@ -84,11 +84,23 @@ See [Monotone Splines](monotone.md) for the full decision guide.
 ## Polynomial
 
 Orthogonal polynomials are a good option when the shape is simple and stable.
+The basis is orthonormalized against the training exposure weights, so the
+per-power coefficient estimates are uncorrelated (exactly under fixed weights,
+approximately at the IRLS working weights) and the classic "is the cubic
+needed?" drop test reads cleanly from the per-power z-statistics.
 
 ```python
 Polynomial(degree=2)            # common quadratic pricing curve
 Polynomial(degree=3)            # cubic
+Polynomial(powers=[1, 2, 4])    # keep the linear, quadratic and quartic components
 ```
+
+`powers=` selects orthogonal *components*: the basis is built up to
+`max(powers)` and the stated components are kept, so under fixed weights
+dropping a middle power leaves the retained coefficients unchanged. Excluding
+power 3 excludes the degree-3 orthogonal component, not the raw `x**3`
+monomial. Dropping powers by their z-statistics is response-driven selection —
+validate out-of-fold or state the powers from the plan.
 
 ## Categorical
 
