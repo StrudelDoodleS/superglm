@@ -13,13 +13,13 @@ Seven interaction types covering all supported feature combinations:
 
 from __future__ import annotations
 
+import copy
 import inspect
 from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
-from numpy.polynomial.legendre import legvander
 from numpy.typing import NDArray
 
 from superglm.features.categorical import _resolve_categorical_labels
@@ -525,15 +525,23 @@ class SplineCategorical:
 class PolynomialCategorical:
     """Varying-coefficient interaction: polynomial curve per categorical level.
 
-    For each non-base level, produces one group of ``degree`` Legendre
-    columns masked by the level indicator.
+    For each non-base level, produces one group of the parent Polynomial's
+    orthonormal component columns masked by the level indicator.
+
+    The per-level columns come from the parent's *stored* factor (a deep
+    copy of the fitted parent spec), so margins match the main effect
+    exactly.  Note the parent's orthonormality is a whole-book property:
+    within a single level the masked columns are not orthonormal under
+    the level-conditional weights, and no per-level re-orthogonalization
+    is attempted.
     """
 
     def __init__(self, poly_name: str, cat_name: str):
         self.poly_name = poly_name
         self.cat_name = cat_name
 
-        self._degree: int = 3
+        self._poly = None
+        self._n_poly_cols: int = 0
         self._lo: float = 0.0
         self._hi: float = 1.0
         self._non_base: list[str] = []
@@ -544,14 +552,12 @@ class PolynomialCategorical:
     def parent_names(self) -> tuple[str, str]:
         return (self.poly_name, self.cat_name)
 
-    def _scale(self, x: NDArray) -> NDArray:
-        span = self._hi - self._lo
-        if span < 1e-12:
-            return np.zeros_like(x)
-        return 2.0 * (x - self._lo) / span - 1.0
-
-    def _basis(self, x_scaled: NDArray) -> NDArray:
-        return legvander(x_scaled, self._degree)[:, 1:]
+    def _poly_basis(self, x_poly: NDArray) -> NDArray:
+        if self._poly is None:
+            raise ValueError(
+                f"PolynomialCategorical({self.poly_name!r}, {self.cat_name!r}) is not built."
+            )
+        return self._poly.transform(x_poly)
 
     def build(
         self,
@@ -569,8 +575,15 @@ class PolynomialCategorical:
             raise TypeError(f"Expected Polynomial spec for {self.poly_name}")
         if not isinstance(cat_spec, Categorical):
             raise TypeError(f"Expected Categorical spec for {self.cat_name}")
+        if poly_spec._R is None:
+            raise ValueError(
+                f"Polynomial parent {self.poly_name!r} must be built before the interaction."
+            )
 
-        self._degree = poly_spec.degree
+        # Deep copy the fitted parent: margins evaluate through the same
+        # stored orthonormalization factor as the main effect.
+        self._poly = copy.deepcopy(poly_spec)
+        self._n_poly_cols = len(poly_spec.powers)
         self._lo = poly_spec._lo
         self._hi = poly_spec._hi
         self._non_base = list(cat_spec._non_base)
@@ -583,13 +596,13 @@ class PolynomialCategorical:
             cat_spec,
             context=self.cat_name,
         )
-        P = self._basis(self._scale(x_poly))
+        P = self._poly_basis(x_poly)
 
         groups: list[GroupInfo] = []
         for level in self._non_base:
             indicator = (x_cat == level).astype(np.float64)
             P_level = P * indicator[:, None]
-            groups.append(GroupInfo(columns=P_level, n_cols=self._degree))
+            groups.append(GroupInfo(columns=P_level, n_cols=self._n_poly_cols))
         return groups
 
     def transform(self, x_poly: NDArray, x_cat: NDArray) -> NDArray:
@@ -600,7 +613,7 @@ class PolynomialCategorical:
             known_levels=set(self._non_base) | {self._base_level},
             context=self.cat_name,
         )
-        P = self._basis(self._scale(x_poly))
+        P = self._poly_basis(x_poly)
 
         blocks = []
         for level in self._non_base:
@@ -616,13 +629,13 @@ class PolynomialCategorical:
             known_levels=set(self._non_base) | {self._base_level},
             context=self.cat_name,
         )
-        P = self._basis(self._scale(x_poly))
+        P = self._poly_basis(x_poly)
         beta = np.asarray(beta, dtype=np.float64).ravel()
         out = np.zeros(len(x_poly), dtype=np.float64)
         offset = 0
         for level in self._non_base:
-            b_level = beta[offset : offset + self._degree]
-            offset += self._degree
+            b_level = beta[offset : offset + self._n_poly_cols]
+            offset += self._n_poly_cols
             mask = x_cat == level
             if np.any(mask):
                 out[mask] = P[mask] @ b_level
@@ -630,13 +643,13 @@ class PolynomialCategorical:
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        P_grid = self._basis(self._scale(x_grid))
+        P_grid = self._poly_basis(x_grid)
 
         per_level: dict[str, dict[str, Any]] = {}
         offset = 0
         for level in self._non_base:
-            b_level = beta[offset : offset + self._degree]
-            offset += self._degree
+            b_level = beta[offset : offset + self._n_poly_cols]
+            offset += self._n_poly_cols
             log_rels = P_grid @ b_level
             per_level[level] = {
                 "log_relativity": log_rels,
@@ -967,16 +980,20 @@ class NumericInteraction:
 class PolynomialInteraction:
     """Cross-product of two polynomial bases.
 
-    Single group of ``d1 * d2`` columns formed by all pairwise products
-    of Legendre basis terms (excluding degree 0).
+    Single group of ``n1 * n2`` columns formed by all pairwise products
+    of the two parents' orthonormal components (constant excluded).
+    Both margins evaluate through the parents' *stored* factors (deep
+    copies of the fitted parent specs) — never re-orthogonalized.
     """
 
     def __init__(self, poly1_name: str, poly2_name: str):
         self.poly1_name = poly1_name
         self.poly2_name = poly2_name
 
-        self._degree1: int = 3
-        self._degree2: int = 3
+        self._poly1 = None
+        self._poly2 = None
+        self._n1: int = 0
+        self._n2: int = 0
         self._lo1: float = 0.0
         self._hi1: float = 1.0
         self._lo2: float = 0.0
@@ -986,28 +1003,23 @@ class PolynomialInteraction:
     def parent_names(self) -> tuple[str, str]:
         return (self.poly1_name, self.poly2_name)
 
-    @staticmethod
-    def _scale(x: NDArray, lo: float, hi: float) -> NDArray:
-        span = hi - lo
-        if span < 1e-12:
-            return np.zeros_like(x)
-        return 2.0 * (x - lo) / span - 1.0
-
-    @staticmethod
-    def _basis(x_scaled: NDArray, degree: int) -> NDArray:
-        return legvander(x_scaled, degree)[:, 1:]
+    def _marginal_bases(self, x1: NDArray, x2: NDArray) -> tuple[NDArray, NDArray]:
+        if self._poly1 is None or self._poly2 is None:
+            raise ValueError(
+                f"PolynomialInteraction({self.poly1_name!r}, {self.poly2_name!r}) is not built."
+            )
+        return self._poly1.transform(x1), self._poly2.transform(x2)
 
     def _cross_design(self, x1: NDArray, x2: NDArray) -> NDArray:
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        P1 = self._basis(self._scale(x1, self._lo1, self._hi1), self._degree1)
-        P2 = self._basis(self._scale(x2, self._lo2, self._hi2), self._degree2)
+        P1, P2 = self._marginal_bases(x1, x2)
         n = len(x1)
-        n_cols = self._degree1 * self._degree2
+        n_cols = self._n1 * self._n2
         cols = np.empty((n, n_cols))
         idx = 0
-        for j in range(self._degree1):
-            for k in range(self._degree2):
+        for j in range(self._n1):
+            for k in range(self._n2):
                 cols[:, idx] = P1[:, j] * P2[:, k]
                 idx += 1
         return cols
@@ -1027,9 +1039,16 @@ class PolynomialInteraction:
             raise TypeError(f"Expected Polynomial spec for {self.poly1_name}")
         if not isinstance(s2, Polynomial):
             raise TypeError(f"Expected Polynomial spec for {self.poly2_name}")
+        if s1._R is None or s2._R is None:
+            raise ValueError(
+                f"Polynomial parents {self.poly1_name!r} and {self.poly2_name!r} "
+                "must be built before the interaction."
+            )
 
-        self._degree1, self._lo1, self._hi1 = s1.degree, s1._lo, s1._hi
-        self._degree2, self._lo2, self._hi2 = s2.degree, s2._lo, s2._hi
+        self._poly1 = copy.deepcopy(s1)
+        self._poly2 = copy.deepcopy(s2)
+        self._n1, self._lo1, self._hi1 = len(s1.powers), s1._lo, s1._hi
+        self._n2, self._lo2, self._hi2 = len(s2.powers), s2._lo, s2._hi
 
         cols = self._cross_design(x1, x2)
         return GroupInfo(columns=cols, n_cols=cols.shape[1])
@@ -1040,9 +1059,8 @@ class PolynomialInteraction:
     def score(self, x1: NDArray, x2: NDArray, beta: NDArray) -> NDArray:
         x1 = np.asarray(x1, dtype=np.float64).ravel()
         x2 = np.asarray(x2, dtype=np.float64).ravel()
-        P1 = self._basis(self._scale(x1, self._lo1, self._hi1), self._degree1)
-        P2 = self._basis(self._scale(x2, self._lo2, self._hi2), self._degree2)
-        C = np.asarray(beta, dtype=np.float64).reshape(self._degree1, self._degree2)
+        P1, P2 = self._marginal_bases(x1, x2)
+        C = np.asarray(beta, dtype=np.float64).reshape(self._n1, self._n2)
         return np.einsum("ij,jk,ik->i", P1, C, P2, optimize=True)
 
     def reconstruct(self, beta: NDArray, n_points: int = 50) -> dict[str, Any]:

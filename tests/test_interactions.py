@@ -1681,3 +1681,98 @@ class TestTensorMarginalParentGeometry:
         ref._place_knots(x1)
         ref_info = ref.tensor_marginal_ingredients(x1)
         np.testing.assert_array_equal(ti._marginal1.knots, ref_info.knots)
+
+
+class TestPolynomialInteractionStoredFactor:
+    """Margins flow through the parents' stored orthonormalization factors."""
+
+    @staticmethod
+    def _heaped(n, seed):
+        rng = np.random.default_rng(seed)
+        x = rng.uniform(0.0, 100.0, n)
+        w = np.exp(-x / 15.0) + 0.02 * rng.uniform(0.5, 1.0, n)
+        return x, w
+
+    def test_polynomial_categorical_uses_parent_factor(self):
+        x, w = self._heaped(600, 3)
+        rng = np.random.default_rng(4)
+        x_cat = rng.choice(["A", "B", "C"], 600)
+
+        poly_spec = Polynomial(powers=[1, 3])
+        cat_spec = Categorical(base="first")
+        poly_spec.build(x, sample_weight=w)
+        cat_spec.build(x_cat)
+
+        pc = PolynomialCategorical("poly", "cat")
+        groups = pc.build(x, x_cat, {"poly": poly_spec, "cat": cat_spec}, sample_weight=w)
+
+        # One group per non-base level, sized by the stated powers.
+        assert len(groups) == 2
+        assert all(g.n_cols == 2 for g in groups)
+
+        # Level block == (masked) parent margin, and that margin is the
+        # exposure-orthonormalized one, not the raw Legendre seed.
+        P_parent = poly_spec.transform(x)
+        total = float(w.sum())
+        G = (P_parent * w[:, None]).T @ P_parent / total
+        np.testing.assert_allclose(G, np.eye(2), atol=1e-10)
+
+        for g, level in zip(groups, ["B", "C"], strict=True):
+            indicator = (x_cat == level).astype(np.float64)
+            np.testing.assert_allclose(g.columns, P_parent * indicator[:, None], atol=1e-12)
+
+        # transform/score go through the same stored factor.
+        np.testing.assert_allclose(
+            pc.transform(x, x_cat),
+            np.hstack(
+                [P_parent * (x_cat == lev).astype(np.float64)[:, None] for lev in ["B", "C"]]
+            ),
+            atol=1e-12,
+        )
+
+    def test_polynomial_categorical_requires_built_parent(self):
+        poly_spec = Polynomial(degree=2)
+        cat_spec = Categorical(base="first")
+        cat_spec.build(np.array(["A", "B"] * 20))
+        pc = PolynomialCategorical("poly", "cat")
+        with pytest.raises(ValueError, match="must be built"):
+            pc.build(
+                np.linspace(0, 10, 40),
+                np.array(["A", "B"] * 20),
+                {"poly": poly_spec, "cat": cat_spec},
+            )
+
+    def test_polynomial_interaction_uses_parent_factors(self):
+        x1, w = self._heaped(500, 7)
+        rng = np.random.default_rng(8)
+        x2 = rng.uniform(0.0, 50.0, 500)
+
+        p1 = Polynomial(powers=[1, 2])
+        p2 = Polynomial(powers=[1, 3])
+        p1.build(x1, sample_weight=w)
+        p2.build(x2, sample_weight=w)
+
+        pi = PolynomialInteraction("a", "b")
+        info = pi.build(x1, x2, {"a": p1, "b": p2}, sample_weight=w)
+        assert info.n_cols == 4
+
+        P1 = p1.transform(x1)
+        P2 = p2.transform(x2)
+        expected = np.column_stack([P1[:, j] * P2[:, k] for j in range(2) for k in range(2)])
+        np.testing.assert_allclose(info.columns, expected, atol=1e-12)
+
+        # The margins are the exposure-orthonormalized components.
+        total = float(w.sum())
+        np.testing.assert_allclose((P1 * w[:, None]).T @ P1 / total, np.eye(2), atol=1e-10)
+
+        # score matches the cross design contraction.
+        beta = np.array([0.2, -0.1, 0.05, 0.01])
+        np.testing.assert_allclose(pi.score(x1, x2, beta), expected @ beta, atol=1e-12)
+
+    def test_polynomial_interaction_requires_built_parents(self):
+        p1 = Polynomial(degree=2)
+        p2 = Polynomial(degree=2)
+        p1.build(np.linspace(0, 10, 30))
+        pi = PolynomialInteraction("a", "b")
+        with pytest.raises(ValueError, match="must be built"):
+            pi.build(np.linspace(0, 10, 30), np.linspace(0, 5, 30), {"a": p1, "b": p2})

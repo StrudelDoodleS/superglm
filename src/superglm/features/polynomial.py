@@ -1,4 +1,4 @@
-"""Orthogonal polynomial feature using Legendre basis.
+"""Orthogonal polynomial feature, orthonormalized against the training weights.
 
 Stable alternative to P-splines for features with simple monotone or
 quadratic shapes.  Group lasso selects or removes the entire polynomial
@@ -7,41 +7,123 @@ as a unit.  Degree 2-3 is the typical insurance choice.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
+import scipy.linalg as la
 from numpy.polynomial.legendre import legvander
 from numpy.typing import NDArray
 
 from superglm.types import GroupInfo
 
+# Rank guard threshold: a diagonal entry of R below this fraction of the
+# largest diagonal entry means the weighted measure cannot identify that
+# degree component.  Refuse loudly rather than let QR-based least squares
+# regularize the fit silently (Brubeck, Nakatsukasa & Trefethen 2021).
+_RANK_RTOL = 1e-10
+
 
 class Polynomial:
-    """Orthogonal polynomial feature (Legendre basis).
+    """Orthogonal polynomial feature (orthonormal in the training-weight measure).
 
-    Scales x to [-1, 1] using training-data min/max, then builds a
-    Legendre polynomial basis of degrees 1 through ``degree`` (the
-    degree-0 constant is excluded — the model intercept handles it).
+    Scales x to [-1, 1] using training-data min/max, seeds a Legendre
+    basis (including the constant), and orthonormalizes it against the
+    training ``sample_weight`` by weighted thin QR.  The constant column
+    is dropped from the emitted block — the model intercept carries it.
 
-    Group size = ``degree``.
+    Normalization convention: with training weights ``w``, the emitted
+    components ``phi_j`` (one per stated power) satisfy
+
+        (1 / sum(w)) * sum_i w_i * phi_j(x_i) * phi_k(x_i) = delta_jk
+
+    i.e. they are orthonormal in the exposure-weighted *mean* empirical
+    inner product, and each is orthogonal to the constant in the same
+    inner product.  Under Gaussian/fixed-weight fitting this makes the
+    per-power coefficient estimates exactly uncorrelated, and it gives the
+    group penalty the within-group orthonormal geometry that the group
+    lasso assumes (Yuan & Lin 2006, JRSS-B 68:49-67; Simon & Tibshirani
+    2012, Statistica Sinica 22(3):983-1001 — orthonormalizing within the
+    group is exactly equivalent to their standardized group lasso).
+
+    The triangular factor of the weighted QR is stored as fitted state
+    beside the min/max scaling.  ``transform``/``score`` push new x
+    through the same seed basis and the *stored* factor — they never
+    re-orthogonalize against new data or new weights.  Out-of-range x is
+    plain polynomial evaluation on the scaled seed basis (unbounded
+    growth); every orthogonality and uncorrelatedness statement is a
+    property of the *training* measure only.
+
+    Honest caveats:
+
+    - Exact uncorrelatedness of the per-power estimates holds under the
+      training weights (the fixed-weight/Gaussian world).  In a GLM it is
+      approximate at the IRLS working weights; no published result
+      quantifies that gap, and published group-penalty practice makes the
+      same fixed spherical approximation of the working Hessian (Simon &
+      Tibshirani 2012, section 5.3).
+    - Dropping powers by their z-statistics is response-driven selection.
+      Validate out-of-fold, or state ``powers`` from the plan.
 
     Parameters
     ----------
-    degree : int
-        Maximum polynomial degree.  2 (quadratic) or 3 (cubic) are the
-        standard insurance choices.  Higher values are allowed but rarely
-        useful.
+    degree : int, optional
+        Maximum polynomial degree; sugar for ``powers=range(1, degree+1)``.
+        2 (quadratic) or 3 (cubic) are the standard insurance choices.
+        Defaults to 3 when neither ``degree`` nor ``powers`` is given.
+        Mutually exclusive with *powers*.
+    powers : sequence of int, optional
+        Distinct integers >= 1 naming the orthogonal components to keep,
+        e.g. ``powers=[1, 2, 4]``.  The orthogonal basis is built up to
+        ``max(powers)`` and the stated components are selected, so under
+        fixed weights dropping a middle power leaves the retained
+        components' fitted coefficients unchanged.  Excluding "power 3"
+        excludes the degree-3 *orthogonal component*, not the raw ``x**3``
+        monomial — on asymmetric exposure the degree-4 orthogonal
+        polynomial carries ``x**3`` monomial content.  API precedent for
+        a degree list: ``numpy.polynomial.Polynomial.fit(deg=[...])``.
+
+    Notes
+    -----
+    Group size = ``len(powers)``.  Columns are emitted in ascending power
+    order and summary rows are labelled by the stated power.
+
+    The QR-on-Legendre-seed build is the published standardized-group-
+    lasso algorithm and is well conditioned at degree <= 8 on min/max-
+    scaled data.  If the degree ceiling ever rises, the upgrade path is
+    the three-term recurrence for weighted discrete measures (Forsythe
+    1957; Gautschi 2004, *Orthogonal Polynomials: Computation and
+    Approximation*): store the recurrence coefficients instead of the
+    triangular factor and evaluate new x by re-running the recurrence.
     """
 
-    def __init__(self, degree: int = 3):
-        if degree < 1:
-            raise ValueError(f"degree must be >= 1, got {degree}")
-        self.degree = degree
+    def __init__(
+        self,
+        degree: int | None = None,
+        powers: Sequence[int] | None = None,
+    ):
+        if degree is not None and powers is not None:
+            raise ValueError("Pass either degree= or powers=, not both.")
+        if powers is None:
+            if degree is None:
+                degree = 3
+            if isinstance(degree, bool) or not isinstance(degree, int | np.integer):
+                raise ValueError(f"degree must be an integer, got {degree!r}")
+            if degree < 1:
+                raise ValueError(f"degree must be >= 1, got {degree}")
+            resolved = tuple(range(1, int(degree) + 1))
+        else:
+            resolved = _validate_powers(powers)
+        self.powers: tuple[int, ...] = resolved
+        self.degree: int = resolved[-1]
         self._lo: float = 0.0
         self._hi: float = 1.0
+        self._R: NDArray | None = None
 
     def __repr__(self) -> str:
-        return f"Polynomial(degree={self.degree})"
+        if self.powers == tuple(range(1, self.degree + 1)):
+            return f"Polynomial(degree={self.degree})"
+        return f"Polynomial(powers={list(self.powers)})"
 
     def _scale(self, x: NDArray) -> NDArray:
         """Scale x to [-1, 1] using stored min/max."""
@@ -50,41 +132,124 @@ class Polynomial:
             return np.zeros_like(x)
         return 2.0 * (x - self._lo) / span - 1.0
 
-    def _basis(self, x_scaled: NDArray) -> NDArray:
-        """Legendre basis for degrees 1..degree (exclude degree 0)."""
-        # legvander returns columns for degrees 0, 1, ..., degree
-        return legvander(x_scaled, self.degree)[:, 1:]
+    def _seed_basis(self, x_scaled: NDArray) -> NDArray:
+        """Legendre seed for degrees 0..degree (constant column included)."""
+        return legvander(x_scaled, self.degree)
+
+    def _components(self, seed: NDArray) -> NDArray:
+        """Push a seed-basis matrix through the stored triangular factor.
+
+        Returns the stated powers' orthonormal components; never
+        re-orthogonalizes.  The constant component (column 0) is dropped.
+        """
+        if self._R is None:
+            raise ValueError(f"{self!r} is not fitted: call build() before transform()/score().")
+        full = la.solve_triangular(self._R, seed.T, trans="T", lower=False).T
+        return np.ascontiguousarray(full[:, list(self.powers)])
 
     def build(
         self,
         x: NDArray[np.floating],
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
-        """Build Legendre basis columns after learning min/max from *x*."""
+        """Learn min/max and the weighted orthonormalization from *x*."""
         x = np.asarray(x, dtype=np.float64).ravel()
+        w = (
+            np.ones_like(x)
+            if sample_weight is None
+            else np.asarray(sample_weight, dtype=np.float64).ravel()
+        )
+        if w.shape != x.shape:
+            raise ValueError(
+                f"{self!r}: sample_weight length {w.shape[0]} != x length {x.shape[0]}"
+            )
+        if np.any(w < 0):
+            raise ValueError(f"{self!r}: sample_weight must be nonnegative.")
+
+        # Distinct-support guard: a discrete measure with r distinct
+        # positive-weight support points identifies orthogonal polynomials
+        # only up to degree r - 1.
+        n_distinct = np.unique(x[w > 0]).size
+        if n_distinct <= self.degree:
+            raise ValueError(
+                f"{self!r} needs more than {self.degree} distinct x values with "
+                f"positive weight, got {n_distinct}: the weighted data cannot "
+                f"identify a degree-{self.degree} orthogonal component."
+            )
+
         self._lo, self._hi = float(x.min()), float(x.max())
-        cols = self._basis(self._scale(x))
-        return GroupInfo(columns=cols, n_cols=self.degree)
+        seed = self._seed_basis(self._scale(x))
+
+        # Weighted thin QR of the seed under the mean-normalized weights.
+        # Rows are presorted by descending weight so unpivoted Householder
+        # QR stays backward stable under extreme weight ratios (Powell &
+        # Reid 1969; Cox & Higham 1998).
+        w_norm = w / float(w.sum())
+        order = np.argsort(-w, kind="stable")
+        R = np.linalg.qr(np.sqrt(w_norm[order])[:, None] * seed[order], mode="r")
+        signs = np.sign(np.diag(R))
+        signs[signs == 0.0] = 1.0
+        R = R * signs[:, None]
+
+        # Rank guard on the pivots: refuse rather than silently regularize.
+        diag = np.abs(np.diag(R))
+        bad = np.flatnonzero(diag <= _RANK_RTOL * diag.max())
+        if bad.size:
+            raise ValueError(
+                f"{self!r}: weighted basis is numerically rank-deficient "
+                f"(pivot ratio {diag[bad[0]] / diag.max():.2e} at degree "
+                f"{int(bad[0])}); the training weights cannot support the "
+                f"requested degrees."
+            )
+
+        self._R = R
+        cols = self._components(seed)
+        return GroupInfo(columns=cols, n_cols=len(self.powers))
 
     def transform(self, x: NDArray) -> NDArray:
-        """Scale *x* using fitted min/max and return the Legendre basis matrix."""
+        """Evaluate the fitted orthonormal components at new *x*.
+
+        Pushes x through the stored min/max scaling, the Legendre seed,
+        and the stored triangular factor.
+        """
         x = np.asarray(x, dtype=np.float64).ravel()
-        return self._basis(self._scale(x))
+        return self._components(self._seed_basis(self._scale(x)))
 
     def score(self, x: NDArray, beta: NDArray) -> NDArray:
         """Score the fitted polynomial contribution directly on new data."""
-        x = np.asarray(x, dtype=np.float64).ravel()
-        return self._basis(self._scale(x)) @ beta
+        return self.transform(x) @ np.asarray(beta, dtype=np.float64).ravel()
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
         """Evaluate the fitted polynomial on a grid and return relativities."""
         x_grid = np.linspace(self._lo, self._hi, n_points)
-        P_grid = self._basis(self._scale(x_grid))
-        log_rels = P_grid @ beta
+        log_rels = self.transform(x_grid) @ beta
         return {
             "x": x_grid,
             "log_relativity": log_rels,
             "relativity": np.exp(log_rels),
             "degree": self.degree,
+            "powers": self.powers,
             "coefficients": beta,
         }
+
+
+def _validate_powers(powers: Sequence[int]) -> tuple[int, ...]:
+    """Validate a powers= sequence at construction time."""
+    try:
+        items = list(powers)
+    except TypeError:
+        raise ValueError(
+            f"powers must be a sequence of distinct integers >= 1, got {powers!r}"
+        ) from None
+    if not items:
+        raise ValueError("powers must contain at least one power.")
+    cleaned: list[int] = []
+    for p in items:
+        if isinstance(p, bool) or not isinstance(p, int | np.integer):
+            raise ValueError(f"powers must be integers >= 1, got {p!r}")
+        if p < 1:
+            raise ValueError(f"powers must be >= 1, got {p}")
+        cleaned.append(int(p))
+    if len(set(cleaned)) != len(cleaned):
+        raise ValueError(f"powers must be distinct, got {sorted(cleaned)}")
+    return tuple(sorted(cleaned))
