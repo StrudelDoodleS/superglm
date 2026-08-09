@@ -313,7 +313,16 @@ def test_structured_statistic_matches_the_dense_one_to_machine_precision(moderat
 
 
 def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
-    """End to end, every rung, including the clamped ones at the bracket edge."""
+    """End to end, on the one pair both paths can score.
+
+    ONE rung, asserted four times.  This pair's ``edf`` runs from 23.00 at
+    maximum penalty to 206.00 at minimum, and every budget here is below
+    23.00, so all four clamp at the same HIGH edge and return the same
+    triple.  The searching rung and the LOW clamp are NOT reached from here;
+    ``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom`` and
+    ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom`` carry
+    a budget above their low edge and are where those two are asserted.
+    """
     from superglm.screening._structured import structured_ladder
 
     U, V, C, M, S_ti, u_m = moderate_pair["args"]
@@ -1169,22 +1178,1120 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     assert saw_low_edge, "a rung must clamp at the LOW edge or this proves nothing"
 
 
-def test_the_block_rank_is_the_one_a_dense_rank_call_reports():
-    """The balanced count is not merely self-consistent, it is right.
+def _vanishing_mass_pair(low_weight, n_vanishing=3):
+    """``_thin_level_pair``'s geometry, carried PAST the crossover it stops at.
 
-    ``rank(P + lambda T)`` is the same for every positive ``lambda``, so an
-    independent dense rank of the same blocks has to agree -- and the counts
-    read off the two bracket edges are what must not be trusted for it.
+    ``_thin_level_pair`` bottoms out at ``low_weight = 0.001``.  There the rare
+    level's free direction still carries ``7.0e-06`` of ``tr(V_eff)`` against a
+    ``lambda_hi * sigma_min(S_a)`` of ``3.0e-08`` of it -- 232x clear, so the
+    ladder's maximum penalty still leaves that direction free, both paths count
+    it, and they agree.  Nothing in the suite went below that crossover.
+
+    Below it the two paths part company by a whole degree of freedom per
+    level, and the geometry here is deliberately NOT degenerate: every level
+    keeps its 40 rows at 40 distinct ``x``, so no level is thin in the sense of
+    rows or support.  The only thing that moves is mass.
+    """
+    rng = np.random.default_rng(3)
+    L, reps = 20, 40
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.0, 1.0, n)
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    w = np.ones(n)
+    for i in range(n_vanishing):
+        w[g == f"L{i}"] = low_weight
+    return _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="ps", n_knots=8)},
+        ("x", "g"),
+        sample_weight=w,
+    )
+
+
+def _free_directions_left_free(grab):
+    """How many free directions the ladder's MAXIMUM penalty actually leaves free.
+
+    ``edf(lambda) = sum_j v_j / (v_j + lambda s_j)`` over the simultaneously
+    diagonalized pencil, so a direction in ``null(S_a) (x) I`` contributes
+    ``v / (v + lambda sigma_min)``: one where the penalty cannot reach it, zero
+    where it can.  This evaluates exactly that sum on the free block, which
+    takes no rank decision and inverts nothing -- the only division is by a sum
+    of two nonnegative numbers -- so it can arbitrate a rung where neither path
+    can be trusted against the other.
+
+    ``sigma_min`` is NOT zero and that is the whole point.  A P-spline penalty
+    is rank deficient in exact arithmetic, but the matrix the screen assembles
+    is not: measured here at ``sigma_min / sigma_max = +1.374e-16``, which
+    ``lambda_hi = 1e10 * scale`` amplifies into a real penalty of
+    ``1.86e-08 * tr(V_eff)``.  A free direction carrying less curvature than
+    that is reached by the penalty like any other, and contributes nothing.
+
+    THE MAGNITUDE OF THAT RESIDUE IS WHAT MATTERS AND ITS SIGN IS AN ACCIDENT,
+    so this takes ``abs``.  Assembly round-off puts ``sigma_min`` on either
+    side of zero depending on the data: seed 3 of this fixture gives
+    ``+2.11e-15`` and seed 12 gives ``-5.03e-16``.  Clamping the negative case
+    up to zero would make the penalty appear not to reach ANY free direction
+    and hand back the full ``k_b`` -- which is the wrong answer by three
+    degrees of freedom, checked against 40-digit mpmath on both seeds
+    (15.999993 and 16.000012).
+
+    On this fixture the split is unambiguous -- the 19 shares come back as
+    three below ``1e-04`` and sixteen at ``0.999997``, four orders apart.
+
+    **HOW CLOSE THIS ORACLE IS DEPENDS ON THE PARAMETRIZATION, AND THE TWO ARE
+    AN ORDER APART.**  Against a 40-digit mpmath evaluation of
+    ``tr((V_eff + lambda_hi S)^-1 V_eff)`` (identical at 60 digits): at
+    ``low_weight = 1e-12`` it agrees to 3.03e-05 (15.999963 against
+    15.999993), but at ``1e-10`` only to 5.84e-04 (16.000083 against
+    16.000667).  The reason is the tail this deliberately ignores: the
+    penalized block's own residual at ``lambda_hi``,
+    ``tr((V_pp + lambda_hi S_pp)^-1 V_pp)``, measures 5.61e-07 -- three orders
+    below the 1e-3 the high-edge assertions carry, but not below 1e-07 as this
+    once claimed.
+
+    So the ABSOLUTE assertions bound the error, they do not adjudicate which
+    path is nearer the truth.  At ``1e-10`` the structured path is 7.17e-04
+    from the mpmath value and the dense path 1.12e-04 -- structured is 6.4x
+    FARTHER while being held to the tighter bound, because it is nearer to
+    THIS oracle (1.33e-04) than the dense path is (4.72e-04).  What the
+    assertions establish is that neither path is a WHOLE degree of freedom
+    out, which is the failure this fixture exists for and is 1000x larger
+    than any of these gaps.
+    """
+    U, V, C, M, S_ti, u_m = grab["args"]
+    _, S_a, _, _, level_rows = _structured_inputs(grab)
+    k_b = level_rows.size
+    V_eff = V - C.T @ np.linalg.solve(M, C)
+    V_eff = 0.5 * (V_eff + V_eff.T)
+    ev, evec = np.linalg.eigh(S_a)
+    null_dim = int(np.sum(np.abs(ev) <= 1e-8 * ev[-1]))
+    free = np.kron(evec[:, :null_dim], np.eye(k_b))
+    v = np.diag(free.T @ V_eff @ free)
+    lam_hi = 1e10 * float(np.trace(V_eff)) / float(np.trace(S_ti))
+    reach = lam_hi * abs(float(ev[0]))
+    share = v / (v + reach)
+    # Refuse to arbitrate a pair whose free directions are not cleanly split:
+    # this is an ORACLE, and a degenerate one that silently returns k_b would
+    # agree with the very path it exists to check.
+    assert np.all((share < 1e-3) | (share > 1.0 - 1e-3)), np.sort(share)
+    return float(np.sum(share)), k_b
+
+
+_VANISHING_BUDGETS = (2.0, 4.0, 8.0, 400.0)
+
+
+@pytest.mark.parametrize("low_weight", [1e-10, 1e-12])
+def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
+    """Three levels holding none of the weight must not buy three degrees of freedom.
+
+    This is :func:`test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom`
+    continued past the weight it stops at.  A level whose share of the weight
+    is below the point where ``lambda_hi`` reaches its free direction is the
+    routine case at high cardinality -- an empty cell, an exposure of nothing.
+
+    THE STRUCTURED PATH USED TO AWARD EACH OF THEM A WHOLE DEGREE OF FREEDOM,
+    reporting the full ``k_b = 19`` at the high edge whatever the weight was,
+    because :func:`~superglm.screening._structured.block_ranks` divided each
+    level block by ITS OWN trace before counting it -- so the count could not
+    see a level's mass, and the mass is what decides.  Driven from 1.0 down to
+    1e-20, twenty decades, that count read 12 on the levels holding the weight
+    and 12 on the levels holding none of it, and ``edf0`` never moved off 19.
+
+    Three assertions, and none implies another.  The ABSOLUTE ones bound how
+    far each path is from an independent closed form that takes no rank
+    decision and inverts nothing, which puts the answer at 16; they do NOT
+    settle which path is nearer the truth, and :func:`_free_directions_left_free`
+    records where they part company with 40-digit mpmath.  PARITY is the
+    contract the two paths are supposed to satisfy, and is what the ladder's
+    public ``edf0`` -- and therefore every ``z`` the screen ranks on -- rides
+    on.  The LOW-edge rung is a control, so a fix that buys the high edge by
+    disturbing the low one fails here rather than silently.
+
+    TOLERANCES ARE SET FROM MEASUREMENT, over 2 weights x 2 thread settings
+    (the second because the DENSE path's clamped ``edf0`` is not a stable
+    function of its inputs at this rung -- on identical moments
+    ``OPENBLAS_NUM_THREADS`` alone moves it by 2.3e-03 here, while the
+    structured value is bit-identical between the two).  Worst observed at the
+    HIGH edge: structured against the closed form 1.331e-04, dense against it
+    2.775e-03, parity 2.908e-03, statistic 3.114e-06 relative and ``lambda0``
+    3.7e-16 relative.  The bounds below are 7.5x, 3.6x, 3.4x, 32x and 2700x
+    above those, and the two that matter are still 3000x and 100x below the
+    one degree of freedom this test exists to catch.
+
+    THE LOW-EDGE BOUNDS COME FROM THE FAMILY, AND 60 DRAWS WERE NOT ENOUGH TO
+    SETTLE THEM.  The parity there was pinned at 1e-6, which this fixture's own
+    seed clears by three orders (1.6e-09) -- and 11 of 60 neighbouring draws
+    (15 seeds x 2 weights x 2 thread settings) do not.  That bound was a
+    property of one lucky draw, and the values it pinned are bit identical to
+    what this file measured before the rank count changed, so it was pinning
+    pre-existing float noise.  Its 5e-5 replacement, set from those 60 draws,
+    was a property of the WINDOW: carried to 320 draws (80 seeds x 2 weights x
+    2 thread settings) parity exceeds 5e-5 on 9 of them, 2.8%, the worst by
+    1.80x at 9.021e-05 -- and the first failing seed is 55, which is why a
+    15-seed window looked clean.  So parity is asserted at 2e-4 here: 2.2x
+    above the worst of the 320 and still 5.0e+03x below the one degree of
+    freedom this test exists to catch.  Over the same 320 draws parity has a
+    median of 7.0e-09, and the structured value's distance from
+    ``_reference_edf`` -- which IS sound at this edge, and is what makes the
+    rung a control on accuracy rather than on agreement -- has a median of
+    1.6e-05 and a worst of 1.036e-04, inside the 3e-4 asserted below on every
+    one of the 320 with 2.9x to spare.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    grab = _vanishing_mass_pair(low_weight)
+    U, V, C, M, S_ti, u_m = grab["args"]
+    dense = penalized_score_statistic_ladder(
+        U, V, C, M, S_ti, budgets=_VANISHING_BUDGETS, U_nuisance=u_m
+    )
+    struct = structured_ladder(
+        spline_cat_moments(*_structured_inputs(grab)), budgets=_VANISHING_BUDGETS
+    )
+    assert struct is not None and len(struct) == len(_VANISHING_BUDGETS)
+
+    left_free, k_b = _free_directions_left_free(grab)
+    # The fixture is what it says it is: 3 of the 19 free directions are
+    # reached by the penalty at the high edge, 16 are not.
+    assert left_free == pytest.approx(k_b - 3, abs=0.01)
+
+    for budget, d, s in zip(_VANISHING_BUDGETS, dense, struct, strict=True):
+        if budget < 100.0:  # every one of these clamps at the HIGH edge
+            assert s.edf0 == pytest.approx(left_free, abs=1e-3), (
+                f"structured edf0 {s.edf0!r} at budget {budget} does not match the "
+                f"{left_free!r} directions the maximum penalty leaves free, with "
+                f"three levels holding {low_weight:g} of the weight"
+            )
+            assert d.edf0 == pytest.approx(left_free, abs=1e-2), (
+                "dense",
+                budget,
+                d.edf0,
+                left_free,
+            )
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity", budget, s.edf0, d.edf0)
+        else:  # the LOW edge, where the reference oracle is sound
+            reference = _reference_edf(U, V, C, M, S_ti, s.lambda0)
+            assert s.edf0 == pytest.approx(reference, abs=3e-4), (
+                "low edge oracle",
+                s.edf0,
+                reference,
+            )
+            assert s.edf0 == pytest.approx(d.edf0, abs=2e-4), ("low edge parity", s.edf0, d.edf0)
+        assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12), ("lambda0", budget)
+        assert s.statistic == pytest.approx(d.statistic, rel=1e-4), ("statistic", budget)
+
+
+def test_the_block_rank_matches_a_dense_rank_only_where_the_terms_separate():
+    """A dense rank call arbitrates this count in one of the two regimes.
+
+    Where no level's free curvature comes near the penalty the high edge
+    still applies, ``rank(P + lambda T)`` is the ordinary lambda-independent
+    rank, an independent dense call has to agree, and it has to agree at
+    EVERY lambda.  ``_thin_level_pair(0.01)``'s rarest level is that case: its
+    free direction carries 1.7e-02 of curvature against a reach of 7.4e-06,
+    2317x clear, so nothing there depends on where in the bracket it is
+    counted.
+
+    Where a level's curvature falls UNDER that reach the dense call stops
+    being an oracle in either direction, and that is the whole reason this
+    count exists.  On ``_vanishing_mass_pair`` the balanced call still reads
+    228 -- the rank of the exact family, which is correct and useless, since
+    three of the directions it counts are ones the inverse at the high edge
+    cannot resolve and the penalty has flattened.  A dense rank of the FLOAT
+    block the arrow kernel actually inverts reads 222 instead: it also loses
+    each starved level's own contrast, which cancels against ``rank(M)`` and
+    must be kept.  225 is neither of them, and it is the count that makes
+    ``rank - lambda tr(A^-1 S)`` come out at the sixteen degrees of freedom
+    the penalty genuinely leaves free.
     """
     from superglm.screening._structured import _unpenalized_blocks, block_ranks
 
+    def penalty_block(p):
+        _, k_a = p.dims
+        T = np.zeros((k_a + 1, k_a + 1))
+        T[:k_a, :k_a] = p.S_a
+        return T
+
+    def balanced_dense_rank(p):
+        P, T = _unpenalized_blocks(p), penalty_block(p)
+        return sum(
+            np.linalg.matrix_rank(P[q] / np.trace(P[q]) + T / np.trace(T)) for q in range(p.dims[0])
+        )
+
+    def bracket(p):
+        tr_S = float(np.trace(p.S_a)) * p.dims[0]
+        scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
+        return 1e-10 * scale, scale, 1e10 * scale
+
     p = spline_cat_moments(*_structured_inputs(_thin_level_pair(0.01)))
+    want = balanced_dense_rank(p)
+    assert want == 228
+    for lam in bracket(p):
+        assert int(block_ranks(p, lam).sum()) == want
+
+    starved = spline_cat_moments(*_structured_inputs(_vanishing_mass_pair(1e-12)))
+    lo, mid, hi = bracket(starved)
+    assert balanced_dense_rank(starved) == 228
+    assert int(block_ranks(starved, lo).sum()) == 228
+    assert int(block_ranks(starved, mid).sum()) == 228
+    assert int(block_ranks(starved, hi).sum()) == 225
+    P, T = _unpenalized_blocks(starved), penalty_block(starved)
+    assert sum(np.linalg.matrix_rank(P[q] + hi * T) for q in range(starved.dims[0])) == 222
+
+
+def _rank_one_penalty_pair(seed, L, reps, width, n_narrow):
+    """A TWO-column spline margin, where the tensor penalty is rank ONE.
+
+    ``Spline(kind="cr", k=3)`` leaves ``k_a = 2``, and the pair's ``S_a`` is
+    then ``u u'`` for a unit ``u``: exactly rank one in exact arithmetic, and
+    in float a matrix whose null residue a symmetric eigensolver frequently
+    cannot resolve AT ALL, handing back a bit-exact ``0.0``.  That is the one
+    regime :data:`~superglm.screening._structured._PENALTY_RESIDUE_FLOOR`
+    governs, and no other fixture in this file reaches it: over 405 pipeline
+    configurations of ``ps``/``cr``/``bs`` at 3 to 20 knots, 5 seeds and three
+    level layouts, every wider margin resolved a NONZERO residue and the floor
+    was never consulted.
+
+    ``n_narrow`` levels are squeezed into a band of ``x`` of the given width,
+    which is what puts a level's free curvature near the floor.  Nothing else
+    is degenerate: unit weights throughout, every level keeps all its rows.
+    """
+    rng = np.random.default_rng(seed)
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.05, 0.95, n)
+    for i in range(n_narrow):
+        selected = g == f"L{i}"
+        x[selected] = 0.2 + 0.6 * i / n_narrow + width * rng.uniform(-0.5, 0.5, selected.sum())
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    return _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="cr", k=3)},
+        ("x", "g"),
+        sample_weight=np.ones(n),
+    )
+
+
+def _exact_residue_bounds(S_a):
+    """``|sigma_min(S_a)|`` bracketed EXACTLY, for a 2x2, without an eigensolver.
+
+    ``sigma_min sigma_max = det`` and ``tr / 2 <= sigma_max <= tr`` for a 2x2
+    with a nonnegative trace, so ``|det| / tr <= |sigma_min| <= 2 |det| / tr``.
+    Both are computed as rationals over the float entries, so no tolerance and
+    no iteration enters -- which is what lets a test state that ``eigh``
+    returned zero AND that the matrix is not singular.
+    """
+    from fractions import Fraction
+
+    a = Fraction(float(S_a[0, 0]))
+    c = Fraction(float(S_a[1, 1]))
+    b = (Fraction(float(S_a[0, 1])) + Fraction(float(S_a[1, 0]))) / 2
+    determinant, trace = a * c - b * b, a + c
+    assert trace > 0, trace
+    return float(abs(determinant) / trace), float(2 * abs(determinant) / trace)
+
+
+def _ladder_high_edge(p):
+    """``structured_ladder``'s own maximum penalty, associated exactly as it is.
+
+    ``1e10 * (trace / tr_S)`` and ``(1e10 * trace) / tr_S`` differ in the last
+    bit, and one bit of ``lambda`` is not nothing at this edge: on
+    ``_resolved_residue_pair(3)`` the two spellings move the reported edf by
+    0.065 df.  Everything asserted here about a rung the ladder publishes has
+    to be evaluated at the ladder's own ``lambda``, not at an equivalent one.
+    """
+    tr_S = float(np.trace(p.S_a)) * p.dims[0]
+    return 1e10 * (max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300))
+
+
+def _free_direction_curvature(p, lam):
+    """The free direction's numbers: ``(v per level, reach, lam sigma_max, cut, dust)``.
+
+    ``v`` is each level's Schur complement on that direction, which is what
+    :func:`~superglm.screening._structured.block_ranks` compares.  ``reach``
+    is ``lam |sigma_min|`` -- the eigensolver's OWN residue, at its magnitude
+    because the sign of a null residue is round-off -- and ``cut`` is what
+    :data:`~superglm.screening._structured._PENALTY_RESIDUE_FLOOR` would
+    substitute for it.  ``dust`` is the other floor, ``_RCOND`` on the level's
+    raw moments, returned so a test can show which of the two decides.
+
+    Both families below carry a penalty that is rank deficient by exactly one,
+    which the assertion states rather than assumes.
+    """
+    from superglm.screening._arrow import _RCOND, _solve_floor
+    from superglm.screening._structured import _PENALTY_RESIDUE_FLOOR
+
+    _, k_a = p.dims
+    sigma, directions = np.linalg.eigh(0.5 * (p.S_a + p.S_a.T))
+    reach = float(lam) * np.abs(sigma)
+    top = float(reach.max())
+    free = reach <= _solve_floor(k_a + 1) * top
+    assert int(free.sum()) == 1, (sigma, free)
+    mass = np.where(p.m > 0.0, p.m, 1.0)
+    direction = directions[:, free]
+    projected = (p.c @ direction).ravel()
+    curvature = np.einsum("ip,lij,jq->lpq", direction, p.V, direction, optimize=True).reshape(-1)
+    curvature = curvature - projected**2 / mass
+    dust = _RCOND * (np.einsum("lpp->l", p.V) + p.m)
+    return curvature, float(reach[free][0]), top, _PENALTY_RESIDUE_FLOOR * top, dust
+
+
+def _floor_band_directions(curvature, floor, dust, direction):
+    """The free directions that moving the floor the parametrized way would move.
+
+    ``direction > 0`` -- DELETING the constant -- keeps every direction between
+    the level's own dust floor and it; ``direction < 0`` -- TRIPLING it -- drops
+    every direction in the ``(1, 3] eps`` band.  Whether a draw carries any such
+    direction is a property of that draw rather than of the constant: 4 of the 9
+    draws that reach the regime for the tripling family below carry none at all,
+    their two nearest sitting between 3.78 and 4.98 times the floor rather than
+    inside the band (3.99 and 4.10 on seed 6).  Which is why the scan's
+    predicate and the assertions below have to read this from one place instead
+    of two copies of it.
+    """
+    if direction > 0:
+        return (curvature > dust) & (curvature <= floor)
+    return (curvature > floor) & (curvature <= 3.0 * floor)
+
+
+def _unpenalized_level_ranks(p):
+    """What every level contributes before any free direction is judged.
+
+    Its own contrast where it holds mass, plus the ``k_a - 1`` directions the
+    penalty genuinely reaches.  Written here so a test can state the whole
+    count :func:`~superglm.screening._structured.block_ranks` should return
+    without borrowing that function's arithmetic.
+    """
+    _, k_a = p.dims
+    return np.where(p.m > 0.0, 1, 0) + (k_a - 1)
+
+
+_FLOOR_SCAN_SEEDS = 40
+
+
+def _first_exact_zero_draw(build, start, exhibits, scan=_FLOOR_SCAN_SEEDS):
+    """The first draw that is EXACTLY singular AND shows what the caller asserts.
+
+    Deterministic and bounded: ``start`` first, then ``0 .. scan - 1``.  A draw
+    qualifies on two counts, not one -- ``eigh`` reports its ``S_a`` as exactly
+    singular, so the floor is read at all, and ``exhibits`` finds on it the
+    direction the caller's assertions are about.  The second is not implied by
+    the first: the floor is read on every draw that reaches the regime but only
+    moves the count on some of them, so a scan that stopped at the regime would
+    hand a caller a draw its assertions do not describe.
+
+    Both are facts about the platform's LAPACK rather than about the fixture,
+    and they are DIFFERENT facts, so they are counted apart: returns
+    ``(seed, pair, reached)``, or ``(None, None, reached)`` where ``reached`` is
+    how many of the scanned draws landed in the regime -- which is what lets the
+    caller say WHICH of the two it is skipping on.
+    """
+    reached = 0
+    for seed in (start, *range(scan)):
+        p = spline_cat_moments(*_structured_inputs(build(seed)))
+        if p.dims[1] != 2 or np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))[0] != 0.0:
+            continue
+        reached += 1
+        if exhibits(p):
+            return seed, p, reached
+    return None, None, reached
+
+
+@pytest.mark.parametrize(
+    ("seed", "L", "reps", "width", "n_narrow", "multiple", "direction"),
+    [
+        (2, 10, 20, 1e-4, 3, 0.0, +1),
+        (13, 6, 12, 2e-3, 3, 3.0, -1),
+    ],
+    ids=["deleting-the-floor-adds-df", "tripling-it-removes-df"],
+)
+def test_the_penalty_residue_floor_is_pinned_from_both_sides(
+    seed, L, reps, width, n_narrow, multiple, direction, monkeypatch
+):
+    """The floor's OWN regime, where the eigensolver reports an exact zero.
+
+    Everywhere else :func:`~superglm.screening._structured.block_ranks` uses
+    the residue the eigensolver returns and the constant is never read, so the
+    rest of this file cannot constrain it: mutating it to 0, 1e-4, 1e-2, 1, 3,
+    10 and 100 times ``eps`` left every other test here green.  A future
+    maintainer could delete it outright.
+
+    Here the margin has two columns, its penalty is rank one, and ``eigh``
+    hands back a bit-exact ``0.0`` -- while :func:`_exact_residue_bounds`,
+    which uses no eigensolver at all, shows the same float matrix is NOT
+    singular.  So the floor is a guess at something real, and both directions
+    of getting it wrong cost whole degrees of freedom:
+
+    * REMOVED, the count keeps directions the penalty has flattened.  On the
+      first case two directions carry ``4.15e-03`` and ``4.94e-03`` of one
+      round-off unit of the largest reach, against an exact residue of
+      ``0.045`` to ``0.090`` of it, so their exact shares are 0.084 and 0.099
+      -- and the ladder reports 8.00 df where it should report 6.00.  This is
+      the same failure as on four wide pairs of the shape the structured
+      kernel exists for, where removing the floor puts the count 5 df above a
+      high-precision oracle.
+    * INFLATED, it discards directions the data almost wholly carries.  On the
+      second case two directions sit inside the ``(1, 3] eps`` band at
+      ``1.59`` and ``2.00`` round-off units, with exact shares of 0.9942 and
+      0.9954, and a 3x floor takes the ladder from 4.98 df to 2.98.
+
+    The assertions below therefore bound the constant on BOTH sides from
+    exact arithmetic rather than from either path's output, and each case
+    fails if the constant is moved the way its parametrization names.
+
+    **WHETHER A DRAW REACHES THE REGIME AT ALL IS A PROPERTY OF THE PLATFORM'S
+    LAPACK, SO THE FIXTURE IS SCANNED RATHER THAN ASSUMED.**  This used to skip
+    whenever the shipped seed resolved a nonzero residue -- and of the 41 draws
+    the scan below walks, only 14 land in the regime for the first family here
+    and only 10 for the second, so the other 27 and 31 resolve one.
+    On a machine where the shipped seeds are among them BOTH parametrizations
+    would have skipped, leaving the constant unpinned, which is precisely the
+    hole this test exists to close, and a skip does not show up in a summary
+    line.  :func:`_first_exact_zero_draw` therefore walks the shipped seed and
+    then seeds 0 to 39, and takes the first draw that lands in the regime AND
+    carries a direction this parametrization moves.
+
+    **REACHING THE REGIME IS NOT ENOUGH, WHICH IS WHY THE SCAN TAKES A
+    PREDICATE.**  The floor is read on every draw that reaches it but moves the
+    count on only some.  Counted by seed rather than by draw -- the walk
+    repeats the shipped seed, which is why 41 draws cover 40 seeds and the 14
+    and 10 above are 13 and 9 -- 4 of the 9 seeds that reach the regime for the
+    tripling family have NO direction in the ``(1, 3] eps`` band, and 1 of the
+    13 for the deleting family is a pair ``structured_ladder`` declines
+    outright.  A scan that stopped at the regime would hand this test one of
+    those on any platform whose LAPACK moved it off the shipped seed, and it
+    would then be RED about the draw rather than about the constant.  Selecting
+    the fixture is not weakening the test: nothing below is relaxed to fit the
+    predicate, which decides at the constant's SHIPPED value so that moving or
+    deleting the constant still fails these assertions rather than emptying the
+    band and skipping, and 12 of the 40 seeds qualify for the deleting family
+    and 5 for the tripling one, on every one of which the count assertions hold
+    as written.  Only if no draw qualifies is anything skipped, and the skip
+    distinguishes the two platform facts -- none reached the regime, or some
+    did and none showed the phenomenon.  The share bounds quoted above are
+    measured on the SHIPPED draw and are asserted only when the scan returns
+    it; the count assertions, which are what pin the constant, hold for
+    whichever draw the scan lands on.
+    """
+    import superglm.screening._structured as structured
+    from superglm.screening._structured import block_ranks, structured_ladder
+
+    eps = float(np.finfo(np.float64).eps)
+
+    def exhibits(p):
+        """Does THIS draw carry what the assertions below state about it?
+
+        The direction the parametrized move would move, and a pair BOTH ladders
+        will score -- the mutated one included, since the degree of freedom
+        asserted at the end reads an edf from each and a declined pair has
+        neither.
+
+        Decided with the constant pinned to the value this test defends, and
+        deliberately NOT to the installed one.  What varies between platforms
+        is which draw reaches the regime, never what the constant is; a
+        predicate that read the installed value would let a maintainer who
+        deleted the constant empty the band on every draw, run the scan out and
+        SKIP -- reopening from the other side exactly the fail-open this scan
+        was written to close -- instead of failing the assertions below.
+        """
+        with monkeypatch.context() as shipped:
+            shipped.setattr(structured, "_PENALTY_RESIDUE_FLOOR", eps)
+            curvature, _reach, _top, floor, dust = _free_direction_curvature(
+                p, _ladder_high_edge(p)
+            )
+            if not _floor_band_directions(curvature, floor, dust, direction).any():
+                return False
+            if structured_ladder(p, budgets=(2.0,)) is None:
+                return False
+        with monkeypatch.context() as moved_floor:
+            moved_floor.setattr(structured, "_PENALTY_RESIDUE_FLOOR", multiple * eps)
+            return structured_ladder(p, budgets=(2.0,)) is not None
+
+    drawn, p, reached = _first_exact_zero_draw(
+        lambda s: _rank_one_penalty_pair(s, L, reps, width, n_narrow), seed, exhibits
+    )
+    if p is None:
+        pytest.skip(
+            (
+                f"none of the {1 + _FLOOR_SCAN_SEEDS} draws scanned reached the floor's regime: "
+                "this platform's eigensolver resolved a nonzero residue on every one of them, so "
+                "the floor is never read here and nothing on this machine can constrain it"
+            )
+            if reached == 0
+            else (
+                f"{reached} of the {1 + _FLOOR_SCAN_SEEDS} draws scanned reached the floor's "
+                "regime, so it IS read on this platform, but none of them carries a direction "
+                "this parametrization moves: nothing here can show what moving it costs"
+            )
+        )
+    assert p.dims[1] == 2, p.dims
+    S_a = 0.5 * (p.S_a + p.S_a.T)
+    sigma = np.linalg.eigvalsh(S_a)
+    assert sigma[0] == 0.0, sigma
+
+    # The matrix is NOT singular, and the floor is above the residue it stands
+    # in for -- which is the whole reason a direction can be wrongly dropped.
+    residue_lo, residue_hi = _exact_residue_bounds(S_a)
+    assert 0.0 < residue_lo <= residue_hi < eps * float(sigma[-1])
+
+    lam_hi = _ladder_high_edge(p)
+    curvature, _reach, top, floor, dust = _free_direction_curvature(p, lam_hi)
+    # The constant is what decides here, not the other floor: that one is four
+    # orders below it, so neither comparison below is really about the dust.
+    assert dust.max() < floor, (dust.max(), floor)
+    # The exact share every free direction carries, at its most generous: the
+    # SMALLER residue makes the penalty reach least and the share largest.
+    share = curvature / (curvature + lam_hi * residue_lo)
+    # Deleting the constant leaves the level's own dust floor standing, so a
+    # direction under THAT is not one deleting it would recover.  Read through
+    # the same helper the scan's predicate used, so the draw it selected and
+    # the assertions it was selected for cannot drift apart.
+    moved = _floor_band_directions(curvature, floor, dust, direction)
+    if direction > 0:  # removing the floor keeps these, and they are flattened
+        df_moved = int(moved.sum())
+        assert df_moved >= 1, (curvature / floor, share)
+        if drawn == seed:
+            assert df_moved == 2, (curvature / floor, share)
+            assert share[moved].max() < 0.11, share[moved]
+    else:  # tripling the floor drops these, and the data carries them
+        df_moved = -int(moved.sum())
+        assert df_moved <= -1, (curvature / floor, share)
+        if drawn == seed:
+            assert df_moved == -2, (curvature / floor, share)
+            assert share[moved].min() > 0.98, share[moved]
+
+    shipped_rank = int(block_ranks(p, lam_hi).sum())
+    shipped_edf = structured_ladder(p, budgets=(2.0,))[0].edf0
+    monkeypatch.setattr(structured, "_PENALTY_RESIDUE_FLOOR", multiple * eps)
+    mutated_rank = int(block_ranks(p, lam_hi).sum())
+    mutated_edf = structured_ladder(p, budgets=(2.0,))[0].edf0
+
+    assert mutated_rank - shipped_rank == df_moved, (drawn, shipped_rank, mutated_rank)
+    assert mutated_edf - shipped_edf == pytest.approx(float(df_moved), abs=1e-6), (
+        drawn,
+        shipped_edf,
+        mutated_edf,
+    )
+
+
+def _resolved_residue_pair(seed, width=2e-3, L=6, reps=12, n_narrow=2):
+    """A margin whose null residue the eigensolver RESOLVES, below one ``eps``.
+
+    ``Spline(kind="cr", n_knots=3)`` leaves ``k_a = 4`` and a penalty of rank
+    three, and ``eigh`` returns a nonzero ``sigma_min`` on every seed scanned
+    -- signed, and between 0.007 and 0.23 round-off units of ``sigma_max``
+    over twelve of them.  Resolving the residue is not by itself enough to
+    separate the rules; a level's curvature has to land BETWEEN the residue
+    and the floor.  No other fixture in this file arranges that.
+    :func:`_rank_one_penalty_pair` is the exact-zero regime, where every
+    candidate rule reads the same floor by construction, and on
+    ``_thin_level_pair`` and ``_vanishing_mass_pair`` -- ``ps(8)``, residue
+    resolved at 0.42 round-off units -- the free curvature is 2.0e-07 to
+    1.7e+05 times the floor and never in between, so those agree too.
+
+    ``n_narrow`` levels are squeezed into a band of ``x`` of the given width,
+    which is what puts one level's free curvature between the resolved residue
+    and the floor.  Nothing else is degenerate: unit weights throughout, every
+    level keeps all its rows.
+    """
+    rng = np.random.default_rng(seed)
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.05, 0.95, n)
+    for i in range(n_narrow):
+        selected = g == f"L{i}"
+        x[selected] = 0.2 + 0.5 * i / n_narrow + width * rng.uniform(-0.5, 0.5, selected.sum())
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    return _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="cr", n_knots=3)},
+        ("x", "g"),
+        sample_weight=np.ones(n),
+    )
+
+
+def _first_resolved_residue_draw(residue_sign, scan=_FLOOR_SCAN_SEEDS):
+    """The first draw whose RESOLVED residue carries ``residue_sign``.
+
+    The sibling of :func:`_first_exact_zero_draw` for the opposite regime, and
+    scanned for the same reason: which draw shows the phenomenon is a fact
+    about the platform's LAPACK, not about the fixture.
+
+    It is scanned on the SIGN in particular because a null residue is round-off
+    -- there is no sign to pin.  Symmetric QR is accurate to ``O(eps ||S||)``
+    absolutely (Demmel & Veselic 1992), so an eigenvalue at ``1e-17 ||S||`` has
+    no correct digits, its sign among them.  This used to hardcode
+    ``[(3, +1.0), (4, -1.0), (7, -1.0)]``, measured here; on the CI runners for
+    3.12 and 3.14 seed 3 resolves ``-1.679e-17`` and seed 4 ``+1.421e-17``, both
+    within the documented band and both the other way round, so the pinned form
+    went RED ON A CORRECT LIBRARY.  Nor can the value be prescribed instead of
+    drawn: at ``eps ||S_a||`` a perturbation is below the ulp of ``S_a``'s own
+    entries, so it cannot be represented in the standard basis at all.  Only the
+    ORDERING of these quantities is portable, and only orderings are asserted.
+
+    Returns ``(seed, pair, resolved)``, or ``(None, None, resolved)`` where
+    ``resolved`` counts the scanned draws that resolved a nonzero residue at
+    all -- which separates "this platform reports exact zeros here, so the
+    regime is unreachable" from "the regime is reachable and this sign is
+    missing from it", the second of which is a coin flip per draw and so is an
+    assertion rather than a skip.
+    """
+    resolved = 0
+    for seed in range(scan):
+        p = spline_cat_moments(*_structured_inputs(_resolved_residue_pair(seed)))
+        if p.dims[1] != 4:
+            continue
+        sigma = np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))
+        if sigma[0] == 0.0:
+            continue
+        resolved += 1
+        if np.sign(sigma[0]) != residue_sign:
+            continue
+        curvature, reach, _top, floor, dust = _free_direction_curvature(p, _ladder_high_edge(p))
+        if not dust.max() < reach < floor:
+            continue
+        if int((curvature > reach).sum()) - int((curvature > floor).sum()) == 1:
+            return seed, p, resolved
+    return None, None, resolved
+
+
+@pytest.mark.parametrize("residue_sign", [+1.0, -1.0], ids=["positive-residue", "negative-residue"])
+def test_a_resolved_penalty_residue_is_used_rather_than_the_floor(residue_sign):
+    """A residue the eigensolver DID resolve is the reach, floor or no floor.
+
+    :func:`test_the_penalty_residue_floor_is_pinned_from_both_sides` pins the
+    CONSTANT.  It cannot pin the RULE, because it only ever runs where the
+    residue is an exact zero and every candidate rule reads the floor there.
+    Both of the forms this one replaced --
+    ``max(residue, _PENALTY_RESIDUE_FLOOR * top)`` and an unconditional
+    ``_PENALTY_RESIDUE_FLOOR * top`` -- leave that test, and every other test
+    in this file, green while costing a whole degree of freedom here:
+    reverting the line to either one fails both cases below and nothing else in
+    the three screening suites.
+
+    The family is the one the regression was found on: 6 levels, 12 rows in
+    every level, unit weights, two levels inside a 2e-3 band of ``x``, a
+    ``cr(n_knots=3)`` margin.  ``eigh`` resolves ``sigma_min`` on all twelve
+    seeds first scanned, at 0.007 to 0.23 round-off units of ``sigma_max`` --
+    under the floor every time, so the floor and the measurement disagree -- and
+    one level's free curvature lands between the two on six of them.  There the
+    reported edf is exactly 1.000000 df apart between the rules, and it is the
+    reach-aware value that is right: an exact-rational oracle put seeds 3, 4
+    and 7 at 5.006935, 5.399635 and 5.139469, against 5.004628 / 5.284769 /
+    5.001895 counted from the residue and 4.004628 / 4.284769 / 4.001895
+    counted from the floor.  Those are a record of the measurement that
+    established the rule, on this machine; nothing below asserts them, because
+    which seed shows what is not portable -- see
+    :func:`_first_resolved_residue_draw`.
+
+    The sign is PARAMETRIZED, and the draw carrying it is discovered, because
+    it is what ``np.abs`` earns its place for.  Taking ``np.maximum(sigma,
+    0.0)`` instead reports NO residue on a negative draw, hands the floor that
+    case, and costs the same degree of freedom -- while on a positive draw the
+    same mutation is invisible.  So the mutation is only covered if a draw of
+    EACH sign is asserted on, and only if neither is allowed to skip.
+
+    Nothing here needs a new oracle: the assertion is that the count KEEPS the
+    direction the measured reach leaves free, and both the reach and the
+    curvature come from the pair's own moments.
+    """
+    from superglm.screening._structured import (
+        _evaluate,
+        _profile,
+        block_ranks,
+        structured_ladder,
+    )
+
+    seed, p, resolved = _first_resolved_residue_draw(residue_sign)
+    # Fail-closed on both counts, and they are different facts.  No draw
+    # resolving anything means this platform reports exact zeros here and the
+    # residue branch is unreachable -- worth being told, not skipped past.  The
+    # regime being reachable while this sign never once appeared across
+    # ``resolved`` draws is a 2**-resolved coincidence, not a fixture property.
+    assert resolved, (residue_sign, resolved)
+    assert seed is not None, (residue_sign, resolved)
+
+    sigma = np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))
+    eps = float(np.finfo(np.float64).eps)
+    # RESOLVED, signed, and under the floor: the one regime where substituting
+    # the constant for the measurement is observable.  The scan selected on the
+    # first two, so only the third constrains anything new here.
+    assert sigma[0] != 0.0, sigma
+    assert np.sign(sigma[0]) == residue_sign, sigma[0]
+    assert abs(sigma[0]) < eps * float(abs(sigma[-1])), (sigma[0], sigma[-1])
+
+    lam_hi = _ladder_high_edge(p)
+    curvature, reach, _top, floor, dust = _free_direction_curvature(p, lam_hi)
+    # Neither comparison is decided by the OTHER floor, the one on the level's
+    # raw moments: it is four orders below the smaller of the two.
+    assert dust.max() < reach < floor, (dust.max(), reach, floor)
+
+    kept_by_reach = curvature > reach
+    kept_by_floor = curvature > floor
+    window = int(kept_by_reach.sum()) - int(kept_by_floor.sum())
+    assert window == 1, (curvature / reach, curvature / floor)
+
+    # The count keeps it.  ``base`` is written out here rather than taken from
+    # block_ranks, so this is a statement about the answer and not a copy of
+    # the arithmetic that produces it.
+    base = _unpenalized_level_ranks(p)
+    assert int(block_ranks(p, lam_hi).sum()) == int(base.sum()) + int(kept_by_reach.sum()), (
+        int(block_ranks(p, lam_hi).sum()),
+        int(base.sum()),
+        curvature / reach,
+    )
+
+    # And a whole degree of freedom rides on it, through the same ``_evaluate``
+    # the ladder uses -- handed the floor's count explicitly for the contrast.
+    U_eff, rank_m = _profile(p)
+    _, edf = _evaluate(p, U_eff, rank_m, lam_hi)
+    _, floored_edf = _evaluate(p, U_eff, rank_m, lam_hi, base + kept_by_floor)
+    assert edf - floored_edf == pytest.approx(float(window), abs=1e-6), (edf, floored_edf)
+
+    # It is the ladder's published rung, not an internal number: every budget
+    # below the high edge clamps there.
+    assert structured_ladder(p, budgets=(2.0,))[0].edf0 == edf
+
+
+def _multi_null_pair(seed, width=1e-3, L=6, reps=12, n_narrow=2, m=3):
+    """A margin whose penalty is rank deficient by TWO, not by one.
+
+    Every other fixture in this file, and every margin any shipped default
+    builds, leaves exactly one free direction, so ``reach[free]`` is a single
+    number and collapsing it to ``reach[free].max()`` is not a decision.
+    Nullity is the penalty order minus one for ``ps`` and ``bs`` -- measured on
+    the CENTERED ``S_a`` the kernel is handed, recovered from the pipeline's
+    own ``S_ti = kron(S_a, I_kb)``, at 6 levels x 12 rows, ``x`` uniform on
+    [0.05, 0.95] from ``default_rng(3)``:
+
+        ps  m=1 -> 0   m=2 -> 1   m=3 -> 2   m=4 -> 3
+        bs  m=1 -> 0   m=2 -> 1   m=3 -> 2   m=4 refused (order > degree 3)
+        cr  m=1 -> 0   m=2 -> 1   m=3 -> 1   m=4 refused (order > 3)
+        ns  m=1 -> 0   m=2 -> 0   m=3 -> 0   m=4 -> 1
+
+    So ``cr`` never reaches nullity two at all, ``ns`` never reaches it, and
+    the DEFAULT ``m=2`` reaches it on none of the four.  ``Spline(kind="ps",
+    k=5, degree=3, m=3)`` is the compact way in: ``k_a = 4``, penalty rank 2,
+    two free directions, and the pair still routes through the arrow kernel.
+
+    Geometry is :func:`_rank_one_penalty_pair`'s -- ``n_narrow`` levels inside
+    a band of ``x`` of the given width, unit weights, every level keeping all
+    its rows -- because that is what puts a level's free curvature between the
+    two free reaches, which is where the collapse decides anything.
+    """
+    rng = np.random.default_rng(seed)
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.05, 0.95, n)
+    for i in range(n_narrow):
+        selected = g == f"L{i}"
+        x[selected] = 0.2 + 0.6 * i / n_narrow + width * rng.uniform(-0.5, 0.5, selected.sum())
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    return _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="ps", k=5, degree=3, m=m)},
+        ("x", "g"),
+        sample_weight=np.ones(n),
+    )
+
+
+def _free_subspace(p, lam):
+    """``(curvature, reach_free, dust)`` on a free subspace of ANY dimension.
+
+    :func:`_free_direction_curvature` asserts the subspace is one dimensional,
+    which is the only case the rest of this file reaches; this is its sibling
+    for the multi-null regime.  ``curvature`` is the ``(L, nfree, nfree)``
+    Schur complement of every level restricted to the free subspace -- the
+    quantity :func:`~superglm.screening._structured.block_ranks` takes the
+    spectrum of -- and ``reach_free`` is the penalty each free direction still
+    carries.  ``dust`` is the other floor, ``_RCOND`` on the level's raw
+    moments, returned so a test can show which of the two decides.
+    """
+    from superglm.screening._arrow import _RCOND, _solve_floor
+
+    _, k_a = p.dims
+    sigma, directions = np.linalg.eigh(0.5 * (p.S_a + p.S_a.T))
+    reach = float(lam) * np.abs(sigma)
+    free = reach <= _solve_floor(k_a + 1) * float(reach.max())
+    N = directions[:, free]
+    mass = np.where(p.m > 0.0, p.m, 1.0)
+    projected = p.c @ N
+    curvature = np.einsum("ip,lij,jq->lpq", N, p.V, N, optimize=True)
+    curvature -= (projected[:, :, None] * projected[:, None, :]) / mass[:, None, None]
+    curvature = 0.5 * (curvature + np.swapaxes(curvature, -1, -2))
+    dust = _RCOND * (np.einsum("lpp->l", p.V) + p.m)
+    return curvature, reach[free], dust
+
+
+def _scalar_ranks(p, lam):
+    """The SHIPPED rule, written out from the pair's own moments.
+
+    The whole free subspace against one number, ``reach[free].max()``, floored
+    per level by ``_RCOND`` on the level's raw moments.  Kept here rather than
+    taken from :func:`~superglm.screening._structured.block_ranks` so the test
+    below states which of two rules the kernel implements instead of copying
+    the arithmetic that produces it -- the idiom of
+    :func:`_unpenalized_level_ranks`.
+    """
+    _, k_a = p.dims
+    curvature, reach_free, dust = _free_subspace(p, lam)
+    base = np.where(p.m > 0.0, 1, 0) + (k_a - reach_free.size)
+    floor = np.maximum(reach_free.max(), dust)
+    return base + (np.linalg.eigvalsh(curvature) > floor[:, None]).sum(axis=-1)
+
+
+def _per_direction_ranks(p, lam):
+    """The rejected alternative: rank the free subspace against the reach MATRIX.
+
+    ``N' S_a N`` is exactly ``diag(sigma[free])`` for ``N`` the penalty's own
+    eigenvectors, so "keep the projected reach rather than one number" is the
+    generalized eigenvalue count of ``(curvature_q, diag(reach_free))`` above
+    one -- each direction of the simultaneously diagonalized free block judged
+    against the penalty reaching THAT direction.  It reduces identically to the
+    shipped rule when the free reaches are equal, which is why nullity <= 1
+    cannot separate the two and why this file had no coverage of the choice.
+
+    Written here, and only here, so the test below is a statement about which
+    of two rules the kernel implements rather than a copy of the one it does.
+    """
+    from superglm.screening._arrow import _solve_floor
+    from superglm.screening._structured import _PENALTY_RESIDUE_FLOOR
+
     L, k_a = p.dims
-    P = _unpenalized_blocks(p)
-    T = np.zeros((k_a + 1, k_a + 1))
-    T[:k_a, :k_a] = p.S_a
-    want = sum(np.linalg.matrix_rank(P[q] / np.trace(P[q]) + T / np.trace(T)) for q in range(L))
-    assert int(block_ranks(p).sum()) == want
+    sigma = np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))
+    reach = float(lam) * np.abs(sigma)
+    top = float(reach.max())
+    free = reach <= _solve_floor(k_a + 1) * top
+    ranks = np.where(p.m > 0.0, 1, 0) + int(np.count_nonzero(~free))
+    curvature, reach_free, dust = _free_subspace(p, lam)
+    per_direction = np.where(reach_free > 0.0, reach_free, _PENALTY_RESIDUE_FLOOR * top)
+    floors = np.maximum(per_direction[None, :], dust[:, None])
+    out = np.empty(L, dtype=np.int64)
+    for q in range(L):
+        # ``D^-1/2 curvature D^-1/2`` turns the pencil into an ordinary
+        # symmetric eigenproblem, and its eigenvalues above one are the
+        # generalized ones above one.
+        scale = 1.0 / np.sqrt(floors[q])
+        block = curvature[q] * scale[:, None] * scale[None, :]
+        out[q] = int((np.linalg.eigvalsh(0.5 * (block + block.T)) > 1.0).sum())
+    return ranks + out
+
+
+def _inverse_keep_count(p, lam):
+    """How many directions ``_psd_pinv`` resolves on the blocks the arrow inverts.
+
+    ``_pair_arrow`` hands ``factor_arrow`` the level blocks ``V_q + lam S_a``
+    bordered by ``c_q`` and ``m_q``; ``factor_arrow`` inverts each with
+    :func:`~superglm.screening._arrow._psd_pinv`, whose cut is a SCALAR
+    relative to that block's own largest eigenvalue.  That count is the other
+    half of ``edf = rank(A) - lambda tr(A^-1 S)``, so it is the standard a rank
+    rule is answerable to: a direction counted here but dropped there
+    contributes a whole degree of freedom with no penalty offset.
+    """
+    from superglm.screening._arrow import _psd_pinv
+    from superglm.screening._structured import _unpenalized_blocks
+
+    _, k_a = p.dims
+    G = _unpenalized_blocks(p)
+    G[:, :k_a, :k_a] += lam * p.S_a
+    _, keep = _psd_pinv(G, None)
+    return int(keep.sum())
+
+
+def _first_multi_null_draw(scan=_FLOOR_SCAN_SEEDS):
+    """The first nullity-two draw on which the two rules actually part.
+
+    The idiom of :func:`_first_exact_zero_draw` and
+    :func:`_first_resolved_residue_draw`, for a third regime.  Reaching nullity
+    two is a property of the margin and holds on every draw; whether a level's
+    free curvature lands between the two free reaches is a property of the
+    DRAW, so it is scanned rather than assumed.  Measured over seeds 0 to 39 at
+    ``width=1e-3``: 40 of 40 reach nullity two, and 15 of those carry a level
+    the collapse moves and are scored by ``structured_ladder`` rather than
+    refused -- seeds 0, 4, 9, 11, 13, 14, 21, 24, 25, 27, 28, 30, 31, 34 and
+    39, the first of which is seed 0.  The free reaches on the 40 span a factor
+    of 1.21 to 63.6 apart, so the collapse is never a no-op here.
+
+    The predicate reads NOTHING from ``block_ranks``: both counts are built
+    from the pair's own moments here, so a maintainer who swaps the rule gets a
+    RED assertion on the same draw rather than a scan that runs out and skips.
+
+    Returns ``(seed, pair, reached)``, or ``(None, None, reached)`` with
+    ``reached`` counting the draws that reached nullity two at all -- which
+    separates "this platform does not build the regime" from "it does and no
+    draw shows the phenomenon".
+    """
+    from superglm.screening._structured import structured_ladder
+
+    reached = 0
+    for seed in range(scan):
+        p = spline_cat_moments(*_structured_inputs(_multi_null_pair(seed)))
+        if p.dims[1] != 4 or p.profiled_trace is None:
+            continue
+        lam_hi = _ladder_high_edge(p)
+        curvature, reach_free, dust = _free_subspace(p, lam_hi)
+        if reach_free.size != 2:
+            continue
+        reached += 1
+        if int(_scalar_ranks(p, lam_hi).sum()) >= int(_per_direction_ranks(p, lam_hi).sum()):
+            continue
+        if structured_ladder(p, budgets=(2.0,)) is not None:
+            return seed, p, reached
+    return None, None, reached
+
+
+def test_a_multi_null_penalty_is_ranked_against_one_reach_not_per_direction():
+    """Nullity TWO: the whole free subspace is judged against ONE reach.
+
+    ``block_ranks`` flattens the free subspace to ``reach[free].max()`` and
+    compares every free direction's curvature against that single number.  At
+    nullity one there is nothing to flatten, which is every other fixture here
+    and every margin a shipped default builds, so nothing in this file
+    constrained the choice: replacing the scalar with a per-direction cut left
+    all three screening suites bit-identical.  This is that gap.
+
+    The scalar is not an approximation of a per-direction rule, it is the
+    matching half of a bargain.  ``edf`` is ``rank(A) - lambda tr(A^-1 S)`` and
+    the inverse's side is :func:`~superglm.screening._arrow._psd_pinv`, whose
+    cut is likewise ONE number per block -- relative to that block's own
+    largest eigenvalue.  Refining the rank's side alone counts directions the
+    inverse still cannot see, and each of those arrives as ``1 - 0``: a whole
+    degree of freedom with no penalty offset.  That is what is asserted below,
+    on the very blocks ``_pair_arrow`` factors.
+
+    Measured over the 40 draws the scan walks, at the ladder's own high edge:
+    the arrow inverse resolves 23 directions on every one of them; the shipped
+    count is 23 or 24; the per-direction count is 24 on all 40.  So the
+    per-direction rule is above what the inverse resolves everywhere, and on
+    the 15 draws where the two rules differ the shipped count is exactly the
+    inverse's own.
+
+    Nothing here pins a magic edf.  Which draw shows the phenomenon is a fact
+    about the platform's LAPACK, like the two regimes above it, so the fixture
+    is scanned and only orderings and differences are asserted.
+    """
+    from superglm.screening._structured import block_ranks, structured_ladder
+
+    seed, p, reached = _first_multi_null_draw()
+    # Two different platform facts, and neither may pass silently.  No draw
+    # reaching nullity two means ``ps(m=3)`` does not build the regime here and
+    # the multi-null path is unreachable -- worth being told.  The regime being
+    # reachable while no draw parts the rules means the fixture has stopped
+    # separating them, which is the coverage this test exists to hold.
+    assert reached, reached
+    assert seed is not None, reached
+
+    _, k_a = p.dims
+    assert k_a == 4, p.dims
+    sigma = np.linalg.eigvalsh(0.5 * (p.S_a + p.S_a.T))
+    assert np.linalg.matrix_rank(0.5 * (p.S_a + p.S_a.T)) == k_a - 2, sigma
+
+    lam_hi = _ladder_high_edge(p)
+    curvature, reach_free, dust = _free_subspace(p, lam_hi)
+    mu = np.linalg.eigvalsh(curvature)
+    assert reach_free.size == 2, reach_free
+    # The two reaches are SPREAD, which is the whole content of the collapse:
+    # were they equal the two rules would be the same rule.
+    assert reach_free.min() < reach_free.max(), reach_free
+    # And neither comparison is decided by the OTHER floor, the one on the
+    # level's raw moments.
+    assert dust.max() < reach_free.min(), (dust.max(), reach_free)
+
+    # What the kernel returns is the SCALAR rule, written out from the pair's
+    # own moments rather than borrowed from the function.
+    scalar = int(_scalar_ranks(p, lam_hi).sum())
+    assert int(block_ranks(p, lam_hi).sum()) == scalar, (
+        block_ranks(p, lam_hi),
+        _scalar_ranks(p, lam_hi),
+        mu / reach_free.max(),
+    )
+
+    # The per-direction alternative counts strictly more -- it can only ever
+    # count more, since every free reach is at or below the largest.
+    per_direction = int(_per_direction_ranks(p, lam_hi).sum())
+    extra = per_direction - scalar
+    assert extra >= 1, (scalar, per_direction)
+
+    # ADJUDICATION: the inverse cannot back the extra directions.  Its own keep
+    # count on the blocks _pair_arrow factors is at or below the shipped count
+    # and strictly below the per-direction one.
+    keep = _inverse_keep_count(p, lam_hi)
+    assert keep <= scalar < per_direction, (keep, scalar, per_direction)
+
+    # So they arrive as whole degrees of freedom, exactly ``extra`` of them,
+    # through the same ``_evaluate`` the ladder uses.
+    U_eff, rank_m = _profile(p)
+    _, edf = _evaluate(p, U_eff, rank_m, lam_hi)
+    _, per_direction_edf = _evaluate(p, U_eff, rank_m, lam_hi, _per_direction_ranks(p, lam_hi))
+    assert per_direction_edf - edf == pytest.approx(float(extra), abs=1e-6), (
+        edf,
+        per_direction_edf,
+    )
+
+    # On the rung the ladder publishes, not on an internal number.
+    assert structured_ladder(p, budgets=(2.0,))[0].edf0 == edf
+
+
+def test_the_cached_rank_geometry_answers_what_each_lambda_would_have():
+    """The ladder builds the free set ONCE; every rung must still get its own count.
+
+    :func:`~superglm.screening._structured.structured_ladder` computes
+    :func:`~superglm.screening._structured._rank_geometry` a single time and
+    hands it to every evaluation.  That is sound only because the free set is
+    the same at every positive lambda -- both sides of
+    ``reach <= _solve_floor(k_a + 1) * top`` carry one factor of it, so it
+    cancels -- and because the two thresholds are then that lambda times a
+    fixed scalar.  What is asserted is the consequence rather than the algebra:
+    the cached answer equals the one each lambda computes for itself, on the
+    RANKS and not merely on the edf they feed, across sixteen decades and at
+    the ladder's own high edge.
+
+    LAMBDA ZERO IS A DIFFERENT READING AND IS NOT CACHED.  There no direction
+    is reached at all, so the count is the unpenalized block's own rank rather
+    than the one the spectrum picks out, and
+    :func:`~superglm.screening._structured.block_ranks` asks for it explicitly
+    instead of letting a cache built the other way answer it.  The guard is
+    worth 1 to 2 df on every fixture here, which is why the assertion is that
+    zero and the smallest positive lambda representable DISAGREE: were the
+    guard dropped, the cached mask would answer both and they would match.
+    """
+    from superglm.screening._structured import _rank_geometry, block_ranks
+
+    for build in (_thin_level_pair, _vanishing_mass_pair):
+        p = spline_cat_moments(*_structured_inputs(build(0.001)))
+        geometry = _rank_geometry(p)
+        for lam in (1e-12, 1e-6, 1.0, 1e6, 1e12, _ladder_high_edge(p)):
+            fresh, cached = block_ranks(p, lam), block_ranks(p, lam, geometry)
+            assert np.array_equal(fresh, cached), (build.__name__, lam, fresh, cached)
+
+    for build in (_resolved_residue_pair, _multi_null_pair):
+        p = spline_cat_moments(*_structured_inputs(build(3)))
+        geometry = _rank_geometry(p)
+        for lam in (1e-12, 1e-6, 1.0, 1e6, 1e12, _ladder_high_edge(p)):
+            fresh, cached = block_ranks(p, lam), block_ranks(p, lam, geometry)
+            assert np.array_equal(fresh, cached), (build.__name__, lam, fresh, cached)
+
+        # Zero is not the smallest positive lambda, and a supplied geometry
+        # must not make it behave as though it were.
+        at_zero = int(block_ranks(p, 0.0).sum())
+        assert at_zero == int(block_ranks(p, 0.0, geometry).sum())
+        assert at_zero < int(block_ranks(p, 1e-300).sum()), (
+            build.__name__,
+            at_zero,
+            int(block_ranks(p, 1e-300).sum()),
+        )
 
 
 def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():

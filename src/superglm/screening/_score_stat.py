@@ -178,7 +178,7 @@ def _rank_floor(n: int) -> float:
     Because this IS ``matrix_rank``'s tolerance, the count it produces cannot
     exceed ``matrix_rank`` -- the contract the unpenalized rung rests on holds
     by construction rather than by luck, and only tightens where a negative
-    eigenvalue makes ``psd_ranks`` stricter than a singular-value count.
+    eigenvalue makes :func:`_psd_rank` stricter than a singular-value count.
 
     It is only meaningful where the matrix's own largest eigenvalue is a real
     scale.  On a wholly PROFILED-AWAY block that is not guaranteed -- see the
@@ -409,12 +409,12 @@ def _edge(
     200.  Through the public screen the same layout reported 209 on 3 of 12
     seeds, moving ``z`` by +0.050; at 4 df of 5 the same flip moved it by
     +0.29, since ``z`` divides by ``sqrt(2 * edf0)``.
-    :func:`superglm.screening._arrow.psd_ranks` is the counter, at
-    :func:`_rank_floor` rather than the arrow kernel's own constant: same RULE
-    — count eigenvalues, respect their sign — at a cut each path can justify,
-    the arrow kernel counting on a deliberately BALANCED reference where a
-    fixed 1e-12 means something, and this path counting on a raw profiled
-    block where only round-off does.
+    :func:`_psd_rank` is the counter, at :func:`_rank_floor` rather than the
+    arrow kernel's own constant: same RULE — count eigenvalues, respect their
+    sign — at a cut each path can justify.  Here that is a raw profiled block
+    on which only round-off is a scale.  The arrow kernel's blocks carry a
+    penalty and need a different instrument again;
+    :func:`superglm.screening._structured.block_ranks` is theirs.
 
     The cut here was a fixed 1e-12 when this counting first landed, then a
     fixed 1e-15; both were wrong and in opposite directions, which is why it
@@ -428,7 +428,7 @@ def _edge(
 
     One difference from ``pinv`` is kept on purpose: it scores directions by
     ``|lambda|``, so it counted a curvature of -1e-11 as a degree of freedom
-    and inverted it, where ``psd_ranks`` reads the sign and drops it.  On a
+    and inverted it, where :func:`_psd_rank` reads the sign and drops it.  On a
     block formed by subtraction small negative eigenvalues are ordinary —
     -4.042e-15 measured on the worked freMTPL2 ``cat_cat`` block — and a
     negative curvature is not a degree of freedom.
