@@ -20,6 +20,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
 
 from superglm import Categorical, Piecewise, SuperGLM
 from superglm.features.piecewise import _SMALL_SEGMENT_WEIGHT_FRACTION, _STRATEGIES
@@ -78,6 +79,61 @@ class TestHatBasis:
         assert info.reparametrize is False
         assert info.penalized is True
 
+    def test_build_columns_are_sparse_with_at_most_two_nonzeros_per_row(self):
+        """The design is emitted CSR so the builder can dedup the repeated rows.
+
+        At most two non-zeros per row is the hat locality stated on the storage
+        itself; the bound is what makes the sparse route cheaper than dense at
+        any knot count.
+        """
+        x = np.linspace(0.0, 10.0, 41)
+        spec = Piecewise([1.0, 4.0], lower=0.0, upper=10.0)
+        info = spec.build(x)
+        assert sp.issparse(info.columns)
+        assert info.columns.format == "csr"
+        per_row = np.diff(info.columns.indptr)
+        assert per_row.max() <= 2
+        np.testing.assert_array_equal(info.columns.toarray(), spec.transform(x))
+
+    def test_a_heaped_fit_stores_the_design_one_distinct_row_deep(self):
+        """The fit-time representation collapses repeated rows without binning.
+
+        Heaped x is the rating-variable norm, so thousands of rows carry a few
+        dozen distinct basis rows; the builder's dedup gate must accept them
+        and the block must stay unpenalized (``omega is None``) -- the compressed
+        container is SSP-shaped, and an identity reparameterisation with no
+        penalty is exactly a fixed-df design stored one distinct row deep.
+        """
+        from superglm.group_matrix import SupportCompressedSSPGroupMatrix
+
+        rng = np.random.default_rng(31)
+        levels = np.arange(6.0, 126.0, 6.0)
+        x = rng.choice(levels, 4000)
+        x[: levels.size] = levels  # every level present, endpoints pinned
+        y = rng.poisson(1.0, x.size).astype(np.float64)
+        model = SuperGLM(features={"x": Piecewise([42.0, 60.0, 66.0])})
+        model.fit(pd.DataFrame({"x": x}), y)
+
+        idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "x")
+        gm = model._dm.group_matrices[idx]
+        assert isinstance(gm, SupportCompressedSSPGroupMatrix)
+        assert gm.is_lossless_support
+        assert gm.omega is None
+        assert gm.omega_components is None
+        assert gm.n_bins <= levels.size
+
+    def test_a_small_fit_declines_compression_and_stays_plain_sparse(self):
+        """Below the calibrated-rows floor the dedup gate declines by design."""
+        from superglm.group_matrix import SparseGroupMatrix
+
+        rng = np.random.default_rng(33)
+        x = np.linspace(0.0, 10.0, 41)
+        model = SuperGLM(features={"x": Piecewise([2.0, 5.0], lower=0.0, upper=10.0)})
+        model.fit(pd.DataFrame({"x": x}), rng.poisson(1.0, x.size).astype(np.float64))
+
+        idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "x")
+        assert isinstance(model._dm.group_matrices[idx], SparseGroupMatrix)
+
     @pytest.mark.parametrize("case_name", CASE_NAMES)
     def test_transform_equals_build_columns(self, case_name):
         """Section 9 property 2 in its load-bearing form: fit and predict share columns.
@@ -94,7 +150,7 @@ class TestHatBasis:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             info = case.spec.build(x, sample_weight=case.sample_weight)
-        np.testing.assert_array_equal(case.spec.transform(x), info.columns)
+        np.testing.assert_array_equal(case.spec.transform(x), info.columns.toarray())
 
     def test_the_case_matrix_moves_the_base_off_column_zero(self):
         """Guard for the sweep above: on a base at knot 0 that property is vacuous."""
@@ -245,7 +301,7 @@ class TestExtrapolationModes:
         info_manual = manual.build(np.clip(x, 20.0, 80.0))
         np.testing.assert_array_equal(pinned._knots, manual._knots)
         assert pinned._base_index == manual._base_index
-        np.testing.assert_array_equal(info_pinned.columns, info_manual.columns)
+        np.testing.assert_array_equal(info_pinned.columns.toarray(), info_manual.columns.toarray())
         probe = np.array([-10.0, 20.0, 45.0, 80.0, 140.0])
         np.testing.assert_array_equal(pinned.transform(probe), manual.transform(probe))
 

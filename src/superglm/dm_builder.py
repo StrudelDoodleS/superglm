@@ -423,6 +423,31 @@ def _build_ssp_group(B_csr, R_inv):
     return SupportCompressedSSPGroupMatrix(B_unique_rows, R_inv, row_index)
 
 
+def _build_unpenalized_sparse_group(B_csr, n_cols: int):
+    """Cheapest exact representation of an unpenalized sparse block.
+
+    The same lossless row-dedup gate as ``_build_ssp_group``: repeated rows are
+    the norm for heaped rating variables (a ``Piecewise`` hat basis above all),
+    and deduplication never bins, so exactness survives.  The identity
+    reparameterisation makes the compressed container a plain factored design;
+    its ``omega`` stays ``None``, which every penalty consumer reads as
+    unpenalized.  Declines to the plain CSR wrapper whenever the measured cost
+    model says compression would not pay.
+    """
+    from superglm._group_matrix._group_matrix_discretized import (
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm._group_matrix._group_matrix_support import detect_row_support
+
+    detected = detect_row_support(B_csr)
+    if detected is None:
+        return SparseGroupMatrix(B_csr)
+    B_unique_rows, row_index = detected
+    return SupportCompressedSSPGroupMatrix(
+        B_unique_rows, np.eye(n_cols, dtype=np.float64), row_index
+    )
+
+
 def add_interaction(
     feat1: str,
     feat2: str,
@@ -748,7 +773,7 @@ def _process_info(
                     if info.lambda_policies is not None:
                         gm.lambda_policies = info.lambda_policies
             else:
-                gm = SparseGroupMatrix(info.columns)
+                gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
         else:
             gm = DenseGroupMatrix(info.columns)
 
