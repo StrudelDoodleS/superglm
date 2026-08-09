@@ -27,9 +27,9 @@ out of Python.  For ``K`` symmetric PSD the generalized Schur complement
 
 That ``rcond`` cut is relative to each block's own largest eigenvalue, which
 is the only scale it has, and it is therefore NOT a reliable rank test when
-the caller's blocks are sums of PSD terms on far-apart scales.  Ranks a
-caller cares about should be counted on a better-conditioned member of the
-same family and handed in — see ``block_ranks`` on :func:`factor_arrow`.
+the caller's blocks are sums of PSD terms on far-apart scales.  A caller
+whose rank has to agree with this inverse should count it against the terms
+themselves and hand it in — see ``block_ranks`` on :func:`factor_arrow`.
 """
 
 from __future__ import annotations
@@ -68,19 +68,6 @@ def _solve_floor(n: int) -> float:
     than the error it removes, and on a 19-df block 6e-05 relative.
     """
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
-
-
-def psd_ranks(A: NDArray, rcond: float = _RCOND) -> NDArray:
-    """Per-matrix ranks of a batch of symmetric PSD matrices, no inverse.
-
-    Eigenvalues only, so this costs a fraction of :func:`_psd_pinv` and can be
-    afforded once per pair on a matrix chosen for CONDITIONING rather than for
-    the quantity being solved — which is the whole reason it is separate.  See
-    :func:`factor_arrow`'s ``block_ranks``.
-    """
-    w = np.linalg.eigvalsh(A)
-    scale = np.maximum(w[..., -1:], np.finfo(np.float64).tiny)
-    return (w > rcond * scale).sum(axis=-1)
 
 
 def _psd_pinv(A: NDArray, rcond: float | None = None) -> tuple[NDArray, NDArray]:
@@ -162,10 +149,13 @@ def factor_arrow(
     module.
 
     ``block_ranks`` overrides the per-block ranks counted here.  Supply it
-    when ``G`` is a sum of PSD terms whose scales are far apart and a
-    better-conditioned matrix with the SAME null space is available: rank is
-    the same for both, but a relative eigenvalue cut is not, and the
-    reasoning is in :func:`_psd_pinv`.  The border's own rank is still
+    when ``G`` is a sum of PSD terms whose scales are far apart, and count it
+    against those terms rather than against their float sum, in which the
+    smaller one has already been lost: the reasoning is in :func:`_psd_pinv`,
+    and the caller's side of it in
+    :func:`superglm.screening._structured.block_ranks`.  It is the CALLER's
+    job to make that count agree with what this inverse can resolve, since
+    the two are subtracted from each other.  The border's own rank is still
     counted from the factorization, which is where it becomes available.
     """
     Ginv, counted = _psd_pinv(G, rcond)

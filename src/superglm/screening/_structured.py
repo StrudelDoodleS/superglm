@@ -35,9 +35,73 @@ against a DENSE ``V_eff`` for one against a block-diagonal ``S`` — and a
 block-diagonal ``S`` needs only the diagonal blocks of the inverse, which the
 arrow factorization already has.
 
-This path is entered only where the dense path is refused, so every pair the
-dense path can score is still scored by it, bit for bit.  The two agree to
-the tolerance pinned in tests/test_structured_screening.py.
+This path is entered only where the dense path is refused, so no production
+pair is ever scored twice and nothing at runtime cross-checks the two.  What
+stands behind the reorganization is the parity pinned in
+tests/test_structured_screening.py, and that parity is a tolerance, not
+bit-for-bit equality: away from the bracket the two agree to round-off, at
+the edges they agree to the tolerances measured there.
+
+**KNOWN DIVERGENCE, NOT CLOSED.**  That parity is measured on the fixtures the
+suite carries and does not generalize.  On a ``ps(8)`` pair with 20 levels, 30
+rows in every level, unit weights and four levels squeezed into a narrow band
+of the covariate, ``|arrow - dense|`` at the ladder's high edge reaches
+11.57 df — 0.62 RELATIVE, against the 1e-5 relative the suite's parity test
+pins where both paths can score.  Neither path is reliably the better one
+there either: at a width of 3e-4 the arrow value sits 6.93 df above the dense
+one and at 5e-4 it sits 4.89 df below it.
+
+**WHAT THE REACH-AWARE COUNT IS WORTH, MEASURED WIDE RATHER THAN ON ONE
+GEOMETRY.**  Against a 50-digit oracle evaluated at each path's own lambda,
+over 6 levels x 12 rows at unit weight with two levels squeezed into a band of
+``x`` of 16 widths from 1e-1 to 1e-6, at 3, 4, 6 and 8 knots in all five bases
+this library assembles (``ps``, ``cr``, ``bs``, cardinal ``cr``, ``ns``): of
+312 well-posed points the reach-aware count in :func:`block_ranks` is nearer
+the oracle at the high edge on 86, farther on 12 and unchanged on 214, and the
+worst error it INTRODUCES anywhere is 1.0 df.  Well posed excludes the 8 of
+those 320 where this path refuses at the bracket's high edge, and 2 of the 8
+refuse only HERE: at ``bs(6)`` width 1e-5 and ``bs(8)`` width 2.15e-4 the
+reach-aware count is one rank lower than the one it replaces, the penalty
+trace it is subtracted from is bit-identical, and the difference puts the edf
+0.18 and 0.34 df BELOW zero — past round-off, so
+:class:`_UnstableStructuredEDFError` declines a value that was returned before
+(0.824 and 0.664 df).  Nothing moved the other way.  That refusal is the
+bracket's own EDGE rather than a budget bisecting inside it, and it is
+user-visible on one of the two: at ``bs(8)``/2.15e-4 a four-budget
+:func:`structured_ladder` goes from a malformed single rung of 16.0 df to
+``None``.  On the narrower family the residue floor governs — a two-column
+``cr`` margin over 24 seeds x 4 level layouts, 96 points — it is nearer on
+29, farther on 16 and unchanged on 51, and the worst error introduced is
+2.0 df.  The class is narrowed and NOT closed.
+
+**THE LOW EDGE IS ALMOST, BUT NOT ENTIRELY, UNTOUCHED.**  Over those same 320
+points the arrow value at the ladder's LOW edge moved on 2, and moved AWAY
+from the oracle on both — ``cr`` at 8 knots, band widths 2.15e-6 and 1e-6,
+error 2.149 -> 3.149 df and 1.277 -> 2.277 df.  It is bit-identical on the
+other 318, on all 96 of the two-column ``cr`` points, and on every fixture
+this suite carries.
+
+On the ``ps(8)`` pair of the first paragraph, walked across eleven band widths
+from 1e-1 to 1e-4, the level ranks counted here still disagree with what
+:func:`superglm.screening._arrow._psd_pinv` keeps, by up to +3 at the high
+edge and on 6 of those 11 widths (9 of 11 before the reach-aware count).  The
+invariant :func:`block_ranks` is written to satisfy — count what the inverse
+resolves, no more — is improved, not achieved.
+
+The ladder's edf is also not monotone in lambda on that same pair, and that
+predates any of this: walking 81 lambdas across the bracket, the arrow edf
+INCREASES at 14 of the 80 steps, by as much as 47.36 df, identically before
+and after the reach-aware count.  A budget inside the bracket bisects rather
+than clamps, so lowering ``edf_hi`` converts clamped rungs into searching
+ones and a search can land on a step it cannot attain — the pair then comes
+back as a NaN row instead of four scored rungs.  The defect is reached by
+that change, not caused by it.
+
+The dense path carries its own version of the same failure and it is not
+touched here: on one of four wide pairs of the shape this kernel exists for
+it reports 1.03 df BELOW a high-precision oracle at the high edge, where
+``numpy.linalg.pinv``'s inherited default ``rcond`` drops a direction the
+penalty leaves free.
 """
 
 from __future__ import annotations
@@ -48,8 +112,15 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.screening._arrow import factor_arrow, psd_ranks
+from superglm.screening._arrow import _RCOND, _solve_floor, factor_arrow
 from superglm.screening._score_stat import ScreenedPair
+
+# What to believe about an assembled ``S_a``'s residue in a direction its own
+# eigendecomposition reports as an EXACT zero -- and only then, since a small
+# nonzero residue is a measurement and this is not.  One round-off unit on the
+# penalty's largest eigenvalue.  The regime, the evidence that it is real, and
+# the error this carries are all in :func:`block_ranks`.
+_PENALTY_RESIDUE_FLOOR = float(np.finfo(np.float64).eps)
 
 _EDF_TOL = 1e-6
 _EDF_ROUNDOFF_FACTOR = 64.0
@@ -470,32 +541,149 @@ def _unpenalized_blocks(p: SplineCatPair) -> NDArray:
     return G
 
 
-def block_ranks(p: SplineCatPair) -> NDArray:
-    """The rank of every level block, counted where the two terms BALANCE.
+def block_ranks(p: SplineCatPair, lam: float) -> NDArray:
+    """Every level block's rank, counted to AGREE with the inverse at ``lam``.
 
-    A block is ``P_q + lambda T`` with both terms PSD, so its null space is
-    ``null(P_q) & null(T)`` for every ``lambda > 0`` and its rank is the same
-    throughout.  That lets it be counted ONCE, and counted on the one member
-    of the family a relative eigenvalue cut can actually resolve: each term
-    scaled to unit trace, so neither is judged against the other's magnitude.
+    ``edf`` is ``rank(A) - lambda tr(A^-1 S)`` and the two halves have to be
+    counted against each other: a direction the rank COUNTS and the inverse
+    DROPS contributes ``1 - 0``, a whole degree of freedom with no penalty
+    offset.  ``_solve_floor`` in :mod:`superglm.screening._arrow` states the
+    inverse's side of that bargain; this is the rank's.
 
-    Counting it at a bracket edge instead — which is what reading it off the
-    factorization does — loses a whole degree of freedom whenever the two
-    terms are far enough apart there.  Measured on a 20-level pair with one
-    level weighted 1/100th of the others: the block-rank sum reads 227 at
-    each edge where the balanced count and ``numpy.linalg.matrix_rank`` both
-    read 228, and the pair's ``edf0`` came back 17.99995 against the dense
-    path's 18.99991.  The low edge is not safe either — it under-counted by
-    one on the same pair at EQUAL weights, the mirror image of the same
-    failure.  Rare levels are the routine case at high cardinality, so this
-    is not an edge case; see :mod:`superglm.screening._arrow`.
+    The penalty splits the block.  Where ``S_a`` has a genuine eigenvalue,
+    ``lambda sigma_j`` is above the inverse's own resolution everywhere the
+    ladder brackets, so the inverse resolves that direction and
+    ``tr(A^-1 S)`` subtracts the right share back — it is always counted, and
+    so is the level's own contrast, which cancels against ``rank(M)``.
+
+    What is left is ``null(S_a)``, and there the RANK is the whole answer,
+    because at the ladder's high edge the block's largest eigenvalue is
+    ``lambda sigma_max`` and a free direction sits below the relative cut of
+    any inverse.  Its exact contribution is ``v / (v + lambda s)``, so it is
+    counted when the level's own curvature beats the penalty still reaching
+    it and dropped when it does not.  ``v`` is the block's own Schur
+    complement ``V_q - c_q c_q' / m_q`` — the level's curvature after its own
+    contrast has absorbed what it can, which is what the pair's rank turns
+    on, and the only place a level's SHARE OF THE WEIGHT enters.
+
+    Scaling each block by its own trace, which is how this was counted
+    before, divides that share out by construction.  Measured on
+    ``_vanishing_mass_pair(1e-12)``: a level holding 6.2e-14 of the weight
+    (free curvature 1.7e-12) and one holding 6.2e-02 of it (free curvature
+    2.1e+00) present balanced free eigenvalues of 5.51e-03 and 5.67e-03 —
+    indistinguishable, with twelve orders between them in the quantity that
+    decides.  Three such levels bought that pair three degrees of freedom it
+    did not have.
+
+    ``s`` IS THE EIGENSOLVER'S OWN ANSWER, WHATEVER ITS SIGN.  A spline
+    penalty's null space is null in exact arithmetic and round-off in float,
+    and how much round-off depends on the DATA as well as on the basis, so the
+    geometry has to be named with the number.  On 6 levels, 12 rows in every
+    level, unit weights and ``x`` uniform on [0.05, 0.95] from
+    ``default_rng(3)``, scored as ``Categorical() x Spline(kind, n_knots=k)``,
+    ``|sigma_min| / sigma_max`` comes out at 0.0100, 0.0391, 0.0486, 0.0512,
+    0.0567, 0.0847, 0.0887, 0.1474, 0.2076, 0.2159, 0.4337 and 0.6157 times
+    ``eps`` over the twelve ``ps``/``cr``/``bs`` margins at 3, 4, 6 and 8
+    knots, with the sign varying between them (``ns`` is full rank at all four
+    and has no free direction at all).  Read that as a tenth of a round-off
+    unit to a whole one rather than as a bound: the same twelve margins drawn
+    from ``default_rng(11)`` instead measure 0.0547 to 0.3340 eps, and the
+    margin that is smallest on one draw is not the smallest on the other.
+    Spelling the knot count ``k=``
+    is a different experiment — ``ps`` and ``bs`` reject ``k=3`` and ``k=4``
+    outright, needing 5 at degree 3, so only eight of those twelve margins
+    exist, and ``cr(k=3)``, the two-column margin, lands in the exact-zero
+    regime below rather than resolving anything.
+
+    Round-off is therefore what the reach IS here, and ``np.abs`` is taken
+    before anything else: clamping a negative residue up to zero would report
+    no residue at all and substitute the floor for one the eigensolver DID
+    resolve.  Measured on the ``cr(n_knots=3)`` family
+    tests/test_structured_screening.py draws, replacing ``np.abs(sigma)`` with
+    ``np.maximum(sigma, 0.0)`` is invisible on the seeds whose residue happens
+    to come out positive and costs exactly 1.000000 df on four of the twelve
+    scanned — the seeds where the sign is negative AND a level's curvature
+    sits between the residue and the floor.  The same round-off decides which
+    directions are free at all: ``_solve_floor``, the inverse's own cut, is
+    ``(k_a + 1) eps`` of the largest reach, which is 13x the residue at the
+    margin where the two come closest (``bs`` at 4 knots) and 797x it where
+    they are farthest (``ps`` at 4 knots), so the split is not close.
+
+    :data:`_PENALTY_RESIDUE_FLOOR` replaces that reach in ONE case: where the
+    eigensolver returned an EXACT zero for every free direction.  ``reach`` is
+    already an absolute value, so ``reach[free].max() == 0.0`` is exactly that
+    case and no tolerance is involved — deliberately, because a residue merely
+    SMALL is still a measurement and overriding it is what drops real degrees
+    of freedom.  Measured against an exact-rational oracle (agreeing with
+    80-digit mpmath to nine decimals) on a ``cr(3)`` pair, 6 levels, 12 rows
+    in every one, unit weights, two levels inside a 2e-3 band of ``x``: an
+    unconditional floor cost exactly 1.000000 df on three of eight seeds, one
+    of them a 435x accuracy regression (0.0023 df of error becoming 1.0023),
+    on directions whose exact shares were 0.946, 1.000 and 1.000.
+
+    The exact-zero regime is REAL and is not exotic.  A two-column spline
+    margin carries a rank-one penalty, and ``eigh`` returned an exact 0.0 for
+    its residue on 52 of 192 ``cr(k=3) x Categorical`` fixtures scanned,
+    while exact rational arithmetic on the same float matrix put that residue
+    at ``0.0012`` to ``0.1773 eps`` times ``sigma_max`` — nonzero every time.
+    Believing the zero costs whole degrees of freedom: of four wide pairs of
+    the shape this kernel exists for (hundreds of levels, a two-column
+    margin), three report an exact zero, and with the floor removed they come
+    back at 114.00 / 113.01 / 114.00 against a high-precision oracle's
+    109.00 / 108.00 / 109.00 — five each.  The fourth, whose residue the
+    eigensolver DOES resolve at 8.7e-19 of ``sigma_max``, never reads the
+    floor and is unmoved either way.
+
+    THE FLOOR IS A BOUNDED-ERROR CONVENTION, NOT AN UNDECIDABLE CASE, and the
+    band is stated rather than hidden.  ``1 eps`` over-states every residue
+    measured above by 5.6x to 830x, so a direction whose curvature sits just
+    under the floor is dropped although the exact share it carries is close to
+    one: over those 52 fixtures the largest exact share actually discarded was
+    ``0.9910``.  Inflating the floor is worse in the same currency: eleven
+    directions over those same fixtures fall in the ``(1, 3] eps`` band, their
+    exact shares run from ``0.9641`` to ``0.9954``, and a 3x floor discards
+    all eleven.  A RANGE over a stated number of directions is what that scan
+    supports; an earlier form of this sentence claimed ``0.9942`` as a lower
+    bound on them, which was the artefact of a max taken over per-fixture
+    MINIMA — an upper bound on the minimum, the opposite of what was wanted.
+    Both sides of the constant are pinned in
+    tests/test_structured_screening.py rather than left free.
+
+    The second floor is the one this always had.  ``_RCOND`` times the block's
+    own trace keeps a direction whose curvature is round-off of the level's
+    raw moments out of the count at the LOW edge, where the reach is
+    negligible and the Schur complement above is a cancelling difference.
     """
     _, k_a = p.dims
-    tiny = np.finfo(np.float64).tiny
-    G = _unpenalized_blocks(p)
-    G /= np.maximum(np.einsum("lpp->l", G, optimize=True), tiny)[:, None, None]
-    G[:, :k_a, :k_a] += p.S_a / max(float(np.trace(p.S_a)), tiny)
-    return psd_ranks(G)
+    S_a = 0.5 * (p.S_a + p.S_a.T)
+    sigma, directions = np.linalg.eigh(S_a)
+    # The penalty each direction actually carries at this lambda.  Written
+    # with the lambda inside so a zero penalty leaves every direction free,
+    # which is the unpenalized block's own rank and what that rung reports.
+    reach = float(lam) * np.abs(sigma)
+    top = float(reach.max()) if reach.size else 0.0
+    free = reach <= _solve_floor(k_a + 1) * top
+    ranks = np.where(p.m > 0.0, 1, 0) + int(np.count_nonzero(~free))
+    if not free.any():
+        return ranks
+
+    N = directions[:, free]
+    # ``reach`` is already an absolute value, so it is 0.0 here only where the
+    # eigensolver returned a signed zero for EVERY free direction -- the one
+    # case where it has reported no residue at all rather than a small one.
+    # A comparison against a tolerance would not do: a residue below the
+    # floor is still a MEASUREMENT, and substituting the floor for it is what
+    # loses whole degrees of freedom.  Taking the absolute value first is
+    # equally load bearing, since the residue is signed.
+    residue = float(reach[free].max())
+    flattened = residue if residue > 0.0 else _PENALTY_RESIDUE_FLOOR * top
+    mass = np.where(p.m > 0.0, p.m, 1.0)
+    projected = p.c @ N
+    curvature = np.einsum("ip,lij,jq->lpq", N, p.V, N, optimize=True)
+    curvature -= (projected[:, :, None] * projected[:, None, :]) / mass[:, None, None]
+    curvature = 0.5 * (curvature + np.swapaxes(curvature, -1, -2))
+    floor = np.maximum(flattened, _RCOND * (np.einsum("lpp->l", p.V) + p.m))
+    return ranks + (np.linalg.eigvalsh(curvature) > floor[:, None]).sum(axis=-1)
 
 
 def _pair_arrow(p: SplineCatPair, lam: float, ranks: NDArray | None = None):
@@ -546,13 +734,13 @@ def _evaluate(
 
     ``rank(V_eff + lambda S)`` is Guttman rank additivity on the bordered
     system — ``rank(K) = rank(M) + rank(A)``.  ``ranks`` carries the level
-    blocks' contribution, counted once by :func:`block_ranks` because it does
-    not depend on ``lambda`` and cannot be resolved reliably at the edges
-    where the ladder brackets; the border's own rank comes from this
+    blocks' contribution, counted by :func:`block_ranks` AT THIS LAMBDA
+    because that is what makes it agree with the inverse the same
+    factorization supplies; the border's own rank comes from this
     factorization.
     """
     L, k_a = p.dims
-    f = _pair_arrow(p, lam, block_ranks(p) if ranks is None else ranks)
+    f = _pair_arrow(p, lam, block_ranks(p, lam) if ranks is None else ranks)
     b = np.zeros((L, k_a + 1), dtype=np.float64)
     b[:, :k_a] = U_eff
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
@@ -616,6 +804,18 @@ def structured_ladder(
     same NaN row an unaffordable dense pair gets.  ``max_evaluations=None``
     means unbounded.
 
+    **A SEARCHING ladder pays for the rank count, because :func:`block_ranks`
+    depends on lambda and so runs once per evaluation rather than once per
+    pair.**  Measured on an ``L = 100`` ``ps(8)`` pair with four budgets forced
+    to search, ``time.process_time`` with all six thread pools pinned to one,
+    interleaved A/B/B/A over 8 pairs: 0.1682 s per ladder against 0.1547 s for
+    the lambda-independent count that preceded it, +9.2% at the median of the
+    8 paired ratios and slower in every one of them (+5.3% to +14.5%; the
+    first four pairs' arm ranges are disjoint, the pooled eight overlap by
+    1.4% because the machine's load fell between rounds).  A CLAMPED ladder is
+    two evaluations whatever it counts, and ``ns`` returns before any of this,
+    so the cost lands only where the bisection does.
+
     A numerical failure reached while bisecting one target refuses that target,
     not independent targets or already certified edge clamps.  The returned
     list may therefore contain fewer entries than ``budgets``.  If no rung
@@ -626,11 +826,10 @@ def structured_ladder(
         return None
 
     U_eff, rank_m = _profile(p)
-    ranks = block_ranks(p)
 
     def evaluate(lam: float) -> tuple[float, float] | None:
         try:
-            return _evaluate(p, U_eff, rank_m, lam, ranks)
+            return _evaluate(p, U_eff, rank_m, lam)
         except _UnstableStructuredEDFError:
             return None
 
