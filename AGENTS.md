@@ -55,15 +55,22 @@ rationale:
 - `release:patch`
 - `release:minor`
 
-`release:none` leaves package version fields unchanged. `release:patch`
-includes the exact next patch version in the same pull request, and
-`release:minor` includes the exact next minor version in the same pull request.
-The code diff is authoritative; declarations and labels are evidence only.
+The declaration is advice to the next release, never a version change. Feature
+and fix pull requests do not touch `pyproject.toml`'s version,
+`superglm.__version__`, or `uv.lock`'s own version pin, and do not carry
+version-record commits; reviewers flag any pull request that does. The code
+diff is authoritative; declarations and labels are evidence only.
 
-Only one release-bearing pull request may advance from a published version at
-a time. Concurrent patch or minor pull requests must rebase after the preceding
-candidate is published and recompute their version. A merge never authorizes a
-tag or publication.
+A release is one deliberate act on master after merging: a single bump commit
+whose message is the consolidated changelog since the previous release, tagged
+`vX.Y.Z` on that same commit, then published — the version file, the tag, and
+PyPI move together and can never disagree. Tags remain release-only. A merge
+never authorizes a tag or publication.
+
+Why one act instead of per-pull-request version records: the record convention
+accumulated concrete unpublished versions — 0.22.0 through 0.24.0 sit on
+master untagged and unpublished, and remain as changelog commits that never
+shipped. The next release bumps directly from 0.24.0 to whatever ships next.
 
 Only an explicit user request to assess, prepare, or publish a release may
 spawn the project-scoped `release_manager` specialist from
@@ -72,14 +79,15 @@ such as “finish”, “merge”, “ship”, or “deploy” do not authorize 
 
 Use these three separate gates:
 
-1. “Use the release_manager agent to assess PR #N as a release candidate.”
-   Assessment is read-only and bound to the exact base and head SHAs.
-2. “Use the release_manager agent to prepare the approved 0.x.y on PR #N.”
-   Preparation requires an exact approved version and assessment ID, updates
-   that same pull request, and does not authorize publication.
+1. “Use the release_manager agent to assess the unreleased changes as a
+   release candidate.” Assessment is read-only and bound to the exact base
+   and head SHAs.
+2. “Use the release_manager agent to prepare the approved 0.x.y.” Preparation
+   requires an exact approved version and assessment ID, writes the single
+   bump commit on master, and does not authorize publication.
 3. “Use the release_manager agent to publish v0.x.y.” Publication requires a
    new explicit instruction naming the exact tag.
 
-The specialist does not merge the feature PR, create a second release PR,
-upload distributions directly, move an existing tag, or bypass
-`.github/workflows/release.yml` and PyPI Trusted Publishing.
+The specialist does not merge feature pull requests, upload distributions
+directly, move an existing tag, or bypass `.github/workflows/release.yml` and
+PyPI Trusted Publishing.
