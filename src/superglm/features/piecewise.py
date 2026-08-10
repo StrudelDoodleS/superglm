@@ -5,12 +5,22 @@ Continuous but deliberately not smooth.  Free joins are already a binned
 remaining cell of that lattice.  Every coefficient is the log-relativity of a
 knot against the base knot, so the summary row, the editor handle and the
 workbook cell are the same number.
+
+Hosted inside an ``OrderedCategorical`` (``basis=Piecewise(...)``) the same
+term runs on the LEVEL axis: breaks may be stated as band names, and
+``degrees=`` states a per-segment polynomial degree -- the classical grafted /
+segmented polynomial (Fuller 1969; Gallant & Fuller 1973, JASA 68:144-147)
+with the degree-0 plateau tail of Anderson & Nelson (1975, Biometrics
+31:303-318).  On the numeric axis both stay refused: the exported workbook is
+exact under linear interpolation only at degree 1, and band names have no
+numeric meaning.
 """
 
 from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -105,6 +115,80 @@ def _format_values(values: NDArray) -> str:
     return "[" + ", ".join(f"{float(v):.10g}" for v in np.asarray(values).ravel()) + "]"
 
 
+def _breaks_contain_names(breaks: Any) -> bool:
+    """Whether a breaks sequence states any break as a level name."""
+    if isinstance(breaks, int | np.integer):
+        return False
+    return any(isinstance(entry, str) for entry in breaks)
+
+
+def _validate_degrees(degrees: Sequence[int] | None, breaks: Any) -> tuple[int, ...] | None:
+    """Validate a ``degrees=`` declaration at construction time."""
+    if degrees is None:
+        return None
+    if isinstance(breaks, int | np.integer):
+        raise ValueError(
+            "Piecewise degrees= requires stated breaks: degrees are per-segment "
+            "statements, and int-mode breaks are placed from the data, so there "
+            "are no stated segments to attach them to."
+        )
+    items = list(degrees)
+    n_segments = len(list(breaks)) + 1
+    if len(items) != n_segments:
+        raise ValueError(
+            f"Piecewise degrees= must state one degree per segment: "
+            f"{len(list(breaks))} break(s) make {n_segments} segments, got "
+            f"{len(items)} degree(s)."
+        )
+    cleaned: list[int] = []
+    for d in items:
+        if isinstance(d, bool) or not isinstance(d, int | np.integer):
+            raise ValueError(f"Piecewise degrees must be integers >= 0, got {d!r}")
+        if d < 0:
+            raise ValueError(f"Piecewise degrees must be >= 0, got {int(d)}")
+        cleaned.append(int(d))
+    if all(d == 0 for d in cleaned):
+        raise ValueError(
+            "Piecewise degrees are all 0: every segment flat is a constant, "
+            "which the model intercept already carries. State at least one "
+            "non-flat segment, or drop the term."
+        )
+    adjacent_flat = [i for i in range(len(cleaned) - 1) if cleaned[i] == 0 and cleaned[i + 1] == 0]
+    if adjacent_flat:
+        i = adjacent_flat[0]
+        raise ValueError(
+            f"Piecewise degrees {cleaned} state consecutive flat segments "
+            f"({i} and {i + 1}): value continuity makes them one plateau, so the "
+            "break between them states no kink. Remove that break, or give one "
+            "side a degree."
+        )
+    return tuple(cleaned)
+
+
+@dataclass(frozen=True)
+class StructuralContrastRow:
+    """One reported structural contrast of a (possibly segmented) piecewise term.
+
+    ``kind == "slope_change"`` carries a contrast vector over the retained
+    columns whose value is the change of slope at the stated break --
+    the truncated-power coefficient of the fixed-knot spline parameterization,
+    whose t/Wald row is ordinary linear-model inference (Smith 1979,
+    Am. Statist. 33(2):57-62; the known-changeover case is Sprent 1961).
+
+    ``kind == "curvature"`` carries the retained column indices of one
+    segment's within-segment curvature freedoms (degree >= 2), tested jointly:
+    "is this stretch actually curved?".  Under C0 seams these are the only
+    honest per-segment questions -- the segments are coupled, so per-segment
+    orthogonal per-power z-statistics do not exist in this design.
+    """
+
+    kind: str  # "slope_change" | "curvature"
+    # Knot index of the break (slope_change) or segment index (curvature).
+    index: int
+    contrast: NDArray[np.float64] | None = None
+    column_indices: tuple[int, ...] = ()
+
+
 class Piecewise:
     """Continuous piecewise-linear feature on stated breakpoints.
 
@@ -128,6 +212,25 @@ class Piecewise:
         quantiles, so int mode can realise fewer breakpoints than requested; it
         warns rather than raising, because that outcome is the library's doing
         and not the caller's.
+
+        As the ``basis=`` of an :class:`OrderedCategorical` the breaks may
+        also be stated as BAND NAMES (``breaks=["Mi060", "Mi066"]``), resolved
+        to level positions when the ordered term is constructed; integer
+        positions on the level axis are the escape hatch.  On the numeric axis
+        a name has nothing to resolve against, so string breaks refuse at
+        ``build()``.
+    degrees : sequence of int, optional
+        One polynomial degree per segment (``len(breaks) + 1`` entries),
+        default all 1 -- the plain kinked line.  ``0`` states a flat segment
+        (the grouped/plateau tail); ``2`` and above add within-segment
+        curvature.  Seams stay value-continuous by construction (the grafted-
+        polynomial device: Gallant & Fuller 1973; plateau tails: Anderson &
+        Nelson 1975).  Legal only when this Piecewise is the ``basis=`` of an
+        :class:`OrderedCategorical`: there the export contract is one row per
+        band, so the table is exact at any degree, while on the numeric axis
+        the exported workbook is exact under linear interpolation only at
+        degree 1 -- a numeric-axis build with any degree != 1 refuses loudly.
+        Requires stated breaks (int-mode placement has no stated segments).
     base : float or {'most_exposed', 'first'}
         Reference knot, mirroring ``Categorical``.  ``'most_exposed'`` picks
         the knot carrying the largest hat-carried mass under the fit weights;
@@ -184,13 +287,14 @@ class Piecewise:
 
     def __init__(
         self,
-        breaks: Sequence[float] | int,
+        breaks: Sequence[float | str] | int,
         *,
         base: float | str = "most_exposed",
         strategy: str = "quantile",
         lower: float | None = None,
         upper: float | None = None,
         extrapolation: str = "clip",
+        degrees: Sequence[int] | None = None,
     ):
         # Validated here, not in build(): a typo'd mode must fail where it is
         # written.  The message mirrors Spline's for the same parameter.
@@ -203,7 +307,10 @@ class Piecewise:
         # in-range check are both false-negative on NaN), so a non-finite
         # break or bound would otherwise surface at build() as a low-level
         # rank/SVD failure with nothing pointing at the line that wrote it.
-        if not isinstance(breaks, int | np.integer):
+        # Name-mode breaks defer instead: a level name is resolved (and
+        # validated) against an OrderedCategorical's declared levels, and a
+        # numeric-axis build refuses it loudly before any arithmetic.
+        if not isinstance(breaks, int | np.integer) and not _breaks_contain_names(breaks):
             requested = np.asarray(breaks, dtype=np.float64).ravel()
             if not np.all(np.isfinite(requested)):
                 raise ValueError(
@@ -212,12 +319,17 @@ class Piecewise:
         for bound_name, bound in (("lower", lower), ("upper", upper)):
             if bound is not None and not np.isfinite(float(bound)):
                 raise ValueError(f"Piecewise {bound_name} must be finite, got {float(bound):.10g}.")
-        self.breaks = breaks
+        self.breaks = breaks if isinstance(breaks, int | np.integer) else list(breaks)
         self.base = base
         self.strategy = strategy
         self.lower = lower
         self.upper = upper
         self.extrapolation = extrapolation
+        self.degrees = _validate_degrees(degrees, breaks)
+        # Set by OrderedCategorical on ITS deep copy when this spec is hosted
+        # as an inner basis: the axis is then level positions 0..L-1, where
+        # name resolution has happened and per-segment degrees are table-exact.
+        self._on_level_axis = False
         # Fitted state, all resolved in build().
         self._knots: NDArray[np.float64] = np.empty(0, dtype=np.float64)
         self._base_index: int = 0
@@ -225,11 +337,45 @@ class Piecewise:
         self._non_base_indices: NDArray[np.intp] = np.empty(0, dtype=np.intp)
         self._strategy_actual: str = "explicit"
         self._n_breaks_requested: int | None = None
+        # Segmented (degrees != all-1) fitted structure; None on the legacy path.
+        self._seg_value_groups: list[NDArray[np.intp]] | None = None
+        self._seg_base_group: int = 0
+        self._seg_bubbles: list[tuple[int, int]] = []
+        self._seg_retained: NDArray[np.intp] | None = None
+
+    def __setstate__(self, state: dict) -> None:
+        # Pre-0.25 pickles predate degrees=/name-mode breaks; default the new
+        # state so a restored spec keeps transforming on the legacy path.
+        state = dict(state)
+        state.setdefault("degrees", None)
+        state.setdefault("_on_level_axis", False)
+        state.setdefault("_seg_value_groups", None)
+        state.setdefault("_seg_base_group", 0)
+        state.setdefault("_seg_bubbles", [])
+        state.setdefault("_seg_retained", None)
+        self.__dict__.update(state)
+
+    @property
+    def _degrees_active(self) -> bool:
+        """Whether any stated degree differs from 1 (the segmented build path).
+
+        ``degrees=[1, ..., 1]`` deliberately routes through the legacy hat
+        path: it states the default, and the default's basis is contractually
+        bit-identical to the un-stated form.
+        """
+        return self.degrees is not None and any(d != 1 for d in self.degrees)
 
     def __repr__(self) -> str:
         breaks = self.breaks
-        shown = breaks if isinstance(breaks, int | np.integer) else _format_values(breaks)
+        if isinstance(breaks, int | np.integer):
+            shown = str(breaks)
+        elif _breaks_contain_names(breaks):
+            shown = "[" + ", ".join(repr(entry) for entry in breaks) + "]"
+        else:
+            shown = _format_values(np.asarray(breaks, dtype=np.float64))
         head = f"Piecewise(breaks={shown}, base={self.base!r})"
+        if self.degrees is not None:
+            head = f"{head[:-1]}, degrees={list(self.degrees)})"
         if self._knots.size:
             ref = float(self._knots[self._base_index])
             return f"{head[:-1]}, {self._knots.size} knots, ref={ref:.10g})"
@@ -305,7 +451,96 @@ class Piecewise:
         ``J + 1`` subset that ``transform`` returns -- so that a handle exists
         at every knot, the base knot included.
         """
+        if self._degrees_active:
+            # Handle-per-knot recovery assumes a coefficient per knot, which a
+            # merged flat run and a curvature column both break.  Unreachable
+            # from shipped surfaces (a segmented term exists only inside an
+            # OrderedCategorical, whose editor display is level-based), so any
+            # future caller fails loudly rather than dragging wrong handles.
+            raise RuntimeError(
+                "Piecewise with per-segment degrees has no per-knot handle basis; "
+                "its columns are knot-value groups plus curvature columns."
+            )
         return self._hat_basis(_finite_x(x))
+
+    # ── segmented (degrees=) structure ───────────────────────────────
+
+    def _resolve_segmented_structure(self) -> None:
+        """Derive the segmented column structure from ``_knots``/``degrees``.
+
+        Runs after ``_resolve_base``, which fixed the base KNOT; here the base
+        COLUMN becomes the knot-value group containing it.  The structure is
+        the grafted-polynomial space (per-segment degrees, C0 seams) spanned in
+        a local form:
+
+        - one knot-value column per group of knots, where a maximal run of
+          consecutive degree-0 segments merges its knots into one group (the
+          plateau: the segment is flat because its endpoint values are one
+          coefficient);
+        - for each segment of degree d >= 2, columns ``u**p - u`` (p = 2..d,
+          ``u`` the within-segment coordinate), supported on that segment and
+          vanishing at both seams.
+
+        Every column is continuous and the curvature columns are zero at every
+        knot, so seams are value-continuous BY CONSTRUCTION and evaluating at
+        the knots still reads off the knot-value coefficients -- the same
+        span as the one-sided truncated-power spelling (Smith 1979), in a
+        better-conditioned local basis.
+        """
+        degrees = self.degrees
+        assert degrees is not None
+        n_knots = self._knots.size
+        if len(degrees) != n_knots - 1:
+            raise ValueError(
+                f"Piecewise degrees state {len(degrees)} segment(s) but the resolved "
+                f"knots make {n_knots - 1}."
+            )
+        groups: list[list[int]] = [[0]]
+        for segment, degree in enumerate(degrees):
+            right_knot = segment + 1
+            if degree == 0:
+                groups[-1].append(right_knot)
+            else:
+                groups.append([right_knot])
+        self._seg_value_groups = [np.asarray(g, dtype=np.intp) for g in groups]
+        knot_to_group = {int(k): gi for gi, g in enumerate(groups) for k in g}
+        self._seg_base_group = knot_to_group[int(self._base_index)]
+        self._seg_bubbles = [
+            (segment, power)
+            for segment, degree in enumerate(degrees)
+            for power in range(2, degree + 1)
+        ]
+        n_value = len(groups)
+        n_full = n_value + len(self._seg_bubbles)
+        retained = [j for j in range(n_value) if j != self._seg_base_group]
+        retained.extend(range(n_value, n_full))
+        self._seg_retained = np.asarray(retained, dtype=np.intp)
+
+    def _segmented_basis_full(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
+        """All segmented columns (knot-value groups first, then curvature).
+
+        *x* must already have the extrapolation policy applied; on the level
+        axis every value is in range, so the policy never binds anyway.
+        """
+        groups = self._seg_value_groups
+        assert groups is not None
+        H = self._hat_values(x)
+        cols = [H[:, g].sum(axis=1) for g in groups]
+        t = self._knots
+        for segment, power in self._seg_bubbles:
+            t0, t1 = float(t[segment]), float(t[segment + 1])
+            u = (x - t0) / (t1 - t0)
+            inside = (x >= t0) & (x <= t1)
+            cols.append(np.where(inside, u**power - u, 0.0))
+        return np.column_stack(cols)
+
+    def _segmented_transform(self, x: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Retained segmented columns under the extrapolation policy."""
+        self._require_fitted()
+        assert self._seg_retained is not None
+        t = self._knots
+        policy_x = self._policy_x(x, float(t[0]), float(t[-1]))
+        return self._segmented_basis_full(policy_x)[:, self._seg_retained]
 
     # ── knot, base and support resolution ────────────────────────────
 
@@ -637,6 +872,10 @@ class Piecewise:
         # Checking only the retained columns misses the very degeneracy this rule
         # was added for -- one distinct x per segment gives J+1 independent
         # retained columns that are still collinear with the intercept.
+        if self._degrees_active:
+            self._validate_segmented_rank(x, weights)
+            self._warn_thin_segments(t, seg_weight, tails)
+            return
         n_cols = self._non_base_indices.size
         if x.size <= _RANK_PROBE_MAX_FACTOR_ROWS:
             # The FACTOR, never the Gram, is the reliable rank object: this
@@ -674,6 +913,14 @@ class Piecewise:
         # failure mode most likely to reach production silently, and the weight
         # per segment is the diagnostic that tells an actuary which breakpoint
         # to move.
+        self._warn_thin_segments(t, seg_weight, tails)
+
+    @staticmethod
+    def _warn_thin_segments(
+        t: NDArray[np.float64],
+        seg_weight: NDArray[np.float64],
+        tails: str,
+    ) -> None:
         total = float(seg_weight.sum())
         thin = np.flatnonzero(seg_weight < _SMALL_SEGMENT_WEIGHT_FRACTION * total)
         if thin.size:
@@ -684,7 +931,55 @@ class Piecewise:
                 f"Per-segment weight over segments {_format_values(t)}: "
                 f"{_format_values(seg_weight)}.{tails}",
                 UserWarning,
-                stacklevel=3,
+                stacklevel=4,
+            )
+
+    def _validate_segmented_rank(
+        self,
+        x: NDArray[np.float64],
+        weights: NDArray[np.float64],
+    ) -> None:
+        """Segmented rule 10: refuse a degenerate segmented basis loudly.
+
+        Two layers, both refusals and never regularization (the Item A
+        discipline): a per-segment distinct-support count with a message that
+        names the starved segment and its degree, then an SVD rank probe on
+        the weighted FACTOR -- the driver-stable rank object this repository
+        standardises on -- over ALL segmented columns.  The knot-value groups
+        are a partition of unity, so the intercept is their row sum and full
+        column rank is exactly identifiability against the intercept, the same
+        argument as the legacy probe.  The row count is the distinct level
+        positions (<= the level count), far under the factor ceiling, so the
+        Gram fallback is never needed here.
+        """
+        degrees = self.degrees
+        assert degrees is not None
+        t = self._knots
+        for segment, degree in enumerate(degrees):
+            if degree < 2:
+                continue
+            inside = (x >= t[segment]) & (x <= t[segment + 1]) & (weights > 0.0)
+            n_distinct = int(np.unique(x[inside]).size)
+            if n_distinct < degree + 1:
+                raise ValueError(
+                    f"Piecewise segment [{t[segment]:.10g}, {t[segment + 1]:.10g}] states "
+                    f"degree {degree}, which needs at least {degree + 1} distinct "
+                    f"positions with positive weight in the segment; the data carry "
+                    f"{n_distinct}. Lower the degree or move the break."
+                )
+        B = self._segmented_basis_full(x)
+        scaled = np.sqrt(weights)[:, None] * B
+        rank = int(np.linalg.matrix_rank(scaled))
+        n_full = B.shape[1]
+        if rank < n_full:
+            assert self._seg_retained is not None
+            raise ValueError(
+                f"Piecewise segmented design is rank deficient against the intercept: "
+                f"rank {rank} of {n_full} ({self._seg_retained.size} retained column(s) "
+                f"plus the intercept they are identified against, deficiency "
+                f"{n_full - rank}). The stated degrees ask for more distinct positions "
+                f"than x supplies. Knots: {_format_values(t)}; degrees: "
+                f"{list(degrees)}."
             )
 
     # ── feature-spec contract ────────────────────────────────────────
@@ -704,7 +999,30 @@ class Piecewise:
         int-mode placement, (6b) breaks strictly inside, (7) base resolves to
         one knot, (8) no zero-mass knot, (9) no in-range empty segment, (10)
         full column rank against the intercept, (11) thin-segment warning.
+
+        Level-axis-only declarations refuse before any of that: band-name
+        breaks and per-segment ``degrees=`` exist only where an
+        ``OrderedCategorical`` hosts this spec as its ``basis=``.
         """
+        if not self._on_level_axis:
+            if _breaks_contain_names(self.breaks):
+                names = [entry for entry in self.breaks if isinstance(entry, str)]
+                raise ValueError(
+                    f"Piecewise breaks {names!r} are stated as band names, which only "
+                    "resolve against the declared levels of an OrderedCategorical "
+                    "(pass this spec as its basis=). On a numeric axis, state the "
+                    "breaks as numbers."
+                )
+            if self._degrees_active:
+                raise ValueError(
+                    f"Piecewise degrees={list(self.degrees or ())} on a numeric axis: "
+                    "per-segment degrees are only legal when this Piecewise is the "
+                    "basis= of an OrderedCategorical, where the export contract is "
+                    "one row per band and the table is exact at any degree. On a "
+                    "numeric axis the exported workbook is exact under linear "
+                    "interpolation only at degree 1; for smooth curvature use "
+                    "Spline, or the hinge composition documented in the guide."
+                )
         x = _finite_x(x)
         weights = _conforming_weights(sample_weight, x.size)
         x = self._resolve_knots(x, weights, sample_weight)
@@ -736,6 +1054,20 @@ class Piecewise:
         seg = self._segment_index(x_unique)
         frac = (x_unique - t[seg]) / (t[seg + 1] - t[seg])
         self._resolve_base(self._knot_mass(seg, frac, w_agg, signed=True))
+        if self._degrees_active:
+            self._resolve_segmented_structure()
+            self._validate_support(x_unique, seg, frac, w_agg)
+            assert self._seg_retained is not None
+            # Dense on purpose: the segmented path exists only on a level axis,
+            # where the distinct rows number at most the level count.
+            columns_dense = self._segmented_basis_full(x_unique)[:, self._seg_retained][inverse]
+            return GroupInfo(
+                columns=columns_dense,
+                n_cols=int(columns_dense.shape[1]),
+            )
+        self._seg_value_groups = None
+        self._seg_bubbles = []
+        self._seg_retained = None
         self._validate_support(x_unique, seg, frac, w_agg)
         # Emitted sparse (a hat row has at most two non-zeros) so the builder's
         # sparse branch can re-detect the repeated rows and store the design
@@ -778,10 +1110,15 @@ class Piecewise:
         return emitted
 
     def transform(self, x: NDArray) -> NDArray[np.float64]:
-        """Evaluate the identifiable ``J+1`` hat columns on new data.
+        """Evaluate the identifiable retained columns on new data.
 
-        Out-of-range x follows the term's ``extrapolation`` policy.
+        Out-of-range x follows the term's ``extrapolation`` policy.  On the
+        legacy (all-degree-1) path these are the ``J+1`` non-base hats; on the
+        segmented path, the non-base knot-value groups then the curvature
+        columns.
         """
+        if self._degrees_active:
+            return self._segmented_transform(_finite_x(x))
         return self._hat_basis(_finite_x(x))[:, self._non_base_indices]
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -793,6 +1130,8 @@ class Piecewise:
         """Coefficients -> per-knot relativities and derived segment slopes."""
         self._require_fitted()
         beta = np.asarray(beta, dtype=np.float64).ravel()
+        if self._degrees_active:
+            return self._reconstruct_segmented(beta)
         t = self._knots
         log_rel = np.zeros(t.size, dtype=np.float64)
         log_rel[self._non_base_indices] = beta
@@ -819,3 +1158,114 @@ class Piecewise:
             # whether the boundary slopes continue or the end values hold.
             "extrapolation": self.extrapolation,
         }
+
+    def _reconstruct_segmented(self, beta: NDArray[np.float64]) -> dict[str, Any]:
+        """Segmented reconstruct: a display grid dense enough for curvature.
+
+        Reachable only from an ``OrderedCategorical`` host, which overwrites
+        the relativities with base-shifted values and derives its own per-level
+        table; the keys here serve the shared curve-display contract ("x",
+        "log_relativity", "relativity") plus the knot bookkeeping.  Per-segment
+        slopes are deliberately absent: a curved segment has no single slope.
+        """
+        degrees = self.degrees
+        assert degrees is not None
+        t = self._knots
+        pieces = []
+        for segment, degree in enumerate(degrees):
+            n_pts = 2 if degree <= 1 else 25
+            pieces.append(np.linspace(float(t[segment]), float(t[segment + 1]), n_pts))
+        x_grid = np.unique(np.concatenate(pieces))
+        log_rel = self.score(x_grid, beta)
+        knot_log_rel = self.score(t, beta)
+        return {
+            "x": x_grid,
+            "knots": t.copy(),
+            "base_knot": float(t[self._base_index]),
+            "base_index": int(self._base_index),
+            "log_relativity": log_rel,
+            "relativity": np.exp(log_rel),
+            "knot_log_relativity": knot_log_rel,
+            "degrees": list(degrees),
+            "extrapolation": self.extrapolation,
+        }
+
+    # ── structural contrast rows (level-axis reporting) ──────────────
+
+    def ordered_structural_rows(self) -> list[StructuralContrastRow]:
+        """Structural contrasts of a fitted piecewise term, for summaries.
+
+        One slope-change contrast per stated break and one curvature family
+        per segment of degree >= 2.  This is the fixed-knot truncated-power
+        inference vocabulary: with the knots stated as inputs the design is
+        linear in every parameter, the slope change at a stated join is the
+        coefficient of its plus-function, and both hypotheses are ordinary
+        Wald/F tests (Smith 1979, "Splines as a useful and convenient
+        statistical tool", Am. Statist. 33(2):57-62; Sprent 1961 for the
+        known-changeover two-phase case).  Deliberately NOT per-segment
+        per-power z-rows: under C0 seams the segments share their joint
+        values, so within-segment orthogonal components are not free
+        parameters and that clean-z geometry does not exist here.
+
+        Contrast vectors are stated over the retained columns of
+        ``transform`` and are invariant to the base-column choice.
+        """
+        self._require_fitted()
+        t = self._knots
+        n_segments = t.size - 1
+        degrees = self.degrees if self.degrees is not None else (1,) * n_segments
+        if self._degrees_active:
+            groups = self._seg_value_groups
+            retained = self._seg_retained
+            bubbles = self._seg_bubbles
+            base_group = self._seg_base_group
+            assert groups is not None and retained is not None
+        else:
+            groups = [np.asarray([k], dtype=np.intp) for k in range(t.size)]
+            bubbles = []
+            base_group = int(self._base_index)
+            retained = np.asarray([g for g in range(t.size) if g != base_group], dtype=np.intp)
+        knot_to_group = {int(k): gi for gi, g in enumerate(groups) for k in g}
+        n_value = len(groups)
+        # Retained position of each full column (value groups then bubbles).
+        position_of = {int(full): pos for pos, full in enumerate(retained)}
+        bubble_position = {
+            (segment, power): position_of[n_value + i] for i, (segment, power) in enumerate(bubbles)
+        }
+
+        n_retained = len(position_of)
+
+        def add_value(c: NDArray[np.float64], knot: int, coefficient: float) -> None:
+            group = knot_to_group[knot]
+            if group != base_group:
+                c[position_of[group]] += coefficient
+
+        rows: list[StructuralContrastRow] = []
+        for k in range(1, t.size - 1):
+            c = np.zeros(n_retained, dtype=np.float64)
+            if degrees[k] > 0:
+                h = float(t[k + 1] - t[k])
+                add_value(c, k + 1, 1.0 / h)
+                add_value(c, k, -1.0 / h)
+                for segment, power in bubbles:
+                    if segment == k:
+                        # d/dx (u**p - u) at u=0 is -1/h for every p >= 2.
+                        c[bubble_position[(segment, power)]] += -1.0 / h
+            if degrees[k - 1] > 0:
+                h = float(t[k] - t[k - 1])
+                add_value(c, k, -1.0 / h)
+                add_value(c, k - 1, 1.0 / h)
+                for segment, power in bubbles:
+                    if segment == k - 1:
+                        # d/dx (u**p - u) at u=1 is (p - 1)/h; subtracted as
+                        # part of the left slope.
+                        c[bubble_position[(segment, power)]] -= (power - 1.0) / h
+            rows.append(StructuralContrastRow(kind="slope_change", index=k, contrast=c))
+        for segment, degree in enumerate(degrees):
+            if degree < 2:
+                continue
+            columns = tuple(bubble_position[(segment, power)] for power in range(2, degree + 1))
+            rows.append(
+                StructuralContrastRow(kind="curvature", index=segment, column_indices=columns)
+            )
+        return rows
