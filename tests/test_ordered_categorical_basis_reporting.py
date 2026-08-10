@@ -201,6 +201,47 @@ def test_workbook_reconstruction_is_exact_for_a_segmented_term() -> None:
     assert np.allclose(ratios, table_ratios, rtol=1e-12, atol=0.0)
 
 
+def test_grouped_display_curve_drops_bands_it_cannot_align() -> None:
+    """A grouped term's rebuilt display curve never carries foreign band arrays.
+
+    The pre-expansion curve of a hosted Piecewise is knot-grid-length, so
+    copying its se/ci onto the 200-point PCHIP rebuild produced a SmoothCurve
+    whose bands could not zip against x (observed: len(x)=200 against
+    len(se)=26). The rebuilt curve is display interpolation only: bands
+    survive exactly when the rebuilt grid equals the pre-expansion grid (the
+    common order= spline case), and the per-level SEs -- the rated quantities
+    -- stay expanded either way.
+    """
+    from superglm.features.grouping import collapse_levels
+
+    X, y = _frame()
+    data = X["band"].to_numpy(dtype=object)
+    groups = {"Mi001+Mi002": ["Mi001", "Mi002"]}
+    covered = {member for members in groups.values() for member in members}
+    for level in LEVELS:
+        if level not in covered:
+            groups[level] = [level]
+    grouping = collapse_levels(data, groups=groups, order=LEVELS)
+
+    def fitted_curve(basis):
+        spec = OrderedCategorical(order=LEVELS, basis=basis, grouping=grouping)
+        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+        model.fit(X, y)
+        inference = model.term_inference("band", with_se=True)
+        assert inference.se_log_relativity is not None
+        assert len(inference.se_log_relativity) == len(inference.levels)
+        return inference.smooth_curve
+
+    piecewise_curve = fitted_curve(Piecewise(breaks=["Mi004"], degrees=[2, 1]))
+    assert piecewise_curve.se_log_relativity is None
+    assert piecewise_curve.ci_lower is None
+    assert piecewise_curve.ci_upper is None
+
+    spline_curve = fitted_curve(Spline(kind="cr", n_knots=4))
+    assert spline_curve.se_log_relativity is not None
+    assert len(spline_curve.se_log_relativity) == len(spline_curve.x)
+
+
 def test_plateau_bands_share_one_table_row_value(segmented_model) -> None:
     relativities = segmented_model.relativities()["band"]
     tail = relativities.set_index("level").loc[["Mi007", "Mi008", "Mi009"], "relativity"]

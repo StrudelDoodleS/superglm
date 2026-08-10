@@ -242,14 +242,26 @@ def _expand_grouped_term(
             new_log_rel = curve.log_relativity
             new_rel = curve.relativity
 
+        # The pre-expansion band arrays belong to the pre-expansion grid, so
+        # they survive only when the rebuilt grid IS that grid -- true for the
+        # common order= spline case, where both are the same linspace over
+        # [0, 1]. Anywhere the grids differ, carrying them was wrong: for a
+        # values= spec whose grouped boundary moved the axis they were
+        # silently misaligned, and for a knot-length parametric curve they
+        # could not even zip against x. The rebuilt curve is display
+        # interpolation only, so it drops the bands rather than fake them;
+        # per-level SEs (the rated quantities) are expanded above and stay.
+        grids_align = np.array_equal(
+            np.asarray(curve.x, dtype=np.float64), np.asarray(new_x, dtype=np.float64)
+        )
         curve = SmoothCurve(
             x=new_x,
             log_relativity=new_log_rel,
             relativity=new_rel,
             level_x=expanded_level_x,
-            se_log_relativity=curve.se_log_relativity,
-            ci_lower=curve.ci_lower,
-            ci_upper=curve.ci_upper,
+            se_log_relativity=curve.se_log_relativity if grids_align else None,
+            ci_lower=curve.ci_lower if grids_align else None,
+            ci_upper=curve.ci_upper if grids_align else None,
         )
 
     # dataclasses.replace, not a hand-listed rebuild: every field this function
