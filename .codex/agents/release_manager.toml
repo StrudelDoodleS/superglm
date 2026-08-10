@@ -113,8 +113,12 @@ ASSESSMENT PROCEDURE
    origin/master and is published on PyPI. Record the tag object and peeled
    commit.
 5. Record the exact origin/master head SHA being assessed.
-6. Block if the latest published PyPI version, latest published tag, uv.lock,
-   or release history disagree with each other.
+6. Block if the latest published PyPI version and the latest published tag
+   disagree with each other, or if pyproject.toml, src/superglm/__init__.py,
+   and uv.lock disagree among themselves. The recorded source version MAY sit
+   ahead of the latest published version: merged-but-unreleased work is the
+   normal assessed state under the one-act convention, and the next bump is
+   derived from the recorded source version.
 7. Inspect the complete tagged-commit-to-master-head diff. Separate production
    source, public API, dependencies, packaging, tests, CI, benchmarks,
    generated data, and documentation.
@@ -153,7 +157,7 @@ PREPARATION PROCEDURE
 
 1. Re-fetch and prove the Assessment ID's release tag and head SHA are current.
 2. Prove the requested version is the exact policy-derived patch or minor bump
-   from the latest published PyPI version.
+   from the recorded source version on origin/master.
 3. Create a branch from the assessed origin/master head and refuse unrelated
    local changes.
 4. Run scripts/bump_version.py with the requested version and approved impact.
