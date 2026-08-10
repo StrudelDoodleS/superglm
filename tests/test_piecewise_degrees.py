@@ -56,6 +56,18 @@ def test_degrees_refuse_int_mode_breaks() -> None:
         Piecewise(breaks=3, degrees=[1, 1, 1, 1])
 
 
+def test_degrees_with_no_breaks_refuse_at_construction_advising_polynomial() -> None:
+    """One global polynomial segment is a Polynomial, and the error says so.
+
+    Before the refusal this constructed fine and died at build() with rule
+    2's "use Numeric() instead" -- wrong advice for the caller degrees=
+    exists for.
+    """
+    with pytest.raises(ValueError, match=r"Polynomial\(degree=d\)") as excinfo:
+        Piecewise(breaks=[], degrees=[2])
+    assert "basis=Polynomial" in str(excinfo.value)
+
+
 def test_degrees_all_zero_refused() -> None:
     with pytest.raises(ValueError, match="all 0"):
         Piecewise(breaks=[3.0], degrees=[0, 0])
