@@ -604,6 +604,28 @@ class TestOffsetAndExposure:
         outside = (x_values < spec._knots[0]) | (x_values > spec._knots[-1])
         assert int(np.count_nonzero(outside)) > 100
 
+    def test_offset_scoring_refuses_out_of_range_rows_under_error_mode(self):
+        """Silently clamping rows the model itself refuses is a wrong offset.
+
+        Under ``extrapolation='error'`` the model's ``score()`` raises on
+        out-of-range rows; ``term_offset_values`` manufacturing a clamped
+        offset for them would let ``refit_with_edited_offset`` rate exactly
+        the rows the term's stated policy excludes.  The refusal mirrors the
+        model's own message, tolerance included.
+        """
+        from superglm.editor.terms import term_offset_values
+
+        model, _ = _fitted("interior_base", extrapolation="error")
+        session = EditorSession.from_model(model, terms=["x"])
+        term = session.terms["x"]
+        spec = _spec(model)
+
+        boundary = np.array([float(spec._knots[0]), float(spec._knots[-1])])
+        assert term_offset_values(term, boundary).shape == (2,)
+        with pytest.raises(ValueError, match="outside the rated range") as excinfo:
+            term_offset_values(term, np.array([float(spec._knots[-1]) + 1.0]))
+        assert "extrapolation='error'" in str(excinfo.value)
+
     def test_the_exposure_layer_keeps_the_weight_behind_the_boundary_segments(self):
         """``np.histogram`` drops anything outside the outermost grid edge.
 
@@ -708,7 +730,11 @@ class TestPlotting:
 
     def test_the_single_term_matplotlib_plot_draws_the_curve(self):
         # The single-term path had its own fallback: a figure containing the
-        # text "Unknown term kind: 'piecewise'" and no curve.
+        # text "Unknown term kind: 'piecewise'" and no curve.  The curve is
+        # drawn on a dense display grid that contains every knot -- the CI
+        # band between knots is a quadratic form of the adjacent hats, not an
+        # interpolation of the knot limits, so the knot grid alone cannot
+        # carry the band.
         model, case = _fitted("interior_base")
         spec = _spec(model)
 
@@ -719,11 +745,21 @@ class TestPlotting:
         assert not any(ax.texts for ax in fig.axes)
         curves = [line for line in panels[0].lines if line.get_label() == "Relativity"]
         assert len(curves) == 1
-        assert_array_equal(curves[0].get_xdata(), spec._knots)
+        drawn_x = np.asarray(curves[0].get_xdata(), dtype=np.float64)
+        assert drawn_x.size > 50
+        assert np.all(np.isin(spec._knots, drawn_x))
+        # At the knots the drawn curve is the fitted relativity, exactly.
+        ti = model.term_inference("x")
+        drawn_y = np.asarray(curves[0].get_ydata(), dtype=np.float64)
+        knot_positions = np.searchsorted(drawn_x, spec._knots)
+        np.testing.assert_allclose(drawn_y[knot_positions], ti.relativity, rtol=1e-12, atol=0.0)
 
     def test_the_plot_data_payload_carries_the_knot_grid_and_a_density(self):
         # `_main_effect_density_dataframe` dispatches on the same kind tuple
         # and would fall through to `list(ti.levels)`, which is None here.
+        # The effect grid stays the knot vector -- it is the exact
+        # representation -- while the density gets an independent dense grid:
+        # a KDE sampled at as few as three knots can miss every mode.
         model, case = _fitted("interior_base")
         spec = _spec(model)
 
@@ -733,7 +769,21 @@ class TestPlotting:
         assert entry["term_kind"] == "piecewise"
         assert_array_equal(entry["effect"]["x"].to_numpy(), spec._knots)
         assert entry["density"] is not None
-        assert_array_equal(entry["density"]["x"].to_numpy(), spec._knots)
+        density_x = entry["density"]["x"].to_numpy(dtype=np.float64)
+        assert density_x.size > 50
+        assert density_x.min() == spec._knots[0]
+        assert density_x.max() == spec._knots[-1]
+
+    def test_the_exposure_density_is_dense_for_a_three_knot_term(self):
+        """codex: a 3-knot term fed the KDE exactly three evaluation points."""
+        case = make_case("interior_base")
+        model = SuperGLM(features={"x": Piecewise([50.0]), "region": Categorical(base="first")})
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        assert model._specs["x"]._knots.size == 3
+
+        payload = model.plot_data("x", X=case.X, sample_weight=case.sample_weight)
+
+        assert len(payload["terms"][0]["density"]) > 50
 
     def test_the_plotly_figure_draws_the_piecewise_curve(self):
         go = pytest.importorskip("plotly.graph_objects", reason="plotly is an optional extra")
@@ -742,15 +792,117 @@ class TestPlotting:
 
         fig = model.plot(engine="plotly", X=case.X, sample_weight=case.sample_weight)
 
-        traces = [
-            trace
-            for trace in fig.data
-            if isinstance(trace, go.Scatter)
-            and trace.x is not None
-            and len(trace.x) == spec._knots.size
-            and np.array_equal(np.asarray(trace.x, dtype=np.float64), spec._knots)
+        # Same display policy as matplotlib: traces live on a dense grid that
+        # contains every knot, and the effect trace passes through the fitted
+        # knot relativities exactly.
+        ti = model.term_inference("x")
+        knot_rel = np.asarray(ti.relativity, dtype=np.float64)
+        matched = []
+        for trace in fig.data:
+            if not isinstance(trace, go.Scatter) or trace.x is None or len(trace.x) <= 50:
+                continue
+            x_arr = np.asarray(trace.x, dtype=np.float64)
+            if not np.all(np.isin(spec._knots, x_arr)):
+                continue
+            y_arr = np.asarray(trace.y, dtype=np.float64)
+            positions = np.searchsorted(x_arr, spec._knots)
+            if positions.max() < y_arr.size and np.allclose(
+                y_arr[positions], knot_rel, rtol=1e-12, atol=0.0
+            ):
+                matched.append(trace)
+        assert matched, "no dense plotly trace passes through the fitted knot relativities"
+
+    def test_the_display_band_is_the_exact_quadratic_form_between_knots(self):
+        """codex: interpolating the knot CI endpoints misstates the band off-knot.
+
+        Constructed so the two MUST differ: strong negative covariance between
+        adjacent knots makes the true mid-segment SE far smaller than the
+        interpolated one.  The display helper has to match the direct
+        quadratic form ``var f(x) = h1^2 V11 + 2 h1 h2 V12 + h2^2 V22`` and
+        not the straight line between the knot SEs.
+        """
+        from scipy.stats import norm
+
+        from superglm.inference import TermInference
+        from superglm.plotting.common import piecewise_display_term
+
+        knots = np.array([0.0, 1.0, 2.0])
+        log_rel = np.array([0.0, 0.5, 1.0])
+        V = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 0.04, -0.038],
+                [0.0, -0.038, 0.04],
+            ]
+        )
+        se = np.sqrt(np.diag(V))
+        z = float(norm.ppf(0.975))
+        ti = TermInference(
+            name="x",
+            kind="piecewise",
+            active=True,
+            x=knots,
+            log_relativity=log_rel,
+            relativity=np.exp(log_rel),
+            se_log_relativity=se,
+            ci_lower=np.exp(log_rel - z * se),
+            ci_upper=np.exp(log_rel + z * se),
+            knot_covariance=V,
+        )
+
+        display = piecewise_display_term(ti, n_points=201)
+        j = int(np.argmin(np.abs(np.asarray(display.x) - 1.5)))
+        assert float(display.x[j]) == pytest.approx(1.5, abs=1e-12)
+
+        expected_var = 0.25 * V[1, 1] + 2 * 0.25 * V[1, 2] + 0.25 * V[2, 2]
+        expected_se = float(np.sqrt(expected_var))
+        assert float(display.se_log_relativity[j]) == pytest.approx(expected_se, rel=1e-12)
+        # The correct band really does differ from interpolating the knot SEs.
+        interpolated = float(np.interp(1.5, knots, se))
+        assert abs(expected_se - interpolated) > 0.1
+        # And the drawn limits are exp(log +- z * se) evaluated on the grid.
+        mid_log = float(np.interp(1.5, knots, log_rel))
+        assert float(display.ci_lower[j]) == pytest.approx(
+            float(np.exp(mid_log - z * expected_se)), rel=1e-12
+        )
+        assert float(display.ci_upper[j]) == pytest.approx(
+            float(np.exp(mid_log + z * expected_se)), rel=1e-12
+        )
+
+    def test_term_inference_carries_the_knot_covariance(self):
+        """The covariance that makes the exact band computable at plot time."""
+        model, _ = _fitted("interior_base")
+        spec = _spec(model)
+        ti = model.term_inference("x")
+
+        V = ti.knot_covariance
+        assert V is not None
+        assert V.shape == (spec._knots.size, spec._knots.size)
+        base = spec._base_index
+        assert np.all(V[base, :] == 0.0)
+        assert np.all(V[:, base] == 0.0)
+        np.testing.assert_allclose(V, V.T, rtol=0.0, atol=1e-18)
+        np.testing.assert_allclose(
+            np.sqrt(np.maximum(np.diag(V), 0.0)),
+            ti.se_log_relativity,
+            rtol=0.0,
+            atol=1e-15,
+        )
+
+    def test_the_matplotlib_band_edges_are_dense(self):
+        """The pointwise band and its edges follow the display grid."""
+        model, case = _fitted("interior_base")
+
+        fig = model.plot("x", X=case.X, sample_weight=case.sample_weight)
+
+        panels = [ax for ax in fig.axes if ax.get_title() == "x"]
+        assert panels[0].collections, "no filled CI band was drawn"
+        dense_dashed = [
+            line
+            for line in panels[0].lines
+            if line.get_linestyle() == "--" and len(line.get_xdata()) > 50
         ]
-        assert traces, "no plotly trace was drawn on the piecewise knot grid"
+        assert len(dense_dashed) >= 2, "CI edge lines still sit on the knot grid"
 
 
 # ══════════════════════════════════════════════════════════════════

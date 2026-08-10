@@ -684,6 +684,25 @@ class TestWorkbookExactness:
         assert np.count_nonzero(x < spec._knots[0]) > 50
         assert np.count_nonzero(x > spec._knots[-1]) > 50
 
+    def test_the_sheet_note_scopes_exactness_to_native_centering(self):
+        """The exactness claim is bounded where it is made.
+
+        Under ``centering="mean"`` every term's values are shifted by a
+        constant that is not transferred into the exported base relativity --
+        a pre-existing property of the mean-centered export shared by all
+        term types -- so the note states the claim's scope instead of letting
+        the workbook promise what that mode does not deliver.
+        """
+        model, case = _fit("interior_base")
+        payload = build_rating_table_payload(
+            model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
+        )
+        ws = _workbook_sheet(payload)
+        note = str(ws.cell(row=_NOTE_ROW, column=1).value)
+
+        assert "centering='native'" in note
+        assert "not folded into the base relativity" in note
+
     def test_the_block_is_three_columns_of_knots_relativities_and_logs(self):
         """Four columns would overwrite the neighbouring block on the fixed stride."""
         model, case = _fit("interior_base")

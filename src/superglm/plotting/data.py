@@ -212,6 +212,13 @@ def _main_effect_density_dataframe(
 
     if ti.kind in ("spline", "polynomial", "piecewise"):
         x_grid = np.asarray(ti.x, dtype=np.float64)
+        if ti.kind == "piecewise" and x_grid.size >= 2:
+            # A piecewise ti.x is the knot vector -- as few as three points --
+            # which is the right grid for coefficients but not for a density:
+            # a KDE sampled at the knots can miss every mode between them.
+            # Build an independent dense grid over the plotted domain, the
+            # same treatment the other continuous kinds get.
+            x_grid = np.linspace(float(x_grid[0]), float(x_grid[-1]), 200)
         x_vals = X.column_array(ti.name, dtype=np.float64)
         density = _exposure_kde(x_vals, sample_weight, x_grid)
         return pd.DataFrame({"x": x_grid, "density": density})

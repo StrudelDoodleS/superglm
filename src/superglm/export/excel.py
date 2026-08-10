@@ -165,6 +165,13 @@ def _piecewise_interpolation_note(table: pd.DataFrame, extrapolation: str) -> st
     silent discrepancy back into the tariff at exactly the rows -- the ones
     outside the rated range -- where nobody would look for it.
 
+    That exactness claim holds under ``centering="native"`` (the default
+    export).  Under ``centering="mean"`` every term's values are shifted by a
+    per-term constant that is not currently transferred into the exported
+    ``base_relativity`` -- a pre-existing property of the mean-centered export
+    shared by every term type, not a piecewise one -- so the note states the
+    scope rather than promising what that mode does not deliver.
+
     The out-of-range rule is the term's ``extrapolation`` parameter, and it is
     stated here rather than assumed because both directions exist in practice:
     holding flat beyond the outermost knots is the default (the library's
@@ -176,24 +183,45 @@ def _piecewise_interpolation_note(table: pd.DataFrame, extrapolation: str) -> st
     interpolate = (
         "Interpolate linearly on Log relativity (equivalently, geometrically on Relativity). "
     )
+    # Scope of the exactness claim, stated in the sheet itself: exact under
+    # the default centering='native' export; centering='mean' shifts every
+    # term by a constant the exported base relativity does not absorb.
+    scope = (
+        " Exact reproduction of the fitted model holds under the default "
+        "centering='native' export; under centering='mean' these values are "
+        "shifted by a per-term constant that is not folded into the base "
+        "relativity."
+    )
     if extrapolation == "extend":
         log_relativity = [float(value) for value in table["Log relativity"]]
         slope_low = (log_relativity[1] - log_relativity[0]) / (knots[1] - knots[0])
         slope_high = (log_relativity[-1] - log_relativity[-2]) / (knots[-1] - knots[-2])
-        return interpolate + (
-            "Beyond the tabulated range the boundary segments continue: "
-            f"below {knots[0]} use slope {slope_low}; "
-            f"above {knots[-1]} use slope {slope_high}."
+        return (
+            interpolate
+            + (
+                "Beyond the tabulated range the boundary segments continue: "
+                f"below {knots[0]} use slope {slope_low}; "
+                f"above {knots[-1]} use slope {slope_high}."
+            )
+            + scope
         )
     if extrapolation == "error":
-        return interpolate + (
-            f"Values outside [{knots[0]}, {knots[-1]}] are not rated: the model "
-            "refuses them (extrapolation='error')."
+        return (
+            interpolate
+            + (
+                f"Values outside [{knots[0]}, {knots[-1]}] are not rated: the model "
+                "refuses them (extrapolation='error')."
+            )
+            + scope
         )
-    return interpolate + (
-        "Beyond the tabulated range hold the end rows flat: "
-        f"below {knots[0]} use the {knots[0]} row; "
-        f"above {knots[-1]} use the {knots[-1]} row."
+    return (
+        interpolate
+        + (
+            "Beyond the tabulated range hold the end rows flat: "
+            f"below {knots[0]} use the {knots[0]} row; "
+            f"above {knots[-1]} use the {knots[-1]} row."
+        )
+        + scope
     )
 
 

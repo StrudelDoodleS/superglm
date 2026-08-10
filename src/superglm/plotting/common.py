@@ -154,6 +154,64 @@ def _exposure_kde(x_vals, sample_weight, grid, bw_factor=0.03):
     return density / density.max()  # normalise to [0, 1]
 
 
+def piecewise_display_term(ti, n_points: int = 200):
+    """Resample a piecewise ``TermInference`` onto a dense display grid.
+
+    The fitted log effect interpolates linearly between knots, but its
+    variance inside a segment is the quadratic form of BOTH adjacent hats
+    with their covariance -- ``var f(x) = h1^2 V11 + 2 h1 h2 V12 + h2^2 V22``
+    -- so neither the standard error nor the exponentiated limits interpolate
+    linearly between the knot values.  This evaluates the exact closed form
+    on a grid that includes every knot (the kinks stay kinks) and rebuilds
+    the CI from it; the centre curve becomes the true piecewise-exponential
+    on the response scale rather than chords between knot relativities.
+
+    A term whose band cannot be computed exactly (no ``knot_covariance``) is
+    returned unchanged: a knots-only band is honest, an interpolated one is
+    not.  Terms of any other kind pass through untouched.
+    """
+    from dataclasses import replace
+
+    from scipy.stats import norm
+
+    from superglm.inference._term_types import _safe_exp
+
+    if getattr(ti, "kind", None) != "piecewise" or ti.x is None or ti.log_relativity is None:
+        return ti
+    knots = np.asarray(ti.x, dtype=np.float64)
+    if knots.size < 2:
+        return ti
+    has_band = ti.ci_lower is not None or ti.se_log_relativity is not None
+    if has_band and ti.knot_covariance is None:
+        return ti
+
+    grid = np.unique(np.concatenate([knots, np.linspace(knots[0], knots[-1], n_points)]))
+    log_rel = np.interp(grid, knots, np.asarray(ti.log_relativity, dtype=np.float64))
+    se = ci_lo = ci_hi = None
+    if has_band:
+        V = np.asarray(ti.knot_covariance, dtype=np.float64)
+        seg = np.clip(np.searchsorted(knots, grid, side="right") - 1, 0, knots.size - 2)
+        h2 = (grid - knots[seg]) / (knots[seg + 1] - knots[seg])
+        h1 = 1.0 - h2
+        variance = (
+            h1 * h1 * V[seg, seg] + 2.0 * h1 * h2 * V[seg, seg + 1] + h2 * h2 * V[seg + 1, seg + 1]
+        )
+        se = np.sqrt(np.maximum(variance, 0.0))
+        z = float(norm.ppf(1.0 - ti.alpha / 2.0))
+        ci_lo = np.asarray(_safe_exp(log_rel - z * se))
+        ci_hi = np.asarray(_safe_exp(log_rel + z * se))
+
+    return replace(
+        ti,
+        x=grid,
+        log_relativity=log_rel,
+        relativity=np.asarray(_safe_exp(log_rel)),
+        se_log_relativity=se,
+        ci_lower=ci_lo,
+        ci_upper=ci_hi,
+    )
+
+
 def _kde_2d(
     x1_vals: NDArray,
     x2_vals: NDArray,

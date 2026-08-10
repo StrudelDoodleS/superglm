@@ -194,6 +194,13 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
     order in the segment width, worst mid-segment on the steepest segment.
     Emitting both, and stating the rule in the sheet, puts that choice in the
     consumer's hands instead of hiding it.
+
+    Exactness is scoped to ``centering="native"`` (the default).  Under
+    ``centering="mean"`` the term's values are shifted by a per-term constant
+    that the exported ``base_relativity`` does not currently absorb -- a
+    pre-existing property of the mean-centered export shared by every term
+    type -- so the workbook's block-times-base product reproduces the model
+    only in native centering, and the sheet note says so.
     """
     ti = model.term_inference(name, with_se=False, centering=centering)
     return RatingTableBlock(

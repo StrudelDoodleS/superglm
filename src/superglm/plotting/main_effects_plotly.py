@@ -34,6 +34,7 @@ from superglm.plotting.common import (
     _hex_to_rgba,
     _level_positions_with_specials,
     _ordered_level_spacing,
+    piecewise_display_term,
 )
 from superglm.plotting.group_display import (
     grouped_level_exposure,
@@ -625,6 +626,13 @@ def _add_term_traces(
     grouped_level_display: str,
 ) -> _XAxisConfig:
     """Append all traces for one term (response Y) and collect link variants."""
+
+    if ti.kind == "piecewise":
+        # Same display policy as the matplotlib route: the CI band between
+        # knots is the exact quadratic form of the adjacent hats, not a
+        # linear interpolation of the knot limits, and the density strip
+        # needs a dense grid rather than the knot vector.
+        ti = piecewise_display_term(ti)
 
     if ti.kind in ("spline", "polynomial", "piecewise"):
         _add_continuous_term_traces(
