@@ -107,6 +107,61 @@ validate out-of-fold or state the powers from the plan. The standardization is
 a main-effect property: interaction blocks built from polynomial margins are
 products of components and are not themselves weight-orthonormal.
 
+## Piecewise
+
+`Piecewise(breaks=[...])` fits a continuous kinked line on stated breakpoints:
+one coefficient per knot, each the log relativity of that knot against the
+base knot. Free joins are already a binned `Categorical` and smooth joins are
+already a `Spline`; this is the remaining cell — continuous, deliberately not
+smooth, with every kink a stated, testable input.
+
+```python
+Piecewise(breaks=[3000, 6000, 12000])   # stated kinks — the filed form
+Piecewise(breaks=4)                     # exploratory: weighted-quantile placement
+```
+
+Because the breaks are *inputs*, the design stays linear in every parameter
+and each per-knot Wald row is ordinary regression inference — none of the
+estimated-breakpoint machinery (Muggeo 2003, *Stat. Med.* 22:3055–3071) is
+needed, and none of its corrections apply.
+
+On the numeric axis a `Piecewise` is deliberately degree-1 only: the exported
+knot rows *are* the model under linear interpolation, so the workbook alone
+reproduces every prediction exactly. Any higher degree would break that
+workbook-alone contract, so a numeric-axis `degrees=` other than all-1 refuses
+loudly. Higher-degree shapes on a numeric axis belong to `Spline`, or to the
+composition below.
+
+### The hinge composition (curvature plus a stated corner)
+
+To combine a smooth body with a stated corner at `c` — the cap-then-flat and
+curve-then-straight shapes banded factors keep wanting — compose two terms on
+transformed columns instead of reaching for a segmented numeric basis:
+
+```python
+X = X.assign(
+    age_body=X["age"].clip(upper=60),
+    age_tail=X["age"].clip(lower=60),
+)
+model = SuperGLM(
+    family="poisson",
+    selection_penalty=0.0,
+    features={
+        "age_body": Spline(kind="cr", n_knots=6),   # smooth below the corner
+        "age_tail": Piecewise(breaks=[70]),         # kinked line above it
+    },
+)
+```
+
+Value continuity at `c` is structural (both terms are flat past their own
+range), the kink at `c` is an estimated, testable contrast, and the penalties
+stay block-separate. The device is the additive hinge basis of MARS —
+reflected pairs of one-sided truncated power functions (Friedman 1991,
+"Multivariate Adaptive Regression Splines", *Ann. Statist.* 19(1):1–67) —
+with the knot stated rather than searched. A C¹ seam between the blocks would
+need a cross-block constraint and is out of scope; if the join must be smooth,
+use one `Spline` with stated knots instead.
+
 ## Categorical
 
 Categoricals are one-hot encoded with a reference level. The entire factor is
@@ -164,20 +219,81 @@ OrderedCategorical(
 )
 ```
 
-`basis=Spline(...)` is the only configuration channel; omitting `basis` keeps
-the default P-spline (`kind="ps"`, `n_knots=5`). The legacy `basis="spline"`
-string, the spline shortcut arguments (`kind=`, `n_knots=`, `degree=`,
-`select=`, `penalty=`), and step smoothing with `basis="step"` were removed in
-0.24.0 — configure the smooth on `basis=Spline(...)`, or use `Categorical(...)`
+`basis=` is the only configuration channel and takes the shape itself — a
+`Spline(...)`, a `Piecewise(...)`, or a `Polynomial(...)` object; omitting
+`basis` keeps the default P-spline (`kind="ps"`, `n_knots=5`). The legacy
+`basis="spline"` string, the spline shortcut arguments (`kind=`, `n_knots=`,
+`degree=`, `select=`, `penalty=`), and step smoothing with `basis="step"` were
+removed in 0.24.0 — configure the shape on `basis=`, or use `Categorical(...)`
 for independent level effects.
 
-Inference follows the spline model, not a saturated categorical model. The
-summary reports one Wood-style whole-smooth p-value for the ordered term; its
-null hypothesis is that the smooth contributes no variation after centering.
-Per-level rows are base-relative effect estimates with standard errors and
-confidence intervals, but deliberately have no p-values or significance codes.
-Changing the reporting base therefore changes the displayed level contrasts,
-not the whole-smooth p-value.
+With `basis=Spline(...)`, inference follows the spline model, not a saturated
+categorical model. The summary reports one Wood-style whole-smooth p-value for
+the ordered term; its null hypothesis is that the smooth contributes no
+variation after centering. Per-level rows are base-relative effect estimates
+with standard errors and confidence intervals, but deliberately have no
+p-values or significance codes. Changing the reporting base therefore changes
+the displayed level contrasts, not the whole-smooth p-value.
+
+### Choosing the shape on a band axis
+
+Every option states structure in band vocabulary; pick by what you are
+prepared to defend:
+
+- **Smooth, with knots at stated bands** — `Spline(knots=["Mi060", "Mi066"])`.
+  A spline *is* the C¹ piecewise polynomial, so smooth-at-stated-breaks needs
+  no new device: knot names resolve to level positions, numeric entries stay
+  axis values.
+- **A corner you can test** — `Piecewise(breaks=["Mi060", "Mi066"])`. Stated
+  kinks, no smoothing penalty, one summary row per break answering "do I need
+  this kink?". Integer positions are the escape hatch for unnamed axes.
+- **No breaks, one global shape** — `Polynomial(powers=[1, 2])`: the classical
+  orthogonal ordinal contrasts (`contr.poly`'s device) on the level positions,
+  orthonormalized against the training exposure, one clean-z row per stated
+  power. Classical trend practice keeps lower-order contrasts under a
+  significant higher one (the hierarchical convention); `powers=` deliberately
+  allows non-contiguous subsets, each component individually in or out.
+- **Segmented curves** — `Piecewise(breaks=[...], degrees=[...])`, one degree
+  per segment: the classical grafted/segmented polynomial (Gallant & Fuller
+  1973, *JASA* 68:144–147) with value-continuous seams.
+- **A grouped tail** — degree `0`: the plateau model (Anderson & Nelson 1975,
+  *Biometrics* 31:303–318). `degrees=[2, 1, 0]` reads "curved, then straight,
+  then flat".
+
+```python
+mileage_bands = ["Mi006", "Mi030", "Mi060", "Mi090", "Mi120", "Mi180"]
+OrderedCategorical(
+    order=mileage_bands,
+    basis=Piecewise(breaks=["Mi060", "Mi120"], degrees=[2, 1, 0]),
+    specials=["MISSING"],
+)
+```
+
+The inner basis evaluates on level *positions* `0..L-1` (with `values=`, the
+values still set the order but not the spacing — band structure is
+positional). Rating-table export stays one row per band whatever the basis, so
+the workbook is exact at any degree — which is why per-segment `degrees=`
+exist here and are refused on the numeric axis. `Piecewise`'s `extrapolation`
+parameter is inert on a level axis (every level is in range by construction).
+
+For a segmented term the summary reports **structural contrasts**: one
+slope-change Wald row per stated break and one curvature row per segment of
+degree ≥ 2 — ordinary fixed-knot inference in the truncated-power
+parameterization (Smith 1979, *Am. Statist.* 33(2):57–62). There are
+deliberately no per-segment per-power z rows: with value-continuous seams the
+segments share their joint values, so within-segment orthogonal components
+are not free parameters and that clean-z geometry does not exist. The clean
+per-power z is exactly what `basis=Polynomial(...)` gives, because there the
+whole term is one orthogonal family.
+
+An editor collapse (or a `grouping=`) that merges a stated break level with a
+neighbour, or spans levels on both sides of one, refuses loudly naming the
+break — a break is a stated kink, and regrouping it is a spec change, not an
+edit. Grouping entirely within a segment stays allowed, and the named break
+follows its level to the new position. The same guard covers `Spline` knots
+given by name. Terms with a `Piecewise` or `Polynomial` basis cannot parent
+interactions and are deferred by interaction screening (the interaction
+machinery crosses a penalized marginal smooth).
 
 ### Free levels (`specials=`)
 
@@ -222,7 +338,8 @@ which the default path does. Expect small differences rather than none.
 A special must be present in the training data and carry positive weight (an
 all-zero indicator column, or one whose rows all have zero weight, has no
 identifiable coefficient), may not be the reporting `base=`, and may not be
-merged into a level group. `specials=` requires `basis=Spline(...)`;
+merged into a level group. `specials=` works with every `basis=` — the main
+block comes first and the unpenalized special block second, always;
 interactions and PSST screening on a term with specials are not supported yet
 and are reported as deferred rather than silently skipped.
 
