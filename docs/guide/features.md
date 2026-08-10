@@ -242,8 +242,8 @@ prepared to defend:
 
 - **Smooth, with knots at stated bands** — `Spline(knots=["Mi060", "Mi066"])`.
   A spline *is* the C¹ piecewise polynomial, so smooth-at-stated-breaks needs
-  no new device: knot names resolve to level positions, numeric entries stay
-  axis values.
+  no new device: each knot name resolves to the named level's *value* on the
+  smooth's axis, so names and numeric entries live on one scale.
 - **A corner you can test** — `Piecewise(breaks=["Mi060", "Mi066"])`. Stated
   kinks, no smoothing penalty, one summary row per break answering "do I need
   this kink?". Integer positions are the escape hatch for unnamed axes.
