@@ -378,10 +378,22 @@ class TestValidationRules:
         with pytest.raises(ValueError, match="base must be 'most_exposed'"):
             Piecewise([2.0], base="middle").build(np.linspace(0.0, 10.0, 11))
 
-    def test_rule_7_most_exposed_without_weights_falls_back_to_the_first_knot(self):
-        """Mirrors Categorical: with no exposure there is nothing to be most of."""
-        spec = _spec_on(np.linspace(0.0, 10.0, 11), [2.0, 5.0], lower=0.0, upper=10.0)
-        assert spec._base_index == 0
+    def test_rule_7_most_exposed_without_weights_picks_the_most_rows_knot(self):
+        """No weights means weights of one: hat-carried mass is the row count.
+
+        The model API always hands ``build()`` an explicit weight vector (ones
+        when the caller gave none), so a weights-absent fallback to the first
+        knot was unreachable through any fit and made the direct spec API
+        disagree with both the fitted behaviour and the documentation.
+        """
+        x = np.linspace(0.0, 10.0, 11)
+        spec = _spec_on(x, [2.0, 5.0], lower=0.0, upper=10.0)
+        mass = spec._raw_basis_matrix(x).sum(axis=0)
+        assert spec._base_index == int(np.argmax(mass))
+        assert spec._base_index != 0
+        ones = Piecewise([2.0, 5.0], lower=0.0, upper=10.0)
+        ones.build(x, sample_weight=np.ones(x.size))
+        assert ones._base_index == spec._base_index
 
     def test_rule_7_most_exposed_picks_the_heaviest_knot(self):
         x = np.concatenate([np.full(50, 5.0), np.array([0.0, 2.0, 10.0])])
@@ -508,6 +520,129 @@ class TestValidationRules:
     def test_rule_11_threshold_is_a_named_constant(self):
         assert _SMALL_SEGMENT_WEIGHT_FRACTION == 0.005
 
+    def test_non_finite_breaks_fail_at_construction(self):
+        """NaN passes every ordering comparison, so it must fail where it is written.
+
+        Left to build(), ``Piecewise([np.nan])`` passes the strict-order and
+        in-range checks (both comparisons are false on NaN) and surfaces as a
+        rank/SVD failure with nothing pointing at the constructor call.
+        """
+        with pytest.raises(ValueError, match="breaks must be finite"):
+            Piecewise([np.nan])
+        with pytest.raises(ValueError, match="breaks must be finite"):
+            Piecewise([1.0, np.inf, 2.0])
+
+    def test_non_finite_bounds_fail_at_construction(self):
+        """``lower=-inf`` passes ``lower < upper`` but makes every hat width infinite."""
+        with pytest.raises(ValueError, match="lower must be finite"):
+            Piecewise([2.0], lower=-np.inf)
+        with pytest.raises(ValueError, match="upper must be finite"):
+            Piecewise([2.0], upper=np.nan)
+
+
+class TestZeroWeightRows:
+    """A zero weight is zero replicated rows: predictable, but never geometry.
+
+    The stated rule is ``_spline_knots.knot_geometry_data``'s, and the spline
+    path already follows it; these tests hold ``Piecewise`` to the same
+    contract, mirroring ``test_spline_weight_geometry``.
+    """
+
+    def test_the_fit_is_identical_with_and_without_the_zero_weight_rows(self):
+        case = make_case("zero_weight_rows")
+        keep = case.sample_weight > 0.0
+        assert not np.all(keep), "fixture must actually carry zero-weight rows"
+
+        def fitted(X, y, w):
+            model = SuperGLM(
+                features={
+                    "x": Piecewise([25.0, 50.0, 75.0], base=50.0),
+                    "region": Categorical(base="first"),
+                },
+            )
+            model.fit(X, y, sample_weight=w)
+            return model
+
+        full = fitted(case.X, case.y, case.sample_weight)
+        dropped = fitted(
+            case.X.loc[keep].reset_index(drop=True),
+            case.y[keep],
+            case.sample_weight[keep],
+        )
+
+        np.testing.assert_array_equal(full._specs["x"]._knots, dropped._specs["x"]._knots)
+        assert full._specs["x"]._base_index == dropped._specs["x"]._base_index
+        np.testing.assert_allclose(
+            np.asarray(full.result.beta),
+            np.asarray(dropped.result.beta),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            full.predict(case.X), dropped.predict(case.X), rtol=1e-10, atol=0.0
+        )
+
+    def test_zero_weight_rows_remain_predictable(self):
+        """Out of geometry is not out of the model: their x still evaluates."""
+        case = make_case("zero_weight_rows")
+        model = SuperGLM(features={"x": case.spec, "region": Categorical(base="first")})
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        spec = model._specs["x"]
+
+        outside = np.array([-30.0, 250.0])
+        # Under the default clip policy the zero-weight tails group onto the
+        # boundary knots, exactly like any other out-of-range prediction row.
+        np.testing.assert_array_equal(
+            spec.transform(outside),
+            spec.transform(np.array([spec._knots[0], spec._knots[-1]])),
+        )
+        preds = model.predict(case.X)
+        assert preds.shape == (len(case.X),)
+        assert np.all(np.isfinite(preds))
+
+    def test_a_zero_weight_outlier_does_not_widen_the_default_range(self):
+        """Regression mirroring the spline path: x=100, w=0 must not widen [-1, 1]."""
+        x = np.array([-1.0, -0.5, 0.0, 0.5, 1.0, 100.0])
+        w = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+
+        weighted = Piecewise([0.0])
+        weighted.build(x, sample_weight=w)
+        omitted = Piecewise([0.0])
+        omitted.build(x[w > 0.0], sample_weight=w[w > 0.0])
+
+        np.testing.assert_array_equal(weighted._knots, np.array([-1.0, 0.0, 1.0]))
+        np.testing.assert_array_equal(weighted._knots, omitted._knots)
+
+    def test_int_mode_places_quantiles_on_positive_weight_rows_only(self):
+        rng = np.random.default_rng(41)
+        x_pos = np.round(rng.uniform(0.0, 10.0, 400), 1)
+        x = np.concatenate([x_pos, np.array([500.0, 800.0])])
+        w = np.concatenate([np.ones(400), np.zeros(2)])
+
+        weighted = Piecewise(3)
+        weighted.build(x, sample_weight=w)
+        omitted = Piecewise(3)
+        omitted.build(x_pos, sample_weight=np.ones(400))
+
+        np.testing.assert_array_equal(weighted._knots, omitted._knots)
+
+    def test_negative_weights_are_refused_with_a_clear_message(self):
+        """A negative weight otherwise reaches sqrt in the rank probe as NaN."""
+        with pytest.raises(ValueError, match="non-negative sample_weight"):
+            Piecewise([2.0]).build(
+                np.linspace(0.0, 10.0, 11), sample_weight=np.linspace(-1.0, 9.0, 11)
+            )
+
+    def test_non_finite_weights_are_refused(self):
+        w = np.ones(11)
+        w[3] = np.nan
+        with pytest.raises(ValueError, match="finite sample_weight"):
+            Piecewise([2.0]).build(np.linspace(0.0, 10.0, 11), sample_weight=w)
+
+    def test_all_zero_weights_are_refused(self):
+        with pytest.raises(ValueError, match="positive sample_weight"):
+            Piecewise([2.0]).build(np.linspace(0.0, 10.0, 11), sample_weight=np.zeros(11))
+
 
 class TestSpecState:
     def test_transform_before_build_names_the_missing_step(self):
@@ -519,7 +654,10 @@ class TestSpecState:
         assert repr(spec) == "Piecewise(breaks=[1, 2], base='most_exposed')"
         spec.build(np.linspace(0.0, 3.0, 7))
         assert "4 knots" in repr(spec)
-        assert "ref=0" in repr(spec)
+        # Unweighted most_exposed is hat-carried row count: the interior knots
+        # each carry 2.0 of the 7 rows' mass against 1.5 at either boundary,
+        # and argmax breaks the tie toward the first of them.
+        assert "ref=1" in repr(spec)
 
     def test_a_refit_keeps_the_base_knot_it_already_chose(self):
         """A CV fold must not silently redefine what every coefficient means."""

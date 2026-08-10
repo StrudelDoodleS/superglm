@@ -150,6 +150,34 @@ def many_knots() -> PiecewiseCase:
     return PiecewiseCase(X, y, w, Piecewise(breaks, base=48.0, lower=0.0, upper=112.0))
 
 
+def zero_weight_rows() -> PiecewiseCase:
+    """Zero-exposure rows, two of them far outside the positive-weight range.
+
+    The library rule (``_spline_knots.knot_geometry_data``): a zero frequency
+    weight represents zero replicated rows, so it must not affect learned
+    geometry.  The far rows at x = -30 and x = 250 widen the default rated
+    range to [-30, 250] if the boundaries ever read zero-weight rows -- moving
+    both outer knots and with them every boundary value the term rates.  The
+    fit must be identical with these rows present and with them dropped; the
+    rows stay predictable (the default ``clip`` groups them onto the boundary
+    knots), they just carry no geometry.
+    """
+    x = _uniform_x(600, 0.0, 100.0, seed=27)
+    X, y, w = _frame(x, seed=28, kink=50.0)
+    x_zero = np.array([-30.0, 15.5, 62.5, 250.0])
+    zero_frame = pd.DataFrame(
+        {
+            "x": x_zero,
+            "region": np.array(["A", "B", "C", "B"]),
+            "density": np.array([0.25, 0.5, 0.75, 0.5]),
+        }
+    )
+    X = pd.concat([X, zero_frame], ignore_index=True)
+    y = np.concatenate([y, np.zeros(x_zero.size)])
+    w = np.concatenate([w, np.zeros(x_zero.size)])
+    return PiecewiseCase(X, y, w, Piecewise([25.0, 50.0, 75.0], base=50.0))
+
+
 CASES = {
     "interior_base": interior_base,
     "end_base_lower": end_base_lower,
@@ -159,6 +187,7 @@ CASES = {
     "pinned_narrower": pinned_narrower,
     "heaped_int_x": heaped_int_x,
     "many_knots": many_knots,
+    "zero_weight_rows": zero_weight_rows,
 }
 
 # Cases whose build() is expected to warn, and why.  Anything else warning is a

@@ -54,12 +54,38 @@ def _conforming_weights(
     sample_weight: NDArray | None,
     n_rows: int,
 ) -> NDArray[np.float64]:
-    """Return per-row weights as float64, defaulting to ones (part of rule 1)."""
+    """Return per-row weights as float64, defaulting to ones (part of rule 1).
+
+    Mirrors ``_spline_knots.knot_geometry_data``: a frequency weight counts
+    replicated rows, so a negative or non-finite count is refused here, where
+    the input is written -- otherwise a negative weight reaches ``np.sqrt`` in
+    the rule-10 rank probe and surfaces as a NaN or LinAlgError far from the
+    cause.  Zero weights are legal (zero replicated rows) and are excluded
+    from learned geometry in ``_resolve_knots``.
+    """
     if sample_weight is None:
         return np.ones(n_rows, dtype=np.float64)
     weights = np.asarray(sample_weight, dtype=np.float64).ravel()
     if weights.size != n_rows:
         raise ValueError(f"sample_weight must have length {n_rows}, got {weights.size}.")
+    if not np.all(np.isfinite(weights)):
+        n_bad = int(np.count_nonzero(~np.isfinite(weights)))
+        raise ValueError(
+            f"Piecewise requires finite sample_weight, got {n_bad} non-finite value(s)."
+        )
+    if np.any(weights < 0.0):
+        n_neg = int(np.count_nonzero(weights < 0.0))
+        raise ValueError(
+            f"Piecewise requires non-negative sample_weight, got {n_neg} negative "
+            "value(s). A frequency weight counts replicated rows, so a negative "
+            "count has no meaning here."
+        )
+    if not np.any(weights > 0.0):
+        raise ValueError(
+            "Piecewise requires at least one row with positive sample_weight: an "
+            "all-zero weight vector represents no replicated rows at all, so there "
+            "is no data to place knots on."
+        )
     return weights
 
 
@@ -92,9 +118,14 @@ class Piecewise:
         warns rather than raising, because that outcome is the library's doing
         and not the caller's.
     base : float or {'most_exposed', 'first'}
-        Reference knot, mirroring ``Categorical``.  ``'most_exposed'`` picks the
-        knot carrying the largest share of the weight; with no ``sample_weight``
-        it falls back to the first knot.  A float must equal exactly one knot.
+        Reference knot, mirroring ``Categorical``.  ``'most_exposed'`` picks
+        the knot carrying the largest hat-carried mass under the fit weights;
+        with no ``sample_weight`` the weights are ones, so it is the knot
+        carrying the most rows.  A float must equal exactly one knot.  The
+        resolved base is sticky: ``_base_knot`` persists across ``build()``
+        calls, so after a refit whose knot set changed, ``base='first'`` can
+        legitimately remain on a surviving interior knot rather than move to
+        the new first knot.
     strategy : {'quantile'}
         Placement rule, consulted only when *breaks* is an int.
     lower, upper : float, optional
@@ -156,6 +187,20 @@ class Piecewise:
             raise ValueError(
                 f"extrapolation must be one of ('clip', 'extend', 'error'), got {extrapolation!r}"
             )
+        # Finiteness is validated here for the same reason: NaN passes every
+        # ordering comparison (rule 4's strict-increase check and rule 6's
+        # in-range check are both false-negative on NaN), so a non-finite
+        # break or bound would otherwise surface at build() as a low-level
+        # rank/SVD failure with nothing pointing at the line that wrote it.
+        if not isinstance(breaks, int | np.integer):
+            requested = np.asarray(breaks, dtype=np.float64).ravel()
+            if not np.all(np.isfinite(requested)):
+                raise ValueError(
+                    f"Piecewise breaks must be finite, got {_format_values(requested)}."
+                )
+        for bound_name, bound in (("lower", lower), ("upper", upper)):
+            if bound is not None and not np.isfinite(float(bound)):
+                raise ValueError(f"Piecewise {bound_name} must be finite, got {float(bound):.10g}.")
         self.breaks = breaks
         self.base = base
         self.strategy = strategy
@@ -305,9 +350,16 @@ class Piecewise:
                 )
 
         # Rule 6a -- the rated range.  Resolved before int-mode placement, which
-        # needs it to know which rows are inside the range.
-        lo = float(x.min()) if self.lower is None else float(self.lower)
-        hi = float(x.max()) if self.upper is None else float(self.upper)
+        # needs it to know which rows are inside the range.  Learned geometry
+        # comes from positive-weight rows only (the documented
+        # ``knot_geometry_data`` rule: a zero frequency weight is zero
+        # replicated rows, so it must not widen the default boundaries or move
+        # data-adaptive knots).  The fixed rules downstream are weight-linear,
+        # so a zero-weight row already contributes nothing to them; it is only
+        # the defaults and int-mode placement that must be scoped here.
+        positive = weights > 0.0
+        lo = float(x[positive].min()) if self.lower is None else float(self.lower)
+        hi = float(x[positive].max()) if self.upper is None else float(self.upper)
         if not lo < hi:
             raise ValueError(
                 f"Piecewise needs lower < upper, got lower={lo:.10g}, upper={hi:.10g}."
@@ -320,10 +372,13 @@ class Piecewise:
         # before any downstream rule can report on rows the term will not rate.
         x = self._policy_x(x, lo, hi)
 
-        # Rule 5 -- int mode places breakpoints at exposure-weighted quantiles.
+        # Rule 5 -- int mode places breakpoints at exposure-weighted quantiles
+        # of the positive-weight rows: a zero-weight row must not pull a
+        # quantile, and snapping must not target an x value that only a
+        # zero-weight row exhibits.
         if int_mode:
             n_requested = int(breaks)
-            inside = (x >= lo) & (x <= hi)
+            inside = (x >= lo) & (x <= hi) & positive
             x_q = x[inside]
             w_q = None if sample_weight is None else weights[inside]
             placed = weighted_quantile_knots(x_q, n_requested, 1.0, sample_weight=w_q)
@@ -384,7 +439,6 @@ class Piecewise:
         self,
         H: NDArray[np.float64],
         weights: NDArray[np.float64],
-        sample_weight: NDArray | None,
     ) -> None:
         """Resolve the base knot and the retained column indices (rule 7)."""
         t = self._knots
@@ -402,15 +456,15 @@ class Piecewise:
                 if self.base == "first":
                     r = 0
                 elif self.base == "most_exposed":
-                    if sample_weight is None:
-                        # Mirror Categorical: with no weights there is no exposure
-                        # to be most of, so fall back to the first knot.
-                        r = 0
-                    else:
-                        # Signed mass, not |h|: the partition of unity makes
-                        # h_j(x_i) row i's share of knot j, and a tail row's
-                        # negative share is genuinely negative support.
-                        r = int(np.argmax(H.T @ weights))
+                    # Signed mass, not |h|: the partition of unity makes
+                    # h_j(x_i) row i's share of knot j, and a tail row's
+                    # negative share is genuinely negative support.  With no
+                    # sample_weight the weights are ones, so this is the knot
+                    # carrying the most rows -- the model API always passes
+                    # explicit weights (ones when the caller gave none), so a
+                    # weights-absent special case would be unreachable there
+                    # and would make the direct spec API disagree with it.
+                    r = int(np.argmax(H.T @ weights))
                 else:
                     raise ValueError(
                         f"base must be 'most_exposed', 'first', or a knot value, got "
@@ -573,7 +627,7 @@ class Piecewise:
         x_unique, inverse = np.unique(x, return_inverse=True)
         w_agg = np.bincount(inverse, weights=weights, minlength=x_unique.size)
         H_unique = self._hat_values(x_unique)
-        self._resolve_base(H_unique, w_agg, sample_weight)
+        self._resolve_base(H_unique, w_agg)
         self._validate_support(x_unique, H_unique, w_agg)
         # Emitted sparse (a hat row has at most two non-zeros) so the builder's
         # sparse branch can re-detect the repeated rows and store the design
