@@ -1,9 +1,10 @@
 # Releases
 
-SuperGLM uses deliberate `0.x.y` releases. A patch or minor feature pull
-request carries its own version bump so the behavior, migration impact, and
-release candidate are reviewed together. A `release:none` pull request leaves
-the version unchanged.
+SuperGLM uses deliberate `0.x.y` releases. Feature and fix pull requests never
+touch the version files (`pyproject.toml`'s version, `superglm.__version__`,
+`uv.lock`'s own pin) and never carry version-record commits. Each pull request
+declares an impact, and that declaration is advice to the next release, never
+a version change.
 
 The authoritative machine-operational policy is
 `.codex/agents/release_manager.toml`. It defines classification, evidence,
@@ -12,31 +13,36 @@ invoke that policy; it does not replace it.
 
 ## Impact summary
 
-- `release:none`: no independent packaged-runtime or public-contract impact;
-  do not change the version.
+- `release:none`: no independent packaged-runtime or public-contract impact.
 - `release:patch`: a compatible and limited fix, stability, performance,
-  memory, packaging, or implementation improvement; include the exact next
-  patch version in that pull request.
+  memory, packaging, or implementation improvement.
 - `release:minor`: a material capability, behavior, numerical semantics,
-  compatibility, dependency-floor, or migration change; include the exact next
-  minor version in that pull request.
+  compatibility, dependency-floor, or migration change.
 
 The code diff is authoritative. Impact declarations and labels are evidence,
-and ambiguous materiality blocks preparation for a human decision.
+and ambiguous materiality blocks preparation for a human decision. None of the
+three changes any version field: the exact version is chosen at release time.
 
-## One release-bearing pull request
+## One release, one act
 
-Only one release-bearing pull request may advance from a published version at
-a time. A concurrent patch or minor pull request must rebase after the preceding
-candidate is published and recompute its version. This coordination cost keeps
-each material change and its release metadata in one review.
+A release is one deliberate act after merging: a bump-only pull request whose
+single commit's message is the consolidated changelog since the previous
+release, rebase-merged under the master linear-history rule, then the tag
+`vX.Y.Z` bound to that rebased bump commit, then `release.yml` publishing
+through PyPI Trusted Publishing. The version file, the tag, and PyPI move
+together and can never disagree. Tags remain release-only, and a merge never
+authorizes a tag or publication.
 
-The pull-request base version must agree with the latest PyPI release before
-preparation. `release:none` work may merge without competing for a version, but
-a release tag still points to the commit on master produced by the reviewed
-release-bearing PR, not an arbitrary later master tip. The repository
-rebase-merges under a linear-history rule, so that commit is the rebased head;
-there is no merge commit to bind to.
+The one-act shape means the release assessor always works from merged history:
+the impact of everything since the last published tag is reconstructed from
+the `release-tag..master-head` diff, taking the highest declared-and-verified
+impact. The previous convention argued the opposite — that a catch-up release
+"is the recovery, not an alternative route", precisely because reconstructing
+materiality from merged history costs the reviewer the original diff. That
+position is reversed here, deliberately: the reconstruction cost is accepted
+in exchange for never minting phantom versions on master, and it is mitigated
+by the advisory impact declaration every pull request still makes at review
+time, when the diff is in front of the reviewer.
 
 ## Version history notes
 
@@ -59,51 +65,52 @@ identity is matched against the spelling in the column. Both are material, and
 neither declared an impact or carried a version bump, so master reached three
 publishable changes while still reading `0.18.0`.
 
-A catch-up release pull request is the recovery, not an alternative route. It
-is permitted only when master already carries unpublished material change, its
-diff touches nothing but the version markers, and no unpublished candidate
-occupies the version it claims. The cost it does not recover is the review
-itself: impact is judged against a diff that no longer contains the behavior,
-so the reviewer has to reconstruct materiality from merged history. Declare the
-impact on the pull request that makes the change.
+`0.22.0` through `0.24.0` were recorded on master under the former per-PR
+convention and never published. They remain as changelog commits — the version
+history their messages carry is real, but no tag or PyPI release exists for
+any of them. The next release consolidates everything since the last published
+tag; the numbers themselves are skipped, exactly as `0.16.2` was.
 
 ## Invoke the specialist
 
 The release specialist is a spawned Codex subagent. It does not replace the
 current agent and never starts automatically.
 
-Assessment of an exact open PR is read-only:
+Assessment of the unreleased changes on master is read-only:
 
 ```text
-Use the release_manager agent to assess PR #N as a release candidate.
+Use the release_manager agent to assess the unreleased changes as a release candidate.
 ```
 
-After approving the exact version and base/head-bound assessment:
+The assessment is bound to the latest published release and the exact
+`origin/master` head SHA; its authoritative diff is release-tag to master
+head. After approving the exact version and that SHA-bound assessment:
 
 ```text
-Use the release_manager agent to prepare the approved 0.x.y on PR #N.
+Use the release_manager agent to prepare the approved 0.x.y.
 ```
 
 The specialist updates versions through `scripts/bump_version.py`, refreshes
-`uv.lock`, validates the release candidate, and updates that existing PR. It
-does not merge the feature PR or create a second release PR.
+`uv.lock`, writes the single bump commit whose message is the consolidated
+changelog, and opens the bump-only pull request. It merges nothing and holds
+no tag or publication authority.
 
-After the feature PR is reviewed, merged, and green, publication requires a
-new exact instruction:
+After the bump-only pull request is reviewed, rebase-merged, and green,
+publication requires a new exact instruction:
 
 ```text
 Use the release_manager agent to publish v0.x.y and monitor PyPI deployment.
 ```
 
-The specialist pushes the approved annotated tag at the reviewed commit on master.
-The existing release workflow builds and verifies the wheel and sdist,
+The specialist pushes the approved annotated tag at the rebased bump commit on
+master. The existing release workflow builds and verifies the wheel and sdist,
 publishes them through PyPI Trusted Publishing, then creates the GitHub Release.
 Direct uploads, reused versions, moved tags, and inferred publication authority
 are forbidden.
 
 ## Failure handling
 
-A changed PR base or head invalidates its assessment. An inconsistent base
-version, an existing unpublished release candidate, ambiguous impact, partial
-publication, uncertain provenance, or an existing tag blocks automation and
-requires a human decision. Published corrections use a new patch version.
+An assessment expires as soon as `origin/master` moves. Ambiguous impact,
+partial publication, uncertain provenance, or an existing tag blocks
+automation and requires a human decision. Published corrections use a new
+patch version.

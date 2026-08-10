@@ -84,7 +84,10 @@ Use these three separate gates:
    and head SHAs.
 2. “Use the release_manager agent to prepare the approved 0.x.y.” Preparation
    requires an exact approved version and assessment ID, writes the single
-   bump commit on master, and does not authorize publication.
+   bump commit via a bump-only pull request (the diff contains only that
+   commit), rebase-merged under the linear-history rule; the release tag
+   binds to the rebased bump commit on master. Preparation
+   does not authorize publication.
 3. “Use the release_manager agent to publish v0.x.y.” Publication requires a
    new explicit instruction naming the exact tag.
 
