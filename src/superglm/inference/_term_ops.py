@@ -320,7 +320,13 @@ def term_inference(
                     level_x=level_x,
                 )
 
-            spline_meta = _build_spline_metadata(inner) if inner is not None else None
+            # Spline-shaped metadata exists only for a spline inner basis; a
+            # Piecewise/Polynomial inner has no knot strategy or B-spline
+            # degree to report, and the editor treats a None here as
+            # "no spline metadata", which is exactly true.
+            from superglm.features.spline import _SplineBase
+
+            spline_meta = _build_spline_metadata(inner) if isinstance(inner, _SplineBase) else None
             # OrderedCategorical: base level already shifted to 0/1 — skip recentering
             ti_result = TermInference(
                 name=name,
