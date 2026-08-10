@@ -324,7 +324,12 @@ class SplineCategorical:
         groups: list[GroupInfo] = []
         for level in self._non_base:
             mask = x_cat == level
-            shared = dict(
+            # dict[str, Any]: a heterogeneous kwargs bag.  Left to inference
+            # the value type becomes a union, and splatting a union into
+            # GroupInfo makes the checker flag every parameter of the
+            # dataclass once per call site -- a diagnostic count that grows
+            # each time GroupInfo gains a field.
+            shared: dict[str, Any] = dict(
                 columns=None,
                 n_cols=n_cols,
                 penalty_matrix=omega,
