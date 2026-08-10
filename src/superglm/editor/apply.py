@@ -11,7 +11,10 @@ from numpy.typing import NDArray
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
-from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.ordered_categorical import (
+    _STEP_MODE_REMOVED_MESSAGE,
+    OrderedCategorical,
+)
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
@@ -153,10 +156,18 @@ def _apply_term_edit(model, term: EditableTerm) -> None:
     groups = _feature_groups(model, term.name)
 
     if isinstance(spec, OrderedCategorical):
-        if spec.basis == "spline":
-            _apply_ordered_spline_term(model, spec, groups, term)
-        else:
-            _apply_ordered_step_term(model, spec, groups, term)
+        if spec.basis != "spline":
+            # A pre-0.24 step-mode pickle is the only way to get here. It used
+            # to be patched through the one-hot geometry, which succeeds
+            # silently whenever the block widths happen to line up -- the model
+            # then carries edited coefficients under a basis that no longer
+            # exists. Refuse with the same migration sentence every other step
+            # path raises.
+            raise AttributeError(
+                f"Editable term {term.name!r} is a step-mode OrderedCategorical. "
+                f"{_STEP_MODE_REMOVED_MESSAGE}"
+            )
+        _apply_ordered_spline_term(model, spec, groups, term)
         return
 
     if isinstance(spec, Categorical):
@@ -331,28 +342,6 @@ def _apply_piecewise_term(
         )
     base_value = float(target[spec._base_index])
     beta_new = np.asarray(target[spec._non_base_indices] - base_value, dtype=np.float64)
-    _adjust_intercept(model, base_value)
-    _patch_beta_block(model, groups, beta_new)
-
-
-def _apply_ordered_step_term(
-    model,
-    spec: OrderedCategorical,
-    groups: list[GroupSlice],
-    term: EditableTerm,
-) -> None:
-    if term.levels is None:
-        raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
-    target = _level_target_map(term, spec)
-    base_value = float(target[str(spec._base_level)])
-    beta_orig = np.array(
-        [float(target[str(level)]) - base_value for level in spec._non_base],
-        dtype=np.float64,
-    )
-    if spec._R_inv is not None:
-        beta_new = np.linalg.lstsq(spec._R_inv, beta_orig, rcond=None)[0]
-    else:
-        beta_new = beta_orig
     _adjust_intercept(model, base_value)
     _patch_beta_block(model, groups, beta_new)
 

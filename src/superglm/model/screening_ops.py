@@ -295,8 +295,8 @@ def _deferral_reason(spec) -> str:
         # term that reached here without an inner spline.
         if spec.basis != "spline":
             return (
-                "step-mode OrderedCategorical is deferred: the deprecated one-hot "
-                "geometry has no marginal smooth to cross with"
+                "step-mode OrderedCategorical is deferred: the one-hot geometry, "
+                "removed in 0.24.0, has no marginal smooth to cross with"
             )
         return (
             "OrderedCategorical is deferred: no inner spline was built, so the term "

@@ -94,9 +94,11 @@ def test_naming_a_specials_term_in_candidates_raises_with_the_reason():
 def test_polynomial_is_reported_deferred_too():
     # FALSE TODAY: it was dropped silently -- the sweep returned no record
     # that a fitted main was skipped. (The step-mode OrderedCategorical case
-    # this test also covered died with step mode in 0.24.0; a pre-0.24 step
-    # pickle can no longer fit, so the deferral reporter's step branch is
-    # unreachable from a fitted model.)
+    # this test also covered can no longer be constructed, so it is not
+    # exercised here. The deferral reporter's step branch is still LIVE: a
+    # pre-0.24 model pickled AFTER fitting restores with its coefficients
+    # intact and never re-fits, so screen_interactions reaches the branch and
+    # reports the deferral instead of dying inside the margin build.)
     df, y = _specials_frame()
     df = df.assign(dens=np.linspace(0.0, 1.0, len(df)))
     model = SuperGLM(
