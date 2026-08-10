@@ -477,13 +477,13 @@ def add_interaction(
     if feat2 not in specs:
         raise ValueError(f"Parent feature not found: {feat2}")
 
-    # _spec_kind reads a step-mode OrderedCategorical as "categorical", which
-    # is right for its MAIN effect but wrong for an interaction parent: the
-    # deprecated one-hot geometry has no marginal smooth to cross with, and
-    # resolve_interaction_parent refuses it.  A specials term is refused for
-    # the same reason -- its free levels have no spline-axis position.  Without
-    # this the pair registers here and only fails much later, mid design-matrix
-    # build, after the caller has already committed a fit.
+    # An OrderedCategorical without an inner spline can only be a pre-0.24
+    # pickle of the removed step mode; every spec this version constructs has
+    # one.  It cannot parent an interaction -- one-hot geometry has no
+    # marginal smooth to cross with -- and a specials term is refused for the
+    # analogous reason: its free levels have no spline-axis position.  Refuse
+    # at registration; otherwise the pair only fails much later, mid
+    # design-matrix build, after the caller has already committed a fit.
     for parent in (feat1, feat2):
         spec = specs[parent]
         if isinstance(spec, OrderedCategorical) and (
@@ -491,9 +491,10 @@ def add_interaction(
         ):
             raise NotImplementedError(
                 f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} is an "
-                "OrderedCategorical with basis='step', which is deprecated and cannot "
-                "parent an interaction; use basis=Spline(...) for a smoothed ordinal "
-                "parent or a Categorical feature for unsmoothed level effects."
+                "OrderedCategorical without an inner spline -- a spec built before "
+                "step mode was removed in 0.24.0 -- and cannot parent an interaction; "
+                "rebuild it with basis=Spline(...) for a smoothed ordinal parent or "
+                "a Categorical feature for unsmoothed level effects."
             )
         if isinstance(spec, OrderedCategorical) and spec.has_specials:
             raise NotImplementedError(

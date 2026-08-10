@@ -164,10 +164,12 @@ OrderedCategorical(
 )
 ```
 
-The legacy `basis="spline"` and spline shortcut arguments such as `kind=` and
-`n_knots=` are deprecated; configure them on `basis=Spline(...)`. Step smoothing
-with `basis="step"` is also deprecated and will be removed. Use `Spline(...)`
-for smoothing or `Categorical(...)` for independent level effects.
+`basis=Spline(...)` is the only configuration channel; omitting `basis` keeps
+the default P-spline (`kind="ps"`, `n_knots=5`). The legacy `basis="spline"`
+string, the spline shortcut arguments (`kind=`, `n_knots=`, `degree=`,
+`select=`, `penalty=`), and step smoothing with `basis="step"` were removed in
+0.24.0 — configure the smooth on `basis=Spline(...)`, or use `Categorical(...)`
+for independent level effects.
 
 Inference follows the spline model, not a saturated categorical model. The
 summary reports one Wood-style whole-smooth p-value for the ordered term; its

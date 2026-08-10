@@ -10,6 +10,7 @@ from superglm import (
     Categorical,
     LevelGrouping,
     OrderedCategorical,
+    Spline,
     SuperGLM,
     collapse_levels,
 )
@@ -49,7 +50,7 @@ def fitted_model(sample_data):
     X, y, sample_weight, midpoints = sample_data
     model = SuperGLM(
         features={
-            "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+            "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3)),
             "region": Categorical(base="first"),
         },
     )
@@ -245,7 +246,9 @@ class TestFeatureC:
 
         X, y, sw, midpoints = sample_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sw)
         ti = model.term_inference("age_band")
@@ -260,7 +263,9 @@ class TestFeatureC:
         X, y, sw, midpoints = sample_data
         model = SuperGLM(
             features={
-                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3)
+                ),
                 "region": Categorical(base="first"),
             },
         )
@@ -284,7 +289,9 @@ class TestFeatureC:
         X, y, sw, midpoints = sample_data
         model = SuperGLM(
             features={
-                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3)
+                ),
                 "region": Categorical(base="first"),
             },
         )
@@ -292,17 +299,6 @@ class TestFeatureC:
         fig = model.plot(engine="plotly", X=X, sample_weight=sw, show_knots=False)
         knot_traces = [t for t in fig.data if getattr(t, "name", None) == "Interior knots"]
         assert len(knot_traces) == 0
-
-    def test_step_basis_no_spline_metadata(self, sample_data):
-        """T-C4: OrderedCategorical(basis='step') has ti.spline is None."""
-        X, y, sw, _ = sample_data
-        levels = ["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
-        model = SuperGLM(
-            features={"age_band": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit(X, y, sample_weight=sw)
-        ti = model.term_inference("age_band")
-        assert ti.spline is None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -394,7 +390,7 @@ class TestOrderedCategoricalGrouping:
         model = SuperGLM(
             features={
                 "age_band": OrderedCategorical(
-                    values=midpoints, basis="spline", n_knots=3, grouping=g
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3), grouping=g
                 ),
             },
         )
@@ -414,7 +410,7 @@ class TestOrderedCategoricalGrouping:
         model = SuperGLM(
             features={
                 "age_band": OrderedCategorical(
-                    values=midpoints, basis="spline", n_knots=3, grouping=g
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3), grouping=g
                 ),
             },
         )
@@ -439,7 +435,7 @@ class TestOrderedCategoricalGrouping:
         model = SuperGLM(
             features={
                 "age_band": OrderedCategorical(
-                    values=midpoints, basis="spline", n_knots=3, grouping=g
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3), grouping=g
                 ),
             },
         )
@@ -503,7 +499,7 @@ class TestGroupingPlot:
         model = SuperGLM(
             features={
                 "age_band": OrderedCategorical(
-                    values=midpoints, basis="spline", n_knots=3, grouping=g
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3), grouping=g
                 ),
                 "region": Categorical(base="first"),
             },

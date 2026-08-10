@@ -165,7 +165,9 @@ def editor_model(editor_frame):
             "x_poly": Polynomial(degree=2),
             "x_num": Numeric(),
             "region": Categorical(base="first"),
-            "band": OrderedCategorical(order=["low", "medium", "high"], basis="step", base="first"),
+            "band": OrderedCategorical(
+                order=["low", "medium", "high"], basis=Spline(kind="ps", n_knots=2), base="first"
+            ),
         },
     )
     model.fit(X, y)
@@ -2480,7 +2482,11 @@ def test_ordered_categorical_ungroup_rejects_non_contiguous_remainder():
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"band": OrderedCategorical(order=levels, basis="step", base="first")},
+        features={
+            "band": OrderedCategorical(
+                order=levels, basis=Spline(kind="ps", n_knots=3), base="first"
+            )
+        },
     )
     model.fit(X, y)
     session = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
@@ -2503,7 +2509,11 @@ def test_ordered_categorical_collapse_checks_fitted_order_after_display_reorder(
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"band": OrderedCategorical(order=levels, basis="step", base="first")},
+        features={
+            "band": OrderedCategorical(
+                order=levels, basis=Spline(kind="ps", n_knots=3), base="first"
+            )
+        },
     )
     model.fit(X, y)
     session = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
@@ -2868,7 +2878,11 @@ def test_ordered_integer_ungroup_pre_collapsed_model_refits_without_history():
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
-        features={"band": OrderedCategorical(order=levels, basis="step", base="first")},
+        features={
+            "band": OrderedCategorical(
+                order=levels, basis=Spline(kind="ps", n_knots=3), base="first"
+            )
+        },
     )
     model.fit(X, y)
     setup = EditorSession.from_model(model, terms=["band"], train_data=(X, y, None))
@@ -4297,7 +4311,7 @@ def test_ordered_categorical_spline_level_edit_applies_to_model_copy():
         family="gaussian",
         selection_penalty=0.0,
         features={
-            "age_band": OrderedCategorical(order=levels, basis="spline", n_knots=3),
+            "age_band": OrderedCategorical(order=levels, basis=Spline(kind="ps", n_knots=3)),
             "x": Numeric(),
         },
     )
@@ -4332,7 +4346,7 @@ def test_ordered_categorical_spline_integer_level_edit_applies_to_model_copy():
         family="gaussian",
         selection_penalty=0.0,
         features={
-            "age_band": OrderedCategorical(order=levels, basis="spline", n_knots=3),
+            "age_band": OrderedCategorical(order=levels, basis=Spline(kind="ps", n_knots=3)),
             "x": Numeric(),
         },
     )
@@ -4415,7 +4429,9 @@ def test_load_rejects_same_shape_artifact_from_different_baseline(
             "x_poly": Polynomial(degree=2),
             "x_num": Numeric(),
             "region": Categorical(base="first"),
-            "band": OrderedCategorical(order=["low", "medium", "high"], basis="step", base="first"),
+            "band": OrderedCategorical(
+                order=["low", "medium", "high"], basis=Spline(kind="ps", n_knots=2), base="first"
+            ),
         },
     )
     shifted_y = y + 0.35 * np.sin(np.asarray(X["x_spline"], dtype=np.float64))
