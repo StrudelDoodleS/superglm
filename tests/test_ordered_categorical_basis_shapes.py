@@ -1,6 +1,6 @@
 """``OrderedCategorical(basis=Piecewise(...) | Polynomial(...))`` hosting.
 
-Pins the 0.25.0 inner-basis contract: band-name resolution (names to level
+Pins the inner-basis hosting contract: band-name resolution (names to level
 positions at construction, unknown names loud, integer positions as the
 escape hatch), the same vocabulary for ``Spline(knots=[names])``, the
 position axis 0..L-1, deep-copy isolation for every basis type, the
