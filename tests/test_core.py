@@ -223,6 +223,25 @@ class TestSplineBaseHierarchy:
         with pytest.raises(ValueError, match="non-empty"):
             Spline(knots=np.array([]))
 
+    @pytest.mark.parametrize(
+        "scalar", [0.5, np.float64(0.5), np.array(0.5)], ids=["float", "np-scalar", "0d-array"]
+    )
+    def test_scalar_knot_means_one_knot(self, scalar):
+        """A scalar knots= is one knot, exactly as ``knots=[scalar]``.
+
+        The named-knots probe iterates the argument, which briefly turned the
+        historically accepted scalar spelling (normalized by
+        ``np.asarray(...).ravel()``) into a construction TypeError.
+        """
+        x = np.linspace(0.0, 1.0, 300)
+        stated = Spline(kind="cr", knots=scalar)
+        listed = Spline(kind="cr", knots=[0.5])
+        assert stated.n_knots == 1
+        np.testing.assert_array_equal(stated._explicit_knots, listed._explicit_knots)
+        stated.build(x)
+        listed.build(x)
+        np.testing.assert_array_equal(stated._knots, listed._knots)
+
     def test_invalid_extrapolation_raises(self):
         """Unknown extrapolation policy should fail at construction time."""
         with pytest.raises(ValueError, match="extrapolation must be one of"):
