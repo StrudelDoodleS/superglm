@@ -1,5 +1,6 @@
 """The two plot backends must draw the same fitted curve for an OC term."""
 
+import warnings
 from dataclasses import replace
 
 import numpy as np
@@ -80,8 +81,14 @@ def single_group_collapsed_model():
     """Every level in one group: the degenerate one-marker display."""
     X, sample_weight, session = _collapse_session()
     session.select_levels("age_band", list(AGE_VALUES))
-    with pytest.warns(UserWarning, match="clamped"):
+    # The clone still clamps ``n_knots`` hard here -- five levels collapse to
+    # one -- but the clamp is the editor re-fitting the caller's own declared
+    # basis to the levels they just merged, so the internal clone stays quiet
+    # and only user-facing construction warns.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         collapsed = session.replace_with_collapsed_levels("age_band", method="fit")
+    assert not [w for w in caught if "clamped" in str(w.message)]
     return X, sample_weight, collapsed
 
 

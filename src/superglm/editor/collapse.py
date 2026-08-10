@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import re
+import warnings
 from typing import Any
 
 import numpy as np
@@ -364,13 +366,25 @@ def _ordered_spec_with_grouping(
     # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
     # loudly instead of silently cloning it onto the default P-spline.
     source = spec._spline_obj if spec._spline_obj is not None else spec._basis_spline
-    return OrderedCategorical(
-        values=values,
-        basis=copy.deepcopy(source),
-        base=native_base,
-        grouping=grouping,
-        specials=specials or None,
-    )
+    # Collapsing levels shrinks the level count, so the pristine spline's
+    # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
+    # clamps it. That clamp is the caller's own basis being re-fitted to the
+    # levels the caller just asked to merge, not a configuration mistake, and
+    # the user-facing construction already warned if the original declaration
+    # over-specified. Do not repeat it from an internal editor clone.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=re.escape("OrderedCategorical: Spline n_knots="),
+            category=UserWarning,
+        )
+        return OrderedCategorical(
+            values=values,
+            basis=copy.deepcopy(source),
+            base=native_base,
+            grouping=grouping,
+            specials=specials or None,
+        )
 
 
 def _ordered_original_values(

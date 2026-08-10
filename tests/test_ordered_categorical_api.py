@@ -24,6 +24,23 @@ from superglm.features.spline import PSpline
 LEVELS = [f"L{i}" for i in range(8)]
 
 
+def _ordered_frame(levels: list[str] | None = None) -> tuple[pd.DataFrame, np.ndarray]:
+    """A small ordinal frame with a monotone signal across the levels."""
+    levels = LEVELS if levels is None else levels
+    rng = np.random.default_rng(20260810)
+    n = 400
+    X = pd.DataFrame({"band": rng.choice(levels, n)})
+    position = {level: index / (len(levels) - 1) for index, level in enumerate(levels)}
+    y = 0.6 * np.array([position[band] for band in X["band"]]) + rng.normal(0.0, 0.1, n)
+    return X, y
+
+
+def _fit_ordered(spec: OrderedCategorical, X: pd.DataFrame, y: np.ndarray) -> SuperGLM:
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(X, y)
+    return model
+
+
 def test_omitted_basis_is_quiet_and_preserves_default_pspline() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -49,6 +66,33 @@ def test_canonical_rewrite_shape_reproduces_the_removed_shortcut_defaults() -> N
     assert spec._spline.degree == 3
     assert spec._spline.select is False
     assert spec._spline.penalty == "ssp"
+
+
+def test_canonical_rewrite_fits_bit_identically_to_the_default_path() -> None:
+    """The shape pin above compares constructor parameters only, so it cannot
+    observe a behaviour change: a rewrite that agreed on all five parameters
+    and still built a different design would pass it unchanged. Fit the same
+    data both ways -- the omitted-basis default against the explicit
+    ``Spline(kind="ps", n_knots=5)`` migration of the removed ``n_knots=5``
+    shortcut -- and require agreement to the BIT rather than to a tolerance.
+    A tolerance would absorb exactly the kind of design difference the shape
+    pin already cannot see."""
+    X, y = _ordered_frame()
+
+    default_path = _fit_ordered(OrderedCategorical(order=LEVELS), X, y)
+    rewritten = _fit_ordered(
+        OrderedCategorical(order=LEVELS, basis=Spline(kind="ps", n_knots=5)), X, y
+    )
+
+    beta_default = np.asarray(default_path._result.beta)
+    beta_rewritten = np.asarray(rewritten._result.beta)
+    assert beta_default.size > 0
+    assert np.max(np.abs(beta_default - beta_rewritten)) == 0.0
+    assert float(default_path._result.intercept) == float(rewritten._result.intercept)
+
+    predicted_default = np.asarray(default_path.predict(X), dtype=np.float64)
+    predicted_rewritten = np.asarray(rewritten.predict(X), dtype=np.float64)
+    assert np.max(np.abs(predicted_default - predicted_rewritten)) == 0.0
 
 
 @pytest.mark.parametrize("legacy", ["spline", "step"])
@@ -196,13 +240,14 @@ def test_documented_canonical_examples_do_not_warn_or_clamp(levels, basis) -> No
 # ── Pre-0.24 pickles ──────────────────────────────────────────────
 
 
-def _restored_step_spec() -> OrderedCategorical:
+def _restored_step_spec(levels: list[str] | None = None) -> OrderedCategorical:
     """What a pre-0.24 step-mode pickle restores.
 
     Unpickling never runs ``__init__`` — it updates the instance dict
     directly — so building the dict by hand and round-tripping it through
     pickle reproduces exactly what loading an old artifact does.
     """
+    levels = ["A", "B", "C"] if levels is None else list(levels)
     spec = OrderedCategorical.__new__(OrderedCategorical)
     spec.__dict__.update(
         {
@@ -220,16 +265,18 @@ def _restored_step_spec() -> OrderedCategorical:
             "_specials": [],
             "_special_raw": [],
             "_special_display": [],
-            "_smooth_levels": ["A", "B", "C"],
-            "_ordered_levels": ["A", "B", "C"],
-            "_level_to_value": {"A": 0.0, "B": 0.5, "C": 1.0},
+            "_smooth_levels": list(levels),
+            "_ordered_levels": list(levels),
+            "_level_to_value": {
+                level: index / (len(levels) - 1) for index, level in enumerate(levels)
+            },
             "_grouping": None,
             "_original_level_to_value": None,
-            "_known_levels": {"A", "B", "C"},
-            "_n_levels": 3,
-            "_base_level": "A",
-            "_non_base": ["B", "C"],
-            "_R_inv": np.eye(2),
+            "_known_levels": set(levels),
+            "_n_levels": len(levels),
+            "_base_level": levels[0],
+            "_non_base": list(levels[1:]),
+            "_R_inv": np.eye(len(levels) - 1),
         }
     )
     return pickle.loads(pickle.dumps(spec))
@@ -289,6 +336,97 @@ def test_step_mode_pickle_is_refused_by_the_editor_clone() -> None:
             base="first",
             data=np.asarray(["A", "B", "C"], dtype=object),
         )
+
+
+def test_step_mode_pickle_is_refused_by_the_editor_apply_path(monkeypatch) -> None:
+    """Editing a restored step-mode term must be refused at DISPATCH, before
+    any coefficient is written.
+
+    ``_apply_term_edit`` used to route every non-spline OrderedCategorical to a
+    one-hot patcher, which writes ``len(_non_base)`` coefficients into the
+    fitted block and therefore succeeds whenever the two widths coincide -- as
+    they do here by construction: eight levels give seven non-base effects, and
+    the fitted P-spline block (``n_knots`` clamped to 4, degree 3) is also seven
+    wide. So the edit landed on a P-spline block through the geometry of a basis
+    that no longer exists.
+
+    An ``AttributeError`` alone does not pin this: the removed path also
+    "raised", but only later and elsewhere, when ``_refresh_fit_statistics``
+    scored the edited copy and ``score`` hit ``_basis_spline`` -- by which point
+    the coefficients had already been rewritten. Spy on the write itself and
+    require that it never happened, and require the message to be the editor's
+    own refusal rather than the downstream scoring one.
+    """
+    from superglm.editor import apply as apply_module
+    from superglm.editor._types import EditableTerm
+    from superglm.editor.apply import apply_edits_to_model_copy
+
+    writes: list[tuple] = []
+    monkeypatch.setattr(
+        apply_module, "_patch_beta_block", lambda *args, **kwargs: writes.append(args)
+    )
+    monkeypatch.setattr(
+        apply_module, "_adjust_intercept", lambda *args, **kwargs: writes.append(args)
+    )
+
+    X, y = _ordered_frame()
+    model = _fit_ordered(OrderedCategorical(order=LEVELS, basis=Spline(kind="ps", n_knots=4)), X, y)
+    block = next(group for group in model._groups if group.feature_name == "band")
+    # The precondition that let the removed path complete instead of erroring
+    # on a width mismatch.
+    assert block.size == len(LEVELS) - 1
+
+    # Restoring a pre-0.24 artifact: the fitted state is intact and only the
+    # spec is the one step mode left behind.
+    model._specs["band"] = _restored_step_spec(LEVELS)
+    beta_before = np.asarray(model._result.beta).copy()
+
+    effect = np.linspace(0.0, 0.7, len(LEVELS))
+    term = EditableTerm(
+        name="band",
+        kind="categorical",
+        original_log_effect=effect,
+        edited_log_effect=effect + 0.25,
+        levels=list(LEVELS),
+        metadata={"term_type": "ordered categorical"},
+    )
+
+    with pytest.raises(AttributeError, match=r"[Ss]tep mode was removed") as excinfo:
+        apply_edits_to_model_copy(model, {"band": term})
+
+    assert writes == [], "the edit was applied before the refusal surfaced"
+    assert "Editable term 'band'" in str(excinfo.value)
+    assert np.array_equal(np.asarray(model._result.beta), beta_before)
+
+
+def test_collapse_clone_does_not_repeat_the_construction_clamp_warning() -> None:
+    """Collapsing merges levels, so the caller's own pristine ``n_knots``
+    routinely exceeds the collapsed ``n_levels - 1`` and the clone's
+    construction clamps it. That is the editor re-fitting the caller's declared
+    basis to the levels they just asked to merge, not a configuration mistake
+    they can act on, and the user-facing construction already warned if the
+    declaration over-specified. Suppress it on the internal clone only -- the
+    same treatment the step clone had before 0.24.0 removed it."""
+    with pytest.warns(UserWarning, match="clamped"):
+        spec = OrderedCategorical(order=["A", "B", "C"], basis=Spline(kind="ps", n_knots=3))
+    data = np.asarray(["A", "B", "C"], dtype=object)
+    spec.build(np.tile(data, 4))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        clone = _ordered_spec_with_grouping(
+            spec,
+            grouping=None,
+            selected_levels=[],
+            base="first",
+            data=data,
+        )
+
+    # Quiet, not unclamped: the suppression hides the message, not the clamp,
+    # and the clone still carries the caller's pristine declaration to re-clamp
+    # against its own level count next time.
+    assert clone._spline.n_knots == 2
+    assert clone._spline_obj.n_knots == 3
 
 
 def test_spline_mode_shortcut_pickle_still_transforms_and_clones() -> None:

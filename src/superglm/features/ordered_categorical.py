@@ -30,6 +30,17 @@ if TYPE_CHECKING:  # Spline imports this module at runtime; keep the cycle type-
     from superglm.features.spline import _SplineBase
 
 
+# One migration sentence for every path that refuses a step-mode spec. Shared
+# rather than repeated so the editor's refusal and the ``_basis_spline`` refusal
+# cannot drift into naming different replacements.
+_STEP_MODE_REMOVED_MESSAGE = (
+    "Step mode was removed in 0.24.0, so a spec built or pickled "
+    "before the removal cannot be used; rebuild it with "
+    "basis=Spline(...) for a smoothed ordinal term, or "
+    "Categorical(...) for independent level effects."
+)
+
+
 def _spline_kind_name(spline: Any) -> str:
     """Return the public factory kind for a spline specification."""
     from superglm.features.spline import (
@@ -578,17 +589,19 @@ class OrderedCategorical:
         if spline is None:
             raise AttributeError(
                 f"OrderedCategorical(basis={self.basis!r}) has no inner spline. "
-                "Step mode was removed in 0.24.0, so a spec built or pickled "
-                "before the removal cannot be used; rebuild it with "
-                "basis=Spline(...) for a smoothed ordinal term, or "
-                "Categorical(...) for independent level effects."
+                f"{_STEP_MODE_REMOVED_MESSAGE}"
             )
         return spline
 
     # ── Derived spline metadata ────────────────────────────────────
     # Read-only views of the inner spline's configuration. These were
     # constructor parameters until 0.24.0 and survive only as derived
-    # attributes; editor/collapse.py and the summary path read them.
+    # attributes. No superglm code path reads them any more --
+    # editor/collapse.py now clones ``_spline_obj``/``_basis_spline``, which is
+    # the pristine caller-supplied spline rather than these post-clamp views --
+    # so they are retained as stable public API for external readers
+    # (notebooks, reporting code, anything that introspected the old
+    # constructor parameters), not as an internal dependency.
 
     @property
     def kind(self) -> str:

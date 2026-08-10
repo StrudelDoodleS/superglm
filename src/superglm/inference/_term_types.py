@@ -39,7 +39,7 @@ class SmoothCurve:
     """Continuous fitted curve for plotting (not for rating tables).
 
     Attached to ``TermInference.smooth_curve`` for features like
-    ``OrderedCategorical(basis="spline")`` where the underlying variable is
+    ``OrderedCategorical(basis=Spline(...))`` where the underlying variable is
     categorical but a smooth curve is fit through the level midpoints.
     """
 

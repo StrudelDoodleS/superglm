@@ -241,7 +241,7 @@ class TestFeatureB:
 
 class TestFeatureC:
     def test_term_inference_spline_metadata(self, sample_data):
-        """T-C1: OrderedCategorical(basis='spline') term_inference has spline metadata."""
+        """T-C1: OrderedCategorical(basis=Spline(...)) term_inference has spline metadata."""
         from superglm.inference import SplineMetadata
 
         X, y, sw, midpoints = sample_data
