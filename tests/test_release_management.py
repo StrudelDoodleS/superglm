@@ -182,6 +182,12 @@ def test_release_manager_prepares_a_bump_only_pull_request() -> None:
         "consolidated changelog",
         "latest published PyPI version",
         "MASTER:<release-tag>..<head-sha>",
+        # The published state (tag, PyPI) and the tree state (pyproject,
+        # __init__, uv.lock) are separate consistency sets: the recorded
+        # source version sitting ahead of the published one is the normal
+        # assessed state, never a blocker.
+        "ahead of the latest published version",
+        "derived from the recorded source version",
     ):
         assert marker in policy
     # The per-PR preparation flow is retired: merged-but-unreleased work on
