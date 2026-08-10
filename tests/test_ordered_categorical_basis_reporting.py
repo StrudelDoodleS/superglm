@@ -268,15 +268,41 @@ def test_export_summary_group_kind_says_group_not_smooth() -> None:
 
 
 def test_specials_ride_alongside_each_basis_in_the_summary() -> None:
+    """The Fit column's word matches the whole-term classification.
+
+    A level carried by an unpenalized parametric block reported "smooth"
+    before the fix, while the whole-term row and the exported workbook said
+    the block is a plain group -- the word must match the model.
+    """
     X, y = _frame()
     rng = np.random.default_rng(9)
     X = X.copy()
     missing = rng.random(len(X)) < 0.08
     X.loc[missing, "band"] = "MISSING"
-    for basis in (Piecewise(breaks=["Mi004"]), Polynomial(powers=[1, 2])):
+    for basis, fit_word in (
+        (Piecewise(breaks=["Mi004"]), "piecewise"),
+        (Polynomial(powers=[1, 2]), "polynomial"),
+    ):
         spec = OrderedCategorical(order=LEVELS, basis=basis, specials=["MISSING"])
         model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
         model.fit(X, y)
         text = str(model.summary())
         assert "band[MISSING]" in text
         assert "free" in text
+        level_line = next(line for line in text.splitlines() if "band[Mi000]" in line)
+        assert fit_word in level_line
+        assert "smooth" not in level_line
+
+        # The editor-stale row builder carries the same vocabulary.
+        from superglm.editor.apply import apply_edits_to_model_copy
+        from superglm.editor.session import EditorSession
+
+        session = EditorSession.from_model(model)
+        term = session._require_term("band")
+        term.edited_log_effect = term.edited_log_effect + 0.01
+        edited = apply_edits_to_model_copy(model, {"band": term})
+        stale_line = next(
+            line for line in str(edited.summary()).splitlines() if "band[Mi000]" in line
+        )
+        assert fit_word in stale_line
+        assert "smooth" not in stale_line

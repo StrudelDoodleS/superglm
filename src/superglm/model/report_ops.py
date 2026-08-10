@@ -455,8 +455,11 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             # Mirrors coef_tables: match on the labels `reconstruct`
             # exported, not the string-coerced `spec._specials`, or a
             # non-str special (`specials=[9]` -> "9" vs level 9) reads
-            # "smooth" on the editor-stale path too.
+            # "smooth" on the editor-stale path too -- and the Fit word
+            # matches the whole-term classification (a parametric-hosted
+            # level is "piecewise"/"polynomial", never "smooth").
             special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+            main_fit = "smooth" if spec.basis_kind == "spline" else spec.basis_kind
             for level in raw["levels"]:
                 rows.append(
                     _CoefRow(
@@ -466,7 +469,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         level_fit=(
                             None
                             if special_labels is None
-                            else ("free" if level in special_labels else "smooth")
+                            else ("free" if level in special_labels else main_fit)
                         ),
                     )
                 )
