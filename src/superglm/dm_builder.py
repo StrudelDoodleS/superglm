@@ -870,6 +870,7 @@ def build_design_matrix(
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
     link = resolve_link(link_spec, distribution)
+    from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.piecewise import Piecewise
     from superglm.features.spline import _SplineBase
 
@@ -892,6 +893,15 @@ def build_design_matrix(
 
     for name in feature_order:
         spec = specs[name]
+        # The physical-rows rule reaches HOSTED model geometry too: an
+        # OrderedCategorical hands its weights to the inner basis, and a
+        # hosted Piecewise's int-mode placement and most_exposed base are as
+        # much model geometry as the numeric term's. The spec cannot know the
+        # family, so the builder stamps the rule here; the OC's own reporting
+        # base, its specials identifiability guards, and Polynomial
+        # standardization deliberately keep following sample_weight.
+        if isinstance(spec, OrderedCategorical):
+            spec._inner_geometry_physical_rows = geometry_weight is None
         x_col = X.column_array(name)
         spline_geometry_weight = (
             geometry_weight if isinstance(spec, _SplineBase | Piecewise) else sample_weight
