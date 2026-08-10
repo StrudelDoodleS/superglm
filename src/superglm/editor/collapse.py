@@ -13,7 +13,10 @@ from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
-from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.ordered_categorical import (
+    _CLAMP_WARNING_PREFIX,
+    OrderedCategorical,
+)
 
 _SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
 
@@ -365,7 +368,30 @@ def _ordered_spec_with_grouping(
     # always set on a spec this version constructed; the fallback covers a
     # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
     # loudly instead of silently cloning it onto the default P-spline.
-    source = spec._spline_obj if spec._spline_obj is not None else spec._basis_spline
+    #
+    # Read it with `getattr`, not `spec._spline_obj`: an attribute-less read
+    # only reaches the fallback when the key EXISTS and is None, so a pickle
+    # old enough to predate the attribute raised a bare AttributeError naming
+    # `_spline_obj` -- still loud, but without the migration sentence, and
+    # never reaching `_basis_spline` where that sentence lives.
+    spline_obj = getattr(spec, "_spline_obj", None)
+    if spline_obj is not None:
+        source = copy.deepcopy(spline_obj)
+    else:
+        # A shortcut-era pickle has no pristine declaration, only the inner
+        # spline -- and its `n_knots` was already clamped to the level count it
+        # was BUILT against. Cloning that alone keeps the reduced basis, which
+        # is wrong in exactly the direction ungrouping goes: back to MORE
+        # levels. The removed shortcut path rebuilt from the then-plain
+        # `n_knots` attribute, i.e. the count the caller REQUESTED, and that
+        # entry survives in the pickled __dict__ because the class property
+        # only shadows it. Recover it and let __init__ re-clamp against the new
+        # level count, so the clamp is still enforced -- just against the right
+        # number of levels.
+        source = copy.deepcopy(spec._basis_spline)
+        requested = spec.__dict__.get("n_knots")
+        if isinstance(requested, int | np.integer) and int(requested) > source.n_knots:
+            source.n_knots = int(requested)
     # Collapsing levels shrinks the level count, so the pristine spline's
     # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
     # clamps it. That clamp is the caller's own basis being re-fitted to the
@@ -375,12 +401,12 @@ def _ordered_spec_with_grouping(
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
-            message=re.escape("OrderedCategorical: Spline n_knots="),
+            message=re.escape(_CLAMP_WARNING_PREFIX),
             category=UserWarning,
         )
         return OrderedCategorical(
             values=values,
-            basis=copy.deepcopy(source),
+            basis=source,
             base=native_base,
             grouping=grouping,
             specials=specials or None,

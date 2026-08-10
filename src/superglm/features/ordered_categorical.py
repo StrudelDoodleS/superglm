@@ -15,6 +15,7 @@ the removal fails loudly at first use (see ``_basis_spline``).
 
 from __future__ import annotations
 
+import copy
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,11 @@ _STEP_MODE_REMOVED_MESSAGE = (
     "basis=Spline(...) for a smoothed ordinal term, or "
     "Categorical(...) for independent level effects."
 )
+
+# Stable leading clause of the knot-clamp warning. editor/collapse.py filters
+# the warning off its internal clone by matching this prefix, so the two must
+# move together -- hence one constant rather than two copies of the wording.
+_CLAMP_WARNING_PREFIX = "OrderedCategorical: n_knots exceeds the level count"
 
 
 def _spline_kind_name(spline: Any) -> str:
@@ -431,6 +437,10 @@ class OrderedCategorical:
             else:
                 order = [lev for lev in order if not _is_special(lev)]
 
+        # Whether the caller named a basis at all. Only the clamp warning reads
+        # it: on the default path there is no `Spline` in the caller's source to
+        # point at, so the remedy has to be spelled out rather than assumed.
+        basis_was_explicit = basis is not None
         if basis is None:
             # The historical default smooth, unchanged by the basis-only API.
             basis = Spline(kind="ps", n_knots=5, degree=3, penalty="ssp", select=False)
@@ -443,7 +453,14 @@ class OrderedCategorical:
             )
         elif not isinstance(basis, _SplineBase):
             raise ValueError(f"basis must be a Spline object or None, got {basis!r}")
-        self._spline_obj: _SplineBase = basis
+        # Deep-copy rather than alias: `_spline_obj` is the pristine declaration
+        # editor/collapse.py rebuilds from when a grouping is undone, so it has
+        # to stay pinned to what was passed HERE. Aliasing let a caller mutate
+        # their own Spline after construction and silently change what a later
+        # collapse cloned, while the fitted `_spline` -- already its own copy --
+        # kept the original geometry.
+        self._spline_obj: _SplineBase = copy.deepcopy(basis)
+        self._basis_was_explicit = basis_was_explicit
         # Vestigial constant. dm_builder, screening, report, export and editor
         # code still branch on this string; collapsing those readers is a
         # deferred cleanup. Kept as a plain instance attribute so that a
@@ -584,6 +601,20 @@ class OrderedCategorical:
         ``_spline``. Every numeric path (build, transform, score, reconstruct,
         set_reparametrisation) funnels through this property, so such a spec
         fails loudly at first use instead of scoring silently wrong.
+
+        The ``AttributeError`` TYPE IS LOAD-BEARING, and not in the direction
+        it looks. ``AttributeError`` is the one exception ``getattr(spec, name,
+        default)`` swallows, so a reader spelled that way takes its default on a
+        step pickle rather than refusing -- and ``hasattr(spec, "n_knots")``
+        already answers ``False`` here rather than raising. What makes the
+        fails-loud guarantee hold is therefore the completeness of the numeric
+        funnel above, NOT the exception type: a step spec dies at build /
+        transform / score before any such reader can matter. Do not "harden" a
+        reader by wrapping these properties in ``getattr`` with a default --
+        that is precisely how the hole reopens. A dedicated exception type
+        would make the refusal un-swallowable; that is deferred, and belongs
+        with the vestigial ``self.basis`` cleanup and its remaining readers
+        (``_spec_kind``, ``_deferral_reason``) rather than on its own.
         """
         spline = self._spline
         if spline is None:
@@ -662,14 +693,25 @@ class OrderedCategorical:
     def _init_spline(self) -> None:
         """Create the internal spline: a deep copy of ``basis`` that we own,
         with ``n_knots`` clamped to the level count."""
-        import copy
-
         self._spline = copy.deepcopy(self._spline_obj)
         if self._spline.n_knots > self._n_levels - 1:
             effective = self._n_levels - 1
+            requested = self._spline.n_knots
+            kind = _spline_kind_name(self._spline)
+            if self._basis_was_explicit:
+                remedy = f"Pass basis=Spline(kind={kind!r}, n_knots={effective}) instead."
+            else:
+                # `basis=` was omitted, so naming "the Spline you passed" would
+                # point at source the caller never wrote. Say where the number
+                # came from, then give them the declaration that silences it.
+                remedy = (
+                    f"No basis= was given, so this is the default "
+                    f"Spline(kind='ps', n_knots={requested}); pass "
+                    f"basis=Spline(kind='ps', n_knots={effective}) to declare it."
+                )
             warnings.warn(
-                f"OrderedCategorical: Spline n_knots={self._spline.n_knots} "
-                f"clamped to {effective} (n_levels - 1 = {self._n_levels - 1})",
+                f"{_CLAMP_WARNING_PREFIX}: n_knots={requested} clamped to "
+                f"{effective} (n_levels - 1). {remedy}",
                 UserWarning,
                 stacklevel=3,
             )
