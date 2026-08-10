@@ -1,6 +1,6 @@
 """Piecewise ``degrees=`` and name-mode breaks: the level-axis-only surface.
 
-Pins the 0.25.0 contract on the ``Piecewise`` class itself: ``degrees=``
+Pins the segmented-degrees contract on the ``Piecewise`` class itself: ``degrees=``
 validation at construction, the loud numeric-axis refusals (band-name breaks
 and any degree != 1 both exist only where an ``OrderedCategorical`` hosts the
 spec), the segmented C0 grafted-polynomial basis (structural continuity,
