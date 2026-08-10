@@ -1,6 +1,6 @@
 """Reporting and export for OrderedCategorical Piecewise/Polynomial bases.
 
-Pins the 0.25.0 reporting vocabulary: segmented terms report STRUCTURAL
+Pins the inner-basis reporting vocabulary: segmented terms report STRUCTURAL
 CONTRASTS -- one slope-change Wald row per stated break and one curvature row
 per degree>=2 segment, never per-segment per-power z rows (under C0 seams that
 geometry does not exist; the rows are ordinary fixed-knot inference, Smith

@@ -355,7 +355,7 @@ class Piecewise:
         self._seg_retained: NDArray[np.intp] | None = None
 
     def __setstate__(self, state: dict) -> None:
-        # Pre-0.25 pickles predate degrees=/name-mode breaks; default the new
+        # Pickles predating segmented degrees lack the new state; default it
         # state so a restored spec keeps transforming on the legacy path.
         state = dict(state)
         state.setdefault("degrees", None)
