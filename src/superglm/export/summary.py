@@ -275,10 +275,15 @@ def _source_spec(model: SuperGLM, groups: tuple[Any, ...]) -> Any:
 
 def _group_test_kind(model: SuperGLM, row, groups: tuple[Any, ...]) -> str:
     spec = _source_spec(model, groups)
-    if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
+    if isinstance(spec, OrderedCategorical) and spec.basis_kind == "spline":
         # Per-term marker: the term's whole-smooth row records that the term
         # contains free levels.  Which ones is recorded on the level rows.
         return "smooth+free" if spec.has_specials else "smooth"
+    if isinstance(spec, OrderedCategorical):
+        # Piecewise/Polynomial inner basis: an unpenalized parametric block
+        # under a plain Wald test -- "group", never "smooth", with the same
+        # free-level marker when specials ride along.
+        return "group+free" if spec.has_specials else "group"
     if isinstance(spec, _SplineBase):
         return "group" if row.subgroup_type == "linear" else "smooth"
     if isinstance(spec, SplineCategorical | TensorInteraction):

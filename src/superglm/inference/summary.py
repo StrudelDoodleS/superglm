@@ -141,6 +141,25 @@ _EDITOR_STALE_NOTE = (
 )
 
 
+# Group-test rows whose test is a plain Wald chi-square on an unpenalized
+# block, not Wood's smooth test: the numeric Piecewise whole-term row, the two
+# ordered parametric whole-term rows, and a curvature family inside one.
+_PARAMETRIC_GROUP_TEST_TYPES = frozenset(
+    {"piecewise", "ordered_piecewise", "ordered_polynomial", "curvature"}
+)
+
+# Display label per group-test subgroup type; anything unrecognised renders as
+# the historical "spline".
+_GROUP_TEST_KIND_LABELS = {
+    "linear": "linear",
+    "ordered_spline": "ordered spline",
+    "piecewise": "piecewise",
+    "ordered_piecewise": "ordered piecewise",
+    "ordered_polynomial": "ordered polynomial",
+    "curvature": "curvature",
+}
+
+
 def _is_smooth_group_row(row: _CoefRow) -> bool:
     """Whether a group row's df is smooth df and its p-value a Wood (2013) test.
 
@@ -150,9 +169,11 @@ def _is_smooth_group_row(row: _CoefRow) -> bool:
     renderer but has no penalty, no estimated smoothing parameter and a df fixed
     at ``J + 1``; its test is a plain Wald chi-square.  Counting it as smooth put
     its parametric df in the header's smooth bucket and printed the Wood
-    footnote over a model containing no smooth at all.
+    footnote over a model containing no smooth at all.  The ordered
+    piecewise/polynomial whole-term rows and curvature family rows are the same
+    shape: unpenalized blocks under plain Wald tests.
     """
-    return bool(row.is_spline) and row.subgroup_type != "piecewise"
+    return bool(row.is_spline) and row.subgroup_type not in _PARAMETRIC_GROUP_TEST_TYPES
 
 
 def _qs_diagnostic_label(row: _CoefRow) -> str:
@@ -538,14 +559,7 @@ class ModelSummary:
                     and row.wald_p is not None
                     and np.isfinite(row.wald_p)
                 )
-                if row.subgroup_type == "linear":
-                    kind = "linear"
-                elif row.subgroup_type == "ordered_spline":
-                    kind = "ordered spline"
-                elif row.subgroup_type == "piecewise":
-                    kind = "piecewise"
-                else:
-                    kind = "spline"
+                kind = _GROUP_TEST_KIND_LABELS.get(row.subgroup_type or "", "spline")
                 param_label = f"{row.n_params} params"
                 # Build detail line: edf, lambda, curve SE, monotone
                 detail_parts = []
@@ -940,14 +954,7 @@ class ModelSummary:
                     and row.wald_p is not None
                     and np.isfinite(row.wald_p)
                 )
-                if row.subgroup_type == "linear":
-                    kind = "linear"
-                elif row.subgroup_type == "ordered_spline":
-                    kind = "ordered spline"
-                elif row.subgroup_type == "piecewise":
-                    kind = "piecewise"
-                else:
-                    kind = "spline"
+                kind = _GROUP_TEST_KIND_LABELS.get(row.subgroup_type or "", "spline")
                 param_label = f"{row.n_params} params"
                 # Build detail suffix: edf, lambda, curve SE, monotone
                 detail_parts = []

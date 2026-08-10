@@ -409,7 +409,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                 sum(group_edf.get(fg.name, 0.0) for fg in smooth_groups) if group_edf else None
             )
             raw = spec.reconstruct(beta_combined)
-            if spec.basis == "spline":
+            if spec.basis_kind == "spline":
                 metadata = spline_group_enrichment(
                     smooth_groups[0].name,
                     spec._spline,
@@ -430,38 +430,46 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         **metadata,
                     )
                 )
-                # Mirrors coef_tables: match on the labels `reconstruct`
-                # exported, not the string-coerced `spec._specials`, or a
-                # non-str special (`specials=[9]` -> "9" vs level 9) reads
-                # "smooth" on the editor-stale path too.
-                special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
-                for level in raw["levels"]:
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.feature_name}[{level}]",
-                            group=g.feature_name,
-                            coef=float(raw["level_log_relativities"][level]),
-                            level_fit=(
-                                None
-                                if special_labels is None
-                                else ("free" if level in special_labels else "smooth")
-                            ),
-                        )
-                    )
             else:
-                row_idx = 0
-                for level in raw["levels"]:
-                    if level == spec._base_level:
-                        continue
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.feature_name}[{level}]",
-                            group=g.feature_name,
-                            coef=float(raw["log_relativities"][level]),
-                            edf=feature_edf if row_idx == 0 else None,
-                        )
+                # Piecewise/Polynomial inner basis: no smoothing parameter and
+                # no spline enrichment to attach -- attaching the global ridge
+                # as a "lambda" here is exactly the mislabelling the numeric
+                # Piecewise branch below exists to prevent. Statistics stay
+                # withheld on this whole path (editor-stale inference).
+                rows.append(
+                    _CoefRow(
+                        name=g.feature_name,
+                        group=g.feature_name,
+                        is_spline=True,
+                        n_params=len(beta_smooth),
+                        active=any(fg.name in selected_names for fg in smooth_groups),
+                        group_norm=float(np.linalg.norm(beta_smooth)),
+                        subgroup_type=(
+                            "ordered_piecewise"
+                            if spec.basis_kind == "piecewise"
+                            else "ordered_polynomial"
+                        ),
+                        edf=feature_edf,
                     )
-                    row_idx += 1
+                )
+            # Mirrors coef_tables: match on the labels `reconstruct`
+            # exported, not the string-coerced `spec._specials`, or a
+            # non-str special (`specials=[9]` -> "9" vs level 9) reads
+            # "smooth" on the editor-stale path too.
+            special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+            for level in raw["levels"]:
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.feature_name}[{level}]",
+                        group=g.feature_name,
+                        coef=float(raw["level_log_relativities"][level]),
+                        level_fit=(
+                            None
+                            if special_labels is None
+                            else ("free" if level in special_labels else "smooth")
+                        ),
+                    )
+                )
             continue
 
         if isinstance(spec, SplineCategorical | PolynomialCategorical):

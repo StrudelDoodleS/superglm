@@ -20,6 +20,99 @@ from superglm.solvers.rank import diagonal_of_square, selected_group_name_set
 from superglm.types import GroupSlice
 
 
+def _ordered_piecewise_structural_rows(
+    spec: Any,
+    feature_name: Any,
+    feature_label: str,
+    b_main: NDArray,
+    V_b_main: NDArray,
+    alpha: float,
+) -> list[_CoefRow]:
+    """Structural contrast rows for an OrderedCategorical Piecewise basis.
+
+    One slope-change Wald row per stated break and one curvature row per
+    segment of degree >= 2 (a single z row for one curvature freedom, a joint
+    chi-square family row for more). These are ordinary linear-model tests of
+    a fixed-knot design -- Smith (1979), Am. Statist. 33(2):57-62 -- and the
+    honest vocabulary under C0 seams, where per-segment orthogonal per-power
+    z-statistics do not exist (the segments share their joint values, so
+    within-segment components are not free parameters).
+    """
+    from scipy.stats import chi2 as chi2_dist
+
+    inner = spec._basis_spline
+    knots = inner._knots
+    levels = spec._smooth_levels
+
+    def _level_at(knot_index: int) -> str:
+        return str(levels[int(round(float(knots[knot_index])))])
+
+    rows: list[_CoefRow] = []
+    for structural in inner.ordered_structural_rows():
+        if structural.kind == "slope_change":
+            contrast = structural.contrast
+            estimate = float(contrast @ b_main)
+            se_val = float(np.sqrt(max(float(contrast @ V_b_main @ contrast), 0.0)))
+            z, p, ci_lo, ci_hi = _compute_coef_stats(estimate, se_val, alpha)
+            rows.append(
+                _CoefRow(
+                    name=f"{feature_name}[slope-change @ {_level_at(structural.index)}]",
+                    group=feature_label,
+                    coef=estimate,
+                    se=se_val,
+                    z=z,
+                    p=p,
+                    ci_low=ci_lo,
+                    ci_high=ci_hi,
+                )
+            )
+            continue
+        segment = structural.index
+        segment_label = f"{_level_at(segment)}..{_level_at(segment + 1)}"
+        indices = np.asarray(structural.column_indices, dtype=np.intp)
+        if indices.size == 1:
+            coef_val = float(b_main[indices[0]])
+            se_val = float(np.sqrt(max(float(V_b_main[indices[0], indices[0]]), 0.0)))
+            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+            rows.append(
+                _CoefRow(
+                    name=f"{feature_name}[curvature {segment_label}]",
+                    group=feature_label,
+                    coef=coef_val,
+                    se=se_val,
+                    z=z,
+                    p=p,
+                    ci_low=ci_lo,
+                    ci_high=ci_hi,
+                )
+            )
+            continue
+        b_family = b_main[indices]
+        V_family = V_b_main[np.ix_(indices, indices)]
+        stat = float("nan")
+        p_val = float("nan")
+        try:
+            stat = float(b_family @ np.linalg.solve(V_family, b_family))
+            p_val = 1.0 - chi2_dist.cdf(stat, float(indices.size))
+        except np.linalg.LinAlgError:
+            pass
+        rows.append(
+            _CoefRow(
+                name=f"{feature_name}[curvature {segment_label}]",
+                group=feature_label,
+                is_spline=True,
+                n_params=int(indices.size),
+                active=True,
+                group_norm=float(np.linalg.norm(b_family)),
+                wald_chi2=stat,
+                wald_p=p_val,
+                ref_df=float(indices.size),
+                subgroup_type="curvature",
+            )
+        )
+    return rows
+
+
 def build_coef_rows(
     *,
     groups: list[GroupSlice],
@@ -388,8 +481,9 @@ def build_coef_rows(
                 interaction_specs,
             )
             raw = spec.reconstruct(beta_combined)
+            inner_kind = spec.basis_kind
 
-            if spec.basis == "spline":
+            if inner_kind == "spline":
                 active_pairs = []
                 for feature_group in smooth_groups:
                     active_group = next(
@@ -468,65 +562,126 @@ def build_coef_rows(
                     )
                 )
 
-                levels = raw["levels"]
-                # `raw["special_levels"]`, not `spec._specials`: the latter is
-                # string-coerced, so for `specials=[9]` the free level is 9 in
-                # `levels` and "9" here, `9 in {"9"}` is False, and the Fit
-                # column silently reports the free level as "smooth".
-                special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
-                for i, level in enumerate(levels):
-                    coef_val = float(raw["level_log_relativities"][level])
-                    se_val: float | None = (
-                        float(se_levels[i]) if feature_active and i < len(se_levels) else None
-                    )
-                    level_ci_lo: float | None
-                    level_ci_hi: float | None
-                    if se_val is not None and np.isfinite(se_val) and se_val > 0.0:
-                        _, _, level_ci_lo, level_ci_hi = _compute_coef_stats(
-                            coef_val, se_val, alpha
-                        )
-                    elif se_val is not None and np.isfinite(se_val) and level == spec._base_level:
-                        level_ci_lo = level_ci_hi = coef_val
-                    else:
-                        se_val = None
-                        level_ci_lo = level_ci_hi = None
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.feature_name}[{level}]",
-                            group=feature_label,
-                            coef=coef_val,
-                            se=se_val,
-                            ci_low=level_ci_lo,
-                            ci_high=level_ci_hi,
-                            level_fit=(
-                                None
-                                if special_labels is None
-                                else ("free" if level in special_labels else "smooth")
-                            ),
-                        )
-                    )
             else:
-                row_idx = 0
-                for i, level in enumerate(raw["levels"]):
-                    if level == spec._base_level:
-                        continue
-                    coef_val = float(raw["log_relativities"][level])
-                    se_val = float(se_levels[i]) if i < len(se_levels) else 0.0
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.feature_name}[{level}]",
-                            group=feature_label,
-                            coef=coef_val,
-                            se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                            edf=feature_edf if row_idx == 0 else None,
+                # Piecewise/Polynomial inner basis: an UNPENALIZED parametric
+                # block, so the whole-term test is a plain Wald chi-square --
+                # deliberately not Wood's smooth test, because there is no
+                # smoothing parameter to have been estimated (the same
+                # reasoning as the numeric Piecewise branch below).
+                main_group = smooth_groups[0]
+                b_main = beta[main_group.sl]
+                se_main = se_dict[main_group.name]
+                stat = float("nan")
+                p_val = float("nan")
+                ref_df = float(main_group.size)
+                V_b_main: NDArray | None = None
+                if smooth_active:
+                    ag = next(
+                        (a for a in active_groups if a.name == main_group.name),
+                        None,
+                    )
+                    if ag is not None:
+                        V_b_main = _augmented_group_block(ag)
+                        from scipy.stats import chi2 as chi2_dist
+
+                        try:
+                            stat = float(b_main @ np.linalg.solve(V_b_main, b_main))
+                            p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
+                        except np.linalg.LinAlgError:
+                            pass
+                rows.append(
+                    _CoefRow(
+                        name=feature_label,
+                        group=feature_label,
+                        is_spline=True,
+                        n_params=main_group.size,
+                        active=smooth_active,
+                        group_norm=float(np.linalg.norm(b_main)) if smooth_active else 0.0,
+                        wald_chi2=stat if smooth_active else None,
+                        wald_p=p_val if smooth_active else None,
+                        ref_df=ref_df if smooth_active else None,
+                        subgroup_type=(
+                            "ordered_piecewise"
+                            if inner_kind == "piecewise"
+                            else "ordered_polynomial"
+                        ),
+                        edf=feature_edf,
+                    )
+                )
+                if inner_kind == "polynomial":
+                    # Per-power rows with the clean z: the main-effect property
+                    # of the exposure-orthonormal ordinal contrasts. Labels
+                    # follow the stated powers, exactly as the numeric
+                    # Polynomial branch does.
+                    powers = spec._basis_spline.powers
+                    for i in range(main_group.size):
+                        coef_val = float(b_main[i])
+                        se_val = float(se_main[i]) if len(se_main) > i else 0.0
+                        z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                        rows.append(
+                            _CoefRow(
+                                name=f"{g.feature_name}[P{powers[i]}]",
+                                group=feature_label,
+                                coef=coef_val,
+                                se=se_val,
+                                z=z,
+                                p=p,
+                                ci_low=ci_lo,
+                                ci_high=ci_hi,
+                            )
+                        )
+                elif V_b_main is not None:
+                    # Structural contrast rows -- the fixed-knot truncated-power
+                    # inference vocabulary (Smith 1979): one slope-change row
+                    # per stated break, one curvature family per degree>=2
+                    # segment. Deliberately NO per-segment per-power z rows:
+                    # under C0 seams that geometry does not exist.
+                    rows.extend(
+                        _ordered_piecewise_structural_rows(
+                            spec,
+                            g.feature_name,
+                            feature_label,
+                            b_main,
+                            V_b_main,
+                            alpha,
                         )
                     )
-                    row_idx += 1
+
+            levels = raw["levels"]
+            # `raw["special_levels"]`, not `spec._specials`: the latter is
+            # string-coerced, so for `specials=[9]` the free level is 9 in
+            # `levels` and "9" here, `9 in {"9"}` is False, and the Fit
+            # column silently reports the free level as "smooth".
+            special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+            for i, level in enumerate(levels):
+                coef_val = float(raw["level_log_relativities"][level])
+                se_val: float | None = (
+                    float(se_levels[i]) if feature_active and i < len(se_levels) else None
+                )
+                level_ci_lo: float | None
+                level_ci_hi: float | None
+                if se_val is not None and np.isfinite(se_val) and se_val > 0.0:
+                    _, _, level_ci_lo, level_ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                elif se_val is not None and np.isfinite(se_val) and level == spec._base_level:
+                    level_ci_lo = level_ci_hi = coef_val
+                else:
+                    se_val = None
+                    level_ci_lo = level_ci_hi = None
+                rows.append(
+                    _CoefRow(
+                        name=f"{g.feature_name}[{level}]",
+                        group=feature_label,
+                        coef=coef_val,
+                        se=se_val,
+                        ci_low=level_ci_lo,
+                        ci_high=level_ci_hi,
+                        level_fit=(
+                            None
+                            if special_labels is None
+                            else ("free" if level in special_labels else "smooth")
+                        ),
+                    )
+                )
             continue
 
         if isinstance(spec, _SplineBase):
