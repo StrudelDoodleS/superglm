@@ -133,6 +133,17 @@ def _validate_degrees(degrees: Sequence[int] | None, breaks: Any) -> tuple[int, 
             "are no stated segments to attach them to."
         )
     items = list(degrees)
+    if len(list(breaks)) == 0:
+        # Without the early refusal this falls through to build()'s rule 2,
+        # whose "use Numeric() instead" advice is wrong for the one caller
+        # degrees= exists for: a single global polynomial segment is a
+        # Polynomial, on either axis.
+        raise ValueError(
+            "Piecewise(breaks=[], degrees=...) states one global polynomial "
+            "segment with no breaks, which is a Polynomial: use "
+            "Polynomial(degree=d) on a numeric axis, or "
+            "OrderedCategorical(basis=Polynomial(...)) on a band axis."
+        )
     n_segments = len(list(breaks)) + 1
     if len(items) != n_segments:
         raise ValueError(
