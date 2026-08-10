@@ -164,25 +164,31 @@ def test_release_manager_policy_has_three_explicit_authority_modes() -> None:
         "release:minor",
         "needs-human-decision",
         "Never upload distributions directly",
-        "Never merge the assessed pull request",
+        "merges nothing",
         "Never move, overwrite, or recreate a published tag",
     ):
         assert marker in policy
 
 
-def test_release_manager_prepares_the_assessed_feature_pr() -> None:
+def test_release_manager_prepares_a_bump_only_pull_request() -> None:
     policy = (ROOT / ".codex/agents/release_manager.toml").read_text(encoding="utf-8")
 
     for marker in (
-        "specific open pull request",
-        "exact base SHA",
-        "exact head SHA",
-        "assessed feature branch",
-        "does not create a second release pull request",
-        "source version on the pull-request base",
+        "naming the unreleased changes",
+        "exact origin/master head SHA",
+        "release-tag..master-head",
+        "bump-only pull request",
+        "single bump commit",
+        "consolidated changelog",
         "latest published PyPI version",
+        "MASTER:<release-tag>..<head-sha>",
     ):
         assert marker in policy
+    # The per-PR preparation flow is retired: merged-but-unreleased work on
+    # master is the normal assessed state, and preparation targets master's
+    # head, never an open feature branch.
+    assert "assessed feature branch" not in policy
+    assert "second release pull request" not in policy
     assert "dedicated release worktree" not in policy
 
 
@@ -198,7 +204,7 @@ def test_release_manager_policy_requires_fresh_sha_bound_assessment() -> None:
     assert "uv lock" in policy
 
 
-def test_repository_guidance_tracks_release_bearing_prs_without_implicit_publish() -> None:
+def test_repository_guidance_pins_the_one_act_release_convention() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
@@ -207,20 +213,27 @@ def test_repository_guidance_tracks_release_bearing_prs_without_implicit_publish
     assert "release:none" in agents
     assert "release:patch" in agents
     assert "release:minor" in agents
-    assert "same pull request" in agents
-    assert "Only one release-bearing pull request" in agents
     assert "Only an explicit user request" in agents
     assert "does not authorize publication" in agents
+    # The one-act convention: declarations advise, versions move only in the
+    # single bump commit, and the tag travels with it.
+    assert "advice to the next release" in agents
+    assert "version-record commits" in agents
+    assert "single bump commit" in agents
+    assert "move together" in agents
+    assert "never authorizes a tag or publication" in agents
+    assert "Tags remain release-only" in agents
 
 
-def test_pull_request_template_records_impact_and_intended_version() -> None:
+def test_pull_request_template_records_impact_as_advice() -> None:
     template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
 
     for impact in ("release:none", "release:patch", "release:minor"):
         assert template.count(f"`{impact}`") == 1
     assert "- [ ]" not in template
     assert "Release impact: `replace-me`" in template
-    assert "Release version: `replace-me`" in template
+    assert "advice to the next release" in template
+    assert "chosen at release time" in template
     assert "Use `none` when no release is warranted" in template
     assert "Select exactly one" in template
     assert "Rationale" in template
@@ -233,10 +246,11 @@ def test_release_documentation_explains_release_bearing_invocations() -> None:
     mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
 
     assert ".codex/agents/release_manager.toml" in documentation
-    assert "assess PR #" in documentation
-    assert "prepare the approved 0.x.y on PR #" in documentation
+    assert "assess the unreleased changes" in documentation
+    assert "prepare the approved 0.x.y" in documentation
     assert "publish v0.x.y" in documentation
-    assert "does not merge the feature PR" in documentation
-    assert "one release-bearing pull request" in documentation
+    assert "merges nothing" in documentation
+    assert "one deliberate act" in documentation
+    assert "never minting phantom versions" in documentation
     assert "Trusted Publishing" in documentation
     assert "development/releases.md" in mkdocs
