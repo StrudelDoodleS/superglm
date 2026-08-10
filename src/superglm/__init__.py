@@ -44,7 +44,6 @@ from superglm.features.interaction import (
 )
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
-from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.random_effect import RandomEffect
 from superglm.features.spline import (
@@ -165,7 +164,6 @@ __all__ = [
     "LevelGrouping",
     "collapse_levels",
     "Numeric",
-    "Piecewise",
     "Polynomial",
     "SplineCategorical",
     "PolynomialCategorical",
@@ -226,4 +224,4 @@ __all__ = [
     "dispersion_test",
     "vuong_test",
 ]
-__version__ = "0.23.0"
+__version__ = "0.24.0"
