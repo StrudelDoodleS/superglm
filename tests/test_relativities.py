@@ -581,6 +581,23 @@ class TestPlotRelativity:
         self,
         collapsed_ordered_model,
     ):
+        """The collapsed labels ride on the TICKS and the hover, not on ``x``.
+
+        This fixture was a ``basis="step"`` OrderedCategorical until 0.24.0.
+        Step mode had no smooth curve, so the panel was a plain categorical one
+        whose ``x`` held the group labels themselves. A ``basis=Spline(...)``
+        term carries a smooth curve, and a curve cannot be drawn over a
+        categorical axis, so the panel now renders on the numeric level axis:
+        ``x`` carries the group positions and the labels move to ``ticktext``
+        and ``hovertext``. That is the same contract the matplotlib twin
+        (``test_ordered_categorical_plot_defaults_to_collapsed_group_display``)
+        has always pinned, via ``get_xticklabels``.
+
+        The display is still COLLAPSED, which is what this test is named for,
+        and pinning the positions as well as the labels is stronger than the
+        removed assertion: a group sits at the mean of its members' positions,
+        which an ``x``-holds-the-strings check could not see at all.
+        """
         go = pytest.importorskip("plotly.graph_objects")
 
         X, sample_weight, model = collapsed_ordered_model
@@ -591,15 +608,31 @@ class TestPlotRelativity:
             sample_weight=sample_weight,
             grouped_level_display="collapsed",
         )
+        collapsed_labels = ["18-24+25-34+35-49", "50-64", "65-80"]
+        # ``order=`` auto-spaces the five original levels over [0, 1]; the
+        # collapsed group takes the mean of the three it absorbed.
+        positions = np.linspace(0.0, 1.0, 5)
+        expected_x = [float(positions[:3].mean()), float(positions[3]), float(positions[4])]
+
+        # The curve is what forces the numeric axis; assert it is there rather
+        # than leaving the reason for the rest of this test implicit.
+        assert any(trace.name == "Smooth curve" for trace in fig.data)
+
         marker_traces = [
             trace
             for trace in fig.data
             if isinstance(trace, go.Scatter)
             and trace.name == "Relativity"
-            and list(trace.x) == ["18-24+25-34+35-49", "50-64", "65-80"]
+            and trace.mode == "markers"
         ]
+        assert len(marker_traces) == 1
+        markers = marker_traces[0]
+        # Three groups, not the five original levels: the collapse is applied.
+        assert list(markers.hovertext) == collapsed_labels
+        assert list(markers.x) == pytest.approx(expected_x)
 
-        assert marker_traces
+        assert list(fig.layout.xaxis.ticktext) == collapsed_labels
+        assert list(fig.layout.xaxis.tickvals) == pytest.approx(expected_x)
 
     def test_plotly_collapsed_ordered_categorical_suppresses_stale_knot_diagnostics(self):
         go = pytest.importorskip("plotly.graph_objects")
