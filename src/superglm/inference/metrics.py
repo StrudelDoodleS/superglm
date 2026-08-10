@@ -239,7 +239,10 @@ def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
         )
         if isinstance(spec, _SplineBase) and group.subgroup_type != "linear":
             return True
-        if isinstance(spec, OrderedCategorical) and spec.basis == "spline":
+        # A Piecewise/Polynomial inner basis is an unpenalized parametric
+        # block: its test is a plain Wald chi-square, never Wood's smooth
+        # test, so it must not trigger the smooth-inference machinery.
+        if isinstance(spec, OrderedCategorical) and spec.basis_kind == "spline":
             return True
         if isinstance(spec, SplineCategorical | TensorInteraction):
             return True
