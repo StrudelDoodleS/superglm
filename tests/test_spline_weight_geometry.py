@@ -221,9 +221,7 @@ def test_tweedie_prior_weights_do_not_move_hosted_piecewise_geometry():
         model = SuperGLM(
             family=family,
             features={
-                "band": OrderedCategorical(
-                    order=levels, basis=Piecewise(3, base="most_exposed")
-                )
+                "band": OrderedCategorical(order=levels, basis=Piecewise(3, base="most_exposed"))
             },
         )
         model.fit(frame, y, sample_weight=sample_weight)
