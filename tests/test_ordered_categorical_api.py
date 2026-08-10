@@ -139,10 +139,41 @@ def test_spline_object_is_the_quiet_canonical_api() -> None:
         spec = OrderedCategorical(order=LEVELS, basis=basis)
 
     assert spec.basis == "spline"
-    assert spec._spline_obj is basis
+    # `_spline_obj` is a COPY of the declaration, not the caller's object; see
+    # test_mutating_the_caller_s_spline_cannot_change_a_built_spec.
+    assert spec._spline_obj is not basis
+    assert type(spec._spline_obj) is type(basis)
+    assert spec._spline_obj.n_knots == basis.n_knots
+    assert spec._spline_obj.degree == basis.degree
+    assert spec._spline_obj.penalty == basis.penalty
+    assert spec._spline_obj.select == basis.select
     assert spec._spline is not basis
     assert isinstance(spec._spline, PSpline)
     assert spec._spline.n_knots == basis.n_knots
+
+
+def test_mutating_the_caller_s_spline_cannot_change_a_built_spec() -> None:
+    """The caller keeps a reference to the Spline they passed. `_spline_obj` is
+    the pristine declaration the editor clone rebuilds from when a grouping is
+    undone, so aliasing it let a post-construction mutation change what a later
+    collapse produced -- while the fitted `_spline`, already its own copy, kept
+    the original geometry. Nothing warned; the two simply disagreed."""
+    basis = Spline(kind="ps", n_knots=4)
+    spec = OrderedCategorical(order=LEVELS, basis=basis)
+
+    basis.n_knots = 20
+
+    assert spec._spline_obj.n_knots == 4
+    assert spec._spline.n_knots == 4
+
+    clone = _ordered_spec_with_grouping(
+        spec,
+        grouping=None,
+        selected_levels=[],
+        base="first",
+        data=np.asarray(LEVELS, dtype=object),
+    )
+    assert clone._spline.n_knots == 4
 
 
 def test_spline_object_wrapper_metadata_matches_canonical_basis() -> None:
@@ -399,6 +430,44 @@ def test_step_mode_pickle_is_refused_by_the_editor_apply_path(monkeypatch) -> No
     assert np.array_equal(np.asarray(model._result.beta), beta_before)
 
 
+def test_step_mode_pickle_is_refused_by_the_summary_row_names() -> None:
+    """``_canonical_level_row_names`` kept a step arm that dropped the base
+    level -- step geometry. The 0.24.0 removal took its coverage with the mode,
+    so a restored artifact silently exported a wrong-SHAPED row set (four names
+    where the model has five rows) rather than refusing."""
+    from superglm.export.summary import _canonical_level_row_names
+
+    X, y = _ordered_frame()
+    model = _fit_ordered(OrderedCategorical(order=LEVELS, basis=Spline(kind="ps", n_knots=4)), X, y)
+    assert len(_canonical_level_row_names(model)) == len(LEVELS)
+
+    model._specs["band"] = _restored_step_spec(LEVELS)
+    with pytest.raises(AttributeError, match=r"[Ss]tep mode was removed"):
+        _canonical_level_row_names(model)
+
+
+def test_default_path_clamp_warning_states_the_remedy_it_can_name() -> None:
+    """With ``basis=`` omitted there is no ``Spline`` in the caller's source, so
+    the warning must not read as though they wrote one -- it has to say where
+    the number came from and give the declaration that silences it."""
+    with pytest.warns(UserWarning, match="clamped") as record:
+        OrderedCategorical(order=["low", "medium", "high"])
+    message = str(record[0].message)
+
+    assert "No basis= was given" in message
+    assert "basis=Spline(kind='ps', n_knots=2)" in message
+    assert "clamped to 2" in message
+
+
+def test_explicit_basis_clamp_warning_names_the_caller_s_own_kind() -> None:
+    with pytest.warns(UserWarning, match="clamped") as record:
+        OrderedCategorical(order=["low", "medium", "high"], basis=Spline(kind="cr", n_knots=6))
+    message = str(record[0].message)
+
+    assert "No basis= was given" not in message
+    assert "basis=Spline(kind='cr', n_knots=2)" in message
+
+
 def test_collapse_clone_does_not_repeat_the_construction_clamp_warning() -> None:
     """Collapsing merges levels, so the caller's own pristine ``n_knots``
     routinely exceeds the collapsed ``n_levels - 1`` and the clone's
@@ -450,3 +519,98 @@ def test_spline_mode_shortcut_pickle_still_transforms_and_clones() -> None:
     )
     assert isinstance(replacement._spline, PSpline)
     assert replacement._spline.n_knots == 2
+
+
+def test_pickle_without_a_spline_obj_key_still_names_the_migration() -> None:
+    """A pickle old enough to predate ``_spline_obj`` restores a ``__dict__``
+    with no such key at all. An attribute-style read only falls back when the
+    key EXISTS and is None, so that spec raised a bare ``AttributeError``
+    naming ``_spline_obj`` -- loud, but silent about the migration, and it
+    never reached ``_basis_spline`` where the sentence lives."""
+    spec = _restored_step_spec()
+    del spec.__dict__["_spline_obj"]
+    assert "_spline_obj" not in spec.__dict__
+
+    with pytest.raises(AttributeError, match=r"[Ss]tep mode was removed"):
+        _ordered_spec_with_grouping(
+            spec,
+            grouping=None,
+            selected_levels=[],
+            base="first",
+            data=np.asarray(["A", "B", "C"], dtype=object),
+        )
+
+
+def test_shortcut_pickle_ungroup_recovers_the_requested_knot_count() -> None:
+    """Ungrouping a shortcut-era pickle must restore the REQUESTED knot count.
+
+    A current-era spec keeps ``_spline_obj``, the caller's pristine
+    declaration, so re-clamping against a larger level count is automatic. A
+    pre-0.24 shortcut pickle has no such declaration -- only the inner spline,
+    whose ``n_knots`` was already clamped to the level count it was BUILT
+    against. Cloning that alone silently keeps the reduced basis, which is
+    wrong in exactly the direction ungrouping goes: back to MORE levels.
+
+    The removed shortcut path rebuilt from the then-plain ``n_knots``
+    attribute, i.e. the count the caller asked for. That entry survives in the
+    pickled ``__dict__`` -- the class property only shadows it -- so it can be
+    recovered.
+    """
+    original = [f"B{index}" for index in range(8)]
+    collapsed = ["B0+B1+B2", "B3+B4", "B5+B6+B7"]
+
+    # The collapsed model: the caller asked for 7 knots, three levels clamp it
+    # to two.
+    with pytest.warns(UserWarning, match="clamped"):
+        spec = OrderedCategorical(order=collapsed, basis=Spline(kind="ps", n_knots=7))
+    assert spec._spline.n_knots == 2
+
+    # Make it a shortcut-era pickle OF THAT COLLAPSED MODEL: no pristine
+    # declaration survives, the then-plain attribute carries the requested 7,
+    # and the original eight levels are what ungrouping restores.
+    spec.__dict__["_spline_obj"] = None
+    spec.__dict__["n_knots"] = 7
+    spec.__dict__["_original_level_to_value"] = {
+        level: index / (len(original) - 1) for index, level in enumerate(original)
+    }
+    spec = pickle.loads(pickle.dumps(spec))
+    assert spec.n_knots == 2  # the property still reports the clamped inner value
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        restored = _ordered_spec_with_grouping(
+            spec,
+            grouping=None,
+            selected_levels=[],
+            base="first",
+            data=np.asarray(original, dtype=object),
+        )
+
+    assert sorted(restored._known_levels) == sorted(original)
+    # 7 comes back and clamps only as the NEW level count dictates -- eight
+    # levels allow seven -- instead of staying stuck at the collapsed two.
+    assert restored._spline.n_knots == 7
+    assert restored._spline_obj.n_knots == 7
+
+
+def test_shortcut_pickle_clone_still_clamps_to_the_new_level_count() -> None:
+    """Recovering the requested count must not bypass the clamp: rebuilding
+    for FEWER levels than the request still clamps, and stays quiet because it
+    is an internal clone."""
+    spec = OrderedCategorical(order=[f"B{index}" for index in range(8)], basis=Spline(n_knots=7))
+    spec.__dict__["_spline_obj"] = None
+    spec.__dict__["n_knots"] = 7
+    spec.__dict__["_original_level_to_value"] = {"B0": 0.0, "B1": 0.5, "B2": 1.0}
+    spec = pickle.loads(pickle.dumps(spec))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        restored = _ordered_spec_with_grouping(
+            spec,
+            grouping=None,
+            selected_levels=[],
+            base="first",
+            data=np.asarray(["B0", "B1", "B2"], dtype=object),
+        )
+
+    assert restored._spline.n_knots == 2  # three levels, so n_levels - 1
