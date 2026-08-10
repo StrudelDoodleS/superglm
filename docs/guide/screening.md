@@ -13,7 +13,7 @@ the block its own refit would build:
 - **`cat_cat`** — factor x factor: the cross-level cells of the two-way table.
 - **`numeric_numeric`** — numeric x numeric: a single product tilt.
 
-A spline-mode `OrderedCategorical` margin screens as a spline **on its mapped
+An `OrderedCategorical` margin screens as a spline **on its mapped
 level scores** — the axis its own refit builds — so an OC x spline pair is a
 `ti` row and an OC x factor pair a `spline_cat` row.
 
@@ -80,8 +80,8 @@ across levels is wanted rather than reference-coded deviations — same parents,
 penalized level curves; see [Interactions](interactions.md).
 
 **What gets swept.** `candidates=None` pairs every eligible fitted feature:
-splines, spline-mode `OrderedCategorical`, `Categorical` and `Numeric`.
-`Polynomial`, `RandomEffect`, step-mode `OrderedCategorical` and any
+splines, `OrderedCategorical`, `Categorical` and `Numeric`.
+`Polynomial`, `RandomEffect` and any
 `OrderedCategorical` carrying `specials=` have no screenable margin — a
 special is a free level with no position on the spline axis, so the pair
 would need a composite margin. Each of them is reported in

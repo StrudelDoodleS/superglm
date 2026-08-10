@@ -53,11 +53,13 @@ def ordinal_data():
 
 class TestConstructor:
     def test_values_derive_ordering(self):
-        spec = OrderedCategorical(values={"C": 3.0, "A": 1.0, "B": 2.0}, basis="spline", n_knots=2)
+        spec = OrderedCategorical(
+            values={"C": 3.0, "A": 1.0, "B": 2.0}, basis=Spline(kind="ps", n_knots=2)
+        )
         assert spec._ordered_levels == ["A", "B", "C"]
 
     def test_order_generates_linspace(self):
-        spec = OrderedCategorical(order=["X", "Y", "Z"], basis="spline", n_knots=2)
+        spec = OrderedCategorical(order=["X", "Y", "Z"], basis=Spline(kind="ps", n_knots=2))
         assert spec._level_to_value == {"X": 0.0, "Y": 0.5, "Z": 1.0}
 
     def test_mutual_exclusion_both(self):
@@ -72,46 +74,30 @@ class TestConstructor:
         with pytest.raises(ValueError, match="basis must be"):
             OrderedCategorical(order=["A", "B"], basis="cubic")
 
-    def test_step_select_raises(self):
-        with pytest.raises(ValueError, match="select=True is not supported"):
-            OrderedCategorical(order=["A", "B", "C"], basis="step", select=True)
+    @pytest.mark.parametrize(
+        ("shortcut", "value"),
+        [("kind", "cr"), ("n_knots", 4), ("degree", 2), ("select", True), ("penalty", "ssp")],
+    )
+    def test_removed_shortcut_raises_type_error(self, shortcut, value):
+        """The five scalar shortcuts were removed in 0.24.0; passing one must
+        fail at the constructor with the parameter's own name, not warn and
+        build something."""
+        with pytest.raises(TypeError, match=shortcut):
+            OrderedCategorical(order=["A", "B", "C"], **{shortcut: value})
 
-    @pytest.mark.parametrize("shortcut", ["kind", "n_knots", "degree", "select", "penalty"])
-    def test_spline_object_in_shortcut_names_the_swap(self, shortcut):
-        """A Spline belongs in `basis=`; every shortcut takes a scalar. Name both
-        parameters at the boundary, whichever one caught the object.
+    def test_removed_shortcut_raises_even_beside_a_spline_basis(self):
+        """Before removal a shortcut next to `basis=Spline(...)` was merely
+        ignored with a warning; silence now would be indistinguishable from
+        the shortcut still working."""
+        with pytest.raises(TypeError, match="n_knots"):
+            OrderedCategorical(order=["A", "B", "C"], basis=Spline(kind="ps", n_knots=2), n_knots=7)
 
-        Unguarded, each shortcut failed in its own unhelpful way. `kind` reached
-        the private spline factory and surfaced as "Unknown spline kind
-        CubicRegressionSpline(n_knots=1)" -- an internal class repr against a
-        list of string kinds, naming neither the parameter at fault nor the one
-        to use. `n_knots` raised a TypeError from an unrelated comparison, and
-        `degree`, `select` and `penalty` swallowed the object silently and built
-        a smooth configured by nothing the caller wrote.
-        """
-        with pytest.raises(ValueError, match=rf"`{shortcut}=`.*basis="):
-            OrderedCategorical(order=["A", "B", "C"], **{shortcut: Spline(kind="cr", k=3)})
-
-    def test_two_misplaced_shortcuts_are_both_named(self):
-        """The guard lists every offending parameter at once, matching the
-        adjacent deprecation code's convention, so a caller with two swapped
-        arguments does not pay a second round-trip. The message names the
-        object's class instead of interpolating its repr: the repr drops
-        `constraint=` and `penalty=`, so a copy-pasteable replacement would
-        silently discard exactly what the caller configured."""
-        with pytest.raises(ValueError, match=r"`kind=` and `n_knots=`.*CubicRegressionSpline"):
-            OrderedCategorical(
-                order=["A", "B", "C"],
-                kind=Spline(kind="cr", k=3),
-                n_knots=Spline(kind="cr", k=3),
-            )
-
-    def test_valid_kind_shortcut_still_builds(self):
-        """The guard must reject objects only -- the deprecated string shortcut
-        keeps working until it is removed."""
-        with pytest.warns(FutureWarning):
-            spec = OrderedCategorical(order=["A", "B", "C", "D"], kind="cr")
-        assert spec.kind == "cr"
+    @pytest.mark.parametrize("legacy", ["spline", "step"])
+    def test_removed_basis_string_names_the_replacement(self, legacy):
+        """`basis="spline"`/`basis="step"` were removed in 0.24.0; the error
+        must name `basis=Spline(...)` as the way forward."""
+        with pytest.raises(ValueError, match=r"basis=Spline\(\.\.\.\)"):
+            OrderedCategorical(order=["A", "B", "C"], basis=legacy)
 
 
 # ── Spline Mode: Build / Transform / Reconstruct ─────────────────
@@ -120,7 +106,7 @@ class TestConstructor:
 class TestSplineMode:
     def test_build_returns_groupinfo(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
-        spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3)
+        spec = OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
         result = spec.build(X["age_band"].values, sample_weight=sample_weight)
         # Should return GroupInfo (not a list when select=False)
         from superglm.types import GroupInfo
@@ -131,7 +117,7 @@ class TestSplineMode:
 
     def test_build_select_returns_single_group_with_components(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
-        spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3, select=True)
+        spec = OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3, select=True))
         result = spec.build(X["age_band"].values, sample_weight=sample_weight)
         assert not isinstance(result, list)
         assert result.penalty_components is not None
@@ -139,7 +125,7 @@ class TestSplineMode:
 
     def test_transform_shape(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
-        spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3)
+        spec = OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
         spec.build(X["age_band"].values, sample_weight=sample_weight)
         T = spec.transform(X["age_band"].values)
         assert T.shape[0] == len(X)
@@ -148,7 +134,9 @@ class TestSplineMode:
         X, y, sample_weight, midpoints, bands = age_band_data
         # Use full model pipeline so R_inv is set correctly
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         spec = model._specs["age_band"]
@@ -167,16 +155,18 @@ class TestSplineMode:
 
     def test_unseen_level_raises(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
-        spec = OrderedCategorical(values=midpoints, basis="spline")
+        spec = OrderedCategorical(values=midpoints)
         spec.build(X["age_band"].values, sample_weight=sample_weight)
         with pytest.raises(ValueError, match="unseen"):
             spec.transform(np.array(["UNKNOWN"]))
 
-    def test_n_knots_clamping(self):
-        """n_knots larger than n_levels-1 should be clamped with a warning."""
+    def test_n_knots_clamping_applies_to_the_default_basis(self):
+        """The default P-spline's n_knots=5 must clamp to n_levels-1 with the
+        same warning an explicit Spline gets."""
         with pytest.warns(UserWarning, match="clamped"):
-            spec = OrderedCategorical(order=["A", "B", "C"], n_knots=10)
-        assert spec._spline.n_knots == 2  # min(10, 3-1) = 2
+            spec = OrderedCategorical(order=["A", "B", "C"])
+        assert spec._spline.n_knots == 2  # min(5, 3-1) = 2
+        assert spec.n_knots == 2  # the derived attribute reports the clamped value
 
     def test_spline_matches_manual(self, age_band_data):
         """Spline mode should produce the same result as manual Spline on midpoints."""
@@ -191,7 +181,7 @@ class TestSplineMode:
         manual_info = manual_spline.build(x_numeric, sample_weight=sample_weight)
 
         # OrderedCategorical
-        spec = OrderedCategorical(values=midpoints, basis="spline", n_knots=3)
+        spec = OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
         ocat_info = spec.build(x_vals, sample_weight=sample_weight)
 
         # Same penalty matrix
@@ -200,92 +190,22 @@ class TestSplineMode:
         assert ocat_info.n_cols == manual_info.n_cols
 
 
-# ── Step Mode: Build / Transform / Reconstruct ───────────────────
+# ── Reporting Base ────────────────────────────────────────────────
 
 
-class TestStepMode:
-    def test_build_returns_groupinfo(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, sample_weight=sample_weight)
-        from superglm.types import GroupInfo
-
-        assert isinstance(info, GroupInfo)
-
-    def test_penalty_shape(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, sample_weight=sample_weight)
-        # K=4, base excluded → K-1=3 columns
-        n_cols = len(levels) - 1
-        assert info.n_cols == n_cols
-        assert info.penalty_matrix.shape == (n_cols, n_cols)
-
-    def test_penalty_is_projected_d1td1(self, ordinal_data):
-        """Penalty should be Z'D1'D1Z (projected first-difference)."""
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, sample_weight=sample_weight)
-        K = len(levels)
-        base_idx = spec._ordered_levels.index(spec._base_level)
-        D1 = np.diff(np.eye(K), n=1, axis=0)
-        Z = np.zeros((K, K - 1))
-        j = 0
-        for i in range(K):
-            if i != base_idx:
-                Z[i, j] = 1.0
-                j += 1
-        expected = Z.T @ D1.T @ D1 @ Z
-        np.testing.assert_allclose(info.penalty_matrix, expected)
-
-    def test_penalty_rank(self, ordinal_data):
-        """Projected D1 penalty on K-1 columns is full rank (K-1).
-
-        The base-to-neighbor difference makes the projected penalty full rank,
-        unlike naive D1 on K-1 columns which has rank K-2.
-        """
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, sample_weight=sample_weight)
-        rank = np.linalg.matrix_rank(info.penalty_matrix)
-        assert rank == len(levels) - 1  # full rank in (K-1) space
-
-    def test_reparametrize_flag(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, sample_weight=sample_weight)
-        assert info.reparametrize is True
-        assert info.penalized is True
-
-    def test_transform_shape(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        spec.build(X["risk"].values, sample_weight=sample_weight)
-        T = spec.transform(X["risk"].values)
-        assert T.shape == (len(X), len(levels) - 1)
-
-    def test_reconstruct_format(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
-        info = spec.build(X["risk"].values, sample_weight=sample_weight)
-        beta = np.zeros(info.n_cols)
-        raw = spec.reconstruct(beta)
-        assert "base_level" in raw
-        assert "levels" in raw
-        assert "log_relativities" in raw
-        assert "relativities" in raw
-        assert set(raw["levels"]) == set(levels)
-
+class TestReportingBase:
     def test_base_level_most_exposed(self, ordinal_data):
         X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step", base="most_exposed")
+        spec = OrderedCategorical(
+            order=levels, base="most_exposed", basis=Spline(kind="ps", n_knots=3)
+        )
         spec.build(X["risk"].values, sample_weight=sample_weight)
         # Should pick the level with highest total sample_weight
         assert spec._base_level in levels
 
     def test_base_level_explicit(self, ordinal_data):
         X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step", base="High")
+        spec = OrderedCategorical(order=levels, base="High", basis=Spline(kind="ps", n_knots=3))
         spec.build(X["risk"].values, sample_weight=sample_weight)
         assert spec._base_level == "High"
 
@@ -294,73 +214,17 @@ class TestStepMode:
 
 
 class TestEdgeCases:
-    def test_k2_step_unpenalized(self):
-        """K=2 step mode: D1 is empty, should fall back to unpenalized."""
-        rng = np.random.default_rng(42)
-        x = rng.choice(["A", "B"], 100)
-        spec = OrderedCategorical(order=["A", "B"], basis="step")
-        info = spec.build(x)
-        # Only 1 non-base column
-        assert info.n_cols == 1
-        # Should be unpenalized (no difference penalty possible)
-        assert info.penalty_matrix is None
-        assert info.reparametrize is False
-
-    def test_k3_step_full_rank(self):
-        """K=3 step mode: projected penalty is (2,2) full rank."""
-        rng = np.random.default_rng(42)
-        x = rng.choice(["A", "B", "C"], 200)
-        spec = OrderedCategorical(order=["A", "B", "C"], basis="step")
-        info = spec.build(x)
-        assert info.n_cols == 2
-        assert info.penalty_matrix.shape == (2, 2)
-        assert np.linalg.matrix_rank(info.penalty_matrix) == 2  # full rank
-
-    def test_middle_base_penalty_respects_adjacency(self):
-        """D1 penalty with base in middle must still fuse original neighbours.
-
-        With levels [A, B, C, D] and base=B, _non_base=[A, C, D].
-        The penalty should fuse A↔B(=0), B(=0)↔C, C↔D — not A↔C directly.
-        """
-        rng = np.random.default_rng(42)
-        x = rng.choice(["A", "B", "C", "D"], 400)
-        spec = OrderedCategorical(order=["A", "B", "C", "D"], basis="step", base="B")
-        info = spec.build(x)
-        omega = info.penalty_matrix
-        # Build expected: Z'D1'D1Z where Z removes row 1 (base=B at index 1)
-        K = 4
-        D1 = np.diff(np.eye(K), n=1, axis=0)
-        Z = np.array([[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 1]])
-        expected = Z.T @ D1.T @ D1 @ Z
-        np.testing.assert_allclose(omega, expected)
-        # The (0,0) entry should be 1 (A↔B penalty), not 2 (which you'd get
-        # from naive D1 on [A,C,D] treating A↔C as adjacent)
-        assert omega[0, 0] == pytest.approx(1.0)
-
-    def test_endpoint_base_projected_penalty(self):
-        """When base is the first level, projected penalty includes A↔B difference."""
-        rng = np.random.default_rng(42)
-        x = rng.choice(["A", "B", "C", "D"], 400)
-        spec = OrderedCategorical(order=["A", "B", "C", "D"], basis="step", base="A")
-        info = spec.build(x)
-        # Z'D1'D1Z with base=A (index 0) should differ from naive:
-        # (0,0) = 2 (A↔B + B↔C), not 1 (only B↔C in naive)
-        K = 4
-        D1 = np.diff(np.eye(K), n=1, axis=0)
-        Z = np.zeros((K, K - 1))
-        Z[1, 0] = Z[2, 1] = Z[3, 2] = 1.0
-        expected = Z.T @ D1.T @ D1 @ Z
-        np.testing.assert_allclose(info.penalty_matrix, expected)
-
     def test_order_single_value_linspace(self):
         """Single level should produce value=0.0."""
-        # This is degenerate but shouldn't crash
-        spec = OrderedCategorical(order=["Only"], basis="step")
+        # This is degenerate but shouldn't crash; the default n_knots clamps
+        # to n_levels - 1 = 0 with the usual warning.
+        with pytest.warns(UserWarning, match="clamped to 0"):
+            spec = OrderedCategorical(order=["Only"])
         assert spec._level_to_value == {"Only": 0.0}
 
     def test_unseen_level_at_predict(self, ordinal_data):
         X, y, sample_weight, levels = ordinal_data
-        spec = OrderedCategorical(order=levels, basis="step")
+        spec = OrderedCategorical(order=levels, basis=Spline(kind="ps", n_knots=3))
         spec.build(X["risk"].values, sample_weight=sample_weight)
         with pytest.raises(ValueError, match="unseen"):
             spec.transform(np.array(["UNKNOWN"]))
@@ -373,7 +237,9 @@ class TestIntegrationSpline:
     def test_fit_predict(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         preds = model.predict(X)
@@ -383,7 +249,9 @@ class TestIntegrationSpline:
     def test_summary(self, age_band_data):
         X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         s = model.summary()
@@ -399,7 +267,9 @@ class TestIntegrationSpline:
     def test_relativities(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         rels = model.relativities()
@@ -410,7 +280,9 @@ class TestIntegrationSpline:
     def test_term_inference(self, age_band_data):
         X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age_band")
@@ -424,7 +296,9 @@ class TestIntegrationSpline:
         """Spline mode SEs should be at the K category positions, not on a grid."""
         X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age_band")
@@ -441,7 +315,9 @@ class TestIntegrationSpline:
         """Spline mode should provide a smooth_curve for plotting."""
         X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         ti = model.term_inference("age_band")
@@ -459,7 +335,9 @@ class TestIntegrationSpline:
         """relativities() should return per-level output, not a continuous curve."""
         X, y, sample_weight, midpoints, bands = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit(X, y, sample_weight=sample_weight)
         rels = model.relativities(with_se=True)
@@ -470,101 +348,13 @@ class TestIntegrationSpline:
         assert np.all(np.isfinite(df["se_log_relativity"].values))
 
 
-class TestIntegrationStep:
-    def test_fit_predict(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        model = SuperGLM(
-            features={"risk": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-        preds = model.predict(X)
-        assert preds.shape == (len(X),)
-        assert np.all(preds > 0)
-
-    def test_summary(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        model = SuperGLM(
-            features={"risk": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-        s = model.summary()
-        text = str(s)
-        base_level = model._specs["risk"]._base_level
-        visible_levels = [lev for lev in levels if lev != base_level]
-        assert f"risk[{visible_levels[0]}]" in text
-        assert f"risk[{visible_levels[-1]}]" in text
-        level_rows = [r for r in s._coef_rows if r.group == "risk" and not r.is_spline]
-        assert len(level_rows) == len(levels) - 1
-        assert all(r.name.startswith("risk[") for r in level_rows)
-        assert not any(r.name == "risk" and r.coef is not None for r in s._coef_rows)
-        assert all(np.isfinite(r.se) and r.se >= 0 for r in level_rows if r.se is not None)
-
-    def test_relativities(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        model = SuperGLM(
-            features={"risk": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-        rels = model.relativities()
-        assert "risk" in rels
-
-    def test_term_inference(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        model = SuperGLM(
-            features={"risk": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-        ti = model.term_inference("risk")
-        assert ti.kind == "categorical"
-        assert ti.levels is not None
-        assert ti.relativity is not None
-
-    def test_step_se_numerically_reasonable(self, ordinal_data):
-        """Step mode SEs should be finite, positive for non-base, and sensible size."""
-        X, y, sample_weight, levels = ordinal_data
-        model = SuperGLM(
-            features={"risk": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-        ti = model.term_inference("risk")
-        se = ti.se_log_relativity
-        assert se is not None
-        assert np.all(np.isfinite(se))
-        # Base level SE should be 0, non-base should be > 0
-        base_idx = levels.index(model._specs["risk"]._base_level)
-        assert se[base_idx] == 0.0
-        non_base_se = np.delete(se, base_idx)
-        assert np.all(non_base_se > 0)
-        # SEs should be O(0.01-1) for reasonable Poisson data, not huge
-        assert np.all(non_base_se < 5.0)
-
-    def test_step_middle_base_fit(self):
-        """Step mode with base in middle of ordering should fit correctly."""
-        rng = np.random.default_rng(42)
-        n = 2000
-        levels = ["A", "B", "C", "D", "E"]
-        x = rng.choice(levels, n)
-        sample_weight = rng.uniform(0.5, 1.0, n)
-        effect = {"A": 0.0, "B": 0.1, "C": 0.2, "D": 0.3, "E": 0.5}
-        mu = np.exp(-1.5 + np.array([effect[v] for v in x]))
-        y = rng.poisson(mu * sample_weight).astype(float)
-        X = pd.DataFrame({"cat": x})
-        model = SuperGLM(
-            features={"cat": OrderedCategorical(order=levels, basis="step", base="C")},
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-        ti = model.term_inference("cat")
-        assert ti.active
-        # Relativities should be monotonically non-decreasing (true effect is monotone)
-        rels = np.array([ti.relativity[levels.index(lev)] for lev in levels])
-        assert rels[0] < rels[-1]  # first < last at minimum
-
-
 class TestIntegrationReml:
     def test_fit_reml_spline(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
-            features={"age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3)},
+            features={
+                "age_band": OrderedCategorical(values=midpoints, basis=Spline(kind="ps", n_knots=3))
+            },
         )
         model.fit_reml(X, y, sample_weight=sample_weight)
         assert model._reml_result is not None
@@ -573,23 +363,12 @@ class TestIntegrationReml:
         preds = model.predict(X)
         assert np.all(preds > 0)
 
-    def test_fit_reml_step(self, ordinal_data):
-        X, y, sample_weight, levels = ordinal_data
-        model = SuperGLM(
-            features={"risk": OrderedCategorical(order=levels, basis="step")},
-        )
-        model.fit_reml(X, y, sample_weight=sample_weight)
-        assert model._reml_result is not None
-        assert model._reml_result.converged
-        preds = model.predict(X)
-        assert np.all(preds > 0)
-
     def test_fit_reml_select(self, age_band_data):
         X, y, sample_weight, midpoints, _ = age_band_data
         model = SuperGLM(
             features={
                 "age_band": OrderedCategorical(
-                    values=midpoints, basis="spline", n_knots=3, select=True
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3, select=True)
                 )
             },
         )
@@ -612,7 +391,9 @@ class TestIntegrationMixed:
         X["region"] = rng.choice(["A", "B", "C"], len(X))
         model = SuperGLM(
             features={
-                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3)
+                ),
                 "region": Categorical(base="first"),
             },
         )
@@ -763,20 +544,6 @@ class TestSplineObjectBasis:
         assert np.all(steps >= -slack), f"not increasing: {steps}"
         assert curve[-1] - curve[0] > 0.1, f"no material rise: {curve}"
         assert "MISSING" in rels
-
-    def test_spline_object_overrides_string_params(self, age_band_data):
-        """When Spline object is passed, kind/n_knots/etc are ignored."""
-        from superglm.features.spline import Spline
-
-        X, y, sample_weight, _, _ = age_band_data
-        spec = OrderedCategorical(
-            order=sorted(X["age_band"].unique()),
-            basis=Spline(n_knots=3, kind="cr"),
-            kind="bs",  # should be ignored
-            n_knots=10,  # should be ignored
-        )
-        # Internal spline should use the Spline object's params
-        assert spec._spline.n_knots <= 3  # may be clamped but not 10
 
     def test_repr_shows_spline_object(self):
         from superglm.features.spline import Spline

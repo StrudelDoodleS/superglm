@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import warnings
 from typing import Any
 
 import numpy as np
@@ -13,7 +12,6 @@ from superglm.editor._types import EditableTerm
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.ordered_categorical import OrderedCategorical
-from superglm.features.spline import Spline
 
 _SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
 
@@ -359,40 +357,20 @@ def _ordered_spec_with_grouping(
     # from the coerced form silently drops that fallback and the special's
     # indicator comes back all-zero on a refit.
     specials = list(spec._special_raw) or list(spec._specials)
-    if spec.basis == "spline":
-        basis = (
-            copy.deepcopy(spec._spline_obj)
-            if spec._spline_obj is not None
-            else Spline(
-                kind=spec.kind,
-                n_knots=spec.n_knots,
-                degree=spec.degree,
-                select=spec.select,
-                penalty=spec.penalty,
-            )
-        )
-        return OrderedCategorical(
-            values=values,
-            basis=basis,
-            base=native_base,
-            grouping=grouping,
-            specials=specials or None,
-        )
-
-    # The user-facing constructor already warned when this legacy step spec was
-    # created. Do not repeat that warning from an internal editor compatibility clone.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"OrderedCategorical step smoothing .* is deprecated",
-            category=FutureWarning,
-        )
-        return OrderedCategorical(
-            values=values,
-            basis="step",
-            base=native_base,
-            grouping=grouping,
-        )
+    # Clone from the pristine caller-supplied spline, not the clamped inner
+    # copy: the new spec re-clamps against ITS OWN level count, which can
+    # exceed the current one when a grouping is being undone. `_spline_obj` is
+    # always set on a spec this version constructed; the fallback covers a
+    # pre-0.24 pickle, whose `_basis_spline` read refuses a step-mode spec
+    # loudly instead of silently cloning it onto the default P-spline.
+    source = spec._spline_obj if spec._spline_obj is not None else spec._basis_spline
+    return OrderedCategorical(
+        values=values,
+        basis=copy.deepcopy(source),
+        base=native_base,
+        grouping=grouping,
+        specials=specials or None,
+    )
 
 
 def _ordered_original_values(

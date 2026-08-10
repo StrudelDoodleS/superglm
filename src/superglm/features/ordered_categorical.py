@@ -2,11 +2,15 @@
 
 Actuarial pricing data frequently contains continuous variables that have been
 pre-binned into ordered categories (e.g. age bands "18-25", "26-35", ...).
-This feature type respects the ordering with two modes:
+This feature type respects the ordering: it maps the category labels to
+numeric values and builds a spline on those values, so adjacent levels borrow
+strength from each other.
 
-- **spline**: map categories to numeric values, build a spline on those values
-- **step**: one-hot encode with a first-difference penalty (D1'D1) so adjacent
-  categories are soft-fused (deprecated)
+``basis=Spline(...)`` is the one configuration channel. The removed
+alternatives -- the scalar shortcuts ``kind``/``n_knots``/``degree``/
+``select``/``penalty`` and the one-hot ``basis="step"`` mode with its D1'D1
+first-difference penalty -- are gone as of 0.24.0; a spec restored from before
+the removal fails loudly at first use (see ``_basis_spline``).
 """
 
 from __future__ import annotations
@@ -248,32 +252,22 @@ def _require_no_grouped_specials(grouping: Any, special_set: set[str]) -> None:
 
 
 class OrderedCategorical:
-    """Ordered categorical feature with spline or step basis.
+    """Ordered categorical feature smoothed by a spline over its level values.
 
     Designed for continuous variables that arrive pre-binned into ordered
     categories (e.g. age bands, mileage bands).  Maps category labels to
     numeric values and fits a smooth function through them, borrowing
-    strength between adjacent levels.
+    strength between adjacent levels.  With ``fit_reml()``, REML selects the
+    smoothing parameter automatically — the effective degrees of freedom will
+    typically be much less than the number of levels.
 
-    The canonical API passes a :func:`Spline` specification as ``basis``::
+    The smooth is configured by passing a :func:`Spline` specification as
+    ``basis``::
 
         OrderedCategorical(
             order=["low", "medium", "high"],
             basis=Spline(kind="ps", k=6),
         )
-
-    Two modes are currently available:
-
-    - **spline** (default): maps levels to numeric values (midpoints or
-      linspace), builds a B-spline through them.  The spline smooths across
-      levels and the penalty controls wiggliness.  With ``fit_reml()``,
-      REML selects the smoothing parameter automatically — the effective
-      degrees of freedom will typically be much less than the number of
-      levels.
-
-    - **step** (deprecated): one-hot encodes with a first-difference penalty
-      (D1'D1) so adjacent categories are soft-fused. Use ``Spline(...)`` for
-      smoothing or :class:`Categorical` for independent level effects.
 
     Parameters
     ----------
@@ -284,29 +278,22 @@ class OrderedCategorical:
     order : list[str] or None
         Ordered list of category labels.  Numeric values are generated as
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
-    basis : Spline object, {"spline", "step"}, or None
+    basis : Spline object or None
         Pass a ``Spline(...)`` object for full control over kind, basis size,
         constraints, selection, and penalty::
 
             OrderedCategorical(order=[...], basis=Spline(kind="cr", k=6))
 
-        Omitting ``basis`` retains the historical default P-spline. The
-        string values ``"spline"`` and ``"step"`` are deprecated; step
-        smoothing will be removed in a future release.
-    kind : str or None
-        Deprecated spline shortcut. Configure ``kind`` on ``basis=Spline(...)``.
+        Omitting ``basis`` retains the historical default P-spline,
+        ``Spline(kind="ps", n_knots=5, degree=3, penalty="ssp",
+        select=False)``.  In either form ``n_knots`` is clamped to
+        ``n_levels - 1`` with a warning.  The legacy strings ``"spline"`` and
+        ``"step"``, and the scalar shortcut parameters ``kind``, ``n_knots``,
+        ``degree``, ``select`` and ``penalty``, were removed in 0.24.0.
     base : str
         Reporting reference level. ``"most_exposed"`` (default), ``"first"``,
-        or a specific level name. In spline mode this changes only the reported
-        relativities and reference-adjusted intercept, not the fitted smooth.
-    n_knots : int or None
-        Deprecated spline shortcut. Auto-clamped to ``n_levels - 1``.
-    degree : int or None
-        Deprecated spline shortcut for B-spline degree.
-    select : bool or None
-        Deprecated spline shortcut for double-penalty shrinkage.
-    penalty : str or None
-        Deprecated spline shortcut for penalty type.
+        or a specific level name. This changes only the reported relativities
+        and reference-adjusted intercept, not the fitted smooth.
     specials : list[str] or None
         Level labels held out of the smooth and fitted as free, unpenalized
         level effects — one indicator column and one coefficient each. Use for
@@ -341,17 +328,12 @@ class OrderedCategorical:
         self,
         values: dict[str, float] | None = None,
         order: list[str] | None = None,
-        basis: Any | None = None,
-        kind: str | None = None,
+        basis: _SplineBase | None = None,
         base: str = "most_exposed",
-        n_knots: int | None = None,
-        degree: int | None = None,
-        select: bool | None = None,
-        penalty: str | None = None,
         grouping: Any = None,
         specials: list[str] | None = None,
     ):
-        from superglm.features.spline import _SplineBase
+        from superglm.features.spline import Spline, _SplineBase
 
         if values is not None and order is not None:
             raise ValueError("Specify exactly one of 'values' or 'order', not both.")
@@ -438,118 +420,27 @@ class OrderedCategorical:
             else:
                 order = [lev for lev in order if not _is_special(lev)]
 
-        basis_was_explicit = basis is not None
-        shortcut_values = {
-            "kind": kind,
-            "n_knots": n_knots,
-            "degree": degree,
-            "select": select,
-            "penalty": penalty,
-        }
-        used_shortcuts = [name for name, value in shortcut_values.items() if value is not None]
-
-        # Every shortcut takes a scalar; `basis` is the one parameter that takes
-        # a Spline. Catch the swap here or it travels on unchecked: `kind` reaches
-        # the private spline factory, which rejects the object against its list of
-        # string kinds and names neither the parameter at fault nor the one to
-        # use, while `degree`, `select` and `penalty` are never read as anything
-        # but scalars and so configure the smooth with silent nonsense.
-        misplaced = [
-            name for name, value in shortcut_values.items() if isinstance(value, _SplineBase)
-        ]
-        if misplaced:
-            names = " and ".join(f"`{name}=`" for name in misplaced)
-            noun = "a scalar" if len(misplaced) == 1 else "scalars"
-            kinds = ", ".join(sorted({type(shortcut_values[name]).__name__ for name in misplaced}))
-            # Name the object instead of interpolating its repr: the repr
-            # renders only a subset of the configuration (spline.py drops
-            # `constraint=` and `penalty=`), so presenting it as a
-            # copy-pasteable replacement would silently discard exactly the
-            # arguments the caller was trying to pass.
+        if basis is None:
+            # The historical default smooth, unchanged by the basis-only API.
+            basis = Spline(kind="ps", n_knots=5, degree=3, penalty="ssp", select=False)
+        elif isinstance(basis, str) and basis in ("spline", "step"):
             raise ValueError(
-                f"OrderedCategorical received a Spline object in {names}, which "
-                f"take{'s' if len(misplaced) == 1 else ''} {noun}. `basis=` is the "
-                f"parameter that takes the smooth: move the {kinds} you built -- "
-                f"with every argument you configured on it -- to "
-                f"OrderedCategorical(..., basis=...)."
+                f"OrderedCategorical no longer accepts basis={basis!r}: the legacy "
+                "string modes were removed in 0.24.0. Pass the smooth itself with "
+                "basis=Spline(...) -- or omit basis for the default P-spline. For "
+                "independent, unsmoothed level effects use Categorical(...)."
             )
+        elif not isinstance(basis, _SplineBase):
+            raise ValueError(f"basis must be a Spline object or None, got {basis!r}")
+        self._spline_obj: _SplineBase = basis
+        # Vestigial constant. dm_builder, screening, report, export and editor
+        # code still branch on this string; collapsing those readers is a
+        # deferred cleanup. Kept as a plain instance attribute so that a
+        # pre-0.24 step-mode pickle retains its own "step" value and the
+        # `_basis_spline` failure names what the spec actually was.
+        self.basis = "spline"
 
-        resolved_basis = "spline" if basis is None else basis
-        resolved_kind = "ps" if kind is None else kind
-        resolved_n_knots = 5 if n_knots is None else n_knots
-        resolved_degree = 3 if degree is None else degree
-        resolved_select = False if select is None else select
-        resolved_penalty = "ssp" if penalty is None else penalty
-
-        # Accept a Spline object as basis.
-        if isinstance(resolved_basis, _SplineBase):
-            self._spline_obj = resolved_basis
-            self.basis = "spline"
-        elif resolved_basis in ("spline", "step"):
-            self._spline_obj = None
-            self.basis = resolved_basis
-        else:
-            raise ValueError(
-                f"basis must be 'spline', 'step', or a Spline object, got {resolved_basis!r}"
-            )
-
-        shortcut_list = ", ".join(f"`{name}`" for name in used_shortcuts)
-        shortcut_noun = "shortcut" if len(used_shortcuts) == 1 else "shortcuts"
-        shortcut_verb = "is" if len(used_shortcuts) == 1 else "are"
-        if self.basis == "step":
-            warnings.warn(
-                "OrderedCategorical step smoothing (`basis='step'`) is deprecated and "
-                "will be removed in a future release. Use `basis=Spline(...)` for "
-                "smoothing or `Categorical(...)` for independent level effects.",
-                FutureWarning,
-                stacklevel=2,
-            )
-        elif self._spline_obj is not None and used_shortcuts:
-            warnings.warn(
-                f"OrderedCategorical spline {shortcut_noun} ({shortcut_list}) "
-                f"{shortcut_verb} ignored "
-                "because basis is a Spline object; configure the Spline object directly.",
-                FutureWarning,
-                stacklevel=2,
-            )
-        legacy_spline_string = basis_was_explicit and resolved_basis == "spline"
-        if (
-            self.basis == "spline"
-            and self._spline_obj is None
-            and (legacy_spline_string or used_shortcuts)
-        ):
-            if legacy_spline_string and used_shortcuts:
-                deprecated_api = (
-                    f"`basis='spline'` and OrderedCategorical spline {shortcut_noun} "
-                    f"({shortcut_list}) are"
-                )
-            elif legacy_spline_string:
-                deprecated_api = "`basis='spline'` is"
-            else:
-                deprecated_api = (
-                    f"OrderedCategorical spline {shortcut_noun} ({shortcut_list}) {shortcut_verb}"
-                )
-            warnings.warn(
-                f"{deprecated_api} deprecated; configure the smooth with "
-                "`basis=Spline(...)` instead.",
-                FutureWarning,
-                stacklevel=2,
-            )
-
-        if self.basis == "step" and resolved_select:
-            raise ValueError("select=True is not supported with basis='step'.")
-        if self.basis == "step" and special_set:
-            raise ValueError(
-                "specials= is not supported with basis='step', which is deprecated. "
-                "Use basis=Spline(...) for a smoothed ordinal term with free levels."
-            )
-
-        self.kind = resolved_kind
         self.base = base
-        self.select = resolved_select
-        self.penalty = resolved_penalty
-        self.degree = resolved_degree
-        self.n_knots = resolved_n_knots
         self._smooth_levels: list[str] = []
         # Levels as REPORTED, in block order: the smooth levels under their
         # `order=`/`values=` labels, then the specials under `_special_display`
@@ -662,41 +553,67 @@ class OrderedCategorical:
                 f"of {self._smooth_levels!r}."
             )
 
-        # Step mode state
+        # Reporting state, populated by _choose_base at build time.
         self._base_level: str = ""
         self._non_base: list[str] = []
-        self._R_inv: NDArray | None = None
 
-        # Spline mode: create internal spline (deferred until we know n_levels)
+        # The inner spline this wrapper owns and delegates to (deferred until
+        # n_levels is known, because the knot count clamps against it).
         self._spline: _SplineBase | None = None
-        if self.basis == "spline":
-            self._init_spline()
-            if self._spline_obj is not None:
-                # The object API is authoritative; ignored legacy shortcuts must
-                # not leak contradictory metadata into summaries or editor clones.
-                self.kind = _spline_kind_name(self._spline)
-                self.select = self._basis_spline.select
-                self.penalty = self._basis_spline.penalty
-                self.degree = self._basis_spline.degree
-                self.n_knots = self._basis_spline.n_knots
+        self._init_spline()
 
     @property
     def _basis_spline(self) -> _SplineBase:
         """The inner spline, narrowed to non-None.
 
-        ``_spline`` is only populated in spline mode, so every path that reaches
-        the basis has already branched on ``self.basis == "spline"``. Routing those
-        reads through here states that invariant once instead of leaving a dozen
-        implicit ``None`` dereferences, and turns a violation into a named error
-        rather than ``AttributeError: 'NoneType' object has no attribute 'score'``.
+        ``__init__`` always builds ``_spline``, so on any spec constructed by
+        this version of the class the narrowing is a no-op. ``None`` here means
+        the instance bypassed ``__init__`` -- in practice, a pickle of the
+        step mode that 0.24.0 removed, whose ``__dict__`` restores without a
+        ``_spline``. Every numeric path (build, transform, score, reconstruct,
+        set_reparametrisation) funnels through this property, so such a spec
+        fails loudly at first use instead of scoring silently wrong.
         """
         spline = self._spline
         if spline is None:
             raise AttributeError(
-                f"OrderedCategorical(basis={self.basis!r}) has no inner spline; "
-                "this attribute is only available in spline mode."
+                f"OrderedCategorical(basis={self.basis!r}) has no inner spline. "
+                "Step mode was removed in 0.24.0, so a spec built or pickled "
+                "before the removal cannot be used; rebuild it with "
+                "basis=Spline(...) for a smoothed ordinal term, or "
+                "Categorical(...) for independent level effects."
             )
         return spline
+
+    # ── Derived spline metadata ────────────────────────────────────
+    # Read-only views of the inner spline's configuration. These were
+    # constructor parameters until 0.24.0 and survive only as derived
+    # attributes; editor/collapse.py and the summary path read them.
+
+    @property
+    def kind(self) -> str:
+        """Public factory kind of the inner spline (``"ps"``, ``"cr"``, ...)."""
+        return _spline_kind_name(self._basis_spline)
+
+    @property
+    def n_knots(self) -> int:
+        """Knot count of the inner spline, after the ``n_levels - 1`` clamp."""
+        return self._basis_spline.n_knots
+
+    @property
+    def degree(self) -> int:
+        """B-spline degree of the inner spline."""
+        return self._basis_spline.degree
+
+    @property
+    def select(self) -> bool:
+        """Whether the inner spline carries double-penalty selection."""
+        return self._basis_spline.select
+
+    @property
+    def penalty(self) -> str:
+        """Penalty type of the inner spline."""
+        return self._basis_spline.penalty
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
         """Forward the inner spline's raw monotone geometry to the builder.
@@ -720,7 +637,9 @@ class OrderedCategorical:
         n = self._n_levels
         if self._spline is not None:
             return f"OrderedCategorical(basis={self._spline!r}, {n} levels)"
-        return f"OrderedCategorical(basis={self.basis!r}, {n} levels, n_knots={self.n_knots})"
+        # Reachable only by a pre-0.24 step-mode pickle; repr must not raise,
+        # since it is exactly what someone debugging such a pickle prints.
+        return f"OrderedCategorical(basis={self.basis!r}, {n} levels)"
 
     @property
     def has_specials(self) -> bool:
@@ -728,41 +647,20 @@ class OrderedCategorical:
         return bool(self._specials)
 
     def _init_spline(self) -> None:
-        """Create the internal Spline object for spline mode."""
+        """Create the internal spline: a deep copy of ``basis`` that we own,
+        with ``n_knots`` clamped to the level count."""
         import copy
 
-        if self._spline_obj is not None:
-            # User passed a Spline object — deep-copy so we own it,
-            # then clamp n_knots if needed.
-            self._spline = copy.deepcopy(self._spline_obj)
-            if self._spline.n_knots > self._n_levels - 1:
-                effective = self._n_levels - 1
-                warnings.warn(
-                    f"OrderedCategorical: Spline n_knots={self._spline.n_knots} "
-                    f"clamped to {effective} (n_levels - 1 = {self._n_levels - 1})",
-                    UserWarning,
-                    stacklevel=3,
-                )
-                self._spline.n_knots = effective
-            return
-
-        from superglm.features.spline import Spline
-
-        effective_n_knots = min(self.n_knots, self._n_levels - 1)
-        if effective_n_knots < self.n_knots:
+        self._spline = copy.deepcopy(self._spline_obj)
+        if self._spline.n_knots > self._n_levels - 1:
+            effective = self._n_levels - 1
             warnings.warn(
-                f"OrderedCategorical: n_knots={self.n_knots} clamped to "
-                f"{effective_n_knots} (n_levels - 1 = {self._n_levels - 1})",
+                f"OrderedCategorical: Spline n_knots={self._spline.n_knots} "
+                f"clamped to {effective} (n_levels - 1 = {self._n_levels - 1})",
                 UserWarning,
                 stacklevel=3,
             )
-        self._spline = Spline(
-            kind=self.kind,
-            n_knots=effective_n_knots,
-            degree=self.degree,
-            penalty=self.penalty,
-            select=self.select,
-        )
+            self._spline.n_knots = effective
 
     def _map_to_numeric(self, x: NDArray) -> NDArray:
         """Map categorical values to their numeric representations (vectorized).
@@ -842,10 +740,7 @@ class OrderedCategorical:
         else:
             _validate_categorical_levels(x, self._known_levels)
 
-        if self.basis == "spline":
-            return self._build_spline(x, sample_weight)
-        else:
-            return self._build_step(x, sample_weight)
+        return self._build_spline(x, sample_weight)
 
     def _build_spline(
         self, x: NDArray, sample_weight: NDArray | None
@@ -989,58 +884,6 @@ class OrderedCategorical:
         expanded[np.flatnonzero(ordered_mask)] = compact
         return dataclasses.replace(info, columns=expanded.tocsr())
 
-    def _build_step(self, x: NDArray, sample_weight: NDArray | None) -> GroupInfo:
-        """Step mode: one-hot with first-difference penalty."""
-        self._choose_base(x, sample_weight)
-        n = len(x)
-        K = self._n_levels
-        n_cols = len(self._non_base)  # K - 1
-
-        # One-hot encode (excluding base) — sparse CSR
-        rows = []
-        cols = []
-        for j, lev in enumerate(self._non_base):
-            mask = np.where(x == lev)[0]
-            rows.append(mask)
-            cols.append(np.full(len(mask), j))
-        rows_arr = np.concatenate(rows)
-        cols_arr = np.concatenate(cols)
-        data = np.ones(len(rows_arr), dtype=np.float64)
-        columns = sp.csr_matrix((data, (rows_arr, cols_arr)), shape=(n, n_cols))
-
-        # K=2 edge case: D1 is empty, fall back to unpenalized
-        if n_cols <= 1:
-            return GroupInfo(columns=columns, n_cols=n_cols)
-
-        # First-difference penalty on the FULL K-level ordering, then project
-        # to the (K-1)-dimensional non-base space via base-removal matrix Z.
-        # This ensures the penalty respects the original adjacency even when
-        # the base level is in the middle of the ordering.
-        #
-        # The projected penalty Z'D1'D1Z is full rank (K-1) — intentionally.
-        # In the treatment-contrast parameterisation (base=0), every direction
-        # is penalized including the absolute level of non-base categories
-        # relative to base.  This is correct: the constraint beta_base=0
-        # breaks the constant null space that a naive (K-2)-rank D1 would have.
-        base_idx = self._ordered_levels.index(self._base_level)
-        D1_full = np.diff(np.eye(K), n=1, axis=0)  # (K-1, K)
-        # Z: (K, K-1) inserts a zero row at base_idx position
-        Z = np.zeros((K, n_cols))
-        j = 0
-        for i in range(K):
-            if i != base_idx:
-                Z[i, j] = 1.0
-                j += 1
-        omega = Z.T @ D1_full.T @ D1_full @ Z  # (K-1, K-1)
-
-        return GroupInfo(
-            columns=columns,
-            n_cols=n_cols,
-            penalty_matrix=omega,
-            reparametrize=True,
-            penalized=True,
-        )
-
     # ── Transform ──────────────────────────────────────────────────
 
     def transform(self, x: NDArray) -> NDArray:
@@ -1057,23 +900,16 @@ class OrderedCategorical:
         else:
             _validate_categorical_levels(x, self._known_levels)
 
-        if self.basis == "spline":
-            if not self.has_specials:
-                return self._basis_spline.transform(self._map_to_numeric(x))
-            special_mask = self._special_mask(x)
-            ordered_mask = ~special_mask.any(axis=1)
-            spline_cols = np.zeros((len(x), self._spline_n_cols()), dtype=np.float64)
-            if ordered_mask.any():
-                spline_cols[ordered_mask] = self._basis_spline.transform(
-                    self._map_to_numeric(x[ordered_mask])
-                )
-            return np.column_stack([spline_cols, special_mask.astype(np.float64)])
-        else:
-            # Step mode: one-hot then apply R_inv
-            onehot = np.column_stack([(x == lev).astype(np.float64) for lev in self._non_base])
-            if self._R_inv is not None:
-                return onehot @ self._R_inv
-            return onehot
+        if not self.has_specials:
+            return self._basis_spline.transform(self._map_to_numeric(x))
+        special_mask = self._special_mask(x)
+        ordered_mask = ~special_mask.any(axis=1)
+        spline_cols = np.zeros((len(x), self._spline_n_cols()), dtype=np.float64)
+        if ordered_mask.any():
+            spline_cols[ordered_mask] = self._basis_spline.transform(
+                self._map_to_numeric(x[ordered_mask])
+            )
+        return np.column_stack([spline_cols, special_mask.astype(np.float64)])
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted ordered-categorical contribution directly on new data."""
@@ -1089,41 +925,29 @@ class OrderedCategorical:
         else:
             _validate_categorical_levels(x, self._known_levels)
 
-        if self.basis == "spline":
-            spline_beta, special_beta = self._split_beta(beta)
-            if not self.has_specials:
-                return self._basis_spline.score(self._map_to_numeric(x), spline_beta)
-            special_mask = self._special_mask(x)
-            ordered_mask = ~special_mask.any(axis=1)
-            out = special_mask.astype(np.float64) @ special_beta
-            if ordered_mask.any():
-                out[ordered_mask] = self._basis_spline.score(
-                    self._map_to_numeric(x[ordered_mask]), spline_beta
-                )
-            return out
-
-        beta_orig = self._R_inv @ beta if self._R_inv is not None else beta
-        level_scores = {self._base_level: 0.0}
-        for i, lev in enumerate(self._non_base):
-            level_scores[lev] = float(beta_orig[i])
-        return np.array([level_scores[lev] for lev in x], dtype=np.float64)
+        spline_beta, special_beta = self._split_beta(beta)
+        if not self.has_specials:
+            return self._basis_spline.score(self._map_to_numeric(x), spline_beta)
+        special_mask = self._special_mask(x)
+        ordered_mask = ~special_mask.any(axis=1)
+        out = special_mask.astype(np.float64) @ special_beta
+        if ordered_mask.any():
+            out[ordered_mask] = self._basis_spline.score(
+                self._map_to_numeric(x[ordered_mask]), spline_beta
+            )
+        return out
 
     # ── Reconstruct ────────────────────────────────────────────────
 
     def _base_log_effect(self, beta: NDArray[np.floating]) -> float:
         """Return the fitted term effect at the reporting reference level."""
-        if self.basis != "spline":
-            return 0.0
         spline_beta, _ = self._split_beta(beta)
         base_value = np.array([self._level_to_value[self._base_level]], dtype=np.float64)
         return float(self._basis_spline.score(base_value, spline_beta)[0])
 
     def reconstruct(self, beta: NDArray[np.floating]) -> dict[str, Any]:
         """Convert fitted coefficients to interpretable output."""
-        if self.basis == "spline":
-            return self._reconstruct_spline(beta)
-        else:
-            return self._reconstruct_step(beta)
+        return self._reconstruct_spline(beta)
 
     def _reconstruct_spline(self, beta: NDArray) -> dict[str, Any]:
         """Spline mode: delegate to internal spline, add per-level annotations.
@@ -1169,56 +993,25 @@ class OrderedCategorical:
         raw["level_relativities"] = dict(zip(all_levels, np.exp(all_log_rels).tolist()))
         return raw
 
-    def _reconstruct_step(self, beta: NDArray) -> dict[str, Any]:
-        """Step mode: same format as Categorical."""
-        # Undo reparametrization
-        if self._R_inv is not None:
-            beta_orig = self._R_inv @ beta
-        else:
-            beta_orig = beta
-
-        relativities = {self._base_level: 1.0}
-        log_rels = {self._base_level: 0.0}
-        for i, lev in enumerate(self._non_base):
-            log_rels[lev] = float(beta_orig[i])
-            relativities[lev] = float(np.exp(beta_orig[i]))
-        return {
-            "base_level": self._base_level,
-            "levels": self._ordered_levels,
-            "log_relativities": log_rels,
-            "relativities": relativities,
-        }
-
     # ── Reparametrisation ──────────────────────────────────────────
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:
-        if self.basis == "spline":
-            self._basis_spline.set_reparametrisation(R_inv)
-        else:
-            self._R_inv = R_inv
+        self._basis_spline.set_reparametrisation(R_inv)
 
 
 def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
     """Resolve one interaction parent (spec, column) for assembly.
 
     Identity for every spec — including ``None``, which FactorSmooth group
-    columns carry — except spline-mode OrderedCategorical, which
-    contributes its inner Spline on the mapped numeric scores, applying
-    the same grouping, level validation, and score mapping its own
-    ``build``/``transform`` apply.  Step-mode OC cannot parent an
-    interaction: the deprecated one-hot geometry has no marginal smooth.
-    Neither can a term carrying ``specials=``: a special is a free level with
-    no position on the spline axis, so there is no single marginal smooth to
-    cross with.
+    columns carry — except OrderedCategorical, which contributes its inner
+    Spline on the mapped numeric scores, applying the same grouping, level
+    validation, and score mapping its own ``build``/``transform`` apply.
+    A term carrying ``specials=`` cannot parent an interaction: a special is
+    a free level with no position on the spline axis, so there is no single
+    marginal smooth to cross with.
     """
     if not isinstance(spec, OrderedCategorical):
         return spec, x
-    if spec.basis != "spline" or spec._spline is None:
-        raise NotImplementedError(
-            "OrderedCategorical with basis='step' is deprecated and cannot parent "
-            "an interaction; use basis=Spline(...) for a smoothed ordinal parent "
-            "or a Categorical feature for unsmoothed level effects."
-        )
     if spec.has_specials:
         raise NotImplementedError(
             f"OrderedCategorical with specials={spec._specials!r} cannot parent an "
@@ -1235,7 +1028,10 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
         x = np.array([spec._grouping.original_to_group.get(v, v) for v in x], dtype=object)
     else:
         _validate_categorical_levels(x, spec._known_levels)
-    return spec._spline, spec._map_to_numeric(x)
+    # _basis_spline rather than _spline: a pre-0.24 step-mode pickle has no
+    # inner spline, and the property refuses it loudly instead of handing the
+    # caller ``None`` as a parent spec.
+    return spec._basis_spline, spec._map_to_numeric(x)
 
 
 def resolve_interaction_parent_of(ispec: Any, spec: Any, x: NDArray) -> tuple[Any, NDArray]:

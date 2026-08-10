@@ -57,46 +57,31 @@ def test_resolver_maps_oc_to_inner_spline_and_scores():
     np.testing.assert_allclose(eff_x, expected)
 
 
-def test_resolver_rejects_step_mode():
-    with pytest.warns(FutureWarning):
-        spec = OrderedCategorical(order=BANDS, basis="step")
-    with pytest.raises(NotImplementedError, match="step"):
-        resolve_interaction_parent(spec, np.array(BANDS, dtype=object))
+def _pre_024_step_pickle() -> OrderedCategorical:
+    """The shape a pre-0.24 step-mode pickle restores: no inner spline.
+
+    Step mode was removed in 0.24.0, so the only way such a spec reaches the
+    interaction machinery is a pickle, whose ``__dict__`` restores without
+    ``__init__`` running.
+    """
+    spec = OrderedCategorical.__new__(OrderedCategorical)
+    spec.__dict__.update({"basis": "step", "_spline": None, "_spline_obj": None})
+    return spec
 
 
-def test_step_mode_parent_is_rejected_when_the_interaction_is_added():
-    """Review finding: _spec_kind reads a step-mode OC as "categorical", so the
-    pair used to register and only fail mid design-matrix build, after the
-    caller had committed a fit.  It is refused where it is declared, naming the
-    pair and the deprecation; the resolver keeps its own guard behind this."""
-    df, y = _frame()
-    with pytest.warns(FutureWarning):
-        step = OrderedCategorical(order=BANDS, basis="step")
-
-    with pytest.raises(NotImplementedError, match="age_band.*basis='step'"):
-        SuperGLM(
-            family="poisson",
-            features={"age_band": step, "region": Categorical()},
-            interactions=[("age_band", "region")],
-        ).fit_reml(df, y)
-
-    # ... and through the incremental API, with the OC in either position
+def test_pre_024_step_pickle_parent_is_rejected_when_the_interaction_is_added():
+    """A spec without an inner spline cannot parent an interaction, and the
+    refusal happens where the pair is declared -- naming both features and
+    the removal -- rather than mid design-matrix build after the caller has
+    committed a fit."""
+    step = _pre_024_step_pickle()
     model = SuperGLM(
         family="poisson",
         features={"age_band": step, "power": Spline(kind="ps", n_knots=4)},
     )
-    with pytest.raises(NotImplementedError, match=r"\('power', 'age_band'\)"):
+    with pytest.raises(NotImplementedError, match=r"\('power', 'age_band'\).*inner spline"):
         model._add_interaction("power", "age_band")
     assert model._interaction_specs == {}  # nothing was half-registered
-
-    # the spline-mode parent in the same position is accepted and fits
-    ok = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc(), "region": Categorical()},
-        interactions=[("age_band", "region")],
-    )
-    ok.fit_reml(df, y)
-    assert np.isfinite(ok._result.effective_df)
 
 
 def test_resolver_rejects_unseen_levels():

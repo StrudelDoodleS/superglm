@@ -1,7 +1,5 @@
 """A specials OrderedCategorical is deferred by screening, and says so."""
 
-import warnings
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -93,30 +91,30 @@ def test_naming_a_specials_term_in_candidates_raises_with_the_reason():
     assert "specials" in str(excinfo.value)
 
 
-def test_polynomial_and_step_mode_oc_are_reported_deferred_too():
-    # FALSE TODAY: both are dropped silently -- the sweep returns exactly one
-    # row (region x age) and no record that two fitted mains were skipped.
+def test_polynomial_is_reported_deferred_too():
+    # FALSE TODAY: it was dropped silently -- the sweep returned no record
+    # that a fitted main was skipped. (The step-mode OrderedCategorical case
+    # this test also covered died with step mode in 0.24.0; a pre-0.24 step
+    # pickle can no longer fit, so the deferral reporter's step branch is
+    # unreachable from a fitted model.)
     df, y = _specials_frame()
     df = df.assign(dens=np.linspace(0.0, 1.0, len(df)))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        step = OrderedCategorical(order=BANDS + ["MISSING"], basis="step")
-        model = SuperGLM(
-            family="poisson",
-            features={
-                "band": step,
-                "region": Categorical(),
-                "age": Spline(kind="ps", n_knots=6),
-                "dens": Polynomial(degree=2),
-            },
-        )
-        model.fit_reml(df, y)
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "band": _specials_oc(),
+            "region": Categorical(),
+            "age": Spline(kind="ps", n_knots=6),
+            "dens": Polynomial(degree=2),
+        },
+    )
+    model.fit_reml(df, y)
 
     table = model.screen_interactions(df, y)
 
     deferred = table.attrs["deferred_features"]
     assert set(deferred) == {"band", "dens"}
-    assert "step" in deferred["band"]
+    assert "specials" in deferred["band"]
     assert "Polynomial" in deferred["dens"]
     assert "age" not in deferred and "region" not in deferred
 

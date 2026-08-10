@@ -89,7 +89,7 @@ def collapsed_ordered_model():
         features={
             "age_band": OrderedCategorical(
                 order=levels,
-                basis="step",
+                basis=Spline(kind="ps", n_knots=2),
                 base="first",
             ),
             "mileage": Numeric(),
@@ -627,7 +627,7 @@ class TestPlotRelativity:
             family="gaussian",
             selection_penalty=0.0,
             features={
-                "age_band": OrderedCategorical(values=values, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(values=values, basis=Spline(kind="ps", n_knots=3)),
                 "mileage": Numeric(),
             },
         )
