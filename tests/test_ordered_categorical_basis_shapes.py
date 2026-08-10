@@ -196,7 +196,9 @@ def test_parametric_main_blocks_are_unpenalized_and_uncompressed() -> None:
 
 
 @pytest.mark.parametrize(
-    "basis", [Polynomial(powers=[1, 2]), Piecewise(breaks=["Mi004"])], ids=["polynomial", "piecewise"]
+    "basis",
+    [Polynomial(powers=[1, 2]), Piecewise(breaks=["Mi004"])],
+    ids=["polynomial", "piecewise"],
 )
 def test_selection_penalty_leaves_the_hosted_block_bit_identical(basis) -> None:
     """A selection penalty must not shrink a hosted parametric block.
