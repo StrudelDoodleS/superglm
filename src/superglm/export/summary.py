@@ -9,7 +9,10 @@ import numpy as np
 
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import SplineCategorical, TensorInteraction
-from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.ordered_categorical import (
+    _STEP_MODE_REMOVED_MESSAGE,
+    OrderedCategorical,
+)
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import spline_groups
 from superglm.model.fit_state import fitted_penalty
@@ -232,12 +235,17 @@ def _canonical_level_row_names(model: SuperGLM) -> set[str]:
     for feature_name, spec in model._specs.items():
         groups = [group for group in model._groups if group.feature_name == feature_name]
         if isinstance(spec, OrderedCategorical):
-            levels = (
-                spec._ordered_levels
-                if spec.basis == "spline"
-                else [level for level in spec._ordered_levels if level != spec._base_level]
-            )
-            names.update(f"{feature_name}[{level}]" for level in levels)
+            if spec.basis != "spline":
+                # The dropped-base row set this used to build is step geometry.
+                # The 0.24.0 removal took the coverage for it with the mode, so
+                # leaving the arm live meant a restored step artifact silently
+                # exported a wrong-shaped row set. Refuse with the migration
+                # sentence, as every other surviving step path does.
+                raise AttributeError(
+                    f"Cannot canonicalise level row names for {feature_name!r}: "
+                    f"{_STEP_MODE_REMOVED_MESSAGE}"
+                )
+            names.update(f"{feature_name}[{level}]" for level in spec._ordered_levels)
         elif isinstance(spec, Categorical):
             for group in groups:
                 names.update(f"{group.name}[{level}]" for level in spec._non_base)

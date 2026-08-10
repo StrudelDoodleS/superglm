@@ -336,7 +336,11 @@ def _spec_kind(spec: FeatureSpec) -> str:
     if isinstance(spec, Categorical):
         return "categorical"
     if isinstance(spec, OrderedCategorical):
-        return "spline" if spec.basis == "spline" else "categorical"
+        # Always the smooth. The old non-spline arm returned "categorical" for a
+        # step spec, but `add_interaction` -- the only caller -- refuses an
+        # OrderedCategorical without an inner spline before it reaches here, so
+        # that arm was strictly dead and would have rotted silently.
+        return "spline"
     return type(spec).__name__
 
 
