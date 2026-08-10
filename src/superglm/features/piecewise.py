@@ -35,6 +35,17 @@ _STRATEGIES = frozenset({"quantile"})
 # and the two must not be conflated in the message.
 _SMALL_SEGMENT_WEIGHT_FRACTION = 0.005
 
+# Rule-10 rank probe routing.  Up to this many distinct x values the probe runs
+# as an SVD on the weighted FACTOR sqrt(W)H -- the reliable rank object -- and
+# the (n_unique, J+2) dense factor it needs is bounded and small.  Above it the
+# probe falls back to the (J+2)x(J+2) weighted Gram accumulated by bincount;
+# see the inline rationale at the use site for why that backstop is safe there
+# and only there.  Module globals rather than defaults so a test can lower the
+# ceiling and drive a small fixture through the Gram arm.
+_RANK_PROBE_MAX_FACTOR_ROWS = 10_000
+_GRAM_CHUNK_ROWS = 1 << 20
+_GRAM_PROBE_RELATIVE_TOL = 1e-8
+
 
 def _finite_x(x: NDArray) -> NDArray[np.float64]:
     """Coerce *x* to a flat float64 array, rejecting NaN and inf (rule 1)."""
@@ -435,12 +446,65 @@ class Piecewise:
         self._knots = np.concatenate(([lo], requested, [hi])).astype(np.float64)
         return x
 
-    def _resolve_base(
+    def _knot_mass(
         self,
-        H: NDArray[np.float64],
+        seg: NDArray[np.intp],
+        frac: NDArray[np.float64],
         weights: NDArray[np.float64],
-    ) -> None:
-        """Resolve the base knot and the retained column indices (rule 7)."""
+        *,
+        signed: bool,
+    ) -> NDArray[np.float64]:
+        """Per-knot hat-carried mass, ``H.T @ w``, without materialising ``H``.
+
+        A hat row has exactly two entries -- ``1 - frac`` at column ``seg`` and
+        ``frac`` at column ``seg + 1`` -- so the column sums are two bincounts.
+        ``signed=False`` takes ``|h|`` first, which is rule 8's form.
+        """
+        k = self._knots.size
+        left = 1.0 - frac
+        right = frac
+        if not signed:
+            left = np.abs(left)
+            right = np.abs(right)
+        return np.bincount(seg, weights=weights * left, minlength=k) + np.bincount(
+            seg + 1, weights=weights * right, minlength=k
+        )
+
+    def _weighted_gram(
+        self,
+        seg: NDArray[np.intp],
+        frac: NDArray[np.float64],
+        weights: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        """Accumulate the ``(J+2, J+2)`` weighted Gram ``H'WH`` from the hat pairs.
+
+        Hat locality makes the Gram symmetric tridiagonal (a row touches only
+        columns ``seg`` and ``seg + 1``), so three bincounts per chunk build it
+        with no array taller than the chunk and nothing wider than ``J + 2``.
+        """
+        k = self._knots.size
+        diag = np.zeros(k, dtype=np.float64)
+        off = np.zeros(k - 1, dtype=np.float64)
+        for start in range(0, seg.size, _GRAM_CHUNK_ROWS):
+            block = slice(start, start + _GRAM_CHUNK_ROWS)
+            s = seg[block]
+            left = 1.0 - frac[block]
+            right = frac[block]
+            w = weights[block]
+            diag += np.bincount(s, weights=w * left * left, minlength=k)
+            diag += np.bincount(s + 1, weights=w * right * right, minlength=k)
+            off += np.bincount(s, weights=w * left * right, minlength=k - 1)[: k - 1]
+        gram = np.diag(diag)
+        idx = np.arange(k - 1)
+        gram[idx, idx + 1] = off
+        gram[idx + 1, idx] = off
+        return gram
+
+    def _resolve_base(self, signed_mass: NDArray[np.float64]) -> None:
+        """Resolve the base knot and the retained column indices (rule 7).
+
+        *signed_mass* is the signed hat-carried mass ``H.T @ w`` per knot.
+        """
         t = self._knots
 
         # Reuse a base fixed by an earlier build() when it still names a knot,
@@ -464,7 +528,7 @@ class Piecewise:
                     # explicit weights (ones when the caller gave none), so a
                     # weights-absent special case would be unreachable there
                     # and would make the direct spec API disagree with it.
-                    r = int(np.argmax(H.T @ weights))
+                    r = int(np.argmax(signed_mass))
                 else:
                     raise ValueError(
                         f"base must be 'most_exposed', 'first', or a knot value, got "
@@ -487,14 +551,18 @@ class Piecewise:
     def _validate_support(
         self,
         x: NDArray[np.float64],
-        H: NDArray[np.float64],
+        seg: NDArray[np.intp],
+        frac: NDArray[np.float64],
         weights: NDArray[np.float64],
     ) -> None:
         """Check the data can carry the knots that were asked for (rules 8-11).
 
-        Callers may pass unique x values with per-value aggregated weights:
-        every rule here is linear in the weights, and the rank probe sees the
-        same weighted Gram either way.
+        Callers pass unique x values with per-value aggregated weights, plus
+        the segment index and within-segment fraction that determine each
+        row's two hat entries: every rule here is linear in the weights, and
+        the rank probe sees the same weighted Gram either way.  Nothing in
+        here materialises an ``(n, J+2)`` array except the rank probe's
+        factor, whose row count is capped.
         """
         t = self._knots
 
@@ -504,7 +572,7 @@ class Piecewise:
         # narrower than the data the tail rows carry negative entries, so a
         # non-zero column can sum to zero by cancellation.  |h_j| is that same
         # condition stated correctly on the mode this feature explicitly supports.
-        mass = np.abs(H).T @ weights
+        mass = self._knot_mass(seg, frac, weights, signed=False)
         empty_knots = np.flatnonzero(mass == 0.0)
         if empty_knots.size:
             raise ValueError(
@@ -528,9 +596,7 @@ class Piecewise:
         # and under "error" the build has already refused them.
         n_seg = t.size - 1
         inside = (x >= t[0]) & (x <= t[-1])
-        seg_weight = np.bincount(
-            self._segment_index(x[inside]), weights=weights[inside], minlength=n_seg
-        )
+        seg_weight = np.bincount(seg[inside], weights=weights[inside], minlength=n_seg)
         extrapolating = float(weights[~inside].sum())
         tails = (
             ""
@@ -568,8 +634,30 @@ class Piecewise:
         # was added for -- one distinct x per segment gives J+1 independent
         # retained columns that are still collinear with the intercept.
         n_cols = self._non_base_indices.size
-        scaled = np.sqrt(weights)[:, None] * H
-        rank = int(np.linalg.matrix_rank(scaled))
+        if x.size <= _RANK_PROBE_MAX_FACTOR_ROWS:
+            # The FACTOR, never the Gram, is the reliable rank object: this
+            # repository's recorded lesson is that eigensolver rank probes on a
+            # Gram are not driver-stable near the cutoff.  The SVD on
+            # sqrt(W)H therefore stays authoritative wherever its dense factor
+            # is affordable, and 10_000 distinct values covers every banded
+            # rating factor this feature was built for.
+            H = self._hat_values(x)
+            scaled = np.sqrt(weights)[:, None] * H
+            rank = int(np.linalg.matrix_rank(scaled))
+        else:
+            # Backstop above the factor ceiling, not a peer of it.  The Gram
+            # squares the condition number and its small eigenvalues are
+            # eigensolver-driver-sensitive, so this arm runs with a GENEROUS
+            # relative tolerance and only needs to catch EXACT deficiency --
+            # an empty or single-point segment -- because rules 8/9/11 catch
+            # graded near-deficiency structurally first.  For exact deficiency
+            # the null eigenvalue is exact up to accumulation round-off,
+            # orders below this tolerance under any LAPACK driver, so the
+            # loose cut cannot flip a verdict either way.
+            gram = self._weighted_gram(seg, frac, weights)
+            eigenvalues = np.linalg.eigvalsh(gram)
+            cutoff = _GRAM_PROBE_RELATIVE_TOL * max(float(eigenvalues[-1]), 0.0)
+            rank = int(np.count_nonzero(eigenvalues > cutoff))
         if rank < n_cols + 1:
             raise ValueError(
                 f"Piecewise design is rank deficient against the intercept: rank {rank} of "
@@ -622,19 +710,61 @@ class Piecewise:
         # give the same masses, the same segment counts and the same weighted
         # Gram -- hence the same rank verdict -- as the row-level design.  This
         # is deduplication, not binning: no discretisation error exists to
-        # introduce.  The policy is already applied to x, so the raw hat
-        # evaluation is the right one here; _hat_basis would just clamp again.
+        # introduce.  The policy is already applied to x, so the raw segment
+        # arithmetic is the right one here; _hat_basis would just clamp again.
         x_unique, inverse = np.unique(x, return_inverse=True)
         w_agg = np.bincount(inverse, weights=weights, minlength=x_unique.size)
-        H_unique = self._hat_values(x_unique)
-        self._resolve_base(H_unique, w_agg)
-        self._validate_support(x_unique, H_unique, w_agg)
+        # Everything downstream works from the two hat entries per row -- the
+        # segment index and the within-segment fraction -- rather than a dense
+        # (n_unique, J+2) basis.  On a genuinely continuous x (n_unique ~ n)
+        # the dense route peaked at three full-height arrays for a basis with
+        # two non-zeros per row; these two vectors are the same information at
+        # O(n) and the identical arithmetic (`_hat_values` computes exactly
+        # `1 - frac` and `frac`), so every emitted float is bit-identical.
+        t = self._knots
+        seg = self._segment_index(x_unique)
+        frac = (x_unique - t[seg]) / (t[seg + 1] - t[seg])
+        self._resolve_base(self._knot_mass(seg, frac, w_agg, signed=True))
+        self._validate_support(x_unique, seg, frac, w_agg)
         # Emitted sparse (a hat row has at most two non-zeros) so the builder's
         # sparse branch can re-detect the repeated rows and store the design
         # one distinct row deep.  The gather reconstructs the exact per-row
         # values: equal x means bit-identical hat arithmetic.
-        columns = sp.csr_matrix(H_unique[:, self._non_base_indices])[inverse]
-        return GroupInfo(columns=columns, n_cols=int(columns.shape[1]))
+        columns = self._emit_unique_csr(seg, frac)[inverse]
+        return GroupInfo(
+            columns=columns,
+            n_cols=int(columns.shape[1]),
+            supports_row_compression=True,
+        )
+
+    def _emit_unique_csr(
+        self,
+        seg: NDArray[np.intp],
+        frac: NDArray[np.float64],
+    ) -> sp.csr_matrix:
+        """Emit the retained hat columns over the unique rows as canonical CSR.
+
+        Built straight from the two per-row entries, never via a dense
+        intermediate.  ``eliminate_zeros`` matches what a dense->CSR
+        conversion produced historically: an x sitting exactly on a knot puts
+        an exact ``0.0`` in its neighbour knot's entry, and the dense route
+        never stored it.
+        """
+        n = seg.size
+        r = self._base_index
+        row = np.tile(np.arange(n, dtype=np.intp), 2)
+        col = np.concatenate([seg, seg + 1])
+        data = np.concatenate([1.0 - frac, frac])
+        keep = col != r
+        row, col, data = row[keep], col[keep], data[keep]
+        col = np.where(col > r, col - 1, col)
+        emitted = sp.csr_matrix(
+            (data, (row, col)),
+            shape=(n, self._knots.size - 1),
+            dtype=np.float64,
+        )
+        emitted.eliminate_zeros()
+        return emitted
 
     def transform(self, x: NDArray) -> NDArray[np.float64]:
         """Evaluate the identifiable ``J+1`` hat columns on new data.
