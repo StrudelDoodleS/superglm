@@ -176,19 +176,52 @@ def test_two_block_contract_holds_for_each_inner_basis() -> None:
         assert special.n_cols == 1
 
 
-def test_piecewise_main_block_is_unpenalized_and_uncompressed() -> None:
+def test_parametric_main_blocks_are_unpenalized_and_uncompressed() -> None:
+    """Both parametric bases emit an unpenalized main block, symmetrically.
+
+    The hosted Polynomial deliberately diverges from the numeric-axis term's
+    group-selection contract: the reported vocabulary (plain whole-term Wald,
+    clean per-power z) is invalid the moment lambda1 shrinkage touches the
+    block, so the block must sit outside selection exactly as the Piecewise
+    and specials blocks do.
+    """
     X, _ = _frame()
     x = X["band"].to_numpy(dtype=object)
-    spec = OrderedCategorical(order=LEVELS, basis=Piecewise(breaks=["Mi004"]))
-    info = spec.build(x, np.ones(len(x)))
-    assert isinstance(info, GroupInfo)
-    assert info.penalized is False
-    assert info.supports_row_compression is False
-    # Polynomial keeps its numeric-axis selection contract (whole block in or
-    # out under the group penalty).
-    poly = OrderedCategorical(order=LEVELS, basis=Polynomial(powers=[1, 2]))
-    poly_info = poly.build(x, np.ones(len(x)))
-    assert poly_info.penalized is True
+    for basis in (Piecewise(breaks=["Mi004"]), Polynomial(powers=[1, 2])):
+        spec = OrderedCategorical(order=LEVELS, basis=basis)
+        info = spec.build(x, np.ones(len(x)))
+        assert isinstance(info, GroupInfo)
+        assert info.penalized is False
+        assert info.supports_row_compression is False
+
+
+@pytest.mark.parametrize(
+    "basis", [Polynomial(powers=[1, 2]), Piecewise(breaks=["Mi004"])], ids=["polynomial", "piecewise"]
+)
+def test_selection_penalty_leaves_the_hosted_block_bit_identical(basis) -> None:
+    """A selection penalty must not shrink a hosted parametric block.
+
+    Observed on the unfixed code for the Polynomial inner: coefficient norm
+    0.116 -> 0.093 under selection_penalty=50, silently invalidating every
+    clean-z row the summary printed.
+    """
+    X, y = _frame()
+
+    def fit(penalty: float) -> SuperGLM:
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=penalty,
+            features={"band": OrderedCategorical(order=LEVELS, basis=basis)},
+        )
+        model.fit(X, y)
+        return model
+
+    unshrunk = fit(0.0)
+    shrunk = fit(50.0)
+    result_a = getattr(unshrunk, "_result", None) or unshrunk._solver_result
+    result_b = getattr(shrunk, "_result", None) or shrunk._solver_result
+    assert np.array_equal(np.asarray(result_a.beta), np.asarray(result_b.beta))
+    assert np.array_equal(unshrunk.predict(X.head(50)), shrunk.predict(X.head(50)))
 
 
 def test_extrapolation_parameter_is_inert_on_the_level_axis() -> None:

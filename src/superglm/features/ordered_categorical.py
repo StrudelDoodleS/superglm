@@ -1099,13 +1099,18 @@ class OrderedCategorical:
         if isinstance(inner, _SplineBase):
             return inner.build(numeric)
         info = inner.build(numeric, sample_weight=sample_weight)
-        if isinstance(info, GroupInfo) and isinstance(inner, Piecewise):
-            # Structurally unpenalized main block -- the same convention as the
-            # specials block, which is exactly an unpenalized second block, so
-            # the two-block contract generalizes rather than breaks. Row
-            # compression stays off for the hosted case: the support-compressed
-            # container was built and verified for the numeric-axis term, and
-            # its composition with the ordered wrapper is unverified.
+        if isinstance(info, GroupInfo):
+            # Structurally unpenalized main block for BOTH parametric bases --
+            # the same convention as the specials block, which is exactly an
+            # unpenalized second block, so the two-block contract generalizes
+            # rather than breaks. Polynomial is flipped too, deliberately
+            # diverging from the numeric-axis term's group-selection contract:
+            # the reported vocabulary here is plain whole-term Wald plus clean
+            # per-power z rows, and both are invalid the moment lambda1
+            # shrinkage touches the block. Row compression stays off for the
+            # hosted case: the support-compressed container was built and
+            # verified for the numeric-axis term, and its composition with the
+            # ordered wrapper is unverified.
             info = replace(info, penalized=False, supports_row_compression=False)
         return info
 
