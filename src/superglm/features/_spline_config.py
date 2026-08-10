@@ -11,6 +11,18 @@ from superglm.features.constraint import ConstraintSpec
 from superglm.types import LambdaPolicy
 
 
+def _iter_knots(knots: Any) -> list[Any]:
+    """Flatten a knots argument to a plain list without numeric coercion."""
+    if isinstance(knots, np.ndarray):
+        return list(knots.ravel())
+    return list(knots)
+
+
+def _knots_contain_names(knots: Any) -> bool:
+    """Whether a knots argument states any knot as a level name."""
+    return any(isinstance(entry, str) for entry in _iter_knots(knots))
+
+
 def validate_m_orders(spec: Any) -> None:
     """Validate the configured derivative penalty orders."""
     if len(spec._m_orders) > 1 and not spec._multi_m_supported:
@@ -113,7 +125,17 @@ def initialize_spec(
     validate_m_orders(spec)
     validate_select(spec)
 
-    if knots is not None:
+    if knots is not None and _knots_contain_names(knots):
+        # Level-name knots: resolvable only against an OrderedCategorical's
+        # declared levels, so resolution is deferred to that host (which
+        # rewrites ``_explicit_knots`` on its own deep copy).  A numeric-axis
+        # build refuses them loudly in ``place_knots``.  Numeric entries in a
+        # mixed list stay axis VALUES, exactly as they are without names.
+        named = [k for k in _iter_knots(knots)]
+        spec.n_knots = len(named)
+        spec._explicit_knots = None
+        spec._named_knots = named
+    elif knots is not None:
         explicit_knots = np.asarray(knots, dtype=np.float64).ravel()
         if explicit_knots.ndim != 1 or len(explicit_knots) < 1:
             raise ValueError("knots must be a non-empty 1D array")
@@ -121,9 +143,11 @@ def initialize_spec(
             raise ValueError("knots must be strictly increasing")
         spec.n_knots = len(explicit_knots)
         spec._explicit_knots = explicit_knots
+        spec._named_knots = None
     else:
         spec.n_knots = n_knots
         spec._explicit_knots = None
+        spec._named_knots = None
 
     spec.degree = degree
     spec.knot_strategy = knot_strategy

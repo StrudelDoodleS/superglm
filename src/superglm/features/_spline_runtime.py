@@ -105,6 +105,18 @@ def place_knots(
     sample_weight: NDArray | None = None,
 ) -> None:
     """Place interior knots and build the full knot vector."""
+    named = getattr(spec, "_named_knots", None)
+    if named is not None:
+        # Reachable only when a Spline stated as knots=[level names] is built
+        # on a numeric axis: hosted as an OrderedCategorical basis, the host
+        # resolved the names to level values at construction and cleared this.
+        names = [entry for entry in named if isinstance(entry, str)]
+        raise ValueError(
+            f"{type(spec).__name__} knots {names!r} are stated as level names, which "
+            "only resolve against the declared levels of an OrderedCategorical "
+            "(pass this spline as its basis=). On a numeric axis, state the knots "
+            "as numbers."
+        )
     x, sample_weight = _spline_knots.knot_geometry_data(x, sample_weight)
     if spec._explicit_boundary is not None:
         spec._lo, spec._hi = spec._explicit_boundary
