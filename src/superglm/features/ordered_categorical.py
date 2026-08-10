@@ -653,6 +653,12 @@ class OrderedCategorical:
         self._base_level: str = ""
         self._non_base: list[str] = []
 
+        # Stamped by the design-matrix builder per build: True under a
+        # weighted-EDM family (Tweedie), where hosted Piecewise MODEL geometry
+        # (int-mode placement, most_exposed base) must follow physical rows.
+        # Read with a getattr default so pre-existing pickles stay valid.
+        self._inner_geometry_physical_rows: bool = False
+
         # The inner spline this wrapper owns and delegates to (deferred until
         # n_levels is known, because the knot count clamps against it).
         self._spline: _SplineBase | None = None
@@ -1088,8 +1094,16 @@ class OrderedCategorical:
         the level values is model geometry, so no weights are passed. The
         parametric bases DO receive the fit weights -- ``Polynomial``
         orthonormalizes against the training exposure (the whole point of the
-        weighted ordinal contrasts) and ``Piecewise`` uses them for
+        weighted ordinal contrasts, and deliberately under every family: the
+        documented inference-geometry rule) and ``Piecewise`` uses them for
         ``base='most_exposed'`` and its support rules.
+
+        The exception is hosted MODEL geometry under a weighted-EDM family:
+        Tweedie weights are prior weights, not frequency mass, so a hosted
+        Piecewise's int-mode placement and base selection follow physical rows
+        exactly as the numeric-axis term does. The builder stamps
+        ``_inner_geometry_physical_rows`` per build because only it knows the
+        family; direct spec-API builds keep the frequency-weight reading.
         """
         from dataclasses import replace
 
@@ -1098,7 +1112,10 @@ class OrderedCategorical:
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
             return inner.build(numeric)
-        info = inner.build(numeric, sample_weight=sample_weight)
+        if isinstance(inner, Piecewise) and getattr(self, "_inner_geometry_physical_rows", False):
+            info = inner.build(numeric, sample_weight=None)
+        else:
+            info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):
             # Structurally unpenalized main block for BOTH parametric bases --
             # the same convention as the specials block, which is exactly an

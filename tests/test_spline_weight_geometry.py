@@ -192,3 +192,47 @@ def test_tweedie_prior_weights_do_not_move_piecewise_placement_or_base():
 
     poisson_weighted = fitted_spec("poisson", weight)
     assert not np.array_equal(poisson_weighted._knots, tweedie_unweighted._knots)
+
+
+def test_tweedie_prior_weights_do_not_move_hosted_piecewise_geometry():
+    """The physical-rows rule reaches an OrderedCategorical's inner Piecewise.
+
+    Hosted int-mode placement and ``base='most_exposed'`` are the same MODEL
+    geometry as the numeric term's, so under Tweedie they must match the
+    no-prior-weights result. Observed before the fix: prior weights heaped on
+    the upper bands pulled the placement to [0, 5, 6, 7] with base index 3,
+    against the physical-rows [0, 2, 4, 5, 7] with base index 1 -- identical
+    to the Poisson weighted fit, which is the control proving the equality
+    below is not vacuous. Polynomial standardization deliberately keeps
+    following ``sample_weight`` under every family (the inference-geometry
+    rule), so only the Piecewise inner is pinned here.
+    """
+    from superglm import OrderedCategorical
+
+    levels = [f"Mi{i:03d}" for i in range(8)]
+    rng = np.random.default_rng(7)
+    bands = rng.choice(levels, 400)
+    positions = np.array([levels.index(band) for band in bands], dtype=np.float64)
+    weight = np.where(positions > 5.0, 9.0, 0.5)
+    y = rng.poisson(2.0, 400).astype(np.float64)
+    frame = pd.DataFrame({"band": bands})
+
+    def fitted_inner(family, sample_weight):
+        model = SuperGLM(
+            family=family,
+            features={
+                "band": OrderedCategorical(
+                    order=levels, basis=Piecewise(3, base="most_exposed")
+                )
+            },
+        )
+        model.fit(frame, y, sample_weight=sample_weight)
+        return model._specs["band"]._spline
+
+    tweedie_weighted = fitted_inner(Tweedie(p=1.5), weight)
+    tweedie_unweighted = fitted_inner(Tweedie(p=1.5), None)
+    np.testing.assert_array_equal(tweedie_weighted._knots, tweedie_unweighted._knots)
+    assert tweedie_weighted._base_index == tweedie_unweighted._base_index
+
+    poisson_weighted = fitted_inner("poisson", weight)
+    assert not np.array_equal(poisson_weighted._knots, tweedie_unweighted._knots)
