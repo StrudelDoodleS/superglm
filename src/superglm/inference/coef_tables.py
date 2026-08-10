@@ -653,6 +653,11 @@ def build_coef_rows(
             # `levels` and "9" here, `9 in {"9"}` is False, and the Fit
             # column silently reports the free level as "smooth".
             special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+            # The Fit column's word matches the whole-term classification: a
+            # level carried by an unpenalized parametric block is not
+            # "smooth", it is "piecewise"/"polynomial" beside its "free"
+            # neighbours.
+            main_fit = "smooth" if inner_kind == "spline" else inner_kind
             for i, level in enumerate(levels):
                 coef_val = float(raw["level_log_relativities"][level])
                 se_val: float | None = (
@@ -678,7 +683,7 @@ def build_coef_rows(
                         level_fit=(
                             None
                             if special_labels is None
-                            else ("free" if level in special_labels else "smooth")
+                            else ("free" if level in special_labels else main_fit)
                         ),
                     )
                 )
