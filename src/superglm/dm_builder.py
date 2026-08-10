@@ -508,6 +508,17 @@ def add_interaction(
                 "to cross with; drop specials= to interact the smoothed ordinal "
                 "parent, or use a Categorical feature for unsmoothed level effects."
             )
+        if isinstance(spec, OrderedCategorical) and spec.basis_kind != "spline":
+            # Same refusal as resolve_interaction_parent, raised HERE at
+            # registration so the pair fails where it is written rather than
+            # mid design-matrix build after the caller committed a fit.
+            raise NotImplementedError(
+                f"cannot add the interaction ({feat1!r}, {feat2!r}): {parent!r} is an "
+                f"OrderedCategorical(basis={type(spec._basis_spline).__name__}(...)), "
+                "an unpenalized parametric block with no marginal smooth to cross "
+                "with; use basis=Spline(...) for an interactable ordinal parent, or "
+                "a Categorical feature for level-by-level structure."
+            )
 
     kind1 = _spec_kind(specs[feat1])
     kind2 = _spec_kind(specs[feat2])
