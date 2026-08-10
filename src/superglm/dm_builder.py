@@ -12,6 +12,7 @@ model.py focused on orchestration.
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -426,6 +427,14 @@ def _build_ssp_group(B_csr, R_inv):
 def _build_unpenalized_sparse_group(B_csr, n_cols: int):
     """Cheapest exact representation of an unpenalized sparse block.
 
+    Reached only for groups that opt in via ``GroupInfo.supports_row_compression``
+    (today: ``Piecewise``).  The routing is opt-in because the compressed
+    container is a ``DiscretizedSSPGroupMatrix`` subclass, and re-routing every
+    unpenalized sparse group through it silently disabled the tabmat split and
+    changed design_summary/partition reporting for shipped term types
+    (``CategoricalInteraction``, two-level ``OrderedCategorical`` steps) that
+    never asked for it.
+
     The same lossless row-dedup gate as ``_build_ssp_group``: repeated rows are
     the norm for heaped rating variables (a ``Piecewise`` hat basis above all),
     and deduplication never bins, so exactness survives.  The identity
@@ -772,8 +781,10 @@ def _process_info(
                     gm.component_types = info.component_types
                     if info.lambda_policies is not None:
                         gm.lambda_policies = info.lambda_policies
-            else:
+            elif info.supports_row_compression:
                 gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
+            else:
+                gm = SparseGroupMatrix(info.columns)
         else:
             gm = DenseGroupMatrix(info.columns)
 
@@ -1031,11 +1042,27 @@ def build_design_matrix(
                 ]
         else:
             try:
-                result = spec.build(x_col, sample_weight=spline_geometry_weight)
+                # Capture build-time warnings so they can be re-emitted with
+                # the feature name.  The errors below already get this
+                # treatment; the warnings (Piecewise int-mode collapse and
+                # thin segments above all -- the failure modes most likely to
+                # reach production silently) were unattributable the moment a
+                # model held two terms of the same spec type.
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    result = spec.build(x_col, sample_weight=spline_geometry_weight)
             except ValueError as err:
                 # Name the failing term: spec-level guards (e.g. Polynomial's
                 # distinct-support and rank checks) cannot know the column name.
                 raise ValueError(f"Feature {name!r}: {err}") from err
+            for captured in caught:
+                warnings.warn(
+                    f"Feature {name!r}: {captured.message}",
+                    category=captured.category,
+                    # Two frames up is the model fit call that named the
+                    # feature -- the place a user can act on the warning.
+                    stacklevel=2,
+                )
             infos = result if isinstance(result, list) else [result]
 
         # Resolve lambda_policies from the spec onto each GroupInfo.
