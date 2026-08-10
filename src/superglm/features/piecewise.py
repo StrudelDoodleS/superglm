@@ -466,9 +466,13 @@ class Piecewise:
         if not signed:
             left = np.abs(left)
             right = np.abs(right)
-        return np.bincount(seg, weights=weights * left, minlength=k) + np.bincount(
+        mass = np.bincount(seg, weights=weights * left, minlength=k) + np.bincount(
             seg + 1, weights=weights * right, minlength=k
         )
+        # asarray, not astype: with weights= the bincounts are already float64,
+        # so this is a no-copy identity that states the dtype the type
+        # checker's bincount stubs get wrong.
+        return np.asarray(mass, dtype=np.float64)
 
     def _weighted_gram(
         self,
@@ -713,7 +717,14 @@ class Piecewise:
         # introduce.  The policy is already applied to x, so the raw segment
         # arithmetic is the right one here; _hat_basis would just clamp again.
         x_unique, inverse = np.unique(x, return_inverse=True)
-        w_agg = np.bincount(inverse, weights=weights, minlength=x_unique.size)
+        # asarray is a no-copy identity here (bincount with weights= already
+        # returns float64); it exists because the checker's bincount stubs
+        # report an integer array, which every float64-annotated consumer of
+        # w_agg would then trip over.
+        w_agg = np.asarray(
+            np.bincount(inverse, weights=weights, minlength=x_unique.size),
+            dtype=np.float64,
+        )
         # Everything downstream works from the two hat entries per row -- the
         # segment index and the within-segment fraction -- rather than a dense
         # (n_unique, J+2) basis.  On a genuinely continuous x (n_unique ~ n)
