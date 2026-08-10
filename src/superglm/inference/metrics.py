@@ -34,6 +34,7 @@ from superglm.model.state_ops import (
     _rank_augmented_covariance,
     _solver_space_working_weights,
 )
+from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
     tweedie_profile_method_label,
@@ -1331,6 +1332,9 @@ class ModelMetrics:
             ),
             sample_weights=self._weights,
             distribution=self._family,
+            selection_shrunk_group_names=selection_shrunk_group_names(
+                fitted_penalty(self._model), self._groups
+            ),
         )
 
     def summary(

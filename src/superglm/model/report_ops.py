@@ -11,6 +11,7 @@ from superglm.inference._term_helpers import spline_group_enrichment, spline_gro
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
+from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
     tweedie_profile_method_label,
@@ -291,6 +292,9 @@ def summary(
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
         distribution=model._distribution,
+        selection_shrunk_group_names=selection_shrunk_group_names(
+            fitted_penalty(model), model._groups
+        ),
     )
     phi = res.phi
     se_dict: dict[str, np.ndarray] = {}
