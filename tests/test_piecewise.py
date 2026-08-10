@@ -135,6 +135,49 @@ class TestHatBasis:
         assert isinstance(model._dm.group_matrices[idx], SparseGroupMatrix)
 
     @pytest.mark.parametrize("case_name", CASE_NAMES)
+    def test_the_emitted_design_is_bit_identical_to_the_dense_hat_path(self, case_name):
+        """build() emits CSR straight from the two hat entries per row.
+
+        The historical path went through a dense (n_unique, J+2) basis and
+        ``sp.csr_matrix(dense)``.  The direct emission must reproduce that
+        matrix bit for bit -- values, indices and indptr -- because the
+        builder's dedup gate groups rows by their raw float bits, and a
+        last-ulp difference would silently change which rows merge.
+        """
+        case = make_case(case_name)
+        x = case.X["x"].to_numpy(dtype=np.float64)
+        spec = case.spec
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            info = spec.build(x, sample_weight=case.sample_weight)
+
+        reference = sp.csr_matrix(spec.transform(x))
+        emitted = info.columns
+        assert emitted.has_sorted_indices
+        np.testing.assert_array_equal(emitted.indptr, reference.indptr)
+        np.testing.assert_array_equal(emitted.indices, reference.indices)
+        np.testing.assert_array_equal(emitted.data, reference.data)
+
+    def test_a_large_distinct_x_build_probes_rank_through_the_gram(self, monkeypatch):
+        """Above the factor ceiling the probe switches to the tridiagonal Gram."""
+        import superglm.features.piecewise as pw
+
+        calls = {"gram": 0}
+        original = Piecewise._weighted_gram
+
+        def spy(self, seg, frac, weights):
+            calls["gram"] += 1
+            return original(self, seg, frac, weights)
+
+        monkeypatch.setattr(Piecewise, "_weighted_gram", spy)
+        x = np.linspace(0.0, 100.0, pw._RANK_PROBE_MAX_FACTOR_ROWS + 1)
+        spec = Piecewise([25.0, 50.0, 75.0], lower=0.0, upper=100.0)
+        info = spec.build(x)
+
+        assert calls["gram"] == 1
+        np.testing.assert_array_equal(info.columns.toarray(), spec.transform(x))
+
+    @pytest.mark.parametrize("case_name", CASE_NAMES)
     def test_transform_equals_build_columns(self, case_name):
         """Section 9 property 2 in its load-bearing form: fit and predict share columns.
 
@@ -511,6 +554,26 @@ class TestValidationRules:
         with pytest.raises(ValueError, match="rank deficient against the intercept"):
             spec.build(x)
 
+    def test_rule_10_the_gram_backstop_still_refuses_exact_deficiency(self, monkeypatch):
+        """Driving the deficient fixtures through the large-n Gram arm.
+
+        The Gram probe runs with a deliberately generous tolerance because it
+        only has to catch EXACT deficiency (rules 8/9/11 catch graded
+        near-deficiency structurally first); these are exactly-deficient, so
+        the verdict must survive the route change.
+        """
+        import superglm.features.piecewise as pw
+
+        monkeypatch.setattr(pw, "_RANK_PROBE_MAX_FACTOR_ROWS", 0)
+        with pytest.raises(ValueError, match="rank deficient against the intercept"):
+            Piecewise([1.0], lower=0.0, upper=2.0, base="first").build(
+                np.concatenate([np.full(50, 0.5), np.full(50, 1.5)])
+            )
+        with pytest.raises(ValueError, match="rank deficient"):
+            Piecewise([1.0, 2.0], base="first", lower=0.0, upper=3.0).build(
+                np.array([0.0, 1.5, 3.0])
+            )
+
     def test_rule_11_a_thin_segment_warns_and_reports_every_segment(self):
         x = np.concatenate([np.array([0.5]), np.linspace(1.01, 2.0, 1000)])
         with pytest.warns(UserWarning, match="of the in-range weight") as record:
@@ -685,6 +748,68 @@ class TestSpecState:
 
 
 class TestPiecewiseIntegration:
+    def test_a_categorical_interaction_keeps_its_plain_sparse_representation(self):
+        """Row compression is opt-in via ``GroupInfo.supports_row_compression``.
+
+        Before the scoping, ``_build_unpenalized_sparse_group`` re-routed EVERY
+        unpenalized sparse group: a categorical interaction became a
+        ``DiscretizedSSPGroupMatrix`` subclass, which disables the tabmat
+        split for the whole model and flips its design_summary representation
+        -- a behaviour change to a shipped term type that never asked for it.
+        """
+        from superglm.group_matrix import SparseGroupMatrix
+
+        rng = np.random.default_rng(37)
+        n = 4000
+        frame = pd.DataFrame(
+            {
+                "region": rng.choice(["A", "B", "C"], n),
+                "ptype": rng.choice(["X", "Y", "Z"], n),
+            }
+        )
+        y = rng.poisson(1.0, n).astype(np.float64)
+        model = SuperGLM(
+            features={"region": Categorical(base="first"), "ptype": Categorical(base="first")},
+            interactions=[("region", "ptype")],
+        )
+        model.fit(frame, y)
+
+        idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "region:ptype")
+        assert type(model._dm.group_matrices[idx]) is SparseGroupMatrix
+        # The pre-PR representation and its consequences, pinned: the split
+        # survives because no group in this model is a compressed one.
+        assert model._dm._get_or_build_tabmat_split() is not None
+        summary = model.design_summary()
+        row = summary.loc[summary["feature"] == "region:ptype"].iloc[0]
+        assert row["representation"] == "sparse-csr"
+        assert not row["compressed"]
+
+    def test_build_warnings_name_the_feature_that_raised_them(self):
+        """Two Piecewise terms, one thin segment: the warning must say which.
+
+        The build-time errors already carry ``Feature {name!r}:``; without the
+        same prefix on warnings, a model with two terms of one spec type emits
+        two identical-looking messages with nothing saying which column to fix.
+        """
+        a = np.linspace(0.0, 10.0, 1001)
+        b = np.concatenate([np.array([0.5]), np.linspace(1.01, 2.0, 1000)])
+        rng = np.random.default_rng(43)
+        y = rng.poisson(1.0, a.size).astype(np.float64)
+        model = SuperGLM(
+            features={
+                "a": Piecewise([5.0], lower=0.0, upper=10.0),
+                "b": Piecewise([1.0], lower=0.0, upper=2.0),
+            },
+        )
+        with pytest.warns(UserWarning) as record:
+            model.fit(pd.DataFrame({"a": a, "b": b}), y)
+
+        messages = [str(w.message) for w in record]
+        thin = [m for m in messages if "of the in-range weight" in m]
+        assert thin, messages
+        assert all(m.startswith("Feature 'b': ") for m in thin)
+        assert not any("Feature 'a'" in m for m in messages)
+
     def test_a_model_with_a_piecewise_term_fits_and_predicts(self):
         """No dm_builder change: the spec builds polymorphically like any other."""
         case = make_case("interior_base")

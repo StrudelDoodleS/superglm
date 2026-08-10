@@ -126,6 +126,13 @@ class GroupInfo:
     penalty_matrix: NDArray | None = None  # (p_g, p_g) for SSP, else None
     reparametrize: bool = False  # whether to apply SSP transform
     penalized: bool = True  # whether this group is subject to the penalty
+    # Opt-in: the builder may losslessly deduplicate this group's repeated
+    # sparse rows into a support-compressed container.  Set only by specs
+    # whose repeated rows are the norm (Piecewise).  Other unpenalized sparse
+    # producers (CategoricalInteraction, a two-level OrderedCategorical step)
+    # keep the plain CSR representation, its tabmat-split eligibility and its
+    # design_summary reporting.
+    supports_row_compression: bool = False
     cat_codes: NDArray | None = None  # (n,) integer codes for categorical features
     # select=True subgroup support for double-penalty decomposition
     subgroup_name: str | None = None  # "linear" or "spline"
