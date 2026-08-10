@@ -65,6 +65,23 @@ def penalty_has_targets(penalty: object, groups: list[GroupSlice]) -> bool:
     return any(penalty_targets_group(penalty, g) for g in groups)
 
 
+def selection_shrunk_group_names(penalty: object, groups: list[GroupSlice]) -> set[str]:
+    """Names of the groups a fitted lambda1-style penalty actually shrinks.
+
+    A positive (or ``"auto"``-resolved) ``selection_penalty`` biases every
+    coefficient in the targeted groups, which invalidates Wald z/p/CI and the
+    whole-term chi-square for them; reporting surfaces use this set to
+    withhold those fields.  Deliberately broader than
+    :func:`penalty_can_zero_groups`: continuous L2 shrinkage breaks the
+    unpenalized-Wald contract just as selection does, even though it never
+    zeroes a group.
+    """
+    lambda1 = getattr(penalty, "lambda1", None)
+    if lambda1 is None or lambda1 <= 0.0:
+        return set()
+    return {group.name for group in groups if penalty_targets_group(penalty, group)}
+
+
 def penalty_can_zero_groups(penalty: object) -> bool:
     """Whether the fitted penalty can set a whole targeted group exactly to zero."""
     lambda1 = getattr(penalty, "lambda1", None)
