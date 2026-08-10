@@ -433,44 +433,6 @@ def test_ordered_spline_whole_feature_row_stays_before_expanded_reference():
     assert [row.edf for row in display.rows] == [1.5, None, None, None, None]
 
 
-def test_ordered_step_groups_expand_in_original_order():
-    from superglm.inference.summary_levels import build_summary_level_display
-
-    levels = ["low", "medium", "high", "very high"]
-    grouping = collapse_levels(
-        levels,
-        groups={"upper fitted label": ["high", "very high"]},
-        order=levels,
-    )
-    with pytest.warns(FutureWarning, match="step smoothing"):
-        spec = OrderedCategorical(
-            order=levels,
-            basis="step",
-            base="low",
-            grouping=grouping,
-        )
-    spec.build(np.asarray(levels))
-    canonical = [
-        _CoefRow(name="risk[medium]", group="risk", coef=0.1, se=0.03, edf=1.5),
-        _CoefRow(name="risk[upper fitted label]", group="risk", coef=0.4, se=0.08),
-    ]
-
-    display = build_summary_level_display(
-        canonical,
-        specs={"risk": spec},
-        groups=[GroupSlice("risk", 0, 2)],
-        level_display="expanded",
-    )
-
-    assert [row.name for row in display.rows] == [
-        "risk[low]",
-        "risk[medium]",
-        "risk[high]",
-        "risk[very high]",
-    ]
-    assert [row.level_group for row in display.rows] == ["", "", "G1", "G1"]
-
-
 def test_group_ids_restart_per_feature_and_unmatched_rows_survive():
     from superglm.inference.summary_levels import build_summary_level_display
 

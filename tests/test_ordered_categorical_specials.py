@@ -105,11 +105,6 @@ def test_fewer_than_two_smooth_levels_is_rejected():
         OrderedCategorical(order=["a", SPECIAL], specials=[SPECIAL], basis=Spline(kind="ps", k=5))
 
 
-def test_specials_with_step_basis_is_rejected():
-    with pytest.raises(ValueError, match="basis='step'"):
-        OrderedCategorical(order=list(ORDERED), specials=[SPECIAL], basis="step")
-
-
 def test_explicit_special_base_is_rejected():
     with pytest.raises(ValueError, match="reporting base"):
         _oc(base=SPECIAL)

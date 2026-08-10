@@ -642,34 +642,6 @@ class TestPlotlyMainEffects:
         trace_names = {trace.name for trace in fig.data}
         assert "Exposure density" not in trace_names
 
-    def test_plotly_ordered_categorical_step_renders(self):
-        rng = np.random.default_rng(123)
-        n = 400
-        levels = ["Low", "Medium", "High", "Very High"]
-        X = pd.DataFrame(
-            {
-                "risk": rng.choice(levels, n, p=[0.35, 0.30, 0.22, 0.13]),
-                "x": rng.normal(size=n),
-            }
-        )
-        sample_weight = rng.uniform(0.4, 1.0, n)
-        effect = {"Low": 0.0, "Medium": 0.15, "High": 0.35, "Very High": 0.65}
-        mu = np.exp(-1.4 + 0.2 * X["x"].to_numpy() + np.array([effect[v] for v in X["risk"]]))
-        y = rng.poisson(mu * sample_weight).astype(float)
-
-        model = SuperGLM(
-            features={
-                "risk": OrderedCategorical(order=levels, basis="step"),
-                "x": Numeric(),
-            }
-        )
-        model.fit(X, y, sample_weight=sample_weight)
-
-        import plotly.graph_objects as go
-
-        fig = model.plot(engine="plotly", X=X, sample_weight=sample_weight)
-        assert isinstance(fig, go.Figure)
-
     def test_plotly_categorical_uses_scatter_with_error_bars(self):
         rng = np.random.default_rng(100)
         n = 500
@@ -785,7 +757,9 @@ class TestPlotlyMainEffects:
 
         model = SuperGLM(
             features={
-                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3)
+                ),
                 "x": Numeric(),
             }
         )
@@ -830,7 +804,9 @@ class TestPlotlyMainEffects:
 
         model = SuperGLM(
             features={
-                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3)
+                ),
                 "x": Numeric(),
             }
         )
@@ -870,7 +846,9 @@ class TestPlotlyMainEffects:
 
         model = SuperGLM(
             features={
-                "age_band": OrderedCategorical(values=midpoints, basis="spline", n_knots=3),
+                "age_band": OrderedCategorical(
+                    values=midpoints, basis=Spline(kind="ps", n_knots=3)
+                ),
                 "x": Numeric(),
             }
         )
