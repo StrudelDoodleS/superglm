@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import PSpline, Spline, SuperGLM, Tweedie
+from superglm import Piecewise, PSpline, Spline, SuperGLM, Tweedie
 
 _X = np.array([-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0])
 _WEIGHT = np.array([1, 4, 2, 6, 1, 3, 5, 1, 4, 2, 3, 1], dtype=np.float64)
@@ -163,3 +163,32 @@ def test_tweedie_prior_weights_keep_physical_row_knot_geometry(strategy):
         physical_knots["interior_knots"],
         rtol=0.0,
     )
+
+
+def test_tweedie_prior_weights_do_not_move_piecewise_placement_or_base():
+    """Piecewise int-mode placement and base selection are model geometry.
+
+    Under Tweedie the weights are EDM prior weights, not frequency mass, so
+    knot placement and ``base='most_exposed'`` follow physical rows -- the
+    same rule the spline strategies above follow (explicit-breaks mode has no
+    learned placement to move).  The Poisson control proves the weights would
+    otherwise have moved the knots, so the equality is not vacuous.
+    """
+    rng = np.random.default_rng(7)
+    x = np.round(rng.uniform(0.0, 40.0, 400), 0)
+    weight = np.where(x > 30.0, 9.0, 0.5)
+    y = rng.poisson(2.0, 400).astype(np.float64)
+    frame = pd.DataFrame({"x": x})
+
+    def fitted_spec(family, sample_weight):
+        model = SuperGLM(family=family, features={"x": Piecewise(3, base="most_exposed")})
+        model.fit(frame, y, sample_weight=sample_weight)
+        return model._specs["x"]
+
+    tweedie_weighted = fitted_spec(Tweedie(p=1.5), weight)
+    tweedie_unweighted = fitted_spec(Tweedie(p=1.5), None)
+    np.testing.assert_array_equal(tweedie_weighted._knots, tweedie_unweighted._knots)
+    assert tweedie_weighted._base_index == tweedie_unweighted._base_index
+
+    poisson_weighted = fitted_spec("poisson", weight)
+    assert not np.array_equal(poisson_weighted._knots, tweedie_unweighted._knots)

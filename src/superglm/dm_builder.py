@@ -841,16 +841,20 @@ def build_design_matrix(
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
     link = resolve_link(link_spec, distribution)
+    from superglm.features.piecewise import Piecewise
     from superglm.features.spline import _SplineBase
 
     # Non-Tweedie weights are frequency mass for learned spline geometry.
     # Tweedie weights are EDM prior weights, so spline knot placement and
     # discretized-bin geometry stay functions of physical rows only.  That
-    # physical-rows rule is scoped to _SplineBase geometry: Polynomial
-    # standardization deliberately follows sample_weight under every family,
-    # because orthonormalization is inference/selection geometry (the spanned
-    # column space is weight-invariant; unpenalized fits are identical), not
-    # model geometry like knot placement.
+    # physical-rows rule covers every MODEL-geometry learner: _SplineBase
+    # knot placement, and Piecewise int-mode quantile placement and
+    # base='most_exposed' selection (explicit-breaks mode is unaffected --
+    # stated knots do not move).  Polynomial standardization deliberately
+    # follows sample_weight under every family, because orthonormalization is
+    # inference/selection geometry (the spanned column space is
+    # weight-invariant; unpenalized fits are identical), not model geometry
+    # like knot placement.
     geometry_weight = None if isinstance(distribution, Tweedie) else sample_weight
 
     group_matrices: list[GroupMatrix] = []
@@ -860,7 +864,9 @@ def build_design_matrix(
     for name in feature_order:
         spec = specs[name]
         x_col = X.column_array(name)
-        spline_geometry_weight = geometry_weight if isinstance(spec, _SplineBase) else sample_weight
+        spline_geometry_weight = (
+            geometry_weight if isinstance(spec, _SplineBase | Piecewise) else sample_weight
+        )
 
         # Check if this feature should use fit-time discretization
         use_discrete = should_discretize(spec, model_discrete)
