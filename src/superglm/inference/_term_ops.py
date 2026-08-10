@@ -637,7 +637,13 @@ def term_inference(
                 # the claim true where it applies and honest where it does not;
                 # the J+1 fallback is for callers that asked for no edf at all.
                 edf=edf if edf is not None else float(spec._non_base_indices.size),
-                smoothing_lambda=lam,
+                # No smoothing lambda, never the global lambda2 fallback: the
+                # group carries no penalty matrix, so lambda2 contributes no
+                # smoothing penalty to this block, and reporting it would leak
+                # a nonexistent smoothing parameter into TermInference, editor
+                # metadata and plot payloads.  Selection shrinkage is a
+                # different object and is not a smoothing lambda either.
+                smoothing_lambda=None,
                 alpha=alpha,
             ),
             centering,

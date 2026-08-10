@@ -96,6 +96,14 @@ def _with_piecewise_reference_rows(
         if not positions:
             continue
         insert_at = positions[base_index] if base_index < len(positions) else positions[-1] + 1
+        # Mirror the whole-term row's active state rather than hardcode True:
+        # when selection drops the group, coef_tables emits the term row with
+        # active=False, and a display row still claiming active would be the
+        # one surface disagreeing about whether the term survived.
+        term_row = next(
+            (row for row in out if row.name == term_prefix and row.is_spline),
+            None,
+        )
         out.insert(
             insert_at,
             _CoefRow(
@@ -103,7 +111,7 @@ def _with_piecewise_reference_rows(
                 group=term_prefix,
                 coef=0.0,
                 is_reference=True,
-                active=True,
+                active=bool(term_row.active) if term_row is not None else True,
             ),
         )
     return out

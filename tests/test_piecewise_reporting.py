@@ -464,8 +464,14 @@ class TestEffectiveDegreesOfFreedom:
 
         assert 0.0 < edf < nominal - _EDF_ATOL
 
-    def test_a_selection_penalty_auto_fit_completes_and_reports_rows(self):
-        """A smoke test only: the four-condition comment withdraws the Wald numbers here."""
+    def test_selection_shrinkage_withholds_the_wald_columns(self):
+        """§4 condition 2 is enforced, not just documented, at the reporting site.
+
+        A positive or "auto"-resolved selection_penalty shrinks the piecewise
+        block, which invalidates the per-knot Wald z/p/CI and the whole-term
+        chi-square.  The estimates and their SEs stay; the calibration claims
+        go.  The unshrunk sweep above is the control showing them present.
+        """
         case = make_case("interior_base")
         model = SuperGLM(
             selection_penalty="auto",
@@ -476,13 +482,75 @@ class TestEffectiveDegreesOfFreedom:
             },
         )
         model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        from superglm.model.fit_state import fitted_penalty
+
+        # Precondition: "auto" really resolved to shrinkage on this fixture.
+        assert (getattr(fitted_penalty(model), "lambda1", 0.0) or 0.0) > 0.0
         spec = _piecewise_spec(model)
+
+        rows = model.summary()._coef_rows
+        knot_rows = [row for row in rows if row.group == "x" and row.name.startswith("x[")]
+        assert len(knot_rows) == spec._non_base_indices.size
+        for row in knot_rows:
+            assert row.coef is not None
+            assert row.se is not None
+            assert row.z is None and row.p is None
+            assert row.ci_low is None and row.ci_high is None
+        term = next(row for row in rows if row.name == "x" and row.is_spline)
+        assert term.active
+        assert term.wald_chi2 is None and term.wald_p is None and term.ref_df is None
 
         payload = build_summary_export_payload(model)
         term_rows = [row for row in payload.terms if row.group == "x"]
         assert sum(row.kind == "coefficient" for row in term_rows) == spec._non_base_indices.size
         assert sum(row.kind == "group" for row in term_rows) == 1
+        assert all(row.p_value is None for row in term_rows)
+        # The renderer tolerates the withheld fields.
         assert str(model.summary())
+
+    def test_no_smoothing_lambda_is_reported_for_a_piecewise_term(self):
+        """The group has no penalty matrix, so the global lambda2 is not its lambda.
+
+        ``_resolve_term_lambda``'s fallback used to report the model-wide
+        ridge here, presenting a nonexistent smoothing parameter to
+        TermInference, the editor metadata and the plot payload.
+        """
+        from superglm.editor.terms import term_from_inference
+        from superglm.plotting.data import build_main_effect_plot_data
+
+        model, _ = _fit("interior_base")
+        ti = model.term_inference("x")
+        assert ti.smoothing_lambda is None
+        assert term_from_inference(ti).metadata["smoothing_lambda"] is None
+        payload = build_main_effect_plot_data(model, [ti])
+        assert payload["terms"][0]["metadata"]["smoothing_lambda"] is None
+
+    def test_the_reference_row_mirrors_a_selection_dropped_group(self):
+        """The display-only base row must not claim active for a dropped term."""
+        case = make_case("interior_base")
+        model = SuperGLM(
+            selection_penalty=25.0,
+            features={
+                "x": case.spec,
+                "region": Categorical(base="first"),
+                "density": Numeric(),
+            },
+        )
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        spec = _piecewise_spec(model)
+
+        rows = model.summary()._coef_rows
+        term = next(row for row in rows if row.name == "x" and row.is_spline)
+        # Precondition: the penalty really dropped the group.
+        assert term.active is False
+
+        base_name = f"x[{float(spec._knots[spec._base_index]):.10g}]"
+        reference = next(
+            row
+            for row in model.summary()._display_rows
+            if row.name == base_name and row.is_reference
+        )
+        assert reference.active is False
 
 
 class TestDerivedSlopes:

@@ -48,6 +48,7 @@ def build_coef_rows(
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
     distribution: Any | None = None,
+    selection_shrunk_group_names: set[str] | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -59,6 +60,10 @@ def build_coef_rows(
     XtWX_inv : (p_active, p_active) inverse used for EDF computation.
     XtWX_inv_aug : (p_active+1, p_active+1) augmented inverse including
         intercept row/column, used for SE computation.
+    selection_shrunk_group_names : groups the fitted penalty's lambda1 term
+        shrinks (``penalties.base.selection_shrunk_group_names``).  Rows whose
+        Wald validity is conditional on being unshrunk -- today the Piecewise
+        branch -- withhold z/p/CI and the whole-term chi-square for these.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -954,12 +959,23 @@ def build_coef_rows(
             # is fixed and known": df stays nominally J+1 under response-selected
             # breaks while the p-values go wrong.  Validity rests on the
             # breakpoints being inputs.
+            #
+            # Condition 2 is ENFORCED here, not just stated: when the fitted
+            # penalty carries positive selection shrinkage aimed at this group
+            # (a positive or "auto"-resolved selection_penalty), the per-knot
+            # z/p/CI and the whole-term chi-square are withheld -- None, the
+            # table's convention for a statistic that does not exist -- while
+            # the estimates and their SEs stay reported.
+            shrunk = g.name in (selection_shrunk_group_names or ())
             knots = spec._knots
             pw_edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
             for i, knot_index in enumerate(spec._non_base_indices):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i]) if len(se_g) > i else 0.0
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                if shrunk:
+                    z = p = ci_lo = ci_hi = None
+                else:
+                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{float(knots[knot_index]):.10g}]",
@@ -986,7 +1002,8 @@ def build_coef_rows(
             stat = float("nan")
             p_val = float("nan")
             ref_df = float(g.size)
-            if active:
+            reportable = active and not shrunk
+            if reportable:
                 from scipy.stats import chi2 as chi2_dist
 
                 ag = next(a for a in active_groups if a.name == g.name)
@@ -1004,9 +1021,9 @@ def build_coef_rows(
                     n_params=g.size,
                     active=active,
                     group_norm=float(np.linalg.norm(b_g)) if active else 0.0,
-                    wald_chi2=stat if active else None,
-                    wald_p=p_val if active else None,
-                    ref_df=ref_df if active else None,
+                    wald_chi2=stat if reportable else None,
+                    wald_p=p_val if reportable else None,
+                    ref_df=ref_df if reportable else None,
                     # Names the row for what it is in both renderers, which
                     # otherwise label every group-test row "spline".
                     subgroup_type="piecewise",
