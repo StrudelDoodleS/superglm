@@ -784,7 +784,9 @@ def _process_info(
             elif info.supports_row_compression:
                 gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
             else:
-                gm = SparseGroupMatrix(info.columns)
+                # cast, not a runtime check: the enclosing branch condition is
+                # sp.issparse(info.columns), which the checker cannot narrow by.
+                gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
         else:
             gm = DenseGroupMatrix(info.columns)
 
