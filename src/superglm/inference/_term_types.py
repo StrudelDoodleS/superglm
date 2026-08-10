@@ -93,6 +93,14 @@ class TermInference:
     # Spline-specific metadata
     spline: SplineMetadata | None = None
 
+    # Piecewise only: covariance of the per-knot log relativities (J+2 square,
+    # base row/col identically zero; its diagonal is se_log_relativity**2).
+    # Carried so plotting can evaluate the exact off-knot band
+    # var f(x) = h1^2 V11 + 2 h1 h2 V12 + h2^2 V22 on a display grid --
+    # pointwise SEs at the knots are not enough, because the variance between
+    # knots is a quadratic form of BOTH adjacent hats and their covariance.
+    knot_covariance: NDArray | None = None
+
     # Smooth curve for plotting (OrderedCategorical spline mode)
     smooth_curve: SmoothCurve | None = None
 

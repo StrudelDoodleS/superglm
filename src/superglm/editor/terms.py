@@ -154,6 +154,19 @@ def _term_extrapolates_linearly(term: EditableTerm) -> bool:
     return str(term.metadata.get("extrapolation", "clip")) == "extend"
 
 
+def _term_refuses_extrapolation(term: EditableTerm) -> bool:
+    """Whether the fitted term refuses out-of-range rows outright.
+
+    Only a piecewise term under ``extrapolation="error"``.  The model's own
+    ``score()`` raises on those rows, so manufacturing a clamped offset for
+    them here would condition ``refit_with_edited_offset`` on values the
+    model itself refuses to produce.
+    """
+    if not _grid_is_knot_vector(term):
+        return False
+    return str(term.metadata.get("extrapolation", "clip")) == "error"
+
+
 def term_offset_values(term: EditableTerm, values) -> NDArray:
     # Score edited terms back onto raw rows for fixed-offset refits. Categoricals
     # map by label; continuous terms interpolate over the editor grid.
@@ -176,6 +189,19 @@ def term_offset_values(term: EditableTerm, values) -> NDArray:
     order = np.argsort(x_grid)
     x_sorted = x_grid[order]
     y_sorted = effects[order]
+    if _term_refuses_extrapolation(term) and x_sorted.size >= 2:
+        # Mirror the model's own refusal (Piecewise._policy_x), tolerance
+        # included, instead of silently clamping rows the model would raise
+        # on: an offset manufactured for unrated rows would let a fixed-offset
+        # refit rate exactly the rows the term's stated policy excludes.
+        lo, hi = float(x_sorted[0]), float(x_sorted[-1])
+        scale = max(1.0, abs(lo), abs(hi), abs(hi - lo))
+        tol = 1e-12 * scale
+        if np.any(x_values < lo - tol) or np.any(x_values > hi + tol):
+            raise ValueError(
+                f"Term {term.name!r} received values outside the rated range "
+                f"[{lo:.6g}, {hi:.6g}] with extrapolation='error'."
+            )
     scored = np.interp(x_values, x_sorted, y_sorted, left=y_sorted[0], right=y_sorted[-1])
     if _term_extrapolates_linearly(term) and x_sorted.size >= 2:
         # A piecewise term's grid IS its knot vector, and it is the first spec

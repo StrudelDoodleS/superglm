@@ -35,6 +35,7 @@ from superglm.plotting.common import (
     _level_positions_with_specials,
     _make_continuous_figure,
     _ordered_level_spacing,
+    piecewise_display_term,
 )
 from superglm.plotting.group_display import (
     GroupedTermDisplay,
@@ -367,6 +368,11 @@ def plot_term(
     if ti.kind == "categorical":
         display = project_grouped_term_for_display(model, ti, grouped_level_display)
         ti = display.term
+    elif ti.kind == "piecewise":
+        # Bands and density both need a display grid: the knot grid draws a
+        # CI band whose interior linearly interpolates the knot limits, which
+        # the covariance says is wrong between knots.
+        ti = piecewise_display_term(ti)
 
     if ti.kind in ("spline", "polynomial", "piecewise"):
         needs_strip = has_density and ti.name in frame.columns
@@ -861,6 +867,8 @@ def _plot_relativities_new(
         if ti.kind == "categorical":
             display = project_grouped_term_for_display(model, ti, grouped_level_display)
             display_ti = display.term
+        elif ti.kind == "piecewise":
+            display_ti = piecewise_display_term(ti)
 
         if display_ti.kind in ("spline", "polynomial", "piecewise"):
             _plot_spline_panel(ax, display_ti, interval, show_knots)

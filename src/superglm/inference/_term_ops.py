@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.inference._term_covariance import feature_se_from_cov, simultaneous_bands
+from superglm.inference._term_covariance import (
+    feature_se_from_cov,
+    piecewise_knot_covariance,
+    simultaneous_bands,
+)
 from superglm.inference._term_helpers import (
     _VALID_CENTERING,
     _build_spline_metadata,
@@ -599,16 +603,19 @@ def term_inference(
         log_rel = raw["log_relativity"]
 
         se = ci_lo = ci_hi = None
+        knot_cov = None
         if with_se and active and Cov_active is not None:
             assert active_groups_cov is not None
-            se = feature_se_from_cov(
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
+            # The full per-knot covariance, not just its diagonal: plotting
+            # needs the off-diagonal terms to evaluate the band between knots
+            # exactly.  sqrt(diag) IS the per-knot SE (same basis map as
+            # feature_se_from_cov's Piecewise branch), so the two stay one
+            # computation rather than two that can drift.
+            knot_cov = piecewise_knot_covariance(name, Cov_active, active_groups_cov, specs)
+            se = (
+                np.sqrt(np.maximum(np.diag(knot_cov), 0.0))
+                if knot_cov is not None
+                else np.zeros(knots.size)
             )
             ci_lo = _safe_exp(log_rel - z_alpha * se)
             ci_hi = _safe_exp(log_rel + z_alpha * se)
@@ -628,6 +635,7 @@ def term_inference(
                 se_log_relativity=se,
                 ci_lower=_maybe_array(ci_lo),
                 ci_upper=_maybe_array(ci_hi),
+                knot_covariance=knot_cov,
                 absorbs_intercept=False,
                 centering_mode="base_knot",
                 # Report the MEASURED edf, not the nominal J+1.  The design

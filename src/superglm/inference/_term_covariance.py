@@ -192,6 +192,32 @@ def feature_se_from_cov(
     return cast(NDArray, np.sqrt(np.maximum(np.diag(Cov_g), 0.0)))
 
 
+def piecewise_knot_covariance(
+    name: str,
+    Cov_active: NDArray,
+    active_groups: list[GroupSlice],
+    specs: dict[str, Any],
+) -> NDArray | None:
+    """Covariance of a Piecewise term's per-knot log relativities.
+
+    ``(J+2, J+2)`` with the base row/column identically zero, built through
+    the same raw-basis-at-the-knots map as ``feature_se_from_cov``'s SE
+    branch, so ``sqrt(diag(V))`` is that SE vector.  Carried on
+    ``TermInference.knot_covariance`` because the variance BETWEEN knots is
+    the quadratic form of both adjacent hats with their covariance --
+    ``var f(x) = h1^2 V11 + 2 h1 h2 V12 + h2^2 V22`` -- which pointwise knot
+    SEs cannot reproduce.  Returns ``None`` when no subgroup is active.
+    """
+    spec = specs[name]
+    active_subs = [ag for ag in active_groups if ag.feature_name == name]
+    if not active_subs:
+        return None
+    indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
+    Cov_g = Cov_active[np.ix_(indices, indices)]
+    M = spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices]
+    return cast(NDArray, M @ Cov_g @ M.T)
+
+
 def simultaneous_bands(
     feature: str,
     *,
@@ -272,5 +298,6 @@ def simultaneous_bands(
 __all__ = [
     "compute_coef_covariance",
     "feature_se_from_cov",
+    "piecewise_knot_covariance",
     "simultaneous_bands",
 ]
