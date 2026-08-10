@@ -319,9 +319,10 @@ class OrderedCategorical:
         select=False)``.  In either form ``n_knots`` is clamped to
         ``n_levels - 1`` with a warning.  ``Spline(knots=[...])`` may state
         knots as BAND NAMES (``knots=["Mi060", "Mi066"]``): each name resolves
-        to that level's position on the smooth's axis at construction --
+        to that level's VALUE on the smooth's axis at construction --
         smooth-at-stated-breaks needs no new device, because a spline IS the
-        C1 piecewise polynomial.  Numeric entries stay axis values.
+        C1 piecewise polynomial.  Numeric entries stay axis values, so both
+        spellings live on one scale.
 
         ``Piecewise(breaks=[...])`` gives stated kinks with NO smoothing
         penalty -- an unpenalized main block, exactly like the ``specials=``
@@ -967,6 +968,19 @@ class OrderedCategorical:
         spline._explicit_knots = np.asarray(values, dtype=np.float64)
         spline._named_knots = None
         spline.n_knots = len(values)
+        # Re-run the explicit-boundary validation the numeric spelling gets at
+        # construction: initialize_spec coerced boundary= with _explicit_knots
+        # still None on the named branch, so the strictly-inside check never
+        # ran, and the two spellings of the same knots must refuse
+        # identically. A knot resolving to the DATA boundary (the first or
+        # last level, with no boundary= stated) is deliberately NOT guarded,
+        # asymmetrically with Piecewise breaks: a boundary spline knot is
+        # redundant, not wrong, and the numeric spelling accepts it too.
+        from superglm.features._spline_config import _coerce_boundary
+
+        spline._explicit_boundary = _coerce_boundary(
+            spline._explicit_boundary, spline._explicit_knots
+        )
 
     def _init_spline(self) -> None:
         """Create the internal basis: a deep copy of ``basis`` that we own,

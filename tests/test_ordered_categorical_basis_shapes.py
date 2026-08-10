@@ -121,6 +121,43 @@ def test_spline_knots_by_name_resolve_to_level_values() -> None:
         OrderedCategorical(order=LEVELS, basis=Spline(kind="cr", knots=["Mi999"]))
 
 
+def test_named_spline_knots_revalidate_an_explicit_boundary() -> None:
+    """Both spellings of the same out-of-boundary knots refuse identically.
+
+    The named branch defers knot resolution, so initialize_spec's
+    strictly-inside-boundary check ran with no knots to check; before the
+    revalidation, ``knots=["Mi000", ...], boundary=(0.0, 1.0)`` was accepted
+    while the numeric spelling of the same knots raised at construction.
+    """
+    with pytest.raises(ValueError, match="strictly inside boundary"):
+        Spline(kind="cr", knots=[0.0, 4 / 7], boundary=(0.0, 1.0))
+    with pytest.raises(ValueError, match="strictly inside boundary"):
+        OrderedCategorical(
+            order=LEVELS,
+            basis=Spline(kind="cr", knots=["Mi000", "Mi004"], boundary=(0.0, 1.0)),
+        )
+    # The codex case: the last level's value (1.0) falls outside a narrower
+    # stated boundary.
+    with pytest.raises(ValueError, match="strictly inside boundary"):
+        OrderedCategorical(
+            order=LEVELS,
+            basis=Spline(kind="cr", knots=["Mi007"], boundary=(0.0, 0.75)),
+        )
+
+
+def test_named_knot_at_a_boundary_band_stays_accepted_without_boundary() -> None:
+    """A knot at the first/last band with no ``boundary=`` is redundant, not wrong.
+
+    Deliberately asymmetric with Piecewise breaks (which refuse the boundary
+    bands): the numeric spelling accepts a knot coincident with the data
+    boundary too, so the named spelling matches it.
+    """
+    spec = OrderedCategorical(order=LEVELS, basis=Spline(kind="cr", knots=["Mi000", "Mi004"]))
+    assert np.allclose(spec._spline._explicit_knots, [0.0, 4 / 7])
+    x = np.array(LEVELS * 30, dtype=object)
+    spec.build(x, np.ones(len(x)))
+
+
 def test_spline_named_knots_refuse_the_numeric_axis() -> None:
     X, y = _frame()
     model = SuperGLM(
