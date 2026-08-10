@@ -1,16 +1,24 @@
-"""OrderedCategorical feature: ordered categories with a spline basis.
+"""OrderedCategorical feature: ordered categories with an inner shape basis.
 
 Actuarial pricing data frequently contains continuous variables that have been
 pre-binned into ordered categories (e.g. age bands "18-25", "26-35", ...).
 This feature type respects the ordering: it maps the category labels to
-numeric values and builds a spline on those values, so adjacent levels borrow
+numeric values and builds a shape on those values, so adjacent levels borrow
 strength from each other.
 
-``basis=Spline(...)`` is the one configuration channel. The removed
-alternatives -- the scalar shortcuts ``kind``/``n_knots``/``degree``/
-``select``/``penalty`` and the one-hot ``basis="step"`` mode with its D1'D1
-first-difference penalty -- are gone as of 0.24.0; a spec restored from before
-the removal fails loudly at first use (see ``_basis_spline``).
+``basis=`` is the one configuration channel and takes the shape itself:
+
+- ``Spline(...)`` -- the penalized smooth (the historical mode, and the
+  default when ``basis`` is omitted);
+- ``Piecewise(...)`` -- stated kinks on the level axis, breaks stated as band
+  names (or integer positions), optionally with per-segment ``degrees=``;
+- ``Polynomial(...)`` -- exposure-weighted orthogonal ordinal contrasts on the
+  level positions, with ``powers=`` subsets.
+
+The removed alternatives -- the scalar shortcuts ``kind``/``n_knots``/
+``degree``/``select``/``penalty`` and the one-hot ``basis="step"`` mode with
+its D1'D1 first-difference penalty -- are gone as of 0.24.0; a spec restored
+from before the removal fails loudly at first use (see ``_basis_spline``).
 """
 
 from __future__ import annotations
@@ -25,6 +33,8 @@ import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm.features.categorical import _grouping_labels, _validate_categorical_levels
+from superglm.features.piecewise import Piecewise
+from superglm.features.polynomial import Polynomial
 from superglm.types import GroupInfo, LinearConstraintSet
 
 if TYPE_CHECKING:  # Spline imports this module at runtime; keep the cycle type-only.
@@ -295,18 +305,52 @@ class OrderedCategorical:
     order : list[str] or None
         Ordered list of category labels.  Numeric values are generated as
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
-    basis : Spline object or None
-        Pass a ``Spline(...)`` object for full control over kind, basis size,
-        constraints, selection, and penalty::
+    basis : Spline, Piecewise, Polynomial object, or None
+        The shape fitted over the ordered levels.  Deep-copied at
+        construction, so mutating the passed object afterwards changes
+        nothing here.
+
+        ``Spline(...)`` gives the penalized smooth::
 
             OrderedCategorical(order=[...], basis=Spline(kind="cr", k=6))
 
         Omitting ``basis`` retains the historical default P-spline,
         ``Spline(kind="ps", n_knots=5, degree=3, penalty="ssp",
         select=False)``.  In either form ``n_knots`` is clamped to
-        ``n_levels - 1`` with a warning.  The legacy strings ``"spline"`` and
-        ``"step"``, and the scalar shortcut parameters ``kind``, ``n_knots``,
-        ``degree``, ``select`` and ``penalty``, were removed in 0.24.0.
+        ``n_levels - 1`` with a warning.  ``Spline(knots=[...])`` may state
+        knots as BAND NAMES (``knots=["Mi060", "Mi066"]``): each name resolves
+        to that level's position on the smooth's axis at construction --
+        smooth-at-stated-breaks needs no new device, because a spline IS the
+        C1 piecewise polynomial.  Numeric entries stay axis values.
+
+        ``Piecewise(breaks=[...])`` gives stated kinks with NO smoothing
+        penalty -- an unpenalized main block, exactly like the ``specials=``
+        block.  The inner basis evaluates on level positions ``0..L-1``
+        (declared order; ``values=`` still sets the order but not the
+        spacing).  Breaks are stated as band names, with integer positions as
+        the escape hatch; ``degrees=[...]`` states one polynomial degree per
+        segment (``0`` = flat/grouped tail), value-continuous at every seam by
+        construction.  Rating-table export stays one row per band at any
+        degree, which is why per-segment degrees are legal here and only
+        here.  ``Piecewise``'s ``extrapolation`` parameter is inert on the
+        level axis -- every level lies inside ``[0, L-1]`` by construction, so
+        no policy ever binds -- and is deliberately ignored rather than
+        refused.
+
+        ``Polynomial(powers=[...])`` gives classical orthogonal ordinal
+        contrasts (the ``contr.poly`` device) built on the level positions and
+        orthonormalized against the training exposure -- SAS ``ORPOL``'s
+        weighted construction inside a modeling term.  Classical trend
+        practice keeps lower-order contrasts under a significant higher-order
+        one (the hierarchical convention); ``powers=`` deliberately allows
+        non-contiguous subsets, each orthogonal component individually in or
+        out.  Each stated power reports its own clean-z summary row -- a
+        main-effect property the segmented ``Piecewise`` deliberately does
+        not claim.
+
+        The legacy strings ``"spline"`` and ``"step"``, and the scalar
+        shortcut parameters ``kind``, ``n_knots``, ``degree``, ``select`` and
+        ``penalty``, were removed in 0.24.0.
     base : str
         Reporting reference level. ``"most_exposed"`` (default), ``"first"``,
         or a specific level name. This changes only the reported relativities
@@ -451,15 +495,18 @@ class OrderedCategorical:
                 "basis=Spline(...) -- or omit basis for the default P-spline. For "
                 "independent, unsmoothed level effects use Categorical(...)."
             )
-        elif not isinstance(basis, _SplineBase):
-            raise ValueError(f"basis must be a Spline object or None, got {basis!r}")
+        elif not isinstance(basis, _SplineBase | Piecewise | Polynomial):
+            raise ValueError(
+                f"basis must be a Spline, Piecewise or Polynomial object, or None; got {basis!r}"
+            )
         # Deep-copy rather than alias: `_spline_obj` is the pristine declaration
         # editor/collapse.py rebuilds from when a grouping is undone, so it has
         # to stay pinned to what was passed HERE. Aliasing let a caller mutate
         # their own Spline after construction and silently change what a later
         # collapse cloned, while the fitted `_spline` -- already its own copy --
-        # kept the original geometry.
-        self._spline_obj: _SplineBase = copy.deepcopy(basis)
+        # kept the original geometry. The same rule covers all three basis
+        # types; the attribute keeps its historical name.
+        self._spline_obj: _SplineBase | Piecewise | Polynomial = copy.deepcopy(basis)
         self._basis_was_explicit = basis_was_explicit
         # Vestigial constant. dm_builder, screening, report, export and editor
         # code still branch on this string; collapsing those readers is a
@@ -489,6 +536,11 @@ class OrderedCategorical:
             vals = np.linspace(0.0, 1.0, n) if n > 1 else np.array([0.0])
             self._level_to_value = dict(zip(order, vals.tolist()))
         self._ordered_levels = list(self._smooth_levels)
+        # The declared smooth levels, in order, BEFORE any grouping replaces
+        # them: the namespace breaks/knots stated as names (or positions)
+        # resolve against, so a collapse re-resolves the same declaration
+        # rather than a moving target.
+        self._declared_smooth_levels: list[Any] = list(self._smooth_levels)
 
         # Level labels must be distinct AS STRINGS. The grouping layer is
         # string-keyed by construction and every report joins on str(), so
@@ -511,6 +563,15 @@ class OrderedCategorical:
         # editor previously carried its own copy of this, and the direct
         # `grouping=` path carried none.
         grouping = _regroup_to_declared(grouping, self._ordered_levels + list(self._specials))
+        # RESERVED SEAM -- penalized collapse (L1 fusion), not built. Gertheiss
+        # & Tutz (2010), "Sparse modeling of categorial explanatory variables",
+        # Ann. Appl. Stat. 4(4):2150-2180: an L1 penalty on adjacent
+        # level-effect differences fuses bands data-adaptively -- the penalized
+        # cousin of the editor's /collapse_levels loop, whose stated form is
+        # exactly this `grouping=`. If that spelling is ever wanted it attaches
+        # here as its own mode (e.g. `fuse=`) beside `basis=`; the stated-
+        # structure bases below answer a different question and must not grow
+        # a penalty path.
         self._grouping = grouping
         # Before the numeric-position check below: a grouping that merges or
         # renames a special is wrong for a specific, explainable reason, and
@@ -572,6 +633,13 @@ class OrderedCategorical:
             self._known_levels = set(self._smooth_levels) | known_special_labels
         self._ordered_levels = list(self._smooth_levels) + list(self._special_display)
         self._n_levels = len(self._smooth_levels)
+
+        # Piecewise/Polynomial inner bases evaluate on level POSITIONS 0..L-1,
+        # not on the values= spacing: their whole point is structure stated in
+        # band vocabulary (a break at "Mi060", the quadratic ordinal contrast),
+        # and band vocabulary is positional. values= still fixes the ORDER.
+        if not isinstance(self._spline_obj, _SplineBase):
+            self._install_position_axis()
 
         _require_two_smooth_levels(self._smooth_levels, special_set)
         if str(base) in special_set:
@@ -690,10 +758,222 @@ class OrderedCategorical:
         """True when one or more levels are fitted as free effects."""
         return bool(self._specials)
 
+    @property
+    def basis_kind(self) -> str:
+        """Kind of the inner basis: ``"spline"``, ``"piecewise"`` or ``"polynomial"``."""
+        from superglm.features.spline import _SplineBase
+
+        inner = self._basis_spline
+        if isinstance(inner, _SplineBase):
+            return "spline"
+        if isinstance(inner, Piecewise):
+            return "piecewise"
+        return "polynomial"
+
+    def _install_position_axis(self) -> None:
+        """Map levels to positions 0..L-1 for a Piecewise/Polynomial inner basis.
+
+        Runs after grouping resolution, so grouped levels take consecutive
+        positions in fitted order and the original declaration keeps its own
+        position map for plot expansion and editor round-trips (an original
+        level sits AT its group's position -- one band, one coordinate).
+        """
+        self._level_to_value = {
+            level: float(position) for position, level in enumerate(self._smooth_levels)
+        }
+        if self._grouping is not None:
+            position_of_label = {
+                str(level): float(position) for position, level in enumerate(self._smooth_levels)
+            }
+            self._original_level_to_value = {
+                str(original): position_of_label[
+                    str(self._grouping.original_to_group.get(str(original), original))
+                ]
+                for original in self._declared_smooth_levels
+            }
+
+    def _resolve_declared_position(self, entry: Any, *, parameter: str) -> int:
+        """Resolve one stated break/knot to a position in the DECLARED levels.
+
+        Names are the primary vocabulary; integer positions (including
+        integer-valued floats) are the escape hatch. Anything else has no
+        band to point at and refuses.
+        """
+        declared_texts = [str(level) for level in self._declared_smooth_levels]
+        if isinstance(entry, str):
+            if entry not in declared_texts:
+                raise ValueError(
+                    f"OrderedCategorical {parameter} entry {entry!r} does not name a "
+                    f"declared smooth level. Declared levels (in order): "
+                    f"{declared_texts!r}."
+                )
+            return declared_texts.index(entry)
+        if isinstance(entry, bool):
+            raise ValueError(
+                f"OrderedCategorical {parameter} entry {entry!r} is not a level name "
+                "or an integer position."
+            )
+        if isinstance(entry, int | np.integer):
+            position = int(entry)
+        elif isinstance(entry, float | np.floating) and float(entry).is_integer():
+            position = int(entry)
+        else:
+            raise ValueError(
+                f"OrderedCategorical {parameter} entry {entry!r} lies between bands: "
+                "on a level axis a break/knot is a band, so state a level name or "
+                "an integer position."
+            )
+        if not 0 <= position < len(declared_texts):
+            raise ValueError(
+                f"OrderedCategorical {parameter} position {position} is outside the "
+                f"declared levels 0..{len(declared_texts) - 1} "
+                f"({declared_texts!r})."
+            )
+        return position
+
+    def _grouped_break_position(self, declared_position: int, *, parameter: str) -> int:
+        """Map a declared-level position through the grouping, guarding breaks.
+
+        The locked collapse-times-breaks rule: a grouping that ABSORBS a stated
+        break level (merges it with any neighbour) or STRADDLES it (spans
+        levels on both sides) refuses loudly, naming the break and the
+        offending group; grouping entirely within a segment stays allowed. A
+        renamed singleton group follows the rename.
+        """
+        level = self._declared_smooth_levels[declared_position]
+        if self._grouping is None:
+            return declared_position
+        grouping = self._grouping
+        label = str(grouping.original_to_group.get(str(level), str(level)))
+        members = [str(m) for m in grouping.group_to_originals.get(label, [str(level)])]
+        if len(members) > 1:
+            raise ValueError(
+                f"OrderedCategorical grouping absorbs the stated {parameter} at level "
+                f"{str(level)!r}: group {label!r} merges {members!r}. A break/knot is a "
+                "stated kink -- regrouping it is a spec change, not an edit. Ungroup "
+                "those levels, or restate the term without this break."
+            )
+        position_of = {str(lev): index for index, lev in enumerate(self._declared_smooth_levels)}
+        for other_label, other_members in grouping.group_to_originals.items():
+            member_positions = [position_of[str(m)] for m in other_members if str(m) in position_of]
+            if len(member_positions) > 1 and min(member_positions) < declared_position < max(
+                member_positions
+            ):
+                raise ValueError(
+                    f"OrderedCategorical grouping straddles the stated {parameter} at "
+                    f"level {str(level)!r}: group {str(other_label)!r} spans "
+                    f"{[str(m) for m in other_members]!r}, which sit on both sides of "
+                    "it. Group within one segment, or restate the term without this "
+                    "break."
+                )
+        smooth_texts = [str(lev) for lev in self._smooth_levels]
+        return smooth_texts.index(label)
+
+    def _resolve_inner_piecewise(self, piecewise: Piecewise) -> None:
+        """Resolve a Piecewise inner basis onto the level-position axis."""
+        n = self._n_levels
+        piecewise._on_level_axis = True
+        piecewise.lower = 0.0
+        piecewise.upper = float(n - 1)
+        breaks = piecewise.breaks
+        if isinstance(breaks, int | np.integer):
+            # Int-mode exploration places breaks from the data's positions;
+            # there is nothing stated to resolve or to guard a collapse
+            # against. degrees= with int-mode is already refused upstream.
+            return
+        stated = list(breaks)
+        resolved: list[int] = []
+        for entry in stated:
+            declared_position = self._resolve_declared_position(entry, parameter="Piecewise break")
+            resolved.append(
+                self._grouped_break_position(declared_position, parameter="Piecewise break")
+            )
+        for entry, position in zip(stated, resolved):
+            if position <= 0 or position >= n - 1:
+                edge = "first" if position <= 0 else "last"
+                raise ValueError(
+                    f"OrderedCategorical Piecewise break {entry!r} resolves to the "
+                    f"{edge} level, which is already a boundary knot; state breaks "
+                    "strictly between the first and last levels."
+                )
+        for i in range(len(resolved) - 1):
+            if resolved[i] >= resolved[i + 1]:
+                raise ValueError(
+                    f"OrderedCategorical Piecewise breaks must be stated in strictly "
+                    f"ascending level order: {stated[i]!r} (position {resolved[i]}) is "
+                    f"not below {stated[i + 1]!r} (position {resolved[i + 1]})."
+                )
+        piecewise.breaks = [float(position) for position in resolved]
+        if piecewise.degrees is not None:
+            knot_positions = [0, *resolved, n - 1]
+            for segment, degree in enumerate(piecewise.degrees):
+                span = knot_positions[segment + 1] - knot_positions[segment]
+                if degree >= 2 and span < degree:
+                    left = self._smooth_levels[knot_positions[segment]]
+                    right = self._smooth_levels[knot_positions[segment + 1]]
+                    raise ValueError(
+                        f"OrderedCategorical Piecewise segment from {str(left)!r} to "
+                        f"{str(right)!r} spans {span + 1} band(s) but states degree "
+                        f"{degree}, which needs at least {degree + 1}. Lower the "
+                        "degree or move the break."
+                    )
+
+    def _resolve_inner_polynomial(self, polynomial: Polynomial) -> None:
+        """Validate a Polynomial inner basis against the level count."""
+        n = self._n_levels
+        if polynomial.degree > n - 1:
+            raise ValueError(
+                f"OrderedCategorical(basis={polynomial!r}) needs max(powers) <= "
+                f"n_levels - 1: {n} smooth level(s) sit at {n} distinct positions, "
+                f"which identify orthogonal components only up to degree {n - 1}."
+            )
+
+    def _resolve_spline_named_knots(self, spline: _SplineBase) -> None:
+        """Resolve ``Spline(knots=[...])`` band names to level values.
+
+        The same vocabulary as Piecewise breaks -- a spline IS the C1
+        piecewise polynomial, so smooth-at-stated-breaks is a spline with its
+        knots stated by name. Names resolve to the named level's value on the
+        smooth's axis; numeric entries stay axis values. The collapse guard
+        applies to the NAMED knots only: a numeric knot states a coordinate,
+        not a band identity.
+        """
+        named = getattr(spline, "_named_knots", None)
+        if named is None:
+            return
+        values: list[float] = []
+        for entry in named:
+            if isinstance(entry, str):
+                declared_position = self._resolve_declared_position(entry, parameter="Spline knot")
+                grouped_position = self._grouped_break_position(
+                    declared_position, parameter="Spline knot"
+                )
+                values.append(float(self._level_to_value[self._smooth_levels[grouped_position]]))
+            else:
+                values.append(float(entry))
+        for i in range(len(values) - 1):
+            if values[i] >= values[i + 1]:
+                raise ValueError(
+                    f"OrderedCategorical Spline knots must be stated in strictly "
+                    f"ascending level order: {named[i]!r} (value {values[i]:.10g}) is "
+                    f"not below {named[i + 1]!r} (value {values[i + 1]:.10g})."
+                )
+        spline._explicit_knots = np.asarray(values, dtype=np.float64)
+        spline._named_knots = None
+        spline.n_knots = len(values)
+
     def _init_spline(self) -> None:
-        """Create the internal spline: a deep copy of ``basis`` that we own,
-        with ``n_knots`` clamped to the level count."""
+        """Create the internal basis: a deep copy of ``basis`` that we own,
+        resolved against the declared levels (band names to positions or
+        values, level-axis flags, ``n_knots`` clamped to the level count)."""
         self._spline = copy.deepcopy(self._spline_obj)
+        if isinstance(self._spline, Piecewise):
+            self._resolve_inner_piecewise(self._spline)
+            return
+        if isinstance(self._spline, Polynomial):
+            self._resolve_inner_polynomial(self._spline)
+            return
+        self._resolve_spline_named_knots(self._spline)
         if self._spline.n_knots > self._n_levels - 1:
             effective = self._n_levels - 1
             requested = self._spline.n_knots
@@ -797,13 +1077,45 @@ class OrderedCategorical:
 
         return self._build_spline(x, sample_weight)
 
+    def _build_inner_info(
+        self,
+        numeric: NDArray[np.float64],
+        sample_weight: NDArray | None,
+    ) -> GroupInfo | list[GroupInfo]:
+        """Build the inner basis on the mapped numeric axis.
+
+        A Spline keeps its historical contract bit-for-bit: knot placement on
+        the level values is model geometry, so no weights are passed. The
+        parametric bases DO receive the fit weights -- ``Polynomial``
+        orthonormalizes against the training exposure (the whole point of the
+        weighted ordinal contrasts) and ``Piecewise`` uses them for
+        ``base='most_exposed'`` and its support rules.
+        """
+        from dataclasses import replace
+
+        from superglm.features.spline import _SplineBase
+
+        inner = self._basis_spline
+        if isinstance(inner, _SplineBase):
+            return inner.build(numeric)
+        info = inner.build(numeric, sample_weight=sample_weight)
+        if isinstance(info, GroupInfo) and isinstance(inner, Piecewise):
+            # Structurally unpenalized main block -- the same convention as the
+            # specials block, which is exactly an unpenalized second block, so
+            # the two-block contract generalizes rather than breaks. Row
+            # compression stays off for the hosted case: the support-compressed
+            # container was built and verified for the numeric-axis term, and
+            # its composition with the ordered wrapper is unverified.
+            info = replace(info, penalized=False, supports_row_compression=False)
+        return info
+
     def _build_spline(
         self, x: NDArray, sample_weight: NDArray | None
     ) -> GroupInfo | list[GroupInfo]:
-        """Spline mode: map to numeric, delegate to internal Spline."""
+        """Map levels to the numeric axis and delegate to the inner basis."""
         self._choose_base(x, sample_weight)
         if not self.has_specials:
-            return self._basis_spline.build(self._map_to_numeric(x))
+            return self._build_inner_info(self._map_to_numeric(x), sample_weight)
 
         special_mask = self._special_mask(x)
         ordered_mask = np.asarray(~special_mask.any(axis=1), dtype=bool)
@@ -839,7 +1151,12 @@ class OrderedCategorical:
         # Building over all rows would break 1'(B@Z) = 0 once the special rows are
         # zeroed, and would let a fabricated coordinate reach knot placement.
         ordered_numeric = self._map_to_numeric(x[ordered_mask])
-        spline_info = self._basis_spline.build(ordered_numeric)
+        ordered_weight = (
+            None
+            if sample_weight is None
+            else np.asarray(sample_weight, dtype=np.float64).ravel()[ordered_mask]
+        )
+        spline_info = self._build_inner_info(ordered_numeric, ordered_weight)
         # build() is declared as returning one GroupInfo or a list of them; the
         # spline bases reachable from here return exactly one, and _expand_rows and
         # the two-block contract both assume it. Say so rather than indexing on faith.
@@ -1074,6 +1391,20 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
             "axis, so the term has no single marginal smooth to cross with; drop "
             "specials= to interact the smoothed ordinal parent, or use a Categorical "
             "feature for unsmoothed level effects."
+        )
+    if spec.basis_kind != "spline":
+        # The interaction classes cross a penalized marginal SMOOTH: their
+        # penalty plumbing, screening margins and margin predictions all read
+        # spline geometry off the parent. A Piecewise/Polynomial inner basis is
+        # an unpenalized parametric block; handing it over would half-support
+        # the pair. Refuse at resolution as the backstop -- registration
+        # already refuses in dm_builder.
+        raise NotImplementedError(
+            f"OrderedCategorical(basis={type(spec._basis_spline).__name__}(...)) "
+            "cannot parent an interaction: the interaction machinery crosses a "
+            "penalized marginal smooth, and this inner basis is an unpenalized "
+            "parametric block. Use basis=Spline(...) for an interactable ordinal "
+            "parent, or a Categorical feature for level-by-level structure."
         )
     x = np.asarray(x).ravel()
     if spec._grouping is not None:

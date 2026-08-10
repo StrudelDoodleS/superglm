@@ -258,8 +258,11 @@ def _margin_kind(spec) -> str | None:
         if spec.has_specials:
             return None
         # A spline-mode OC is a spline through the level values, so it screens
-        # (and refits) exactly like one; step mode has no interaction target.
-        if spec.basis == "spline" and spec._spline is not None:
+        # (and refits) exactly like one; step mode has no interaction target,
+        # and a Piecewise/Polynomial inner basis is an unpenalized parametric
+        # block the interaction classes cannot host (the same refusal
+        # add_interaction raises at registration).
+        if spec.basis == "spline" and spec._spline is not None and spec.basis_kind == "spline":
             return "spline"
         return None
     if isinstance(spec, Categorical):
@@ -297,6 +300,13 @@ def _deferral_reason(spec) -> str:
             return (
                 "step-mode OrderedCategorical is deferred: the one-hot geometry, "
                 "removed in 0.24.0, has no marginal smooth to cross with"
+            )
+        if spec._spline is not None and spec.basis_kind != "spline":
+            return (
+                f"OrderedCategorical(basis={type(spec._basis_spline).__name__}(...)) "
+                "margins are deferred: the inner basis is an unpenalized parametric "
+                "block, not a penalized marginal smooth, so no interaction class "
+                "refits the pair"
             )
         return (
             "OrderedCategorical is deferred: no inner spline was built, so the term "
