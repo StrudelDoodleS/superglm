@@ -12,9 +12,17 @@ from superglm.types import LambdaPolicy
 
 
 def _iter_knots(knots: Any) -> list[Any]:
-    """Flatten a knots argument to a plain list without numeric coercion."""
+    """Flatten a knots argument to a plain list without numeric coercion.
+
+    A scalar (plain number, numpy scalar, or 0-d array) is one knot: the
+    numeric branch always accepted it through ``np.asarray(...).ravel()``, so
+    the name probe must not turn it into a TypeError. A bare string is one
+    NAME, never a character sequence.
+    """
     if isinstance(knots, np.ndarray):
         return list(knots.ravel())
+    if isinstance(knots, str) or not hasattr(knots, "__iter__"):
+        return [knots]
     return list(knots)
 
 
