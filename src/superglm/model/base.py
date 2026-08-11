@@ -986,6 +986,9 @@ def model_build_design_matrix(
         model_discrete=model._discrete,
         n_bins_config=model._n_bins,
         lambda2=configured_lambda2(model),
+        level_bindings=(
+            dict(model._level_bindings) if getattr(model, "_level_bindings", None) else None
+        ),
     )
     model._distribution = result.distribution
     model._link = result.link

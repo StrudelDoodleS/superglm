@@ -5,9 +5,12 @@ from __future__ import annotations
 import copy
 from collections.abc import Hashable, Iterator, Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from superglm.types import LevelBinding
 
 
 class FrozenMapping(Mapping[str, object]):
@@ -98,6 +101,10 @@ class ModelConfig:
     max_iter: int
     convergence: str
     retain_fit_state: bool
+    # Fit-machinery intent, not constructor API: a caller that knows the whole
+    # frame (cross_validate) resolves one level universe per categorical term
+    # and every attempt materialized from this configuration binds to it.
+    level_bindings: tuple[tuple[Hashable, LevelBinding], ...] | None = None
 
     def __getattr__(self, name: str) -> object:
         """Supply fields absent from models pickled before config migrations."""
@@ -153,6 +160,7 @@ class ModelConfig:
             max_iter=int(model._max_iter),
             convergence=str(model._convergence),
             retain_fit_state=bool(model._retain_fit_state),
+            level_bindings=copy.deepcopy(getattr(model, "_level_bindings", None)),
         )
 
     def with_value(self, **changes: object) -> ModelConfig:
@@ -218,6 +226,7 @@ class ModelConfig:
             "_retain_fit_state": self.retain_fit_state,
             "_convergence": self.convergence,
             "_specs": {name: copy.deepcopy(spec) for name, spec in self.feature_templates},
+            "_level_bindings": copy.deepcopy(self.level_bindings),
             "_feature_order": [name for name, _ in self.feature_templates],
             "_groups": [],
             "_distribution": None,

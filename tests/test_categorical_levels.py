@@ -207,6 +207,57 @@ class TestAdoptionHooks:
         assert spec._levels == [] and spec._declared_levels is None  # untouched
 
 
+class TestEndToEndDtypeUniverse:
+    def test_categorical_dtype_column_declares_universe_through_fit(self):
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(0)
+        g = pd.Categorical(rng.choice(["a", "b"], size=200), categories=["a", "b", "c"])
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=200)})
+        y = rng.poisson(1.0, size=200).astype(float)
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")})
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(X, y)
+        spec = model._specs["g"]
+        assert spec._levels == ["a", "b", "c"]
+        assert spec._pinned_levels == ["c"]
+        assert spec._level_source == "dtype"
+        # predict on a frame containing the declared-but-unfitted level: no error
+        Xp = pd.DataFrame(
+            {
+                "g": pd.Categorical(["c", "a"], categories=["a", "b", "c"]),
+                "x": [0.0, 0.0],
+            }
+        )
+        mu = model.predict(Xp)
+        assert np.isfinite(mu).all()
+
+    def test_level_bindings_flow_through_config(self):
+        from superglm import SuperGLM
+        from superglm.types import LevelBinding
+
+        rng = np.random.default_rng(1)
+        X = pd.DataFrame({"g": rng.choice(["a", "b"], size=100).astype(object)})
+        y = rng.poisson(1.0, size=100).astype(float)
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")})
+        model._config = model._config.with_value(
+            level_bindings=(("g", LevelBinding(levels=("a", "b", "z"), base=None)),)
+        )
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(X, y)
+        assert model._specs["g"]._levels == ["a", "b", "z"]
+        assert model._specs["g"]._level_source == "full-frame"
+
+    def test_config_pickle_roundtrip_without_bindings(self):
+        import pickle
+
+        from superglm import SuperGLM
+
+        model = SuperGLM(family="poisson")
+        state = pickle.loads(pickle.dumps(model._config))
+        assert state.level_bindings is None
+
+
 class TestReconstruct:
     def test_reconstruct_reports_pins_and_source(self):
         spec = Categorical(base="first", levels=["a", "b", "c"])
