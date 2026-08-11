@@ -403,6 +403,86 @@ class TestDerivedTerms:
             screening_ops._categorical_codes(spec, np.asarray(["a", "ROGUE"], dtype=object))
 
 
+class TestEquivalenceControl:
+    """Declared, dtype-carried and inferred universes agree (spec §6.11).
+
+    Every level of the frame is observed, so the universe machinery has
+    nothing to add: the three sources must resolve one universe, build one
+    design, and land one fit. This is the control on the already-correct
+    path, not a test of the new behaviour.
+    """
+
+    LEVELS = ["a", "b", "c"]
+    PROBE = np.asarray(["a", "b", "c", "c", "b", "a"], dtype=object)
+
+    def _data(self, n=300, seed=17):
+        rng = np.random.default_rng(seed)
+        g = np.asarray(rng.choice(self.LEVELS, size=n), dtype=object)
+        assert sorted(set(g), key=str) == self.LEVELS  # a pin would void the control
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=n)})
+        return X, rng.poisson(1.0, size=n).astype(float)
+
+    def _fit(self, X, y, spec):
+        from superglm import SuperGLM
+        from superglm.features.numeric import Numeric
+
+        model = SuperGLM(family="poisson", features={"g": spec, "x": Numeric()})
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            model.fit(X, y)
+        assert not [
+            w
+            for w in caught
+            if "pinned to base" in str(w.message) or "falling back to" in str(w.message)
+        ]
+        return model
+
+    def _fits(self):
+        """One frame per source; the dtype frame only re-types the column."""
+        X, y = self._data()
+        Xd = X.assign(g=pd.Categorical(X["g"], categories=self.LEVELS))
+        return {
+            "declared": (self._fit(X, y, Categorical(base="first", levels=self.LEVELS)), X),
+            "dtype": (self._fit(Xd, y, Categorical(base="first")), Xd),
+            "inferred": (self._fit(X, y, Categorical(base="first")), X),
+        }
+
+    def test_all_sources_resolve_one_universe(self):
+        for source, (model, _) in self._fits().items():
+            spec = model._specs["g"]
+            assert spec._levels == self.LEVELS
+            assert spec._non_base == ["b", "c"]
+            assert spec._base_level == "a"
+            assert spec._pinned_levels == []
+            assert spec._base_fallback is None
+            assert spec._level_source == source
+
+    def test_designs_are_byte_equal(self):
+        designs = {
+            source: model._specs["g"].transform(self.PROBE).tobytes()
+            for source, (model, _) in self._fits().items()
+        }
+        for source in ("dtype", "inferred"):
+            assert designs[source] == designs["declared"], source
+
+    def test_fitted_coefficients_are_identical(self):
+        results = {s: m.result for s, (m, _) in self._fits().items()}
+        declared = results["declared"]
+        for source in ("dtype", "inferred"):
+            assert results[source].beta.tobytes() == declared.beta.tobytes(), source
+            assert results[source].intercept == declared.intercept, source
+
+    def test_predictions_are_identical(self):
+        preds = {s: m.predict(X).tobytes() for s, (m, X) in self._fits().items()}
+        for source in ("dtype", "inferred"):
+            assert preds[source] == preds["declared"], source
+
+    def test_reported_relativities_are_identical(self):
+        rels = {s: m.relativities()["g"] for s, (m, _) in self._fits().items()}
+        for source in ("dtype", "inferred"):
+            pd.testing.assert_frame_equal(rels[source], rels["declared"])
+
+
 class TestReconstruct:
     def test_reconstruct_reports_pins_and_source(self):
         spec = Categorical(base="first", levels=["a", "b", "c"])
