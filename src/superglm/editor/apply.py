@@ -275,6 +275,26 @@ def _apply_ordered_spline_term(
     # term's own rows spell it "9.0" -- the level is then reported missing and the
     # edit is refused on data that plainly contains it.
     specials = [str(level) for level in spec._special_display]
+    # A special with no effective training rows is PINNED: it stays a declared,
+    # known level but this fit emitted no indicator column for it, so there is no
+    # coefficient for an edit to write. `special_beta` below is built over every
+    # DECLARED special, one entry per row, so without this the block comes out
+    # wider than the groups and `_patch_beta_block` reports a raw width mismatch.
+    # Refuse the whole term rather than dropping the pinned entries: the term is
+    # patched as one block, and an edit that silently does not apply to a level
+    # the user can see and select is worse than one that fails. Read through
+    # `getattr` -- a spec pickled before pinning has no such attribute, and every
+    # declared special is then active. Compare in the same str-coerced display
+    # namespace as `specials`, for the float-domain reason above.
+    pinned_display = {str(level) for level in getattr(spec, "_pinned_specials", ())}
+    pinned = [level for level in specials if level in pinned_display]
+    if pinned:
+        raise ValueError(
+            f"Editable term {term.name!r} cannot be edited: special level(s) {pinned} "
+            "had no effective training rows in this fit and are pinned to zero "
+            "contribution, so they have no fitted coefficient to edit. Refit on data "
+            "carrying those level(s) with weight, or drop them from specials=."
+        )
     missing = [level for level in specials if level not in labels]
     if missing:
         raise ValueError(f"Editable term {term.name!r} has no row for special level(s) {missing}.")

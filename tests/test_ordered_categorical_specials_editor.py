@@ -21,7 +21,13 @@ TWO_SPECIALS = (
 )
 
 
-def _fit(specials, probabilities, effects, *, select=False):
+def _fit(specials, probabilities, effects, *, select=False, declare=None):
+    """Fit a one-feature model; `specials` drives the SAMPLED labels.
+
+    `declare` overrides what the spec declares under `specials=`, so a level can
+    be declared with no rows behind it -- which the build pins to zero
+    contribution and gives no coefficient column.
+    """
     rng = np.random.default_rng(20260805)
     labels = rng.choice(SMOOTH_LEVELS + specials, 900, p=probabilities)
     X = pd.DataFrame({"band": labels})
@@ -32,7 +38,7 @@ def _fit(specials, probabilities, effects, *, select=False):
         features={
             "band": OrderedCategorical(
                 order=SMOOTH_LEVELS,
-                specials=specials,
+                specials=list(declare) if declare is not None else specials,
                 basis=Spline(kind="ps", k=8, select=select),
             )
         },
@@ -44,6 +50,17 @@ def _fit(specials, probabilities, effects, *, select=False):
 @pytest.fixture
 def specials_model():
     return _fit(*ONE_SPECIAL)
+
+
+@pytest.fixture
+def pinned_special_model():
+    """A fit declaring two specials whose second one never appears in the data."""
+    with pytest.warns(UserWarning, match="pinned to zero contribution"):
+        model, X, y = _fit(*ONE_SPECIAL, declare=["MISSING", "UNKNOWN"])
+    spec = model._specs["band"]
+    assert spec._pinned_specials == ["UNKNOWN"], "precondition: exactly one special is pinned"
+    assert spec._active_specials == [0], "precondition: MISSING keeps its column"
+    return model, X, y
 
 
 def _band_blocks(model):
@@ -168,6 +185,35 @@ def test_a_special_with_no_editable_row_is_refused(specials_model):
     # the fitted free-level effect instead of refusing the edit.
     with pytest.raises(ValueError, match="MISSING"):
         apply_edits_to_model_copy(model, terms)
+
+
+@pytest.mark.parametrize("level", ["3", "MISSING", "UNKNOWN"])
+def test_editing_a_term_carrying_a_pinned_special_is_refused_by_name(pinned_special_model, level):
+    # A pinned special owns NO coefficient column in this fit, but the apply path
+    # builds `special_beta` from `_special_display` -- every DECLARED special --
+    # so the concatenated block is one wide and `_patch_beta_block` dies with a
+    # raw "Projected beta has size 9, expected 8". That is a width mismatch
+    # reported to a user who never saw a width; it names neither the level nor
+    # the remedy. Parametrized over all three kinds of selection, because the
+    # term is patched as one block: editing a SMOOTH level trips it just as the
+    # pinned level itself does, and the user touched nothing pinned at all.
+    model = pinned_special_model[0]
+    session = EditorSession.from_model(model, terms=["band"])
+    session.select_levels("band", [level])
+    session.shift("band", 0.3)
+
+    with pytest.raises(ValueError) as excinfo:
+        session.to_model()
+
+    message = str(excinfo.value)
+    assert "Projected beta" not in message, "the raw width mismatch is not an explanation"
+    assert "UNKNOWN" in message, "the refusal must name the pinned level"
+    assert "MISSING" not in message, "the active special is not implicated"
+    assert "band" in message
+    assert "no fitted coefficient" in message
+    # ...and both remedies, because either one makes the edit applicable.
+    assert "specials=" in message
+    assert "refit" in message.lower()
 
 
 def _term_and_indices(model, levels):
