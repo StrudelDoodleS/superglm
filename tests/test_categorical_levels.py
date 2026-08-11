@@ -258,6 +258,151 @@ class TestEndToEndDtypeUniverse:
         assert state.level_bindings is None
 
 
+class TestDerivedTerms:
+    """Interactions inherit the parent's universe, pins and unseen policy."""
+
+    def _parent(self, x, unseen="error"):
+        spec = Categorical(base="first", levels=["a", "b", "c"], unseen=unseen)
+        with pytest.warns(UserWarning, match="pinned to base"):
+            _build(spec, x)
+        return spec
+
+    def _spline_by_cat_model(self, unseen="error"):
+        from superglm import SuperGLM
+        from superglm.features.spline import Spline
+
+        rng = np.random.default_rng(3)
+        n = 240
+        X = pd.DataFrame(
+            {
+                "x": rng.uniform(0.0, 10.0, n),
+                "g": np.asarray(rng.choice(["a", "b"], size=n), dtype=object),
+            }
+        )
+        y = rng.poisson(1.0, size=n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={
+                "x": Spline(n_knots=5),
+                "g": Categorical(base="first", levels=["a", "b", "c"], unseen=unseen),
+            },
+            interactions=[("x", "g")],
+        )
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(X, y)
+        return model
+
+    def test_spline_categorical_inherits_universe_and_pins(self):
+        model = self._spline_by_cat_model()
+        ispec = model._interaction_specs["x:g"]
+        assert ispec._non_base == ["b"]  # no block for the pinned 'c'
+        assert ispec._cat_levels == ["a", "b", "c"]
+        assert ispec._cat_unseen == "error"
+
+    def test_pinned_level_predicts_as_base_through_the_interaction(self):
+        model = self._spline_by_cat_model()
+        Xp = pd.DataFrame({"x": [2.5, 2.5], "g": np.asarray(["c", "a"], dtype=object)})
+        mu = model.predict(Xp)
+        assert np.isfinite(mu).all()
+        assert mu[0] == pytest.approx(mu[1])
+
+    def test_pinned_level_contributes_zero_to_the_interaction(self):
+        ispec = self._spline_by_cat_model()._interaction_specs["x:g"]
+        x_num = np.array([1.0, 5.0])
+        x_cat = np.asarray(["c", "c"], dtype=object)
+        blocks = ispec.transform(x_num, x_cat)
+        assert np.count_nonzero(blocks) == 0
+        eta = ispec.score(x_num, x_cat, np.ones(blocks.shape[1]))
+        assert eta == pytest.approx([0.0, 0.0])
+
+    def test_unseen_base_routes_novel_levels_through_the_interaction(self):
+        model = self._spline_by_cat_model(unseen="base")
+        Xp = pd.DataFrame({"x": [2.5, 2.5], "g": np.asarray(["NOVEL", "a"], dtype=object)})
+        with pytest.warns(UserWarning, match="NOVEL"):
+            mu = model.predict(Xp)
+        assert mu[0] == pytest.approx(mu[1])
+
+    def test_unseen_error_still_raises_through_the_interaction(self):
+        ispec = self._spline_by_cat_model()._interaction_specs["x:g"]
+        with pytest.raises(ValueError, match="unseen categorical levels"):
+            ispec.score(np.array([2.5]), np.asarray(["NOVEL"], dtype=object), np.zeros(1))
+
+    def test_numeric_categorical_accepts_pins_and_routes_novel(self):
+        from superglm.features.interaction import NumericCategorical
+        from superglm.features.numeric import Numeric
+
+        x_cat = np.asarray(["a", "b"] * 6, dtype=object)
+        x_num = np.arange(12, dtype=float)
+        num = Numeric()
+        num.build(x_num)
+        nc = NumericCategorical("v", "g")
+        nc.build(x_num, x_cat, {"v": num, "g": self._parent(x_cat, unseen="base")})
+
+        assert nc.transform(np.array([1.0]), np.asarray(["c"], dtype=object)).tolist() == [[0.0]]
+        with pytest.warns(UserWarning, match="NOVEL"):
+            eta = nc.score(np.array([1.0]), np.asarray(["NOVEL"], dtype=object), np.array([2.0]))
+        assert eta == pytest.approx([0.0])
+
+    def test_polynomial_categorical_accepts_pinned_levels(self):
+        from superglm.features.interaction import PolynomialCategorical
+        from superglm.features.polynomial import Polynomial
+
+        x_cat = np.asarray(["a", "b"] * 6, dtype=object)
+        x_poly = np.linspace(0.0, 1.0, 12)
+        poly = Polynomial(degree=2)
+        poly.build(x_poly)
+        pc = PolynomialCategorical("p", "g")
+        pc.build(x_poly, x_cat, {"p": poly, "g": self._parent(x_cat)})
+
+        blocks = pc.transform(np.array([0.4]), np.asarray(["c"], dtype=object))
+        assert np.count_nonzero(blocks) == 0
+
+    def test_categorical_interaction_accepts_pins_and_routes_novel(self):
+        from superglm.features.interaction import CategoricalInteraction
+
+        left_x = np.asarray(["a", "b"] * 6, dtype=object)
+        right_x = np.asarray(["X", "Y"] * 6, dtype=object)
+        right = Categorical(base="first")
+        _build(right, right_x)
+        ci = CategoricalInteraction("g", "h")
+        ci.build(left_x, right_x, {"g": self._parent(left_x, unseen="base"), "h": right})
+
+        eta = ci.score(
+            np.asarray(["c"], dtype=object), np.asarray(["Y"], dtype=object), np.array([1.5])
+        )
+        assert eta == pytest.approx([0.0])
+        with pytest.warns(UserWarning, match="NOVEL"):
+            eta = ci.score(
+                np.asarray(["NOVEL"], dtype=object),
+                np.asarray(["Y"], dtype=object),
+                np.array([1.5]),
+            )
+        assert eta == pytest.approx([0.0])
+
+    def test_screening_codes_accept_declared_but_pinned_levels(self):
+        from superglm.model.screening_ops import _categorical_codes
+
+        spec = self._parent(["a", "b", "a"])
+        codes, n_levels = _categorical_codes(spec, np.asarray(["c", "a"], dtype=object))
+        assert n_levels == 3
+        assert codes.tolist() == [2, 0]
+
+    def test_screening_guard_names_the_declared_universe(self, monkeypatch):
+        # The guard is defensive: label resolution rejects out-of-universe data
+        # first. Disable that to reach the branch and pin what it says.
+        from superglm.model import screening_ops
+
+        monkeypatch.setattr(
+            screening_ops,
+            "_resolve_categorical_labels",
+            lambda x, grouping, **kwargs: np.asarray(x),
+        )
+        spec = self._parent(["a", "b", "a"])
+        with pytest.raises(ValueError, match="declared level universe"):
+            screening_ops._categorical_codes(spec, np.asarray(["a", "ROGUE"], dtype=object))
+
+
 class TestReconstruct:
     def test_reconstruct_reports_pins_and_source(self):
         spec = Categorical(base="first", levels=["a", "b", "c"])

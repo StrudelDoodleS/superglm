@@ -85,6 +85,7 @@ from superglm._frame import as_eager_frame
 from superglm.distributions import _VARIANCE_FLOOR, Tweedie, validate_response
 from superglm.features.categorical import (
     Categorical,
+    _codes_against,
     _resolve_categorical_labels,
 )
 from superglm.features.numeric import Numeric
@@ -392,26 +393,28 @@ def _validated_pairs(candidates, margin_kinds, fitted_pairs, deferred_features):
 
 
 def _categorical_codes(spec, x_raw) -> tuple[np.ndarray, int]:
-    """Dense 0-based codes over ALL fitted levels, in ``spec._levels`` order.
+    """Dense 0-based codes over the whole level UNIVERSE, in ``spec._levels`` order.
 
-    Applies the same grouping collapse and unseen-level validation the fitted
-    spec's ``transform`` applies, so the screen sees exactly the mains' level
-    geometry — including the BASE level, which the main effect absorbs into
-    the intercept but the screen needs a grid row for.
+    Applies the same grouping collapse and out-of-universe validation the
+    fitted spec's ``transform`` applies, so the screen sees exactly the mains'
+    level geometry — including the BASE level, which the main effect absorbs
+    into the intercept but the screen needs a grid row for, and any level
+    pinned to base for want of training rows.
     """
     x = _resolve_categorical_labels(
         x_raw,
         spec._grouping,
         known_levels=set(spec._levels),
     )
-    codes = pd.Categorical(x, categories=spec._levels).codes.astype(np.intp)
+    codes = _codes_against(x, spec._levels)
     if codes.size and codes.min() < 0:
-        # Reachable through a grouping whose collapsed label was absent from
-        # the training data: validation passes on the original level, but the
-        # group it maps to was never fitted and has no grid row.
+        # Defensive: label resolution above already rejects anything the
+        # universe does not admit.  It stays because screening runs at FIT
+        # time, where out-of-universe data is an error under every unseen
+        # policy -- a pinned level is in the universe and codes fine.
         raise ValueError(
-            "screen_interactions found categorical values outside the fitted "
-            f"level set {list(spec._levels)}"
+            "screen_interactions found categorical values outside the declared "
+            f"level universe {list(spec._levels)}"
         )
     return codes, len(spec._levels)
 
