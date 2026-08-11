@@ -20,6 +20,7 @@ from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.inference._ordered_reference import ordered_reference_intercept
+from superglm.inference._term_types import TermInference
 from superglm.links import LogLink
 
 if TYPE_CHECKING:
@@ -35,6 +36,14 @@ class RatingTableBlock:
     table: pd.DataFrame
     # Piecewise only: the out-of-range rule, so the workbook note can state it.
     extrapolation: str | None = None
+    # The constant ``centering=`` removed from this block's log relativities.
+    # The payload's ``base_relativity`` carries the total back, so the
+    # workbook's product still reproduces ``model.predict``.  Zero on every
+    # block a centering leaves alone -- the offset blocks, the binned
+    # continuous blocks, an ``OrderedCategorical``, a single-valued
+    # ``Numeric`` -- which is why the total is summed from the blocks rather
+    # than assumed to run over every exported term.
+    centering_shift: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -152,6 +161,27 @@ def _weights_by_level(
     return grouped.reindex(level_keys, fill_value=0.0).to_numpy(dtype=np.float64)
 
 
+def _main_effect_inference(model: SuperGLM, name: str, centering: str) -> TermInference:
+    """``model.term_inference`` narrowed to the main-effect half of its return type.
+
+    ``build_rating_table_payload`` dispatches on the FEATURE spec, so every
+    name that reaches a block builder is a main effect and the
+    ``InteractionInference`` arm of the public signature cannot occur here.
+    Narrowing it once, by an isinstance check rather than a cast, is what lets
+    the builders read fields that exist on only one arm -- ``centering_shift``
+    is the first of them -- and turns a future caller that does hand this an
+    interaction name into a failure at the boundary rather than an
+    ``AttributeError`` several lines into building a table.
+    """
+    ti = model.term_inference(name, with_se=False, centering=centering)
+    if not isinstance(ti, TermInference):
+        raise TypeError(
+            f"Rating-table export asked for main-effect inference on {name!r} and got "
+            f"{type(ti).__name__}; interactions are exported by _interaction_blocks."
+        )
+    return ti
+
+
 def _categorical_block(
     model: SuperGLM,
     X: EagerFrame,
@@ -159,7 +189,7 @@ def _categorical_block(
     sample_weight: NDArray | None,
     centering: str,
 ) -> RatingTableBlock:
-    ti = model.term_inference(name, with_se=False, centering=centering)
+    ti = _main_effect_inference(model, name, centering)
     levels = list(ti.levels or [])
     return RatingTableBlock(
         name=name,
@@ -171,6 +201,7 @@ def _categorical_block(
                 "Weight": _weights_by_level(X, name, levels, sample_weight),
             }
         ),
+        centering_shift=float(ti.centering_shift),
     )
 
 
@@ -195,14 +226,15 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
     Emitting both, and stating the rule in the sheet, puts that choice in the
     consumer's hands instead of hiding it.
 
-    Exactness is scoped to ``centering="native"`` (the default).  Under
-    ``centering="mean"`` the term's values are shifted by a per-term constant
-    that the exported ``base_relativity`` does not currently absorb -- a
-    pre-existing property of the mean-centered export shared by every term
-    type -- so the workbook's block-times-base product reproduces the model
-    only in native centering, and the sheet note says so.
+    Exactness holds in both centerings.  ``centering="mean"`` shifts the whole
+    block by a constant so its relativities have geometric mean 1; the block
+    reports that constant as ``centering_shift`` and the payload folds the
+    total into ``base_relativity``, so the workbook's block-times-base product
+    reproduces the model either way.  It did not always: the removed constants
+    used to go nowhere, scaling every reconstructed prediction by a uniform
+    factor (issue #253).
     """
-    ti = model.term_inference(name, with_se=False, centering=centering)
+    ti = _main_effect_inference(model, name, centering)
     return RatingTableBlock(
         name=name,
         kind="piecewise",
@@ -214,11 +246,12 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
             }
         ),
         extrapolation=model._specs[name].extrapolation,
+        centering_shift=float(ti.centering_shift),
     )
 
 
 def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlock:
-    ti = model.term_inference(name, with_se=False, centering=centering)
+    ti = _main_effect_inference(model, name, centering)
     return RatingTableBlock(
         name=name,
         kind="numeric",
@@ -229,6 +262,12 @@ def _numeric_block(model: SuperGLM, name: str, centering: str) -> RatingTableBlo
                 "Weight": [0.0],
             }
         ),
+        # Always 0.0 today -- a single-valued term has no mean to center on,
+        # so ``_recenter_term`` returns it untouched.  Read from the term
+        # anyway rather than hard-coded: this is the one number that must
+        # agree with what the block's values actually carry, and a lie here
+        # moves every prediction in the workbook.
+        centering_shift=float(ti.centering_shift),
     )
 
 
@@ -521,6 +560,36 @@ def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBl
     return blocks
 
 
+def _total_centering_shift(blocks: list[RatingTableBlock]) -> float:
+    """The constant the exported base relativity has to carry back.
+
+    A reporting centering subtracts a per-term constant from that term's log
+    relativities.  Left there, the constants are simply gone: a consumer who
+    multiplies ``base_relativity`` by one relativity per block -- the whole
+    documented use of the workbook -- rates every risk by
+    ``exp(-sum_t shift_t)`` of what the model says.  A uniform factor is the
+    worst shape that error can take, because every relativity RATIO in the
+    workbook is still exactly right, so nothing short of comparing absolute
+    predictions against ``model.predict`` reveals it (issue #253).
+
+    Summed over the blocks, from the constant each one recorded, for two
+    reasons.  The set of shifted terms is not the set of exported terms:
+    ``OrderedCategorical`` is never recentered, a single-valued ``Numeric``
+    has nothing to center, the binned continuous blocks come from the
+    discretisation path and never see ``centering=`` at all, and the offset
+    blocks are not relativities of a fitted term.  And the constant removed
+    from a grouped categorical is the mean over its GROUPED levels, computed
+    before the term is expanded back to the original ones -- so even for the
+    terms that are shifted, re-deriving the constant from the values on the
+    sheet gives a different number and the product stops closing.
+
+    Interactions are absent by the same rule: ``_interaction_blocks``
+    reconstructs from beta directly and applies no centering, so it removes
+    nothing to give back.
+    """
+    return float(sum(block.centering_shift for block in blocks))
+
+
 def _empty_impact_frame() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
@@ -594,6 +663,33 @@ def build_rating_table_payload(
     bin_strategy: str = "exposure_quantile",
     centering: str = "native",
 ) -> RatingTablePayload:
+    """Build the renderer-independent rating-table payload.
+
+    The payload's contract is multiplicative and per row:
+    ``base_relativity`` times one relativity per main-effect block (times the
+    interaction blocks) reproduces ``model.predict``.  It is exact for the
+    exactly tabulable term types -- ``Categorical``, ``OrderedCategorical``,
+    ``Numeric``, ``Piecewise`` -- and carries the reported discretisation error
+    for ``Spline`` and ``Polynomial``, whose blocks are the binned curves the
+    ``discretization_impact`` sheet quantifies.
+
+    ``centering`` is a presentation choice and does not change what the
+    payload rates.  ``"native"`` reports each term under the model's own
+    identifiability constraint.  ``"mean"`` shifts the terms that have a mean
+    to shift -- ``Categorical`` and ``Piecewise`` -- so their relativities have
+    geometric mean 1, and ``base_relativity`` absorbs the total so the product
+    is unchanged; before issue #253 it did not, and every reconstructed
+    prediction came out scaled by ``exp(-sum_t shift_t)``.
+
+    That mode is a PARTIAL centering, and deliberately so.  An
+    ``OrderedCategorical`` is already anchored on its base level and is not
+    recentered; a ``Numeric`` reports one per-unit relativity with no mean to
+    take; and the binned ``Spline``/``Polynomial`` blocks come from the
+    discretisation path, which never sees ``centering`` at all.  Only the
+    blocks that were shifted contribute to the transferred constant, which is
+    why it is summed from the shift each block recorded rather than assumed to
+    run over every exported term.
+    """
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
     _preflight_rating_table_terms(model)
@@ -691,6 +787,7 @@ def build_rating_table_payload(
                     model._specs,
                     model._groups,
                 )
+                + _total_centering_shift(main_effects)
             )
         ),
         selected_n_bins=int(n_bins),
