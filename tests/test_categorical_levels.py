@@ -494,3 +494,108 @@ class TestReconstruct:
         assert rec["base_fallback"] is None
         assert rec["relativities"]["c"] == pytest.approx(1.0)
         assert rec["log_relativities"]["c"] == pytest.approx(0.0)
+
+
+class TestBindLevels:
+    """`bind_levels` binds the universe from the outermost frame (spec §9)."""
+
+    def _outer_frame(self, n=150, seed=7):
+        rng = np.random.default_rng(seed)
+        g = rng.choice(["a", "b"], size=n).astype(object)
+        g[-1] = "holdout_only"
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=n)})
+        y = rng.poisson(1.1, size=n).astype(float)
+        return X, y
+
+    def test_bind_then_manual_holdout(self):
+        from superglm import SuperGLM
+
+        X, y = self._outer_frame()
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")}).bind_levels(X)
+        Xtr, ytr, Xho = X.iloc[:-1], y[:-1], X.iloc[[-1]]
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(Xtr, ytr)
+        assert model._specs["g"]._levels == ["a", "b", "holdout_only"]
+        assert model._specs["g"]._level_source == "full-frame"
+        assert np.isfinite(model.predict(Xho)).all()
+
+    def test_returns_self_for_chaining(self):
+        from superglm import SuperGLM
+
+        X, _ = self._outer_frame()
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        assert model.bind_levels(X) is model
+
+    def test_declared_universe_violation_fails_at_bind_time(self):
+        from superglm import SuperGLM
+
+        X, _ = self._outer_frame()  # contains 'holdout_only'
+        model = SuperGLM(family="poisson", features={"g": Categorical(levels=["a", "b"])})
+        with pytest.raises(ValueError, match="outside the declared level universe"):
+            model.bind_levels(X)
+
+    def test_most_exposed_base_pinned_from_outer_frame(self):
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(11)
+        g = np.array(["a"] * 40 + ["b"] * 60, dtype=object)
+        X = pd.DataFrame({"g": g})
+        y = rng.poisson(1.0, size=100).astype(float)
+        w = np.ones(100)
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        model.bind_levels(X, sample_weight=w)  # outer winner: 'b'
+        # training slice where 'a' dominates: outer pin must still win
+        sl = np.r_[0:40, 40:50]
+        model.fit(X.iloc[sl], y[sl], sample_weight=w[sl])
+        assert model._specs["g"]._base_level == "b"
+
+    def test_rebind_replaces(self):
+        from superglm import SuperGLM
+
+        X1 = pd.DataFrame({"g": np.array(["a", "b"], dtype=object)})
+        X2 = pd.DataFrame({"g": np.array(["a", "b", "c"], dtype=object)})
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        model.bind_levels(X1).bind_levels(X2)
+        bound = dict(model._config.level_bindings)
+        assert set(bound["g"].levels) == {"a", "b", "c"}
+
+    def test_features_none_auto_detect_path(self):
+        from superglm import SuperGLM
+
+        X, y = self._outer_frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            model = SuperGLM(family="poisson", splines=[])  # features=None auto-detect
+        model.bind_levels(X)
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(X.iloc[:-1], y[:-1])
+        assert np.isfinite(model.predict(X.iloc[[-1]])).all()
+
+    def test_cross_validate_respects_existing_bindings(self):
+        from sklearn.model_selection import KFold
+
+        from superglm import SuperGLM, cross_validate
+
+        X, y = self._outer_frame()
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")}).bind_levels(X)
+        # CV only sees the slice WITHOUT the holdout level; universe must
+        # still be the full-frame one on every fold estimator
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = cross_validate(
+                model,
+                X.iloc[:-1],
+                y[:-1],
+                cv=KFold(n_splits=3, shuffle=True, random_state=0),
+                return_estimators=True,
+                error_score="raise",
+            )
+        for est in res.estimators:
+            assert "holdout_only" in est._specs["g"]._levels
+
+    def test_missing_feature_column_errors(self):
+        from superglm import SuperGLM
+
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        with pytest.raises(ValueError, match="missing required columns"):
+            model.bind_levels(pd.DataFrame({"other": [1.0, 2.0]}))
