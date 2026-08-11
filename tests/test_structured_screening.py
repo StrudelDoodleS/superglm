@@ -1050,47 +1050,143 @@ def _thin_level_pair(low_weight):
     return grab
 
 
-def _reference_edf(U, V, C, M, S_ti, lam):
-    """``edf(lambda)`` from a form that cannot cancel, for use as an ORACLE.
+# ``_thin_level_pair(1.0)``'s low-edge rung, certified with 400-bit ball
+# arithmetic (python-flint ``arb``) on the pair's exact design:
+#
+#     edf = 207.999955426981464537192 +/- 8.54e-24    at lambda below
+#
+# computed as ``tr((V_eff + lambda S)^-1 V_eff)`` with the moments M, C, V
+# formed exactly rather than in float64, so the design's own near-dependency
+# is carried at full strength instead of being lost in the moments' round-off.
+# Forming them from the float64 moments the ladder receives instead moves the
+# answer by 3.94e-11, so the two truth models agree far below anything
+# asserted here.  Both lambdas are hard-coded rather than read back from the
+# ladder: they pin the ORACLE, not the search that produced them.
+_CERTIFIED_LOW_EDGE_LAMBDA = 2.2876641890924248e-11
+_CERTIFIED_LOW_EDGE_EDF = 207.99995542698146
 
-    ``sum_j a_j / (a_j + lambda (1 - a_j))`` over the simultaneously
-    diagonalized dense pencil.  There is no ``rank - lambda tr(A^-1 S)``
-    subtraction here, which is what makes it independent of the two paths it
-    arbitrates.
 
-    **It is not usable at the ladder's HIGH edge, and that is a property of
-    float64 rather than of this implementation.**  ``1 - a`` cancels whenever
-    ``a`` approaches 1, which is exactly what the penalty's null space
-    produces: on the pair below, 19 of 209 directions carry ``a`` within 1e-12
-    of 1, so ``1 - a`` is pure round-off there -- and the high edge multiplies
-    it by ``lambda = 2.2e+09``, turning 1e-13 of noise into 1e-04 per
-    direction.
+def _reference_edf(grab, lam):
+    """``edf(lambda)`` from the pair's DESIGN rather than from its Gram.
 
-    Three algebraically EQUIVALENT ways of writing the same oracle then
-    disagree, on one machine in one process, at ``lambda = 2.16e+09``::
+    ``edf = tr(R (R'R + lambda S)^-1 R')`` with ``R`` the tensor block
+    residualized on the mains and ``S = L'L``.  It is evaluated as
+    ``||R T^-1||_F^2`` where ``T`` is the triangular factor of the stacked
+    matrix ``[R; sqrt(lambda) L]`` -- the augmented-system form of Tikhonov
+    regularization (Elden 1977, 1982; Golub, Heath & Wahba 1979), and the
+    statistical instance of it in Wood, JASA 99:673-686 (2004).  Every term
+    summed is a square, there is no ``rank - lambda tr(A^-1 S)``
+    subtraction, and no Gram is formed or inverted anywhere.
 
-        via a                     18.999976474337
-        via (v, s), balanced      18.997645230554
-        both terms diagonalized   18.999417915384
+    **THE POINT IS THE FACTOR, NOT THE FORMULA.**  This oracle previously
+    took the moments and whitened ``V_eff = V - C' M^-1 C``.  That is
+    algebraically the same quantity and it was wrong by 1.13e-05 at the low
+    edge, which is 1.1x the bound the caller asserts.  The mechanism:
 
-    -- a spread of 2.3e-03.  At the low edge, ``lambda = 2.16e-11``, all three
-    agree to 3.4e-09.  The oracle is therefore sound at one end of the bracket
-    and beyond float64 at the other, and is used only where it is sound.
+    * ``_thin_level_pair``'s design is rank 208 of 209, because one level's
+      40 rows put the constant vector inside 1.194e-16 (relative, exact at
+      80 digits) of the span of that level's own 11 spline columns.  A level
+      whose rows miss a knot span does this; it is routine, not contrived.
+    * a Gram-level difference carries design round-off LINEARLY: ``V_eff``'s
+      float64 value in that direction is ``eps ||V||`` ~ 5e-16 of curvature,
+      where the exact value is 1.71e-28.  In the factored form the same
+      round-off enters as its SQUARE, 2.5e-31 of curvature.
+    * the low edge then multiplies it by ``1/lambda``.  The filter factor
+      ``a/(a + lambda (1 - a))`` has slope ``1/lambda = 4.37e+10`` at
+      ``a = 0``, so 5e-16 of curvature noise becomes 1.13e-05 of a degree of
+      freedom.  Measured: float64 returns ``a = 2.5743e-16`` for a direction
+      whose certified ``a`` is 1.7036e-28.
+
+    Against the certified value at the top of this module, at the low edge of
+    ``_thin_level_pair(1.0)``::
+
+        this form                 1.99e-13
+        the moment-space form     1.13e-05
+        structured path           6.97e-09
+        dense path                1.37e-10
+
+    and it is not a property of one arrangement: over 60 symmetric
+    relabelings of the tensor and overlap coordinates, which leave ``edf``
+    exactly unchanged in real arithmetic and change only the order of every
+    reduction, the moment-space form spreads 1.4721e-05 and this one 7.39e-13.
+    Three of 40 level relabelings put the moment-space form outside the 1e-5
+    the caller asserts, on one machine, at fixed thread count -- which is
+    issue #272's cross-machine failure reproduced locally.
+
+    **A RANK CUT WAS MEASURED AND REFUSED.**  Dropping ``a_j <= n eps``
+    before summing repairs this pair (2.84e-14) and destroys the next one:
+    on ``_vanishing_mass_pair(1e-10)`` that cut falls inside a cluster --
+    neighbouring ``a`` of 3.4466e-14 and 6.1508e-14, 1.785x apart -- and
+    discards 5 directions that carry real curvature, taking the error from
+    2.73e-06 to 4.87e-03.  Magnitude cannot separate round-off from a level
+    that genuinely holds 1e-10 of the weight.  Not squaring it in the first
+    place can.
+
+    **STILL NOT USABLE AT THE HIGH EDGE.**  At ``lambda = 2.29e+09`` this
+    form is 8.15e-05 from the certified value against the structured path's
+    2.15e-05 and the dense path's 1.69e-05 -- worse than both paths it would
+    arbitrate, because there the conditioning is the penalty's own and no
+    parametrization escapes it.  The high edge stays parity-only.
     """
-    eps = np.finfo(np.float64).eps
-    MinvC = np.linalg.solve(M, C)
-    V_eff = V - C.T @ MinvC
-    V_eff = 0.5 * (V_eff + V_eff.T)
-    S = 0.5 * (S_ti + S_ti.T)
-    G = 0.5 * ((V_eff + S) + (V_eff + S).T)
-    w, Q = np.linalg.eigh(G)
-    keep = w > w.size * eps * w.max()
-    whiten = Q[:, keep] / np.sqrt(w[keep])
-    Vt = whiten.T @ V_eff @ whiten
-    a = np.clip(np.linalg.eigvalsh(0.5 * (Vt + Vt.T)), 0.0, 1.0)
-    den = a + lam * (1.0 - a)
-    ok = den > 0.0
-    return float(np.sum(a[ok] / den[ok]))
+    B_a, S_a, _, W_cell, level_rows = _structured_inputs(grab)
+    k_a, k_b = B_a.shape[1], level_rows.size
+    cells = np.argwhere(W_cell > 0.0)
+    rows_a, rows_b = cells[:, 0], cells[:, 1]
+    root_w = np.sqrt(W_cell[rows_a, rows_b])[:, None]
+    indicator = (rows_b[:, None] == level_rows[None, :]).astype(np.float64)
+    tensor = (B_a[rows_a][:, :, None] * indicator[:, None, :]).reshape(cells.shape[0], k_a * k_b)
+    mains = np.concatenate([np.ones((cells.shape[0], 1)), B_a[rows_a], indicator], axis=1)
+    # Pivoted QR of the overlap span, so a rank-deficient set of mains
+    # residualizes rather than raises -- the one rank decision in here, taken
+    # on a FACTOR and never on a Gram.
+    Q, R_mains, _ = scipy.linalg.qr(mains * root_w, mode="economic", pivoting=True)
+    tol = max(mains.shape) * np.finfo(np.float64).eps * abs(R_mains[0, 0])
+    Q = Q[:, : int(np.sum(np.abs(np.diag(R_mains)) > tol))]
+    resid = tensor * root_w
+    resid -= Q @ (Q.T @ resid)
+    ev, evec = np.linalg.eigh(0.5 * (S_a + S_a.T))
+    root_S = np.kron((evec * np.sqrt(np.clip(ev, 0.0, None))) @ evec.T, np.eye(k_b))
+    T = np.linalg.qr(np.vstack([resid, np.sqrt(lam) * root_S]), mode="r")
+    return float(np.sum(scipy.linalg.solve_triangular(T, resid.T, trans="T", lower=False) ** 2))
+
+
+def test_the_low_edge_reference_matches_a_certified_high_precision_value():
+    """The oracle is pinned to arbitrary precision, not to the other arm.
+
+    Everything else in this file compares two float64 arms, which cannot tell
+    a wrong reference from a wrong path.  Issue #272 was exactly that: the
+    low-edge assertion failed on a developer machine and passed in CI on the
+    same locked dependencies, and the term that moved was neither path.  Both
+    of them sit 6.97e-09 and 1.37e-10 from the certified value; the reference
+    sat 1.13e-05 away and moved by 1.47e-05 across arrangements of the same
+    algebra.
+
+    Two properties, and the second is what makes the first portable:
+
+    * the value itself, against 400-bit ball arithmetic.  1e-9 is 500x above
+      the worst error this form was measured at over five fixtures
+      (1.93e-12), 1350x above its spread over exact relabelings (7.39e-13),
+      and 7000x above what a one-ulp perturbation of the basis moves it
+      (1.42e-13, worst of 20 draws; ``S_a`` 5.68e-14; ``lambda`` 0.00e+00).
+    * invariance under an exact relabeling.  A reference that is only right
+      in the coordinate order it happened to be handed is not a reference,
+      and that is the property the moment-space form lacked.
+    """
+    grab = _thin_level_pair(1.0)
+    B_a, _, _, W_cell, level_rows = _structured_inputs(grab)
+    # Pin the fixture the constant was certified for, so a change to it fails
+    # as itself rather than as an unexplained numeric miss.
+    assert (B_a.shape[1], level_rows.size) == (11, 19)
+    assert float(W_cell.sum()) == 800.0
+
+    got = _reference_edf(grab, _CERTIFIED_LOW_EDGE_LAMBDA)
+    assert got == pytest.approx(_CERTIFIED_LOW_EDGE_EDF, abs=1e-9), got
+
+    menu_a, menu_b = grab["menus"]
+    rng = np.random.default_rng(11)
+    for _ in range(8):
+        relabeled = {**grab, "menus": (menu_a, menu_b[:, rng.permutation(level_rows.size)])}
+        assert _reference_edf(relabeled, _CERTIFIED_LOW_EDGE_LAMBDA) == pytest.approx(got, abs=1e-9)
 
 
 # One budget above edf at the LOW bracket edge (~208) and four below edf at the
@@ -1113,22 +1209,33 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     fails when one moves TOWARD the truth.  Both happened.  It passed while
     the structured path was a full degree of freedom out at the low bracket
     edge, because every budget it used clamped at the HIGH edge and the low
-    one was never reported.  ``_reference_edf`` is a form that cannot cancel,
-    so it can arbitrate.
+    one was never reported.  ``_reference_edf`` is built from the DESIGN and
+    never forms a Gram, so it can arbitrate -- and it is itself pinned to a
+    high-precision value rather than to either path, because a reference that
+    is only checked against the arms it judges is not one.
 
     Neither path dominates, which is the other reason agreement proves
-    nothing: measured against the reference, at ``low_weight`` 0.01 the
-    structured path is closer (4.20e-04 against dense 5.26e-04) and at 0.001
-    the dense one is (2.07e-05 against structured 1.10e-03).
+    nothing.  Measured against the reference at the LOW edge: dense is closer
+    at ``low_weight`` 1.0 (1.37e-10 against structured 6.97e-09) and at 0.01
+    (2.40e-09 against 5.18e-08), structured is closer at 0.001 (2.69e-09
+    against 3.23e-09).
 
-    Tolerances are set from measurement.  At the LOW edge the oracle is exact
-    and the assertion is 1e-5 against a worst observed 1.991e-06 over the three
-    weights -- three hundred times tighter than this test carried before, at
-    the edge where the degree-of-freedom error lived.  At the HIGH edge the oracle is not usable
-    at all (see ``_reference_edf``), so only path parity is asserted there, at
-    3e-3 against a worst observed structured-vs-dense of 1.0780e-03 and a
-    statistic gap of 1.5641e-06 relative.  That 3e-3 is unchanged, and is still
-    333x tighter than the one degree of freedom this test exists to catch.
+    Tolerances are set from measurement.  At the LOW edge the reference is
+    certified against 400-bit ball arithmetic -- see ``_reference_edf`` and
+    ``test_the_low_edge_reference_matches_a_certified_high_precision_value``
+    -- and the assertion is 1e-5 against a worst observed 5.1805e-08 over the
+    three weights, 193x of headroom.  **That bound is unchanged, and the
+    reference under it is not.**  Until issue #272 this compared the paths to
+    a moment-space form that was itself 1.13e-05 out here, so the 1.991e-06
+    "worst observed" it was calibrated from was mostly the reference's own
+    round-off; on a machine where that round-off fell the other way the same
+    assertion missed by 1.126e-05 and the suite went red in one place and
+    green in another.  At the HIGH edge the reference is still not usable (it
+    is 8.15e-05 out there, worse than either path), so only path parity is
+    asserted, at 3e-3 against a worst observed structured-vs-dense of
+    1.2695e-03 and a statistic gap of 1.9446e-06 relative.  That 3e-3 is
+    unchanged, and is still 333x tighter than the one degree of freedom this
+    test exists to catch.
 
     The structured path is knowingly the less accurate at the high edge: it
     resolves directions the penalty has flattened, which amplifies ``1/w``
@@ -1151,18 +1258,19 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
         # tr(V_eff), though their endpoint solves remain independent and can
         # differ at the ill-conditioned high edge.
         if budget > 100.0:
-            # LOW edge.  The oracle is sound here -- three equivalent forms of
-            # it agree to 3.4e-09 -- so this is asserted tightly, and it is the
+            # LOW edge.  The oracle is CERTIFIED here -- 1.99e-13 from a
+            # 400-bit evaluation, against 1.13e-05 for the moment-space form
+            # this used to use -- so this is asserted tightly, and it is the
             # regime that matters: the whole-degree-of-freedom error this test
             # exists for lived at this edge, at 1.0 against the reference.
-            # 1e-5 is set from the worst observed over the three weights,
-            # 1.991e-06, and is 100,000x below the error it guards against.
-            assert s.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, s.lambda0), abs=1e-5), (
+            # 1e-5 is 193x above the worst observed over the three weights,
+            # 5.1805e-08, and is 100,000x below the error it guards against.
+            assert s.edf0 == pytest.approx(_reference_edf(grab, s.lambda0), abs=1e-5), (
                 "structured",
                 budget,
                 s.edf0,
             )
-            assert d.edf0 == pytest.approx(_reference_edf(U, V, C, M, S_ti, d.lambda0), abs=1e-5), (
+            assert d.edf0 == pytest.approx(_reference_edf(grab, d.lambda0), abs=1e-5), (
                 "dense",
                 budget,
                 d.edf0,
@@ -1335,11 +1443,20 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
     15-seed window looked clean.  So parity is asserted at 2e-4 here: 2.2x
     above the worst of the 320 and still 5.0e+03x below the one degree of
     freedom this test exists to catch.  Over the same 320 draws parity has a
-    median of 7.0e-09, and the structured value's distance from
-    ``_reference_edf`` -- which IS sound at this edge, and is what makes the
-    rung a control on accuracy rather than on agreement -- has a median of
-    1.6e-05 and a worst of 1.036e-04, inside the 3e-4 asserted below on every
-    one of the 320 with 2.9x to spare.
+    median of 7.0e-09.
+
+    THE DISTANCE FROM ``_reference_edf`` WAS RE-MEASURED WHEN THAT REFERENCE
+    WAS REPLACED (issue #272).  It used to read a median of 1.6e-05 and a
+    worst of 1.036e-04; most of that median was the old moment-space
+    reference's own round-off, which this fixture's near-zero-mass levels
+    make worse -- on ``low_weight = 1e-12`` it was 4.20e-05 out against the
+    certified value, where the structured path was 3.04e-09 out.  Against the
+    factored reference, over 160 draws (80 seeds x 2 weights, one thread),
+    the structured value's distance has a median of 7.0757e-10 and a worst of
+    8.2123e-05, inside the 3e-4 asserted below on every one of them with 3.7x
+    to spare.  Parity over the same window reproduces the 320-draw figure
+    above to four digits (worst 9.0208e-05), which is the check that this
+    narrower window is measuring the same family.
     """
     from superglm.screening._structured import structured_ladder
 
@@ -1373,7 +1490,7 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
             )
             assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity", budget, s.edf0, d.edf0)
         else:  # the LOW edge, where the reference oracle is sound
-            reference = _reference_edf(U, V, C, M, S_ti, s.lambda0)
+            reference = _reference_edf(grab, s.lambda0)
             assert s.edf0 == pytest.approx(reference, abs=3e-4), (
                 "low edge oracle",
                 s.edf0,
