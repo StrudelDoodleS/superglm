@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -13,8 +12,12 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm._frame import FrameLike, as_eager_frame
 from superglm.distributions import Tweedie
+
+# The full-frame binding pass lives in a neutral module so the public
+# SuperGLM.bind_levels runs this exact resolution without importing this one.
+from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
 from superglm.solvers.dispersion import dispersion_likelihood_size
 from superglm.validation import _normalized_gini
 
@@ -111,71 +114,6 @@ class CrossValidationResult:
 def _clone_model(model):
     """Create a fresh (unfitted) copy of *model* preserving constructor config."""
     return model.clone_unfitted()
-
-
-# ── Full-frame level binding ─────────────────────────────────────
-
-
-def _auto_detected_templates(model, frame: EagerFrame, sample_weight) -> list[tuple[Any, Any]]:
-    """Return the specs the fit path's own auto-detection builds on *frame*.
-
-    Classification is not reimplemented here: a throwaway clone runs the very
-    detection each fold will run, so a column that becomes categorical for the
-    fold becomes categorical for the binding pass too.
-    """
-    if getattr(model._config, "splines", None) is None:
-        # Without the splines shorthand an empty feature set is a configuration
-        # error the fold fit reports; there is nothing to detect or bind.
-        return []
-
-    from superglm.model.base import auto_detect
-
-    probe = _clone_model(model)
-    try:
-        auto_detect(probe, frame, sample_weight)
-    except Exception as exc:
-        # Detection failures belong to the fold that raises them, where
-        # error_score decides the outcome; binding must not preempt that.
-        logger.debug(f"Level binding skipped: feature auto-detection failed: {exc!r}")
-        return []
-    return [(name, probe._specs[name]) for name in probe._feature_order]
-
-
-def _resolve_level_bindings(model, frame: EagerFrame, sample_weight) -> dict[Any, Any]:
-    """Bind level universes and most-exposed bases on the full pre-split frame.
-
-    Sharing the level SET across folds is R factor semantics: the vocabulary is
-    a property of the data column, not of the training subset, so no target
-    information crosses folds (spec 2026-08-11, §3.5).  Quantities that do
-    depend on training rows -- knots, penalties, coefficients -- keep binding
-    per fold.
-    """
-    config = getattr(model, "_config", None)
-    if config is None:
-        return {}
-    templates: list[tuple[Any, Any]] = list(config.feature_templates)
-    if not templates:
-        templates = _auto_detected_templates(model, frame, sample_weight)
-
-    available = set(frame.columns)
-    bindings: dict[Any, Any] = {}
-    for name, spec in templates:
-        # Terms that declare their own universe (OrderedCategorical) or hold no
-        # universe at all (numeric, spline) never grow the hook.
-        if not hasattr(spec, "resolve_binding") or name not in available:
-            continue
-        probe = copy.deepcopy(spec)
-        declared = frame.column_declared_categories(name)
-        if declared is not None and hasattr(probe, "adopt_dtype_categories"):
-            probe.adopt_dtype_categories(declared)
-        try:
-            bindings[name] = probe.resolve_binding(frame.column_array(name), sample_weight)
-        except Exception as exc:
-            # A column the whole frame cannot bind (missing values, data outside
-            # a declared universe) is a fit error, and stays one: it is reported
-            # per fold under the caller's error_score rather than raised here.
-            logger.debug(f"Level binding skipped for feature {name!r}: {exc!r}")
-    return bindings
 
 
 # ── Built-in scorers ─────────────────────────────────────────────
@@ -406,8 +344,11 @@ def cross_validate(
 
     # One vocabulary for every fold, resolved before the split: a level thin
     # enough to miss a training fold would otherwise invent a per-fold universe
-    # and kill that fold at predict time.
-    level_bindings = _resolve_level_bindings(model, frame, sample_weight)
+    # and kill that fold at predict time.  A binding the caller already made on
+    # a wider frame (bind_levels, spec §9) outranks this one: the frame here is
+    # whatever slice CV was handed, so this pass fills gaps, never overwrites.
+    existing = dict(getattr(getattr(model, "_config", None), "level_bindings", None) or ())
+    level_bindings = {**_resolve_level_bindings(model, frame, sample_weight), **existing}
 
     # ── Fold loop ─────────────────────────────────────────────────
     fold_records: list[dict[str, Any]] = []

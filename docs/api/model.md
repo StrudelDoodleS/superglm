@@ -4,6 +4,7 @@
     options:
       members:
         - __init__
+        - bind_levels
         - fit
         - fit_reml
         - fit_path

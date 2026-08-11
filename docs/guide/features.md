@@ -182,7 +182,8 @@ precedence order:
 1. **`levels=` on the term** — the stated universe.
 2. **The column dtype** — a `pd.CategoricalDtype` (or a polars `Enum`) carries
    its declared categories through the frame boundary.
-3. **The full frame under `cross_validate`** — resolved once, before splitting.
+3. **A full frame** — `model.bind_levels(df)`, or `cross_validate` doing the
+   same pass on its own input, resolved once and before any split.
 4. **The training data** — per-fit inference, the historical fallback, still
    what a plain `fit` on a plain object column does.
 
@@ -291,6 +292,52 @@ training rows (knots, penalty scaling, coefficients) still binds per fold.
 For a filed model, state it on the term anyway: `levels=` plus an explicit
 `base=` makes the term completely data-independent, so the same spec builds the
 same design on any slice, in any order, at any refresh.
+
+### True holdouts and level universes
+
+`cross_validate` binds from the frame *it* is given, so a train/val/test carve
+made before any CV needs the universe supplied from the outermost frame.
+`bind_levels` is that pass, called by hand:
+
+```python
+from sklearn.model_selection import train_test_split
+
+from superglm import Categorical, SuperGLM
+
+model = SuperGLM(family="poisson", features={"Area": Categorical()}).bind_levels(df)
+
+train, test = train_test_split(df, test_size=0.2, random_state=0)
+model.fit(train.drop(columns="claims"), train["claims"])
+model.predict(test.drop(columns="claims"))
+```
+
+Bind on the **full** frame, before the split. Every later fit — on any slice,
+in any order — then shares one universe and one base identity, so a level
+living only in the test rows is a known, pinned level instead of a predict-time
+error, and coefficients from two slices are comparable. This is
+fit-the-encoder-on-the-full-data, minus the encoder object: the vocabulary is
+read once and stored on the term, and no encoded matrix ever leaves the model.
+
+Only columns the model's features reference are scanned, and a feature column
+missing from the frame is an immediate error. Precedence is unchanged —
+`levels=` and a dtype-declared universe both outrank the binding, which fills
+gaps and pins an unresolved `base="most_exposed"`. A frame value outside a
+term's *declared* universe fails right here, with the same error the fit would
+have raised, just earlier and louder. Calling `bind_levels` again replaces the
+stored bindings.
+
+`cross_validate` respects what is already bound: run it on the training slice
+and its own pre-pass fills only the terms `bind_levels` did not reach, so every
+fold keeps the full-frame universe.
+
+```python
+from sklearn.model_selection import KFold
+
+from superglm import cross_validate
+
+model = SuperGLM(family="poisson", features={"Area": Categorical()}).bind_levels(df)
+result = cross_validate(model, train, train["claims"], cv=KFold(5))
+```
 
 ### Collapsing Sparse Levels
 
