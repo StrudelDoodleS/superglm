@@ -137,6 +137,17 @@ base, so the interaction contributes nothing for those rows. See
 [Feature types](features.md#the-level-universe) for the sources and the pin
 semantics.
 
+`FactorSmooth` is the one exception to "every source works everywhere": it is
+not `Categorical`-parented, and in this release only the explicit
+`FactorSmooth(levels=...)` channel reaches it — the column-dtype and
+`cross_validate`/`bind_levels` full-frame channels bind main-loop features
+only. Declare its universe explicitly when folds may drop a level. With
+`basis="fs"` an empty declared level is absorbed by the penalty (its curve
+shrinks to the population); `basis="sz"` rejects empty declared levels
+outright, because a level with no rows makes the centered system numerically
+singular (measured: minimum penalized eigenvalue collapses from ~0.6 to
+~4e-10).
+
 ## Prediction behavior
 
 Known levels receive their fitted FS curve or SZ deviation. With the default
