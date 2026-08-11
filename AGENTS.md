@@ -16,6 +16,15 @@ The ordinary checks are:
 - `uv pip check`
 - `uv run python run_test.py`
 
+Three suites are anchored to the real freMTPL2 book and skip without a local
+copy of it: `tests/test_realdata_parity.py`,
+`tests/test_screening_guide_numbers.py` and
+`tests/test_mixed_interaction_screening.py`. Fetch the data with
+`uv run python scripts/fetch_fremtpl.py --dest data/`, and set
+`SUPERGLM_REQUIRE_DATA=1` so a dataset skip fails instead of passing silently.
+The `Real data` workflow does both, which is what stops those suites reporting
+a green tick for tests that never ran.
+
 Use `apply_patch` for repository file edits. Do not discard dirty-worktree
 changes or use destructive git commands.
 

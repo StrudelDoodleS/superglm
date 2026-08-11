@@ -1,0 +1,142 @@
+name: Real data
+
+# The freMTPL2 suites are the only ones anchored to a real book, and they were
+# also the only ones that never ran.  The parquet is gitignored, so they skipped
+# on every branch of every run, forever -- and a skip reads identically to a
+# pass in the summary.  That is how the screening guide's anchor drifted out of
+# tolerance on 2026-08-07 and went unreported for four days (#261).
+#
+# This workflow gives CI the data, then runs those suites with
+# SUPERGLM_REQUIRE_DATA=1 so a dataset skip is a FAILURE and not a silent pass.
+#
+# It is deliberately its own workflow and not a required check.  The download is
+# a third-party dependency: a transient OpenML outage must never read as "the
+# code is broken", and must never block a merge.  See the two failure paths at
+# the bottom of the job.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/fetch_fremtpl.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/real-data.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/fetch_fremtpl.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/real-data.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-data-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-data:
+    name: Python 3.13 · freMTPL2 real-data suites
+    runs-on: ubuntu-latest
+    # The three suites take 3.4 min pinned to one thread locally (parity 5.7s,
+    # guide 93s, mixed screening 105s) and the download 3.2s cold. Held an order
+    # of magnitude above that: a slower runner should report as a slow job, not
+    # as a timeout, and a timeout here blocks nothing.
+    timeout-minutes: 30
+    env:
+      SUPERGLM_DATA_DIR: ${{ github.workspace }}/data
+      FREMTPL_RAW_DIR: ${{ github.workspace }}/.fremtpl-raw
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # The key is derived from the SHA-256 pins inside the script, so the
+      # workflow never restates a hash it could drift from, and a re-pin
+      # invalidates the cache by construction.  Runner python: the script needs
+      # nothing outside the standard library to answer this.
+      - name: Resolve the pinned dataset cache key
+        id: pins
+        run: |
+          key="$(python3 scripts/fetch_fremtpl.py --cache-key)"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "dataset cache key: $key"
+
+      # Caches the pinned upstream bytes, not the normalised output: the
+      # normalised parquet depends on the pyarrow that wrote it, the raw
+      # download does not, and the raw download is the thing the pin names.
+      - name: Restore the pinned freMTPL2 downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ env.FREMTPL_RAW_DIR }}
+          key: ${{ steps.pins.outputs.key }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+
+      # --locked, unlike the other suites: this job asserts six-decimal anchors,
+      # so a floating numpy or scipy would report as a numeric regression.
+      - name: Install dependencies
+        run: uv sync --locked --python 3.13 --extra dev
+
+      - name: Fetch the pinned freMTPL2 datasets
+        id: fetch
+        run: >-
+          uv run python scripts/fetch_fremtpl.py
+          --dest "$SUPERGLM_DATA_DIR" --raw-dir "$FREMTPL_RAW_DIR"
+
+      # SUPERGLM_REQUIRE_DATA is the whole point: without it a dataset that
+      # failed to arrive would skip these suites and this job would pass green
+      # having asserted nothing, which is the defect being fixed.
+      - name: Run the real-data suites with the skip guard armed
+        id: suites
+        env:
+          SUPERGLM_REQUIRE_DATA: "1"
+        run: >-
+          uv run pytest -q
+          tests/test_realdata_parity.py
+          tests/test_screening_guide_numbers.py
+          tests/test_mixed_interaction_screening.py
+
+      # Only reachable when the download itself failed, because the step above
+      # is then skipped and no assertion in superglm was ever evaluated.  A red
+      # X on a download and a red X on a numeric assertion need different
+      # people, so say which one this is.
+      - name: Report the fetch failure as infrastructure, not code
+        if: failure() && steps.fetch.outcome == 'failure'
+        run: |
+          {
+            echo "## freMTPL2 download failed — this is NOT a test failure"
+            echo
+            echo "The pinned datasets could not be fetched, or did not match their"
+            echo "SHA-256 pins, so the real-data suites never ran. No assertion in"
+            echo "superglm was evaluated by this job, and nothing here says the"
+            echo "code is wrong."
+            echo
+            echo "- Transient OpenML outage: re-run this job."
+            echo "- Pin mismatch: upstream re-encoded the artifact. Re-measure the"
+            echo "  suites' anchors against the new bytes *before* re-pinning"
+            echo "  \`scripts/fetch_fremtpl.py\`; the anchors are pinned to six"
+            echo "  decimals and a re-encode can move them."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report the suite failure as code
+        if: failure() && steps.suites.outcome == 'failure'
+        run: |
+          {
+            echo "## The real-data suites failed"
+            echo
+            echo "The datasets were fetched and verified against their pins, so"
+            echo "this is a genuine assertion failure or a dataset skip that"
+            echo "SUPERGLM_REQUIRE_DATA escalated. Read the pytest output above."
+          } >> "$GITHUB_STEP_SUMMARY"
