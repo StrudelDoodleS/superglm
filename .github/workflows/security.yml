@@ -88,7 +88,7 @@ jobs:
         run: uvx --from 'build==1.2.2.post1' python -m build
 
       - name: Check package metadata
-        run: uvx --from 'twine==6.2.0' twine check dist/*
+        run: uvx --from 'twine==7.0.0' twine check dist/*
 
       - name: Check wheel contents
         run: uvx --from 'check-wheel-contents==0.6.3' check-wheel-contents dist/*.whl
