@@ -16,15 +16,18 @@ from superglm import (
     GroupElasticNet,
     GroupLasso,
     Numeric,
+    OrderedCategorical,
     Spline,
     SuperGLM,
     cross_validate,
 )
+from superglm._frame import as_eager_frame
 from superglm.distributions import Gaussian, Poisson, Tweedie
 from superglm.model_selection import (
     _clone_model,
     _pooled_deviance_parts,
     _pooled_nll_parts,
+    _resolve_level_bindings,
     _score_deviance,
     _score_gini,
     _score_nll,
@@ -1750,3 +1753,124 @@ class TestScorerEdgeCases:
                 scoring=bad_scorer,
                 error_score="raise",
             )
+
+
+# ── Full-frame level binding ─────────────────────────────────────
+
+
+class TestFullFrameLevelBinding:
+    """One level universe per column, resolved before the split (spec §3.5)."""
+
+    @staticmethod
+    def _rare_level_frame(n=120, seed=0):
+        rng = np.random.default_rng(seed)
+        g = rng.choice(["a", "b"], size=n).astype(object)
+        g[0] = "rare"  # exactly one row: pigeonhole-guaranteed to miss a fold
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=n)})
+        y = rng.poisson(1.2, size=n).astype(float)
+        return X, y
+
+    def test_rare_level_no_longer_kills_folds(self):
+        X, y = self._rare_level_frame()
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # expected pin warnings
+            res = cross_validate(
+                model,
+                X,
+                y,
+                cv=SimpleKFold(5, shuffle=True, random_state=0),
+                error_score="raise",
+            )
+        assert len(res.fold_scores) == 5
+        assert all(np.isfinite(res.fold_scores["deviance"]))
+
+    def test_folds_share_universe_and_base(self):
+        X, y = self._rare_level_frame()
+        w = np.ones(len(y))
+        model = SuperGLM(family="poisson", features={"g": Categorical()})  # most_exposed
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = cross_validate(
+                model,
+                X,
+                y,
+                sample_weight=w,
+                cv=SimpleKFold(4, shuffle=True, random_state=1),
+                return_estimators=True,
+                error_score="raise",
+            )
+        specs = [est._specs["g"] for est in res.estimators]
+        universes = {tuple(s._levels) for s in specs}
+        bases = {s._base_level for s in specs}
+        assert len(universes) == 1 and len(bases) == 1
+        assert set(next(iter(universes))) == {"a", "b", "rare"}
+
+    def test_auto_detect_path_binds_too(self):
+        X, y = self._rare_level_frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            model = SuperGLM(family="poisson", splines=[])  # features=None auto-detect
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = cross_validate(
+                model,
+                X,
+                y,
+                cv=SimpleKFold(5, shuffle=True, random_state=0),
+                error_score="raise",
+            )
+        assert all(np.isfinite(res.fold_scores["deviance"]))
+
+    def test_user_model_not_mutated(self):
+        X, y = self._rare_level_frame()
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            cross_validate(model, X, y, cv=SimpleKFold(3, shuffle=True, random_state=0))
+        assert model._config.level_bindings is None
+        assert model._specs["g"]._levels == []
+
+    def test_numeric_only_model_binds_nothing(self, poisson_data, base_model):
+        """No cat-family term means no binding and no configuration rewrite."""
+        df, y, sw = poisson_data
+
+        assert _resolve_level_bindings(base_model, as_eager_frame(df), sw) == {}
+
+        result = cross_validate(
+            base_model,
+            df,
+            y,
+            cv=SimpleKFold(2),
+            sample_weight=sw,
+            return_estimators=True,
+            error_score="raise",
+        )
+        assert all(est._config.level_bindings is None for est in result.estimators)
+
+    def test_binding_universe_includes_dtype_declared_levels(self):
+        """The dtype declaration is a superset the binding must not narrow."""
+        X, y = self._rare_level_frame()
+        X = X.assign(g=pd.Categorical(X["g"], categories=["a", "b", "rare", "never"]))
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+
+        binding = _resolve_level_bindings(model, as_eager_frame(X), np.ones(len(y)))["g"]
+
+        assert list(binding.levels) == ["a", "b", "rare", "never"]
+        assert binding.base == X["g"].value_counts().idxmax()
+
+    def test_ordered_categorical_is_not_bound(self):
+        """OrderedCategorical declares through order=; the CV bind stays out."""
+        X, y = self._rare_level_frame()
+        X = X.assign(band=np.where(np.arange(len(y)) % 2 == 0, "low", "high"))
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "g": Categorical(base="first"),
+                "band": OrderedCategorical(order=["low", "high"], basis=Spline(n_knots=1)),
+            },
+        )
+
+        bindings = _resolve_level_bindings(model, as_eager_frame(X), None)
+
+        assert set(bindings) == {"g"}
