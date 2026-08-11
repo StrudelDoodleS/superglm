@@ -272,6 +272,34 @@ class SuperGLM:
         cloned._config = type(self._config).capture(cloned)
         return cloned
 
+    def bind_levels(self, X: FrameLike, sample_weight: NDArray | None = None) -> SuperGLM:
+        """Bind categorical level universes from the outermost frame.
+
+        Runs the same pre-pass ``cross_validate`` applies to its own input:
+        for every categorical-family feature, resolve the level universe and
+        any unresolved ``most_exposed`` base from *X*, and store the result on
+        this model's configuration.  Call it with the FULL frame before any
+        train/val/test carve; every subsequent fit on any slice then shares one
+        universe, and a level living only in the holdout is a pinned known
+        level rather than a predict-time error.
+
+        Explicit ``levels=`` on a term always wins, and a frame value outside
+        such a declared universe fails here rather than at fit.  Re-calling
+        replaces the stored bindings.  Returns ``self`` so construction chains:
+        ``model = SuperGLM(...).bind_levels(df)``.
+        """
+        from superglm.model.binding_ops import resolve_level_bindings
+
+        frame = as_eager_frame(X)
+        # strict=True: this frame is the caller's stated universe source, so a
+        # column that cannot bind is an error now, not a surprise per fold.
+        bindings = resolve_level_bindings(self, frame, sample_weight, strict=True)
+        stored = tuple(bindings.items()) if bindings else None
+        self._level_bindings = stored
+        self._config = self._config.with_value(level_bindings=stored)
+        self._config_revision += 1
+        return self
+
     @property
     def features(self) -> dict:
         """Defensive fitted/configured feature-spec view."""
