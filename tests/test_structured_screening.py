@@ -10,6 +10,8 @@ refused for.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -2706,3 +2708,232 @@ def test_degenerate_levels_are_scored_not_skipped():
     assert np.isfinite(row["z"])
     assert np.isfinite(row["edf0"])
     assert row["edf0"] > 0.0
+
+
+def _starved_level_pair(seed=3, L=8, reps=3, n_narrow=4, width=1e-3, n_knots=5):
+    """A margin with FEWER distinct covariate values per level than columns.
+
+    ``ps(5)`` leaves ``k_a = 8``; three rows in a level leave that level's
+    centered geometry rank TWO.  So the pair's profiled curvature is massively
+    rank deficient by construction -- 8 of 56 directions on the default draw --
+    and that deficiency is EXACT in real arithmetic.  It is the geometry issue
+    #249 documents, and the one regime where the moment contract's rounding is
+    not a rounding at all: see
+    :func:`test_a_perfect_float64_moment_assembly_does_not_close_the_low_edge`.
+    """
+    rng = np.random.default_rng(seed)
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.05, 0.95, n)
+    for i in range(n_narrow):
+        selected = g == f"L{i}"
+        x[selected] = 0.2 + 0.6 * i / n_narrow + width * rng.uniform(-0.5, 0.5, selected.sum())
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    return _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="ps", n_knots=n_knots)},
+        ("x", "g"),
+        sample_weight=np.ones(n),
+    )
+
+
+def _exact_profiled_rank(B_a, W_cell, level_rows):
+    """``rank(V_eff)`` EXACTLY, with no eigensolver and no tolerance.
+
+    ``V_eff`` is the Gram of the tensor columns after the overlap span
+    ``[intercept | spline main | level indicators]`` is profiled out, so its
+    rank is ``rank([overlap | tensor]) - rank(overlap)`` on the pair's own
+    design.  Both ranks are taken over exact rationals by elimination, and a
+    positive row scaling does not move either, so the weights enter as ``w``
+    rather than ``sqrt(w)``.  Nothing here reads a cutoff, which is the point:
+    it is the one number in this file that a float64 route can be graded
+    against without first agreeing on a threshold.
+
+    ``numpy.linalg.matrix_rank`` on the same two float64 matrices returns 8 as
+    well, so the rational route is not what produces the answer HERE -- it is
+    what makes the answer independent of a default SVD tolerance and of which
+    LAPACK driver is installed, which this repository has been bitten by
+    before.  A rank read through a cutoff cannot be the reference for a defect
+    that IS a cutoff.
+    """
+    from fractions import Fraction
+
+    B_a = np.asarray(B_a, dtype=np.float64)
+    W_cell = np.asarray(W_cell, dtype=np.float64)
+    n_a, k_a = B_a.shape
+    n_cells = W_cell.shape[1]
+    rows = np.asarray(level_rows, dtype=np.intp)
+    B = [[Fraction(float(v)) for v in row] for row in B_a]
+    W = [[Fraction(float(v)) for v in row] for row in W_cell]
+
+    overlap, tensor = [], []
+    for i in range(n_a):
+        for j in range(n_cells):
+            w = W[i][j]
+            if w == 0:
+                continue
+            overlap.append(
+                [w]
+                + [w * B[i][t] for t in range(k_a)]
+                + [w if j == c else Fraction(0) for c in range(n_cells)]
+            )
+            row = []
+            for q in rows:
+                row += [w * B[i][t] if j == q else Fraction(0) for t in range(k_a)]
+            tensor.append(row)
+
+    def rank(matrix):
+        A = [list(r) for r in matrix]
+        n_rows = len(A)
+        found = 0
+        for col in range(len(A[0]) if A else 0):
+            pivot = next((r for r in range(found, n_rows) if A[r][col] != 0), None)
+            if pivot is None:
+                continue
+            A[found], A[pivot] = A[pivot], A[found]
+            lead = A[found]
+            for r in range(found + 1, n_rows):
+                if A[r][col] != 0:
+                    factor = A[r][col] / lead[col]
+                    A[r] = [a - factor * b for a, b in zip(A[r], lead, strict=True)]
+            found += 1
+            if found == n_rows:
+                break
+        return found
+
+    return rank([o + t for o, t in zip(overlap, tensor, strict=True)]) - rank(overlap)
+
+
+def _correctly_rounded_moments(p, B_a, W_cell, level_rows):
+    """``p`` with V, c, m and the border each the NEAREST double to its exact value.
+
+    The CEILING of any float64 moment assembly whatever -- compensated
+    summation, a different contraction order, pairwise or exact accumulation
+    all land here or worse.  Formed with exact rationals and rounded once.
+    """
+    from fractions import Fraction
+
+    B_a = np.asarray(B_a, dtype=np.float64)
+    W_cell = np.asarray(W_cell, dtype=np.float64)
+    n_a, k_a = B_a.shape
+    rows = np.asarray(level_rows, dtype=np.intp)
+    B = [[Fraction(float(v)) for v in row] for row in B_a]
+    W = [[Fraction(float(v)) for v in row] for row in W_cell]
+
+    V = np.empty((rows.size, k_a, k_a))
+    c = np.empty((rows.size, k_a))
+    m = np.empty(rows.size)
+    for q, col in enumerate(rows):
+        mass = Fraction(0)
+        cq = [Fraction(0)] * k_a
+        Vq = [[Fraction(0)] * k_a for _ in range(k_a)]
+        for i in range(n_a):
+            w = W[i][col]
+            if w == 0:
+                continue
+            mass += w
+            for a in range(k_a):
+                cq[a] += w * B[i][a]
+                for b in range(k_a):
+                    Vq[a][b] += w * B[i][a] * B[i][b]
+        m[q] = float(mass)
+        c[q] = [float(v) for v in cq]
+        V[q] = [[float(v) for v in row] for row in Vq]
+
+    w_row = [sum(row) for row in W]
+    border = np.empty((1 + k_a, 1 + k_a))
+    border[0, 0] = float(sum(w_row))
+    for a in range(k_a):
+        border[0, 1 + a] = border[1 + a, 0] = float(sum(w_row[i] * B[i][a] for i in range(n_a)))
+        for b in range(k_a):
+            border[1 + a, 1 + b] = float(sum(w_row[i] * B[i][a] * B[i][b] for i in range(n_a)))
+    return dataclasses.replace(p, V=V, c=c, m=m, border=border)
+
+
+def test_a_perfect_float64_moment_assembly_does_not_close_the_low_edge():
+    """The float64 MOMENT CONTRACT, not its summation, is what costs the low edge.
+
+    ``spline_cat_moments`` hands the ladder four raw Grams -- ``V``, ``c``,
+    ``m`` and the border -- and every downstream rule is exactly as correct as
+    those are.  On a starved margin the pair's profiled curvature is EXACTLY
+    rank deficient (8 of 56 directions below), and no float64 Gram can carry
+    that: forming ``V_eff = V - C' M^+ C`` lifts the structurally zero
+    directions to round-off of the RAW moments, which is
+    ``max|border| / max|V_eff|`` = 24 / 0.067 = 357 times larger than round-off
+    of ``V_eff`` itself, and the ladder's low-edge filter threshold
+    ``lambda sigma_max(S_a)`` sits between the two.
+
+    So this is not a summation defect, and the assertion below is what says so:
+    replacing every delivered moment with the NEAREST DOUBLE to its exact
+    value -- the ceiling of compensated summation, of a different contraction
+    order, of any assembly at all -- moves the low-edge edf by 1.010 df out of
+    9.803 df of error.  Measured against a 60-digit oracle on exactly formed
+    moments, the truth here is 7.988441 df; the shipped kernel returns
+    17.791501 and a perfect float64 assembly returns 16.781645.  The four
+    objects differ by at most 5.6e-17 (V), 2.2e-16 (c), 0.0 (m) and 3.5e-16
+    (border).
+
+    **WHAT IT COSTS ON ITS OWN, SEPARATED FROM THE LADDER'S OWN ERROR.**
+    Evaluating ``tr((V_eff + lambda S)^+ V_eff)`` at 60 digits on the DELIVERED
+    moments gives 12.621633 against 7.988441 on exactly formed ones -- the
+    assembly alone is +4.633191 df, 47% of the low-edge error, before any rank
+    rule runs.  The remaining +5.169869 df is the arrow kernel's, and the two
+    are opposite-signed enough on other draws that fixing the moments alone
+    reads as noise: over a 16-geometry family the shipped kernel's median
+    low-edge error is 14.92 df and a perfect float64 assembly's is 14.40 df.
+
+    **AND CORRECTLY ROUNDING IS NOT RELIABLY BETTER, WHICH IS THE POINT.**  On
+    the same 60-digit oracle, the correctly-rounded moments come back
+    +2.116, +2.697, +4.247, -0.047, +6.554 and +1.595 df from the truth over
+    seeds 0 to 5 of this fixture, and +47.698 df at a band width of 1e-5 --
+    against the shipped route's +11.526, +2.725, +4.841, +4.633, +11.826 and
+    +0.649.  Neither is the better one.  A 1 eps relative perturbation of the
+    moments moves the low-edge edf by a median 1.8 to 11.4 df and up to 34.8;
+    jittering the BASIS by 1 to 4 ulp, and forming the moments exactly, moves
+    it by 6.8e-14 to 2.7e-07 df.  The quantity is well posed in the DATA by
+    eight to fourteen orders and ill posed in the MOMENTS, so the information
+    is present upstream and destroyed by the contract.
+
+    Both numbers are pinned so that a future change to the assembly is graded
+    on the contract rather than on its arithmetic.  Tracked as #268; a fix is a
+    contract change -- deliver the level-centered FACTORS, whose Gram is the
+    same ``(L, k_a, k_a)`` and which ``spline_cat_moments`` already builds and
+    discards -- not a summation change, and it is not made here.
+
+    On the well populated sibling of this fixture (6 levels x 12 rows) both
+    routes agree with the oracle to 2e-3 df, so nothing above generalizes to a
+    margin whose levels support their own columns.
+    """
+    grab = _starved_level_pair()
+    B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
+    p = spline_cat_moments(B_a, S_a, S_cell, W_cell, level_rows)
+    L, k_a = p.dims
+    assert (L, k_a) == (7, 8), p.dims
+    assert p.profiled_trace is not None
+
+    # The target, with no eigensolver and no cutoff anywhere in it.
+    assert _exact_profiled_rank(B_a, W_cell, level_rows) == 8
+
+    tr_S = float(np.trace(p.S_a)) * L
+    lam = 1e-10 * (max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300))
+
+    rounded = _correctly_rounded_moments(p, B_a, W_cell, level_rows)
+    # A correctly-rounded assembly is a DIFFERENT assembly, not a no-op...
+    assert not np.array_equal(rounded.border, p.border)
+    assert np.max(np.abs(rounded.border - p.border)) < 1e-15
+    assert np.max(np.abs(rounded.V - p.V)) < 1e-15
+    assert np.array_equal(rounded.m, p.m)
+
+    shipped = _evaluate(p, *_profile(p), lam)[1]
+    perfect = _evaluate(rounded, *_profile(rounded), lam)[1]
+    assert shipped == pytest.approx(17.791501, abs=1e-5)
+    assert perfect == pytest.approx(16.781645, abs=1e-5)
+    # ...and it buys 1.01 df of the 9.80 the low edge is out by.  The exact
+    # value is 7.988441 df, which is 8 free directions minus the share the
+    # penalty has already taken from the last one.
+    assert abs(perfect - shipped) == pytest.approx(1.010, abs=1e-3)
+    assert shipped - 7.988441 == pytest.approx(9.803, abs=1e-3)
+    assert perfect - 7.988441 == pytest.approx(8.793, abs=1e-3)

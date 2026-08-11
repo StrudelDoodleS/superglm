@@ -494,6 +494,63 @@ def spline_cat_moments(
     no bandwidth to scan, and :func:`structured_ladder` reports it at a
     single rung.  Refusing here would abort the whole sweep over one pair,
     where the contract is a NaN row.
+
+    **WHAT THE RAW-GRAM CONTRACT COSTS AT THE LOW EDGE, AND WHY BETTER
+    SUMMATION IS NOT THE FIX.**  Four raw Grams go out of here, and every rank
+    rule downstream is exactly as correct as they are.  On a margin whose
+    levels carry FEWER distinct covariate values than the margin has columns,
+    the pair's profiled curvature ``V_eff = V - C' M^+ C`` is EXACTLY rank
+    deficient -- 8 of 56 directions on the ``ps(5)``, 8 levels x 3 rows, four
+    inside a 1e-3 band, ``default_rng(3)`` geometry issue #249 documents,
+    established by rational elimination with no cutoff anywhere in it -- and no
+    float64 Gram carries that.  Forming ``V_eff`` lifts the structurally zero
+    directions to round-off of the RAW moments, ``max|border| / max|V_eff|`` =
+    24 / 0.067 = 357 times round-off of ``V_eff`` itself, and the ladder's
+    low-edge filter threshold ``lambda sigma_max(S_a)`` sits between the two.
+
+    Measured against a 60-digit oracle evaluating
+    ``tr((V_eff + lambda S)^+ V_eff)`` -- the cancellation-free sum of Tikhonov
+    filter factors, every term in [0, 1] -- on exactly formed moments, the
+    truth there is 7.988441 df.  The SAME oracle on the moments this function
+    delivers reads 12.621633: the assembly alone is **+4.633191 df**, 47% of
+    the low edge's 9.803 df of error, before any rank rule runs.
+
+    It is not a summation defect.  Replacing every delivered moment with the
+    NEAREST DOUBLE to its exact value -- the ceiling of compensated summation,
+    of a different contraction order, of any float64 assembly at all -- moves
+    the shipped low-edge edf from 17.791501 to 16.781645, 1.010 df of the
+    9.803.  Nor is correct rounding reliably BETTER: on the oracle it is
+    +2.116, +2.697, +4.247, -0.047, +6.554 and +1.595 df from the truth over
+    seeds 0 to 5 of that fixture and +47.698 df at a band width of 1e-5,
+    against this route's +11.526, +2.725, +4.841, +4.633, +11.826 and +0.649.
+
+    The information is present upstream and destroyed here.  A 1 eps relative
+    perturbation of the delivered moments moves the low-edge edf by a median
+    1.8 to 11.4 df and by up to 34.8; jittering the BASIS by 1 to 4 ulp and
+    forming the moments exactly moves it by 6.8e-14 to 2.7e-07 df.  Eight to
+    fourteen orders of magnitude apart, on the same geometry.
+
+    A fix is therefore a CONTRACT change, not an arithmetic one: deliver the
+    level-centered factors ``R_q`` with ``R_q' R_q = V_q - c_q c_q' / m_q``,
+    which :func:`_centered_level_factors` already builds twice here and
+    discards, and whose footprint is the ``(L, k_a, k_a)`` of ``V`` itself.
+    Then ``V_eff[q][r] = R_q' (delta_qr I - P_q P_r') R_r`` with ``P`` the Q
+    factor of the stacked ``R`` -- orthonormal, so the correction is rank
+    ``k_a`` whatever ``L`` is, and the whole object stays linear in ``L``.
+    Prototyped: it recovers the exact rank 8 where both Gram routes read 17,
+    and over 13 starved geometries it never OVER-counts (worst 0, against +15
+    for the delivered moments and +14 for correctly-rounded ones).  Measured
+    cost of retaining the factors and the stacked QR: +7% on this function's
+    time and 2x ``V``'s bytes at L = 2,000 and L = 10,000 with all six thread
+    pools pinned -- 51 MB at L = 50,000, against 2.4 TB for a dense ``V``.
+
+    NOT DONE HERE, and the reason is measured too: the ladder's own low-edge
+    error is 14.92 df at the median over a 16-geometry family where a perfect
+    float64 assembly's is 14.40, so a moments-only change is not observable
+    end to end and would be graded on a curve.  The two halves are the same
+    disease -- raw Grams differenced -- and #268 and the arrow cluster have to
+    move together.  Pinned by
+    tests/test_structured_screening.py::test_a_perfect_float64_moment_assembly_does_not_close_the_low_edge.
     """
     B_a = np.asarray(B_a, dtype=np.float64)
     n_a, k_a = B_a.shape
