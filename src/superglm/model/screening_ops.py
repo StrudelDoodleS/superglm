@@ -420,14 +420,16 @@ def _categorical_codes(spec, x_raw) -> tuple[np.ndarray, int]:
 
 
 def _contrast_menu(spec) -> np.ndarray:
-    """(L, L-1) treatment-contrast menu; the base level's row is all zeros.
+    """Treatment-contrast menu; base and pinned levels' rows are all zeros.
 
     Column ``j`` indicates ``spec._non_base[j]``, matching the main effect's
     column order, so the interaction block this menu generates is exactly the
-    one the confirmatory refit would build.
+    one the confirmatory refit would build. Width follows ``_non_base``, not
+    ``L - 1`` — a pinned level (declared, no effective rows) has no main-effect
+    column and must not contribute an all-zero contrast column here.
     """
     position = {lev: i for i, lev in enumerate(spec._levels)}
-    menu = np.zeros((len(position), len(position) - 1), dtype=np.float64)
+    menu = np.zeros((len(position), len(spec._non_base)), dtype=np.float64)
     for j, lev in enumerate(spec._non_base):
         menu[position[lev], j] = 1.0
     return menu
@@ -465,7 +467,9 @@ def _marginal_width_estimate(spec) -> int:
     estimates: a contrast menu is (L - 1) wide and a numeric margin is 1.
     """
     if isinstance(spec, Categorical):
-        return max(len(spec._levels) - 1, 1)
+        # _non_base, not L - 1: pinned levels carry no main-effect column, and
+        # an over-estimate here skips a pair the budget actually admits.
+        return max(len(spec._non_base), 1)
     if isinstance(spec, Numeric):
         return 1
     n_knots = getattr(spec, "n_knots", None)
