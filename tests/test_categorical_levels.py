@@ -58,6 +58,29 @@ class TestDeclaredUniverse:
         assert spec._declared_levels == ["a", "b"]
         assert spec._level_source == "declared"
 
+    def test_numeric_levels_source_sorts_numerically(self):
+        spec = Categorical(base="first", levels=pd.Series([10, 2, 2]))
+        assert spec._declared_levels == [2, 10]
+
+    def test_declared_and_full_frame_sources_agree_on_a_numeric_column(self):
+        # The two sources read the SAME column and must land the same universe.
+        # `levels=` sorted by `key=str` ("10" < "2") while the binding path
+        # factorizes with sort=True (2 < 10), so the universe order -- and with
+        # it the level base="first" names -- depended on which one the caller
+        # happened to use.
+        from superglm import SuperGLM
+
+        column = pd.Series([10, 2, 2, 10, 2])
+        declared = Categorical(base="first", levels=column)
+        X = pd.DataFrame({"g": column})
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")})
+        model.bind_levels(X)
+
+        bound = dict(model._config.level_bindings)["g"]
+        assert list(bound.levels) == declared._declared_levels
+        _build(declared, column.to_numpy())
+        assert declared._base_level == bound.levels[0]
+
 
 class TestZeroWeightAndBaseFallback:
     def test_zero_weight_level_is_pinned(self):
@@ -149,12 +172,55 @@ class TestGroupedDeclared:
             Categorical(levels=["a", "b", "c"], grouping=grouping)
 
     def test_declared_raws_become_the_grouping_image(self):
-        grouping = collapse_levels(["a", "b", "c"], groups={"grp": ["a", "b"]})
-        spec = Categorical(base="first", levels=["a", "b", "c"], grouping=grouping)
-        with pytest.warns(UserWarning, match=r"pinned to base.*'c'"):
-            _build(spec, ["a", "b"])
-        assert spec._levels == ["grp", "c"]  # first-occurrence order of the image
-        assert spec._pinned_levels == ["c"]
+        # 'd' is declared and absent, so it pins; 'c' is present, so the term
+        # keeps an estimable non-base level and the build is identified.
+        grouping = collapse_levels(["a", "b", "c", "d"], groups={"grp": ["a", "b"]})
+        spec = Categorical(base="first", levels=["a", "b", "c", "d"], grouping=grouping)
+        with pytest.warns(UserWarning, match=r"pinned to base.*'d'"):
+            _build(spec, ["a", "b", "c"])
+        assert spec._levels == ["grp", "c", "d"]  # first-occurrence order of the image
+        assert spec._pinned_levels == ["d"]
+        assert spec._non_base == ["c"]
+
+    def test_binding_carries_the_raw_universe_not_the_collapsed_one(self):
+        # `apply_level_binding` stores `binding.levels` as `_declared_levels`,
+        # and `_working_universe` maps every one of those through
+        # `original_to_group`. A binding of COLLAPSED labels therefore looks up
+        # "South" in a mapping keyed by raw labels -- KeyError for every group
+        # label that is not also a raw label, i.e. for every real collapse.
+        grouping = collapse_levels(["TX", "FL", "NY"], groups={"South": ["TX", "FL"]})
+        spec = Categorical(grouping=grouping)
+
+        binding = spec.resolve_binding(
+            np.asarray(["TX", "FL", "NY", "NY"], dtype=object), np.array([1.0, 1.0, 3.0, 3.0])
+        )
+
+        assert set(binding.levels) == {"TX", "FL", "NY"}, "the RAW universe"
+        assert binding.base == "NY", "the base names a GROUP, the domain `_levels` speaks"
+        bound = Categorical(grouping=grouping)
+        bound.apply_level_binding(binding)
+        _build(bound, ["NY", "TX"])
+        assert bound._levels == ["NY", "South"]
+
+    def test_a_bound_grouping_matches_the_unbound_universe_and_base(self):
+        # Binding a frame in which every level is present must be a no-op on the
+        # design. Ordering the raw universe by raw label alone would order the
+        # GROUPS by their alphabetically-first member ("South" ahead of "NY",
+        # via "FL"), permuting the columns and moving which level base="first"
+        # names -- a silent re-basing caused only by having called bind_levels.
+        grouping = collapse_levels(["TX", "FL", "NY"], groups={"South": ["TX", "FL"]})
+        values = np.asarray(["TX", "FL", "NY", "NY", "TX"], dtype=object)
+
+        unbound = Categorical(base="first", grouping=grouping)
+        _build(unbound, values)
+
+        bound = Categorical(base="first", grouping=grouping)
+        bound.apply_level_binding(Categorical(grouping=grouping).resolve_binding(values))
+        _build(bound, values)
+
+        assert bound._levels == unbound._levels
+        assert bound._base_level == unbound._base_level
+        assert bound._non_base == unbound._non_base
 
     def test_novel_raw_label_still_errors_under_unseen_base(self):
         # Documented v1 limitation: unseen='base' routes novel WORKING levels,
@@ -179,6 +245,15 @@ class TestAdoptionHooks:
         spec.adopt_dtype_categories(["a", "b"])
         assert spec._declared_levels == ["x", "y"]
         assert spec._level_source == "declared"
+
+    def test_a_bad_dtype_universe_blames_the_dtype_not_levels(self):
+        # The caller never wrote `levels=` here: the universe came off the
+        # column's own CategoricalDtype. A message pointing at `levels=` sends
+        # them to edit an argument that does not exist in their code.
+        spec = Categorical(base="first")
+        with pytest.raises(ValueError, match="dtype") as excinfo:
+            spec.adopt_dtype_categories(["only"])
+        assert "levels=" not in str(excinfo.value)
 
     def test_apply_level_binding_levels_and_base(self):
         from superglm.types import LevelBinding
@@ -496,6 +571,166 @@ class TestReconstruct:
         assert rec["log_relativities"]["c"] == pytest.approx(0.0)
 
 
+class TestIdentifiability:
+    """A universe whose every non-base level is empty cannot be fitted."""
+
+    def test_no_estimable_non_base_level_is_named(self):
+        # `_non_base` comes out empty, so the term emits a zero-column block.
+        # Before the guard that reached the design matrix, where the failure
+        # surfaces (if at all) as a shape or rank complaint naming neither the
+        # term nor the reason.
+        spec = Categorical(base="first", levels=["a", "b"])
+        with pytest.warns(UserWarning, match="pinned to base"):
+            with pytest.raises(ValueError, match="no estimable non-base level"):
+                _build(spec, ["a", "a", "a"])
+
+    def test_the_message_names_the_base_and_the_universe(self):
+        spec = Categorical(base="first", levels=["a", "b", "c"])
+        with pytest.warns(UserWarning), pytest.raises(ValueError) as excinfo:
+            _build(spec, ["a", "a"])
+        message = str(excinfo.value)
+        assert "'a'" in message  # the base that survived
+        assert "['a', 'b', 'c']" in message  # the universe that did not
+
+    def test_one_observed_non_base_level_is_enough(self):
+        spec = Categorical(base="first", levels=["a", "b", "c"])
+        with pytest.warns(UserWarning, match="pinned to base"):
+            info = _build(spec, ["a", "b"])
+        assert info.n_cols == 1
+
+
+class TestPinnedLevelInference:
+    """A pinned level reports at base with zero uncertainty, not a crash."""
+
+    def _model(self):
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(20260811)
+        g = np.asarray(rng.choice(["a", "b"], size=240), dtype=object)
+        X = pd.DataFrame({"g": g})
+        y = rng.poisson(1.0, size=len(X)).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"g": Categorical(base="first", levels=["a", "b", "ghost"])},
+        )
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(X, y)
+        return model
+
+    def test_term_inference_covers_the_pinned_level(self):
+        # `feature_se_from_cov` used to locate each level's SE with
+        # `_non_base.index(lev)`, and `_non_base` is exactly the list a pinned
+        # level is missing from -- so asking a fitted model for its own standard
+        # errors raised ValueError('ghost' is not in list).
+        ti = self._model().term_inference("g")
+
+        assert ti.levels == ["a", "b", "ghost"]
+        se = np.asarray(ti.se_log_relativity, dtype=np.float64)
+        assert se.shape == (3,)
+        # The pin fixes the coefficient at zero, so its SE is zero for the same
+        # reason the base's is -- not "unknown", and not the neighbour's.
+        assert se[0] == 0.0 and se[2] == 0.0
+        assert se[1] > 0.0
+        assert ti.log_relativity[2] == pytest.approx(0.0)
+
+    def test_relativities_with_se_covers_the_pinned_level(self):
+        table = self._model().relativities(with_se=True)["g"]
+
+        assert list(table["level"]) == ["a", "b", "ghost"]
+        assert float(table.loc[table["level"] == "ghost", "se_log_relativity"].iloc[0]) == 0.0
+        assert float(table.loc[table["level"] == "ghost", "relativity"].iloc[0]) == pytest.approx(
+            1.0
+        )
+
+
+class TestLegacyPickleState:
+    """Specs restored from a pre-universe pickle read class-level defaults."""
+
+    NEW_ATTRS = (
+        "unseen",
+        "_declared_levels",
+        "_level_source",
+        "_pinned_levels",
+        "_base_fallback",
+        "_pinned_base",
+    )
+
+    def _legacy(self):
+        """A fitted model whose spec has lost every attribute `__init__` added.
+
+        Unpickling restores an instance `__dict__` and never calls `__init__`,
+        so a spec pickled before the level-universe state existed carries none
+        of these names. Deleting them from a live fitted spec reproduces that
+        object exactly, without committing a binary fixture that would have to
+        be regenerated whenever anything else on the class moves.
+        """
+        from superglm import SuperGLM
+
+        rng = np.random.default_rng(20260811)
+        g = np.asarray(rng.choice(["a", "b", "c"], size=210), dtype=object)
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=len(g))})
+        y = rng.poisson(1.0, size=len(g)).astype(float)
+        model = SuperGLM(family="poisson", features={"g": Categorical(base="first")})
+        model.fit(X, y)
+        spec = model._specs["g"]
+        for attr in self.NEW_ATTRS:
+            spec.__dict__.pop(attr, None)
+        assert not [a for a in self.NEW_ATTRS if a in spec.__dict__]
+        return model, X
+
+    def test_every_new_attribute_reads_the_pre_feature_behaviour(self):
+        spec = self._legacy()[0]._specs["g"]
+
+        assert spec.unseen == "error"
+        assert spec._declared_levels is None
+        assert spec._level_source == "inferred"
+        assert list(spec._pinned_levels) == []
+        assert spec._base_fallback is None
+        assert spec._pinned_base is None
+
+    def test_the_defaults_are_immutable_and_class_level(self):
+        # A mutable class default is shared by every instance that never assigns
+        # its own, so one legacy spec's in-place mutation would silently become
+        # every other spec's state. Immutability is what makes that impossible.
+        for attr in self.NEW_ATTRS:
+            assert attr in vars(Categorical), attr
+            assert not isinstance(getattr(Categorical, attr), list | dict | set), attr
+
+    def test_predict_reconstruct_and_summary_all_work(self):
+        model, X = self._legacy()
+
+        assert np.isfinite(model.predict(X)).all()
+        rec = model.reconstruct_feature("g")
+        assert list(rec["pinned_levels"]) == []
+        assert rec["level_source"] == "inferred"
+        assert rec["base_fallback"] is None
+        record = model.summary()["level_universes"]["g"]
+        assert record["levels"] == ["a", "b", "c"]
+        assert record["pinned_levels"] == []
+        assert record["base_level"] == "a"
+
+    def test_unseen_defaults_to_error_at_predict(self):
+        model, X = self._legacy()
+        novel = X.assign(g=np.asarray(["ROGUE"] * len(X), dtype=object))
+
+        with pytest.raises(ValueError, match="unseen categorical levels"):
+            model.predict(novel)
+
+    def test_a_legacy_spec_can_be_rebuilt(self):
+        # The class defaults have to work as build INPUT too, not only as
+        # reporting output: refitting a restored model is the ordinary reason to
+        # unpickle one.
+        model, X = self._legacy()
+        spec = model._specs["g"]
+
+        spec.build(X["g"].to_numpy())
+
+        assert spec._levels == ["a", "b", "c"]
+        assert spec._pinned_levels == []
+        assert Categorical._pinned_levels == (), "the class default was mutated"
+
+
 class TestBindLevels:
     """`bind_levels` binds the universe from the outermost frame (spec §9)."""
 
@@ -599,3 +834,116 @@ class TestBindLevels:
         model = SuperGLM(family="poisson", features={"g": Categorical()})
         with pytest.raises(ValueError, match="missing required columns"):
             model.bind_levels(pd.DataFrame({"other": [1.0, 2.0]}))
+
+    def _weighted_model(self):
+        from superglm import SuperGLM
+
+        X = pd.DataFrame({"g": np.array(["a"] * 6 + ["b"] * 6, dtype=object)})
+        return SuperGLM(family="poisson", features={"g": Categorical()}), X
+
+    @pytest.mark.parametrize(
+        "weight, match",
+        [
+            (np.ones(11), "length 11"),
+            (np.ones((12, 1)), "one-dimensional"),
+            (np.r_[np.ones(11), -1.0], "nonnegative"),
+            (np.r_[np.ones(11), np.nan], "finite"),
+            (np.r_[np.ones(11), np.inf], "finite"),
+        ],
+    )
+    def test_bad_binding_weight_is_refused(self, weight, match):
+        # The weight decides the pinned base and which levels count as empty,
+        # and both outlive the call. Unvalidated, a ragged weight dies inside a
+        # bincount with no mention of sample_weight, and a negative one does not
+        # raise at all -- it silently moves the reference level for every later
+        # fit.
+        model, X = self._weighted_model()
+        with pytest.raises(ValueError, match=match):
+            model.bind_levels(X, sample_weight=weight)
+        assert model._config.level_bindings is None, "a refused bind must store nothing"
+
+    def test_a_valid_weight_still_binds(self):
+        model, X = self._weighted_model()
+        weight = np.r_[np.ones(6), np.full(6, 3.0)]
+
+        model.bind_levels(X, sample_weight=weight)
+
+        assert dict(model._config.level_bindings)["g"].base == "b"
+
+
+class TestGroupedBindingEndToEnd:
+    """A grouped spec survives full-frame binding and every CV fold (§3.6)."""
+
+    def _frame(self, n=240, seed=3):
+        rng = np.random.default_rng(seed)
+        g = np.asarray(rng.choice(["TX", "FL", "NY"], size=n), dtype=object)
+        g[0] = "RARE"  # one raw level most folds never train on
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=n)})
+        y = rng.poisson(1.0, size=n).astype(float)
+        return X, y
+
+    def _model(self, X):
+        from superglm import SuperGLM
+
+        grouping = collapse_levels(X["g"], groups={"South": ["TX", "FL"]})
+        return SuperGLM(
+            family="poisson",
+            features={"g": Categorical(base="first", grouping=grouping)},
+        )
+
+    def test_bind_levels_then_fit(self):
+        X, y = self._frame()
+        model = self._model(X).bind_levels(X)
+
+        model.fit(X, y)
+
+        spec = model._specs["g"]
+        assert spec._levels == ["NY", "RARE", "South"]
+        assert spec._level_source == "full-frame"
+        assert spec._pinned_levels == []
+
+    def test_every_fold_completes_and_shares_the_universe(self):
+        from sklearn.model_selection import KFold
+
+        from superglm import cross_validate
+
+        X, y = self._frame()
+        model = self._model(X).bind_levels(X)
+
+        with warnings.catch_warnings():
+            # Folds without the rare raw level pin it, and say so.
+            warnings.simplefilter("ignore", UserWarning)
+            res = cross_validate(
+                model,
+                X,
+                y,
+                cv=KFold(n_splits=4, shuffle=True, random_state=0),
+                return_estimators=True,
+                error_score="raise",  # the KeyError must not be swallowed
+            )
+
+        assert len(res.estimators) == 4
+        for est in res.estimators:
+            assert est._specs["g"]._levels == ["NY", "RARE", "South"]
+
+    def test_cross_validate_binds_the_universe_without_bind_levels(self):
+        # The CV pre-pass runs the same resolution on its own input, so the
+        # grouped KeyError reaches folds that never called `bind_levels`.
+        from sklearn.model_selection import KFold
+
+        from superglm import cross_validate
+
+        X, y = self._frame()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = cross_validate(
+                self._model(X),
+                X,
+                y,
+                cv=KFold(n_splits=4, shuffle=True, random_state=0),
+                return_estimators=True,
+                error_score="raise",
+            )
+
+        for est in res.estimators:
+            assert est._specs["g"]._levels == ["NY", "RARE", "South"]

@@ -45,7 +45,10 @@ def validate_level_display(value: object) -> LevelDisplay:
     return cast(LevelDisplay, value)
 
 
-def build_level_universes(specs: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def build_level_universes(
+    specs: Mapping[str, Any],
+    interaction_specs: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Per-term level-universe provenance for the summary payload (spec §3.8).
 
     The audit trail a rating-governance reader needs about a categorical-family
@@ -59,6 +62,14 @@ def build_level_universes(specs: Mapping[str, Any]) -> dict[str, dict[str, Any]]
     term with no universe at all -- every numeric spec -- is absent rather than
     present-and-empty, so ``level_universes`` reads as the list of terms that
     have levels.
+
+    ``interaction_specs`` is the model's interaction namespace, read on the same
+    terms as the main one. ``FactorSmooth`` is the reason it exists: it carries
+    a bound group universe and a ``_level_source``, and it lives ONLY there, so
+    scanning ``_specs`` alone drops precisely the term whose universe is least
+    obvious from the coefficient table. The two namespaces share one key space
+    (``validate_term_name_namespace`` refuses a name in both), so a flat payload
+    keyed by term name cannot collide.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -66,7 +77,8 @@ def build_level_universes(specs: Mapping[str, Any]) -> dict[str, dict[str, Any]]
     from superglm.features.random_effect import RandomEffect
 
     universes: dict[str, dict[str, Any]] = {}
-    for feature, spec in specs.items():
+    scanned = {**dict(specs), **dict(interaction_specs or {})}
+    for feature, spec in scanned.items():
         if not isinstance(spec, Categorical | OrderedCategorical | RandomEffect | FactorSmooth):
             continue
         levels = (
@@ -81,10 +93,19 @@ def build_level_universes(specs: Mapping[str, Any]) -> dict[str, dict[str, Any]]
         pinned = list(getattr(spec, "_pinned_levels", ())) + list(
             getattr(spec, "_pinned_specials", ())
         )
+        # `""` is the pre-build sentinel `Categorical.__init__` writes, and an
+        # absent attribute is a term with no base at all (RandomEffect,
+        # FactorSmooth). Those two are the only "no base" cases, so they are the
+        # only ones tested for: a falsey test instead would erase the perfectly
+        # real base levels `0` and `False` on an integer or boolean universe and
+        # report the audit trail as having no reference level.
+        base_level = getattr(spec, "_base_level", None)
+        if isinstance(base_level, str) and base_level == "":
+            base_level = None
         universes[feature] = {
             "levels": list(levels),
             "level_source": getattr(spec, "_level_source", "declared"),
-            "base_level": getattr(spec, "_base_level", None) or None,
+            "base_level": base_level,
             "base_fallback": getattr(spec, "_base_fallback", None),
             "pinned_levels": pinned,
         }

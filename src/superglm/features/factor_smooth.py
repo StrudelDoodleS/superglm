@@ -212,7 +212,13 @@ class FactorSmooth:
         return numeric
 
     def adopt_dtype_categories(self, categories: list) -> None:
-        """Adopt a dtype-declared universe unless one is already declared."""
+        """Adopt a dtype-declared universe unless one is already declared.
+
+        Not reached by the main-loop hooks this release: FactorSmooth lives in
+        the interaction specs, and dm_builder/binding_ops bind main-loop
+        features only. Declare ``levels=`` explicitly; this hook exists so the
+        wiring lands in one place when interaction binding is added.
+        """
         if self._declared_levels is None:
             from superglm.features._level_source import resolve_level_source
 
@@ -242,11 +248,19 @@ class FactorSmooth:
         probe._factorize_group(values)
         return LevelBinding(levels=tuple(probe._levels), base=None)
 
-    def _declared_codes(self, group_values: NDArray) -> NDArray[np.intp]:
+    def _declared_codes(
+        self,
+        group_values: NDArray,
+        sample_weight: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.intp]:
         """Code group values against the bound universe, rejecting anything outside it.
 
         Missing values are already rejected by the caller, so a -1 here can only
         mean data the declaration does not admit.
+
+        ``sample_weight`` is read for the ``sz`` empty-level guard alone, which
+        asks whether a declared level has any EFFECTIVE rows; ``None`` keeps the
+        physical-row count. Nothing else here is weighted.
         """
         codes = pd.Index(self._levels).get_indexer(group_values).astype(np.intp, copy=False)
         if np.any(codes < 0):
@@ -266,9 +280,28 @@ class FactorSmooth:
             # max|beta| 1.8 -> 4.9e3.  fs has no such gap: every coordinate
             # carries a penalty, so an empty block sits at its own lambda and
             # the observed levels' coefficients do not move.
-            counts = np.bincount(codes, minlength=len(self._levels))
+            #
+            # Effective rows, not physical ones. A level whose every row carries
+            # weight 0 contributes exactly nothing to the fitted system, so it
+            # is as empty as a level with no rows at all and recreates the same
+            # near-singularity -- but a physical `bincount` counts it as
+            # present and waves it through. This mirrors `Categorical.build`,
+            # which has always measured occupancy as total weight when weights
+            # are supplied.
+            if sample_weight is None:
+                effective = np.bincount(codes, minlength=len(self._levels)).astype(np.float64)
+            else:
+                weights = np.asarray(sample_weight, dtype=np.float64).ravel()
+                if weights.size != codes.size:
+                    raise ValueError(
+                        f"FactorSmooth sample_weight length {weights.size} != group length "
+                        f"{codes.size}."
+                    )
+                effective = np.bincount(codes, weights=weights, minlength=len(self._levels))
             unobserved = [
-                level for level, count in zip(self._levels, counts, strict=True) if count == 0
+                level
+                for level, weight in zip(self._levels, effective, strict=True)
+                if weight <= 0.0
             ]
             if unobserved:
                 raise ValueError(
@@ -279,7 +312,11 @@ class FactorSmooth:
                 )
         return codes
 
-    def _factorize_group(self, values: NDArray) -> NDArray[np.intp]:
+    def _factorize_group(
+        self,
+        values: NDArray,
+        sample_weight: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.intp]:
         group_values = np.asarray(values).ravel()
         if np.any(pd.isna(group_values)):
             raise ValueError("FactorSmooth group contains missing values (NaN or None).")
@@ -287,7 +324,7 @@ class FactorSmooth:
             # A declared universe is >= 2 labels by construction, so the fitted
             # minimums below are already satisfied.
             self._levels = list(self._declared_levels)
-            codes = self._declared_codes(group_values)
+            codes = self._declared_codes(group_values, sample_weight)
         else:
             codes, uniques = pd.factorize(group_values, sort=True)
             if len(uniques) < 1:
@@ -452,9 +489,12 @@ class FactorSmooth:
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build one exact compact factor-by-spline block."""
-        del specs, sample_weight
+        del specs
         numeric = self._validate_numeric(x)
-        codes = self._factorize_group(group)
+        # The weights reach the universe check only: they decide which declared
+        # levels are EFFECTIVELY empty (see `_declared_codes`). The basis and
+        # the penalty geometry stay weight-free as before.
+        codes = self._factorize_group(group, sample_weight)
         if len(numeric) != len(codes):
             raise ValueError("FactorSmooth variable and group lengths differ.")
         exact_basis = self._build_marginal(numeric, retain_basis=True)
@@ -471,11 +511,13 @@ class FactorSmooth:
         sample_weight: NDArray[np.floating] | None = None,
     ) -> GroupInfo:
         """Build compact support-space geometry with a fixed natural basis."""
-        del specs, sample_weight
+        del specs
         from superglm.group_matrix import _discretize_column
 
         numeric = self._validate_numeric(x)
-        codes = self._factorize_group(group)
+        # Same rule as the exact path: weights inform the empty-level check and
+        # nothing else. The support grid and the natural basis are unweighted.
+        codes = self._factorize_group(group, sample_weight)
         if len(numeric) != len(codes):
             raise ValueError("FactorSmooth variable and group lengths differ.")
         self._build_marginal(numeric, retain_basis=False)

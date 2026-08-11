@@ -170,9 +170,12 @@ def feature_se_from_cov(
     if isinstance(spec, Categorical):
         se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
         se_all = np.zeros(len(spec._levels))
+        # _non_base excludes pinned levels (declared, no effective rows); their
+        # coefficient is fixed at zero, so their SE stays 0.0 like the base's.
+        position = {lev: j for j, lev in enumerate(spec._non_base)}
         for i, lev in enumerate(spec._levels):
-            if lev != spec._base_level:
-                idx = spec._non_base.index(lev)
+            idx = position.get(lev)
+            if idx is not None:
                 se_all[i] = se_nonbase[idx]
         return se_all
 

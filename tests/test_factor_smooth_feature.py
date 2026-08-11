@@ -420,6 +420,64 @@ def test_sz_basis_rejects_a_declared_level_without_rows(declared) -> None:
         spec.build(x, group, {})
 
 
+def _three_level_columns(n: int = 240) -> tuple[np.ndarray, np.ndarray]:
+    x = np.linspace(-2.0, 2.0, n)
+    group = np.array(["a", "b", "ghost"] * (n // 3), dtype=object)
+    return x, group
+
+
+@pytest.mark.parametrize("build", ["build", "build_discrete"])
+def test_sz_basis_rejects_a_level_present_only_on_zero_weight_rows(build) -> None:
+    # A physical `bincount` counts a zero-weight row as occupancy, so the level
+    # walks past the guard and rebuilds exactly the near-singularity the guard
+    # exists to refuse: a row with weight 0 contributes nothing to the weighted
+    # system, which is the same thing as having no row at all. Both build paths,
+    # because both were discarding the weight.
+    x, group = _three_level_columns()
+    weight = np.where(group == "ghost", 0.0, 1.0)
+    spec = FactorSmooth("x", group="group", basis="sz", levels=["a", "b", "ghost"])
+
+    with pytest.raises(ValueError, match=r"basis='sz'.*ghost"):
+        if build == "build":
+            spec.build(x, group, {}, sample_weight=weight)
+        else:
+            spec.build_discrete(x, group, {}, 64, sample_weight=weight)
+
+
+def test_sz_basis_still_accepts_a_level_carrying_positive_weight() -> None:
+    # The guard reads EFFECTIVE occupancy, so a level whose rows are merely
+    # light is not empty; refusing it would make the fix a different bug.
+    x, group = _three_level_columns()
+    weight = np.where(group == "ghost", 1e-3, 1.0)
+    spec = FactorSmooth("x", group="group", basis="sz", levels=["a", "b", "ghost"])
+
+    info = spec.build(x, group, {}, sample_weight=weight)
+
+    assert info.factor_smooth_n_levels == 3
+
+
+def test_sz_basis_keeps_physical_counts_when_no_weight_is_given() -> None:
+    x, group = _three_level_columns()
+    spec = FactorSmooth("x", group="group", basis="sz", levels=["a", "b", "ghost"])
+
+    info = spec.build(x, group, {})
+
+    assert info.factor_smooth_n_levels == 3
+
+
+def test_fs_basis_tolerates_a_zero_weight_level() -> None:
+    # The refusal is sz-specific: under fs every coordinate carries a penalty,
+    # so an empty block sits at its own lambda and the observed levels do not
+    # move. Widening the guard to fs would remove a supported configuration.
+    x, group = _three_level_columns()
+    weight = np.where(group == "ghost", 0.0, 1.0)
+    spec = FactorSmooth("x", group="group", basis="fs", levels=["a", "b", "ghost"])
+
+    info = spec.build(x, group, {}, sample_weight=weight)
+
+    assert info.factor_smooth_n_levels == 3
+
+
 def test_sz_basis_binds_a_fully_observed_declared_universe() -> None:
     x, group = _two_level_columns()
     spec = FactorSmooth("x", group="group", basis="sz", levels=["b", "a"])

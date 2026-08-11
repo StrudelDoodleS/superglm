@@ -149,7 +149,7 @@ def summary(
             "n_obs": n,
             "n_active_groups": n_active,
         },
-        "level_universes": build_level_universes(model._specs),
+        "level_universes": build_level_universes(model._specs, model._interaction_specs),
     }
 
     penalty = fitted_penalty(model)
@@ -542,8 +542,11 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             continue
 
         non_base = getattr(spec, "_non_base", None)
-        if non_base is not None and len(non_base) >= g.size:
-            for i, level in enumerate(non_base[: g.size]):
+        # Exact width match only: for every spec that reaches here the emitted
+        # column count IS len(_non_base), and a mismatch must fail loudly
+        # rather than silently truncate and mislabel coefficient rows.
+        if non_base is not None and len(non_base) == g.size:
+            for i, level in enumerate(non_base):
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
