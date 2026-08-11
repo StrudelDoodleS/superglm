@@ -24,6 +24,10 @@ htmlcov/
 
 # Data
 data/
+# Pinned upstream freMTPL2 downloads (scripts/fetch_fremtpl.py); this is what
+# actions/cache stores, and it sits beside data/ rather than inside it so the
+# cache holds the raw artifacts and not the normalised output.
+.fremtpl-raw/
 
 # Other
 .claude/

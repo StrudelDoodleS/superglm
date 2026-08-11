@@ -3,14 +3,27 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_FILES = (
-    ".github/workflows/ci.yml",
-    ".github/workflows/dev-ci.yml",
-    ".github/workflows/docs.yml",
-    ".github/workflows/release.yml",
-    ".github/workflows/scorecard.yml",
-    ".github/workflows/security.yml",
-)
+
+
+def _workflow_files() -> tuple[str, ...]:
+    """Every workflow in the tree, rather than a list someone must remember to extend.
+
+    The pinning check below is worth exactly its coverage, and a hardcoded tuple
+    omits whatever lands next without saying so -- ``claude.yml`` was already
+    missing from it, and ``real-data.yml`` would have been too.  An unchecked
+    workflow reads identically to a checked one, which is the same failure this
+    branch is fixing for skipped tests.
+    """
+    directory = ROOT / ".github" / "workflows"
+    found = sorted(
+        str(path.relative_to(ROOT).as_posix())
+        for path in (*directory.glob("*.yml"), *directory.glob("*.yaml"))
+    )
+    assert found, f"no workflows found under {directory}"
+    return tuple(found)
+
+
+WORKFLOW_FILES = _workflow_files()
 
 
 def _read(path: str) -> str:
