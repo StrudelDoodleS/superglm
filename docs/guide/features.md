@@ -307,8 +307,8 @@ from superglm import Categorical, SuperGLM
 model = SuperGLM(family="poisson", features={"Area": Categorical()}).bind_levels(df)
 
 train, test = train_test_split(df, test_size=0.2, random_state=0)
-model.fit(train.drop(columns="claims"), train["claims"])
-model.predict(test.drop(columns="claims"))
+model.fit(train.drop(columns="ClaimNb"), train["ClaimNb"])
+model.predict(test.drop(columns="ClaimNb"))
 ```
 
 Bind on the **full** frame, before the split. Every later fit — on any slice,
@@ -336,7 +336,7 @@ from sklearn.model_selection import KFold
 from superglm import cross_validate
 
 model = SuperGLM(family="poisson", features={"Area": Categorical()}).bind_levels(df)
-result = cross_validate(model, train, train["claims"], cv=KFold(5))
+result = cross_validate(model, train, train["ClaimNb"], cv=KFold(5))
 ```
 
 ### Collapsing Sparse Levels
