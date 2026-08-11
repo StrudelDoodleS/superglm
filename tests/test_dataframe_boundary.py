@@ -635,3 +635,50 @@ def test_dataframe_boundary_failed_cross_backend_refit_rolls_back_atomically() -
         assert model._fit_revision == revision_before
         assert model._tweedie_profile_result is profile_sentinel
         np.testing.assert_array_equal(model.predict(initial_X), predictions_before)
+
+
+class TestDeclaredCategories:
+    def test_pandas_categorical_dtype_declared_categories(self):
+        import pandas as pd
+
+        from superglm._frame import as_eager_frame
+
+        df = pd.DataFrame(
+            {"g": pd.Categorical(["a", "b"], categories=["a", "b", "c"]), "x": [1.0, 2.0]}
+        )
+        frame = as_eager_frame(df)
+        assert frame.column_declared_categories("g") == ["a", "b", "c"]
+
+    def test_pandas_object_column_returns_none(self):
+        import pandas as pd
+
+        from superglm._frame import as_eager_frame
+
+        frame = as_eager_frame(pd.DataFrame({"g": ["a", "b"]}))
+        assert frame.column_declared_categories("g") is None
+
+    def test_declared_categories_survive_take_rows(self):
+        import numpy as np
+        import pandas as pd
+
+        from superglm._frame import as_eager_frame
+
+        df = pd.DataFrame({"g": pd.Categorical(["a", "b", "a"], categories=["a", "b", "c"])})
+        sliced = as_eager_frame(as_eager_frame(df).take_rows(np.array([0, 2])))
+        assert sliced.column_declared_categories("g") == ["a", "b", "c"]
+
+    def test_polars_enum_declared_categories(self):
+        pl = pytest.importorskip("polars")
+
+        from superglm._frame import as_eager_frame
+
+        df = pl.DataFrame({"g": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b", "c"]))})
+        assert as_eager_frame(df).column_declared_categories("g") == ["a", "b", "c"]
+
+    def test_polars_plain_categorical_returns_none(self):
+        pl = pytest.importorskip("polars")
+
+        from superglm._frame import as_eager_frame
+
+        df = pl.DataFrame({"g": pl.Series(["a", "b"], dtype=pl.Categorical)})
+        assert as_eager_frame(df).column_declared_categories("g") is None
