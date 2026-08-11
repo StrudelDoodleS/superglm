@@ -233,45 +233,174 @@ def test_workbook_reconstruction_is_exact_for_a_segmented_term() -> None:
     assert np.allclose(ratios, table_ratios, rtol=1e-12, atol=0.0)
 
 
-def test_grouped_display_curve_drops_bands_it_cannot_align() -> None:
-    """A grouped term's rebuilt display curve never carries foreign band arrays.
-
-    The pre-expansion curve of a hosted Piecewise is knot-grid-length, so
-    copying its se/ci onto the 200-point PCHIP rebuild produced a SmoothCurve
-    whose bands could not zip against x (observed: len(x)=200 against
-    len(se)=26). The rebuilt curve is display interpolation only: bands
-    survive exactly when the rebuilt grid equals the pre-expansion grid (the
-    common order= spline case), and the per-level SEs -- the rated quantities
-    -- stay expanded either way.
-    """
+def _grouping(X, groups: dict[str, list[str]]):
+    """A LevelGrouping over LEVELS with everything unnamed left as a singleton."""
     from superglm.features.grouping import collapse_levels
 
-    X, y = _frame()
-    data = X["band"].to_numpy(dtype=object)
-    groups = {"Mi001+Mi002": ["Mi001", "Mi002"]}
     covered = {member for members in groups.values() for member in members}
+    full = dict(groups)
     for level in LEVELS:
         if level not in covered:
-            groups[level] = [level]
-    grouping = collapse_levels(data, groups=groups, order=LEVELS)
+            full[level] = [level]
+    return collapse_levels(X["band"].to_numpy(dtype=object), groups=full, order=LEVELS)
 
-    def fitted_curve(basis):
-        spec = OrderedCategorical(order=LEVELS, basis=basis, grouping=grouping)
-        model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
-        model.fit(X, y)
-        inference = model.term_inference("band", with_se=True)
-        assert inference.se_log_relativity is not None
-        assert len(inference.se_log_relativity) == len(inference.levels)
-        return inference.smooth_curve
 
-    piecewise_curve = fitted_curve(Piecewise(breaks=["Mi004"], degrees=[2, 1]))
-    assert piecewise_curve.se_log_relativity is None
-    assert piecewise_curve.ci_lower is None
-    assert piecewise_curve.ci_upper is None
+def _grouped_curve(X, y, basis, groups: dict[str, list[str]]):
+    spec = OrderedCategorical(order=LEVELS, basis=basis, grouping=_grouping(X, groups))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(X, y)
+    inference = model.term_inference("band", with_se=True)
+    assert inference.se_log_relativity is not None
+    assert len(inference.se_log_relativity) == len(inference.levels)
+    return inference
 
-    spline_curve = fitted_curve(Spline(kind="cr", n_knots=4))
-    assert spline_curve.se_log_relativity is not None
-    assert len(spline_curve.se_log_relativity) == len(spline_curve.x)
+
+def test_grouped_display_curve_drops_bands_it_cannot_align() -> None:
+    """A grouped term's REBUILT display curve never carries foreign band arrays.
+
+    A collapse that moves the display axis leaves the fitted curve undrawable
+    against the expanded markers, so that expansion interpolates a fresh curve
+    -- and the pre-expansion bands belong to the pre-expansion grid. They
+    survive exactly when the rebuilt grid IS that grid: merging an INTERIOR
+    pair leaves the axis endpoints alone and both grids are the same 200-point
+    linspace, while merging the FIRST pair moves the grouped boundary off the
+    original one and the two disagree. Per-level SEs -- the rated quantities --
+    stay expanded either way.
+
+    A hosted Piecewise no longer appears here: its level axis is positions
+    0..L-1 and a collapse does not move it, so nothing is rebuilt and the
+    fitted bands stay on their own fitted grid. That case is pinned by
+    ``test_grouped_display_curve_keeps_the_stated_c0_corner`` below.
+    """
+    X, y = _frame()
+
+    moved = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), {"Mi000+Mi001": ["Mi000", "Mi001"]})
+    assert moved.smooth_curve.se_log_relativity is None
+    assert moved.smooth_curve.ci_lower is None
+    assert moved.smooth_curve.ci_upper is None
+
+    kept = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), {"Mi001+Mi002": ["Mi001", "Mi002"]})
+    assert kept.smooth_curve.se_log_relativity is not None
+    assert len(kept.smooth_curve.se_log_relativity) == len(kept.smooth_curve.x)
+
+
+def test_grouped_display_curve_keeps_the_stated_c0_corner() -> None:
+    """A grouped Piecewise term draws its stated corner, not a smoothed bend.
+
+    The whole contract of ``Piecewise`` is STATED breaks with C0 joins, so a
+    display path that rounds the join shows a different function from the one
+    that was fitted. The grouped expansion used to replace the fitted curve
+    with a 200-point ``PchipInterpolator`` through the expanded level markers.
+    PCHIP is C1 by construction -- one derivative per node -- so the drawn
+    curve had no corner anywhere, and the stated break was not even a point on
+    its grid. Measured on this fit: the drawn secants straddling the break
+    differed by -0.008956 against the fitted slope change of -0.057576 (6.4x
+    too shallow, and what little difference remained was the interpolant's own
+    curvature rather than a join), and the drawn curve ran 0.006570 in
+    log-relativity -- 0.66% in relativity -- away from the fitted shape. The
+    same rebuild on a merge that also shifts the break gave 0.012590 (1.27%)
+    and 5.9x; on a sharper stated kink it reached 0.0393 (4.0%) and 6.3x.
+
+    Grouping a pair AFTER the break leaves the break at position 4, so the
+    fitted shape is exactly the polyline through the three knot bands
+    (Mi000, Mi004, Mi009) and this test needs no model internals to state it.
+    """
+    X, y = _frame()
+    ti = _grouped_curve(X, y, Piecewise(breaks=["Mi004"]), {"Mi007+Mi008": ["Mi007", "Mi008"]})
+    curve = ti.smooth_curve
+
+    curve_x = np.asarray(curve.x, dtype=np.float64)
+    curve_y = np.asarray(curve.log_relativity, dtype=np.float64)
+    level_x = np.asarray(curve.level_x, dtype=np.float64)
+    by_position = dict(zip(level_x.tolist(), np.asarray(ti.log_relativity, dtype=np.float64)))
+    break_x = 4.0
+
+    # The corner is a point ON the drawn curve, not something a renderer has to
+    # interpolate its way through.
+    assert np.any(curve_x == break_x), (
+        f"the stated break sits at x={break_x} but the drawn grid is {curve_x!r}"
+    )
+    corner = int(np.flatnonzero(curve_x == break_x)[0])
+    # ...and the curve meets the break band at exactly the value that band rates.
+    assert curve_y[corner] == by_position[break_x]
+
+    # The drawn curve IS the fitted piecewise-linear function: exactly the
+    # polyline through the three knot bands, to the last bit.
+    knot_positions = np.array([0.0, break_x, 8.0])
+    knot_values = np.array([by_position[position] for position in knot_positions])
+    assert np.abs(curve_y - np.interp(curve_x, knot_positions, knot_values)).max() == 0.0
+
+    # And the join is a genuine corner: the two drawn segments meeting at the
+    # break have different slopes, by the amount the fit states.
+    left = (curve_y[corner] - curve_y[corner - 1]) / (curve_x[corner] - curve_x[corner - 1])
+    right = (curve_y[corner + 1] - curve_y[corner]) / (curve_x[corner + 1] - curve_x[corner])
+    fitted_left = (knot_values[1] - knot_values[0]) / (knot_positions[1] - knot_positions[0])
+    fitted_right = (knot_values[2] - knot_values[1]) / (knot_positions[2] - knot_positions[1])
+    assert right - left == pytest.approx(fitted_right - fitted_left, abs=1e-15)
+    # Guards the line above against vacuity: a corner that small would be a
+    # straight line either way. Measured -0.0576 here, against the -0.0090 the
+    # PCHIP's own curvature produced.
+    assert abs(right - left) > 0.04
+
+    # The bands now belong to the curve they are drawn around, so they zip.
+    assert curve.se_log_relativity is not None
+    assert len(curve.se_log_relativity) == len(curve_x)
+
+
+def test_grouped_piecewise_panel_draws_the_corner_on_the_canvas() -> None:
+    """The corner survives all the way to the rendered line, not just the term.
+
+    ``_collapsed_smooth_curve`` keeps whatever curve the term inference hands
+    it, so a rounded curve upstream is a rounded curve on the canvas.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    X, y = _frame()
+    spec = OrderedCategorical(
+        order=LEVELS,
+        basis=Piecewise(breaks=["Mi004"]),
+        grouping=_grouping(X, {"Mi007+Mi008": ["Mi007", "Mi008"]}),
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(X, y)
+    curve = model.term_inference("band").smooth_curve
+    expected_x = np.asarray(curve.x, dtype=np.float64)
+    expected_y = np.asarray(curve.relativity, dtype=np.float64)
+
+    ax = model.plot("band", X=X).axes[0]
+    drawn = [line for line in ax.lines if len(line.get_xdata()) == len(expected_x)]
+    assert len(drawn) == 1, f"expected one curve line of {len(expected_x)} vertices, got {drawn}"
+    np.testing.assert_array_equal(np.asarray(drawn[0].get_xdata(), dtype=np.float64), expected_x)
+    np.testing.assert_array_equal(np.asarray(drawn[0].get_ydata(), dtype=np.float64), expected_y)
+    # Three vertices: the two boundary knots and the stated break. A polyline
+    # through them is the fitted shape exactly; anything denser is a rebuild.
+    np.testing.assert_array_equal(expected_x, [0.0, 4.0, 8.0])
+
+
+def test_grouped_polynomial_display_curve_is_the_fitted_polynomial() -> None:
+    """The same rebuild also replaced a hosted Polynomial's fitted curve.
+
+    A Polynomial inner basis shares the Piecewise level-position axis, so a
+    collapse does not move it either -- and there the rebuilt 200-point grid
+    happened to MATCH the fitted one, so the pre-expansion bands were carried
+    onto a curve that was not the one they were computed for. There is no
+    corner to lose here; the shape itself was wrong.
+
+    ``powers=[1, 2]`` fits a parabola, and on the uniform display grid a
+    parabola has a constant second difference. Measured: 2.8e-16 spread on a
+    mean of -3.08e-05 once the fitted curve is kept, against 9.59e-05 through
+    the PCHIP -- a spread 3.1x the mean itself, i.e. not a parabola at all.
+    """
+    X, y = _frame()
+    ti = _grouped_curve(X, y, Polynomial(powers=[1, 2]), {"Mi001+Mi002": ["Mi001", "Mi002"]})
+    curve_x = np.asarray(ti.smooth_curve.x, dtype=np.float64)
+    curve_y = np.asarray(ti.smooth_curve.log_relativity, dtype=np.float64)
+
+    assert np.ptp(np.diff(curve_x)) < 1e-12  # uniform grid, so second differences compare
+    second = np.diff(curve_y, 2)
+    assert np.ptp(second) < 1e-14 * abs(float(second.mean())) + 1e-15
 
 
 def test_plateau_bands_share_one_table_row_value(segmented_model) -> None:
