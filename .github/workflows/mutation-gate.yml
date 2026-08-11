@@ -1,0 +1,91 @@
+name: Mutation gate
+
+# Enforces the AGENTS.md rule that "adversarial regressions include a mutation
+# check or a demonstration against the unfixed implementation". The tests a
+# change adds must pass at the head revision and fail when src/ is rolled back
+# to the merge base; anything else is reported as no-evidence or inconclusive.
+#
+# Runs on pull_request so it evaluates the merge result rather than the branch
+# head. It is deliberately NOT in the required status checks — enable it in the
+# ruleset once a few pull requests have shown its outcome distribution. Until
+# then a red result is informational and does not block.
+
+# No `paths:` filter, deliberately. A workflow skipped by a path filter never
+# reports its check, and a *required* check that never reports leaves the pull
+# request blocked forever. The script's own no-production-change branch returns
+# SKIP with exit 0, which is the same saving with none of the trap.
+#
+# `labeled`/`unlabeled` are listed because the default activity set is only
+# [opened, synchronize, reopened]: without them the advertised
+# mutation-gate-exempt escape hatch cannot be applied after a failure without
+# pushing another commit, and a re-run replays the original payload's labels.
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-gate-${{ github.event.pull_request.number }}
+  # Label events do not cancel: a label change would otherwise kill an in-flight
+  # run and restart a 30-minute job. Everything else still supersedes.
+  #
+  # This deliberately does NOT skip the job with a `if:` condition on label
+  # events. A job skipped by `if:` still reports a check run, with conclusion
+  # `skipped` -- and `skipped` *satisfies* a required status check. The day this
+  # enters the ruleset, that would let anyone clear a red gate by adding an
+  # unrelated label. A duplicate run is the cheaper mistake.
+  cancel-in-progress: >-
+    ${{ github.event.action != 'labeled' && github.event.action != 'unlabeled' }}
+
+jobs:
+  mutation-gate:
+    name: Added tests must fail against the unfixed code
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          # The gate diffs against the merge base and builds worktrees at two
+          # revisions, so it needs real history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v6
+
+      # 3.12 is the declared floor and the version ci.yml evaluates pull
+      # requests on. Running the mutant on a different version can skip a
+      # version-specific regression test and report a false result.
+      #
+      # AGENTS.md installs the dev environment on 3.13, so a local run uses a
+      # different interpreter than this one. Both runs of a given invocation
+      # share their interpreter, so the head-versus-mutant comparison stays
+      # valid either way; only which version-guarded tests are skipped differs.
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --extra dev
+
+      # The gate's own scenarios are marked `slow`, which the pull-request suite
+      # deselects. They are the only thing standing between a defect in this
+      # script and a silently wrong verdict on every other pull request, so they
+      # run here where the cost is already being paid.
+      - name: Test the gate itself
+        run: uv run --python 3.12 pytest tests/test_mutation_gate.py -q -m "slow or not slow"
+
+      - name: Build the mutant and run the added tests
+        env:
+          # Reviewed, per-pull-request, and visible in the PR's own metadata.
+          # The justification belongs in the PR body.
+          MUTATION_GATE_EXEMPT: >-
+            ${{ contains(github.event.pull_request.labels.*.name, 'mutation-gate-exempt')
+                && 'mutation-gate-exempt label' || '' }}
+        run: |
+          uv run python scripts/mutation_gate.py \
+            --base-ref "origin/${{ github.base_ref }}" \
+            --head-ref HEAD

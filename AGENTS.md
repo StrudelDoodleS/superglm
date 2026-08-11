@@ -44,7 +44,14 @@ baseline.
 - Performance and backend-dispatch behaviour are tested separately from
   numerical correctness.
 - Adversarial regressions include a mutation check or a demonstration against
-  the unfixed implementation.
+  the unfixed implementation. `scripts/mutation_gate.py` enforces this: it
+  builds the branch's tree with `src/` rolled back to the merge base, and
+  requires that at least one test the branch added or strengthened passes at the
+  head revision and fails against that mutant. Commit first — it compares two
+  committed revisions and refuses to run on a dirty `src/` or `tests/`. Run it
+  locally with
+  `uv run python scripts/mutation_gate.py --base-ref origin/master`.
+  `docs/development/fixing-issues.md` describes the surrounding process.
 
 ## Release impact and publishing
 
