@@ -33,6 +33,14 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
     Shifts log-relativities so geometric mean of relativities = 1.
     SEs are invariant (shift on log scale).  Numeric terms (single
     value) are skipped since centering is meaningless.
+
+    The constant that was removed is recorded on ``centering_shift`` -- it is
+    not recoverable from the returned values, and anything that has to put it
+    back (the rating-table export folds it into the exported base relativity)
+    needs the constant this function actually subtracted rather than a
+    re-derivation from the shifted output.  Every early return leaves the field
+    at its ``0.0`` default, which is the truth for a term this function did not
+    touch.
     """
     if centering == "native" or ti.log_relativity is None:
         return ti
@@ -79,6 +87,7 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
         ci_upper_simultaneous=new_ci_hi_sim,
         smooth_curve=new_curve,
         centering_mode="mean",
+        centering_shift=shift,
     )
 
 

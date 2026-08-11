@@ -656,14 +656,27 @@ class TestWorkbookExactness:
     # the parsed boundary slopes under "extend", the end-row clamp under
     # "clip" -- to reach them at all.  Both modes are swept so neither rule
     # can silently stand in for the other.
+    # ``centering`` is swept because the mean-centered export used to drop the
+    # constant it subtracted (issue #253): every reconstructed prediction came
+    # out scaled by a uniform factor, which no ratio between two workbook rows
+    # can reveal.  The reconstruction below reads the base cell and the block
+    # cells and nothing else, so it is exactly the check that catches it.
+    @pytest.mark.parametrize("centering", ["native", "mean"])
     @pytest.mark.parametrize("extrapolation", ["clip", "extend"])
     @pytest.mark.parametrize("case_name", ["interior_base", "pinned_narrower"])
-    def test_the_workbook_alone_reproduces_the_predictions(self, case_name, extrapolation):
+    def test_the_workbook_alone_reproduces_the_predictions(
+        self, case_name, extrapolation, centering
+    ):
         assert _RECONSTRUCTION_RTOL <= 1e-12
 
         model, case = _fit(case_name, extrapolation=extrapolation)
         payload = build_rating_table_payload(
-            model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
+            model,
+            case.X,
+            case.y,
+            sample_weight=case.sample_weight,
+            n_bins=20,
+            centering=centering,
         )
         ws = _workbook_sheet(payload)
 
@@ -684,24 +697,44 @@ class TestWorkbookExactness:
         assert np.count_nonzero(x < spec._knots[0]) > 50
         assert np.count_nonzero(x > spec._knots[-1]) > 50
 
-    def test_the_sheet_note_scopes_exactness_to_native_centering(self):
-        """The exactness claim is bounded where it is made.
+    def test_the_sheet_note_names_the_centering_constant_it_was_shifted_by(self):
+        """The claim is unbounded now, so the note has to reconcile the two modes.
 
-        Under ``centering="mean"`` every term's values are shifted by a
-        constant that is not transferred into the exported base relativity --
-        a pre-existing property of the mean-centered export shared by all
-        term types -- so the note states the claim's scope instead of letting
-        the workbook promise what that mode does not deliver.
+        Two workbooks exported from one model in the two centerings hold
+        different Log relativity columns and different base relativities, and
+        rate identically.  The note is where a reader is told why: it prints
+        the constant this block was shifted by, at full round-trip precision,
+        for the same reason the boundary slopes are printed that way.
         """
         model, case = _fit("interior_base")
-        payload = build_rating_table_payload(
+        native = build_rating_table_payload(
             model, case.X, case.y, sample_weight=case.sample_weight, n_bins=20
         )
-        ws = _workbook_sheet(payload)
-        note = str(ws.cell(row=_NOTE_ROW, column=1).value)
+        mean = build_rating_table_payload(
+            model,
+            case.X,
+            case.y,
+            sample_weight=case.sample_weight,
+            n_bins=20,
+            centering="mean",
+        )
 
-        assert "centering='native'" in note
-        assert "not folded into the base relativity" in note
+        native_note = str(_workbook_sheet(native).cell(row=_NOTE_ROW, column=1).value)
+        assert "holds in either centering." in native_note
+
+        block = next(b for b in mean.main_effects if b.name == "x")
+        shift = float(
+            np.mean(
+                np.log(next(b for b in native.main_effects if b.name == "x").table["Relativity"])
+                - np.log(block.table["Relativity"])
+            )
+        )
+        assert block.centering_shift == pytest.approx(shift, abs=1e-12)
+        assert abs(shift) > 0.01
+
+        mean_note = str(_workbook_sheet(mean).cell(row=_NOTE_ROW, column=1).value)
+        assert "holds in either centering:" in mean_note
+        assert repr(block.centering_shift) in mean_note
 
     def test_the_block_is_three_columns_of_knots_relativities_and_logs(self):
         """Four columns would overwrite the neighbouring block on the fixed stride."""
