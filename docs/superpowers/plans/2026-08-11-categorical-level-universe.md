@@ -1253,6 +1253,182 @@ git commit -m "Equivalence control and full-suite fixes for level universes"
 
 ---
 
+### Task 11 (addendum, spec §9): public `bind_levels`
+
+**Files:**
+- Create: `src/superglm/model/binding_ops.py` (relocated from `model_selection.py`)
+- Modify: `src/superglm/model/api.py` (new method on `SuperGLM`), `src/superglm/model_selection.py` (import from new module + merge rule), `docs/guide/features.md` (train/val/test section — the file was rewritten by Task 9; read it first), `CHANGELOG.md` (extend the Task 9 entry)
+- Test: `tests/test_categorical_levels.py` (append `TestBindLevels`)
+
+**Interfaces:**
+- Consumes: `_resolve_level_bindings` / `_auto_detected_templates` (Task 5), `LevelBinding` + config threading (Task 4).
+- Produces: `SuperGLM.bind_levels(X, sample_weight=None) -> self`; `superglm.model.binding_ops.resolve_level_bindings(model, frame, sample_weight)` (public-ish home of the Task 5 helper, `model_selection` re-imports it).
+
+- [ ] **Step 1: Write the failing tests** (append to `tests/test_categorical_levels.py`):
+
+```python
+class TestBindLevels:
+    def _outer_frame(self, n=150, seed=7):
+        rng = np.random.default_rng(seed)
+        g = rng.choice(["a", "b"], size=n).astype(object)
+        g[-1] = "holdout_only"
+        X = pd.DataFrame({"g": g, "x": rng.normal(size=n)})
+        y = rng.poisson(1.1, size=n).astype(float)
+        return X, y
+
+    def test_bind_then_manual_holdout(self):
+        from superglm import SuperGLM
+        from superglm.features import Categorical
+
+        X, y = self._outer_frame()
+        model = SuperGLM(
+            family="poisson", features={"g": Categorical(base="first")}
+        ).bind_levels(X)
+        Xtr, ytr, Xho = X.iloc[:-1], y[:-1], X.iloc[[-1]]
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(Xtr, ytr)
+        assert model._specs["g"]._levels == ["a", "b", "holdout_only"]
+        assert model._specs["g"]._level_source == "full-frame"
+        assert np.isfinite(model.predict(Xho)).all()
+
+    def test_returns_self_for_chaining(self):
+        from superglm import SuperGLM
+        from superglm.features import Categorical
+
+        X, _ = self._outer_frame()
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        assert model.bind_levels(X) is model
+
+    def test_declared_universe_violation_fails_at_bind_time(self):
+        from superglm import SuperGLM
+        from superglm.features import Categorical
+
+        X, _ = self._outer_frame()   # contains 'holdout_only'
+        model = SuperGLM(
+            family="poisson", features={"g": Categorical(levels=["a", "b"])}
+        )
+        with pytest.raises(ValueError, match="outside the declared level universe"):
+            model.bind_levels(X)
+
+    def test_most_exposed_base_pinned_from_outer_frame(self):
+        from superglm import SuperGLM
+        from superglm.features import Categorical
+
+        rng = np.random.default_rng(11)
+        g = np.array(["a"] * 40 + ["b"] * 60, dtype=object)
+        X = pd.DataFrame({"g": g})
+        y = rng.poisson(1.0, size=100).astype(float)
+        w = np.ones(100)
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        model.bind_levels(X, sample_weight=w)     # outer winner: 'b'
+        # training slice where 'a' dominates: outer pin must still win
+        sl = np.r_[0:40, 40:50]
+        model.fit(X.iloc[sl], y[sl], sample_weight=w[sl])
+        assert model._specs["g"]._base_level == "b"
+
+    def test_rebind_replaces(self):
+        from superglm import SuperGLM
+        from superglm.features import Categorical
+
+        X1 = pd.DataFrame({"g": np.array(["a", "b"], dtype=object)})
+        X2 = pd.DataFrame({"g": np.array(["a", "b", "c"], dtype=object)})
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        model.bind_levels(X1).bind_levels(X2)
+        bound = dict(model._config.level_bindings)
+        assert set(bound["g"].levels) == {"a", "b", "c"}
+
+    def test_features_none_auto_detect_path(self):
+        from superglm import SuperGLM
+
+        X, y = self._outer_frame()
+        model = SuperGLM(family="poisson").bind_levels(X)
+        with pytest.warns(UserWarning, match="pinned to base"):
+            model.fit(X.iloc[:-1], y[:-1])
+        assert np.isfinite(model.predict(X.iloc[[-1]])).all()
+
+    def test_cross_validate_respects_existing_bindings(self):
+        from sklearn.model_selection import KFold
+        from superglm import SuperGLM, cross_validate
+        from superglm.features import Categorical
+
+        X, y = self._outer_frame()
+        model = SuperGLM(
+            family="poisson", features={"g": Categorical(base="first")}
+        ).bind_levels(X)
+        # CV only sees the slice WITHOUT the holdout level; universe must
+        # still be the full-frame one on every fold estimator
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = cross_validate(
+                model, X.iloc[:-1], y[:-1],
+                cv=KFold(n_splits=3, shuffle=True, random_state=0),
+                return_estimators=True, error_score="raise",
+            )
+        for est in res.estimators:   # adapt attribute per CrossValidationResult
+            assert "holdout_only" in est._specs["g"]._levels
+
+    def test_missing_feature_column_errors(self):
+        from superglm import SuperGLM
+        from superglm.features import Categorical
+
+        model = SuperGLM(family="poisson", features={"g": Categorical()})
+        with pytest.raises(ValueError, match="missing required columns"):
+            model.bind_levels(pd.DataFrame({"other": [1.0, 2.0]}))
+```
+
+(Adapt `res.estimators` to the real `CrossValidationResult` attribute, same as Task 5 did.)
+
+- [ ] **Step 2: Verify failure** — AttributeError: no `bind_levels`.
+
+- [ ] **Step 3: Implement.**
+  1. Create `src/superglm/model/binding_ops.py`; MOVE `_resolve_level_bindings` and `_auto_detected_templates` there from `model_selection.py` (public names `resolve_level_bindings`, `auto_detected_templates`); `model_selection.py` imports them (keep behavior identical — Task 5's tests are the guard). Add `require_columns` validation for explicit-features models: every cat-family feature name must be a column of the frame.
+  2. `api.py`, near `clone_unfitted` (`api.py:218`):
+
+```python
+    def bind_levels(self, X, sample_weight=None):
+        """Bind categorical level universes from the outermost frame.
+
+        Runs the same pre-pass ``cross_validate`` applies to its own input:
+        for every categorical-family feature, resolve the level universe and
+        any unresolved ``most_exposed`` base from ``X``, and store the result
+        on this model's configuration. Call with the FULL frame before any
+        train/val/test carve; every subsequent fit on any slice shares one
+        universe. Explicit ``levels=`` on a term always wins; re-calling
+        replaces the stored bindings. Returns ``self`` so construction
+        chains: ``model = SuperGLM(...).bind_levels(df)``.
+        """
+        from superglm._frame import as_eager_frame
+        from superglm.model.binding_ops import resolve_level_bindings
+
+        frame = as_eager_frame(X)
+        bindings = resolve_level_bindings(self, frame, sample_weight)
+        stored = tuple(bindings.items()) if bindings else None
+        self._level_bindings = stored
+        self._config = self._config.with_value(level_bindings=stored)
+        return self
+```
+
+  3. Merge rule in `cross_validate` (the pre-pass call from Task 5):
+
+```python
+    existing = dict(model._config.level_bindings or ())
+    computed = _resolve_level_bindings(model, frame, sample_weight)
+    level_bindings = {**computed, **existing}   # outer/user bindings win
+```
+
+  4. Docs: read the Task 9 version of `docs/guide/features.md`; add a "True holdouts and level universes" subsection with the bind-then-split example and the one-line sklearn bridge ("this is fit-the-encoder-on-full-data, minus the encoder object"). CHANGELOG: extend the existing Unreleased entry with one line for `bind_levels`.
+
+- [ ] **Step 4: Verify pass** — `python -m pytest tests/test_categorical_levels.py tests/test_cross_validate.py -q` (the second file guards the relocation + merge rule).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/superglm/model/binding_ops.py src/superglm/model/api.py src/superglm/model_selection.py tests/test_categorical_levels.py docs/guide/features.md CHANGELOG.md
+git commit -m "Public bind_levels: one-call full-frame universe binding"
+```
+
+---
+
 ## Self-review (run after writing, before execution)
 
 - Spec coverage: §3.1→T1/T3/T4, §3.2→T3/T6/T7, §3.3→T3/T8, §3.4→T2/T4, §3.5→T5, §3.6→T6/T7/T8, §3.7→T3/T6 messages, §3.8→T9, §5→T9 changelog + T10 equivalence, §6→tests throughout. No gap found.

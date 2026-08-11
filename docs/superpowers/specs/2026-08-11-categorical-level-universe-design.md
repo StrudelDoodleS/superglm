@@ -182,6 +182,9 @@ penalty scaling, coefficients) continue to bind per fold.
 Docs recommendation (not enforcement): governance models declare `levels=`
 and `base=` explicitly, making the term fully data-independent.
 
+For user-managed splits (train/val/test with a true holdout), the same
+pre-pass is public: `SuperGLM.bind_levels(X)` — see §9 (addendum).
+
 ### 3.6 Family propagation
 
 - **`SplineCategorical`, `CategoricalInteraction`, `NumericCategorical`,
@@ -352,3 +355,43 @@ For the planner; discovered 2026-08-11, verify at implementation time.
   `:315-316`, `:730-732`, `:803-806`).
 - Screening guard to keep consistent: `src/superglm/model/screening_ops.py`
   `:390-396`.
+
+## 9. Addendum (2026-08-11, same day): public `bind_levels`
+
+Approved by Max after the main design, during the build. Motivation: the
+`cross_validate` pre-pass (§3.5) binds from the frame *it* is given, so a
+true-holdout workflow (train/val/test carved before any CV) still needs the
+universe supplied from the outermost frame. The per-term (`levels=df[col]`)
+and dtype channels cover that today; `bind_levels` is the one-call form
+scoped automatically to the model's features.
+
+- **API**: `SuperGLM.bind_levels(X, sample_weight=None) -> self`. Chainable,
+  so construction reads as one expression:
+  `model = SuperGLM(features={...}).bind_levels(df)`. A frame-valued
+  *constructor argument* was considered and rejected: it is a second spelling
+  of the same mechanism, and a DataFrame constructor param is hostile to
+  clone/pickle/`get_params` conventions. The chained method gives the same
+  ergonomics.
+- **Semantics**: runs exactly the resolution `cross_validate` uses internally
+  (`resolve_level_bindings`) on `X` and stores the result in the model's
+  config (`level_bindings`). Calling it again **replaces** the stored set
+  (explicit user action = replace; contrast the implicit CV rule below).
+- **Precedence unchanged**: explicit `levels=` > dtype > binding > per-fit
+  inference; bindings fill gaps and pin unresolved `most_exposed` bases only.
+  A frame value outside a term's *declared* universe fails at bind time with
+  the fit-time universe-exceeded error — same contract, earlier and louder.
+- **Scope**: touches only columns the model's features reference
+  (`features=None`: the auto-detect pre-pass discovers the categorical-family
+  columns). Unrelated columns are never scanned. A missing feature column in
+  `X` is an immediate error.
+- **`cross_validate` merge rule**: features already bound on the model keep
+  their existing binding (the outer frame wins); the internal pre-pass fills
+  only unbound features. `bind_levels(df_full)` →
+  `cross_validate(model, X_trainval)` therefore gives every fold the full-df
+  universe.
+- **Reporting**: universes acquired this way carry `level_source =
+  "full-frame"` (provenance names the mechanism, not the call site).
+- **Implementation note**: relocate `_resolve_level_bindings` /
+  `_auto_detected_templates` from `model_selection.py` into a neutral module
+  (`superglm/model/binding_ops.py`) so `api.py` can use them without a
+  circular import; `model_selection` re-imports from there.
