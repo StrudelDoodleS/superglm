@@ -11,9 +11,50 @@ import copy
 import logging
 from typing import Any
 
+import numpy as np
+from numpy.typing import NDArray
+
 from superglm._frame import EagerFrame
 
 logger = logging.getLogger(__name__)
+
+
+def validate_binding_weight(sample_weight, n_rows: int) -> NDArray[np.floating] | None:
+    """Validate a weight handed to the binding pre-pass, before anything reads it.
+
+    The binding pass uses the weight to decide two things that persist into
+    every later fit: which level is ``most_exposed`` enough to be the pinned
+    base, and which declared levels have no EFFECTIVE rows and are therefore
+    pinned. A silently wrong weight -- ragged length, NaN, a negative entry --
+    does not raise there; it quietly moves the reference level or invents a pin,
+    and the model then carries that decision through every fold.
+
+    The checks are the ones ``cross_validate`` already applies to its own
+    weight, minus the family-specific rule (Tweedie's strictly-positive
+    requirement), which belongs to the fit that knows the family: binding only
+    needs the weight to be a real, finite, nonnegative measure of exposure.
+    """
+    if sample_weight is None:
+        return None
+    try:
+        raw = np.asarray(sample_weight)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("sample_weight must be a numeric one-dimensional array") from exc
+    if raw.ndim != 1:
+        raise ValueError("sample_weight must be one-dimensional")
+    if len(raw) != n_rows:
+        raise ValueError(f"sample_weight length {len(raw)} != X row count {n_rows}")
+    if np.iscomplexobj(raw) or getattr(raw.dtype, "kind", None) in {"M", "m"}:
+        raise ValueError("sample_weight must contain only real numeric values")
+    try:
+        weight = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("sample_weight must contain only real numeric values") from exc
+    if not np.all(np.isfinite(weight)):
+        raise ValueError("sample_weight must contain only finite values")
+    if np.any(weight < 0.0):
+        raise ValueError("sample_weight must be nonnegative")
+    return weight
 
 
 def auto_detected_templates(
@@ -87,6 +128,9 @@ def resolve_level_bindings(
     bindings: dict[Any, Any] = {}
     for name, spec in bindable:
         if name not in available:
+            # Only reachable when strict=False: strict mode already raised via
+            # require_columns above. The CV pre-pass tolerates absent columns
+            # so error_score still owns fold-level failures.
             continue
         probe = copy.deepcopy(spec)
         declared = frame.column_declared_categories(name)

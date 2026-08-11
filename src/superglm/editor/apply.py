@@ -321,6 +321,26 @@ def _apply_categorical_term(
 ) -> None:
     if term.levels is None:
         raise NotImplementedError(f"Term {term.name!r} has no editable levels.")
+    # A pinned level is a DECLARED level with no effective training rows: it
+    # keeps its identity in `_levels` and `reconstruct()` reports it at
+    # relativity 1.0, which is what the editor draws a handle from -- so it
+    # looks exactly as editable as any level sitting at the base. It is not.
+    # `_non_base` excludes it, so the patched block never has a slot for it and
+    # the edit is a silent no-op that the user reads back as applied. Refuse the
+    # whole term rather than the selection, for the same reason the pinned
+    # SPECIALS guard does: the term is patched as one block, and half-applying
+    # an edit is worse than declining it. Read through `getattr` so a spec
+    # pickled before pinning existed pins nothing.
+    pinned = list(getattr(spec, "_pinned_levels", ()))
+    if pinned:
+        raise ValueError(
+            f"Editable term {term.name!r} cannot be edited: level(s) "
+            f"{sorted(pinned, key=str)} had no effective training rows in this fit and "
+            f"are pinned to the base level, so they have no fitted coefficient in this "
+            f"fit to edit -- the 1.0 relativity shown against them is the pin, not an "
+            f"editable value. Refit on data carrying those level(s) with weight, or "
+            f"remove them from the term's level universe (levels=)."
+        )
     target = _level_target_map(term, spec)
     base_value = float(target[str(spec._base_level)])
     beta_new = np.array(

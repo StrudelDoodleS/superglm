@@ -925,3 +925,102 @@ def test_summary_marks_a_pinned_ordered_special_as_pinned():
     assert [row.name for row in rows] == [f"band[{level}]" for level in order]
     assert [row.level_fit for row in rows] == ["smooth"] * 4 + ["pinned"]
     assert model.summary()["level_universes"]["band"]["pinned_levels"] == ["MISSING"]
+
+
+def test_summary_reports_an_integer_base_level_of_zero():
+    # The audit payload used to read the base as `getattr(...) or None`, which
+    # is the one falsey test that erases a real answer: `0` and `False` are
+    # perfectly ordinary base levels on an integer or boolean universe, and the
+    # governance record then claimed the term had no reference level at all --
+    # while `reconstruct()`, reading the same attribute directly, said `0`.
+    rng = np.random.default_rng(20260811)
+    band = np.tile(np.asarray([0, 1, 2]), 40)
+    X = pd.DataFrame({"band": band})
+    y = rng.poisson(1.0, size=len(X)).astype(float)
+    model = SuperGLM(features={"band": Categorical(base="first")})
+    model.fit(X, y)
+    assert model._specs["band"]._base_level == 0, "precondition: the base IS the falsey level"
+
+    record = model.summary()["level_universes"]["band"]
+
+    assert record["base_level"] == 0
+    assert record["base_level"] is not None
+    assert model.reconstruct_feature("band")["base_level"] == record["base_level"]
+
+
+def test_an_unbuilt_spec_still_reports_no_base_level():
+    # The empty string is the pre-build sentinel `__init__` writes, and it must
+    # keep reading as "no base" -- the fix narrows the falsey test, it does not
+    # remove it.
+    from superglm.inference.summary_levels import build_level_universes
+
+    spec = Categorical(base="first")
+    spec._levels = ["a", "b"]  # a universe with no build behind it
+
+    record = build_level_universes({"g": spec})["g"]
+
+    assert record["base_level"] is None
+
+
+def _factor_smooth_model():
+    """A REML fit whose only level-bearing term lives in the interactions."""
+    from superglm import FactorSmooth, LambdaPolicy
+
+    x_level = np.linspace(-1.0, 1.0, 40)
+    observed = np.array(["a", "b", "c"], dtype=object)
+    x = np.tile(x_level, len(observed))
+    group = np.repeat(observed, len(x_level))
+    y = 1.1 + np.concatenate(
+        [
+            0.8 * np.sin(2.2 * x_level),
+            -0.4 * np.cos(1.7 * x_level),
+            0.3 * x_level,
+        ]
+    )
+    X = pd.DataFrame({"x": x, "group": group})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        direct_solve="gram",
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="group",
+                k=6,
+                levels=["a", "b", "c", "ghost"],
+                lambda_policy=LambdaPolicy.fixed(1.4),
+            )
+        ],
+    )
+    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+    return model, X, y
+
+
+def test_summary_records_a_factor_smooth_group_universe():
+    # FactorSmooth carries a bound group universe and a level source, but it
+    # lives ONLY in the interaction namespace -- so a payload built from
+    # `model._specs` alone dropped precisely the term whose universe is least
+    # visible in the coefficient table, and the governance record showed nothing
+    # at all for a model whose only level-bearing term was this one.
+    model, _, _ = _factor_smooth_model()
+
+    universes = model.summary()["level_universes"]
+
+    assert "x:group:fs" in universes
+    assert universes["x:group:fs"] == {
+        "levels": ["a", "b", "c", "ghost"],
+        "level_source": "declared",
+        # A penalized term has no reference level and pools empty levels
+        # through its penalty, so it never pins.
+        "base_level": None,
+        "base_fallback": None,
+        "pinned_levels": [],
+    }
+
+
+def test_model_and_metrics_summaries_agree_on_a_factor_smooth_universe():
+    # The two payloads are read as one surface; adding a namespace to one of
+    # them and not the other is exactly how they drift apart.
+    model, X, y = _factor_smooth_model()
+
+    assert model.metrics(X, y).summary()["level_universes"] == model.summary()["level_universes"]
