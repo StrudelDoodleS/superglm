@@ -345,3 +345,163 @@ def test_required_column_validation_includes_both_factor_smooth_columns() -> Non
 
     with pytest.raises(ValueError, match="broker"):
         model.fit_reml(X, y)
+
+
+# ── Bound level universes (spec 2026-08-11, §3.1/§3.2) ──────────
+
+
+def _two_level_columns(n: int = 240) -> tuple[np.ndarray, np.ndarray]:
+    x = np.linspace(-2.0, 2.0, n)
+    group = np.array(["a", "b"] * (n // 2), dtype=object)
+    return x, group
+
+
+def test_declared_universe_keeps_a_block_for_an_unobserved_level() -> None:
+    x, group = _two_level_columns()
+    spec = FactorSmooth("x", group="group", levels=["a", "b", "ghost"])
+
+    info = spec.build(x, group, {})
+
+    assert spec._levels == ["a", "b", "ghost"]
+    assert spec._level_to_code == {"a": 0, "b": 1, "ghost": 2}
+    assert spec._level_source == "declared"
+    assert info.factor_smooth_n_levels == 3
+    assert info.factor_smooth_levels == ("a", "b", "ghost")
+    assert info.n_cols == 3 * spec.k
+
+
+def test_declared_universe_rejects_group_values_outside_it() -> None:
+    x, group = _two_level_columns()
+    spec = FactorSmooth("x", group="group", levels=["a", "b"])
+    rogue = group.copy()
+    rogue[0] = "ROGUE"
+
+    with pytest.raises(ValueError, match="outside the declared level universe"):
+        spec.build(x, rogue, {})
+
+
+def test_declared_universe_still_rejects_missing_group_values() -> None:
+    x, group = _two_level_columns()
+    spec = FactorSmooth("x", group="group", levels=["a", "b"])
+    broken = group.copy()
+    broken[0] = None
+
+    with pytest.raises(ValueError, match="missing values"):
+        spec.build(x, broken, {})
+
+
+def test_score_on_a_declared_unobserved_level_uses_its_own_block() -> None:
+    x, group = _two_level_columns()
+    spec = FactorSmooth("x", group="group", levels=["a", "b", "ghost"])
+    spec.build(x, group, {})
+    beta = np.zeros(3 * spec.k, dtype=np.float64)
+    beta[2 * spec.k :] = 1.0
+
+    scored = spec.score(
+        np.array([0.5]),
+        np.array(["ghost"], dtype=object),
+        beta,
+    )
+
+    expected = spec.marginal_basis(np.array([0.5])).sum(axis=1)
+    np.testing.assert_allclose(scored, expected)
+    assert scored[0] != 0.0
+
+
+@pytest.mark.parametrize("declared", [["a", "b", "ghost"], ["ghost", "a", "b"]])
+def test_sz_basis_rejects_a_declared_level_without_rows(declared) -> None:
+    # Measured, not assumed: one empty level takes the penalized system's
+    # smallest eigenvalue to 4e-10 and max|beta| to 4.9e3 under sz, wherever
+    # the empty level sits in the contrast.
+    x, group = _two_level_columns()
+    spec = FactorSmooth("x", group="group", basis="sz", levels=declared)
+
+    with pytest.raises(ValueError, match=r"basis='sz'.*no training rows"):
+        spec.build(x, group, {})
+
+
+def test_sz_basis_binds_a_fully_observed_declared_universe() -> None:
+    x, group = _two_level_columns()
+    spec = FactorSmooth("x", group="group", basis="sz", levels=["b", "a"])
+
+    info = spec.build(x, group, {})
+
+    assert spec._levels == ["b", "a"]
+    assert info.factor_smooth_n_levels == 2
+    assert info.n_cols == spec.k
+    assert info.factor_smooth_codes[:2].tolist() == [1, 0]
+
+
+def test_dtype_and_full_frame_sources_bind_the_group_universe() -> None:
+    from superglm.types import LevelBinding
+
+    x, group = _two_level_columns()
+    dtype_bound = FactorSmooth("x", group="group")
+    dtype_bound.adopt_dtype_categories(["b", "a", "ghost"])
+    dtype_bound.build(x, group, {})
+
+    frame_bound = FactorSmooth("x", group="group")
+    frame_bound.apply_level_binding(LevelBinding(levels=("a", "b", "ghost")))
+    frame_bound.build(x, group, {})
+
+    declared = FactorSmooth("x", group="group", levels=["a", "b"])
+    declared.apply_level_binding(LevelBinding(levels=("a", "b", "ghost")))
+
+    assert dtype_bound._levels == ["b", "a", "ghost"]
+    assert dtype_bound._level_source == "dtype"
+    assert frame_bound._levels == ["a", "b", "ghost"]
+    assert frame_bound._level_source == "full-frame"
+    assert declared._declared_levels == ["a", "b"]
+    assert declared._level_source == "declared"
+
+
+def test_resolve_binding_reads_the_group_column_without_mutating_the_spec() -> None:
+    spec = FactorSmooth("x", group="group")
+
+    binding = spec.resolve_binding(np.array(["b", "a", "b"], dtype=object))
+
+    assert binding.levels == ("a", "b")
+    assert binding.base is None
+    assert spec._levels == []
+
+
+def test_reml_fit_shrinks_a_declared_unobserved_level_to_the_population() -> None:
+    x_level = np.linspace(-1.0, 1.0, 24)
+    levels = np.array(["a", "b"], dtype=object)
+    x = np.tile(x_level, len(levels))
+    group = np.repeat(levels, len(x_level))
+    curves = {
+        "a": 0.8 * np.sin(2.2 * x_level) + 0.2 * x_level,
+        "b": -0.4 * np.cos(1.7 * x_level) - 0.3 * x_level,
+    }
+    y = 1.1 + np.concatenate([curves[level] for level in levels])
+    X = pd.DataFrame({"x": x, "group": group})
+    model = SuperGLM(
+        family="gaussian",
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="group",
+                k=6,
+                levels=["a", "b", "ghost"],
+                unseen="error",
+                lambda_policy=LambdaPolicy.fixed(1.4),
+            )
+        ],
+        selection_penalty=0.0,
+        direct_solve="gram",
+    )
+
+    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
+
+    assert len(model.result.beta) == 3 * 6
+    assert np.all(np.isfinite(model.result.beta))
+    X_ghost = pd.DataFrame({"x": [0.25], "group": ["ghost"]})
+    conditional = model.predict(X_ghost, random_effects="conditional")
+    population = model.predict(X_ghost, random_effects="population")
+    np.testing.assert_allclose(conditional, population)
+    X_known = pd.DataFrame({"x": [0.25], "group": ["a"]})
+    assert not np.allclose(
+        model.predict(X_known, random_effects="conditional"),
+        model.predict(X_known, random_effects="population"),
+    )
