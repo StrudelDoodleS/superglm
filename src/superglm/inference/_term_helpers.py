@@ -294,11 +294,11 @@ def _expand_grouped_term(
     if ci_hi is not None:
         ci_hi = np.asarray(ci_hi)[indices]
 
-    # Expand smooth_curve: give each original level its own x-position and
-    # rebuild the display curve via PCHIP interpolation through the expanded
-    # (level_x, relativity) pairs so it passes through every marker.  level_x
-    # covers the SMOOTHED levels only, so specials are held out of the rebuild
-    # and keep their detached marker rows.
+    # Expand smooth_curve: give each original level its own x-position and,
+    # WHERE THE COLLAPSE MOVED THE DISPLAY AXIS, rebuild the display curve via
+    # PCHIP interpolation through the expanded (level_x, relativity) pairs so it
+    # passes through every marker.  level_x covers the SMOOTHED levels only, so
+    # specials are held out of the rebuild and keep their detached marker rows.
     expanded_special = (
         None
         if ti.level_is_special is None
@@ -306,8 +306,6 @@ def _expand_grouped_term(
     )
     curve = ti.smooth_curve
     if curve is not None and curve.level_x is not None:
-        from scipy.interpolate import PchipInterpolator
-
         smooth_mask = (
             np.ones(len(expanded_levels), dtype=bool)
             if expanded_special is None
@@ -337,37 +335,67 @@ def _expand_grouped_term(
         uniq_x = np.array(sorted(seen_x.keys()))
         uniq_log_y = np.array([seen_x[x] for x in uniq_x])
 
-        if len(uniq_x) >= 2:
-            pchip = PchipInterpolator(uniq_x, uniq_log_y)
-            new_x = np.linspace(float(uniq_x[0]), float(uniq_x[-1]), 200)
-            new_log_rel = pchip(new_x)
-            new_rel = np.exp(new_log_rel)
-        else:
-            new_x = curve.x
-            new_log_rel = curve.log_relativity
-            new_rel = curve.relativity
+        # A collapse that leaves the display axis WHERE IT WAS has nothing to
+        # reconcile, and re-interpolating there replaces the fitted curve with a
+        # smooth read of its own samples.  A Piecewise or Polynomial inner basis
+        # lives on level POSITIONS 0..L-1 and every original level sits AT its
+        # group's position, so the expanded positions are the fitted curve's own
+        # ``level_x`` exactly -- the rebuild then draws a different function
+        # through points that already lie on the fitted one.  Measured on a
+        # hosted ``Piecewise`` with one stated break, one grouped pair and a
+        # V-shaped signal: the PCHIP rendered the C0 corner 6.3x too shallow
+        # (slope jump +0.0743 against the fitted +0.4703) and ran 0.0393 in
+        # log-relativity -- 4.0% in relativity -- away from the fitted shape one
+        # band before the break.  PCHIP is C1 by construction, so the corner is
+        # not merely rounded, it cannot be drawn at all.  That contradicts the
+        # term's headline feature at the very break it states, so the fitted
+        # curve is kept and only the markers move.  The
+        # test is the geometry itself, not the basis name: any expansion that
+        # genuinely re-spreads the levels (a spline's ``order=`` linspace or
+        # ``values=`` spacing, where the grouped curve sits on group MEANS) fails
+        # it and rebuilds exactly as before.
+        axis_unmoved = np.array_equal(
+            np.asarray(curve.level_x, dtype=np.float64), uniq_x.astype(np.float64)
+        )
 
-        # The pre-expansion band arrays belong to the pre-expansion grid, so
-        # they survive only when the rebuilt grid IS that grid -- true for the
-        # common order= spline case, where both are the same linspace over
-        # [0, 1]. Anywhere the grids differ, carrying them was wrong: for a
-        # values= spec whose grouped boundary moved the axis they were
-        # silently misaligned, and for a knot-length parametric curve they
-        # could not even zip against x. The rebuilt curve is display
-        # interpolation only, so it drops the bands rather than fake them;
-        # per-level SEs (the rated quantities) are expanded above and stay.
-        grids_align = np.array_equal(
-            np.asarray(curve.x, dtype=np.float64), np.asarray(new_x, dtype=np.float64)
-        )
-        curve = SmoothCurve(
-            x=new_x,
-            log_relativity=new_log_rel,
-            relativity=new_rel,
-            level_x=expanded_level_x,
-            se_log_relativity=curve.se_log_relativity if grids_align else None,
-            ci_lower=curve.ci_lower if grids_align else None,
-            ci_upper=curve.ci_upper if grids_align else None,
-        )
+        if axis_unmoved:
+            # Only the markers move.  The bands ride along untouched because the
+            # grid they were computed on is the grid still being drawn.
+            curve = replace(curve, level_x=expanded_level_x)
+        else:
+            from scipy.interpolate import PchipInterpolator
+
+            if len(uniq_x) >= 2:
+                pchip = PchipInterpolator(uniq_x, uniq_log_y)
+                new_x = np.linspace(float(uniq_x[0]), float(uniq_x[-1]), 200)
+                new_log_rel = pchip(new_x)
+                new_rel = np.exp(new_log_rel)
+            else:
+                new_x = curve.x
+                new_log_rel = curve.log_relativity
+                new_rel = curve.relativity
+
+            # The pre-expansion band arrays belong to the pre-expansion grid, so
+            # they survive only when the rebuilt grid IS that grid -- true for the
+            # common order= spline case, where both are the same linspace over
+            # [0, 1]. Anywhere the grids differ, carrying them was wrong: for a
+            # values= spec whose grouped boundary moved the axis they were
+            # silently misaligned, and for a knot-length parametric curve they
+            # could not even zip against x. The rebuilt curve is display
+            # interpolation only, so it drops the bands rather than fake them;
+            # per-level SEs (the rated quantities) are expanded above and stay.
+            grids_align = np.array_equal(
+                np.asarray(curve.x, dtype=np.float64), np.asarray(new_x, dtype=np.float64)
+            )
+            curve = SmoothCurve(
+                x=new_x,
+                log_relativity=new_log_rel,
+                relativity=new_rel,
+                level_x=expanded_level_x,
+                se_log_relativity=curve.se_log_relativity if grids_align else None,
+                ci_lower=curve.ci_lower if grids_align else None,
+                ci_upper=curve.ci_upper if grids_align else None,
+            )
 
     # dataclasses.replace, not a hand-listed rebuild: every field this function
     # does not touch — including level_is_special's siblings — survives by

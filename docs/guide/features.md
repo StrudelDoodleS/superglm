@@ -472,11 +472,13 @@ An editor collapse (or a `grouping=`) that merges a stated break level with a
 neighbour, or spans levels on both sides of one, refuses loudly naming the
 break — a break is a stated kink, and regrouping it is a spec change, not an
 edit. Grouping entirely within a segment stays allowed, and the named break
-follows its level to the new position. On a grouped term's plot, the
-between-band shape is display interpolation only: the rated values are the
-band markers themselves, and the stated kink lives at the break even where
-the drawn curve smooths it. The same guard covers `Spline` knots
-given by name. Terms with a `Piecewise` or `Polynomial` basis cannot parent
+follows its level to the new position. A grouped term's plot draws the fitted
+piecewise shape itself — the stated break is a vertex of the drawn line, so
+the kink you declared is the kink you see. Collapsing a `Spline` basis is the
+other case: there the merge moves the level axis, the fitted curve no longer
+lines up with the expanded markers, and the between-band shape is display
+interpolation only. Either way the rated values are the band markers
+themselves. The same guard covers `Spline` knots given by name. Terms with a `Piecewise` or `Polynomial` basis cannot parent
 interactions and are deferred by interaction screening (the interaction
 machinery crosses a penalized marginal smooth).
 
