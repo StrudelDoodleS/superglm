@@ -2723,6 +2723,113 @@ def test_collapse_selected_levels_across_existing_groups_preserves_remainders():
     assert grouping.original_to_group["T06"] == "T05+T06"
 
 
+def _pinned_categorical_model():
+    """A fit whose declared universe carries one level the data never shows."""
+    rng = np.random.default_rng(20260811)
+    levels = ["T01", "T02", "T03"]
+    territory = rng.choice(levels, 600, p=[0.40, 0.35, 0.25])
+    effects = {"T01": 0.10, "T02": -0.05, "T03": 0.12}
+    X = pd.DataFrame({"territory": territory})
+    y = 0.5 + np.array([effects[value] for value in territory]) + rng.normal(0.0, 0.05, 600)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"territory": Categorical(base="first", levels=[*levels, "GHOST"])},
+    )
+    with pytest.warns(UserWarning, match="pinned to base"):
+        model.fit(X, y)
+    spec = model._specs["territory"]
+    assert spec._pinned_levels == ["GHOST"], "precondition: exactly one level is pinned"
+    assert spec._non_base == ["T02", "T03"], "precondition: the pin owns no column"
+    return model, X, y
+
+
+@pytest.mark.parametrize("level", ["T02", "GHOST"])
+def test_editing_a_categorical_carrying_a_pinned_level_is_refused_by_name(level):
+    # A pinned level is a declared level with no effective training rows.
+    # `reconstruct()` reports it at relativity 1.0 -- correctly, it contributes
+    # nothing -- and the editor draws a handle from exactly that table, so it
+    # looks as editable as any level sitting at the base. It is not: `_non_base`
+    # excludes it, so `_apply_categorical_term` writes a block with no slot for
+    # it and the edit vanishes with no error at all, which the user reads back
+    # as applied. Parametrized over both kinds of selection because the term is
+    # patched as one block: editing a FITTED level is refused too, so the
+    # refusal is the term's, not the selection's.
+    model = _pinned_categorical_model()[0]
+    session = EditorSession.from_model(model, terms=["territory"])
+    session.select_levels("territory", [level])
+    session.shift("territory", 0.3)
+
+    with pytest.raises(ValueError) as excinfo:
+        session.to_model()
+
+    message = str(excinfo.value)
+    assert "GHOST" in message, "the refusal must name the pinned level"
+    assert "territory" in message
+    assert "no fitted coefficient" in message
+    # ...and both remedies, because either one makes the term editable again.
+    assert "levels=" in message
+    assert "refit" in message.lower()
+
+
+def test_a_pinned_term_does_not_block_editing_a_different_term():
+    # Only CHANGED terms are applied, so the refusal has to be the pinned
+    # TERM's, not the model's: a model carrying one pinned categorical must
+    # still be editable everywhere else, or the pin locks the whole session.
+    rng = np.random.default_rng(20260811)
+    territory = rng.choice(["T01", "T02", "T03"], 600, p=[0.40, 0.35, 0.25])
+    x = rng.normal(0.0, 1.0, 600)
+    X = pd.DataFrame({"territory": territory, "x": x})
+    y = 0.5 + 0.3 * x + rng.normal(0.0, 0.05, 600)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={
+            "territory": Categorical(base="first", levels=["T01", "T02", "T03", "GHOST"]),
+            "x": Numeric(),
+        },
+    )
+    with pytest.warns(UserWarning, match="pinned to base"):
+        model.fit(X, y)
+
+    session = EditorSession.from_model(model, terms=["territory", "x"], train_data=(X, y, None))
+    session.select_indices("x", np.arange(session.terms["x"].size))
+    session.shift("x", 0.2)
+    edited = session.to_model()
+
+    assert edited._specs["territory"]._pinned_levels == ["GHOST"]
+    # ...and the untouched pinned term came through unchanged.
+    np.testing.assert_allclose(
+        edited._specs["territory"].reconstruct(np.zeros(2))["relativities"]["GHOST"], 1.0
+    )
+
+
+def test_a_categorical_with_no_pinned_level_still_edits():
+    # The guard must not be reachable from an ordinary fit: every level here
+    # has rows, so nothing is pinned and the edit applies as before.
+    unpinned = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"territory": Categorical(base="first")},
+    )
+    X = pd.DataFrame({"territory": np.repeat(["T01", "T02", "T03"], 200)})
+    rng = np.random.default_rng(20260811)
+    y = 0.5 + rng.normal(0.0, 0.05, len(X))
+    unpinned.fit(X, y)
+    assert unpinned._specs["territory"]._pinned_levels == []
+
+    session = EditorSession.from_model(unpinned, terms=["territory"])
+    session.select_levels("territory", ["T02"])
+    session.shift("territory", 0.3)
+    edited = session.to_model()
+
+    before = np.asarray(unpinned._predict_eta_exact(X))
+    delta = np.asarray(edited._predict_eta_exact(X)) - before
+    is_t02 = (X["territory"] == "T02").to_numpy()
+    assert delta[is_t02] == pytest.approx(0.3, abs=1e-10)
+    assert delta[~is_t02] == pytest.approx(0.0, abs=1e-10)
+
+
 def test_regrouping_split_base_group_chooses_valid_remaining_base():
     rng = np.random.default_rng(20260722)
     levels = [f"T{i:02d}" for i in range(1, 7)]

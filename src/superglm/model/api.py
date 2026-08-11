@@ -288,9 +288,16 @@ class SuperGLM:
         replaces the stored bindings.  Returns ``self`` so construction chains:
         ``model = SuperGLM(...).bind_levels(df)``.
         """
-        from superglm.model.binding_ops import resolve_level_bindings
+        from superglm.model.binding_ops import resolve_level_bindings, validate_binding_weight
 
         frame = as_eager_frame(X)
+        # The weight decides the pinned base and which levels count as empty,
+        # and both decisions outlive this call on every later fit -- so it is
+        # checked here rather than trusted, on the same terms `fit` checks its
+        # own. Unvalidated, a ragged or negative weight either dies inside a
+        # bincount with no mention of `sample_weight` or moves the reference
+        # level with no error at all.
+        sample_weight = validate_binding_weight(sample_weight, len(frame))
         # strict=True: this frame is the caller's stated universe source, so a
         # column that cannot bind is an error now, not a surprise per fold.
         bindings = resolve_level_bindings(self, frame, sample_weight, strict=True)

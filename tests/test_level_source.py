@@ -24,10 +24,30 @@ def test_numpy_array_sorted_uniques():
     assert resolve_level_source(np.array(["b", "a", "b"])) == ["a", "b"]
 
 
+def test_numeric_series_sorts_numerically():
+    # `key=str` puts "10" before "2", so a numeric column read through `levels=`
+    # came out in an order no numeric reader would predict -- and, worse, in a
+    # DIFFERENT order from `pd.factorize(sort=True)`, which is what the inferred
+    # and full-frame-binding paths use on the same column. base="first" then
+    # names a different level depending on which path bound the universe.
+    assert resolve_level_source(pd.Series([10, 2, 2])) == [2, 10]
+
+
+def test_float_array_sorts_numerically():
+    assert resolve_level_source(np.array([10.5, 2.25, 10.5])) == [2.25, 10.5]
+
+
 def test_mixed_type_array_sorts_by_str():
-    # int beside str must not crash the sort
+    # int beside str has no natural order (`1 < "MISSING"` is a TypeError), so
+    # the str fallback is the only thing that can order it -- and ordering it at
+    # all is the requirement: this is the shape the sort must not crash on.
     out = resolve_level_source(np.array([2, "MISSING", 1], dtype=object))
-    assert set(out) == {1, 2, "MISSING"} and len(out) == 3
+    assert out == [1, 2, "MISSING"]
+
+
+def test_mixed_type_with_a_two_digit_number_still_resolves():
+    out = resolve_level_source(np.array([10, 2, "MISSING"], dtype=object))
+    assert set(out) == {10, 2, "MISSING"} and len(out) == 3
 
 
 def test_categorical_series_uses_dtype_categories_and_order():

@@ -61,7 +61,14 @@ def resolve_level_source(source: Any, *, context: str = "") -> list:
                 values = np.asarray(
                     source.to_numpy() if hasattr(source, "to_numpy") else source
                 ).ravel()
-                labels = sorted(pd.unique(values).tolist(), key=str)
+                uniques = pd.unique(values).tolist()
+                try:
+                    # Natural order matches the inferred pd.factorize(sort=True)
+                    # path, so levels=df[col] and full-frame binding agree on
+                    # numeric labels (and on which one base="first" names).
+                    labels = sorted(uniques)
+                except TypeError:
+                    labels = sorted(uniques, key=str)  # mixed types have no natural order
     else:
         _fail(
             "levels= accepts a list/tuple of labels, a data column "
@@ -75,11 +82,15 @@ def resolve_level_source(source: Any, *, context: str = "") -> list:
     # narrow float test is not redundant with `pd.isna`, which also catches
     # pd.NA / pd.NaT.
     if any(v is None or (isinstance(v, float) and np.isnan(v)) or pd.isna(v) for v in labels):
-        _fail("levels= contains a missing value; a level cannot be NaN or None.", context)
+        _fail(
+            "The level universe contains a missing value; a level cannot be NaN or None.", context
+        )
     seen: set = set()
     dupes = [v for v in labels if v in seen or seen.add(v)]
     if dupes:
-        _fail(f"levels= contains duplicate labels: {sorted(set(dupes), key=str)}.", context)
+        _fail(
+            f"The level universe contains duplicate labels: {sorted(set(dupes), key=str)}.", context
+        )
     if len(labels) < 2:
-        _fail(f"levels= needs >= 2 labels, got {len(labels)}.", context)
+        _fail(f"The level universe needs >= 2 labels, got {len(labels)}.", context)
     return labels

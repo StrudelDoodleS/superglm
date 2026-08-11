@@ -202,6 +202,27 @@ class Categorical:
         with one warning per call.
     """
 
+    # Class-level defaults for the level-universe state. Unpickling restores an
+    # instance `__dict__` and bypasses `__init__`, so a spec pickled before this
+    # state existed carries none of these names; a class attribute is what makes
+    # every read site (build, transform, score, reconstruct, the summary audit,
+    # the editor) find a value instead of raising AttributeError, and it does so
+    # without a `__setstate__` that would have to be kept in step with
+    # `__init__`. The values are the pre-feature behaviour exactly: no declared
+    # universe, an inferred source, nothing pinned, `unseen="error"`.
+    #
+    # IMMUTABLE defaults only. A class attribute is shared by every instance
+    # that never assigns its own, so a mutable default turns one legacy spec's
+    # in-place mutation into a change to every other. `__init__` assigns its own
+    # instance value for each of these, so a spec built by this version never
+    # reads them; `build` likewise rebinds `_pinned_levels` rather than mutating.
+    unseen: str = "error"
+    _declared_levels: list | None = None
+    _level_source: str = "inferred"
+    _pinned_levels: tuple | list = ()
+    _base_fallback: tuple | None = None
+    _pinned_base: Any | None = None
+
     def __init__(
         self,
         base: str = "most_exposed",
@@ -251,7 +272,9 @@ class Categorical:
         if self._declared_levels is None:
             from superglm.features._level_source import resolve_level_source
 
-            self._declared_levels = resolve_level_source(list(categories), context="Categorical")
+            self._declared_levels = resolve_level_source(
+                list(categories), context="Categorical dtype categories"
+            )
             self._level_source = "dtype"
 
     def apply_level_binding(self, binding) -> None:
@@ -275,7 +298,33 @@ class Categorical:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             probe.build(values, sample_weight=sample_weight)
-        return LevelBinding(levels=tuple(probe._levels), base=probe._base_level)
+        if self._grouping is None:
+            return LevelBinding(levels=tuple(probe._levels), base=probe._base_level)
+
+        # Under a grouping the binding must carry the RAW, pre-collapse
+        # universe. `apply_level_binding` stores `binding.levels` as
+        # `_declared_levels`, and `_working_universe` then maps each one through
+        # `grouping.original_to_group` -- so handing back `probe._levels`, which
+        # is already collapsed, makes that lookup a KeyError for every group
+        # label that is not also a raw label, i.e. for every genuine collapse.
+        # The raw labels are read in the same str-cast domain the grouping path
+        # itself uses, and sorted so the binding is reproducible; `build` above
+        # has already rejected missing values and raws the grouping cannot map.
+        #
+        # The base stays the probe's own fitted level, which names a GROUP: that
+        # is the domain `_resolve_base` and `_levels` work in once the declared
+        # raws have been mapped through.
+        #
+        # Ordered by (group, raw) rather than by raw alone, so the image
+        # `_working_universe` builds comes out in sorted GROUP order -- which is
+        # exactly the order the unbound path gets from `pd.factorize(sort=True)`
+        # on the collapsed labels. Sorting the raws alone would order the groups
+        # by their alphabetically-first member instead, and binding a frame in
+        # which every level is present would then silently permute the design
+        # columns and move which level `base="first"` names.
+        to_group = self._grouping.original_to_group
+        raws = sorted(set(_grouping_labels(values).tolist()), key=lambda raw: (to_group[raw], raw))
+        return LevelBinding(levels=tuple(raws), base=probe._base_level)
 
     def _working_universe(self) -> list | None:
         """The bound universe in build coordinates, or None when unbound.
@@ -366,6 +415,14 @@ class Categorical:
             i for i, lev in enumerate(self._levels) if lev != self._base_level and observed[i]
         ]
         self._non_base = [self._levels[i] for i in emitted]
+        if not self._non_base:
+            raise ValueError(
+                f"Categorical has no estimable non-base level in this fit: every "
+                f"level except the base {self._base_level!r} has no effective "
+                f"training rows (universe {sorted(self._levels, key=str)}). The "
+                f"term cannot be identified from this data; widen the training "
+                f"slice or drop the term."
+            )
         n_levels = len(self._non_base)
         remap = np.full(len(self._levels), -1, dtype=np.intp)
         remap[emitted] = np.arange(n_levels, dtype=np.intp)
