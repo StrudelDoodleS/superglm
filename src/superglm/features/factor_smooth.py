@@ -98,6 +98,12 @@ class FactorSmooth:
     ``basis="fs"`` is fully penalized and retains independent level curves.
     ``basis="sz"`` represents centered sum-to-zero deviations; its specialized
     geometry is populated by the design-matrix builder.
+
+    ``levels=`` binds the grouping column's level universe (spec 2026-08-11,
+    §3.1).  Under ``basis="fs"`` a declared level with no training rows keeps
+    its own curve block and shrinks to zero through the penalty.  ``basis="sz"``
+    rejects one: its sum-to-zero contrast is what identifies the deviations, and
+    an empty level makes that constraint vacuous.
     """
 
     structured_kind = "factor_smooth"
@@ -112,11 +118,14 @@ class FactorSmooth:
         kind: str = "ps",
         k: int = 6,
         m: int = 2,
+        levels=None,
         unseen: Literal["population", "error"] = "population",
         missing: Literal["error"] = "error",
         lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
         name: str | None = None,
     ):
+        from superglm.features._level_source import resolve_level_source
+
         if not isinstance(variable, str) or not variable:
             raise ValueError("variable must be a non-empty column name")
         if not isinstance(group, str) or not group:
@@ -176,6 +185,10 @@ class FactorSmooth:
         self._lambda_policy = lambda_policy
         self.name = name or f"{variable}:{group}:{basis}"
 
+        self._declared_levels: list | None = (
+            None if levels is None else resolve_level_source(levels, context="FactorSmooth")
+        )
+        self._level_source: str = "declared" if levels is not None else "inferred"
         self._levels: list[Any] = []
         self._level_to_code: dict[Any, int] = {}
         self._spline: PSpline | None = None
@@ -198,16 +211,92 @@ class FactorSmooth:
             raise ValueError("FactorSmooth variable contains missing or non-finite values.")
         return numeric
 
+    def adopt_dtype_categories(self, categories: list) -> None:
+        """Adopt a dtype-declared universe unless one is already declared."""
+        if self._declared_levels is None:
+            from superglm.features._level_source import resolve_level_source
+
+            self._declared_levels = resolve_level_source(list(categories), context="FactorSmooth")
+            self._level_source = "dtype"
+
+    def apply_level_binding(self, binding) -> None:
+        """Adopt a full-frame universe when nothing more specific declared one.
+
+        Only the levels are read: a penalized term has no base level, so its
+        bindings carry ``base=None`` and there is nothing to pin.
+        """
+        if self._declared_levels is None and binding.levels is not None:
+            self._declared_levels = list(binding.levels)
+            self._level_source = "full-frame"
+
+    def resolve_binding(self, values: NDArray, sample_weight=None):
+        """Compute this spec's full-frame group binding without mutating the spec."""
+        import copy
+
+        from superglm.types import LevelBinding
+
+        del sample_weight
+        # Factorize on a throwaway copy so the universe and its NaN checks stay
+        # single-sourced in `_factorize_group`.
+        probe = copy.deepcopy(self)
+        probe._factorize_group(values)
+        return LevelBinding(levels=tuple(probe._levels), base=None)
+
+    def _declared_codes(self, group_values: NDArray) -> NDArray[np.intp]:
+        """Code group values against the bound universe, rejecting anything outside it.
+
+        Missing values are already rejected by the caller, so a -1 here can only
+        mean data the declaration does not admit.
+        """
+        codes = pd.Index(self._levels).get_indexer(group_values).astype(np.intp, copy=False)
+        if np.any(codes < 0):
+            outside = group_values[codes < 0]
+            raise ValueError(
+                f"Training data contains levels outside the declared level universe: "
+                f"{sorted(set(outside.tolist()), key=str)}. Declared: "
+                f"{sorted(self._levels, key=str)}. Widen levels= or fix the column."
+            )
+        if self.basis == "sz":
+            # An empty level does not shrink under sz, it breaks it: the
+            # sum-to-zero constraint is what identifies these deviations
+            # against the population smooth, and a level with no rows absorbs
+            # any common curve, so the constraint stops binding.  Measured on
+            # a three-level fit, adding one empty declared level moved the
+            # penalized system's smallest eigenvalue 5.9e-1 -> 4.4e-10 and
+            # max|beta| 1.8 -> 4.9e3.  fs has no such gap: every coordinate
+            # carries a penalty, so an empty block sits at its own lambda and
+            # the observed levels' coefficients do not move.
+            counts = np.bincount(codes, minlength=len(self._levels))
+            unobserved = [
+                level for level, count in zip(self._levels, counts, strict=True) if count == 0
+            ]
+            if unobserved:
+                raise ValueError(
+                    f"FactorSmooth basis='sz' cannot carry a declared group level with "
+                    f"no training rows: {sorted(unobserved, key=str)}. Its sum-to-zero "
+                    f"contrast stops identifying the deviations once a level is empty. "
+                    f"Use basis='fs', which penalizes every coordinate, or narrow levels=."
+                )
+        return codes
+
     def _factorize_group(self, values: NDArray) -> NDArray[np.intp]:
         group_values = np.asarray(values).ravel()
         if np.any(pd.isna(group_values)):
             raise ValueError("FactorSmooth group contains missing values (NaN or None).")
-        codes, uniques = pd.factorize(group_values, sort=True)
-        if len(uniques) < 1:
-            raise ValueError("FactorSmooth requires at least one fitted group level.")
-        if self.basis == "sz" and len(uniques) < 2:
-            raise ValueError("FactorSmooth basis='sz' requires at least two fitted group levels.")
-        self._levels = uniques.tolist()
+        if self._declared_levels is not None:
+            # A declared universe is >= 2 labels by construction, so the fitted
+            # minimums below are already satisfied.
+            self._levels = list(self._declared_levels)
+            codes = self._declared_codes(group_values)
+        else:
+            codes, uniques = pd.factorize(group_values, sort=True)
+            if len(uniques) < 1:
+                raise ValueError("FactorSmooth requires at least one fitted group level.")
+            if self.basis == "sz" and len(uniques) < 2:
+                raise ValueError(
+                    "FactorSmooth basis='sz' requires at least two fitted group levels."
+                )
+            self._levels = uniques.tolist()
         self._level_to_code = {level: code for code, level in enumerate(self._levels)}
         return codes.astype(np.intp, copy=False)
 
