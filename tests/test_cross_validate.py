@@ -1859,6 +1859,33 @@ class TestFullFrameLevelBinding:
         assert list(binding.levels) == ["a", "b", "rare", "never"]
         assert binding.base == X["g"].value_counts().idxmax()
 
+    def test_thin_special_survives_cv(self):
+        """One special row: the folds whose training misses it pin instead of dying."""
+        rng = np.random.default_rng(3)
+        band = rng.choice(["b1", "b2", "b3"], size=100).astype(object)
+        band[0] = "MISSING"  # exactly one row: pigeonhole-guaranteed to miss a fold
+        X = pd.DataFrame({"band": band})
+        y = rng.poisson(1.0, size=100).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "band": OrderedCategorical(
+                    order=["b1", "b2", "b3"], specials=["MISSING"], basis=Spline(n_knots=1)
+                )
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)  # expected pin warnings
+            res = cross_validate(
+                model,
+                X,
+                y,
+                cv=SimpleKFold(5, shuffle=True, random_state=0),
+                error_score="raise",
+            )
+        assert len(res.fold_scores) == 5
+        assert all(np.isfinite(res.fold_scores["deviance"]))
+
     def test_ordered_categorical_is_not_bound(self):
         """OrderedCategorical declares through order=; the CV bind stays out."""
         X, y = self._rare_level_frame()
