@@ -45,6 +45,52 @@ def validate_level_display(value: object) -> LevelDisplay:
     return cast(LevelDisplay, value)
 
 
+def build_level_universes(specs: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-term level-universe provenance for the summary payload (spec §3.8).
+
+    The audit trail a rating-governance reader needs about a categorical-family
+    term: the bound universe, where it came from (``declared`` / ``dtype`` /
+    ``full-frame`` / ``inferred``), the reference level and whether an empty
+    declared base forced a swap, and any level pinned to base for want of
+    training rows.
+
+    Keys mirror ``reconstruct()`` exactly, because both are read as one record
+    of the same fitted state and a second spelling is how they drift apart. A
+    term with no universe at all -- every numeric spec -- is absent rather than
+    present-and-empty, so ``level_universes`` reads as the list of terms that
+    have levels.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.random_effect import RandomEffect
+
+    universes: dict[str, dict[str, Any]] = {}
+    for feature, spec in specs.items():
+        if not isinstance(spec, Categorical | OrderedCategorical | RandomEffect | FactorSmooth):
+            continue
+        levels = (
+            spec._ordered_levels if isinstance(spec, OrderedCategorical) else list(spec._levels)
+        )
+        if not levels:
+            continue
+        # OrderedCategorical declares through `order=`/`values=` and pins only
+        # specials; RandomEffect and FactorSmooth pool empty levels through
+        # their penalty and so never pin. Read both pin lists rather than
+        # branching on the type: a term carries at most one of them.
+        pinned = list(getattr(spec, "_pinned_levels", ())) + list(
+            getattr(spec, "_pinned_specials", ())
+        )
+        universes[feature] = {
+            "levels": list(levels),
+            "level_source": getattr(spec, "_level_source", "declared"),
+            "base_level": getattr(spec, "_base_level", None) or None,
+            "base_fallback": getattr(spec, "_base_fallback", None),
+            "pinned_levels": pinned,
+        }
+    return universes
+
+
 def _with_piecewise_reference_rows(
     rows: list[_CoefRow],
     *,
@@ -183,6 +229,12 @@ def build_summary_level_display(
                     break
 
         base_level = str(spec._base_level)
+        # A pinned level is bound and known but has no coefficient, so no
+        # canonical row names it. Dropping it here would leave the summary the
+        # only surface that never mentions the pin, which is the one thing a
+        # reader has to see: `reconstruct()` reports it at relativity 1.0 and
+        # the term still predicts it as base.
+        pinned_levels = {str(level) for level in getattr(spec, "_pinned_levels", ())}
         reference_only = bool(presentation_fitted_levels) and all(
             fitted == base_level for fitted in presentation_fitted_levels
         )
@@ -248,9 +300,21 @@ def build_summary_level_display(
                 )
                 if source.edf is not None:
                     edf_emitted.add(id(source))
+            elif fitted in pinned_levels:
+                display_row = _CoefRow(
+                    name=row_name,
+                    group=term_prefix,
+                    coef=0.0,
+                    active=True,
+                    is_reference=True,
+                    level_group=group_ids.get(fitted, ""),
+                    level_fit="pinned",
+                )
             else:
                 continue
-            if source.level_n_obs is not None or source.level_exposure_share is not None:
+            if source is not None and (
+                source.level_n_obs is not None or source.level_exposure_share is not None
+            ):
                 if id(source) in diagnostics_emitted:
                     display_row = replace(
                         display_row,

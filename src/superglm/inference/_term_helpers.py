@@ -310,6 +310,32 @@ def spline_groups(feature_groups: Sequence[GroupSlice]) -> list[GroupSlice]:
     return [g for g in feature_groups if g.subgroup_type != "special"]
 
 
+def ordered_level_fit(
+    level: object,
+    *,
+    special_labels: set | None,
+    pinned_labels: set,
+    main_fit: str,
+) -> str | None:
+    """The ``Fit`` word for one OrderedCategorical level row.
+
+    Lives beside ``spline_groups`` for the same reason: the smooth/free split
+    was re-derived at both level-row builders (``coef_tables`` and the
+    editor-stale path in ``report_ops``), and they drifted. A pinned special is
+    a third state -- declared, carrying no rows, and therefore no coefficient --
+    and reporting it as ``"free"`` claims a fitted level effect that was never
+    estimated.
+
+    ``special_labels`` is ``None`` for a term with no ``specials=``, which is
+    what suppresses the column entirely.
+    """
+    if special_labels is None:
+        return None
+    if level in pinned_labels:
+        return "pinned"
+    return "free" if level in special_labels else main_fit
+
+
 def _compute_term_edf(
     name: str,
     feature_groups: list[GroupSlice],

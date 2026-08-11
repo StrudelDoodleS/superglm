@@ -120,11 +120,33 @@ that same grouping column because FS already contains its constant direction
 and SZ's uncentered level curves contain lower-order factor geometry. A random
 effect for a different column is supported.
 
+## Level universes are inherited, never redeclared
+
+A `Categorical`-parented interaction — `SplineCategorical`,
+`CategoricalInteraction`, `NumericCategorical`, `PolynomialCategorical` — takes
+its level universe from the parent term at build time. Whatever bound the
+parent (a `levels=` list, the column dtype, a `cross_validate` full-frame bind,
+or plain inference) binds the interaction too, along with the parent's pinned
+levels and its `unseen=` policy. There is no `levels=` on the interaction
+itself: one declaration on the main effect is the whole story, and a second one
+would be a second thing to keep in step.
+
+A level pinned on the parent gets no block in the interaction either — no
+all-zero columns for a level with no data — and predicts through the parent's
+base, so the interaction contributes nothing for those rows. See
+[Feature types](features.md#the-level-universe) for the sources and the pin
+semantics.
+
 ## Prediction behavior
 
 Known levels receive their fitted FS curve or SZ deviation. With the default
 `unseen="population"`, an unseen level receives zero deviation; set
 `unseen="error"` to reject it with its label. Missing values always fail.
+`FactorSmooth(levels=...)` binds the grouping factor's universe the same way
+`Categorical` does, so folds and refreshes share one set of curves; an empty
+declared level shrinks to the population smooth under `basis="fs"`, and is
+refused under `basis="sz"`, whose sum-to-zero contrast needs every level to
+carry rows.
 
 ```python
 conditional = model.predict(test)
