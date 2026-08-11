@@ -173,6 +173,125 @@ Categorical(base="first")
 Categorical(base="B")
 ```
 
+### The level universe
+
+A `Categorical` fits the levels it was *bound* to, not "the levels this
+training slice happened to contain". Four sources bind that universe, in
+precedence order:
+
+1. **`levels=` on the term** — the stated universe.
+2. **The column dtype** — a `pd.CategoricalDtype` (or a polars `Enum`) carries
+   its declared categories through the frame boundary.
+3. **The full frame under `cross_validate`** — resolved once, before splitting.
+4. **The training data** — per-fit inference, the historical fallback, still
+   what a plain `fit` on a plain object column does.
+
+`levels=` accepts exactly three shapes:
+
+```python
+import pandas as pd
+
+from superglm import Categorical
+
+Categorical(levels=["A", "B", "E", "F"])                        # a list or tuple
+Categorical(levels=df["Area"])                                  # a Series or array
+Categorical(levels=pd.CategoricalDtype(["A", "B", "E", "F"]))   # a dtype
+```
+
+A list or tuple *is* the universe, in the order given, so `base="first"` means
+first-declared. A Series or array of plain object data contributes its sorted
+uniques; a Series of *categorical* data contributes the dtype's declared
+categories in dtype order, which is how a level that exists but was not sampled
+still gets counted. A `CategoricalDtype` contributes its `.categories`. Labels
+must be unique, and a `NaN` anywhere in the source is an error — a level cannot
+be missing.
+
+An already-fitted encoder's vocabulary is a plain array, so pass it directly:
+
+```python
+from sklearn.preprocessing import OneHotEncoder
+
+encoder = OneHotEncoder().fit(df[["Area"]])
+area = Categorical(levels=encoder.categories_[0])
+```
+
+The encoder object itself is not a level source, and neither is
+`pd.get_dummies` output: recovering a vocabulary by parsing dummy column names
+is exactly the brittle step this argument exists to remove. Pre-one-hot-encoded
+input is not accepted either — it bypasses the base level, the exposure
+weighting, `grouping=`, and every other term-level semantic.
+
+Typing the column once is the alternative to stating the universe on every term
+that reads it: a bare `Categorical()` then carries the full universe, and so
+does every interaction built on it.
+
+```python
+import pandas as pd
+
+area_levels = pd.CategoricalDtype(["A", "B", "E", "F"])
+df = df.assign(Area=df["Area"].astype(area_levels))
+```
+
+**This changes what an existing categorical-dtype column does.** The frame
+boundary used to flatten such a column and discard its declared categories, so
+typing the universe bought nothing and said nothing. Those categories now bind:
+refitting on a column typed this way can produce pinned levels and the warning
+that names them, and the level table gains their rows. Nothing changes for a
+plain object column with no `levels=` — that path still infers per fit and
+raises the same error on an unseen level at predict time.
+
+### Levels with no training rows
+
+A bound level that no training row carries — or that only zero-weight rows
+carry — is **pinned to base** rather than rejected. No design column is emitted
+for it (so no all-zero column and no rank-deficiency roulette), one warning
+names it and the term, and its rows predict as the base level. It stays a
+*known* level: `reconstruct()` reports it at relativity 1.0 and the summary
+gives it a row whose `Fit` column reads `pinned`.
+
+Training rows *outside* a bound universe are the opposite case and a hard
+error. You declared the world; data exceeding it is a data bug, never something
+to group or drop silently.
+
+If the declared `base=` is the empty one, intercept and dummy sum would be
+collinear, so the base falls back deterministically — to the most-exposed
+observed level, or to the first observed level in universe order when
+unweighted — with a loud warning. Coefficient identity moves; predictions do
+not, and the swap is recorded in the summary.
+
+### Unseen levels at predict time
+
+```python
+Categorical(levels=["A", "B", "E", "F"])                    # unseen level -> error
+Categorical(levels=["A", "B", "E", "F"], unseen="base")     # unseen level -> base
+```
+
+`unseen="error"` is the default and keeps the historical `ValueError`. No
+data-derived universe is ever complete against production, so `unseen="base"`
+is the opt-in policy for that: rows carrying a level outside the universe
+predict as the base level, and one warning per `predict` call names the novel
+levels and how many rows they cover. It is deliberately never silent — a routed
+row is indistinguishable from a genuine base row in the output, so the warning
+is the only record that it happened.
+
+### CV and level universes
+
+`cross_validate` resolves the universe for every categorical-family term that
+does not already have one on the **full** frame before splitting, resolves
+`base="most_exposed"` once there too, and stamps both onto every fold. **CV
+scores therefore change wherever folds used to fail**: a level landing only in
+one fold's test rows previously raised at predict time and, under the default
+`error_score`, left that fold warned about and NaN-scored. It now completes,
+and every fold reports the same base, so per-fold coefficients are comparable.
+Sharing the level *set* across folds is R factor semantics — the
+vocabulary is a property of the column, not of the training subset — and moves
+no target information between folds. Everything that legitimately depends on
+training rows (knots, penalty scaling, coefficients) still binds per fold.
+
+For a filed model, state it on the term anyway: `levels=` plus an explicit
+`base=` makes the term completely data-independent, so the same spec builds the
+same design on any slice, in any order, at any refresh.
+
 ### Collapsing Sparse Levels
 
 `collapse_levels(...)` lets you merge sparse levels for fitting while keeping
@@ -190,6 +309,12 @@ single grouped factor inside the model. Interaction terms and interaction
 screening use the same mapping: pass original labels at fit and predict time,
 and each grouped interaction is built in the collapsed level geometry.
 
+With a `grouping`, `levels=` declares the **raw**, pre-collapse universe, and
+the grouping must cover every declared level or the build errors — a declared
+level quietly falling through to itself is the silent identity mapping the
+declaration exists to prevent. A grouping built from the full column, as above,
+covers by construction.
+
 ## RandomEffect
 
 `RandomEffect()` gives every observed factor level a penalized intercept. REML
@@ -197,14 +322,24 @@ estimates the shared variance component, so thin levels shrink more strongly
 toward the portfolio prediction than thick levels.
 
 ```python
-RandomEffect()                    # unseen levels use the population prediction
-RandomEffect(unseen="error")      # fail on an unseen level
+RandomEffect()                              # unseen levels use the population prediction
+RandomEffect(unseen="error")                # fail on an unseen level
+RandomEffect(levels=df["Region"].unique())  # bind the level universe
 ```
 
 It is the SuperGLM analogue of mgcv's `s(group, bs="re")`. Unlike
 `Categorical`, it retains every level rather than choosing a reference level,
 and it requires `fit_reml()`. See [Credibility terms](credibility.md) for
 reporting, prediction, and a real insurance example.
+
+`levels=` takes the same three source shapes as `Categorical`, and the dtype
+and full-frame channels apply here too. A penalized term needs no pin: a
+declared level with no training rows shrinks all the way to the population
+value through its own penalty, exactly as an empty stretch of a numeric spline
+is bridged, so it gets a coefficient rather than a warning. `FactorSmooth`
+takes the same argument, with one exception — `basis="sz"` refuses an empty
+declared level, because its sum-to-zero contrast stops identifying the
+deviations once a level carries nothing.
 
 ## OrderedCategorical
 
@@ -317,10 +452,10 @@ base-relative relativity beside them. Use this for levels that are
 *structurally* different, never for merely sparse ones: the penalty already
 handles a sparse band better than a free level does.
 
-The summary marks each level in a `Fit` column reading `smooth` or `free`, and
-the exported workbook records the term as `smooth+free` with the special's own
-row as a `free level`. Plots draw the fitted curve across the ordered levels
-and place free levels as detached points past its end.
+The summary marks each level in a `Fit` column reading `smooth`, `free`, or
+`pinned`, and the exported workbook records the term as `smooth+free` with the
+special's own row as a `free level`. Plots draw the fitted curve across the
+ordered levels and place free levels as detached points past its end.
 
 **The reported intercept changes when you add or remove a special.** The
 smooth's identifiability constraint is taken over the rows it is built on, so
@@ -338,13 +473,18 @@ at around 1e-3 in log relativity with one imbalanced factor at a 5% special
 share — and it moves again if `fit_reml()` re-selects the smoothing parameter,
 which the default path does. Expect small differences rather than none.
 
-A special must be present in the training data and carry positive weight (an
-all-zero indicator column, or one whose rows all have zero weight, has no
-identifiable coefficient), may not be the reporting `base=`, and may not be
-merged into a level group. `specials=` works with every `basis=` — the main
-block comes first and the unpenalized special block second, always;
-interactions and PSST screening on a term with specials are not supported yet
-and are reported as deferred rather than silently skipped.
+A declared special that the training data does not carry — no rows at all, or
+only zero-weight rows — is **pinned** rather than rejected: no indicator column
+is emitted for it, it contributes zero, one warning names it, and its `Fit`
+column reads `pinned` instead of `free`. An all-zero indicator has no
+identifiable coefficient, so the alternative was a hard error, and a thin
+special declared on the whole book but missing from one CV fold used to kill
+that fold. The level stays declared and keeps its row in the rating table. A
+special may not be the reporting `base=`, and may not be merged into a level
+group. `specials=` works with every `basis=` — the main block comes first and
+the unpenalized special block second, always; interactions and PSST screening
+on a term with specials are not supported yet and are reported as deferred
+rather than silently skipped.
 
 This interpretation depends on the numeric positions assigned to the levels.
 `order=[...]` uses equal spacing on `[0, 1]`; use `values={...}` when the real

@@ -1380,12 +1380,16 @@ class ModelMetrics:
             and dict-like access for backward compatibility.
         """
         from superglm.inference.summary_levels import (
+            build_level_universes,
             build_summary_level_display,
             validate_level_display,
         )
 
         level_display = validate_level_display(level_display)
         data = {
+            # Same record as `model.summary()`: the two payloads are read as one
+            # surface and are tested for agreement.
+            "level_universes": build_level_universes(self._model._specs),
             "information_criteria": {
                 "log_likelihood": self.log_likelihood,
                 "null_log_likelihood": self.null_log_likelihood,

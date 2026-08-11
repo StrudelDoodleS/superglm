@@ -7,7 +7,11 @@ from typing import Any, cast
 
 import numpy as np
 
-from superglm.inference._term_helpers import spline_group_enrichment, spline_groups
+from superglm.inference._term_helpers import (
+    ordered_level_fit,
+    spline_group_enrichment,
+    spline_groups,
+)
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
@@ -76,6 +80,7 @@ def summary(
     from superglm.inference.coef_tables import build_basis_detail, build_coef_rows
     from superglm.inference.summary import ModelSummary
     from superglm.inference.summary_levels import (
+        build_level_universes,
         build_summary_level_display,
         validate_level_display,
     )
@@ -144,6 +149,7 @@ def summary(
             "n_obs": n,
             "n_active_groups": n_active,
         },
+        "level_universes": build_level_universes(model._specs),
     }
 
     penalty = fitted_penalty(model)
@@ -459,6 +465,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
             # matches the whole-term classification (a parametric-hosted
             # level is "piecewise"/"polynomial", never "smooth").
             special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+            pinned_labels = set(raw.get("pinned_specials") or ())
             main_fit = "smooth" if spec.basis_kind == "spline" else spec.basis_kind
             for level in raw["levels"]:
                 rows.append(
@@ -466,10 +473,11 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
                         name=f"{g.feature_name}[{level}]",
                         group=g.feature_name,
                         coef=float(raw["level_log_relativities"][level]),
-                        level_fit=(
-                            None
-                            if special_labels is None
-                            else ("free" if level in special_labels else main_fit)
+                        level_fit=ordered_level_fit(
+                            level,
+                            special_labels=special_labels,
+                            pinned_labels=pinned_labels,
+                            main_fit=main_fit,
                         ),
                     )
                 )
