@@ -90,6 +90,21 @@ class LambdaPolicy:
         return cls.fixed(0.0)
 
 
+# ── Bound level universe for the categorical family ─────────────
+@dataclass(frozen=True)
+class LevelBinding:
+    """One categorical term's level universe, resolved on the full frame.
+
+    Carried from ``cross_validate`` to every fold so the folds share one
+    vocabulary and one base identity.  ``base`` is a level label (not a
+    strategy name) or None when the term's base is not a full-frame
+    question.
+    """
+
+    levels: tuple
+    base: Any | None = None
+
+
 # ── What a feature spec must provide ────────────────────────────
 @runtime_checkable
 class FeatureSpec(Protocol):
