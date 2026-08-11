@@ -123,6 +123,23 @@ class EagerFrame:
             return str(cast(pd.DataFrame, self.native)[cast(Any, name)].dtype)
         return str(self._polars_schema[cast(str, name)])
 
+    def column_declared_categories(self, name: object) -> list | None:
+        """Return dtype-declared categories, or None when the dtype has none.
+
+        Only dtypes that DECLARE a universe qualify (pandas CategoricalDtype,
+        Polars Enum). A plain Polars Categorical is an encoding, not a
+        declaration, and returns None.
+        """
+        if self.backend == "pandas":
+            pandas_dtype = cast(pd.DataFrame, self.native)[cast(Any, name)].dtype
+            if isinstance(pandas_dtype, pd.CategoricalDtype):
+                return pandas_dtype.categories.tolist()
+            return None
+        polars_dtype = self._polars_schema[cast(str, name)]
+        if isinstance(polars_dtype, nw.Enum):
+            return list(polars_dtype.categories)
+        return None
+
     def _extract_column(self, name: object) -> NDArray:
         if self.backend == "pandas":
             return np.asarray(cast(pd.DataFrame, self.native)[cast(Any, name)])
