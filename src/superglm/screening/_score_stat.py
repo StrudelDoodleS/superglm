@@ -29,6 +29,45 @@ decomposition depends on neither ``lambda`` nor ``edf0``, so ONE of them serves
 an entire ladder of budgets — which is why ``penalized_score_statistic_ladder``
 exists and why callers sweeping a ladder should prefer it.
 
+**THIS MODULE HAS TWO ``edf`` ESTIMATORS AND THEY DISAGREE.  NOT CLOSED.**  A
+CLAMPED rung answers from :func:`_edge`'s ``tr(A^-1 V_eff)``; a SEARCHING rung
+answers from the pencil above.  They are the same quantity, so at one lambda
+they are one number — and they are not.  On a ``bs(8)`` pair with 12 levels,
+30 rows in each and four inside a 1e-6 band of the covariate, one ladder
+returns 7.000004 for the budgets that clamp and 9.000019 for the budget that
+searches, both at ``lambda = 1.0652e+05``, where arb ball arithmetic puts the
+exact value at 6.9997546284 (enclosure radius 1.3e-221 at 800 bits) and a
+1-ulp perturbation of ``S_a`` moves it by only 6.6e-04 df.  The clamped
+estimator is 2.5e-04 df out; the searching one is 2.000265 df out.
+
+Measured over 703 searching rungs with a range-valid oracle — ``ps``/``cr``/
+``bs``/``ns`` at 3 to 8 knots, ``L`` in 6/12/20, 12 and 30 rows per level, five
+band layouts, two seeds — the two differ by more than 1e-3 df on 32.8% of the
+rungs whose pair carries a narrow band, on 0.0% of the 120 without one, and on
+0.0% of the 232 ``ns`` rungs.  The clamped estimator is the nearer to the
+oracle on 532 of 697 and the searching one on 165; ``|trace - oracle|`` has p90
+8.2e-02 df against the pencil's 1.62 df.  A further 93 of the 703 searching
+rungs miss their own budget by more than 1e-6 df — median 1.00, max 3.00 —
+because the ladder decides a rung SEARCHES from :func:`_edge`'s bracket and
+then searches inside the PENCIL's, and the two brackets differ.
+
+The mechanism is documented rather than inferred.  :func:`_build_pencil` calls
+``scipy.linalg.eigh(V, G)``, LAPACK's ``?sygv``, whose error bound degrades
+with the condition number of the second operand — "there may be a significant
+loss of accuracy if B is ill-conditioned with respect to inversion" (LAPACK
+Users' Guide, *Further Details: Error Bounds for the Generalized Symmetric
+Definite Eigenproblem*).  ``cond(G)`` measures 5.58e+12 on the pair above and
+up to 1.77e+13 across the sweep, against 6.41e+02 on an ``ns`` pair, whose
+penalty is full rank — which is exactly the split in the firing rates.  LAPACK
+names the alternative for a positive-definite ``A``: Cholesky both operands and
+take the GSVD of the pair, "a tighter error bound than the above bounds when B
+is ill conditioned but A+B is well-conditioned", which is this pencil's case.
+That is Van Loan, *Generalizing the Singular Value Decomposition*, SIAM J.
+Numer. Anal. 13(1):76-83 (1976), and it computes the same filter factors
+without inverting anything ill conditioned.  It is not what this module does.
+
+Pins and the certified constants are in tests/test_screening_edf_target.py.
+
 ``G`` is the right thing to whiten by, rather than ``V_eff``: where ``V_eff``
 is singular but ``V_eff + lambda S`` is not, those directions still contribute
 to ``edf``, and whitening by ``V_eff`` alone silently drops them.  The common

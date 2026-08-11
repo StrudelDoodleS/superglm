@@ -51,6 +51,69 @@ pins where both paths can score.  Neither path is reliably the better one
 there either: at a width of 3e-4 the arrow value sits 6.93 df above the dense
 one and at 5e-4 it sits 4.89 df below it.
 
+**THAT HIGH-EDGE DIVERGENCE IS NOT A DEFECT OF EITHER PATH, AND THE LOW-EDGE
+ONE IS THIS PATH'S.**  Settled against arb ball arithmetic — a RIGOROUS
+enclosure rather than a high-precision guess, radius below 1e-200 df at 800
+bits, agreeing to nine decimals across three algebraically distinct forms of
+the same quantity.  An 882-point sweep, 853 of them scored by both paths, over
+``ps``/``cr``/``bs``/``ns`` at 3 to 8 knots, ``L`` in 6/12/20, 3/12/30 rows per
+level, seven band layouts and two seeds, each path graded at its OWN lambda:
+
+* **The high edge is not determined by the assembled moments.**  ``lambda`` is
+  1e10 times the pair's scale there, and a spline penalty assembled in float64
+  carries a smallest eigenvalue that is round-off of either sign, so
+  ``lambda S_a`` inherits an indefiniteness of order ``lambda eps sigma_max``.
+  On the geometry above that is 4.7e-06 against a ``V_eff`` whose own smallest
+  eigenvalues are 1e-15: the exact ``V_eff + lambda S`` is INDEFINITE, its
+  filter factors leave [0, 1], and the exact edf falls outside ``[0, k]`` on 12
+  of the 853 scored points — as far out as 524.70 on a ``k = 209`` pair and
+  -69.49 on a ``k = 35`` one.  A ONE-ULP symmetric perturbation of ``S_a``
+  moves the exact high-edge edf by 1.30 to 145.87 df across the geometries
+  measured, and by 11.11, 31.83 and 77.54 df on the very pair whose 11.57 df
+  this docstring quotes — 40 draws at each of three generator seeds, and a max
+  over finitely many draws is a LOWER bound on the spread.  The divergence is
+  inside the noise floor, not above it.  Where the high edge IS determined — no
+  narrow band, spread 1.0e-04 df — both paths are right: 18.999995 and
+  18.999936 against a certified 18.999990.
+* **The low edge IS determined**, to a median 3.8e-04 and a worst 6.8e-03 df
+  under a 1-ulp perturbation of ``V`` (``S_a`` moves it by 0.0e+00 there), and
+  there THIS path is the wrong one.  Over the
+  20 sweep points where both paths clamp to one lambda and the answer is
+  attainable to 1e-2 df, the arrow error has median 1.17 df and maximum
+  30.74 df and lands inside the attainable band on 3 of 20; the dense path's
+  clamped rung has median 6.9e-05 df, maximum 2.7e-02 df, and lands inside on
+  19 of 20.  Worst measured anywhere: an ``ns(6)`` pair, 6 levels, 12 rows in
+  each, two inside a 1e-1 band, where this path reads 0.245 against a certified
+  30.989 — ``rank - lambda tr(A^-1 S)`` splits as 35.00 - 34.75 where the exact
+  split is 35.00 - 4.01.  That is not an edf-only error: ``z`` divides by the
+  edf, so the same pair ranks at ``z = 0.13`` from the dense path and
+  ``z = 35.42`` from this one at a budget of 2.
+
+**THE LOW-EDGE ERROR DOES NOT SHRINK AS THE LEVEL COUNT GROWS**, which is what
+decides whether any of the above reaches the regime this kernel actually runs
+in.  Every graded point above is a pair the DENSE path can also score, and this
+path is entered only where that one is refused — above ``k = 1357`` for a
+penalized block at the default ``max_cells``, so ``L`` past about 124 for a
+``ps(8)`` margin.  Walking one family (``ps(8)``, 12 rows in every level, four
+inside a 1e-3 band, seed 3) from ``L = 6`` to ``L = 80``, which is ``k = 55`` to
+``k = 869`` — 64% of the way to that refusal — against the same certified
+oracle at each pair's own low-edge lambda:
+
+    L      6      12      20      40      60      80
+    k     55     121     209     429     649     869
+    arrow  +10.89  +3.97   +4.14   +5.16   +4.28   +4.55
+    dense  -1.4e-02 +8.3e-05 -1.3e-04 -7.0e-05 -1.6e-03 +1.3e-03
+    noise   1.7e-02  1.2e-03  1.4e-03  4.4e-03  5.4e-03  3.2e-03
+
+The dense clamped rung tracks the oracle to 1.6e-03 df at every width; this
+path sits at 4 to 5 df and is flat in ``L``.  The extrapolation past the
+routing threshold is therefore unfavourable rather than benign — but it is
+still an extrapolation, since an arb oracle is ``O(k^3)`` in ball arithmetic
+and ``k = 869`` already costs 319 s.
+
+The pins are in tests/test_screening_edf_target.py, three of them
+``xfail(strict=True)`` because they are the defect rather than the contract.
+
 **WHAT THE REACH-AWARE COUNT IS WORTH, MEASURED WIDE RATHER THAN ON ONE
 GEOMETRY.**  Against a 50-digit oracle evaluated at each path's own lambda,
 over 6 levels x 12 rows at unit weight with two levels squeezed into a band of
