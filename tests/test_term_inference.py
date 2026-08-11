@@ -8,6 +8,7 @@ from superglm import (
     Categorical,
     InteractionInference,
     Numeric,
+    OrderedCategorical,
     Spline,
     SplineMetadata,
     SuperGLM,
@@ -583,3 +584,66 @@ class TestCenteringMetadata:
         raw = model.reconstruct_feature("age")
         ti = model.term_inference("age", centering="native")
         np.testing.assert_allclose(raw["log_relativity"], ti.log_relativity, atol=1e-12)
+
+    def test_the_recorded_shift_is_the_constant_that_was_subtracted(self, sample_data):
+        """``centering_shift`` is not recoverable from the values it produced.
+
+        A mean-centered term reports values whose mean is zero, so the removed
+        constant leaves no trace in ``log_relativity``.  Anything that has to
+        add it back -- the rating-table export folds it into the exported base
+        relativity -- needs it recorded, and needs it to be the number that was
+        subtracted, exactly, on every element.
+        """
+        X, y, sample_weight = sample_data
+        model = SuperGLM(
+            penalty="group_lasso",
+            selection_penalty=0.01,
+            features={"age": Spline(n_knots=10, penalty="ssp")},
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+
+        native = model.term_inference("age", centering="native")
+        mean = model.term_inference("age", centering="mean")
+
+        assert native.centering_shift == 0.0
+        assert mean.centering_shift != 0.0
+        np.testing.assert_array_equal(
+            np.asarray(native.log_relativity) - mean.centering_shift,
+            np.asarray(mean.log_relativity),
+        )
+
+    def test_a_term_the_centering_left_alone_records_no_shift(self, sample_data):
+        """Zero is a claim about the values, not a default nobody set.
+
+        A ``Numeric`` has one value and no mean to center on, and an
+        ``OrderedCategorical`` is already anchored on its base level, so
+        ``centering="mean"`` returns both untouched.  A consumer that adds a
+        constant back for them would move every prediction, so the zero has to
+        be the truth rather than an omission.
+        """
+        X, y, sample_weight = sample_data
+        band = np.asarray(["b1", "b2", "b3", "b4"])[np.arange(len(X)) % 4]
+        frame = X.copy()
+        frame["band"] = band
+        model = SuperGLM(
+            selection_penalty=0.0,
+            features={
+                "density": Numeric(),
+                "band": OrderedCategorical(
+                    order=["b1", "b2", "b3", "b4"], basis=Spline(kind="ps", n_knots=3)
+                ),
+            },
+        )
+        model.fit(frame, y, sample_weight=sample_weight)
+
+        for name in ("density", "band"):
+            native = model.term_inference(name, centering="native")
+            mean = model.term_inference(name, centering="mean")
+            assert mean.centering_shift == 0.0, name
+            np.testing.assert_array_equal(native.log_relativity, mean.log_relativity)
+
+        # Both would have contributed a non-zero constant to a re-derivation,
+        # so the zeros above are constraints rather than coincidences.
+        for name in ("density", "band"):
+            log_rel = np.asarray(model.term_inference(name).log_relativity)
+            assert abs(float(np.mean(log_rel))) > 1e-3, name

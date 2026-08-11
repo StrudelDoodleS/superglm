@@ -85,6 +85,23 @@ class TermInference:
     # Centering
     absorbs_intercept: bool = True
     centering_mode: str = "training_mean_zero_unweighted"
+    # The constant a reporting centering removed from this term, on the log
+    # scale: ``log_relativity`` as reported is the fitted contribution MINUS
+    # ``centering_shift``.  Zero for every term the centering left alone --
+    # ``centering="native"``, a single-valued ``Numeric``, an
+    # ``OrderedCategorical`` (which is already anchored on its base level and
+    # is never recentered).
+    #
+    # It is recorded rather than re-derived because the two are not the same
+    # number.  A consumer who reconstructs it as ``mean(log_relativity)`` over
+    # the values it can see gets zero for a mean-centered term (correct but
+    # useless), the whole level mean for an ``OrderedCategorical`` that was
+    # never shifted at all, and the EXPANDED level mean for a grouped
+    # categorical whose shift was computed on its grouped levels.  Anything
+    # that has to add the constant back -- the rating-table export folds it
+    # into ``base_relativity`` so the workbook still multiplies out to
+    # ``model.predict`` -- must use the constant that was actually subtracted.
+    centering_shift: float = 0.0
 
     # Smoothness / penalty
     edf: float | None = None

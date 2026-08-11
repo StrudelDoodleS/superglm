@@ -153,7 +153,9 @@ def _write_dataframe(ws, df: pd.DataFrame, start_row: int, start_col: int) -> tu
     return start_row + len(df), start_col + len(df.columns) - 1
 
 
-def _piecewise_interpolation_note(table: pd.DataFrame, extrapolation: str) -> str:
+def _piecewise_interpolation_note(
+    table: pd.DataFrame, extrapolation: str, centering_shift: float = 0.0
+) -> str:
     """The interpolation and extrapolation rule for one piecewise block.
 
     Derived from the block's own printed columns, so a reader can check the
@@ -165,12 +167,12 @@ def _piecewise_interpolation_note(table: pd.DataFrame, extrapolation: str) -> st
     silent discrepancy back into the tariff at exactly the rows -- the ones
     outside the rated range -- where nobody would look for it.
 
-    That exactness claim holds under ``centering="native"`` (the default
-    export).  Under ``centering="mean"`` every term's values are shifted by a
-    per-term constant that is not currently transferred into the exported
-    ``base_relativity`` -- a pre-existing property of the mean-centered export
-    shared by every term type, not a piecewise one -- so the note states the
-    scope rather than promising what that mode does not deliver.
+    That exactness claim holds in both centerings.  ``centering="mean"``
+    shifts this block by a constant so its relativities have geometric mean 1,
+    and the exported base relativity carries the same constant back, so the
+    base-times-blocks product is the same number either way.  The note states
+    the constant it was shifted by, because a reader holding the two workbooks
+    side by side can otherwise only see that the columns disagree.
 
     The out-of-range rule is the term's ``extrapolation`` parameter, and it is
     stated here rather than assumed because both directions exist in practice:
@@ -183,14 +185,18 @@ def _piecewise_interpolation_note(table: pd.DataFrame, extrapolation: str) -> st
     interpolate = (
         "Interpolate linearly on Log relativity (equivalently, geometrically on Relativity). "
     )
-    # Scope of the exactness claim, stated in the sheet itself: exact under
-    # the default centering='native' export; centering='mean' shifts every
-    # term by a constant the exported base relativity does not absorb.
+    # The exactness claim, stated in the sheet itself, with the centering
+    # constant named so a reader can check the two exports against each other.
+    # Printed at full round-trip precision for the same reason the boundary
+    # slopes are: it is the number that reconciles this block with the base.
     scope = (
-        " Exact reproduction of the fitted model holds under the default "
-        "centering='native' export; under centering='mean' these values are "
-        "shifted by a per-term constant that is not folded into the base "
-        "relativity."
+        " Exact reproduction of the fitted model holds in either centering."
+        if centering_shift == 0.0
+        else (
+            " Exact reproduction of the fitted model holds in either centering: "
+            f"these Log relativity values are the fitted ones less {centering_shift}, "
+            "and the base relativity carries that constant back."
+        )
     )
     if extrapolation == "extend":
         log_relativity = [float(value) for value in table["Log relativity"]]
@@ -246,7 +252,11 @@ def _annotate_piecewise_blocks(ws, main_effects) -> None:
         ws.cell(
             row=_MAIN_EFFECT_NOTE_ROW,
             column=start_col,
-            value=_piecewise_interpolation_note(block.table, block.extrapolation or "clip"),
+            value=_piecewise_interpolation_note(
+                block.table,
+                block.extrapolation or "clip",
+                block.centering_shift,
+            ),
         )
 
 
