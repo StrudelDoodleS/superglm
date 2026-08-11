@@ -12,17 +12,27 @@ from superglm.types import GroupInfo, LambdaPolicy
 
 
 class RandomEffect:
-    """All-level categorical effect with a REML-estimated variance component."""
+    """All-level categorical effect with a REML-estimated variance component.
+
+    ``levels=`` binds the level universe (spec 2026-08-11, §3.1) from an
+    explicit sequence, a data column, or a categorical dtype.  A declared level
+    with no training rows is not pinned the way an unpenalized dummy is: it
+    keeps its own coefficient and shrinks to the population value through the
+    variance component, exactly as a thinly observed level does.
+    """
 
     requires_reml = True
 
     def __init__(
         self,
         *,
+        levels=None,
         unseen: Literal["population", "error"] = "population",
         missing: Literal["error"] = "error",
         lambda_policy: LambdaPolicy | None = None,
     ):
+        from superglm.features._level_source import resolve_level_source
+
         if unseen not in ("population", "error"):
             raise ValueError(f"unseen must be 'population' or 'error', got {unseen!r}")
         if missing != "error":
@@ -33,8 +43,58 @@ class RandomEffect:
         self.unseen = unseen
         self.missing = missing
         self._lambda_policy = lambda_policy
+        self._declared_levels: list | None = (
+            None if levels is None else resolve_level_source(levels, context="RandomEffect")
+        )
+        self._level_source: str = "declared" if levels is not None else "inferred"
         self._levels: list[Any] = []
         self._level_to_code: dict[Any, int] = {}
+
+    def adopt_dtype_categories(self, categories: list) -> None:
+        """Adopt a dtype-declared universe unless one is already declared."""
+        if self._declared_levels is None:
+            from superglm.features._level_source import resolve_level_source
+
+            self._declared_levels = resolve_level_source(list(categories), context="RandomEffect")
+            self._level_source = "dtype"
+
+    def apply_level_binding(self, binding) -> None:
+        """Adopt a full-frame universe when nothing more specific declared one.
+
+        Only the levels are read: a penalized term has no base level, so its
+        bindings carry ``base=None`` and there is nothing to pin.
+        """
+        if self._declared_levels is None and binding.levels is not None:
+            self._declared_levels = list(binding.levels)
+            self._level_source = "full-frame"
+
+    def resolve_binding(self, values: NDArray, sample_weight=None):
+        """Compute this spec's full-frame binding without mutating the spec."""
+        import copy
+
+        from superglm.types import LevelBinding
+
+        # Build on a throwaway copy so the universe and its NaN checks stay
+        # single-sourced in `build`.
+        probe = copy.deepcopy(self)
+        probe.build(values, sample_weight=sample_weight)
+        return LevelBinding(levels=tuple(probe._levels), base=None)
+
+    def _declared_codes(self, values: NDArray) -> NDArray[np.intp]:
+        """Code *values* against the bound universe, rejecting anything outside it."""
+        codes = pd.Index(self._levels).get_indexer(values).astype(np.intp, copy=False)
+        if np.any(codes < 0):
+            # A -1 under a bound universe is either a broken column or data the
+            # declaration does not admit; those are different bugs.
+            outside = values[codes < 0]
+            if np.any(pd.isna(outside)):
+                raise ValueError("RandomEffect column contains missing values (NaN or None).")
+            raise ValueError(
+                f"Training data contains levels outside the declared level universe: "
+                f"{sorted(set(outside.tolist()), key=str)}. Declared: "
+                f"{sorted(self._levels, key=str)}. Widen levels= or fix the column."
+            )
+        return codes
 
     def build(
         self,
@@ -44,10 +104,14 @@ class RandomEffect:
         """Factorize all fitted levels without dropping a reference category."""
         del sample_weight
         values = np.asarray(x).ravel()
-        codes, uniques = pd.factorize(values, sort=True)
-        if np.any(codes < 0):
-            raise ValueError("RandomEffect column contains missing values (NaN or None).")
-        self._levels = uniques.tolist()
+        if self._declared_levels is not None:
+            self._levels = list(self._declared_levels)
+            codes = self._declared_codes(values)
+        else:
+            codes, uniques = pd.factorize(values, sort=True)
+            if np.any(codes < 0):
+                raise ValueError("RandomEffect column contains missing values (NaN or None).")
+            self._levels = uniques.tolist()
         self._level_to_code = {level: code for code, level in enumerate(self._levels)}
         return GroupInfo(
             columns=None,

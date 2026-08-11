@@ -233,3 +233,130 @@ def test_random_effect_prediction_rejects_unknown_mode():
 
     with pytest.raises(ValueError, match="random_effects"):
         model.predict(X, random_effects="marginal")
+
+
+def _declared_universe_model(*, levels, unseen="error"):
+    x = np.linspace(-2.0, 2.0, 12)
+    broker = np.array(["a", "b", "c"] * 4, dtype=object)
+    offsets = {"a": 0.3, "b": -0.2, "c": 0.1}
+    y = 0.5 * x + np.array([offsets[level] for level in broker])
+    y = y + np.array([0.02, -0.03, 0.01, 0.04, -0.02, 0.03, -0.01, 0.02, -0.04, 0.01, 0.03, -0.02])
+    X = pd.DataFrame({"x": x, "broker": broker})
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Numeric(),
+            "broker": RandomEffect(
+                levels=levels,
+                unseen=unseen,
+                lambda_policy=LambdaPolicy.fixed(1.5),
+            ),
+        },
+        selection_penalty=0,
+        direct_solve="gram",
+    )
+    model.fit_reml(X, y, max_reml_iter=2)
+    return model, X
+
+
+class TestDeclaredUniverse:
+    """Bound level universes on RandomEffect (spec 2026-08-11, §3.1/§3.2)."""
+
+    def test_declared_unobserved_level_gets_shrunk_coefficient(self):
+        spec = RandomEffect(levels=["a", "b", "ghost"])
+
+        info = spec.build(np.asarray(["a", "b", "a"], dtype=object))
+
+        assert info.n_cols == 3
+        assert spec._levels == ["a", "b", "ghost"]
+        assert spec._level_to_code == {"a": 0, "b": 1, "ghost": 2}
+        assert spec._level_source == "declared"
+        assert info.cat_codes.tolist() == [0, 1, 0]
+
+    def test_fit_data_outside_declared_universe_errors(self):
+        spec = RandomEffect(levels=["a", "b"])
+
+        with pytest.raises(ValueError, match="outside the declared level universe"):
+            spec.build(np.asarray(["a", "ROGUE"], dtype=object))
+
+    def test_declared_universe_still_rejects_missing_values(self):
+        spec = RandomEffect(levels=["a", "b"])
+
+        with pytest.raises(ValueError, match="missing values"):
+            spec.build(np.asarray(["a", None], dtype=object))
+
+    def test_score_on_declared_unobserved_level_uses_its_beta(self):
+        spec = RandomEffect(levels=["a", "b", "ghost"])
+        spec.build(np.asarray(["a", "b"], dtype=object))
+
+        eta = spec.score(np.asarray(["ghost"], dtype=object), np.array([0.1, 0.2, 0.3]))
+
+        assert eta == pytest.approx([0.3])
+
+    def test_no_declaration_stays_per_fit_inference(self):
+        spec = RandomEffect()
+
+        spec.build(np.asarray(["b", "a", "b"], dtype=object))
+
+        assert spec._levels == ["a", "b"]
+        assert spec._level_source == "inferred"
+
+    def test_dtype_categories_bind_the_universe_when_undeclared(self):
+        spec = RandomEffect()
+
+        spec.adopt_dtype_categories(["b", "a", "ghost"])
+        spec.build(np.asarray(["a", "b"], dtype=object))
+
+        assert spec._levels == ["b", "a", "ghost"]
+        assert spec._level_source == "dtype"
+
+    def test_declared_levels_win_over_the_other_sources(self):
+        from superglm.types import LevelBinding
+
+        spec = RandomEffect(levels=["a", "b"])
+
+        spec.adopt_dtype_categories(["a", "b", "ghost"])
+        spec.apply_level_binding(LevelBinding(levels=("a", "b", "ghost")))
+
+        assert spec._declared_levels == ["a", "b"]
+        assert spec._level_source == "declared"
+
+    def test_full_frame_binding_applies_when_nothing_is_declared(self):
+        from superglm.types import LevelBinding
+
+        spec = RandomEffect()
+
+        spec.apply_level_binding(LevelBinding(levels=("a", "b", "ghost")))
+        spec.build(np.asarray(["a", "b"], dtype=object))
+
+        assert spec._levels == ["a", "b", "ghost"]
+        assert spec._level_source == "full-frame"
+
+    def test_resolve_binding_reads_the_column_without_mutating_the_spec(self):
+        spec = RandomEffect()
+
+        binding = spec.resolve_binding(np.asarray(["b", "a", "b"], dtype=object))
+
+        assert binding.levels == ("a", "b")
+        assert binding.base is None
+        assert spec._levels == []
+
+    def test_reml_fit_shrinks_a_declared_unobserved_level_to_the_population(self):
+        model, _ = _declared_universe_model(levels=["a", "b", "c", "ghost"])
+        X_ghost = pd.DataFrame({"x": [0.25], "broker": ["ghost"]})
+
+        conditional = model.predict(X_ghost, random_effects="conditional")
+        population = model.predict(X_ghost, random_effects="population")
+
+        assert np.all(np.isfinite(model.result.beta))
+        assert len(model.result.beta) == 5
+        np.testing.assert_allclose(conditional, population)
+
+    def test_declared_universe_keeps_observed_levels_conditional(self):
+        model, _ = _declared_universe_model(levels=["a", "b", "c", "ghost"])
+        X_known = pd.DataFrame({"x": [0.25], "broker": ["a"]})
+
+        conditional = model.predict(X_known, random_effects="conditional")
+        population = model.predict(X_known, random_effects="population")
+
+        assert not np.allclose(conditional, population)
