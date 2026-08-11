@@ -183,6 +183,7 @@ def build_coef_rows(
     from superglm.inference._term_covariance import feature_se_from_cov
     from superglm.inference._term_helpers import (
         _resolve_group_lambda,
+        ordered_level_fit,
         spline_group_enrichment,
         spline_groups,
     )
@@ -653,6 +654,7 @@ def build_coef_rows(
             # `levels` and "9" here, `9 in {"9"}` is False, and the Fit
             # column silently reports the free level as "smooth".
             special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+            pinned_labels = set(raw.get("pinned_specials") or ())
             # The Fit column's word matches the whole-term classification: a
             # level carried by an unpenalized parametric block is not
             # "smooth", it is "piecewise"/"polynomial" beside its "free"
@@ -680,10 +682,11 @@ def build_coef_rows(
                         se=se_val,
                         ci_low=level_ci_lo,
                         ci_high=level_ci_hi,
-                        level_fit=(
-                            None
-                            if special_labels is None
-                            else ("free" if level in special_labels else main_fit)
+                        level_fit=ordered_level_fit(
+                            level,
+                            special_labels=special_labels,
+                            pinned_labels=pinned_labels,
+                            main_fit=main_fit,
                         ),
                     )
                 )

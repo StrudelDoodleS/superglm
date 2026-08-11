@@ -802,3 +802,126 @@ def test_editor_stale_inference_stays_suppressed_after_level_adaptation(
     assert all(row.se is None for row in rows)
     assert all(row.p is None for row in rows)
     assert all(row.ci_low is None and row.ci_high is None for row in rows)
+
+
+# ── Bound level universes (spec 2026-08-11 §3.8) ──────────────────
+
+
+def _pinned_level_model(base: str = "A"):
+    rng = np.random.default_rng(20260811)
+    territory = np.tile(np.asarray(["A", "B", "C"]), 40)
+    X = pd.DataFrame({"territory": territory})
+    means = {"A": 1.0, "B": 1.4, "C": 0.8}
+    y = rng.poisson(np.asarray([means[level] for level in territory])).astype(float)
+    model = SuperGLM(
+        features={"territory": Categorical(base=base, levels=["A", "B", "C", "D"])},
+    )
+    with pytest.warns(UserWarning, match="pinned to base"):
+        model.fit(X, y)
+    return model
+
+
+@pytest.fixture(scope="module")
+def pinned_level_model():
+    return _pinned_level_model()
+
+
+def test_summary_gives_a_pinned_level_its_own_row_marked_pinned(pinned_level_model):
+    # A declared level with no training rows has no coefficient, so nothing in
+    # the canonical rows names it and the level display used to drop it
+    # silently -- the one surface that must not, because the pin is exactly
+    # what the reader has to see.
+    rows = [row for row in pinned_level_model.summary()._display_rows if row.group == "territory"]
+
+    assert [row.name for row in rows] == [
+        "territory[A]",
+        "territory[B]",
+        "territory[C]",
+        "territory[D]",
+    ]
+    pinned = rows[-1]
+    assert pinned.level_fit == "pinned"
+    assert pinned.coef == 0.0
+    assert pinned.is_reference
+    assert pinned.se is None and pinned.p is None
+    # The pin marks the pinned level alone; the base row is a reference for a
+    # different reason and the fitted levels are not pinned at all.
+    assert [row.level_fit for row in rows[:-1]] == [None, None, None]
+
+
+def test_ascii_summary_prints_the_pin_in_the_fit_column(pinned_level_model):
+    text = str(pinned_level_model.summary())
+
+    assert "Fit" in text
+    pinned_line = next(line for line in text.splitlines() if "territory[D]" in line)
+    assert "pinned" in pinned_line
+    assert "0.0000" in pinned_line
+
+
+def test_summary_records_the_bound_universe_and_its_source(pinned_level_model):
+    universes = pinned_level_model.summary()["level_universes"]
+
+    assert universes["territory"] == {
+        "levels": ["A", "B", "C", "D"],
+        "level_source": "declared",
+        "base_level": "A",
+        "base_fallback": None,
+        "pinned_levels": ["D"],
+    }
+
+
+def test_summary_records_a_base_that_fell_back_to_an_observed_level():
+    model = _pinned_level_model(base="D")
+
+    record = model.summary()["level_universes"]["territory"]
+
+    assert record["base_fallback"] == ("D", "A")
+    assert record["base_level"] == "A"
+    assert record["pinned_levels"] == ["D"]
+
+
+def test_model_and_metrics_summaries_record_the_same_universes(pinned_level_model):
+    model = pinned_level_model
+    X = pd.DataFrame({"territory": np.tile(np.asarray(["A", "B", "C"]), 40)})
+    y = np.asarray(model.predict(X), dtype=float)
+
+    metrics_summary = model.metrics(X, y).summary()
+
+    assert metrics_summary["level_universes"] == model.summary()["level_universes"]
+
+
+def test_summary_reports_an_inferred_universe_without_pins(grouped_model_data):
+    model, _, _, _ = grouped_model_data
+
+    record = model.summary()["level_universes"]["territory"]
+
+    assert record["level_source"] == "inferred"
+    assert record["pinned_levels"] == []
+    assert record["base_level"] == "A"
+
+
+def test_summary_marks_a_pinned_ordered_special_as_pinned():
+    # The Fit column already separates "smooth" from "free"; a special that had
+    # no rows is neither -- it is a declared level carrying no contribution,
+    # and reading "free" there claims a fitted coefficient that does not exist.
+    order = ["1", "2", "3", "4", "MISSING"]
+    band = np.tile(np.asarray(order[:4]), 20)
+    X = pd.DataFrame({"band": band})
+    rng = np.random.default_rng(20260811)
+    y = rng.poisson(1.0, size=len(X)).astype(float)
+    model = SuperGLM(
+        features={
+            "band": OrderedCategorical(
+                order=order,
+                specials=["MISSING"],
+                basis=Spline(kind="ps", k=5),
+            )
+        },
+    )
+    with pytest.warns(UserWarning, match="pinned to zero contribution"):
+        model.fit(X, y)
+
+    rows = [row for row in model.summary()._display_rows if row.name.startswith("band[")]
+    assert [row.name for row in rows] == [f"band[{level}]" for level in order]
+    assert [row.level_fit for row in rows] == ["smooth"] * 4 + ["pinned"]
+    assert model.summary()["level_universes"]["band"]["pinned_levels"] == ["MISSING"]
