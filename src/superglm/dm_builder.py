@@ -851,6 +851,7 @@ def build_design_matrix(
     model_discrete: bool,
     n_bins_config: int | dict[str, int],
     lambda2: float | dict,
+    level_bindings: dict | None = None,
 ) -> BuildResult:
     """Build features, groups, and design matrix from specs.
 
@@ -903,6 +904,17 @@ def build_design_matrix(
         if isinstance(spec, OrderedCategorical):
             spec._inner_geometry_physical_rows = geometry_weight is None
         x_col = X.column_array(name)
+        # Universe sources the spec cannot see for itself, in precedence order
+        # (spec 2026-08-11 §3.1): the column's own dtype declaration, then a
+        # caller's full-frame binding. Both hooks decline when the spec already
+        # holds a universe, and terms without a universe never grow the hooks.
+        declared_categories = X.column_declared_categories(name)
+        if declared_categories is not None and hasattr(spec, "adopt_dtype_categories"):
+            spec.adopt_dtype_categories(declared_categories)
+        if level_bindings is not None and hasattr(spec, "apply_level_binding"):
+            binding = level_bindings.get(name)
+            if binding is not None:
+                spec.apply_level_binding(binding)
         spline_geometry_weight = (
             geometry_weight if isinstance(spec, _SplineBase | Piecewise) else sample_weight
         )
