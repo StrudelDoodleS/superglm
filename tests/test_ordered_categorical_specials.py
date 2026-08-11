@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import OrderedCategorical, Spline, SuperGLM
+from superglm.types import GroupInfo
 
 ORDERED = [str(i) for i in range(1, 11)]
 SPECIAL = "MISSING"
@@ -276,12 +277,25 @@ def test_expanded_rows_carry_their_own_rows_basis():
         assert not np.allclose(seen[a], seen[b])
 
 
-def test_declared_special_absent_from_training_data_is_rejected():
+def test_declared_special_absent_from_training_data_is_pinned():
+    # Was a hard error ("never observed") until bound level universes: a declared
+    # special with no rows is Rule 2 (spec §3.2), not a data bug. No indicator
+    # column is emitted -- an all-zero one is the rank-deficiency this used to
+    # refuse -- and with the only special pinned the term is back to its single
+    # spline block. The level stays KNOWN: predict still accepts it and scores it
+    # at zero contribution.
     frame = _fit_frame()
     ordered_only = frame[frame["band"] != SPECIAL]
     spec = _oc()
-    with pytest.raises(ValueError, match="never observed"):
-        spec.build(ordered_only["band"].to_numpy(), ordered_only["exposure"].to_numpy())
+    with pytest.warns(UserWarning, match=f"{SPECIAL}.*zero contribution"):
+        info = spec.build(ordered_only["band"].to_numpy(), ordered_only["exposure"].to_numpy())
+    assert isinstance(info, GroupInfo)
+    assert spec._pinned_specials == [SPECIAL]
+    assert spec._n_special_cols == 0
+    assert SPECIAL in spec._known_levels
+    out = spec.transform(np.array(["1", SPECIAL], dtype=object))
+    assert out.shape == (2, info.columns.shape[1])
+    assert np.allclose(out[1], 0.0)
 
 
 # The construction is only legitimate if [1 | centered spline | indicators] is
@@ -599,19 +613,23 @@ def test_adding_a_special_does_not_move_the_fitted_curve():
         assert rel_b[lev] == pytest.approx(rel_a[lev], rel=2e-2)
 
 
-def test_a_special_carrying_no_weight_is_refused_like_an_absent_one():
-    # False today: the presence check reads the raw boolean mask, so a special
-    # that appears only on zero-weight rows counts as observed. In the weighted
-    # fit its indicator contributes nothing to X'WX, so the unpenalized
-    # coefficient is exactly as unidentifiable as the absent case the branch
-    # immediately above already rejects -- the model just does not say so.
+def test_a_special_carrying_no_weight_is_pinned_like_an_absent_one():
+    # "No training data" means zero rows OR rows carrying no weight (spec §3.2):
+    # a special present only on zero-weight rows contributes nothing to X'WX, so
+    # its unpenalized coefficient is exactly as unidentifiable as the absent
+    # case. One rule covers both, so both pin.
     spec = OrderedCategorical(
         order=["1", "2", "3", "4", "5"], specials=["MISSING"], basis=Spline(kind="ps", k=5)
     )
     x = np.array(["1", "2", "3", "4", "5", "MISSING", "MISSING"], dtype=object)
     weights = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
-    with pytest.raises(ValueError, match="carry no weight"):
-        spec.build(x, weights)
+    with pytest.warns(UserWarning, match="MISSING.*zero contribution"):
+        info = spec.build(x, weights)
+    assert isinstance(info, GroupInfo)
+    assert spec._pinned_specials == ["MISSING"]
+    # The zero-weight rows are still held out of the smooth: a pinned special has
+    # no coordinate on the spline axis, so its rows carry zero in BOTH blocks.
+    assert np.allclose(np.asarray(info.columns.todense())[-2:], 0.0)
 
 
 def test_a_special_with_some_positive_weight_still_builds():
@@ -756,3 +774,126 @@ def test_numerically_equal_specials_spelled_differently_are_rejected():
     spec = OrderedCategorical(order=[1, 2, 3, 8, 9], specials=[8, 9], basis=Spline(kind="ps", k=5))
     assert spec._specials == ["8", "9"]
     assert spec._ordered_levels == [1, 2, 3, 8, 9]
+
+
+# ── Thin specials: pinned, not refused (spec §3.2) ────────────────
+
+
+class TestThinSpecialsPin:
+    """A declared special with no effective rows is pinned to zero contribution."""
+
+    @pytest.fixture
+    def oc_model_factory(self):
+        """Build (model, X, y) with `specials=` declared and `data_specials=` present."""
+
+        def _make(specials, data_specials, n=600, seed=5):
+            rng = np.random.default_rng(seed)
+            band = rng.choice(ORDERED + list(data_specials), size=n).astype(object)
+            position = {lev: i / (len(ORDERED) - 1) for i, lev in enumerate(ORDERED)}
+            log_rel = np.array(
+                [0.6 * (1 - np.exp(-3 * position[b])) if b in position else -0.55 for b in band]
+            )
+            y = rng.poisson(np.exp(np.log(1.5) + log_rel)).astype(float)
+            model = SuperGLM(
+                family="poisson",
+                link="log",
+                features={"band": _oc(specials=list(specials))},
+            )
+            return model, pd.DataFrame({"band": band}), y
+
+        return _make
+
+    def test_declared_special_with_no_rows_pins_not_errors(self, oc_model_factory):
+        model, X, y = oc_model_factory(specials=[SPECIAL, "GHOST"], data_specials=[SPECIAL])
+        with pytest.warns(UserWarning, match=r"GHOST.*zero contribution"):
+            model.fit(X, y)
+        spec = model._specs["band"]
+        assert spec._pinned_specials == ["GHOST"]
+        # The observed special keeps its free column; only the empty one is dropped.
+        assert spec._n_special_cols == 1
+        assert "GHOST" in spec._known_levels
+
+    def test_pinned_special_predicts_zero_contribution(self, oc_model_factory):
+        model, X, y = oc_model_factory(specials=[SPECIAL, "GHOST"], data_specials=[SPECIAL])
+        with pytest.warns(UserWarning):
+            model.fit(X, y)
+        Xg = X.copy()
+        Xg.iloc[0, Xg.columns.get_loc("band")] = "GHOST"
+        mu = model.predict(Xg)
+        assert np.isfinite(mu).all()
+        # Zero contribution, not merely finite: the pinned level's design row is
+        # empty in BOTH blocks, so the term adds nothing to the linear predictor.
+        spec = model._specs["band"]
+        design = np.asarray(spec.transform(np.array(["GHOST", SPECIAL, "1"], dtype=object)))
+        assert np.allclose(design[0], 0.0)
+        assert not np.allclose(design[1], 0.0)
+        assert not np.allclose(design[2], 0.0)
+
+    def test_zero_weight_special_pins(self, oc_model_factory):
+        model, X, y = oc_model_factory(specials=[SPECIAL], data_specials=[SPECIAL])
+        w = np.ones(len(y))
+        w[(X["band"] == SPECIAL).to_numpy()] = 0.0
+        with pytest.warns(UserWarning, match=rf"{SPECIAL}.*zero contribution"):
+            model.fit(X, y, sample_weight=w)
+        assert model._specs["band"]._pinned_specials == [SPECIAL]
+
+    def test_unseen_level_still_errors(self, oc_model_factory):
+        # Rule 1 is untouched: a level outside the declared domain is still a data
+        # bug, and pinning must not turn it into a silent zero.
+        model, X, y = oc_model_factory(specials=[SPECIAL], data_specials=[SPECIAL])
+        model.fit(X, y)
+        Xb = X.copy()
+        Xb.iloc[0, Xb.columns.get_loc("band")] = "NEVER_DECLARED"
+        with pytest.raises(ValueError, match="unseen"):
+            model.predict(Xb)
+
+    def test_pinning_drops_only_the_empty_special_column(self):
+        # Column j of the free block is special j: dropping one must renumber the
+        # survivors, not shift them. The absent special is declared FIRST here, so
+        # an implementation that trims the tail (or leaves the mask full-width)
+        # hands the observed special's rows to the wrong coefficient.
+        frame = _fit_frame()
+        band = frame["band"].to_numpy()
+        spec = _oc(specials=["GHOST", SPECIAL])
+        with pytest.warns(UserWarning, match=r"GHOST.*zero contribution"):
+            _, special_info = spec.build(band, frame["exposure"].to_numpy())
+        assert special_info.n_cols == 1
+        indicator = np.asarray(special_info.columns.todense()).ravel()
+        np.testing.assert_array_equal(indicator == 1.0, band == SPECIAL)
+
+    def test_reconstruct_reports_a_pinned_special_at_zero_effect(self):
+        # The level table still carries every declared level -- the pinned one
+        # reports what the model actually predicts for it: no contribution from
+        # this term, which on the base-anchored scale is -f(base).
+        frame = _fit_frame()
+        spec = _oc(specials=[SPECIAL, "GHOST"])
+        with pytest.warns(UserWarning, match=r"GHOST.*zero contribution"):
+            spline_info, special_info = spec.build(
+                frame["band"].to_numpy(), frame["exposure"].to_numpy()
+            )
+        n_spline = spline_info.columns.shape[1]
+        beta = np.zeros(n_spline + special_info.n_cols)
+        beta[:n_spline] = 0.3
+        beta[-1] = -0.55
+        raw = spec.reconstruct(beta)
+
+        assert raw["levels"] == ORDERED + [SPECIAL, "GHOST"]
+        assert raw["special_levels"] == [SPECIAL, "GHOST"]
+        assert raw["pinned_specials"] == ["GHOST"]
+        base_shift = spec._base_log_effect(beta)
+        assert base_shift != pytest.approx(0.0)
+        assert raw["level_log_relativities"][SPECIAL] == pytest.approx(-0.55 - base_shift)
+        assert raw["level_log_relativities"]["GHOST"] == pytest.approx(-base_shift)
+
+    def test_one_observed_smooth_level_still_builds_when_two_are_declared(self):
+        # The smooth-level minimum counts DECLARED levels (spec §3.2): an empty
+        # smooth position is bridged by the penalty exactly as an empty region of
+        # a numeric spline is, so a fit that happens to see one band still builds.
+        # A declaration with fewer than two smooth levels is still refused, at
+        # construction (test_fewer_than_two_smooth_levels_is_rejected).
+        spec = _oc()
+        x = np.array(["3"] * 20 + [SPECIAL] * 5, dtype=object)
+        spline_info, special_info = spec.build(x, np.ones(len(x)))
+        assert spline_info.n_cols >= 2
+        assert special_info.n_cols == 1
+        assert spec._pinned_specials == []

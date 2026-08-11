@@ -654,6 +654,16 @@ class OrderedCategorical:
         self._base_level: str = ""
         self._non_base: list[str] = []
 
+        # Per-build state for thin specials. A declared special with no effective
+        # training rows is PINNED rather than refused: no indicator column is
+        # emitted (an all-zero one is an unidentifiable coefficient), the level
+        # keeps its identity in `_specials`/`_known_levels`/`_ordered_levels`, and
+        # its rows score at zero contribution. `_active_specials` indexes
+        # `_specials` and is the emitted column order; `_pinned_specials` holds
+        # the display labels of the rest, for reporting.
+        self._pinned_specials: list[Any] = []
+        self._active_specials: list[int] = list(range(len(self._specials)))
+
         # Stamped by the design-matrix builder per build: True under a
         # weighted-EDM family (Tweedie), where hosted Piecewise MODEL geometry
         # (int-mode placement, most_exposed base) must follow physical rows.
@@ -1084,7 +1094,9 @@ class OrderedCategorical:
         penalized spline block first, the unpenalized special-indicator block
         second. Downstream metadata readers select by ``subgroup_type``, but
         the order is part of the contract — ``_split_beta`` and ``transform``
-        both assume it.
+        both assume it. The free block covers the specials that have effective
+        rows in THIS fit; when every declared special is pinned there is no
+        second block and one GroupInfo comes back.
         """
         x = self._canonical(np.asarray(x).ravel())
 
@@ -1154,33 +1166,35 @@ class OrderedCategorical:
             return self._build_inner_info(self._map_to_numeric(x), sample_weight)
 
         special_mask = self._special_mask(x)
+        # The DECLARED mask splits the design, not the active one: a pinned
+        # special has no coordinate on the spline axis either, so its rows must
+        # stay out of the smooth and carry zero in both blocks -- the dense
+        # spelling of the categorical kernel's -1 sink.
         ordered_mask = np.asarray(~special_mask.any(axis=1), dtype=bool)
-        missing = [lev for j, lev in enumerate(self._specials) if not special_mask[:, j].any()]
-        if missing:
-            raise ValueError(
-                f"Special level(s) {missing!r} were never observed in the training data. "
-                "A special with no rows has an all-zero indicator column and an "
-                "unidentifiable coefficient; remove it from specials= or supply data "
-                "containing it."
+        # Effective observation, the same rule as Categorical's zero-count pin:
+        # rows when unweighted, total weight otherwise. Presence alone is not
+        # enough, because it is X'WX that has to see the indicator -- a special
+        # carried only by zero-weight rows contributes nothing to it and its
+        # unpenalized coefficient is exactly as unidentifiable as an absent one.
+        if sample_weight is None:
+            effective = special_mask.sum(axis=0).astype(np.float64)
+        else:
+            effective = np.asarray(sample_weight, dtype=np.float64).ravel() @ special_mask
+        self._active_specials = [j for j in range(len(self._specials)) if effective[j] > 0.0]
+        self._pinned_specials = [
+            self._special_display[j] for j in range(len(self._specials)) if not effective[j] > 0.0
+        ]
+        if self._pinned_specials:
+            warnings.warn(
+                f"OrderedCategorical special level(s) "
+                f"{sorted(self._pinned_specials, key=str)} have no effective training rows "
+                "and are pinned to zero contribution for this fit: no indicator column is "
+                "emitted for them. Each remains a known level, and its rows predict with no "
+                "contribution from this term. Supply rows carrying weight, or drop the "
+                "level from specials=.",
+                UserWarning,
+                stacklevel=2,
             )
-        # Presence is not enough: it is X'WX that has to see the indicator. A
-        # special observed only on zero-weight rows contributes nothing to it, so
-        # its unpenalized coefficient is exactly as unidentifiable as the absent
-        # case above -- the design just does not look empty.
-        if sample_weight is not None:
-            w = np.asarray(sample_weight, dtype=np.float64).ravel()
-            unweighted = [
-                lev
-                for j, lev in enumerate(self._specials)
-                if not float(w[special_mask[:, j]].sum()) > 0.0
-            ]
-            if unweighted:
-                raise ValueError(
-                    f"Special level(s) {unweighted!r} carry no weight in the training data. "
-                    "Their rows are present but all have zero weight, so the indicator "
-                    "contributes nothing to the fit and the coefficient is unidentifiable; "
-                    "remove them from specials= or supply weighted rows."
-                )
 
         # The identifiability constraint is a column sum over the rows present, so
         # the spline must be built on exactly the rows its block is nonzero on.
@@ -1203,10 +1217,16 @@ class OrderedCategorical:
             )
         spline_info = self._expand_rows(spline_info, ordered_mask)
 
-        indicators = sp.csr_matrix(special_mask.astype(np.float64))
+        if not self._active_specials:
+            # Every declared special pinned: there is no free block to emit. A
+            # zero-column GroupInfo would instead put an empty group into every
+            # slice, penalty and selection list downstream, so the term returns
+            # the shape it has without specials -- which is what it now is.
+            return spline_info
+        indicators = sp.csr_matrix(special_mask[:, self._active_specials].astype(np.float64))
         special_info = GroupInfo(
             columns=indicators,
-            n_cols=len(self._specials),
+            n_cols=len(self._active_specials),
             penalty_matrix=None,
             reparametrize=False,
             penalized=False,
@@ -1240,8 +1260,22 @@ class OrderedCategorical:
         return np.column_stack(columns)
 
     @property
+    def _active_special_cols(self) -> list[int]:
+        """Indices into ``_specials`` of the indicator columns this fit emits.
+
+        Read through ``getattr`` because it is per-build state: a spec pickled
+        before thin-special pinning has no such attribute, and one that has never
+        been built has every declared special active.
+        """
+        active = getattr(self, "_active_specials", None)
+        if active is None:
+            return list(range(len(self._specials)))
+        return list(active)
+
+    @property
     def _n_special_cols(self) -> int:
-        return len(self._specials)
+        """Width of the free block AS FITTED -- pinned specials own no column."""
+        return len(self._active_special_cols)
 
     def _split_beta(
         self, beta: NDArray[np.floating]
@@ -1311,13 +1345,16 @@ class OrderedCategorical:
         if not self.has_specials:
             return self._basis_spline.transform(self._map_to_numeric(x))
         special_mask = self._special_mask(x)
+        # Held out of the smooth on the declared mask, given a column only on the
+        # active one: a pinned special's row is zero across the whole term.
         ordered_mask = ~special_mask.any(axis=1)
         spline_cols = np.zeros((len(x), self._spline_n_cols()), dtype=np.float64)
         if ordered_mask.any():
             spline_cols[ordered_mask] = self._basis_spline.transform(
                 self._map_to_numeric(x[ordered_mask])
             )
-        return np.column_stack([spline_cols, special_mask.astype(np.float64)])
+        indicators = special_mask[:, self._active_special_cols].astype(np.float64)
+        return np.column_stack([spline_cols, indicators])
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted ordered-categorical contribution directly on new data."""
@@ -1338,7 +1375,10 @@ class OrderedCategorical:
             return self._basis_spline.score(self._map_to_numeric(x), spline_beta)
         special_mask = self._special_mask(x)
         ordered_mask = ~special_mask.any(axis=1)
-        out = special_mask.astype(np.float64) @ special_beta
+        # A pinned special contributes through neither term of this sum: it has no
+        # column in the mask below and no coordinate on the smooth's axis, so its
+        # rows keep the 0.0 they start at.
+        out = special_mask[:, self._active_special_cols].astype(np.float64) @ special_beta
         if ordered_mask.any():
             out[ordered_mask] = self._basis_spline.score(
                 self._map_to_numeric(x[ordered_mask]), spline_beta
@@ -1387,13 +1427,19 @@ class OrderedCategorical:
         # one, coefficient row names from the other), and re-deriving is how they
         # came to be spelled differently in the first place.
         all_levels = list(self._ordered_levels)
-        all_log_rels = np.concatenate(
-            [level_log_rels, np.asarray(special_beta, dtype=np.float64) - base_shift]
-        )
+        # A pinned special has no coefficient because it had no data, not because
+        # it is unknown, so it reports the zero contribution the model actually
+        # predicts for it -- which on the base-anchored scale is -f(base), just
+        # like a free level fitted at zero. Re-inflating here rather than
+        # shortening `levels` keeps every declared level in the rating table.
+        special_effects = np.zeros(len(self._specials), dtype=np.float64)
+        special_effects[self._active_special_cols] = np.asarray(special_beta, dtype=np.float64)
+        all_log_rels = np.concatenate([level_log_rels, special_effects - base_shift])
 
         raw["base_level"] = self._base_level
         raw["levels"] = all_levels
         raw["special_levels"] = list(self._special_display)
+        raw["pinned_specials"] = list(getattr(self, "_pinned_specials", ()))
         # Keyed on the smooth levels only — a special never receives a coordinate
         # on the spline's axis.
         raw["level_values"] = dict(zip(self._smooth_levels, level_values.tolist()))
