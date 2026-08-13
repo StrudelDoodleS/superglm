@@ -426,21 +426,19 @@ def test_the_dense_ladder_reports_one_edf_per_lambda():
     )
 
 
-def test_the_dense_ladder_two_estimator_gap_is_two_degrees_of_freedom():
-    """Bracket the defect the strict xfail above cannot describe.
+def test_the_dense_ladder_two_estimators_still_disagree_at_one_lambda():
+    """Say the thing the strict xfail above cannot: the defect is still THERE.
 
-    At ``lambda = 106521.06561131448`` the clamped rungs read
-    7.000004364954146 and the searching rung 9.000019310394286, a gap of
-    2.000014945440140 df.  This asserts ``1.5 < gap < 2.5``.
+    A strict xfail is satisfied by any failure, so it cannot distinguish the
+    documented defect from an unrelated one or from a tenfold worsening.  This
+    asserts that the two estimators still differ at one lambda, which is
+    precisely the statement that goes red when #257 is fixed.
 
-    That is a BRACKET, not a tolerance, and the distinction is deliberate.
-    The searching rung comes out of ``?sygv`` at ``cond(G) = 5.58e+12``, where
-    LAPACK's own error bound is the one quoted above and no accuracy statement
-    is available to pin it against; what IS available is that the defect today
-    is two whole degrees of freedom, and both its repair (gap to 0) and its
-    worsening (gap past 2.5) are things this suite should notice.  The width
-    is one quarter of the gap on each side, which is 2500x the first-order floor
-    of the clamped half.
+    It asserts EXISTENCE and not size, and it is named for what it asserts.
+    The size is not portable: the gap is 2.000014945440140 df here (clamped
+    7.000004364954146 against searching 9.000019310394286) and 4.0000 df on
+    CI's Python 3.12, on the same fixture and seed.  1e-3 sits far under both
+    and far over a repaired ladder's 0.
     """
     dense, _ = _both(_band_pair(**_BS8))
     lam = max(r.lambda0 for r in dense)
@@ -599,20 +597,19 @@ def test_the_dense_clamped_rung_matches_the_certified_low_edge_oracle():
     assert got == pytest.approx(_PS8_LO_ORACLE, abs=_PS8_LO_TOL)
 
 
-def test_the_arrow_ladder_low_edge_error_is_half_a_degree_of_freedom():
-    """Bracket the defect its strict xfail below cannot describe.
+def test_the_arrow_ladder_still_disagrees_with_the_dense_path_at_the_low_edge():
+    """Say the thing the strict xfail below cannot: the defect is still THERE.
 
-    The arrow ladder reads 172.37960656016872 at this pair's low edge against a
-    certified 172.90456267038329, so it is 0.52496 df LOW.  This asserts
-    ``0.3 < oracle - arrow < 0.8``, which goes red if the path is repaired and
-    red if it worsens -- neither of which the xfail below can see, since a
-    strict xfail is satisfied by any failure at all.
+    Both paths are read from the SAME assembly and compared to each other, so
+    no cross-environment constant enters.  A repaired arrow path would agree
+    with the dense one to the dense path's own accuracy, ~1e-4 df; the
+    threshold is 1e-3.
 
-    A bracket, not a tolerance: the arrow reading has no derived accuracy bound
-    to be pinned against, and inventing one would be the defect this file
-    documents.  The width is roughly half the error on each side, and it is 53x
-    the point's certified 5.6825e-03 df floor, so reassembling the moments
-    elsewhere cannot move it out.
+    Existence, not size, and not even sign -- CI showed both are properties of
+    the interpreter rather than of the algorithm.  The arrow reading here is
+    172.37960656016872 against a dense 172.90468989250675, 0.525 df LOW; on
+    CI's 3.12 it is 2.780 df low; on CI's 3.14 it is 172.9870 against 172.9045,
+    0.0825 df HIGH.  See the module docstring.
     """
     grab = _band_pair(**_PS8)
     dense, arrow = _both(grab)
@@ -795,15 +792,16 @@ def test_the_two_dense_estimators_agree_where_the_pencil_is_conditioned():
     assert worst < _NS6_LO_TOL, ("dense estimators disagree by", worst)
 
 
-def test_the_arrow_ladder_low_edge_collapses_on_a_full_rank_penalty():
-    """Bracket the worst arrow reading measured anywhere.
+def test_the_arrow_ladder_still_disagrees_on_a_full_rank_penalty():
+    """Say the thing the strict xfail below cannot: the defect is still THERE.
 
     The arrow ladder reads 0.24516151291386734 at this pair's low edge against
-    a certified 30.988667391753435 -- 30.74 df low, on a point whose certified
-    floor is 8.2863e-05 df, where the dense path reads 30.988679169193755
-    (error 1.18e-05).  This asserts ``25 < oracle - arrow < 35``, which the
-    strict xfail below cannot: that one is satisfied by any failure, so a
-    reading of -400 would leave it green.
+    a dense 30.988679169193755 -- 30.74 df low, on a point whose first-order
+    floor is 8.2863e-05 df.  On CI's Python 3.12 the same fixture reads 30.9529,
+    0.036 df low: the collapse does not happen there at all, so the SIZE is one
+    interpreter's.  What holds on every run is that the two paths disagree by
+    more than the dense path's own ~1e-5 df, and that is what this asserts,
+    against the dense reading from the same assembly.
 
     The mechanism is visible in the two halves of the difference:
     ``rank - lambda tr(A^-1 S)`` is 35.00 - 34.75 where the exact split is
@@ -812,10 +810,8 @@ def test_the_arrow_ladder_low_edge_collapses_on_a_full_rank_penalty():
     4.011319142520 (arb, radius 2.0e-183).
 
     It is not an edf-only defect.  ``z = (T - edf0) / sqrt(2 edf0)`` divides by
-    the edf, so the same pair is ranked at z = 0.13 by the dense path and
-    z = 35.42 by the arrow path at a budget of 2, and at 35.4 against -1.65 at
-    a budget of 16 -- the arrow reading puts a pair that ranks at the bottom of
-    the table at the very top of it.
+    the edf, so on THIS interpreter the same pair is ranked at z = 0.13 by the
+    dense path and z = 35.42 by the arrow path at a budget of 2.
     """
     grab = _band_pair(**_NS6)
     dense, arrow = _both(grab)
@@ -843,7 +839,7 @@ def test_the_arrow_ladder_low_edge_survives_a_full_rank_penalty():
     dense path already reads it to 1.18e-05 df, inside the new bound by 85x.
 
     The magnitude of today's failure is bracketed by
-    ``test_the_arrow_ladder_low_edge_collapses_on_a_full_rank_penalty``.
+    ``test_the_arrow_ladder_still_disagrees_on_a_full_rank_penalty``.
     """
     _, arrow = _both(_band_pair(**_NS6))
     assert arrow is not None
