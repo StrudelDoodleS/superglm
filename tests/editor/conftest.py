@@ -13,6 +13,14 @@ from superglm.editor import EditorSession
 
 @pytest.fixture(scope="session")
 def editor_browser_model() -> SuperGLM:
+    """The model behind every browser editor page.
+
+    Poisson on a log link, not gaussian: one of these tests drives the export
+    dialog, and the rating-table export it reaches is multiplicative -- base
+    times one relativity per block -- so it accepts log-link models only.  The
+    same signal is carried through ``exp`` into a count, so the terms, the
+    level labels and the shape of every curve the page draws are unchanged.
+    """
     rng = np.random.default_rng(20260711)
     territory_levels = [f"T{i:02d}" for i in range(1, 11)]
     age_band_levels = ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
@@ -33,13 +41,13 @@ def editor_browser_model() -> SuperGLM:
     territory = rng.choice(territory_levels, n)
     age_band = rng.choice(age_band_levels, n)
     long_category = rng.choice(long_levels, n)
-    y = (
+    eta = (
         0.5
         + 0.12 * np.sin(curve)
         + 0.03 * np.array([territory_levels.index(value) for value in territory])
         + 0.08 * np.array([age_band_levels.index(value) for value in age_band])
-        + rng.normal(0.0, 0.04, n)
     )
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
     frame = pd.DataFrame(
         {
             "curve": curve,
@@ -49,7 +57,7 @@ def editor_browser_model() -> SuperGLM:
         }
     )
     model = SuperGLM(
-        family="gaussian",
+        family="poisson",
         selection_penalty=0.0,
         spline_penalty=0.1,
         features={
