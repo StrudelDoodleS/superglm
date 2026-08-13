@@ -1,20 +1,29 @@
 """The exported rating table has to reproduce the model it was exported from.
 
 The workbook's contract is multiplicative: ``base_relativity`` times one
-relativity per main-effect block reproduces ``model.predict`` row by row.  That
-is what a filed tariff *is*, so it is pinned here directly -- the consumer below
-reads only what a workbook carries (level labels, knots, log relativities, bin
-interval strings, a per-unit relativity) and never consults the fitted spec.
+relativity per main-effect block, times one per interaction block, reproduces
+``model.predict`` row by row.  That is what a filed tariff *is*, so it is pinned
+here directly -- the consumer below reads only what a workbook carries (level
+labels, knots, log relativities, bin interval strings, a per-unit relativity,
+interaction cells) and never consults the fitted spec.
 
-Two claims are separated on purpose, because only one of them can be exact:
+Three claims are separated on purpose, because only the first can be exact:
 
-* **Exactly tabulable terms** -- ``Categorical``, ``OrderedCategorical``,
-  ``Numeric``, ``Piecewise`` -- reproduce ``model.predict`` to round-off.
-* **Binned terms** -- ``Spline`` and ``Polynomial`` -- are exported through the
+* **Exactly tabulable blocks** -- ``Categorical``, ``OrderedCategorical``,
+  ``Numeric``, ``Piecewise``, and the categorical-by-categorical interaction --
+  reproduce ``model.predict`` to round-off.
+* **Binned blocks** -- ``Spline`` and ``Polynomial`` -- are exported through the
   discretisation path, so they carry the binning error the impact sheet exists
-  to report.  For them the exactness claim is centering INVARIANCE: the
+  to report.  Two things are asserted of them.  Centering INVARIANCE: the
   reconstructed prediction may not equal ``model.predict``, but it must not
-  depend on which reporting centering was asked for.
+  depend on which reporting centering was asked for.  And ABSENCE OF BIAS: the
+  binning error is spread, not scale, so the exposure-weighted mean log ratio
+  must stay inside a bound derived from the bin geometry.  The second exists
+  because the first cannot see a constant dropped from the binned path -- both
+  centerings drop it, so the comparison cancels.
+* **The base relativity** is neither: it is the one number with no tolerable
+  approximation, so an unrepresentable one has to stop the export rather than
+  ship as ``inf`` or ``0.0``.
 
 ``centering="mean"`` is swept beside the default everywhere, because that is
 the mode that was wrong: ``_recenter_term`` subtracted a per-term constant that
@@ -25,6 +34,7 @@ prediction by a uniform factor that no ratio-based spot check can see.
 from __future__ import annotations
 
 import re
+from functools import cache
 
 import numpy as np
 import pandas as pd
@@ -38,7 +48,11 @@ from superglm import (
     Spline,
     SuperGLM,
 )
-from superglm.export.rating_tables import build_rating_table_payload
+from superglm.export import rating_tables
+from superglm.export.rating_tables import (
+    RatingTableBaseNotRepresentableError,
+    build_rating_table_payload,
+)
 from superglm.features.grouping import collapse_levels
 from superglm.features.piecewise import Piecewise
 
@@ -115,17 +129,85 @@ def _every_term_type_features() -> dict:
     return features
 
 
-_FITTED: dict[str, SuperGLM] = {}
+_SEGMENT_LEVELS = ["s1", "s2", "s3"]
 
 
+def _interaction_frame(
+    n: int = 1200, seed: int = 20260813
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """A frame for the interaction fixture, kept separate from ``_frame``.
+
+    Its own columns and its own response, so that adding an interaction cannot
+    move the fitted values the exactness and shift-accounting tests above pin.
+    Both interacting columns are plain ``Categorical``: that is the pair the
+    export tabulates as a full cell table, and the grouped ``territory`` of the
+    main fixture is deliberately not used, because the exported interaction
+    table is keyed on GROUPED levels while its main-effect block is keyed on the
+    original ones, and the grouping map is not in the workbook.
+    """
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(
+        {
+            "region": rng.choice(["A", "B", "C"], n),
+            "segment": rng.choice(_SEGMENT_LEVELS, n),
+            "density": rng.uniform(0.0, 1.0, n),
+            "x": rng.uniform(0.0, 10.0, n),
+        }
+    )
+    region = X["region"].to_numpy()
+    segment = X["segment"].to_numpy()
+    eta = (
+        -1.2
+        + 0.25 * (region == "B")
+        + 0.45 * (region == "C")
+        + 0.30 * (segment == "s2")
+        + 0.55 * (segment == "s3")
+        # The interaction proper: a cell that is not the sum of its margins.
+        + 0.40 * ((region == "C") & (segment == "s3"))
+        + 0.20 * X["density"].to_numpy()
+        + 0.03 * X["x"].to_numpy()
+    )
+    sample_weight = rng.uniform(0.5, 2.0, n)
+    y = rng.poisson(np.exp(eta) * sample_weight).astype(np.float64)
+    return X, y, sample_weight
+
+
+def _interaction_features() -> dict:
+    """Centered main effects beside the interaction, so both paths are live."""
+    return {
+        "region": Categorical(base="first"),
+        "segment": Categorical(base="first"),
+        "density": Numeric(),
+        "x": Piecewise(breaks=[2.5, 5.0, 7.5], base=5.0),
+    }
+
+
+@cache
 def _fit(kind: str) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
-    X, y, sample_weight = _frame()
-    if kind not in _FITTED:
+    """Fit once per model shape; every test here reads the fit, none mutates it.
+
+    ``"exact"`` carries only exactly tabulable terms, ``"all"`` adds the binned
+    ``Spline`` and ``Polynomial``, and ``"interaction"`` puts a
+    categorical-by-categorical interaction beside centered main effects -- the
+    one interaction kind the export tabulates as a full cell table, and so the
+    only one for which the payload's product claim can be exact.
+    """
+    if kind == "interaction":
+        X, y, sample_weight = _interaction_frame()
+        features: dict = _interaction_features()
+        interactions: list[tuple[str, str]] | None = [("region", "segment")]
+    else:
+        X, y, sample_weight = _frame()
         features = _exactly_tabulable_features() if kind == "exact" else _every_term_type_features()
-        model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
-        model.fit(X, y, sample_weight=sample_weight)
-        _FITTED[kind] = model
-    return _FITTED[kind], X, y, sample_weight
+        interactions = None
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features=features,
+        interactions=interactions,
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    return model, X, y, sample_weight
 
 
 def _payload(model, X, y, sample_weight, centering: str):
@@ -175,10 +257,38 @@ def _block_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     raise AssertionError(f"unhandled exported block kind {block.kind!r}")
 
 
-def _predict_from_payload(payload, X: pd.DataFrame) -> np.ndarray:
+def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
+    """The per-row factor one exported interaction cell table implies.
+
+    Read the same way a consumer reads it off the sheet: the first column
+    carries the row key and is named for the first parent, every remaining
+    column header is a level of the second parent, and the cell is the factor.
+    The second parent's name comes from the block name, which is the only place
+    the sheet records it.
+    """
+    table = block.table
+    parent1 = str(table.columns[0])
+    parent2 = block.name.split(":")[1]
+    assert parent2 in X.columns, f"{block.name!r} names a column the frame does not have"
+    levels2 = [str(column) for column in table.columns[1:]]
+    cells = {
+        (str(row[parent1]), level2): float(row[level2])
+        for _, row in table.iterrows()
+        for level2 in levels2
+    }
+    return np.array(
+        [cells[(str(a), str(b))] for a, b in zip(X[parent1], X[parent2])],
+        dtype=np.float64,
+    )
+
+
+def _predict_from_payload(payload, X: pd.DataFrame, *, with_interactions: bool = True):
     reconstructed = np.full(len(X), float(payload.base_relativity), dtype=np.float64)
     for block in payload.main_effects:
         reconstructed = reconstructed * _block_multiplier(block, X)
+    if with_interactions:
+        for block in payload.interactions:
+            reconstructed = reconstructed * _interaction_multiplier(block, X)
     return reconstructed
 
 
@@ -317,3 +427,285 @@ def test_an_offset_model_reconstructs_from_the_offset_lookup_and_the_blocks(cent
         rtol=_RECONSTRUCTION_RTOL,
         atol=0.0,
     )
+
+
+# ── The interaction half of the payload's product claim ────────────────────
+#
+# ``build_rating_table_payload``'s docstring states a contract over the
+# interaction blocks as well as the main-effect ones.  Nothing pinned it: the
+# reconstruction above multiplied main effects only, so an interaction block
+# could have been empty, transposed, or keyed on the wrong parent and every
+# equivalence test would still have passed.
+
+
+@pytest.mark.parametrize("centering", _CENTERINGS)
+def test_the_workbook_with_an_interaction_reproduces_the_predictions(centering):
+    """A categorical-by-categorical interaction is a full cell table, so exact."""
+    assert _RECONSTRUCTION_RTOL <= 1e-12
+
+    model, X, y, sample_weight = _fit("interaction")
+    payload = _payload(model, X, y, sample_weight, centering)
+    assert [block.name for block in payload.interactions] == ["region:segment"]
+
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, X),
+        model.predict(X),
+        rtol=_RECONSTRUCTION_RTOL,
+        atol=0.0,
+    )
+
+
+def test_the_interaction_factor_is_load_bearing_not_decorative():
+    """The exactness above has to be earned by the interaction block.
+
+    An interaction whose cells were all 1.0 -- or one dropped from the product
+    -- would leave the test above asserting only that the main effects are
+    right.  This fixes how far the reconstruction moves without it, so the
+    exactness claim is a discriminating measurement.
+    """
+    model, X, y, sample_weight = _fit("interaction")
+    payload = _payload(model, X, y, sample_weight, "mean")
+
+    without = _predict_from_payload(payload, X, with_interactions=False)
+    relative = np.abs(without - model.predict(X)) / model.predict(X)
+    assert relative.max() > 0.05
+
+    cells = np.concatenate(
+        [
+            block.table.iloc[:, 1:].to_numpy(dtype=np.float64).ravel()
+            for block in payload.interactions
+        ]
+    )
+    assert np.abs(np.log(cells)).max() > 0.05
+
+
+def test_an_interaction_block_carries_no_centering_shift_of_its_own():
+    """Interactions are reconstructed from beta and never recentered.
+
+    ``_total_centering_shift`` sums over the MAIN-EFFECT blocks only.  That is
+    correct exactly because the interaction path removes no constant, and the
+    two exports' interaction cells being bit-identical is what says so -- if an
+    interaction were ever centered, its constant would have to join the total
+    and the base would be wrong by it.
+    """
+    model, X, y, sample_weight = _fit("interaction")
+    native = _payload(model, X, y, sample_weight, "native")
+    mean = _payload(model, X, y, sample_weight, "mean")
+
+    for block_native, block_mean in zip(native.interactions, mean.interactions):
+        np.testing.assert_array_equal(
+            block_mean.table.iloc[:, 1:].to_numpy(dtype=np.float64),
+            block_native.table.iloc[:, 1:].to_numpy(dtype=np.float64),
+        )
+    # ...while the main effects beside them genuinely were shifted, so the
+    # equality above is a constraint rather than an observation about a model
+    # in which nothing moved at all.
+    transferred = np.log(mean.base_relativity) - np.log(native.base_relativity)
+    assert abs(transferred) > 0.01
+
+
+# ── The binned path's ABSOLUTE accuracy ────────────────────────────────────
+
+
+def _rebinning_bias_bound(payload, X: pd.DataFrame, sample_weight: np.ndarray) -> float:
+    """A worst-case bound on the exposure-weighted log bias of the binned blocks.
+
+    Derived, not observed.  ``discretize`` sets each bin's log relativity to the
+    exposure-weighted MEAN of the smooth log relativity over the rows in that
+    bin, so within a bin the weighted residual sums to zero identically, and
+    therefore so does the weighted mean residual over the whole column.  The
+    binning error is spread, not bias: it cannot move the exposure-weighted
+    geometric mean of the reconstruction at all.
+
+    One thing breaks that identity, and only one: a row that the workbook bins
+    differently from ``discretize``.  The block prints its edges through
+    ``_format_interval`` at ``.10g``, so a printed edge is within 5e-10
+    relative of the exact one and any row inside that band can land one bin to
+    either side.  A displaced row contributes at most its own weight share
+    times the step between neighbouring bins, so summing
+
+        (weight share of rows within the printing band of an edge)
+        x (largest step between neighbouring log relativities)
+
+    over the binned blocks bounds the bias from above.  Every input is read
+    from the payload, the frame and the weights -- nothing is fitted to what
+    the reconstruction happens to produce.
+    """
+    total = 0.0
+    for block in payload.main_effects:
+        if block.kind != "continuous":
+            continue
+        bounds = [_INTERVAL.match(str(label)) for label in block.table[block.name]]
+        assert all(bound is not None for bound in bounds)
+        edges = np.array(
+            [float(bound.group(1)) for bound in bounds] + [float(bounds[-1].group(2))],
+            dtype=np.float64,
+        )
+        log_relativity = np.log(block.table["Relativity"].to_numpy(dtype=np.float64))
+        step = float(np.max(np.abs(np.diff(log_relativity))))
+
+        values = X[block.name].to_numpy(dtype=np.float64)
+        # ``.10g`` keeps ten significant digits, so the printed edge is within
+        # half a unit in the tenth: 5e-10 relative, floored at absolute for
+        # edges near zero.
+        band = 5e-10 * np.maximum(np.abs(edges), 1.0)
+        displaceable = np.zeros(len(values), dtype=bool)
+        for edge, half_width in zip(edges, band):
+            displaceable |= np.abs(values - edge) <= half_width
+        share = float(sample_weight[displaceable].sum() / sample_weight.sum())
+        total += share * step
+    return total
+
+
+def test_the_binned_reconstruction_carries_no_uniform_scale_error():
+    """Binned blocks cannot be exact, but they must not be BIASED.
+
+    The centering-invariance test beside this one compares the two centerings
+    against each other, so a constant dropped from the binned path -- the exact
+    shape of issue #253, on the one path this fix does not route through
+    ``centering_shift`` -- cancels and passes.  The exact fixture never reaches
+    that path at all.  This is the assertion that closes the gap: a dropped or
+    doubled constant multiplies every reconstructed prediction by ``exp(c)``
+    and moves the exposure-weighted mean log ratio by exactly ``c``, while the
+    binning error itself cannot move it at all.
+
+    The tolerance is the derived re-binning bound, not the observed residual.
+    On this fixture it is 8.1e-02 against a measured bias of 5.9e-04, and the
+    smallest constant this export actually transfers is the 0.5 the
+    shift-accounting test below fixes -- six times the bound.  So the check
+    bites on a real regression and is not sized to the headroom it happens to
+    have.  It does NOT catch a scale error smaller than the bound; that is what
+    the exactly tabulable sweep is for, on the paths where exactness is
+    available.
+    """
+    model, X, y, sample_weight = _fit("all")
+    predicted = model.predict(X)
+
+    for centering in _CENTERINGS:
+        payload = _payload(model, X, y, sample_weight, centering)
+        reconstructed = _predict_from_payload(payload, X)
+        bias = float(np.average(np.log(reconstructed) - np.log(predicted), weights=sample_weight))
+        bound = _rebinning_bias_bound(payload, X, sample_weight)
+        assert bound < 0.1, f"{centering}: bound {bound} is too loose to discriminate"
+        assert abs(bias) <= bound, f"{centering}: bias {bias} exceeds derived bound {bound}"
+
+
+# ── The other mean centering ───────────────────────────────────────────────
+
+
+def test_the_two_mean_centerings_disagree_on_an_ordered_categorical():
+    """``relativities(centering="mean")`` is a SECOND implementation, and differs.
+
+    ``term_inference`` centers through ``_recenter_term``, which never reaches
+    an ``OrderedCategorical``; ``relativities`` centers through
+    ``_term_model_ops._center_df``, which does, and records no shift while
+    doing it.  Nothing in the export consumes the second one today, which is
+    why this PR could fix the first alone.  It is pinned rather than
+    reconciled because reconciling it moves values other tests fix, and the
+    reader who next wires ``centering_shift`` into the plot-data path needs
+    the divergence measured rather than discovered.
+    """
+    model, X, y, sample_weight = _fit("exact")
+    native = model.relativities(centering="native")
+    centered = model.relativities(centering="mean")
+
+    def _frame_shift(name: str) -> float:
+        removed = np.asarray(native[name]["log_relativity"], dtype=np.float64) - np.asarray(
+            centered[name]["log_relativity"], dtype=np.float64
+        )
+        assert np.ptp(removed) < 1e-12, f"{name}: relativities() shift is not a constant"
+        return float(removed[0])
+
+    # The OrderedCategorical: one path shifts it, the other does not.
+    assert model.term_inference("band", centering="mean").centering_shift == 0.0
+    assert abs(_frame_shift("band")) > 0.01
+
+    # Every other term type agrees exactly, so the disagreement above is
+    # specific to the OrderedCategorical branch and not a general drift
+    # between two independently written centerings.
+    for name in ("region", "territory", "x"):
+        assert _frame_shift(name) == pytest.approx(
+            model.term_inference(name, centering="mean").centering_shift, abs=1e-12
+        )
+
+
+# ── The base relativity is the one number with no tolerable approximation ──
+
+
+def test_an_unrepresentable_base_relativity_stops_the_export(monkeypatch):
+    """A base that leaves float64 range must raise, not ship as ``inf``.
+
+    Every relativity the centering constant came OUT of goes through
+    ``_safe_exp``, which clips at +/- 500.  The base is the sum of the
+    ordered-reference intercept and everything the blocks gave back, so it
+    reaches further than any single term, and clipping it would emit a
+    complete-looking workbook that rates every risk by a factor of
+    ``exp(clip)`` off the model -- the same silent uniform error as issue #253,
+    reintroduced at the one cell that multiplies the whole tariff.
+
+    The intercept is substituted rather than fitted: reaching 709 by fitting
+    would need a response near ``e**709``, so the only honest way to exercise
+    the guard is to hand it the argument directly.
+    """
+    model, X, y, sample_weight = _fit("exact")
+
+    for intercept in (800.0, -800.0):
+        monkeypatch.setattr(
+            rating_tables,
+            "ordered_reference_intercept",
+            lambda *args, intercept=intercept, **kwargs: intercept,
+        )
+        # Not merely non-finite: the negative tail flushes to exactly 0.0, which
+        # is just as unusable and just as quiet, because every RATIO in the
+        # workbook still reads correctly.
+        with np.errstate(over="ignore", under="ignore"):
+            assert np.exp(intercept) in (np.inf, 0.0)
+        with pytest.raises(RatingTableBaseNotRepresentableError, match="base relativity"):
+            _payload(model, X, y, sample_weight, "mean")
+
+
+def test_a_representable_base_is_left_exactly_alone():
+    """The guard rejects; it never repairs, rounds or clips a usable base."""
+    model, X, y, sample_weight = _fit("exact")
+    payload = _payload(model, X, y, sample_weight, "mean")
+    expected = float(
+        np.exp(
+            rating_tables.ordered_reference_intercept(
+                model.result.intercept,
+                model.result.beta,
+                model._feature_order,
+                model._specs,
+                model._groups,
+            )
+            + rating_tables._total_centering_shift(payload.main_effects)
+        )
+    )
+    assert payload.base_relativity == expected
+
+
+# ── ``centering=`` is validated where it is accepted ───────────────────────
+
+
+def test_an_unknown_centering_is_rejected_even_with_no_centerable_term():
+    """The check has to live at the export boundary, not in a term builder.
+
+    ``_main_effect_inference`` validates ``centering``, but a model whose every
+    term is a ``Spline`` or ``Polynomial`` never calls it -- those blocks come
+    from the discretisation path -- so such a model used to accept
+    ``centering="Mean"`` and quietly export native values under a name the
+    caller believed meant something else.
+    """
+    X, y, sample_weight = _frame()
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=8), "score": Polynomial(degree=3)},
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    assert all(
+        block.kind == "continuous"
+        for block in _payload(model, X, y, sample_weight, "native").main_effects
+    )
+
+    with pytest.raises(ValueError, match="centering must be one of"):
+        _payload(model, X, y, sample_weight, "Mean")

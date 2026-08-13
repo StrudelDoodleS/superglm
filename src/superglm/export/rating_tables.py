@@ -20,11 +20,24 @@ from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.inference._ordered_reference import ordered_reference_intercept
+from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import TermInference
 from superglm.links import LogLink
 
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
+
+
+class RatingTableBaseNotRepresentableError(OverflowError):
+    """The exported base relativity is not a usable multiplier.
+
+    ``base_relativity`` multiplies every row of the tariff, so it is the one
+    exported number that has no tolerable approximation: clipping it the way
+    ``_safe_exp`` clips a confidence bound would hand back a workbook that
+    silently rates every risk wrong, which is precisely the failure issue #253
+    was.  A base that overflows to ``inf`` or underflows to ``0.0`` therefore
+    stops the export instead of being repaired.
+    """
 
 
 @dataclass(frozen=True)
@@ -590,6 +603,42 @@ def _total_centering_shift(blocks: list[RatingTableBlock]) -> float:
     return float(sum(block.centering_shift for block in blocks))
 
 
+def _base_relativity(log_base: float) -> float:
+    """``exp`` of the exported base, refusing a result that cannot be applied.
+
+    Every relativity the centering constant came out of goes through
+    ``_safe_exp``, which clips its argument to +/- 500 so a quasi-separated
+    level yields a large finite confidence bound instead of ``inf``.  That is
+    the right discipline for a bound and the wrong one here.  This number is a
+    MULTIPLIER on every row of the tariff, and the argument it exponentiates is
+    now a sum -- the ordered-reference intercept plus the total the blocks
+    subtracted -- so it reaches further from zero than any single term does.
+    Clipping it would return a workbook that looks complete and rates every
+    risk by a factor of ``exp(clip)`` off the model, which is exactly the
+    silent uniform error issue #253 was about; clipping is therefore refused in
+    favour of failing at the export boundary.
+
+    Both tails are rejected.  ``exp`` overflows to ``inf`` above about 709.78
+    and flushes to exactly ``0.0`` below about -745.13, and a base of ``0.0``
+    is no more usable than an infinite one: it drives every exported premium to
+    zero while every relativity RATIO in the workbook still reads correctly.
+    """
+    # The overflow is the condition being tested for, so it is detected from
+    # the result rather than announced as a warning on the way to the raise.
+    with np.errstate(over="ignore", under="ignore"):
+        base = float(np.exp(log_base))
+    if not np.isfinite(base) or base <= 0.0:
+        raise RatingTableBaseNotRepresentableError(
+            f"Exported base relativity is exp({log_base!r}) = {base!r}, which cannot "
+            "multiply a rating table. The base is the ordered-reference intercept plus "
+            "the centering constant the exported blocks gave back; a fit whose sum "
+            "leaves float64 range (roughly [-745, 709]) is quasi-separated or "
+            "mis-scaled, and the export refuses rather than emit a clipped multiplier "
+            "that would silently mis-rate every row."
+        )
+    return base
+
+
 def _empty_impact_frame() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
@@ -666,12 +715,38 @@ def build_rating_table_payload(
     """Build the renderer-independent rating-table payload.
 
     The payload's contract is multiplicative and per row:
-    ``base_relativity`` times one relativity per main-effect block (times the
-    interaction blocks) reproduces ``model.predict``.  It is exact for the
-    exactly tabulable term types -- ``Categorical``, ``OrderedCategorical``,
-    ``Numeric``, ``Piecewise`` -- and carries the reported discretisation error
-    for ``Spline`` and ``Polynomial``, whose blocks are the binned curves the
-    ``discretization_impact`` sheet quantifies.
+    ``base_relativity`` times one relativity per main-effect block, times one
+    per interaction block, reproduces ``model.predict``.
+
+    Exact to round-off for the exactly tabulable blocks -- ``Categorical``,
+    ``OrderedCategorical``, ``Numeric``, ``Piecewise``, and the
+    categorical-by-categorical interaction, which is a full cell table.
+    Measured on the equivalence fixtures: 5.0e-16 maximum relative error with
+    an interaction present, against 4.2e-01 if its block is left out of the
+    product, so the interaction factor is load-bearing rather than decorative.
+
+    Lossy, by construction, for the binned blocks -- ``Spline``,
+    ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
+    distinct errors ride on those, and only the first is reported:
+
+    * The binning itself, which the ``discretization_impact`` sheet quantifies.
+      It is bias-free in the exposure-weighted mean: each bin's relativity is
+      the exposure-weighted mean of the smooth log-relativity over the rows in
+      it, so the weighted mean residual is zero by construction.
+    * Interval-string rounding, which the impact sheet does NOT see.  The
+      impact sweep bins on the exact ``edges`` array while the exported block
+      prints its bin boundaries through ``_format_interval`` at ``.10g``, so a
+      consumer applying the printed strings re-bins the rows that sit within
+      the rounding band of an edge -- and with ``bin_strategy=
+      "exposure_quantile"`` the edges ARE data values, so a row sitting exactly
+      on one flips whenever its printed edge rounds up.  Measured on the
+      equivalence fixture (900 rows, 150 bins, two continuous terms): 302 of
+      302 printed edges differ from exact by up to 4.99e-09, 133 of 900 rows
+      (14.8%) land in a different bin, and the reconstruction carries 2.29e-01
+      maximum relative error against the discretised predictions the blocks are
+      meant to reproduce exactly -- 6.94e-16 with the exact edges.  Tracked
+      separately as issue #278; fixing it changes a public column of the
+      payload, not the centering this function fixed.
 
     ``centering`` is a presentation choice and does not change what the
     payload rates.  ``"native"`` reports each term under the model's own
@@ -689,9 +764,24 @@ def build_rating_table_payload(
     blocks that were shifted contribute to the transferred constant, which is
     why it is summed from the shift each block recorded rather than assumed to
     run over every exported term.
+
+    Raises
+    ------
+    ValueError
+        If ``centering`` is not one of ``("native", "mean")``.
+    RatingTableBaseNotRepresentableError
+        If the exported base relativity overflows or underflows float64.
     """
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
+    # Validated here rather than left to the first term that happens to consult
+    # it.  ``_main_effect_inference`` is the only thing that checks ``centering``
+    # today, and a model whose every term is a ``Spline`` or ``Polynomial``
+    # never calls it -- the binned blocks come from the discretisation path --
+    # so such a model used to accept ``centering="Mean"`` and silently export
+    # native values under a name the caller believed meant something else.
+    if centering not in _VALID_CENTERING:
+        raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     _preflight_rating_table_terms(model)
 
     native_X = X
@@ -778,8 +868,8 @@ def build_rating_table_payload(
         features=continuous,
     )
     return RatingTablePayload(
-        base_relativity=float(
-            np.exp(
+        base_relativity=_base_relativity(
+            float(
                 ordered_reference_intercept(
                     model.result.intercept,
                     model.result.beta,
@@ -787,8 +877,8 @@ def build_rating_table_payload(
                     model._specs,
                     model._groups,
                 )
-                + _total_centering_shift(main_effects)
             )
+            + _total_centering_shift(main_effects)
         ),
         selected_n_bins=int(n_bins),
         main_effects=main_effects,
@@ -821,6 +911,15 @@ def export_rating_tables(
     impact_sheet_name: str = "Discretization Impact",
     centering: str = "native",
 ) -> Path:
+    """Render the rating-table payload to a workbook and return the path.
+
+    A thin renderer over :func:`build_rating_table_payload`, which is where the
+    payload's contract lives: what the exported product reproduces, which term
+    types are exact and which are binned, what ``centering=`` does and does not
+    change, and which errors the export raises.  Read that docstring before
+    relying on an exported workbook; this function adds only the file format,
+    the sheet names, and the extra rounding a renderer imposes.
+    """
     out = Path(file_path)
     fmt = _resolve_format(out, format)
     if fmt != "excel":
