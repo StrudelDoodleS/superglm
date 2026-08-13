@@ -45,10 +45,16 @@ instead, or record the question as unmeasured and move on.
 
 ## The instrument
 
-`tests/_linalg_cost.py` records every `numpy.linalg` and `scipy.linalg` call
-made inside a block, with operand shapes and dtypes, plus the `tracemalloc`
-peak. It is deterministic: the log is a function of the code path taken, not of
-how busy the machine is.
+`tests/_linalg_cost.py` records calls to a **fixed registry** of `numpy.linalg`
+and `scipy.linalg` entry points made inside a block, with operand shapes and
+dtypes, plus the `tracemalloc` peak. It is deterministic: the log is a function
+of the code path taken, not of how busy the machine is.
+
+The registry is a list, not the whole namespace — an unregistered routine
+produces no entry at all, and a complexity assertion built on the log would
+pass while that work stayed invisible. `NUMPY_ROUTINES` and `SCIPY_ROUTINES`
+are the boundary, and `test_the_registry_covers_every_routine_superglm_calls`
+scans `src/superglm` to keep them ahead of what this package actually calls.
 
 ```python
 from ._linalg_cost import assert_grows_linearly, record_linalg_calls
@@ -84,22 +90,29 @@ statements decidable from a call log.
 Worked example, from `tests/test_screening_cost_scaling.py` on the screening
 `edf` ladder with rows and spline width held fixed:
 
-| levels | elementary factorizations | peak | widest core dimension |
+| levels | elementary factorizations | largest array | widest core dimension |
 |---:|---:|---:|---:|
-| 64 | 7,231 | ~370 KiB | 40 |
-| 128 | 14,719 | ~645 KiB | 40 |
-| 256 | 30,207 | ~1,275 KiB | 40 |
-| 512 | 57,855 | ~2,530 KiB | 40 |
+| 64 | 7,231 | 12,800 | 40 |
+| 128 | 14,719 | 25,600 | 40 |
+| 256 | 30,207 | 51,200 | 40 |
+| 512 | 57,855 | 102,400 | 40 |
 
-Eight times the levels, eight times the work and the bytes, and not one
-operand any larger. Densifying the arrow kernel — the implementation this path
-replaces — moves the widest core dimension to 378, 762, 1,530 and 3,066, and
-multiplies the peak by 3.76 per doubling against the 2.0 a linear path shows.
+Eight times the levels, eight times the work, eight times the largest array,
+and no matrix any larger — the arrays that grow do so in their *batch* axis,
+which is the algorithm factoring more small blocks rather than one bigger one.
+Peak allocation grows sub-linearly over the same span, between 5x and 7x
+depending on the run. Densifying the arrow kernel — the implementation this
+path replaces — moves the widest core dimension to 378, 762, 1,530 and 3,066,
+and multiplies the peak by 3.76 per doubling against the 2.0 a linear path
+shows.
 
 **Counts repeat exactly.** The four factorization figures above were taken once
-on an idle machine and again at load 15, and were identical to the digit. The
-traced peak moved by about 1% between those runs, because it picks up
-incidental Python object churn along with the arrays.
+on an idle machine and again at load 15, and were identical to the digit — as
+are the largest-array figures, which are pure geometry. The traced peak is the
+one column that does not: it picks up incidental Python object churn, including
+the recorder's own call log, and has been seen to move by half between runs.
+Quote it as an order of magnitude, assert it only as a growth bound, and put
+the weight of any claim on the two exact columns.
 
 Exactly reproducible is not the same as constant in the size, though, and the
 distinction decides how tightly each channel can be asserted. The ladder
@@ -126,13 +139,25 @@ the first merged away, doubling at `2 + 1/(L-1)`.
 | Did we stop batching and start looping? | number of calls, at fixed work | Elementary count and shapes both survive that change; only the call count moves. |
 | Is this fast enough in seconds? | the clock, on a quiet machine | Nothing else answers an absolute wall-time question. |
 
-**Two blind spots, both real.** Matrix multiplication is a bytecode operator,
-not a call, so `A @ B` is invisible to any recorder — `sys.monitoring`
-included. Quadratic work written with `@` in bounded space therefore passes
-every assertion here, and
+**Three blind spots, all real.** Matrix multiplication is a bytecode operator,
+not a call, so `A @ B` never enters the log. (`sys.monitoring` can *detect* it
+through the `INSTRUCTION` event, but that event carries no operands, so it
+answers "a product happened" and never "how big".) Quadratic work written with
+`@` in bounded space therefore passes every assertion here, and
 `test_quadratic_work_built_from_matrix_products_is_invisible_to_the_counter`
 pins that hole so it cannot quietly close and reopen. Allocation is the
 backstop for a dense temporary's *space*; nothing here backstops its *time*.
+
+Allocation is not unconditional either. `tracemalloc` sees NumPy buffers
+because NEP 49 has NumPy register them, and sees whatever LAPACK workspace
+SciPy allocates as an array — but a compiled extension using its own allocator
+is invisible to the call log and the peak alike.
+
+And the factorization count cannot separate `O(L)` from `O(L log L)`. Its
+constant swings 4.4% with the ladder's bisection, which is wider than the gap
+being looked for; `L log L` doubles at 2.25–2.33 where linear doubles at 2.05.
+The largest-array channel *can* — it doubles at exactly 2.0000 and is held to a
+bound that rejects anything from `O(L^1.07)` up.
 
 That bounds what counting proves about the arrow path specifically. Its cost is
 `O(L(g³ + g²r + gr²))`; the `g³` term is the eigendecomposition and is counted,
