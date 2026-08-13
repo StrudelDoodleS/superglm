@@ -44,6 +44,19 @@ _MAIN_EFFECT_HEADER_ROW = 7
 # entire purpose of publishing that column.
 _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 
+# The base relativity cell, for the same reason and re-applied at the same
+# point.  ``C2`` is column 3, so the global loop's ``column % 3 == 0`` arm
+# claims it and renders the base at two decimal places; the value stored stays
+# exact, so no reader of the file object notices, but a human reading the sheet
+# does.  It is the one cell that multiplies EVERY row of the tariff, and under
+# ``centering="mean"`` it additionally carries the whole transferred centering
+# constant, so a reader rating off the displayed number is uniformly wrong.
+# Measured on a two-term Poisson fit: base 0.3719954211385351 displays as 0.37,
+# a 5.4e-03 relative error on every risk; 0.4027922135365106 -> 0.40 (6.9e-03)
+# in the mean-centered export of the same model.
+_BASE_RELATIVITY_CELL = "C2"
+_BASE_RELATIVITY_NUMBER_FORMAT = "0.000000000000"
+
 
 def _resolve_workbook_target(
     target: str | PathLike[str] | BinaryIO,
@@ -290,8 +303,7 @@ def write_rating_table_workbook(
 
     ws["A2"] = "Base"
     ws["A2"].font = Font(bold=True)
-    ws["C2"] = float(payload.base_relativity)
-    ws["C2"].number_format = "0.000000"
+    ws[_BASE_RELATIVITY_CELL] = float(payload.base_relativity)
 
     max_main_row = 8
     for idx, block in enumerate(payload.main_effects):
@@ -310,6 +322,7 @@ def write_rating_table_workbook(
             if cell.column % 3 == 0:
                 cell.number_format = "#,##0.00"
 
+    ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT
     _annotate_piecewise_blocks(ws, payload.main_effects)
 
     interaction_row = max_main_row + 3
