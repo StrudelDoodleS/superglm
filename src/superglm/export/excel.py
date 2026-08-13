@@ -54,8 +54,21 @@ _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 # Measured on a two-term Poisson fit: base 0.3719954211385351 displays as 0.37,
 # a 5.4e-03 relative error on every risk; 0.4027922135365106 -> 0.40 (6.9e-03)
 # in the mean-centered export of the same model.
+#
+# ``General`` rather than a fixed-decimal format, which is where this differs
+# from the piecewise columns.  Those hold log relativities, which are bounded
+# by the tariff's own design, so twelve decimals is always enough.  The base is
+# ``exp(intercept)`` and its magnitude is not bounded by anything: a low-
+# frequency Poisson fit puts it near 1e-6, where twelve decimals leaves seven
+# significant digits.  ``General`` carries eleven significant digits at every
+# magnitude, which is more than the ten this module already prints bin edges
+# and axis values at -- the base should not be the least precisely stated
+# number on a sheet whose other public strings are ``.10g``.
 _BASE_RELATIVITY_CELL = "C2"
-_BASE_RELATIVITY_NUMBER_FORMAT = "0.000000000000"
+_BASE_RELATIVITY_NUMBER_FORMAT = "General"
+# Significant digits Excel's ``General`` renders, given a column wide enough to
+# hold them -- ``_autosize`` sizes from ``str(value)``, so it always is.
+_GENERAL_SIGNIFICANT_DIGITS = 11
 
 
 def _resolve_workbook_target(
