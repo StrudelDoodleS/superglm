@@ -31,135 +31,151 @@ The two quantities the ladder needs both read off one such factorization:
     edf(lambda) = tr(A(lambda)^-1 V_eff)
 
 **THE SECOND IS A SUM, NOT A DIFFERENCE, AND THAT IS THE WHOLE POINT.**
-Diagonalize the pencil and ``tr(A^-1 V_eff)`` is ``sum_j a_j / (a_j + lambda
+Diagonalize the pencil and ``tr(A^+ V_eff)`` is ``sum_j a_j / (a_j + lambda
 s_j)`` — one Tikhonov filter factor per direction, every term in ``[0, 1]``,
 bounded and cancellation-free.  That is the standard form for the effective
-degrees of freedom of a regularized fit: Golub, Heath & Wahba,
-*Technometrics* 21:215-223 (1979); Elden, *BIT* 17:134-145 (1977) and 22:487-
-502 (1982); Hansen, Nagy & O'Leary, *Deblurring Images* (SIAM 2006), ch. 6.
+degrees of freedom of a regularized fit: Wood, *JRSS-B* 73(1):3-36 (2011),
+§3.6 and Appendix H define ``edf = tr(F)`` with ``F = (X'WX + S)^-1 X'WX`` and
+evaluate it as ``||K||_F^2``; Golub, Heath & Wahba, *Technometrics*
+21:215-223 (1979); Eldén, *BIT* 17:134-145 (1977) and 22:487-502 (1982) for
+the standard-form transformation, and *BIT* 24:467-472 (1984) for computing
+the trace in O(n) by bidiagonalization; Hansen, *Regularization Tools* manual
+v4.1 (March 2008, Technical University of Denmark), §2.4 — Eq. (2.19) for the
+filter-factor expansion, (2.30) for the unregularized ``null(L)`` component
+and (2.63) for the trace itself, ``trace(I_m - A A^I) = m - (n - p) -
+sum_i f_i``, with the general-form ``f_i = gamma_i^2 / (gamma_i^2 +
+lambda^2)`` stated as prose in the same section; journal versions *Numer.
+Algorithms* 6:1-35 (1994) and 46:189-194 (2007).  (Hansen, Nagy & O'Leary,
+*Deblurring Images* (SIAM 2006) is cited for spectral filtering in the
+STANDARD form only — its ch. 6 has no general form; ch. 7 §7.3, Eq. (7.9) is
+the general one and uses no GSVD.)
 
-This used to be written ``rank(A) - lambda tr(A^-1 S)``, using
-``V_eff = A - lambda S``, which is the same number as a DIFFERENCE of two
-independently thresholded quantities — an integer rank against a trace.  A
-direction the rank counted and the inverse dropped contributed ``1 - 0``: a
-whole degree of freedom with no penalty offset, and no bound on the error
-because the two halves were decided by different cuts.  Roughly 300 lines of
-this module existed to make those two cuts agree; they are gone, and with them
-issues #249, #258, #263's stated mechanism, #265 and #271, all of which are
-statements about a rank that no longer exists.
+**WE ARE OUTSIDE EVERY ONE OF THOSE PAPERS' STATED ASSUMPTIONS, AND THIS SAYS
+SO WHERE THE BOUND IS CLAIMED RATHER THAN IN AN ASIDE.**  Wood 2011 assumes
+Fisher weights, which make both ``X'WX + S`` and ``X'WX`` positive definite
+and the edf well defined; Hansen assumes ``rank(L) = p`` and ``N(A) & N(L) =
+{0}``.  Here ``S`` is semidefinite by construction and a probe on the starved
+family found 6 of 77 directions in ``null(V_eff) & null(S)``.  A pencil with a
+common null space is SINGULAR, not merely ill conditioned (Cao, *LAA*
+92:187-196, 1987), and LAPACK says the same about what it can return: the
+trivial eigenvalues, "those corresponding to the leading ``n - r`` columns of
+``X``, which span the common null space of ``A^T A`` and ``B^T B``", are NOT
+WELL DEFINED (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, §2.3.5).  Fix &
+Heiberger, *SIAM J. Numer. Anal.* 9:78-88 (1972), doi:10.1137/0709009, refuse
+such a pencil outright.  Contribution ZERO on the common null space is the
+defensible convention, it is what ``tr(A^+ V_eff)`` already implements, and it
+is a CHOICE about an undefined quantity rather than an approximation to a
+defined one.
+
+**THE ONE SUBTRACTION LEFT WAS THE WHOLE DEFECT, AND ITS CAUSE WAS ONE
+MATRIX.**  This used to be evaluated as ``edf = local - border``, a difference
+of two nonnegative traces, because ``V_eff`` was carried as ``blockdiag(D_q) -
+D' Omega D`` with ``Omega = Sigma_M^-1[1:, 1:]`` — a pseudo-inverse of a GRAM.
+That carries ``kappa(Abar)^2`` where the row-space factor carries
+``kappa(Abar)``, measured at 1e+12 against 1e+6 on the starved family, and
+squaring the condition number is the entire story.  On an 8-level ``ps``-like
+pair with 3 rows per level against an 11-column margin, at ``lambda = 1e-4``,
+that form published **4.950 against a certified 6.000** — a ``-1.05`` df error
+that sits INSIDE the range guard and was not refused.  Both halves are
+``tr(A^-1 . PSD)`` and hence exactly nonnegative, so ``local = edf + border``
+is an identity and the cancellation ratio is exactly ``border / edf``; on that
+point it is 5.7.
 
 ``V_eff`` is dense, so evaluating the trace against it needs its structure
-rather than the matrix.  Profiling the level contrasts out of each block
-leaves
+rather than the matrix — but it is the Gram of a RESIDUALIZED design, not a
+difference.  With ``Zc_q`` level ``q``'s centered weighted spline rows,
+``J = blockdiag(Zc_q)`` and ``P`` the projector onto the residualized overlap
+span ``Abar``,
 
-    V_eff = blockdiag(D_q) - D' Omega D,     D_q = V_q - c_q c_q' / m_q
+    V_eff = J' (I - P) J = G' G,      G = (I - P) J,
 
-with ``Omega`` the ``(k_a, k_a)`` spline-main corner of ``Sigma_M^-1``, the
-border Schur complement of the OVERLAP arrow — verified against a dense
-``V - C' M^+ C`` to 4.8e-14 relative.  **``V_eff`` IS NOT BLOCK DIAGONAL**:
-the correction has rank exactly ``k_a`` whatever ``L`` is, but it is not
-small, so anything that treats the levels as separable is missing a
-first-order term.  Both halves contract through the arrow inverse's own
-blocks in O(L): the block-diagonal half against ``diag_blocks()``, and the
-rank-``k_a`` half against ``Y`` and ``Sinv``, since
-``[A^-1]_qq' = delta_qq' Ginv_q + Y_q Sinv Y_q''`` is all the off-diagonal
-structure there is.
+which is Frisch-Waugh-Lovell absorption.  With ``Abar = Q R`` thin and
+``Psi_q = Q_q' Zc_q`` bounded by the data scale,
 
-This path is entered only where the dense path is refused, so no production
-pair is ever scored twice and nothing at runtime cross-checks the two.  What
-stands behind the reorganization is the parity pinned in
-tests/test_structured_screening.py, and that parity is a tolerance, not
-bit-for-bit equality: away from the bracket the two agree to round-off, at
-the edges they agree to the tolerances measured there.
+    V_eff = blockdiag(D_q) - Psi' Psi,   A(lambda) = blockdiag(N_q) - Psi' Psi.
 
-**KNOWN DIVERGENCE, NOT CLOSED.**  That parity is measured on the fixtures the
-suite carries and does not generalize; on narrow-band geometries the two paths
-part by whole degrees of freedom at the ladder's high edge, and neither is
-reliably the better one.  This change does not close that class — it moves the
-arrow side of it and the measurements below say by how much and in which
-direction.  Parity is therefore no longer the top-level evidence: every claim
-here is against a high-precision oracle on the delivered moments, which can
-arbitrate where parity cannot.
+Everything below is built from ``[R_q ; sqrt(lambda) rootS]``-style QRs and
+never from a sum or a difference of Grams: Gill, Golub, Murray & Saunders,
+*Math. Comp.* 28(126):505-535 (1974) §5.2 is the authority — computing a Schur
+complement via a triangular solve is "numerically less satisfactory than
+computing R using orthogonal matrices" — and (p. 516) downdating is stable
+only when the result's smallest eigenvalue is large relative to the norm of
+the removed term, which is this module's documented failure mode rather than
+its exception.  The block-angular structure is standard: Golub & Plemmons,
+*LAA* 34:3-28 (1980); Golub, Manneback & Toint, *SIAM J. Sci. Stat. Comput.*
+7(3):799-816 (1986); Scott & Tuma, *Numer. Algorithms* 79(4):1147-1168 (2018).
+Golub & Van Loan, *Matrix Computations* 4th ed. is the reference for block
+Cholesky — with the border eliminated first the trailing factor IS the
+Cholesky factor of the Schur complement — and for the stacked least-squares
+form.  Kaufman & Rosset, *Biometrika* 101(4):771-784 (2014) stays where it
+sits, for monotonicity under a DEFINITE pencil.
 
-**WHAT THE FILTER-FACTOR FORM IS WORTH, MEASURED.**  Against an mpmath oracle
-on each pair's DELIVERED float moments — the pencil simultaneously diagonalized
-once and every lambda read off the filter factors, evaluated at 50 and 70
-digits and identical to every digit quoted below at both — over 22 pairs at the
-bracket's low edge, mid-bracket and high edge.  The pairs are ``ps``/``cr``/
-``bs``/``ns`` margins at 5 to 10 knots, ``L`` from 5 to 39, 3 to 40 rows per
-level, unit and 1e-12 weights, narrow-band and not, plus a real
-``freMTPL2freq`` pair.  Of the 57 points where both forms return a value the
-new one is nearer on 32, farther on 23 and identical on 2, and the worst error
-anywhere falls from 53.08 df to 22.01 df.
+**A NEGATIVE RESULT, RECORDED BECAUSE IT IS ONE.**  A sweep for
+``tr(A^-1 V)`` where ``V`` is an explicitly formed Schur complement found
+nothing.  The literature's move is to never form it; there is no published
+stabilization of the difference because the difference is not what anyone
+computes.  Holding a factor of ``V_eff`` directly does not work here either
+and that was verified rather than assumed: ``V_eff`` is block-diagonal minus
+rank ``k_a``, hence dense, so any factor of it is dense — O(L^2) memory and
+O(L^3) time, which is the cost this module exists to avoid.
 
-That summary hides the shape, so the shape is stated by edge:
+**WHAT THE MOMENTS COST, AND WHY THE edf HALF NO LONGER READS THEM.**  The
+``edf`` half is computed from the row-space factors ``p.R`` and the compacted
+overlap rows, which come from the DESIGN.  ``V``, ``c``, ``m`` and ``border``
+are read only by the statistic.  That is not a tidiness argument: forming the
+pair's moments in float64 destroys the quantity before any screening rule
+runs.  Measured on the starved family, three defensible exact-arithmetic
+policies for ``M^+`` applied to the SAME delivered float64 moments -- invert
+everything above 1e-38, drop the negative directions, cut at 1e-14 -- return
+10.0, 10.0 and 11.0 on one 8-level pair and 8.0, 8.0 and 9.0 on another, where
+the exact DESIGN gives 6.000000 under every one of those cuts and under 1e-30,
+1e-25 and 1e-20 as well.  So the moment-formed answer is ambiguous by up to a
+degree of freedom and wrong by four, and the design-formed one is not
+ambiguous at all.  On a healthy pair all three policies agree to six digits
+and the gap to the design is 5.4e-03.  **The factored route does not RESOLVE
+that ambiguity, it avoids INCURRING it**, which is the same defect as issue
+#268 and is why this route reaches 1.1e-06 median where a moment-based one
+cannot.
 
-* **LOW edge**, which is where the largest budgets clamp: nearer on 15 of 19.
-  On a 19-level ``ps(8)`` pair 3.998 -> 0.0068 df, 588x; on 5-level ``ps``/
-  ``cr`` pairs 4.235 -> 0.700, 3.100 -> 0.747, 3.114 -> 0.695, 1.092 -> 0.754.
-  On the starved family below, nearer on 9 of 9, worst 44.39 -> 22.01 df.
-* **HIGH edge**: nearer on 8 of 18.  On the wide two-column pairs this kernel
-  exists for, 2.34e-04 -> 1.63e-05 df (14x) and 6.07e-05 -> 2.64e-05.  Farther
-  on the 5-level narrow-band pairs, worst 1.000 -> 2.000 df.
-* **MID-bracket**: FARTHER on 9 of 10 well-posed pairs, 1.1e-09 -> 1.1e-05 df.
-  That is the price of the one subtraction this form still carries — the
-  block-diagonal half of ``V_eff`` against its rank-``k_a`` correction — and on
-  the WELL-POSED family it is five orders below the errors it removes.  It is
-  not five orders below them everywhere; see the tail below.
+**WHAT IT IS WORTH, MEASURED AGAINST AN EXACT-DESIGN ORACLE.**  Seven
+geometries -- one healthy, three starved (3 rows per level against 9 to 12
+columns), one with more columns than rows per level, one thin-level and one
+with a level at 1e-8 weight -- at eight lambdas each, against mpmath at 50
+digits on each pair's exact float64 design.  Of the 56 points, the old form
+published 54 and refused 2; this publishes all 56.  Median error falls
+**3.06e-03 -> 1.10e-06**, worst **22.01 -> 1.00 df**, and points worse than
+0.1 df fall 19 -> 13.  Every one of the 13 is on a geometry where the oracle
+itself is policy-dependent -- ``null(V_eff) & null(S)`` is nonempty -- and the
+error is exactly ``+1.00`` df, the irreducible singular-pencil offset below.
+On the two starved pairs where the pencil is NOT singular the error is at
+round-off: 6.000000 against 6.000000 to 5e-15 and 3e-13 at every lambda in the
+bracket, where the old form ranged from -1.05 to +22.2 df and refused twice.
 
-On 8 of the 66 points the new value lands outside ``[0, L k_a]`` and is refused
-where the old form PUBLISHED numbers wrong by 0.998 to 53.08 df; on one the old
-form refused and the new one returns a value 2.23 df from the oracle.
+**THE +1.00 df ON SINGULAR-PENCIL GEOMETRIES IS IRREDUCIBLE IN FLOAT64.**  It
+is shared by this form, by the form it replaces, and by the textbook O(L^3)
+Wood stacked-QR method; it is the same statement as the LAPACK sentence above.
+Do not read the range guard as implying exactness.
 
-**THE ADVERSARIAL TAIL, MEASURED SEPARATELY AND PARTLY AGAINST THIS CHANGE.**
-The 22-pair sample above is a cross-section; it is not the worst case, and
-three of its lines read better than the truth because of which pairs it holds.
-A second, deliberately hostile sample — 12 pairs, all narrow-band ``cr(3)``,
-nullity-two ``ps(5, m=3)`` and starved ``ps(8)``/``cr(5)`` geometries — was
-measured at the same three bracket points against ARB BALL ARITHMETIC
-(python-flint) on each pair's exact design at 320 AND 640 bits, agreeing to
-every digit reported and returning balls of radius 1e-137 or smaller.  On those
-36 points **the two forms split 18/18**.  What the new one buys is the tail:
-the worst error anywhere falls 7.995 -> 3.108 df (2.6x), and per edge
+**WHERE THIS IS WORSE, STATED RATHER THAN AVERAGED AWAY.**  On the
+near-absorbed 1-column pair, whose ``V_eff`` is 1e-12 of its own level block,
+the relative error is 4e-16 at ten of eleven lambdas across the bracket
+against the old form's 1e-10 to 1.3e-04 -- but at the two lambdas where the
+0.5 rung sits it is 2.4e-04, against 5e-13 for the old form, and that is
+enough that a bisection targeting ``_EDF_TOL = 1e-6`` no longer converges and
+the pair is refused where it used to publish.  The cause is located: ``H``'s
+small eigenvalue is 2e-12 there and ``1/h`` multiplies an ``eps``-level
+residue.  Writing the level's contribution in the shifted coordinates
+``[K_q | K_q Y_q - Phi_q]``, and separately equilibrating ``W_q`` before its
+PSD factorization, each fix that rung and each break three others; both were
+measured and neither is adopted.
 
-* LOW: nearer on 5 of 12; worst 7.995 -> 2.746 df.  The starved ``ps(8)``
-  8-levels-by-3-rows pair goes 7.995 -> 0.401 (19.9x) — that is the case this
-  form exists for.  Against it, ``cr(3)`` at band 1e-4 goes 5.4e-04 -> 0.911
-  and ``cr(5)`` starved goes 2.5e-04 -> 0.148.
-* MID: nearer on 5 of 12, and **FARTHER ON ALL SEVEN NARROW-BAND PAIRS**, by
-  up to 0.513 df (``cr(3)``, band 1e-4, 2.1e-08 -> 0.513) and 0.170 df (band
-  1e-4 at ``L = 5``).  The "1.1e-09 -> 1.1e-05" line above is the well-posed
-  family only and must not be read as the mid-bracket cost in general.
-* HIGH: nearer on 8 of 12; worst 5.410 -> 3.108 df.  **The published high-edge
-  value REGRESSES by up to +2.017 df** (``cr(3)``, band 2e-3, 1.7e-03 ->
-  2.019) and by +0.232 df on nullity-two ``ps(5, m=3)``.  Against that it goes
-  1.753 -> 0.053, 2.156 -> 0.456, 5.410 -> 3.108 and 0.708 -> 0.0026 elsewhere
-  on the same sample.
-
-The same regression is visible on the suite's own ``_thin_level_pair`` at both
-edges: the high edge goes 2.15e-05 -> 3.90e-05 at unit weight and 6.11e-06 ->
-1.20e-04 at 0.01 (19.6x), improving only at 0.001 (1.31e-03 -> 5.60e-04); the
-LOW edge goes 6.97e-09 -> 3.96e-11 at unit weight (175x nearer) and **2.69e-09
--> 1.29e-07 at 0.001, 47.8x FARTHER**.  All six are inside the derived bounds
-that fixture asserts, which is why they are disclosure and not a defect, and
-all six are stated in
-``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom``.
-
-**THE ZERO-PENALTY RUNG STOPS BEING AN INTEGER, DELIBERATELY.**  Where ``S_a``
-is absent or identically zero the ladder publishes one rung at ``lambda = 0``.
-The old form returned ``rank(A)`` there, so that rung was an integer by
-construction; ``tr(A^-1 V_eff)`` is ``tr(V_eff^+ V_eff)``, which IS
-``rank(V_eff)`` in exact arithmetic but is whatever the inverse resolves in
-float64.  THE INTEGER WAS NEVER THE ACCURACY: against the dense path's own
-counted rank over twelve near-rank fixtures the old integer disagreed by up to
-3.000 df and this disagrees by at most 0.9965, nearer on 6 and farther on 4,
-both exact on the two well-posed ones (1.7e-12 and 7.2e-11).  Restoring an
-integer would restore the larger disagreement.  Rank is simply not well defined
-on these geometries: on one ``cr(3)`` pair the dense path counts 9,
-``numpy.linalg.matrix_rank`` on the residualized design counts 10, and the old
-arrow form counted 6.  On a nullity-two pair the ``lambda = 0`` value is only
-determined to 1.98e-02 under exact relabeling, so it is not pinnable tighter
-than two decimals by any implementation.
+**WHAT THE RANGE GUARD IS FOR NOW.**  Every term of the sum is a squared norm,
+so ``edf >= 0`` holds by construction rather than by luck, and on the suite's
+own starved ``bs(10)`` pair -- where the old form left ``[0, L k_a]`` at 101
+of 200 lambdas and the whole ladder returned ``None`` -- this leaves it at
+NONE of them.  The upper end is still a guard: ``A^+`` rests on a deflation
+decision, and a deflation that misfires inverts a direction the pencil does
+not resolve.  Measured once, at 2237 against a ceiling of 77.
 
 **WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
 leaves ``edf`` unchanged in exact arithmetic and changes only the order of
@@ -307,6 +323,14 @@ class SplineCatPair:
     # None means the global centered-row rank lies inside its certified
     # numerical ambiguity band; the structured route must be refused.
     profiled_trace: float | None
+    # THE ROW-SPACE FACTORS, NOT THE MOMENTS.  ``R[q]' R[q] == D_q`` exactly
+    # in the sense that both are Grams of the same centered weighted rows, but
+    # ``R`` is that geometry's FACTOR: it carries kappa where ``D_q`` carries
+    # kappa^2.  The ladder's edf is computed from these and from
+    # ``overlap_rows`` alone, never from ``V``/``c``/``m``; see the module
+    # docstring's "WHAT THE MOMENTS COST".
+    R: NDArray  # (L, k_a, k_a)     centered row factor of each emitted level
+    overlap_rows: NDArray  # (., 1 + k_a)  compacted rows of the unemitted levels
 
     @property
     def dims(self) -> tuple[int, int]:
@@ -498,6 +522,8 @@ def _profiled_curvature_trace(
     B: NDArray,
     W_cell: NDArray,
     level_rows: NDArray,
+    *,
+    keep_factors: NDArray | None = None,
 ) -> float | None:
     """Compute ``tr(V_eff)`` as an exact sum of squared residual norms.
 
@@ -528,6 +554,11 @@ def _profiled_curvature_trace(
     then all trace scratch is discarded before the arrow ladder.  Work and
     memory remain linear in the level count; no SVD, normal-matrix inverse, or
     dense ``V_eff`` is formed.
+
+    ``keep_factors`` is an ``(len(level_rows), k, k)`` output array that
+    receives ``R_q`` for each emitted level as the forward pass forms it.  The
+    ladder needs exactly those factors and they are otherwise discarded here,
+    so keeping them costs one store rather than a third chunked QR pass.
     """
     B = np.asarray(B, dtype=np.float64)
     W_cell = np.asarray(W_cell, dtype=np.float64)
@@ -556,6 +587,8 @@ def _profiled_curvature_trace(
     active, null_action = representative
     emitted = np.zeros(n_levels, dtype=bool)
     emitted[level_rows] = True
+    emitted_index = np.full(n_levels, -1, dtype=np.intp)
+    emitted_index[level_rows] = np.arange(level_rows.size, dtype=np.intp)
     prefix = np.zeros((k_a, k_a), dtype=np.float64)
     trace = 0.0
     correction = 0.0
@@ -566,6 +599,8 @@ def _profiled_curvature_trace(
         for level in range(start, stop):
             local = factors[level - start]
             if emitted[level]:
+                if keep_factors is not None:
+                    keep_factors[emitted_index[level]] = local
                 other = _combine_row_factors(prefix, suffix[level + 1])
                 projection, complement = _aligned_representative_actions(active, local, other)
                 residual = null_action + complement
@@ -583,6 +618,44 @@ def _profiled_curvature_trace(
             prefix = _combine_row_factors(prefix, local)
 
     return trace + correction
+
+
+def _unemitted_overlap_rows(
+    B: NDArray,
+    W_cell: NDArray,
+    level_rows: NDArray,
+) -> NDArray:
+    """Compact the overlap rows of the levels the contrast menu does not emit.
+
+    The menu is treatment coded, so the levels it emits carry their own
+    indicator and the base levels do not.  Residualizing the overlap span on
+    those indicators therefore centers an emitted level's rows inside the
+    level -- which is exactly :func:`_centered_level_factors`, and which sends
+    its intercept column to zero -- and leaves a base level's rows
+    ``[sqrt(w) | sqrt(w) B]`` untouched.  Only the COMBINED factor of the base
+    rows is ever needed, so they are compacted chunk by chunk and never held.
+    """
+    B = np.asarray(B, dtype=np.float64)
+    W_cell = np.asarray(W_cell, dtype=np.float64)
+    n_rows, k_a = B.shape
+    n_levels = W_cell.shape[1]
+    width = 1 + k_a
+    unemitted = np.ones(n_levels, dtype=bool)
+    unemitted[np.asarray(level_rows, dtype=np.intp)] = False
+    columns = np.flatnonzero(unemitted)
+    factor = np.zeros((0, width), dtype=np.float64)
+    if columns.size == 0 or n_rows == 0:
+        return factor
+    chunk = _trace_chunk_width(n_rows, width, columns.size)
+    for start in range(0, columns.size, chunk):
+        block = columns[start : start + chunk]
+        root = np.sqrt(W_cell[:, block]).T[:, :, None]  # (levels, n_rows, 1)
+        rows = np.concatenate((root, root * B[None, :, :]), axis=2)
+        factor = _combine_row_factors(
+            factor,
+            np.linalg.qr(rows, mode="r").reshape(-1, width),
+        )
+    return factor
 
 
 def spline_cat_moments(
@@ -621,7 +694,9 @@ def spline_cat_moments(
     del AA
     # V persists into the ladder, but its n_a*k_a^2 construction scratch has
     # been released before the one level-sized suffix stack below is formed.
-    profiled_trace = _profiled_curvature_trace(B_a, W_cell, level_rows)
+    R = np.zeros((level_rows.size, k_a, k_a), dtype=np.float64)
+    profiled_trace = _profiled_curvature_trace(B_a, W_cell, level_rows, keep_factors=R)
+    overlap_rows = _unemitted_overlap_rows(B_a, W_cell, level_rows)
 
     w_row = W_cell.sum(axis=1)
     s_row = S_cell.sum(axis=1)
@@ -646,6 +721,8 @@ def spline_cat_moments(
         u_border=u_border,
         u_cat=Sq.sum(axis=0),
         profiled_trace=profiled_trace,
+        R=R,
+        overlap_rows=overlap_rows,
     )
 
 
@@ -676,40 +753,103 @@ def _unpenalized_blocks(p: SplineCatPair) -> NDArray:
     return G
 
 
+def _penalty_root(S_a: NDArray) -> NDArray:
+    """``rootS`` with ``rootS' rootS`` the NEAREST PSD matrix to ``S_a``.
+
+    ``edf`` is a sum of filter factors ``a_j / (a_j + lambda s_j)``, and a
+    NEGATIVE ``s_j`` puts that term outside ``[0, 1]``: there is no bound to
+    keep and no nonnegative decomposition to have.  Assembled penalties here
+    are not all inside the cone.  A difference penalty IS exactly PSD as
+    stored -- exact rational LDL certifies exactly ``m`` zero pivots, and the
+    ``-1e-15`` an eigensolver reports on it is the eigensolver's own backward
+    error -- but the integrated-derivative penalty ``bs`` and ``cr`` margins
+    carry is genuinely not, and ``fl(lambda * S_a)`` leaves the cone even for
+    the exactly-PSD one.
+
+    **ONLY STRICTLY NEGATIVE EIGENVALUES ARE CLIPPED, AND THE REASON IS
+    MEASURED.**  ``max(w, 0)`` is the Euclidean projection onto the PSD cone
+    (Higham, *Linear Algebra Appl.* 103:103-118, 1988), so it is the smallest
+    change that makes the identity true.  A cut at the module's usual
+    ``k eps`` relative floor is NOT: on the suite's vanishing-mass pair the
+    penalty's smallest eigenvalue is ``+1.374e-16`` of its largest, which
+    ``lambda_hi = 1e10 * scale`` amplifies into a real penalty of
+    ``1.86e-08 * tr(V_eff)`` that reaches three levels' free directions.
+    Dropping it reports 19 free directions where the closed form counts 16.
+    The residue is data, not dust, and its SIGN is the accident -- the same
+    fixture measures ``+2.11e-15`` at one seed and ``-5.03e-16`` at another.
+    """
+    n = S_a.shape[0]
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
+    keep = w > 0.0
+    return (Q[:, keep] * np.sqrt(w[keep])).T
+
+
 @dataclass(frozen=True)
 class _PairGeometry:
     """Everything the ladder needs that does NOT depend on ``lambda``.
 
-    ``V_eff`` is dense, but it is a rank-``k_a`` downdate of a block-diagonal
-    matrix and both pieces are level-local::
+    ``V_eff`` is dense, but it is the Gram of a RESIDUALIZED design and never
+    has to be written as a difference of two Grams.  Write level ``q``'s
+    centered weighted spline rows as ``Zc_q`` (``R_q' R_q = Zc_q' Zc_q``), let
+    ``J = blockdiag(Zc_q)`` over emitted levels and let ``P`` project onto the
+    span of the residualized overlap rows ``Abar``.  Then
 
-        V_eff = blockdiag(D_q) - D' Omega D,     D_q = V_q - c_q c_q' / m_q
+        V_eff = J' (I - P) J = G' G,       G = (I - P) J,
 
-    ``D_q`` is level q's own curvature after its own contrast has absorbed what
-    it can; ``Omega`` is the spline-main corner of ``Sigma_M^-1``, the border
-    Schur complement of the OVERLAP arrow, and it is what couples the levels.
-    Both come out of the one ``M`` factorization :func:`_profile` already
-    builds for ``U_eff``, so this costs nothing beyond the ``(L, k_a, k_a)``
-    array itself -- linear in ``L``, like everything else here.
+    which is Frisch-Waugh-Lovell absorption: the tensor block residualized on
+    the overlap span.  With ``Abar = Q R`` thin and ``Psi_q = Q_q' Zc_q``,
+
+        V_eff = blockdiag(D_q) - Psi' Psi,      A(lambda) = blockdiag(N_q) - Psi' Psi
+
+    with ``N_q = D_q + lambda S_a``.  ``Psi`` is bounded by the data scale
+    because ``Q`` has orthonormal columns.
+
+    **THAT IS THE WHOLE CHANGE.**  The form this replaces coupled the levels
+    through ``Omega = Sigma_M^-1[1:, 1:]``, a pseudo-inverse of a GRAM: it
+    carries ``kappa(Abar)^2`` where this carries ``kappa(Abar)``, measured at
+    1e+12 against 1e+6 on the starved family.  Squaring the condition number
+    was the entire mechanism behind ``edf = local - border``; nothing else
+    about that difference had to be fixed once the squared inverse was gone.
+
+    ``coupling`` is the ``(k_a, r)`` map from a level's row factor into the
+    shared overlap coordinates -- ``Psi_q = (R_q coupling)' R_q`` -- and
+    ``base_gram`` is a factor of ``sum_b Q_b' Q_b`` over the levels the menu
+    does not emit.  Nothing here is ``L``-sized except ``p.R``, which the
+    trace pass already formed.
 
     ``ceiling`` is ``L * k_a``: the number of Tikhonov filter factors summed,
-    each in ``[0, 1]``, hence an exact bound on ``edf`` that takes no rank
-    decision.  **A TIGHTER BOUND WAS TRIED AND IS NOT SAFE.**  ``rank(V_eff)``
-    is the mathematically right ceiling and is 10 to 65 df tighter here, but
-    every way of computing it in O(L) is a numerical rank, and a numerical rank
-    that comes out LOW refuses true values: counted by Guttman additivity off
-    the unpenalized arrow -- ``rank(K(0)) - rank(M)`` -- it reads 12 on a
-    7-level ``cr(5)`` pair with 3 rows per level whose certified ``edf`` at the
+    each in ``[0, 1]``, hence a bound on ``edf`` that takes no rank decision.
+    **A TIGHTER BOUND WAS TRIED AND IS NOT SAFE.**  ``rank(V_eff)`` is the
+    mathematically right ceiling and is 10 to 65 df tighter here, but every way
+    of computing it in O(L) is a numerical rank, and a numerical rank that
+    comes out LOW refuses true values: counted by Guttman additivity off the
+    unpenalized arrow -- ``rank(K(0)) - rank(M)`` -- it reads 12 on a 7-level
+    ``cr(5)`` pair with 3 rows per level whose certified ``edf`` at the
     ladder's low edge is 17.618, and 36 against a certified rank of 45 on a
     5-level ``ps(8)`` pair.  Evaluating this module's own ``edf`` at
     ``lambda = 0`` is no better: 30.014 on a pair whose low-edge ``edf`` is
-    30.072, so it refuses that pair's own bracket.  The loose bound that cannot
-    lie is preferred to the tight one that can.
+    30.072, so it refuses that pair's own bracket.
+
+    **A THIRD COUNTER WAS MEASURED AGAINST THAT SAME COUNTEREXAMPLE AND ALSO
+    FAILS IT.**  The factors this route now carries give a structurally exact
+    O(L) bound, ``sum_q rank(R_q) + rank(overlap_rows) - r``, which is a rank
+    count on FACTORS rather than on Grams and is 4x to 12x tighter -- it equals
+    the true ``rank(V_eff)`` on 6 of 7 synthetic geometries.  On the ``cr(5)``
+    pair above it reads 12, exactly as Guttman additivity does, against a
+    low-edge ``edf`` of 17.618: the pair's own bracket would be refused.  The
+    counterexample kills the tight ceiling on the factor route too, so the
+    loose bound that cannot lie is kept.
     """
 
     U_eff: NDArray  # (L, k_a)      the profiled score
-    D: NDArray  # (L, k_a, k_a) per-level curvature, own contrast absorbed
-    Omega: NDArray  # (k_a, k_a)    what couples the levels through V_eff
+    coupling: NDArray  # (k_a, r)   R_q -> the shared overlap coordinates
+    base_gram: NDArray  # (., r)    factor of sum_b Q_b' Q_b, unemitted levels
+    root_penalty: NDArray  # (., k_a)  rootS' rootS = the PSD part of S_a
+    penalty_clip: float  # relative mass the PSD projection removed from S_a
+    orthonormality: float  # ||sum_q Q_q' Q_q - I_r||_2, the deflation's floor
+    overlap_rank: int  # r
     ceiling: float  # L * k_a
 
 
@@ -735,46 +875,305 @@ def _pair_arrow(p: SplineCatPair, lam: float):
 
 
 def _profile(p: SplineCatPair) -> _PairGeometry:
-    """The whole lambda-independent half of the work, from ONE ``M`` factor.
+    """The whole lambda-independent half of the work.
 
     ``U_eff = U - C' M^-1 u_m``.  Column ``(p, q)`` of ``C`` is nonzero in
     exactly three places — the intercept row, the spline-main rows, and level
     q's own contrast row — so the contraction never touches a level other
     than its own.  ``M`` depends on no lambda, so this is computed once and
-    every rung of the ladder reuses it.
+    every rung of the ladder reuses it.  That is the STATISTIC's half and it
+    still reads the moments.
 
-    The same factorization delivers ``V_eff``.  Writing ``M``'s inverse in
-    arrow form and contracting ``C' M^-1 C`` through it, every level's contrast
-    row cancels against its own block and what survives is
+    The ``edf`` half reads none of them.  One orthonormal basis for the
+    residualized overlap span is built by TSQR over the per-level row factors
+    the trace pass already formed -- ``[0 | R_q]`` for an emitted level,
+    ``p.overlap_rows`` for the rest -- and rank-revealed by an SVD of that
+    single ``(1 + k_a)``-column factor, at the LAPACK / ``matrix_rank`` cut
+    ``max(shape) * eps * s_max``.  The cut lands on the FACTOR's singular
+    values, so it is the square root of what the same decision costs on a
+    Gram; that is the whole reason this route can see directions
+    ``Omega = (sum_q D_q)^+`` cannot.  Wood, *JRSS-B* 73(1):3-36 (2011)
+    §3.3.1 is the same move -- rank-reveal the balanced stack and drop --
+    and Gill, Golub, Murray & Saunders, *Math. Comp.* 28(126):505-535 (1974)
+    §5.2 is why the Gram route is the one that has to go.
 
-        C' M^-1 C = blockdiag(c_q c_q' / m_q) + D' Omega D
-
-    with ``Omega = Sigma_M^-1[1:, 1:]`` — the spline-main corner, because the
-    intercept row of ``C - Y' C_cat`` is identically zero.  Subtracting that
-    from the block-diagonal ``V`` gives the decomposition in
-    :class:`_PairGeometry`.  A level holding no mass contributes an exact zero
-    ``D_q``, since its ``c_q`` and ``V_q`` are already zero.
+    Nothing here is ``L``-sized: the TSQR accumulates chunk by chunk into one
+    ``(1 + k_a, 1 + k_a)`` factor.
     """
     f = _overlap_arrow(p)
     L, k_a = p.dims
     w_cat, w_border = f.solve(p.u_cat.reshape(L, 1), p.u_border)
     U_eff = p.U - (p.c * (w_border[0] + w_cat.reshape(L))[:, None] + p.V @ w_border[1:])
-    mass = np.where(p.m > 0.0, p.m, 1.0)
-    D = p.V - (p.c[:, :, None] * p.c[:, None, :]) / mass[:, None, None]
-    D += np.swapaxes(D, -1, -2)
-    D *= 0.5
-    return _PairGeometry(U_eff=U_eff, D=D, Omega=f.Sinv[1:, 1:], ceiling=float(L * k_a))
+
+    width = 1 + k_a
+    combined_base = np.asarray(p.overlap_rows, dtype=np.float64).reshape(-1, width)
+    combined = combined_base
+    if L:
+        chunk = _trace_chunk_width(k_a, width, L)
+        padded = np.zeros((min(chunk, L), k_a, width), dtype=np.float64)
+        for start in range(0, L, chunk):
+            block = p.R[start : start + chunk]
+            padded[: block.shape[0], :, 1:] = block
+            combined = _combine_row_factors(combined, padded[: block.shape[0]].reshape(-1, width))
+    if combined.size:
+        row_factor = np.linalg.qr(combined, mode="r")
+        singular, right = np.linalg.svd(row_factor)[1:]
+        cut = max(row_factor.shape) * np.finfo(np.float64).eps * float(singular[0])
+        rank = int(np.count_nonzero(singular > cut))
+        basis = right[:rank].T / singular[:rank]
+    else:
+        rank = 0
+        basis = np.zeros((width, 0), dtype=np.float64)
+
+    root_penalty = _penalty_root(p.S_a)
+    trace_S = float(np.trace(p.S_a))
+    kept_S = float(np.sum(np.square(root_penalty)))
+    clip = abs(trace_S - kept_S) / max(abs(trace_S), np.finfo(np.float64).tiny)
+
+    # ``sum over ALL levels of Q_q' Q_q`` is EXACTLY ``I_r``: that is what
+    # makes ``Q`` an orthonormal basis, and every bound the ladder rests on --
+    # ``Psi N^+ Psi' <= I``, hence ``H >= 0``, hence the deflation -- is that
+    # identity in disguise.  Its computed residual is the floor those bounds
+    # actually hold to, so it is measured here rather than assumed, in one
+    # chunked pass that touches nothing the trace pass has not already formed.
+    coupling = np.ascontiguousarray(basis[1:])
+    base_gram = combined_base @ basis
+    closure = base_gram.T @ base_gram
+    if L:
+        chunk = _trace_chunk_width(k_a, rank, L)
+        for start in range(0, L, chunk):
+            carried = p.R[start : start + chunk] @ coupling
+            closure += np.einsum("lkr,lks->rs", carried, carried, optimize=True)
+    defect = float(np.linalg.norm(closure - np.eye(rank), 2)) if rank else 0.0
+
+    return _PairGeometry(
+        U_eff=U_eff,
+        coupling=coupling,
+        base_gram=base_gram,
+        root_penalty=root_penalty,
+        penalty_clip=clip,
+        orthonormality=defect,
+        overlap_rank=rank,
+        ceiling=float(L * k_a),
+    )
+
+
+def _block_inverse_factors(triangular: NDArray) -> NDArray:
+    """Batched ``T^+`` for a stack of small triangular factors, at the LAPACK cut."""
+    u, singular, vt = np.linalg.svd(triangular)
+    cut = max(triangular.shape[-2:]) * np.finfo(np.float64).eps
+    top = np.maximum(singular[..., :1], np.finfo(np.float64).tiny)
+    keep = singular > cut * top
+    inv = np.where(keep, 1.0 / np.where(keep, singular, 1.0), 0.0)
+    return (np.swapaxes(vt, -1, -2) * inv[..., None, :]) @ np.swapaxes(u, -1, -2)
+
+
+def _psd_factor(M: NDArray) -> NDArray:
+    """Batched ``F`` with ``F F' = M`` for symmetric ``M``, negatives clipped.
+
+    Equilibrating ``M`` to a unit diagonal before the eigendecomposition was
+    tried and is NOT adopted: on the near-absorbed pair it moves the
+    mid-bracket rung from 2.4e-04 relative to 1.1e-16 and the surrounding
+    three lambdas the other way, from 4.4e-16 to 2.2e-04, and it reds one more
+    of this module's own fixtures than it greens.  Recorded so the next reader
+    does not repeat it.
+    """
+    w, Q = np.linalg.eigh(0.5 * (M + np.swapaxes(M, -1, -2)))
+    return Q * np.sqrt(np.where(w > 0.0, w, 0.0))[..., None, :]
+
+
+def _absorption_floor(n_terms: int, rank: int, defect: float) -> float:
+    """Cut below which a singular value of ``H``'s factor is not resolvable.
+
+    ``H = I_r - Psi N^+ Psi'`` is delivered here as ``R_H' R_H`` with ``R_H``
+    assembled by orthogonal transformations only, so the quantity being cut is
+    a SINGULAR VALUE and not an eigenvalue of a difference.  ``H``'s exact
+    spectrum lies in ``[0, 1]``, so the scale is 1 and the cut is absolute.
+
+    Two things bound how far float64 can move it, and both are measured:
+
+    * ``defect`` is ``||sum_q Q_q' Q_q - I_r||_2``.  ``sum_q X_q' X_q +
+      Gb' Gb`` is ``H`` only because that sum is ``I_r``, so the residual is
+      subtracted from ``H``'s eigenvalues one for one -- and an eigenvalue
+      floor of ``defect`` is a singular-value floor of ``sqrt(defect)``.
+    * the TSQR that assembles ``R_H`` over ``L`` blocks is backward stable
+      with ``||R_H|| <= 1``, so its singular values carry an absolute error of
+      order ``L k_a eps``.
+
+    Measured, the gap this has to land in is enormous: on the starved fixture
+    at the bracket's low edge ``R_H``'s singular values are ``1.00, 0.849,
+    0.664`` and then ``3.4e-13`` and below -- twelve orders in ``sigma``,
+    twenty-four in ``H`` -- where the SAME quantity taken as ``I_r`` minus a
+    Gram separates only ``0.44`` from ``7e-13``.  Nothing is fitted; both
+    terms are dimensions or measured residuals.
+    """
+    eps = float(np.finfo(np.float64).eps)
+    return float(np.sqrt(max(defect, 0.0))) + max(int(n_terms), int(rank), 1) * eps
+
+
+def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> float:
+    """``tr(A(lambda)^+ V_eff)`` as a sum of squared norms.
+
+    **THIS IS THE SUM THE MODULE HEADLINE CLAIMS, AND NOW IT IS ONE.**  With
+    ``E_q`` the selector for level ``q``'s block, ``M_q = [E_q, -Psi']`` and
+    ``F_q = [Zc_q | Q_q]``,
+
+        C_q = F_q' F_q,   W_q = M_q' A^+ M_q,
+        edf = sum over ALL levels of tr(W_q C_q) = sum || F_q chol(W_q) ||_F^2,
+
+    which closes because ``sum_q Q_q' Q_q = I_r``.  ``W_q`` and ``C_q`` are
+    both Gram matrices, so every term is a squared norm: no difference of two
+    large numbers survives into the answer.  That is Wood's ``tr(F) =
+    ||K||_F^2`` (*JRSS-B* 73(1):3-36, 2011, §3.6 and App. H) carried onto a
+    block-angular structure instead of a dense ``X``.
+
+    **EVERY PIECE IS BUILT BY ORTHOGONAL TRANSFORMATIONS.**  Per emitted level
+    one QR delivers all three of them at once::
+
+        [[  R_q          ,  Phi_q ],        [[ T_q , Y_q ],
+         [ sqrt(lam) rootS,   0    ]]  =  Q  [[  0  , X_q ]]
+
+    with ``Phi_q = R_q coupling``, so ``T_q' T_q = D_q + lambda S_a`` is never
+    summed, ``Y_q = T_q^-T Psi_q'`` is never solved for, and
+
+        X_q' X_q = Gam_q - Psi_q N_q^+ Psi_q'
+
+    is never differenced.  Summing the trailing blocks over emitted levels and
+    adding the unemitted levels' ``Gb`` gives ``H = I_r - Psi N^+ Psi'``
+    itself, again with no subtraction, because ``sum_q Gam_q = I_r``.  That is
+    the block-angular QR of Golub & Plemmons, *LAA* 34:3-28 (1980) -- local
+    eliminations feeding one border -- and it is exactly what Gill, Golub,
+    Murray & Saunders, *Math. Comp.* 28(126):505-535 (1974) §5.2 prescribes
+    over forming a Schur complement and factoring it: "numerically less
+    satisfactory than computing R using orthogonal matrices", and (p. 516)
+    downdating is stable only when the result's smallest eigenvalue is large
+    relative to the norm of the removed term, which is this module's regime.
+
+    ``A^+`` IS NOT ASSEMBLED, and it does not have to be.  With
+
+        B = N^+ + N^+ Psi' H^+ Psi N^+
+
+    -- every term PSD, nothing indefinite, no Woodbury middle to invert --
+    ``B`` differs from ``A^+`` only on ``null(A)``, and ``range(V_eff) <=
+    range(A)`` because ``A = V_eff + lambda S`` with both summands PSD.  So
+    ``tr(B V_eff) = tr(A^+ V_eff)`` EXACTLY: if ``A x = A x'`` then
+    ``v'(x - x') = 0`` for every ``v`` in ``range(A)``, and both are solutions
+    of the same consistent system.  Where ``H`` is singular the deflation is
+    then just ``H^+``, taken at :func:`_absorption_floor`.
+
+    **THE CONTRACTION IS DONE BEFORE THE INVERSE, NOT AFTER.**  ``A^+``'s own
+    blocks run to ``||T_q^+||^2``, which is 1e+17 on a starved pair at the
+    bracket's low edge while the answer is 6.  Every appearance of ``T_q^+``
+    here is already contracted against ``R_q`` as ``K_q = R_q T_q^+``, whose
+    norm is bounded by 1 because ``R_q' R_q <= T_q' T_q``; the level's whole
+    contribution is then ``|| [K_q | Phi_q] chol(What_q) ||_F^2`` with
+
+        What_q = [[ I + Y_q H^+ Y_q' , -Y_q (H^+ + P_0) ],
+                  [        .          ,       Xi        ]]
+
+    bounded by ``||H^+||``.  Measured on the starved fixture, contracting
+    afterwards instead publishes 10.996 df against a certified 6.000.
+
+    Two chunked passes over the levels, each bounded by
+    ``_TRACE_CHUNK_DOUBLES``; ``K`` and ``Y`` are what they carry between them.
+    """
+    L, k_a = p.dims
+    r = geometry.overlap_rank
+    coupling = geometry.coupling
+    root = np.sqrt(lam) * geometry.root_penalty
+    height, width = k_a + root.shape[0], k_a + r
+    chunk = _trace_chunk_width(height, width, L) if L else 1
+    blocks = [(s, min(L, s + chunk)) for s in range(0, L, chunk)]
+
+    # --- pass 1: one block-angular QR per level, and H's factor ------------
+    contracted = np.empty((L, k_a, k_a), dtype=np.float64)
+    cross = np.empty((L, k_a, r), dtype=np.float64)
+    border = np.asarray(geometry.base_gram, dtype=np.float64)
+    local = np.zeros((min(chunk, max(L, 1)), height, width), dtype=np.float64)
+    for start, stop in blocks:
+        rows = p.R[start:stop]
+        view = local[: stop - start]
+        view[:, :k_a, :k_a] = rows
+        view[:, :k_a, k_a:] = rows @ coupling
+        view[:, k_a:, :k_a] = root
+        # Scale the leading column block to unit norm.  The QR's backward
+        # error is relative to the WHOLE matrix, and ``X_q`` is bounded by 1
+        # while ``R_q`` carries the data scale, so without this the trailing
+        # block is delivered to ``eps ||R_q||`` rather than to ``eps``.  A
+        # column scaling leaves ``Y_q`` and ``X_q`` untouched and divides
+        # ``T_q`` by the same factor, which is undone below.
+        scale = np.linalg.norm(view[:, :, :k_a], axis=(1, 2))
+        scale = np.where(scale > 0.0, scale, 1.0)
+        view[:, :, :k_a] /= scale[:, None, None]
+        factored = np.linalg.qr(view, mode="r")
+        contracted[start:stop] = (rows @ _block_inverse_factors(factored[:, :k_a, :k_a])) / (
+            scale[:, None, None]
+        )
+        cross[start:stop] = factored[:, :k_a, k_a:]
+        border = _combine_row_factors(border, factored[:, k_a:, k_a:].reshape(-1, r))
+
+    # --- H's spectrum, from its factor's singular values -------------------
+    if r:
+        singular, right = np.linalg.svd(border)[1:]
+        keep = singular > _absorption_floor(L * k_a, r, geometry.orthonormality)
+        occupied = singular * singular
+        free = (1.0 - singular) * (1.0 + singular)
+        safe = np.where(keep, occupied, 1.0)
+        # ``I + H^+ (I - H)`` is ``H^+`` PLUS the projector onto
+        # ``null(H)``: dropping the second term loses a whole degree of
+        # freedom per deflated direction -- measured, 22.0 against a certified
+        # 6.000 on the starved fixture.
+        resolved = (right.T * np.where(keep, 1.0 / safe, 0.0)) @ right
+        extended = (right.T * np.where(keep, 1.0 / safe, 1.0)) @ right
+        xi = np.where(keep, free / safe, free)
+        coupled = (right.T * xi) @ right
+        coupled = 0.5 * (coupled + coupled.T)
+    else:
+        resolved = extended = coupled = np.zeros((0, 0), dtype=np.float64)
+
+    # --- pass 2: one PSD factor per level, and the squared norms -----------
+    total = 0.0
+    correction = 0.0
+    block = np.empty((min(chunk, max(L, 1)), width, width), dtype=np.float64)
+    for start, stop in blocks:
+        carried = p.R[start:stop] @ coupling
+        Y = cross[start:stop]
+        contract = contracted[start:stop]
+        Yt = np.swapaxes(Y, -1, -2)
+        crossed = Y @ extended
+        view = block[: stop - start]
+        view[:, :k_a, :k_a] = np.eye(k_a) + Y @ resolved @ Yt
+        view[:, :k_a, k_a:] = -crossed
+        view[:, k_a:, :k_a] = -np.swapaxes(crossed, -1, -2)
+        view[:, k_a:, k_a:] = coupled
+        term = float(
+            np.sum(np.square(np.concatenate((contract, carried), axis=2) @ _psd_factor(view)))
+        )
+        # Neumaier-style compensated accumulation: the chunk totals are
+        # nonnegative, so this only keeps the scalar independent of chunking.
+        updated = total + term
+        if abs(total) >= abs(term):
+            correction += (total - updated) + term
+        else:
+            correction += (term - updated) + total
+        total = updated
+
+    # The levels the menu does not emit all carry the SAME ``W_q = Xi``, so
+    # their whole contribution is one term against the compacted Gram factor
+    # rather than one term per level.
+    total += float(np.sum(np.square(geometry.base_gram @ _psd_factor(coupled))))
+    return total + correction
 
 
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
-    """``(T, edf)`` at one lambda, from ONE arrow factorization.
+    """``(T, edf)`` at one lambda.
 
-    ``edf = tr(A^-1 V_eff)`` is the sum of the pencil's Tikhonov filter
-    factors.  ``V_eff``'s block-diagonal half contracts against the inverse's
-    diagonal blocks; its rank-``k_a`` half needs the OFF-diagonal blocks too,
-    and ``[A^-1]_qq' = delta_qq' Ginv_q + Y_q Sinv Y_q''`` reduces the whole
-    double sum over levels to one ``(k_a, r)`` accumulator ``Z``.  Nothing
-    here loops over ``L`` and nothing here counts.
+    ``T`` still reads the pair arrow, and therefore still reads the moments.
+    ``edf`` reads neither: :func:`_filter_factor_sum` works from the row-space
+    factors ``p.R`` and the compacted overlap rows, which is why the two are
+    two factorizations rather than one.  What that buys is stated in the
+    module docstring under "WHAT THE MOMENTS COST"; what it costs is one extra
+    factorization per evaluation, measured there too.
     """
     L, k_a = p.dims
     f = _pair_arrow(p, lam)
@@ -783,53 +1182,28 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
     T = float(np.sum(geometry.U_eff * x[:, :k_a]))
 
-    D = geometry.D
-    # ``[A^-1]_qq = Ginv_q + Y_q Sinv Y_q'`` restricted to the tensor
-    # coordinates, which is all ``V_eff`` lives on.  Sliced BEFORE the product
-    # rather than after: ``diag_blocks()`` would build the full ``(L, g, g)``
-    # inverse block and then discard its border row and column.  Measured
-    # bit-identical to that route at both bracket edges on the thin-level,
-    # vanishing-mass and narrow-band pairs, so this is a temporary removed and
-    # not a different number.
-    Yt = f.Y[:, :k_a, :]
-    diag = f.Ginv[:, :k_a, :k_a] + Yt @ f.Sinv @ np.swapaxes(Yt, -1, -2)
-    local = float(np.einsum("lpq,lqp->", diag, D, optimize=True))
-    Z = np.einsum("lpq,lqr->pr", D, Yt, optimize=True)
-    coupled = np.einsum("lpq,lqs,lst->pt", D, f.Ginv[:, :k_a, :k_a], D, optimize=True)
-    coupled += Z @ f.Sinv @ Z.T
-    border = float(np.einsum("pq,qp->", geometry.Omega, coupled, optimize=True))
-    edf = local - border
+    edf = _filter_factor_sum(p, geometry, lam)
 
     # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
     # with both parts nonnegative, so the sum lies in ``[0, L * k_a]`` for
     # every lambda and every pair -- a property of the identity, not a
-    # tolerance.
+    # tolerance.  Every term COMPUTED above is a squared norm, so the lower
+    # end of that bound now holds by construction rather than by luck.
     #
-    # THAT IS A PROPERTY OF THE EXACT IDENTITY, WHICH IS WHY THIS IS A GUARD
-    # AND NOT AN ASSERTION.  The two ``V_eff`` in ``tr(A^-1 V_eff)`` reach
-    # float64 by different routes: the one in the numerator is built above
-    # from the OVERLAP arrow (``D`` from the level moments, ``Omega`` from
-    # that arrow's ``Sinv``), while the one inside ``A^-1`` is whatever the
-    # PAIR arrow's own cut leaves of ``V + lambda S - C' M^-1 C``.  They are
-    # the same matrix in exact arithmetic and two independent numerical
-    # objects here, so the computed sum is not the filter-factor sum of any
-    # ONE pencil and the bound can be left.  That mismatch is the structural
-    # reason ``_mixed_rank_cells`` reads 0.0 where the oracle reads 1.0 -- the
-    # pair arrow drops the direction from ``Ginv`` while ``D`` still carries
-    # it -- and it is the most likely source of the mid-bracket error too.
-    #
-    # Outside the bound the two halves have cancelled away the answer, and
-    # accepting the residue can make a ladder search converge to a plausible
-    # but wrong row.  The dust allowance is taken on the two halves rather
-    # than on the result, because it is their magnitude that bounds the
-    # cancellation: at the ladder's low edge on a starved pair they run to 5e5
-    # against an answer of 73, and on the ``bs(10)`` pair in the suite to
-    # 9.65e7 against a residue of -13.6.
-    roundoff = _edf_roundoff(local, border)
+    # THE UPPER END IS STILL A GUARD AND NOT AN ASSERTION.  ``A^+`` is
+    # assembled from a deflation decision, and a deflation that misfires can
+    # invert a direction the pencil does not resolve; measured once, at 2237
+    # against a ceiling of 77 on a starved pair at the bracket's low edge.
+    # That is exactly what the bound is here to refuse.  The allowance is
+    # taken on the answer and the ceiling because both terms are now
+    # nonnegative and there is no cancellation left to bound: pairwise
+    # summation of ``n`` nonnegative terms has error at most ``log2(n) eps``
+    # times their total, and ``_EDF_ROUNDOFF_FACTOR`` covers ``n`` up to
+    # ``2**64``.
+    roundoff = _edf_roundoff(edf, geometry.ceiling)
     if not np.isfinite(edf) or edf < -roundoff or edf > geometry.ceiling + roundoff:
         raise _UnstableStructuredEDFError(
-            f"structured EDF is not a filter-factor sum: {edf} "
-            f"(local={local}, border={border}, ceiling={geometry.ceiling})"
+            f"structured EDF is not a filter-factor sum: {edf} (ceiling={geometry.ceiling})"
         )
     return T, min(max(edf, 0.0), geometry.ceiling)
 
