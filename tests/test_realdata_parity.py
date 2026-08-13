@@ -326,9 +326,18 @@ class TestNB2GroupLassoSanity:
 # Gamma parity — freMTPL2sev (~25k policies with claims)
 # ═══════════════════════════════════════════════════════════════════════
 
+#: ``_load_gamma_data`` reads BOTH files -- it joins freq's features onto sev's
+#: aggregated claims -- but this guard named only sev.  A machine holding sev and
+#: not freq therefore ran the Gamma tests and died in ``_prep_freq(None)``:
+#: measured, 5 errors on ``TestGammaExactREML`` where a skip was meant, blaming
+#: an AttributeError inside a helper rather than the absent file.  Harmless while
+#: nothing fetched the two separately; this is the branch that makes the freq/sev
+#: pairing a CI property, so the guard has to name the pair.
+_GAMMA_SKIP_REASON = _SEV_SKIP_REASON or _FREQ_SKIP_REASON
+
 GAMMA_SKIP = pytest.mark.skipif(
-    _SEV_SKIP_REASON is not None,
-    reason=_SEV_SKIP_REASON or "",
+    _GAMMA_SKIP_REASON is not None,
+    reason=_GAMMA_SKIP_REASON or "",
 )
 
 
