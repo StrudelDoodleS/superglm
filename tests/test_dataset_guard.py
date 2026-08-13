@@ -13,6 +13,7 @@ with the parquet present or absent.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import subprocess
@@ -576,6 +577,58 @@ def test_the_parametrized_module_list_is_not_empty():
     this branch's own clothes.
     """
     assert _GUARDED_MODULES, "the data-guarded suite discovery found nothing"
+
+
+def _imperative_skip_calls(source: str) -> list[str]:
+    """Calls that skip from inside a test body rather than from a mark."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in ("skip", "importorskip"):
+            if isinstance(func.value, ast.Name) and func.value.id == "pytest":
+                found.append(f"pytest.{func.attr} at line {node.lineno}")
+    return found
+
+
+@pytest.mark.parametrize("module", _GUARDED_MODULES)
+def test_no_data_guarded_suite_skips_from_inside_a_test_body(module):
+    """The one channel the setup hook cannot see, kept shut by construction.
+
+    ``pytest_runtest_setup`` runs before the body, so an imperative
+    ``pytest.skip(_datasets.skip_reason(...))`` inside a test would skip with the
+    sentinel and never be escalated -- the same silence as the three channels
+    this round closed, by a door no mark-reader can reach.  Catching it properly
+    means a report-time hook, which is a redesign of a mechanism whose scoping
+    was deliberate, not a fix.
+
+    Measured: none of these suites does it today, and none needs to.  A guard is
+    a mark here, and this keeps it that way; a suite that genuinely needs an
+    imperative skip has to change this test and say why.
+
+    ``pytest.importorskip`` is included because at module scope it is what
+    :func:`_suite_imported_with_the_dataset_absent` had to start catching, and
+    inside a body it is the same silence again.
+    """
+    leaf = module.rsplit(".", 1)[-1]
+    source = (Path(__file__).parent / f"{leaf}.py").read_text(encoding="utf-8")
+    found = _imperative_skip_calls(source)
+    assert not found, (
+        f"{module} skips imperatively ({', '.join(found)}); SUPERGLM_REQUIRE_DATA "
+        f"cannot reach a skip raised from inside a test body, so it would go silent"
+    )
+
+
+def test_the_imperative_skip_scan_actually_matches_one():
+    """A scan that matched nothing would make the check above vacuous."""
+    assert _imperative_skip_calls("import pytest\ndef t():\n    pytest.skip('why')\n") == [
+        "pytest.skip at line 3"
+    ]
+    assert _imperative_skip_calls("import pytest\npytest.importorskip('x')\n") == [
+        "pytest.importorskip at line 2"
+    ]
+    assert _imperative_skip_calls("import pytest\ndef t():\n    other.skip('why')\n") == []
 
 
 @pytest.mark.parametrize("module", _GUARDED_MODULES)
