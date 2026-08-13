@@ -107,6 +107,27 @@ def test_it_separates_the_batch_from_the_core_shape():
     assert record.core_signature() == {("numpy.linalg.eigh", ((5, 5),))}
 
 
+def test_it_counts_a_batch_carried_by_an_operand_other_than_the_first():
+    """NumPy broadcasts the stacked axes, so the matrix can look unbatched.
+
+    ``solve`` with one ``(n, n)`` matrix and an ``(L, n, 1)`` right-hand side
+    does ``L`` solves.  Reading the batch off the first operand would report
+    one, undercounting by a factor of ``L`` -- and silently, since nothing
+    else about the call changes.
+    """
+    matrix = _spd(5)
+    stacked_rhs = np.random.default_rng(0).normal(size=(7, 5, 1))
+
+    with record_linalg_calls() as record:
+        solved = np.linalg.solve(matrix, stacked_rhs)
+
+    assert solved.shape == (7, 5, 1)
+    (call,) = record.of("numpy.linalg.solve")
+    assert call.operands[0].batch == 1, "the matrix really is unbatched"
+    assert call.batch == 7
+    assert record.elementary_factorizations() == 7
+
+
 def test_it_unpacks_a_packed_factor_argument():
     """``cho_solve`` takes its factor as a tuple; the operand is inside it."""
     a = _spd(4)
