@@ -806,8 +806,9 @@ def build_rating_table_payload(
     ``_interaction_blocks`` keys its cells on the GROUPED ones the interaction
     was fitted over, and no block in the payload carries the map between them.
     A consumer holding a raw row therefore has no cell to look up.  Measured on
-    a six-level territory collapsed to four: 68.7% of rows, and the same share
-    of weight, key on a label the interaction table does not have.  This is
+    the committed fixture, a six-level territory collapsed to four: 821 of 1200
+    rows (68.4%), and the same share of weight, key on a label the interaction
+    table does not have.  This is
     pre-existing -- the interaction export predates issue #253 and centering
     does not touch it -- and is tracked as issue #286; until it is fixed, the
     product contract above holds for interactions whose parents are ungrouped.
@@ -828,10 +829,13 @@ def build_rating_table_payload(
       prior precision, not case counts, so ``discretize`` deliberately gives
       every physical row unit geometry mass and each bin's value is the
       UNWEIGHTED mean; the identity then holds per physical row, and the
-      prior-weighted residual is not zero.  Measured on a Tweedie(p=1.5) fit
-      with weights drawn on [0.5, 20]: the residual mean is 1.2e-18 per
-      physical row and -8.7e-04 under the prior weights, and per bin 1.9e-17
-      against 6.4e-03.
+      prior-weighted residual is not zero.  Measured on a 900-row Tweedie(p=1.5)
+      fit with 20 bins and prior weights drawn on [0.5, 20]: the residual mean
+      is 1.2e-18 per physical row and -8.7e-04 under the prior weights, and per
+      bin 1.9e-17 against 6.4e-03.  Those figures come from a probe, not from a
+      committed fixture; what the suite pins is the mechanism they follow from,
+      in ``test_the_binning_measure_is_physical_rows_for_tweedie_and_the_
+      weights_otherwise``.
     * Interval-string rounding, which the impact sheet does NOT see.  The
       impact sweep bins on the exact ``edges`` array while the exported block
       prints its bin boundaries through ``_format_interval`` at ``.10g``, so a
