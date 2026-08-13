@@ -13,6 +13,7 @@ with the parquet present or absent.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -272,6 +273,35 @@ def test_the_switch_works_through_a_real_pytest_run(tmp_path):
 # ── every suite that guards on a dataset must route through skip_reason ─────
 
 
+def _suite_imported_with_the_dataset_absent(module: str, monkeypatch):
+    """Import *module*'s source afresh, with nothing readable, under a private name.
+
+    A suite decides its ``skipif`` marks at import.  On a machine that HAS the
+    parquet every condition is false, so reading the marks says nothing at all
+    -- and the real-data job is *precisely* a machine that has it, which makes
+    the data-present run the one where this check must not go quiet.  Forcing
+    the absent branch is what makes it bite on every machine.
+
+    Under a private name and NOT via ``importlib.reload``, deliberately: reload
+    rebinds the classes in ``sys.modules[module]``, and pytest has already
+    collected items that hold the originals.  ``sys.modules[module]`` is left
+    exactly as it was found.
+    """
+    leaf = module.rsplit(".", 1)[-1]
+    probe_name = f"tests._{leaf}__dataset_absent_probe"
+    spec = importlib.util.spec_from_file_location(probe_name, Path(__file__).parent / f"{leaf}.py")
+    assert spec is not None and spec.loader is not None, module
+    probe = importlib.util.module_from_spec(spec)
+
+    monkeypatch.setattr(_datasets, "usable", lambda name: None)
+    sys.modules[probe_name] = probe
+    try:
+        spec.loader.exec_module(probe)
+    finally:
+        del sys.modules[probe_name]
+    return probe
+
+
 @pytest.mark.parametrize(
     "module",
     [
@@ -280,7 +310,7 @@ def test_the_switch_works_through_a_real_pytest_run(tmp_path):
         "tests.test_realdata_parity",
     ],
 )
-def test_every_data_guarded_suite_carries_the_sentinel(module):
+def test_every_data_guarded_suite_carries_the_sentinel(module, monkeypatch):
     """The enforcement switch must reach every suite that skips on a dataset.
 
     ``test_realdata_parity`` shipped a revision where the helpers moved to
@@ -290,24 +320,37 @@ def test_every_data_guarded_suite_carries_the_sentinel(module):
     with no engine as "not found".  A suite that guards on a dataset without
     routing through ``skip_reason`` evades enforcement, so assert the tag.
 
+    Two ways this check has already been vacuous, both closed here:
+
+    * it read module variables named ``*_SKIP_REASON``, and the bug it is named
+      for had none -- the reason was inlined into the mark;
+    * it read the marks of the ALREADY-imported module, so with the parquet
+      present every condition was false and the loop skipped every mark.
+      Measured: a ``FREQ_SKIP`` whose reason bypasses ``skip_reason`` passed on
+      a data-present machine and failed only on a data-absent one.  The
+      real-data job is a data-present machine.
+
     The "is this mark skipping here?" question is answered by the hook's own
     :func:`~tests.conftest.skipif_is_active`, deliberately, and not by a second
     reading of ``mark.args``: this check had that reading too, so a suite that
     moved to ``skipif(condition=...)`` would have gone unchecked here at the
     same moment it went unescalated there.
     """
-    import importlib
-
-    mod = importlib.import_module(module)
+    mod = _suite_imported_with_the_dataset_absent(module, monkeypatch)
     marks = [(k, v) for k, v in vars(mod).items() if k.endswith("_SKIP")]
     assert marks, f"{module} declares no dataset skip mark"
 
+    checked = 0
     for name, dec in marks:
         mark = getattr(dec, "mark", None)
         assert mark is not None and mark.name == "skipif", f"{module}.{name} is not a skipif mark"
-        if not skipif_is_active(mark):
-            continue  # dataset usable here; the mark is not skipping, nothing to escalate
+        assert skipif_is_active(mark), (
+            f"{module}.{name} does not skip even with no dataset readable, so its "
+            f"condition is not the dataset guard it is named for"
+        )
         assert str(mark.kwargs.get("reason", "")).startswith(_datasets.SKIP_SENTINEL), (
             f"{module}.{name} builds a skip reason that bypasses _datasets.skip_reason, "
             "so SUPERGLM_REQUIRE_DATA cannot reach it"
         )
+        checked += 1
+    assert checked == len(marks), "a mark escaped the check"
