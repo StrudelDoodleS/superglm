@@ -1094,7 +1094,9 @@ class SuperGLM:
             contribution under the model's identifiability constraint.
             ``"mean"`` is a reporting convenience that shifts so the
             geometric mean of relativities = 1 — useful for cross-feature
-            comparison but not the fitted term decomposition.
+            comparison but not the fitted term decomposition.  It is a change
+            of identifiability constraint, so ``se_log_relativity`` changes
+            with it: it becomes the error of the centered contrast.
         """
         return explain_ops.relativities(self, with_se, centering=centering)
 
@@ -1137,7 +1139,10 @@ class SuperGLM:
             ``"native"`` (default) returns the canonical fitted term
             contribution under the model's identifiability constraint.
             ``"mean"`` is a reporting convenience that shifts so the
-            geometric mean of relativities = 1.
+            geometric mean of relativities = 1.  It is a change of
+            identifiability constraint, so the standard errors and intervals
+            change with it: they become those of the centered contrast, and
+            the level the fit pinned stops carrying a zero-width interval.
         """
         return explain_ops.term_inference(
             self,
@@ -1362,7 +1367,10 @@ class SuperGLM:
             ``"native"`` (default) returns the canonical fitted term
             contribution under the model's identifiability constraint.
             ``"mean"`` is a reporting convenience that shifts so the
-            geometric mean of relativities = 1.
+            geometric mean of relativities = 1.  It is a change of
+            identifiability constraint, so the standard errors and intervals
+            change with it: they become those of the centered contrast, and
+            the level the fit pinned stops carrying a zero-width interval.
         n_points : int
             Grid resolution for spline/polynomial curves.
         figsize : tuple, optional

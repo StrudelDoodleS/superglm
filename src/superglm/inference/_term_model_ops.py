@@ -50,6 +50,13 @@ def relativities(
 
     from superglm.features.ordered_categorical import OrderedCategorical
 
+    # The shift below is the mean of the same fitted coefficients the frame
+    # reports, so a centered frame's errors are those of the contrast ``C b``
+    # and have to be propagated through ``C``, not carried over.  They are
+    # asked for at each SE call site rather than repaired here, because this
+    # function only sees the shifted values and not the covariance.
+    center_se = centering == "mean"
+
     def _center_df(df: pd.DataFrame) -> pd.DataFrame:
         if centering != "mean" or "log_relativity" not in df.columns:
             return df
@@ -83,6 +90,7 @@ def relativities(
                     groups,
                     specs,
                     interaction_specs,
+                    center=center_se,
                 )
             out[name] = _center_df(df)
             continue
@@ -105,6 +113,7 @@ def relativities(
                     specs,
                     interaction_specs,
                     n_points=len(raw["x"]),
+                    center=center_se,
                 )
             out[name] = _center_df(df)
         elif "levels" in raw:
@@ -127,6 +136,7 @@ def relativities(
                     groups,
                     specs,
                     interaction_specs,
+                    center=center_se,
                 )
             out[name] = _center_df(df)
         elif "relativity_per_unit" in raw:

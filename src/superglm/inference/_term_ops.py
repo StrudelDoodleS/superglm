@@ -43,6 +43,40 @@ def _maybe_array(value: NDArray | float | None) -> NDArray | None:
     return cast(NDArray, np.asarray(value))
 
 
+def _centered_se(
+    centering: str,
+    name: str,
+    Cov_active,
+    active_groups_cov,
+    result: PIRLSResult,
+    groups: list[GroupSlice],
+    specs: dict[str, Any],
+    interaction_specs: dict[str, Any],
+    *,
+    n_points: int = 200,
+) -> NDArray | None:
+    """The errors of the mean-centered report, or ``None`` when not centering.
+
+    ``centering="mean"`` reports the estimable contrast ``C b`` rather than
+    ``b``, so its errors come from ``C V C'`` and cannot be recovered from the
+    against-base errors the native report carries.  Computed here, beside the
+    covariance, and handed to ``_recenter_term``, which has no access to it.
+    """
+    if centering != "mean" or Cov_active is None:
+        return None
+    return feature_se_from_cov(
+        name,
+        Cov_active,
+        active_groups_cov,
+        result,
+        groups,
+        specs,
+        interaction_specs,
+        n_points=n_points,
+        center=True,
+    )
+
+
 # ── Main Entry Point ──────────────────────────────────────────────
 
 
@@ -101,7 +135,10 @@ def term_inference(
         ``"native"`` (default) returns the canonical fitted term
         contribution under the model's identifiability constraint.
         ``"mean"`` is a reporting convenience that shifts so the
-        geometric mean of relativities = 1.
+        geometric mean of relativities = 1.  The shift is a function of the
+        same fitted coefficients, so the errors and intervals are propagated
+        through the centering contrast rather than translated with the
+        values -- see ``_recenter_term``.
 
     Returns
     -------
@@ -206,6 +243,16 @@ def term_inference(
                 alpha=alpha,
             ),
             centering,
+            se_centered=_centered_se(
+                centering,
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            ),
         )
 
     # ── OrderedCategorical ────────────────────────────────────────
@@ -440,12 +487,20 @@ def term_inference(
                     n_sim=n_sim,
                     n_points=n_points,
                     seed=seed,
+                    center=centering == "mean",
                 )
                 ci_lo_sim = bands["ci_lower_simultaneous"].values
                 ci_hi_sim = bands["ci_upper_simultaneous"].values
-                # Back out the critical value: ci_upper_sim = exp(log_rel + c*se)
-                safe_se = np.maximum(se, 1e-20)
-                c_vals = (np.log(ci_hi_sim) - log_rel) / safe_se
+                # Back out the critical value: ci_upper_sim = exp(log_rel + c*se).
+                # Under centering the band was simulated through the centered
+                # map, so it is backed out against the scale it was built on --
+                # the outer `se` and `log_rel` are still the against-base pair.
+                band_se = bands["se"].to_numpy() if centering == "mean" else se
+                band_log_rel = (
+                    bands["log_relativity"].to_numpy() if centering == "mean" else log_rel
+                )
+                safe_se = np.maximum(band_se, 1e-20)
+                c_vals = (np.log(ci_hi_sim) - band_log_rel) / safe_se
                 c_sim = float(np.median(c_vals[safe_se > 1e-15]))
 
         spline_meta = _build_spline_metadata(spec)
@@ -473,6 +528,17 @@ def term_inference(
                 alpha=alpha,
             ),
             centering,
+            se_centered=_centered_se(
+                centering,
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+                n_points=n_points,
+            ),
         )
 
     # ── Categorical ──────────────────────────────────────────────
@@ -515,6 +581,16 @@ def term_inference(
                 alpha=alpha,
             ),
             centering,
+            se_centered=_centered_se(
+                centering,
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+            ),
         )
         if spec._grouping is not None:
             ti_result = _expand_grouped_term(ti_result, spec._grouping)
@@ -560,6 +636,17 @@ def term_inference(
                 alpha=alpha,
             ),
             centering,
+            se_centered=_centered_se(
+                centering,
+                name,
+                Cov_active,
+                active_groups_cov,
+                result,
+                groups,
+                specs,
+                interaction_specs,
+                n_points=n_points,
+            ),
         )
 
     # ── Numeric ──────────────────────────────────────────────────
@@ -616,7 +703,10 @@ def term_inference(
             # needs the off-diagonal terms to evaluate the band between knots
             # exactly.  sqrt(diag) IS the per-knot SE (same basis map as
             # feature_se_from_cov's Piecewise branch), so the two stay one
-            # computation rather than two that can drift.
+            # computation rather than two that can drift.  It is also why this
+            # branch passes no `se_centered`: it publishes the covariance of
+            # its own reported vector, so `_recenter_term` transforms that and
+            # reads the centered errors off the diagonal.
             knot_cov = piecewise_knot_covariance(name, Cov_active, active_groups_cov, specs)
             se = (
                 np.sqrt(np.maximum(np.diag(knot_cov), 0.0))
