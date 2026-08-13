@@ -1002,12 +1002,19 @@ def test_the_smallest_base_the_export_accepts_is_the_smallest_exact_one():
     # The cutoff constant itself, which no round trip is involved in.
     assert rating_tables._SMALLEST_EXACT_BASE == tiny
 
-    # ``abs=0.0`` is load-bearing, not decoration.  ``pytest.approx`` applies an
-    # ABSOLUTE tolerance of 1e-12 by default and accepts a value within EITHER
-    # tolerance, so at 2.2e-308 the default is 4.5e+295 times the number being
-    # compared and admits anything at all -- including ``0.0``, the one value
-    # this guard exists to reject.  Both directions are pinned so that dropping
-    # the argument fails here rather than silently emptying the assertion.
+    # ``abs=0.0`` is load-bearing, not decoration.  ``pytest.approx`` accepts a
+    # value within EITHER tolerance and supplies an absolute default when only
+    # ``rel=`` is given, so down here that default decides the comparison
+    # outright and admits anything at all -- including ``0.0``, the one value
+    # this guard exists to reject.  Read back from the object rather than
+    # asserted as a literal, so this documents pytest's MECHANISM and does not
+    # break, misleadingly and inside a test about a float64 cutoff, if pytest
+    # ever retunes the constant.
+    default_abs = pytest.approx(tiny, rel=1e-15).tolerance
+    assert default_abs > tiny, (
+        f"pytest.approx's absolute default ({default_abs:g}) no longer dwarfs {tiny:g}; "
+        "the abs=0.0 below may have stopped being necessary"
+    )
     assert 0.0 == pytest.approx(tiny, rel=1e-15)
     assert 0.0 != pytest.approx(tiny, rel=1e-15, abs=0.0)
 
@@ -1176,17 +1183,32 @@ def test_the_exported_table_keeps_going_where_the_model_saturates():
     reconstructed = _predict_from_payload(payload, rated)
     predicted = model.predict(rated)
 
-    # This fixture does NOT get the 32 eps the exactly-tabulable one derives.
-    # A power amplifies the relative error of its base by the exponent: the
-    # numeric block's multiplier is ``relativity ** sum_insured``, so one
-    # rounding of ``exp`` in ``relativity`` becomes about ``x`` of them in the
-    # multiplier, and ``x`` runs to 50 here rather than staying O(1).  Budget:
-    # ``x`` for the amplification, one each for the power's own rounding, the
-    # base ``exp`` and the product, three on the model's side (dot product and
-    # ``exp``), and two for the comparison -- ``x + 8``, rounded up to the next
-    # power of two for headroom on a differently ordered BLAS.
-    power_rtol = 64 * _EPS
-    assert power_rtol >= (float(rated["sum_insured"].max()) + 8.0) * _EPS
+    # This fixture does NOT get the 32 eps the exactly-tabulable one derives,
+    # and the reason is CONDITIONING rather than operation count.  Every
+    # quantity compared here is an ``exp``, and ``exp`` has condition number
+    # ``|z|``: an absolute error in the exponent comes out as ``|z|`` times
+    # itself, relative, in the value.  Two terms follow, and the second is the
+    # one that dominates:
+    #
+    #   * the numeric block's multiplier is ``relativity ** x``.  One rounding
+    #     of ``exp`` inside ``relativity`` is an absolute error in
+    #     ``log(relativity)``, which the power multiplies by ``x`` -- so ``x``
+    #     units of eps, with ``x`` running to 50 here rather than staying O(1).
+    #   * the exponent itself is ``eta``, formed by a dot product and an
+    #     intercept add, and reaching |eta| = 99 on this sweep.  Those roundings
+    #     are absolute in ``eta``, so each contributes ``|eta|`` units of eps to
+    #     the value -- and both sides of each comparison pay it, the
+    #     reconstruction through ``exp(x*log rel)`` and the model through
+    #     ``exp(eta)`` (or ``exp(eta - stabilized)``, where the subtraction is
+    #     itself exact by Sterbenz, 80 <= 99 <= 160, but carries eta's error in).
+    #
+    # So the budget is ``x + 2|eta| + O(1)``, not ``x + O(1)``: the earlier form
+    # counted the model side as three units of eps when they are three units of
+    # ``|eta|``eps, omitting a term four times larger than the one it kept.  It
+    # passed here and went red on the 3.12 version floor at 1.53e-14.
+    eta_max = float(np.max(np.abs(eta)))
+    x_max = float(rated["sum_insured"].max())
+    power_rtol = (x_max + 2.0 * eta_max + 8.0) * _EPS
 
     np.testing.assert_allclose(reconstructed[inside], predicted[inside], rtol=power_rtol, atol=0.0)
     # Outside, the ratio is the clip and nothing else.  Compared against
@@ -1210,29 +1232,42 @@ def test_a_saturated_export_frame_stops_the_export():
     model, _, _ = _saturating_fit()
     rated = pd.DataFrame({"sum_insured": np.linspace(0.0, 50.0, 200)})
     eta = predict_eta_raw_exact(model, rated)
+    # 38 is derived, not observed: the fit recovers eta = -1 + 2x, which crosses
+    # 80 at x = 40.5, and 38 of the 200 points of linspace(0, 50) sit above that.
+    # The adjacent points are 0.5 apart in eta, so the count only moves if beta
+    # moves by 1.2e-03 relative -- ten orders of magnitude more than a reordered
+    # BLAS can do. Stated so a future refit's red is legible rather than cryptic.
     assert (eta != stabilize_eta(eta, model._link)).sum() == 38
 
     with pytest.raises(ValueError, match="saturates on this frame"):
         build_rating_table_payload(model, rated, model.predict(rated), n_bins=10, impact_bins=(10,))
 
 
-def test_a_log_link_binomial_whose_mean_is_clamped_cannot_be_exported():
-    """``clip_mu`` is the second saturation, and a log-link binomial is its only reach.
+def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
+    """``clip_mu`` bounds a binomial mean, so the family is refused, not the frame.
 
     ``clip_mu`` clamps a ``Binomial`` mean into [1e-7, 1 - 1e-7].  For the
     positive families the band is [1e-50, 1e50], which the eta clip already sits
     strictly inside -- ``exp(+/-80)`` is [1.8e-35, 5.5e34] -- and ``Gaussian`` is
-    not clamped, so no other family can reach this gate through a log link.
+    not clamped, so ``Binomial`` is the only family a log link can reach it with.
 
-    A level with a 100% event rate is all it takes: the MLE puts it at ``mu = 1``
-    and the fit lands slightly above, at eta +0.3647, so ``exp`` returns a
-    "probability" of 1.4401 where ``predict`` returns 0.9999999.  Measured
-    before the gate: 974 of 3000 rows rewritten by the clamp and 4.40e-01
-    maximum relative error, against a documented round-off claim of 7.1e-15.
+    A level with a 100% event rate is all it takes to make it bite in-frame: the
+    MLE puts it at ``mu = 1`` and the fit lands slightly above, at eta +0.3647,
+    so ``exp`` returns a "probability" of 1.4401 where ``predict`` returns
+    0.9999999 -- 974 of 3000 rows rewritten, 4.40e-01 maximum relative error
+    against a documented round-off claim of 7.1e-15.
 
-    Note this is the UPPER clamp.  The lower one is out of reach: a zero-event
-    level converges to eta -15.03, a mean of 2.98e-07, which is above the 1e-7
-    floor -- measured at 8000 rows, 0 clamped.
+    But the refusal is by FAMILY, and the second fixture below is why.  A
+    binomial whose every fitted mean sits inside the clamp exports with nothing
+    to complain about, and then breaks on a row rated later: the usable band is
+    ``-16.118 <= eta <= -1.0e-7``, a mere 20.1% of the ``[-80, 0]`` a log link
+    permits, and ``mu > 1`` out of sample is the characteristic hazard of
+    log-binomial regression rather than an exotic corner.  A frame-scoped gate
+    would have passed that model and shipped the workbook.
+
+    The lower clamp, by contrast, is out of reach: a zero-event level converges
+    to eta -15.03, a mean of 2.98e-07, above the 1e-7 floor -- 0 rows clamped at
+    n=8000.  Recorded so the next reader does not go looking for it.
     """
     rng = np.random.default_rng(3)
     n = 3000
@@ -1255,8 +1290,166 @@ def test_a_log_link_binomial_whose_mean_is_clamped_cannot_be_exported():
     assert float(np.abs(eta).max()) < 80.0
     assert float(np.exp(eta).max()) > 1.0, "a mean above one is what the clamp catches"
 
-    with pytest.raises(ValueError, match="saturates on this frame"):
+    with pytest.raises(ValueError, match="not supported for Binomial"):
         build_rating_table_payload(model, X, y, n_bins=10, impact_bins=(10,))
+
+    # And the case a frame-scoped gate would have let through: every fitted mean
+    # inside the clamp, so nothing is visible at export time.
+    rng2 = np.random.default_rng(31)
+    n2 = 1200
+    X2 = pd.DataFrame({"dose": rng2.uniform(0.0, 1.0, n2)})
+    mu2 = np.exp(-2.0 + 0.5 * X2["dose"].to_numpy())
+    y2 = (rng2.random(n2) < mu2).astype(np.float64)
+    benign = SuperGLM(
+        family="binomial", link="log", selection_penalty=0.0, features={"dose": Numeric()}
+    )
+    benign.fit(X2, y2)
+    eta2 = predict_eta_raw_exact(benign, X2)
+    mu_pre = benign._link.inverse(stabilize_eta(eta2, benign._link))
+    assert np.array_equal(mu_pre, benign.predict(X2)), "nothing is clamped on this frame"
+
+    # The block is still one per-unit relativity raised to whatever a consumer
+    # holds, so a larger dose walks the "probability" straight past one.
+    beta = float(np.asarray(benign.result.beta, dtype=np.float64).ravel()[0])
+    dose_at_one = -float(benign.result.intercept) / beta
+    assert dose_at_one > 1.0, "the fitted frame stays under mu = 1, as intended"
+    far = pd.DataFrame({"dose": [dose_at_one * 2.0]})
+    assert float(np.exp(predict_eta_raw_exact(benign, far))[0]) > 1.0
+    assert float(benign.predict(far)[0]) <= 1.0 - 1e-7
+
+    with pytest.raises(ValueError, match="not supported for Binomial"):
+        build_rating_table_payload(benign, X2, y2, n_bins=10, impact_bins=(10,))
+
+
+def test_a_continuous_offset_exports_a_binned_block_that_is_not_a_row_exact_factor():
+    """The offset multiplier block is binned above 20 distinct values, not looked up.
+
+    ``_offset_multiplier_block`` emits one exact row per distinct multiplier only
+    while there are fewer than 20 of them.  At 20 or more -- the normal case for
+    a continuous exposure -- it bins them like a continuous block: rows keyed on
+    interval STRINGS, each carrying the exposure-weighted average multiplier of
+    its bin.  So a consumer cannot look its own multiplier up at all, and the
+    factor it does find is an average.
+
+    This is a characterisation of a pre-existing shape, not a fix.  What is new
+    is that the payload contract claimed row-exact equivalence over every
+    main-effect block without excepting this one, and the equivalence tests
+    reconstruct through the ``offset_source=`` form, which IS an exact lookup,
+    so nothing here would have noticed.
+    """
+    rng = np.random.default_rng(19)
+    n = 800
+    X = pd.DataFrame({"region": rng.choice(["A", "B", "C"], n)})
+    exposure = rng.uniform(0.1, 2.0, n)
+    offset = np.log(exposure)
+    region = X["region"].to_numpy()
+    y = rng.poisson(np.exp(-1.0 + 0.4 * (region == "B") + 0.8 * (region == "C")) * exposure).astype(
+        np.float64
+    )
+
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, offset=offset)
+    payload = build_rating_table_payload(model, X, y, offset=offset, n_bins=150, impact_bins=(20,))
+
+    block = next(b for b in payload.main_effects if b.kind == "offset")
+    multiplier = np.exp(offset)
+    assert len(np.unique(np.round(multiplier, 12))) == n >= 20, "well past the exact-row limit"
+    assert len(block.table) == 150 < n, "binned, so it cannot be one row per multiplier"
+
+    # Keyed on interval strings, which is what makes an exact lookup impossible.
+    bounds = [_INTERVAL.match(str(label)) for label in block.table.iloc[:, 0]]
+    assert all(bound is not None for bound in bounds)
+
+    edges = np.array(
+        [float(b.group(1)) for b in bounds] + [float(bounds[-1].group(2))], dtype=np.float64
+    )
+    relativity = block.table["Relativity"].to_numpy(dtype=np.float64)
+    applied = relativity[
+        np.clip(np.digitize(multiplier, edges, right=False), 1, len(relativity)) - 1
+    ]
+
+    # Every row gets a factor that is not its own multiplier.
+    err = np.abs(applied - multiplier) / multiplier
+    assert int(np.count_nonzero(err > 1e-12)) == n
+    assert float(err.max()) == pytest.approx(8.861e-02, rel=1e-3)
+
+    # And so the documented reconstruction misses by a binning error, not round-off.
+    reconstructed = np.full(n, float(payload.base_relativity), dtype=np.float64)
+    for other in payload.main_effects:
+        if other.kind == "categorical":
+            lookup = {
+                str(k): float(v) for k, v in zip(other.table[other.name], other.table["Relativity"])
+            }
+            reconstructed = reconstructed * np.array(
+                [lookup[str(value)] for value in X[other.name]], dtype=np.float64
+            )
+    reconstructed = reconstructed * applied
+    relative = np.abs(reconstructed - model.predict(X, offset=offset)) / model.predict(
+        X, offset=offset
+    )
+    assert float(relative.max()) > 1e-2 > _RECONSTRUCTION_RTOL
+
+
+def test_a_clipped_relativity_stops_the_export():
+    """A factor ``_safe_exp`` had to clip is not the model's, so it cannot ship.
+
+    ``_safe_exp`` clips its argument to +/-500 so a quasi-separated CONFIDENCE
+    BOUND comes back finite.  Right for a bound, wrong for a factor: the clipped
+    value is representable but is no longer the number the model fitted.
+
+    The reason it needs its own guard, rather than riding on the base's, is
+    CANCELLATION.  Term contributions of +800 and -700 have an ordinary product,
+    ``exp(100)``; clipped they become ``exp(500) * exp(-500) = 1``, so the
+    workbook rates every such risk 2.7e+43 low while the predictor -- and
+    therefore the base guard and the saturation gate, which both look at the
+    SUM -- stay entirely healthy.  The sum is well behaved exactly when the
+    parts are not.
+
+    Disclosed limit: I could not drive a fitted model into that regime. The
+    closest was two numerics at rho = 1 - 1e-8, which reached beta -35.5/+35.8
+    and relativities spanning 3.9e-16 to 3.5e+15 -- the cancellation is real and
+    the span is already 31 orders of magnitude, but it stays inside the clip.
+    So the guard is exercised on a constructed block rather than a fitted one,
+    and that is stated rather than dressed up as a reproduction.
+    """
+    from superglm.inference._term_types import _MAX_LOG_REL
+
+    ceiling = float(np.exp(_MAX_LOG_REL))
+    floor = float(np.exp(-_MAX_LOG_REL))
+    assert np.isfinite(ceiling) and floor > 0.0, "both clip endpoints are representable"
+
+    def block(*values: float) -> rating_tables.RatingTableBlock:
+        return rating_tables.RatingTableBlock(
+            name="region",
+            kind="categorical",
+            table=pd.DataFrame(
+                {
+                    "region": ["a"] * len(values),
+                    "Relativity": list(values),
+                    "Weight": [1.0] * len(values),
+                }
+            ),
+        )
+
+    # Accepted: one ulp inside each endpoint, so the guard rejects the clip and
+    # not merely "a large number" -- without this it could have been `> 1e10`.
+    rating_tables._require_unclipped_relativities_export(
+        [block(float(np.nextafter(ceiling, 0.0)), float(np.nextafter(floor, np.inf)), 1.0)]
+    )
+
+    for bad in (ceiling, floor, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="_safe_exp clips to"):
+            rating_tables._require_unclipped_relativities_export([block(1.0, bad)])
+
+    # And an ordinary tariff is nowhere near either endpoint.
+    model, X, y, sample_weight = _fit("exact")
+    payload = _payload(model, X, y, sample_weight, "mean")
+    for emitted in payload.main_effects:
+        if "Relativity" in emitted.table:
+            values = np.asarray(emitted.table["Relativity"], dtype=np.float64)
+            assert np.all((values > floor) & (values < ceiling))
 
 
 def test_the_impact_sheet_does_not_cover_a_continuous_interaction():

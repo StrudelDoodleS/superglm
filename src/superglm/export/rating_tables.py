@@ -343,40 +343,74 @@ def _require_log_link_export(model: SuperGLM) -> None:
         )
 
 
-def _require_unclamped_prediction_export(
+def _require_unclamped_response_export(model: SuperGLM) -> None:
+    """``clip_mu`` bounds a binomial mean, and a bound is not a factor.
+
+    ``model.predict`` does not stop at the inverse link: it finishes with
+    ``clip_mu``, which for ``Binomial`` clamps the mean into
+    ``[1e-7, 1 - 1e-7]``.  A clamp cannot be distributed over the exported
+    blocks, so no multiplicative table can express it, and the refusal is by
+    FAMILY rather than by frame because the payload is frame-independent -- a
+    table that satisfies the clamp on every row of the export frame still
+    breaks on a risk rated later.
+
+    The usable domain is what settles it.  Under a log link a binomial mean is
+    ``exp(eta)``, so the table agrees with ``predict`` only on
+    ``-16.118 <= eta <= -1.0e-7``: that is **20.1%** of the ``[-80, 0]`` band
+    ``stabilize_eta`` allows, and both edges are ordinary rather than
+    degenerate.  Below it lies any probability under 1e-7, which is a real
+    rare-event rate and not a mis-scaled fit; above it lies ``mu > 1``, and
+    predicting above one out of sample is the CHARACTERISTIC hazard of
+    log-binomial regression -- which is fitted precisely because it yields the
+    multiplicative risk ratios someone would then want a rating table of.
+    Measured: at eta 0.1 the table returns 1.105 where ``predict`` returns
+    0.9999999, 10.5% out at a predictor one ten-thousandth of the way to the
+    stabilization bound; and on a three-level fit with one 100%-event level,
+    974 of 3000 rows are rewritten by the clamp for 4.40e-01 maximum relative
+    error against a documented round-off claim of 7.1e-15.
+
+    Refusing the family is what makes ``_require_unsaturated_predictor_export``
+    able to check the predictor alone: with ``Binomial`` gone, ``clip_mu``
+    cannot fire at all under a log link.  The positive families are clamped to
+    ``[1e-50, 1e50]``, which ``exp`` of the stabilization band -- ``[1.8e-35,
+    5.5e34]`` -- sits strictly inside, and ``Gaussian`` is not clamped.
+    """
+    from superglm.distributions import Binomial
+
+    if isinstance(model._distribution, Binomial):
+        raise ValueError(
+            "Rating-table export is not supported for Binomial models. The exported "
+            "table is a product of per-block factors, and model.predict finishes by "
+            "clamping a binomial mean into [1e-7, 1 - 1e-7]; a clamp is not a factor, "
+            "so no table can carry it. Under a log link the two agree only for "
+            "-16.118 <= eta <= -1e-7 -- 20.1% of the permitted range -- and outside it "
+            "the workbook returns a 'probability' above one, or below the clamp, while "
+            "the model returns the clamped value."
+        )
+
+
+def _require_unsaturated_predictor_export(
     model: SuperGLM,
     frame: EagerFrame,
     offset: NDArray | None,
 ) -> None:
-    """A table of factors cannot carry a CLAMP, so a clamped row stops the export.
+    """A saturated row stops the export, because a clip is not a factor either.
 
-    ``model.predict`` does not stop at ``exp(eta)``.  It finishes with two
-    saturating steps, and a saturation is not a factor -- it cannot be
-    distributed over the blocks, so no multiplicative table can express it:
+    ``stabilize_eta`` clips a log-link predictor to ``[-80, 80]`` before the
+    inverse link, so a quasi-separated row is predicted at ``exp(80)`` while the
+    workbook, which has no such bound, keeps returning ``exp(eta)``.  Tested
+    against ``stabilize_eta`` itself rather than against a re-derived ``80``, so
+    the gate cannot drift from the rule if the band moves.
 
-    * ``stabilize_eta`` clips a log-link predictor to ``[-80, 80]`` before the
-      inverse link, so a quasi-separated row is predicted at ``exp(80)`` while
-      the workbook, which has no such bound, keeps returning ``exp(eta)``.
-    * ``clip_mu`` clamps the mean afterwards.  For ``Binomial`` that band is
-      ``[1e-7, 1 - 1e-7]``.  For the positive families it is ``[1e-50, 1e50]``,
-      which the eta clip already sits strictly inside -- ``exp(+/-80)`` is
-      ``[1.8e-35, 5.5e34]`` -- and ``Gaussian`` is not clamped at all.  So this
-      second step reaches exactly one configuration: a log-link binomial.
-
-    Both are tested against the rule ``predict`` applies rather than against a
-    re-derived bound, so the gate cannot drift from it if either band moves.
     Measured, with the base relativity representable throughout so that no
-    existing guard fires:
+    existing guard fires: a Poisson fit whose own frame reaches eta 19.0 exports
+    cleanly, and the table then misses ``model.predict`` by 1.78e+08 on rows out
+    to eta 99.0.  The ratio is exactly ``exp(eta - 80)``, first breaching the
+    round-off claim at eta 80.41.
 
-        eta clip:  a Poisson fit whose own frame reaches eta 19.0 exports
-            cleanly, and the table then misses ``model.predict`` by 1.78e+08 on
-            rows out to eta 99.0.  The ratio is exactly ``exp(eta - 80)``, and
-            it first breaches the round-off claim at eta 80.41.
-        mu clamp:  a log-link binomial with one 100%-event level fits that
-            level at eta +0.3647, so the table returns a "probability" of
-            1.4401 where ``predict`` returns 0.9999999.  974 of 3000 rows are
-            rewritten by the clamp and the product misses by 4.40e-01, against
-            a documented round-off claim of 7.1e-15.
+    Not dead code, which was the assumption worth checking: a fit on
+    ``y = exp(eta)`` out to eta 85 lands 293 of its own 400 rows past the clip
+    and still exported, with a representable base of 1.269e-203.
 
     What this CANNOT see is a row the export frame does not contain.  The
     payload is frame-independent by design -- a ``Numeric`` block is one
@@ -385,40 +419,71 @@ def _require_unclamped_prediction_export(
     That is stated in ``build_rating_table_payload``'s contract rather than
     guarded, because there is no row here to inspect.
     """
-    from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
     from superglm.model.base import predict_eta_raw_exact
 
     raw = predict_eta_raw_exact(model, frame, offset)
     stabilized = stabilize_eta(raw, model._link)
     clipped = int(np.count_nonzero(raw != stabilized))
-    mu = model._link.inverse(stabilized)
-    clamped = int(np.count_nonzero(clip_mu(mu, model._distribution) != mu))
-    if not clipped and not clamped:
+    if not clipped:
         return
 
-    rows = len(raw)
-    reasons = []
-    if clipped:
-        reasons.append(
-            f"{clipped} of {rows} rows have a linear predictor outside the "
-            f"[-80, 80] range model.predict clips a log link to (this frame reaches "
-            f"{float(np.max(np.abs(raw))):.4g})"
-        )
-    if clamped:
-        reasons.append(
-            f"{clamped} of {rows} rows have a mean outside the range model.predict "
-            f"clamps {type(model._distribution).__name__} to"
-        )
     raise ValueError(
         "Rating-table export is refused because model.predict saturates on this "
-        f"frame: {'; and '.join(reasons)}. The exported table is a product of "
-        "per-block factors and a clamp is not a factor, so the workbook would keep "
-        "returning exp(linear predictor) where the model returns the saturated "
-        "value -- a complete-looking sheet that silently disagrees with the model "
-        "it came from. A fit that saturates is quasi-separated or mis-scaled; "
-        "refit or rescale rather than export it."
+        f"frame: {clipped} of {len(raw)} rows have a linear predictor outside the "
+        f"range model.predict clips a log link to, reaching "
+        f"{float(np.max(np.abs(raw))):.4g} against a bound of "
+        f"{float(np.max(np.abs(stabilized))):.4g}. The exported table is a product of "
+        "per-block factors and a clip is not a factor, so the workbook would keep "
+        "returning exp(linear predictor) where the model returns the saturated value "
+        "-- a complete-looking sheet that silently disagrees with the model it came "
+        "from. A fit that saturates is quasi-separated or mis-scaled; refit or "
+        "rescale rather than export it."
     )
+
+
+def _require_unclipped_relativities_export(blocks: list[RatingTableBlock]) -> None:
+    """No exported factor may be one ``_safe_exp`` had to clip.
+
+    Relativities are exponentiated through ``_safe_exp``, which clips its
+    argument to +/-500 so a quasi-separated CONFIDENCE BOUND comes back finite
+    instead of ``inf``.  That is right for a bound and wrong for a factor, for
+    the same reason it was wrong for the base (see ``_base_relativity``): the
+    clipped value is representable but is no longer the model's.
+
+    It matters because a clip on one block is not cancelled by the opposite
+    contribution on another.  Term contributions of ``+800`` and ``-700`` have a
+    perfectly ordinary product, ``exp(100)``; clipped they become
+    ``exp(500) * exp(-500) = 1``, so the workbook rates every such risk
+    ``2.7e+43`` low while the predictor -- and therefore the base guard, and
+    therefore ``_require_unsaturated_predictor_export`` -- stays entirely
+    healthy.  The cancellation is what hides it: the sum is well behaved
+    precisely when the parts are not.
+
+    Checked against ``_safe_exp``'s own constant rather than a copy of it, and
+    on the emitted values rather than on the fitted coefficients, so it covers
+    every path that reaches a block regardless of centering.
+    """
+    from superglm.inference._term_types import _MAX_LOG_REL
+
+    ceiling = float(np.exp(_MAX_LOG_REL))
+    floor = float(np.exp(-_MAX_LOG_REL))
+    for block in blocks:
+        if "Relativity" not in block.table:
+            continue
+        values = np.asarray(block.table["Relativity"], dtype=np.float64)
+        bad = ~np.isfinite(values) | (values >= ceiling) | ((values <= floor) & (values != 0.0))
+        if not np.any(bad):
+            continue
+        raise ValueError(
+            f"Rating-table block {block.name!r} carries {int(np.count_nonzero(bad))} "
+            f"relativity value(s) at or beyond the +/-exp({_MAX_LOG_REL:g}) range "
+            "_safe_exp clips to, so the exported factor is a clipped stand-in rather "
+            "than the model's. Two blocks whose contributions cancel can leave the "
+            "prediction well behaved while their individual factors do not, so this "
+            "is checked per block. The fit is quasi-separated or mis-scaled; refit or "
+            "rescale rather than export it."
+        )
 
 
 def _resolve_export_offset(
@@ -869,20 +934,34 @@ def build_rating_table_payload(
     binomial/logit.  See ``_require_log_link_export``.
 
     It is also a statement about the RANGE, because ``model.predict`` saturates
-    and a product of factors does not.  ``stabilize_eta`` clips a log-link
-    predictor to ``[-80, 80]`` and ``clip_mu`` then clamps the mean, so above
-    ``exp(80)`` the model stops moving while the table keeps going.  A frame
-    that already saturates is refused outright
-    (``_require_unclamped_prediction_export``), but the payload is
-    frame-independent -- a ``Numeric`` block is one per-unit relativity a
-    consumer raises to whatever value it holds -- so the contract above is
-    exactly: it reproduces ``model.predict`` on every row whose predictor stays
-    inside ``[-80, 80]``.  Beyond that the table returns ``exp(eta)`` and the
-    model returns ``exp(80)``, a ratio of ``exp(eta - 80)``: measured on a
+    twice and a product of factors does not saturate at all.  A saturation
+    cannot be distributed over the blocks, so each is refused rather than
+    approximated, and between them they close the range claim:
+
+    * ``clip_mu`` clamps the mean.  It reaches only ``Binomial``, whose usable
+      band under a log link is a mere 20.1% of the permitted one, so that family
+      is refused outright by ``_require_unclamped_response_export`` -- by family
+      and not by frame, because the payload is frame-independent and a table
+      that satisfies the clamp on every exported row still breaks on a risk
+      rated later.  With ``Binomial`` gone the clamp cannot fire: the positive
+      families' ``[1e-50, 1e50]`` strictly contains ``exp(+/-80)``, and
+      ``Gaussian`` is unclamped.
+    * ``stabilize_eta`` clips a log-link predictor to ``[-80, 80]``.  A frame
+      that already saturates is refused
+      (``_require_unsaturated_predictor_export``), but the same
+      frame-independence applies -- a ``Numeric`` block is one per-unit
+      relativity a consumer raises to whatever value it holds -- and no guard
+      can inspect a row that is not here.
+
+    So the contract above is exactly: it reproduces ``model.predict`` on every
+    row whose predictor stays inside ``[-80, 80]``, and that is now the only
+    exception, because the family whose second bound sat 80 units inside it is
+    no longer exportable.  Beyond the clip the table returns ``exp(eta)`` and
+    the model returns ``exp(80)``, a ratio of ``exp(eta - 80)``: measured on a
     Poisson fit whose own frame reached eta 19.0 and exported cleanly, 1.78e+08
-    at eta 99.0, first breaching the round-off claim at eta 80.41.  No block can
-    carry the bound, since a clamp is not a factor; a tariff that rates risks
-    into that range is quasi-separated or mis-scaled rather than badly exported.
+    at eta 99.0, first breaching the round-off claim at eta 80.41.  A tariff
+    that rates risks into that range is quasi-separated or mis-scaled rather
+    than badly exported.
 
     Exact to round-off for the exactly tabulable blocks -- ``Categorical``,
     ``OrderedCategorical``, ``Numeric``, ``Piecewise``, and the
@@ -906,6 +985,21 @@ def build_rating_table_payload(
     pre-existing -- the interaction export predates issue #253 and centering
     does not touch it -- and is tracked as issue #286; until it is fixed, the
     product contract above holds for interactions whose parents are ungrouped.
+
+    The OFFSET multiplier block is the other exception, and it is a binning
+    rather than a rounding.  ``_offset_multiplier_block`` emits one exact row
+    per distinct multiplier only while there are fewer than 20 of them; at 20 or
+    more -- the normal case for a continuous exposure -- it bins them like a
+    continuous block, keying rows on interval STRINGS and reporting the
+    exposure-weighted average multiplier of each bin.  A consumer therefore
+    cannot look its own multiplier up at all, and the factor it does find is a
+    bin average.  Measured on 800 distinct multipliers over ``[0.1, 2.0]`` with
+    ``n_bins=150``: every one of the 800 rows receives a factor that is not its
+    own, by up to 8.86e-02 (median 2.9e-03), and the documented reconstruction
+    misses ``model.predict`` by 8.86e-02 rather than by round-off.  Pass
+    ``offset_source=`` for the exact form: that block is keyed on a raw column
+    of the frame and is a lookup, which is why the equivalence tests reconstruct
+    through it and treat the binned block as the exposure summary it is.
 
     Lossy, by construction, for the binned blocks -- ``Spline``,
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
@@ -996,10 +1090,20 @@ def build_rating_table_payload(
     ------
     ValueError
         If ``centering`` is not one of ``("native", "mean")``; if the model's
-        link is not ``log``; or if ``model.predict`` saturates on this frame,
-        so that the exported product could not reproduce it.
+        link is not ``log``; if the family is ``Binomial``; if
+        ``model.predict`` saturates on this frame; or if any emitted relativity
+        is one ``_safe_exp`` had to clip.
     RatingTableBaseNotRepresentableError
         If the exported base relativity overflows or underflows float64.
+
+    Two exception disciplines, deliberately, and the split is by what went
+    wrong rather than by when.  ``ValueError`` means THIS MODEL OR FRAME IS NOT
+    EXPORTABLE -- a structural refusal a caller answers by changing the model,
+    the frame or the argument.  ``RatingTableBaseNotRepresentableError`` (an
+    ``OverflowError``) means the export ran and A NUMBER CAME OUT UNUSABLE,
+    which is why it is a distinct root-exported class: it is the one outcome a
+    caller might reasonably catch and report per-model in a batch, rather than
+    fix.
     """
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
@@ -1019,6 +1123,10 @@ def build_rating_table_payload(
     # problem.  Before the build, because the whole payload is a product of
     # exponentials, which is the prediction only under a log link.
     _require_log_link_export(model)
+    # Beside the link gate because it is the same kind of complaint -- a property
+    # of the model that no frame can rescue -- and before it would be wrong,
+    # since a binomial on a logit link should hear about its link first.
+    _require_unclamped_response_export(model)
 
     native_X = X
     frame = as_eager_frame(X)
@@ -1035,11 +1143,11 @@ def build_rating_table_payload(
     elif offset is not None or offset_source is not None:
         raise ValueError("Offset rating-table export requires a model fitted with an offset.")
 
-    # Last of the boundary gates, and after the offset is resolved because the
-    # offset is part of the predictor it inspects.  The two before it read the
-    # model alone; this one is the first that needs the frame, so it is also the
-    # first that can be answered only once there is data to answer it about.
-    _require_unclamped_prediction_export(model, frame, export_offset)
+    # After the offset is resolved, because the offset is part of the predictor
+    # it inspects.  The gates before it read the model alone; this one is the
+    # first that needs the frame, so it is also the first that can be answered
+    # only once there is data to answer it about.
+    _require_unsaturated_predictor_export(model, frame, export_offset)
 
     continuous = _continuous_features(model)
     selected = (
@@ -1098,6 +1206,10 @@ def build_rating_table_payload(
                 offset_mapping_atol=offset_mapping_atol,
             )
         main_effects.append(offset_block)
+
+    # After the blocks are built, because it is the emitted values it checks
+    # rather than the coefficients they came from.
+    _require_unclipped_relativities_export(main_effects)
 
     impact = _impact_sweep(
         model,
