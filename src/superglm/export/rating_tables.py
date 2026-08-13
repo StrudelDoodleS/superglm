@@ -337,7 +337,7 @@ def _require_log_link_export(model: SuperGLM) -> None:
         raise ValueError(
             "Rating-table export is supported only for log-link models, because the "
             "exported table is multiplicative: base_relativity times one relativity "
-            f"per block reproduces model.predict only under a log link. This model "
+            "per block reproduces model.predict only under a log link. This model "
             f"uses {type(model._link).__name__}, for which that product would be "
             "exp(linear predictor) rather than the prediction."
         )
