@@ -87,11 +87,20 @@ level, seven band layouts and two seeds, each path graded at its OWN lambda:
   divergence is inside that, not above it.  Where the
   high edge IS determined — no narrow band, spread 1.0e-04 df — both paths are
   right: 18.999995 and 18.999936 against a certified 18.999990.
-* **The low edge IS determined, and CERTIFIABLY so** — ``r`` is 2.19e-02 on
-  the ``ps(8)`` pair and 2.82e-04 on the ``ns(6)`` one below, both far under
-  1, so ``D / (1 - r)`` really does bound a one-ulp step there: 5.683e-03 and
-  8.286e-05 df (random draws reached 6.78e-03 and 1.82e-04, 1.2x and 2.2x,
-  which is what a max-minus-min spread should show against a one-sided bound).
+* **The low edge IS determined** — the exact first-order sensitivity is
+  5.554e-03 df on the ``ps(8)`` pair and 8.284e-05 df on the ``ns(6)`` one
+  below, and random one-ulp draws reach 1.2x and 2.2x of those, so the
+  derivative is very nearly attained rather than an underestimate.  It is NOT a
+  certified finite-step bound, and the tests say so rather than implying
+  otherwise: put a one-ulp BALL on every stored entry and arb returns a radius
+  of 1.5109 df on the ``ps(8)`` low edge and refuses the ``ns(6)`` one
+  outright.  Which bound is used DOES matter on one of the two, and that is
+  disclosed rather than smoothed over: the ``ps(8)`` low-edge error is 0.525 df,
+  which is 94x the derivative but only 0.35x the ball radius, so interval
+  arithmetic does not certify it.  The ``ns(6)`` one needs no bound at all —
+  this path reads 0.245 where the certified value is 30.989, which is 0.8% of
+  the answer on a ``k = 35`` pair, and no noise model puts 99.2% of a degrees-
+  of-freedom quantity inside round-off.  That is the case the verdict rests on.
   And there THIS path is the wrong one.  Over the
   20 sweep points where both paths clamp to one lambda and the answer is
   attainable to 1e-2 df, the arrow error has median 1.17 df and maximum
@@ -142,9 +151,20 @@ low-edge verdict is unaffected — but any fix that adopts the dense path's
 estimator adopts its truncation with it, and that has to be a decision rather
 than an inheritance.
 
+**THE LOW-EDGE MAGNITUDES ARE INTERPRETER-DEPENDENT, THE DIRECTION IS NOT.**
+Same numpy 2.4.2 and scipy 1.18.0, Python 3.12 against 3.14, same fixtures and
+seeds: the ``ns(6)`` reading above is 0.245 on one and **30.9529** on the other,
+against a certified 30.9887 — 30.74 df of error becoming 0.036 df.  The
+``ps(8)`` low-edge error moves 0.525 to 2.780 df, and the ``bs(8)`` two-estimator
+gap 2.000 to 4.000 df.  What survives both: this path reads LOW at the low edge
+on both, and the dense path reads the certified value to within its pinned
+tolerance on both.  So the verdict — this path is the wrong one at the low edge
+— stands, and every MAGNITUDE quoted in this docstring is one interpreter's.
+The tests assert direction, not magnitude, and say why.
+
 The pins are in tests/test_screening_edf_target.py, three of them
 ``xfail(strict=True)`` because they are the defect rather than the contract,
-and each one carries the DERIVED noise floor of its own point beside it.
+and each one carries the first-order noise floor of its own point beside it.
 
 **WHAT THE REACH-AWARE COUNT IS WORTH, MEASURED WIDE RATHER THAN ON ONE
 GEOMETRY.**  Against a 50-digit oracle evaluated at each path's own lambda,
