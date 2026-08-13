@@ -647,3 +647,94 @@ class TestCenteringMetadata:
         for name in ("density", "band"):
             log_rel = np.asarray(model.term_inference(name).log_relativity)
             assert abs(float(np.mean(log_rel))) > 1e-3, name
+
+
+class TestTermInferenceConstructorContract:
+    """``TermInference`` is public, so its POSITIONAL order is a contract.
+
+    Every field after ``active`` is optional with a default, so a field
+    inserted in the middle does not raise: it renumbers every positional
+    argument after it and the call still succeeds, with each one landing a
+    field to the left of where its author wrote it.  That is the one shape of
+    break a type checker, a test suite and a reviewer all read straight past.
+
+    It is not hypothetical.  ``centering_shift`` was first added between
+    ``centering_mode`` and ``edf``, where a caller's sixteenth positional
+    argument -- written as ``edf`` -- became a centering shift instead, with
+    ``edf`` silently ``None``.  ``centering_shift`` is added into the exported
+    base relativity, so that caller's rating tables would have priced every
+    risk at ``exp(edf)`` of the model's premium.
+    """
+
+    # v0.26.0's order, which is the released constructor contract.  Extend this
+    # list by APPENDING; changing any existing position is the break.
+    _RELEASED_FIELD_ORDER = (
+        "name",
+        "kind",
+        "active",
+        "x",
+        "levels",
+        "log_relativity",
+        "relativity",
+        "se_log_relativity",
+        "ci_lower",
+        "ci_upper",
+        "ci_lower_simultaneous",
+        "ci_upper_simultaneous",
+        "critical_value_simultaneous",
+        "absorbs_intercept",
+        "centering_mode",
+        "edf",
+        "smoothing_lambda",
+        "spline",
+        "knot_covariance",
+        "smooth_curve",
+        "level_is_special",
+        "monotone",
+        "monotone_repaired",
+        "alpha",
+    )
+
+    def test_term_inference_field_order_is_append_only(self):
+        """New fields go on the end; the released prefix never moves."""
+        import dataclasses
+
+        order = tuple(f.name for f in dataclasses.fields(TermInference))
+        assert order[: len(self._RELEASED_FIELD_ORDER)] == self._RELEASED_FIELD_ORDER
+        # Everything added since is genuinely new, not a rename of a released
+        # field that was moved to the end to satisfy the check above.
+        assert set(order[len(self._RELEASED_FIELD_ORDER) :]).isdisjoint(self._RELEASED_FIELD_ORDER)
+
+    def test_a_released_positional_call_still_lands_its_arguments(self):
+        """The failure the ordering check exists to prevent, spelled out.
+
+        Written against v0.26.0: sixteen positional arguments, the sixteenth
+        being ``edf``.  If a field is ever inserted ahead of ``edf`` again this
+        assertion reports ``edf is None`` and a non-zero ``centering_shift``,
+        which is the exact corruption rather than a field-name diff.
+        """
+        ti = TermInference(
+            "f",  # name
+            "categorical",  # kind
+            True,  # active
+            None,  # x
+            ["a", "b"],  # levels
+            np.array([0.0, 0.5]),  # log_relativity
+            np.exp(np.array([0.0, 0.5])),  # relativity
+            None,  # se_log_relativity
+            None,  # ci_lower
+            None,  # ci_upper
+            None,  # ci_lower_simultaneous
+            None,  # ci_upper_simultaneous
+            None,  # critical_value_simultaneous
+            True,  # absorbs_intercept
+            "training_mean_zero_unweighted",  # centering_mode
+            3.0,  # edf
+        )
+        assert ti.edf == 3.0
+        assert ti.centering_shift == 0.0
+
+    def test_the_appended_field_defaults_to_no_shift(self):
+        """A caller that predates the field gets the value that means "untouched"."""
+        ti = TermInference("f", "numeric", True)
+        assert ti.centering_shift == 0.0

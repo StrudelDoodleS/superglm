@@ -1802,3 +1802,36 @@ def test_summary_sheet_level_activity_filter_fails_closed_on_a_renamed_field():
     model._groups = [_Renamed(group) for group in model._groups]
     with pytest.raises(AttributeError, match="subgroup_type"):
         _term_rows(model, source)
+
+
+@pytest.mark.parametrize("centering", ["native", "mean"])
+def test_the_base_relativity_cell_is_rendered_at_full_precision(tmp_path, centering):
+    """The one cell that multiplies every row must not render at two decimals.
+
+    ``C2`` is column 3, so the global number-format loop's ``column % 3 == 0``
+    arm claims it and formats it ``#,##0.00``.  The stored value stays exact,
+    which is why no reader of the file object ever noticed: ``float(ws["C2"])``
+    is right and every reconstruction test passes.  A human reading or
+    copy-pasting the sheet sees the rounded number, and the base multiplies the
+    entire tariff -- measured 0.3719954211385351 displaying as 0.37, a 5.4e-03
+    relative error on every risk.  Under ``centering="mean"`` that cell also
+    carries the whole transferred centering constant, so it is exactly the
+    number a consumer would reconcile two exports with.
+
+    The format is required to resolve the stored value: the assertion is that
+    reading back the displayed digits reproduces the base to the precision the
+    reconstruction tolerance already demands, not that the format string has a
+    particular spelling.
+    """
+    model, X, y, w = _fit_export_model()
+    output = tmp_path / f"base-{centering}.xlsx"
+    model.export_rating_tables(output, X, y, sample_weight=w, n_bins=20, centering=centering)
+
+    cell = load_workbook(output)["Rating Tables"]["C2"]
+    stored = float(cell.value)
+    decimals = len(cell.number_format.split(".")[-1]) if "." in cell.number_format else 0
+    displayed = round(stored, decimals)
+    assert stored > 0.0
+    assert displayed == pytest.approx(stored, rel=1e-11), (
+        f"base {stored!r} renders as {displayed!r} under number_format {cell.number_format!r}"
+    )
