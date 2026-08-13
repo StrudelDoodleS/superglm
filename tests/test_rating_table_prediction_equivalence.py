@@ -59,6 +59,7 @@ from superglm.export.rating_tables import (
 )
 from superglm.features.grouping import collapse_levels
 from superglm.features.piecewise import Piecewise
+from superglm.links import LogLink
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -968,6 +969,100 @@ def test_the_smallest_base_the_export_accepts_is_the_smallest_exact_one():
     # quietly rejecting the models this export exists for.
     payload = _payload(model, X, y, sample_weight, "mean")
     assert payload.base_relativity > 1e-6
+
+
+# ── The product contract is a statement about the LINK ─────────────────────
+
+
+@pytest.mark.parametrize(
+    ("family", "link", "response"),
+    [
+        ("gaussian", "identity", "continuous"),
+        ("binomial", "logit", "bernoulli"),
+    ],
+)
+def test_a_non_log_link_model_cannot_be_exported_at_all(family, link, response):
+    """Every block is an ``exp``, so the product is the prediction only under log.
+
+    Under any other link the same arithmetic runs to completion and emits a
+    workbook of the wrong quantity, with nothing raised and every relativity
+    ratio internally consistent -- the shape of error this module keeps having
+    to refuse.  Measured before the guard, on a three-factor fit:
+
+        gaussian/identity: the product is ``exp(linear_predictor)``, 9.19
+            maximum relative error; row 0 reconstructs 25.5680 against a
+            prediction of 3.2413, and log(25.5680) = 3.2413.
+        binomial/logit:    the product is the ODDS; row 0 reconstructs 2.0201
+            against a predicted probability of 0.6689, and
+            0.6689 / (1 - 0.6689) = 2.0201.
+
+    Refused rather than repaired, because there is nothing to repair it into:
+    applying the inverse link to the product would stop the table being a table
+    of factors, and a logit model has no multiplicative tariff to export.  The
+    offset path has required this since before issue #253
+    (``test_fit_offset_export_rejects_non_log_link_model``); what was missing is
+    that a model WITHOUT an offset never reached a link check.
+    """
+    rng = np.random.default_rng(4)
+    n = 600
+    X = pd.DataFrame(
+        {"region": rng.choice(["A", "B", "C"], n), "density": rng.uniform(0.0, 1.0, n)}
+    )
+    region = X["region"].to_numpy()
+    eta = 2.0 + 0.5 * (region == "B") + 0.9 * (region == "C") + 0.7 * X["density"].to_numpy()
+    y = (
+        eta + rng.normal(0.0, 0.1, n)
+        if response == "continuous"
+        else (rng.random(n) < 1.0 / (1.0 + np.exp(-(eta - 2.5)))).astype(np.float64)
+    )
+    model = SuperGLM(
+        family=family,
+        link=link,
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first"), "density": Numeric()},
+    )
+    model.fit(X, y)
+
+    with pytest.raises(ValueError, match="log-link models"):
+        build_rating_table_payload(model, X, y, n_bins=10, impact_bins=(10,))
+
+
+def test_the_log_link_families_this_export_exists_for_are_not_refused():
+    """The guard rejects a link, not a family -- otherwise it would be untestable.
+
+    ``"gaussian"`` above is refused for its identity link, so without this the
+    check could have been ``family == "poisson"`` and passed.  Gamma and
+    Tweedie are the other two ratemaking families and both carry a log link
+    here; each must still export and still reproduce its predictions.
+    """
+    rng = np.random.default_rng(11)
+    n = 400
+    X = pd.DataFrame(
+        {"region": rng.choice(["A", "B", "C"], n), "density": rng.uniform(0.0, 1.0, n)}
+    )
+    region = X["region"].to_numpy()
+    mu = np.exp(-0.4 + 0.3 * (region == "B") + 0.6 * (region == "C"))
+
+    for family, y in (
+        ("poisson", rng.poisson(mu).astype(np.float64)),
+        ("gamma", rng.gamma(shape=4.0, scale=mu / 4.0)),
+        (families.tweedie(p=1.5), rng.gamma(shape=2.0, scale=mu / 2.0) * (rng.random(n) > 0.3)),
+    ):
+        model = SuperGLM(
+            family=family,
+            selection_penalty=0.0,
+            features={"region": Categorical(base="first"), "density": Numeric()},
+        )
+        model.fit(X, y)
+        assert isinstance(model._link, LogLink), f"{family} is not log-linked here"
+
+        payload = build_rating_table_payload(model, X, y, n_bins=10, impact_bins=(10,))
+        np.testing.assert_allclose(
+            _predict_from_payload(payload, X),
+            model.predict(X),
+            rtol=_RECONSTRUCTION_RTOL,
+            atol=0.0,
+        )
 
 
 # ── ``centering=`` is validated where it is accepted ───────────────────────
