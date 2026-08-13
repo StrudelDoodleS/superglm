@@ -37,6 +37,44 @@ from benchmarks import rank_deficient_complete_fit as bench
 # coupon-collector row floor, so the fixture and the flag agree.
 TINY = {"levels": 41, "rows": 800, "repeats": 1, "seed": 31337}
 
+# The long side of the footprint comparison. A per-tick store would hold this
+# many entries, so it breaks both bounds below by a wide margin, while the wait
+# stays short: 100 ticks at `interval=0.001` is 0.15 s on an idle machine.
+_LONG_TICKS = 100
+
+# How long a starved sampler is given to reach a tick target before the
+# precondition is reported as unmet. It bounds only the FAILING path. The
+# budget is `_LONG_TICKS` times the worst per-tick cost this could be
+# reproduced at -- 175 ms, under two CPU-bound threads on a four-CPU cgroup,
+# against 1.5 ms idle and the 50 ms of the hosted-runner failure this replaced
+# -- which is 18 s, with the rest as margin for a slower machine.
+_TICK_TIMEOUT = 120.0
+
+
+def _hold_open_until(sampler, target_samples: int, timeout: float = _TICK_TIMEOUT) -> None:
+    """Run `sampler` until it has recorded `target_samples` ticks, then stop it.
+
+    The sampler ticks on a background thread, so "sleep 0.5 s and you will have
+    ten times the ticks of a 0.05 s sleep" is an assumption about the OS
+    scheduler, not a measurement -- and it is false under contention. A hosted
+    runner recorded 25 ticks for the 0.05 s window and 10 for the 0.5 s one
+    (50 ms per tick against 2 ms), inverting the ratio the tests asserted;
+    locally, two CPU-bound threads on a four-CPU cgroup reproduce the inversion
+    in 4 runs out of 4.
+
+    Waiting on the tick COUNT makes the precondition something these tests
+    establish rather than something they hope for. Contention then makes them
+    slower, never wrong, and a sampler that has genuinely stopped ticking is
+    reported as exactly that.
+    """
+    deadline = time.monotonic() + timeout
+    with sampler:
+        while sampler.samples < target_samples and time.monotonic() < deadline:
+            time.sleep(0.002)
+    assert sampler.samples >= target_samples, (
+        f"sampler recorded {sampler.samples} of {target_samples} ticks in {timeout:.0f}s"
+    )
+
 
 def test_the_fixture_reaches_the_deficient_path_it_claims_to_measure(payload) -> None:
     """Guard the fixture itself, not just the harness.
@@ -74,13 +112,14 @@ def test_the_sampler_records_every_fit_not_just_the_first() -> None:
 
     A stop flag set in `__exit__` and never cleared in `__enter__` makes the
     second and third fits record nothing, silently -- the payload still reports
-    a sample count, just one from the first fit only.
+    a sample count, just one from the first fit only.  `samples` is cumulative
+    across re-entries, so a sampler that stopped recording never reaches the
+    next target and is reported as stalled rather than as slow.
     """
     sampler = bench._DispatchSampler(interval=0.001)
     counts = []
-    for _ in range(3):
-        with sampler:
-            time.sleep(0.05)
+    for target in (5, 10, 15):
+        _hold_open_until(sampler, target)
         counts.append(sampler.samples)
     assert counts[0] > 0
     # each re-entry must add samples, not sit at the first fit's total
@@ -95,16 +134,19 @@ def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
     RUNTIME of the side being measured, so the slower side carries a larger
     term -- an asymmetry biased toward whichever side is faster, in the one
     figure the comparison publishes as a memory result.
+
+    The long side is defined by the TICKS it took, not by how long it slept:
+    ticks are what a per-tick store would retain, and a sleep only buys them on
+    an idle machine.
     """
     short = bench._DispatchSampler(interval=0.001)
-    with short:
-        time.sleep(0.05)
+    _hold_open_until(short, 5)
     long = bench._DispatchSampler(interval=0.001)
-    with long:
-        time.sleep(0.5)
+    _hold_open_until(long, _LONG_TICKS)
 
+    # established by the two waits above, restated as the premise of the rest
     assert long.samples > short.samples * 3, "fixture did not produce a longer run"
-    # the store is keyed by configuration, so a 10x longer run must not make it
+    # the store is keyed by configuration, so a 20x longer run must not make it
     # meaningfully bigger
     assert len(long._dwell) <= len(short._dwell) + 2
     assert len(long._dwell) < 20
@@ -118,8 +160,7 @@ def test_the_sampler_reports_dwell_not_just_presence() -> None:
     distinction this benchmark got wrong once.
     """
     sampler = bench._DispatchSampler(interval=0.001)
-    with sampler:
-        time.sleep(0.1)
+    _hold_open_until(sampler, 10)
     observed = sampler.observed()
     assert observed
     for pool in observed:
@@ -146,8 +187,7 @@ def test_the_sampler_counts_duplicate_pool_metadata_once_per_tick(monkeypatch) -
     }
     monkeypatch.setattr(bench, "_pool_snapshot", lambda: [pool.copy(), pool.copy()])
     sampler = bench._DispatchSampler(interval=0.001)
-    with sampler:
-        time.sleep(0.02)
+    _hold_open_until(sampler, 5)
 
     observed = sampler.observed()
     assert sampler.samples > 0
