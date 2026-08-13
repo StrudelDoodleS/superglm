@@ -66,6 +66,11 @@ _EPS = float(np.finfo(np.float64).eps)
 # 32 for headroom on a differently ordered BLAS -- the same count and the same
 # rounding the piecewise workbook test derives, because it is the same two
 # paths with two more exactly tabulable terms in the product.
+#
+# The interaction fixture adds one factor to each side -- a cell lookup in the
+# reconstruction, an additive contribution in the model -- so its count is 24
+# rather than 22 and the same 32 still covers it.  Measured there: 4.36e-16
+# (native) and 6.17e-16 (mean), against this bound of 7.11e-15.
 _RECONSTRUCTION_RTOL = 32 * _EPS
 
 _CENTERINGS = ("native", "mean")
