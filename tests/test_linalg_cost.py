@@ -332,14 +332,22 @@ def test_it_puts_back_an_alias_bound_by_a_module_imported_inside_the_block():
     The entry scan cannot see a module that does not exist yet, so the exit
     scan looks for wrappers rather than trusting the entry list.
     """
+    original = scipy.linalg.cho_factor
     module = types.ModuleType("superglm._costinst_probe")
-    module.cho_factor = scipy.linalg.cho_factor
-
-    with record_linalg_calls():
-        sys.modules["superglm._costinst_probe"] = module
 
     try:
-        assert module.cho_factor is scipy.linalg.cho_factor
+        with record_linalg_calls():
+            sys.modules["superglm._costinst_probe"] = module
+            # Bound *inside* the block, which is the whole point: this is what
+            # `from scipy.linalg import cho_factor` does in a module imported
+            # while recording, and it captures the wrapper.  Binding it
+            # outside would capture the original, and the closing assertion
+            # would then compare the original against itself and pass however
+            # broken the exit scan was.
+            module.cho_factor = scipy.linalg.cho_factor
+            assert module.cho_factor is not original, "the probe captured no wrapper"
+
+        assert module.cho_factor is original
     finally:
         del sys.modules["superglm._costinst_probe"]
 
