@@ -149,32 +149,39 @@ one documented, so a repair and a tenfold worsening look identical.  Each is
 therefore PAIRED with an ordinary passing test asserting that the defect is
 still THERE and still in the same DIRECTION.
 
-**THOSE PAIRED TESTS ASSERT DIRECTION AND NOT MAGNITUDE, BECAUSE THE MAGNITUDE
-IS NOT PORTABLE.**  They were written as magnitude brackets first, and CI
-refuted that outright.  Same numpy 2.4.2, same scipy 1.18.0, Python 3.12 in CI
-against 3.14 here, same fixtures, same seeds:
+**THOSE PAIRED TESTS ASSERT ONLY THAT THE TWO PATHS DISAGREE, BECAUSE NOTHING
+ELSE IS PORTABLE.**  They were written as magnitude brackets first, then as
+signed direction assertions, and CI refuted both in turn.  Same numpy 2.4.2,
+same scipy 1.18.0, same fixtures, same seeds -- only the interpreter and the
+runner differ:
 
-    quantity                              3.14 (here)   3.12 (CI)    ratio
-    two-estimator gap, bs(8) hi           2.0000 df     4.0000 df    2x
-    arrow low-edge error, ps(8)           0.525 df      2.780 df     5.3x
-    arrow low-edge error, ns(6)           30.74 df      0.0358 df    859x
-    round-off-subspace V-mass, ps(8) hi   3.108 df      0.963 df     3.2x
+    quantity                            local 3.14   CI 3.12    CI 3.14
+    two-estimator gap, bs(8) hi         2.0000 df    4.0000 df  --
+    arrow error, ps(8) lo               -0.525 df    -2.780 df  +0.0825 df
+    arrow error, ns(6) lo               -30.74 df    -0.0358 df --
+    round-off V-mass, ps(8) hi          3.108 df     0.963 df   --
 
-The last row is the one that matters: on CI's interpreter the ``ns(6)`` arrow
-reading does not collapse at all -- 30.9529 against a certified 30.9887 -- where
-here it reads 0.2452.  **The "worst arrow reading measured anywhere" is a
-property of one interpreter, not of the algorithm.**  The direction of the
-``ns(6)`` and ``ps(8)`` low-edge errors survives on both (the arrow path reads
-LOW on both, by 0.036 to 30.74 df), and so does the dense path's accuracy (its
-low-edge pin passes on both at 6e-2), so the verdict of #257 -- the arrow path
-is the wrong one at the low edge -- stands in direction.  Its magnitude does
-not, and the branch's headline "0.245 against a certified 30.989" must be read
-as one interpreter's number.
+Two things die there.  On CI's 3.12 the ``ns(6)`` arrow reading does not
+collapse at all -- 30.9529 against a certified 30.9887 -- where here it reads
+0.2452, so **"the worst arrow reading measured anywhere" is one interpreter's
+number**.  And on CI's 3.14 the ``ps(8)`` arrow error changes SIGN: the arrow
+path reads 172.9870 against the dense path's 172.9045, HIGH by 0.0825 df, where
+here it reads 0.525 df low.  So "the arrow path reads low at the low edge" is
+not portable either.
 
-So these tests assert ``defect > 1e-3 df`` against a repaired path's ~1e-5, not
-a bracket.  They catch REPAIR, which is what the xfails cannot say.  They do NOT
-catch worsening, and no portable test can: a 5x and an 859x swing between two
-interpreters is larger than any worsening worth alarming on.
+WHAT IS PORTABLE, on every run observed:
+
+* the two paths DISAGREE at the low edge, by 0.0825 to 30.74 df, where a
+  repaired arrow path would agree to the dense path's own ~1e-4;
+* the DENSE path matches the certified oracle inside its pinned tolerance --
+  1.27e-04 here, 9.4e-05 on CI's 3.14, both against 6e-2.
+
+Those two together are the verdict -- they disagree, and the dense one is the
+accurate one -- and they need neither the sign nor the size of the arrow error.
+That is what these tests assert: ``|dense - arrow| > 1e-3 df``.  They catch
+REPAIR, which is what a strict xfail cannot say.  They do NOT catch worsening,
+and no portable test can when the same fixture moves 859x and changes sign
+between interpreters.
 """
 
 from __future__ import annotations
@@ -613,7 +620,7 @@ def test_the_arrow_ladder_low_edge_error_is_half_a_degree_of_freedom():
     lam = min(r.lambda0 for r in arrow)
     got = max(r.edf0 for r in arrow if r.lambda0 == lam)
     reference = _clamped(dense, "lo").edf0
-    assert reference - got > 1e-3, ("the arrow low edge no longer reads low", got, reference)
+    assert abs(reference - got) > 1e-3, ("the two paths now agree at the low edge", got, reference)
 
 
 @pytest.mark.xfail(
@@ -816,7 +823,7 @@ def test_the_arrow_ladder_low_edge_collapses_on_a_full_rank_penalty():
     lam = min(r.lambda0 for r in arrow)
     got = max(r.edf0 for r in arrow if r.lambda0 == lam)
     reference = _clamped(dense, "lo").edf0
-    assert reference - got > 1e-3, ("the arrow low edge no longer reads low", got, reference)
+    assert abs(reference - got) > 1e-3, ("the two paths now agree at the low edge", got, reference)
 
 
 @pytest.mark.xfail(

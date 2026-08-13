@@ -151,16 +151,26 @@ low-edge verdict is unaffected — but any fix that adopts the dense path's
 estimator adopts its truncation with it, and that has to be a decision rather
 than an inheritance.
 
-**THE LOW-EDGE MAGNITUDES ARE INTERPRETER-DEPENDENT, THE DIRECTION IS NOT.**
-Same numpy 2.4.2 and scipy 1.18.0, Python 3.12 against 3.14, same fixtures and
-seeds: the ``ns(6)`` reading above is 0.245 on one and **30.9529** on the other,
-against a certified 30.9887 — 30.74 df of error becoming 0.036 df.  The
-``ps(8)`` low-edge error moves 0.525 to 2.780 df, and the ``bs(8)`` two-estimator
-gap 2.000 to 4.000 df.  What survives both: this path reads LOW at the low edge
-on both, and the dense path reads the certified value to within its pinned
-tolerance on both.  So the verdict — this path is the wrong one at the low edge
-— stands, and every MAGNITUDE quoted in this docstring is one interpreter's.
-The tests assert direction, not magnitude, and say why.
+**EVERY LOW-EDGE MAGNITUDE ABOVE IS ONE INTERPRETER'S, AND SO IS THE SIGN.**
+Same numpy 2.4.2 and scipy 1.18.0, same fixtures and seeds, three runs:
+
+    quantity              local 3.14   CI 3.12     CI 3.14
+    arrow error, ps(8)    -0.525 df    -2.780 df   +0.0825 df
+    arrow error, ns(6)    -30.74 df    -0.0358 df  --
+
+The ``ns(6)`` reading quoted above as 0.245 comes back as **30.9529** on CI's
+3.12, against a certified 30.9887 — the collapse does not happen there at all.
+And on CI's 3.14 the ``ps(8)`` error changes SIGN, this path reading 172.9870
+against the dense path's 172.9045.  So neither "0.245 against 30.989" nor "this
+path reads low" is a property of the algorithm.
+
+WHAT IS PORTABLE, on every run observed: the two paths DISAGREE at the low edge,
+by 0.0825 to 30.74 df, where a repaired arrow path would agree to the dense
+path's own ~1e-4; and the DENSE path matches the certified oracle inside its
+pinned tolerance every time (1.27e-04 and 9.4e-05 against 6e-2).  Those two
+together are the verdict — they disagree and the dense one is accurate — and
+they need neither the sign nor the size of this path's error.  The tests assert
+exactly that and nothing more.
 
 The pins are in tests/test_screening_edf_target.py, three of them
 ``xfail(strict=True)`` because they are the defect rather than the contract,
