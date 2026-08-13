@@ -17,22 +17,33 @@ is ``L`` independent ``g x g`` factorizations.  Splitting the two apart turns
 the complexity claim into two statements that are decidable from a call log:
 
 * the *core shapes* are drawn from a fixed set that does not move with ``L``
-  -- no operand is ever ``L``-sized, which is the dense temporary;
-* the *work*, batches unrolled, and the peak allocation both grow linearly.
+  -- no matrix is ever ``L``-sized, which is the dense temporary;
+* the *work* with batches unrolled, the largest array touched, and the peak
+  allocation all grow linearly.
 
-Neither can be corrupted by load, both reproduce exactly, and both run in CI.
+None of it can be corrupted by load, and all of it runs in CI.  The first two
+reproduce exactly, being counts and geometry; the peak does not, since it picks
+up incidental Python object churn, so it is asserted only as a growth bound and
+never quoted as a figure.
 
 Rows and spline width are held fixed across the sweep so that the level count
 is the only thing that varies.  A generator that grew the row count alongside
 ``L`` -- the natural one, six rows per level -- would confound the two, and the
 row dimension does legitimately appear in operand shapes.
 
-The last two tests are the point of the first three: they run the same
-assertions against implementations that lack the property, and require them to
-fail.  A dense factorization keeps its core shape growing with ``L``; a
-pairwise loop keeps its shapes small but does ``L^2`` work.  Each kills exactly
-one assertion, which is what makes the pair discriminating rather than
-decorative.
+What counting does *not* settle is stated here rather than left to be
+discovered.  ``_arrow``'s cost has three terms; the ``g^3`` one is the
+eigendecomposition and is counted, while ``g^2 r`` and ``g r^2`` live in
+einsums and matrix products, which no recorder can see.  Allocation bounds
+their space and nothing here bounds their time --
+``test_quadratic_work_built_from_matrix_products_is_invisible_to_the_counter``
+pins that hole open so it cannot close and reopen unnoticed.
+
+Three of the tests below exist to prove the other three discriminate: they run
+the same assertions against implementations lacking the property and require
+them to fail.  A dense factorization keeps its counts small but grows its
+shapes; a pairwise loop keeps its shapes small but does ``L^2`` work; a loop
+written with ``@`` defeats both, on purpose.
 """
 
 from __future__ import annotations
