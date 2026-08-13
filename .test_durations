@@ -7261,5 +7261,9 @@
  "tests/test_term_inference.py::TestCenteringMetadata::test_the_recorded_shift_is_the_constant_that_was_subtracted": 0.019683555932715535,
  "tests/test_term_inference.py::TestTermInferenceConstructorContract::test_a_released_positional_call_still_lands_its_arguments": 0.0002226480282843113,
  "tests/test_term_inference.py::TestTermInferenceConstructorContract::test_term_inference_field_order_is_append_only": 0.00035238696727901697,
- "tests/test_term_inference.py::TestTermInferenceConstructorContract::test_the_appended_field_defaults_to_no_shift": 0.00018144294153898954
+ "tests/test_term_inference.py::TestTermInferenceConstructorContract::test_the_appended_field_defaults_to_no_shift": 0.00018144294153898954,
+ "tests/test_rating_table_prediction_equivalence.py::test_the_exported_table_keeps_going_where_the_model_saturates": 0.02,
+ "tests/test_rating_table_prediction_equivalence.py::test_a_saturated_export_frame_stops_the_export": 0.02,
+ "tests/test_rating_table_prediction_equivalence.py::test_a_log_link_binomial_whose_mean_is_clamped_cannot_be_exported": 0.26,
+ "tests/test_rating_table_prediction_equivalence.py::test_the_impact_sheet_does_not_cover_a_continuous_interaction": 0.11
 }
