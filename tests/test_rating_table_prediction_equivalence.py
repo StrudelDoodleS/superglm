@@ -282,7 +282,15 @@ def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     )
 
 
-def _predict_from_payload(payload, X: pd.DataFrame, *, with_interactions: bool = True):
+def _predict_from_payload(
+    payload, X: pd.DataFrame, *, with_interactions: bool = True
+) -> np.ndarray:
+    """The premium the exported workbook implies, read out of the workbook alone.
+
+    ``with_interactions=False`` exists only to measure how far the
+    reconstruction moves without the interaction factor, so that the exactness
+    claim beside it is a discriminating measurement.  No consumer would drop it.
+    """
     reconstructed = np.full(len(X), float(payload.base_relativity), dtype=np.float64)
     for block in payload.main_effects:
         reconstructed = reconstructed * _block_multiplier(block, X)

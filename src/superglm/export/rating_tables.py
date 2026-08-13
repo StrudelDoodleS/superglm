@@ -737,13 +737,16 @@ def build_rating_table_payload(
       impact sweep bins on the exact ``edges`` array while the exported block
       prints its bin boundaries through ``_format_interval`` at ``.10g``, so a
       consumer applying the printed strings re-bins the rows that sit within
-      the rounding band of an edge.  Measured on the equivalence fixture: 151
-      of 151 printed edges differ from exact by up to 4.98e-09, 76 of 1200 rows
-      (6.3%) land in a different bin, and those rows carry up to 5.89e-02
-      relative error against the discretised prediction the block is meant to
-      reproduce exactly (4.44e-16 with exact edges).  Tracked separately; it is
-      a change to a public column of the payload, not to the centering this
-      function fixed.
+      the rounding band of an edge -- and with ``bin_strategy=
+      "exposure_quantile"`` the edges ARE data values, so a row sitting exactly
+      on one flips whenever its printed edge rounds up.  Measured on the
+      equivalence fixture (900 rows, 150 bins, two continuous terms): 302 of
+      302 printed edges differ from exact by up to 4.99e-09, 133 of 900 rows
+      (14.8%) land in a different bin, and the reconstruction carries 2.29e-01
+      maximum relative error against the discretised predictions the blocks are
+      meant to reproduce exactly -- 6.94e-16 with the exact edges.  Tracked
+      separately as issue #278; fixing it changes a public column of the
+      payload, not the centering this function fixed.
 
     ``centering`` is a presentation choice and does not change what the
     payload rates.  ``"native"`` reports each term under the model's own
