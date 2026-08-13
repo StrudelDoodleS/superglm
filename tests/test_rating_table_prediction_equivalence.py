@@ -563,7 +563,7 @@ def test_a_grouped_interaction_parent_keys_its_two_blocks_differently():
     levels while ``_interaction_blocks`` keys cells on the four grouped ones,
     and no block carries the map, so a consumer starting from a raw row has
     nothing to look up.  This is a characterisation of a pre-existing gap
-    (issue #284) rather than a fix: it fails the moment the export starts
+    (issue #286) rather than a fix: it fails the moment the export starts
     emitting the mapping or the original-level cells, which is the point --
     whoever does that has to come here and correct the contract beside it.
     """

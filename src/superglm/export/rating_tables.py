@@ -767,7 +767,7 @@ def build_rating_table_payload(
     a six-level territory collapsed to four: 68.7% of rows, and the same share
     of weight, key on a label the interaction table does not have.  This is
     pre-existing -- the interaction export predates issue #253 and centering
-    does not touch it -- and is tracked as issue #284; until it is fixed, the
+    does not touch it -- and is tracked as issue #286; until it is fixed, the
     product contract above holds for interactions whose parents are ungrouped.
 
     Lossy, by construction, for the binned blocks -- ``Spline``,
