@@ -93,23 +93,38 @@ def test_the_level_count_appears_only_as_a_batch_never_as_a_matrix_dimension(
     ladder_records,
 ):
     """The whole O(L) claim in one sentence, and it is decidable from the log."""
+    # Before anything else: prove the recorder saw the path.  Every assertion
+    # below degrades to a tautology on an empty log -- an empty shape set
+    # matches an empty shape set, a maximum over nothing is zero, and the
+    # empty batch set is a subset of everything -- so the guard is not
+    # decoration.  Interception could stop working while the ladder keeps
+    # running, and this test carries the headline claim.
+    for n_levels, record in zip(LEVELS, ladder_records, strict=True):
+        assert record.factorizations(), f"nothing recorded at {n_levels} levels"
+
     assert_core_shapes_independent(LEVELS, ladder_records)
 
     # The fixed set is small: arrow blocks are k_a square, the border is
     # (1 + k_a) square, and the row factors are n_rows x k_a.  Densifying
-    # would put L * k_a here instead.
+    # would put L * k_a -- at least 320 here -- in its place.
     widest = max(record.max_core_dim() for record in ladder_records)
     assert widest <= N_ROWS, report(ladder_records[-1])
-    assert widest < min(LEVELS) * K_A
 
     # Where L does appear, it appears as a count of small matrices.  A call
     # batching over anything else -- level pairs, or levels times spline
     # width -- would be super-linear work that the shape check cannot see.
+    # Bounded rather than enumerated: `_trace_chunk_width` caps a batch by a
+    # memory budget, so a larger sweep would legitimately split one batch of
+    # L into several smaller ones.
     for n_levels, record in zip(LEVELS, ladder_records, strict=True):
-        batches = {call.batch for call in record.factorizations()}
-        assert batches <= {1, n_levels - 1, n_levels}, (
-            f"at {n_levels} levels a factorization batched {sorted(batches)}, "
-            f"which is neither one matrix nor one per level\n{report(record)}"
+        widest_batch = max(call.batch for call in record.factorizations())
+        assert widest_batch <= n_levels, (
+            f"at {n_levels} levels a factorization batched {widest_batch}, "
+            f"which is more than one per level\n{report(record)}"
+        )
+        assert widest_batch >= n_levels - 1, (
+            f"at {n_levels} levels nothing batched over the levels at all "
+            f"(widest {widest_batch})\n{report(record)}"
         )
 
 
@@ -126,6 +141,21 @@ def test_the_edf_path_work_and_allocation_grow_linearly_in_the_level_count(
         LEVELS,
         [record.peak_bytes for record in ladder_records],
         label="peak allocation",
+    )
+    # The largest single array, counting what routines return as well as what
+    # they were given.  An assembly whose *result* is the dense object --
+    # block_diag over L blocks, say -- keeps every operand small and would
+    # slip past the shape invariant entirely.
+    #
+    # Held to a much tighter bound than the two above, because it earns one:
+    # it is structural rather than search-dependent and doubles at exactly
+    # 2.0000, where the factorization count's constant swings 4.4% with the
+    # bisection.  At 1.05 this rejects anything from O(L^1.07) up.
+    assert_grows_linearly(
+        LEVELS,
+        [record.max_elements() for record in ladder_records],
+        label="largest array",
+        tolerance=1.05,
     )
 
 
@@ -204,6 +234,37 @@ def test_a_quadratic_loop_fails_the_growth_bound():
             [record.elementary_factorizations() for record in records],
             label="elementary factorizations",
         )
+
+
+def test_quadratic_work_built_from_matrix_products_is_invisible_to_the_counter():
+    """The instrument's blind spot, pinned rather than described.
+
+    ``A @ B`` is a bytecode operator, not a call, so no recorder sees it --
+    ``sys.monitoring`` included.  A quadratic loop written with ``@`` in
+    bounded space therefore passes both assertions, and this test fails if
+    that ever stops being true so the limits section cannot quietly rot.
+
+    It also bounds what the counting half of this file proves.  ``_arrow``
+    claims ``O(L (g^3 + g^2 r + g r^2))``.  The ``g^3`` term is the ``eigh``
+    and is counted; the other two live in einsums and matrix products and are
+    not.  Allocation covers their space, nothing here covers their time.
+    """
+    records = []
+    for n_levels in CONTROL_LEVELS:
+        rng = np.random.default_rng(5)
+        blocks = rng.normal(size=(n_levels, K_A, K_A))
+        with record_linalg_calls(packages=("tests",)) as record:
+            total = np.zeros((K_A, K_A))
+            for q in range(n_levels):  # L^2 work, O(1) extra space
+                total += (blocks @ blocks[q]).sum(axis=0)
+        records.append(record)
+
+    assert all(not record.factorizations() for record in records)
+    assert_grows_linearly(
+        CONTROL_LEVELS,
+        [record.peak_bytes + 1 for record in records],
+        label="peak allocation",
+    )
 
 
 def test_one_arrow_factorization_costs_exactly_one_eigendecomposition_per_block():

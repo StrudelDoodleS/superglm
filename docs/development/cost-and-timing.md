@@ -60,8 +60,17 @@ with record_linalg_calls() as record:
 record.counts()                     # calls per routine
 record.core_signature()             # the distinct (routine, core shapes) pairs
 record.elementary_factorizations()  # work, batches unrolled
+record.max_elements()               # largest array seen, operands and results
 record.peak_bytes                   # peak allocation over the block
 ```
+
+Assertions built on a call log have one failure mode worth guarding above all
+others: **an empty log satisfies almost anything.** An empty set of shapes
+matches an empty set of shapes, a maximum over nothing is zero, and an empty
+set of batch sizes is a subset of every set. If interception silently stops
+working, every such assertion goes green while measuring nothing at all.
+`assert_core_shapes_independent` refuses an empty log for that reason, and any
+new assertion should start by proving the recorder saw the path.
 
 The split that makes this a cost model rather than a tally is **core shape
 versus batch**. NumPy's linear algebra operates on the last two axes and
@@ -87,26 +96,52 @@ operand any larger. Densifying the arrow kernel — the implementation this path
 replaces — moves the widest core dimension to 378, 762, 1,530 and 3,066, and
 multiplies the peak by 3.76 per doubling against the 2.0 a linear path shows.
 
-The two columns are reproducible to different degrees, and the difference is
-worth knowing. **Counts repeat exactly**: the four factorization figures above
-were taken once on an idle machine and again at load 15, and were identical to
-the digit. The traced peak moved by about 1% between those runs, because it
-picks up incidental Python object churn along with the arrays. So assert counts
-as equalities and allocation as a growth bound, never the other way round.
+**Counts repeat exactly.** The four factorization figures above were taken once
+on an idle machine and again at load 15, and were identical to the digit. The
+traced peak moved by about 1% between those runs, because it picks up
+incidental Python object churn along with the arrays.
+
+Exactly reproducible is not the same as constant in the size, though, and the
+distinction decides how tightly each channel can be asserted. The ladder
+bisects a data-dependent number of times, so its factorizations *per level*
+runs between 113.0 and 118.0 across the sweep — a 4.4% swing that is perfectly
+repeatable and still not flat. A quantity that is *structural* has no such
+swing: the largest array the path touches doubles at exactly 2.0000. So put the
+tight bound on the structural channel and a documented looser one on the
+search-dependent channel, rather than one tolerance over both.
+
+Sizing that tolerance has a trap worth naming, because the intuitive reason for
+it is backwards. A positive fixed overhead does **not** need an allowance: for
+`a*L + b` with `b > 0`, doubling gives `(2aL + b)/(aL + b) < 2`, so overhead
+makes the ratio *smaller*. What pushes a linear cost above the size ratio is a
+*negative* intercept — a term like `a(L-1)`, one factorization per level with
+the first merged away, doubling at `2 + 1/(L-1)`.
 
 ## Which instrument answers which question
 
 | question | instrument | why |
 |---|---|---|
-| Is this path O(L)? | call counts and operand shapes | The count *is* the complexity, not a proxy for it. Exact, and load-invariant. |
-| Did an accidental dense temporary appear? | `peak_bytes` | Implementation-independent. A `@` product is a bytecode operator, so no call recorder sees it — allocation does. |
+| Is this path O(L)? | call counts and operand core shapes | The count *is* the complexity, not a proxy for it. Exact, and load-invariant. |
+| Did an accidental dense temporary appear? | `max_elements`, then `peak_bytes` | `max_elements` spans operands *and* results, so an assembly whose output is the dense object is visible even though every input stayed small. `peak_bytes` catches whatever built it. |
 | Did we stop batching and start looping? | number of calls, at fixed work | Elementary count and shapes both survive that change; only the call count moves. |
 | Is this fast enough in seconds? | the clock, on a quiet machine | Nothing else answers an absolute wall-time question. |
 
-Counts are necessary, not sufficient. They pin the *shape* of the work and say
-nothing about whether it is correct — a routine blind to a weighting term
-passes every count assertion. Numerical-equivalence tests stay; counting
-replaces the timing test only.
+**Two blind spots, both real.** Matrix multiplication is a bytecode operator,
+not a call, so `A @ B` is invisible to any recorder — `sys.monitoring`
+included. Quadratic work written with `@` in bounded space therefore passes
+every assertion here, and
+`test_quadratic_work_built_from_matrix_products_is_invisible_to_the_counter`
+pins that hole so it cannot quietly close and reopen. Allocation is the
+backstop for a dense temporary's *space*; nothing here backstops its *time*.
+
+That bounds what counting proves about the arrow path specifically. Its cost is
+`O(L(g³ + g²r + gr²))`; the `g³` term is the eigendecomposition and is counted,
+while the other two live in einsums and matrix products and are not.
+
+And counts are necessary, not sufficient in a second sense: they pin the
+*shape* of the work and say nothing about whether it is correct — a routine
+blind to a weighting term passes every count assertion. Numerical-equivalence
+tests stay; counting replaces the timing test only.
 
 ## When a wall-clock number is warranted
 

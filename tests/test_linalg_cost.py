@@ -9,7 +9,11 @@ against the weaker instrument that would miss it.
 
 from __future__ import annotations
 
+import re
+import sys
 import tracemalloc
+import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -186,6 +190,48 @@ def test_every_registered_routine_still_exists_upstream():
     assert FACTORIZATIONS <= registered, sorted(FACTORIZATIONS - registered)
 
 
+def test_the_registry_covers_every_routine_superglm_calls():
+    """The registry is a denylist by omission; this ties it to actual usage.
+
+    Guarding renames is not enough — nothing otherwise notices when superglm
+    starts calling something unregistered, and an unregistered routine is
+    silently uncounted rather than loudly missing.  Scanning the source makes
+    coverage exactly as strong as this package needs, instead of as strong as
+    upstream's API surface happens to be.
+    """
+    package = Path(__file__).resolve().parent.parent / "src" / "superglm"
+    used: dict[str, set[str]] = {"numpy.linalg": set(), "scipy.linalg": set()}
+    patterns = (
+        (re.compile(r"\bnp\.linalg\.(\w+)"), "numpy.linalg"),
+        (re.compile(r"\bnumpy\.linalg\.(\w+)"), "numpy.linalg"),
+        (re.compile(r"\bscipy\.linalg\.(\w+)"), "scipy.linalg"),
+        (re.compile(r"\bfrom scipy\.linalg import ([\w, ]+)"), "scipy.linalg"),
+    )
+    for source in package.rglob("*.py"):
+        text = source.read_text(encoding="utf-8")
+        for pattern, module_name in patterns:
+            for match in pattern.findall(text):
+                for name in (part.strip().split(" as ")[0] for part in match.split(",")):
+                    used[module_name].add(name)
+
+    # Not routines: the exception class, and the submodule that the rank
+    # solver reaches through to call a LAPACK driver directly.  That call is
+    # genuinely below the registry and no rebinding can see it.
+    ignored = {"LinAlgError", "lapack", "blas", "interpolative"}
+    registered = {
+        "numpy.linalg": set(NUMPY_ROUTINES),
+        "scipy.linalg": set(SCIPY_ROUTINES),
+    }
+    unregistered = {
+        module_name: sorted(names - registered[module_name] - ignored)
+        for module_name, names in used.items()
+    }
+    assert not any(unregistered.values()), (
+        f"superglm calls routines the recorder would not see: {unregistered}"
+    )
+    assert used["numpy.linalg"], "the source scan matched nothing, so it proves nothing"
+
+
 def test_a_routine_whose_leading_axes_are_not_a_batch_is_not_counted_as_work():
     """``tensorsolve`` reshapes, so the batch/core split does not describe it.
 
@@ -231,6 +277,58 @@ def _eigh(core: int, batch: int) -> LinalgCall:
     return LinalgCall("numpy.linalg.eigh", (Operand(shape, "float64"),))
 
 
+def test_it_records_what_a_routine_returned_not_only_what_it_was_given():
+    """``block_diag`` keeps every operand small and builds a large result.
+
+    An assembly like that is invisible to any check that only reads operands,
+    which is why the result is recorded and why ``max_elements`` spans both.
+    """
+    blocks = [np.eye(3) for _ in range(8)]
+
+    with record_linalg_calls() as record:
+        scipy.linalg.block_diag(*blocks)
+
+    (call,) = record.of("scipy.linalg.block_diag")
+    assert call.shapes == ((3, 3),) * 8
+    assert call.outputs[0].shape == (24, 24)
+    assert record.max_elements() == 24 * 24
+
+
+def test_it_records_a_call_that_raised():
+    """A routine that raised still did the work, and superglm falls back."""
+    with record_linalg_calls() as record:
+        with pytest.raises(np.linalg.LinAlgError):
+            np.linalg.cholesky(-np.eye(3))
+
+    (call,) = record.of("numpy.linalg.cholesky")
+    assert call.shapes == ((3, 3),)
+    assert call.outputs == ()
+
+
+def test_it_puts_back_an_alias_bound_by_a_module_imported_inside_the_block():
+    """Otherwise that module holds a live wrapper for the rest of the session.
+
+    The entry scan cannot see a module that does not exist yet, so the exit
+    scan looks for wrappers rather than trusting the entry list.
+    """
+    module = types.ModuleType("superglm._costinst_probe")
+    module.cho_factor = scipy.linalg.cho_factor
+
+    with record_linalg_calls():
+        sys.modules["superglm._costinst_probe"] = module
+
+    try:
+        assert module.cho_factor is scipy.linalg.cho_factor
+    finally:
+        del sys.modules["superglm._costinst_probe"]
+
+
+def test_the_shape_assertion_refuses_an_empty_log():
+    """Every arm of it is a tautology on nothing, so nothing must not pass."""
+    with pytest.raises(AssertionError, match="no factorizations were recorded"):
+        assert_core_shapes_independent((10, 20), [CostRecord(), CostRecord()])
+
+
 def test_the_shape_assertion_rejects_an_operand_that_tracks_the_size():
     sizes = (10, 20)
     structured = [_record_of(_eigh(4, size)) for size in sizes]
@@ -247,6 +345,37 @@ def test_the_growth_assertion_separates_linear_from_quadratic():
 
     with pytest.raises(AssertionError, match="faster than linearly"):
         assert_grows_linearly(sizes, [100, 400, 1600], label="quadratic work")
+
+
+def test_the_growth_assertion_rejects_the_exponents_its_default_claims_to():
+    """Pin the default tolerance, which otherwise no test constrains.
+
+    Without this, the default could be widened until the assertion admitted
+    ``O(L*sqrt(L))`` and every test here would stay green — the loosening
+    would be invisible, which is the failure mode this whole file exists to
+    prevent.  The exponents come from the docstring: 1.25 allows 2.50 on a
+    doubling, so anything from ``L^1.33`` up must fail, ``O(L*sqrt(L))``
+    included.
+    """
+    sizes = (64, 128, 256)
+
+    for exponent in (1.0, 1.1, 1.3):
+        assert_grows_linearly(
+            sizes, [float(size**exponent) for size in sizes], label=f"L^{exponent}"
+        )
+
+    for exponent in (1.33, 1.5, 2.0):
+        with pytest.raises(AssertionError, match="faster than linearly"):
+            assert_grows_linearly(
+                sizes, [float(size**exponent) for size in sizes], label=f"L^{exponent}"
+            )
+
+    # And the tight value the largest-array channel is held to.
+    assert_grows_linearly(sizes, [float(size) for size in sizes], label="exact", tolerance=1.05)
+    with pytest.raises(AssertionError, match="faster than linearly"):
+        assert_grows_linearly(
+            sizes, [float(size**1.08) for size in sizes], label="L^1.08", tolerance=1.05
+        )
 
 
 def test_the_growth_assertion_needs_two_sizes_and_a_positive_baseline():

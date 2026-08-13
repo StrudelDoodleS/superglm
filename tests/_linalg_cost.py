@@ -57,9 +57,13 @@ implementation-independent backstop that sees a dense temporary however it was
 built.  Counts say which call did it; the peak says that it happened.
 
 Calls below the registry are not individually recorded -- a raw LAPACK wrapper
-obtained from ``scipy.linalg.get_lapack_funcs``, or a call from inside
-compiled code.  ``get_lapack_funcs`` is itself registered, so a path dropping
-below the registry is at least visible in the log.
+obtained from ``scipy.linalg.get_lapack_funcs``, or a call from inside compiled
+code.  ``get_lapack_funcs`` is registered so that *that* route is visible, but
+it is not the only one: reaching straight into ``scipy.linalg.lapack`` bypasses
+the registry with nothing in the log at all, and ``superglm`` does this once
+today, in the rank solver.  The registry is therefore checked against the
+routines this package actually uses, rather than trusted to cover them --
+see ``test_the_registry_covers_every_routine_superglm_calls``.
 
 The recorder is not thread-safe, so the recorded block must be single-threaded
 at the Python level.  BLAS may still thread internally; that does not affect
@@ -69,6 +73,7 @@ counts, which is the point.
 from __future__ import annotations
 
 import contextlib
+import math
 import sys
 import tracemalloc
 from collections import Counter
@@ -148,16 +153,20 @@ SCIPY_ROUTINES = (
 
 #: Routines whose cost is at least quadratic in an operand dimension *and*
 #: whose leading axes are a batch.  These are the calls a complexity claim is
-#: made about; the cheap remainder (``norm``, ``det``, ``block_diag``, the
-#: ``get_*_funcs`` lookups) is still recorded, but counting it alongside a
+#: made about; the cheap remainder -- ``norm``, ``block_diag`` and the
+#: ``get_*_funcs`` lookups -- is still recorded, but counting it alongside a
 #: Cholesky would compare unlike work.
 #:
-#: ``tensorsolve`` and ``tensorinv`` are excluded despite being expensive:
-#: they reshape, so their leading axes are tensor structure rather than a
-#: stack, and the batch/core split would misread ``(2, 3, 4, 24)`` as six
-#: factorizations of a ``4 x 24`` when it is one of a ``24 x 24``.  They stay
-#: in the registry, so a path that starts using them is visible in the log --
-#: at which point this split needs revisiting rather than trusting.
+#: Three expensive routines are deliberately outside the set, all for the same
+#: reason: their first operand's leading axes are not a batch, so the work
+#: metric would sum a number that is wrong.  ``tensorsolve`` and ``tensorinv``
+#: reshape, and would misread a ``(2, 3, 4, 24)`` operand as six
+#: factorizations of a ``4 x 24`` when it is one of a ``24 x 24``;
+#: ``multi_dot`` takes a *sequence* of matrices, so it has no batch axis at
+#: all.  All three stay in the registry, so a path that starts using them is
+#: visible in the log -- at which point this split needs revisiting rather
+#: than trusting.  Everything else at least quadratic is in, including ``det``
+#: beside ``slogdet``, which is the same factorization at the same cost.
 FACTORIZATIONS = frozenset(
     f"{module}.{name}"
     for module, names in (
@@ -172,6 +181,8 @@ FACTORIZATIONS = frozenset(
                 "eigvalsh",
                 "inv",
                 "lstsq",
+                "det",
+                "matrix_power",
                 "matrix_rank",
                 "pinv",
                 "qr",
@@ -256,10 +267,21 @@ class Operand:
 
 @dataclass(frozen=True)
 class LinalgCall:
-    """One recorded call: the qualified routine name and its array operands."""
+    """One recorded call: the routine, its array operands, and what it returned.
+
+    Outputs are recorded because a routine can build something far larger than
+    anything it was given -- ``block_diag`` turns ``L`` small blocks into one
+    ``(L g, L g)`` array, and every *operand* stays small while it does.  They
+    are kept out of :meth:`CostRecord.core_signature` deliberately: a batched
+    ``eigh`` returns eigenvalues shaped ``(L, g)``, whose last two axes are
+    genuinely size-dependent without anything being wrong, so folding outputs
+    into the shape invariant would make it fail on correct code.
+    :meth:`CostRecord.max_elements` is the assertion that uses them.
+    """
 
     name: str
     operands: tuple[Operand, ...]
+    outputs: tuple[Operand, ...] = ()
 
     @property
     def shapes(self) -> tuple[tuple[int, ...], ...]:
@@ -330,13 +352,32 @@ class CostRecord:
         """The distinct ``(routine, core shapes)`` pairs among factorizations.
 
         The multiset of calls grows with the problem; this set is what must
-        not.
+        not.  Operands only -- see :class:`LinalgCall` for why outputs are not
+        in here.
         """
         return frozenset((call.name, call.core_shapes) for call in self.factorizations())
 
     def max_core_dim(self) -> int:
         """Largest core dimension handed to any factorization."""
         return max((call.max_core_dim for call in self.factorizations()), default=0)
+
+    def max_elements(self) -> int:
+        """Elements in the largest array seen, counting operands and outputs.
+
+        The size-blind companion to :meth:`core_signature`, and the one that
+        catches an assembly whose *result* is the dense object: an ``(L, g, g)``
+        stack holds ``L g^2`` elements where the ``(L g, L g)`` matrix built
+        from the same blocks holds ``L^2 g^2``.  Growth rate separates them
+        without needing to know ``g``.
+        """
+        return max(
+            (
+                math.prod(operand.shape)
+                for call in self.calls
+                for operand in (*call.operands, *call.outputs)
+            ),
+            default=0,
+        )
 
 
 def _operands(value: Any, *, depth: int = 0) -> Iterator[Operand]:
@@ -437,6 +478,7 @@ def record_linalg_calls(
 
     originals: dict[int, str] = {}
     replacements: dict[int, Any] = {}
+    reverted: dict[int, Any] = {}
     restore: list[tuple[Any, str, Any]] = []
 
     for module, module_name, routines in targets:
@@ -447,23 +489,36 @@ def record_linalg_calls(
             qualified = f"{module_name}.{routine}"
 
             def wrapper(*args: Any, _f: Any = original, _n: str = qualified, **kwargs: Any):
-                record.calls.append(LinalgCall(_n, _describe(args, kwargs)))
-                return _f(*args, **kwargs)
+                operands = _describe(args, kwargs)
+                try:
+                    result = _f(*args, **kwargs)
+                except BaseException:
+                    # A routine that raised still did its work, and superglm
+                    # routinely catches LinAlgError and falls back.  Dropping
+                    # the failed attempt would undercount the real cost.
+                    record.calls.append(LinalgCall(_n, operands))
+                    raise
+                record.calls.append(LinalgCall(_n, operands, _describe((result,), {})))
+                return result
 
             wrapper.__name__ = routine
             wrapper.__qualname__ = qualified
             wrapper.__doc__ = getattr(original, "__doc__", None)
             originals[id(original)] = qualified
             replacements[id(original)] = wrapper
+            reverted[id(wrapper)] = original
             restore.append((module, routine, original))
-
-    restore.extend(_alias_sites(originals, packages))
-    for module, attr, original in restore:
-        setattr(module, attr, replacements[id(original)])
 
     started_tracing = False
     baseline = 0
     try:
+        # Inside the try: a setattr that fails partway through must still
+        # unwind, or the process is left running against live wrappers that
+        # append to a record nobody will ever read.
+        restore.extend(_alias_sites(originals, packages))
+        for module, attr, original in restore:
+            setattr(module, attr, replacements[id(original)])
+
         if trace_memory:
             if not tracemalloc.is_tracing():
                 tracemalloc.start()
@@ -478,6 +533,12 @@ def record_linalg_calls(
                 tracemalloc.stop()
         for module, attr, original in reversed(restore):
             setattr(module, attr, original)
+        # A module first imported *inside* the block bound the wrapper and was
+        # not in the entry scan.  Left alone it would hold that wrapper for the
+        # rest of the session, appending to a record nobody reads and keeping
+        # it alive.  Scan once more, this time for wrappers.
+        for module, attr, wrapped in _alias_sites(reverted, packages):
+            setattr(module, attr, reverted[id(wrapped)])
 
 
 def assert_core_shapes_independent(sizes: Sequence[int], records: Sequence[CostRecord]) -> None:
@@ -491,6 +552,14 @@ def assert_core_shapes_independent(sizes: Sequence[int], records: Sequence[CostR
     set or is not.
     """
     signatures = [record.core_signature() for record in records]
+    empty = [size for size, signature in zip(sizes, signatures, strict=True) if not signature]
+    assert not empty, (
+        f"no factorizations were recorded at sizes {empty}, so this assertion would "
+        "pass on any code at all.  Either the path factors nothing, or the recorder "
+        "did not see it -- check that the code under test was imported before the "
+        "block and that `packages` covers it."
+    )
+
     shared = signatures[0]
     offenders = [
         (size, sorted(signature ^ shared))
@@ -508,22 +577,41 @@ def assert_grows_linearly(
     values: Sequence[float],
     *,
     label: str,
-    tolerance: float = 1.4,
+    tolerance: float = 1.25,
 ) -> None:
     """Assert *values* grow no faster than *sizes*, up to *tolerance*.
 
     Each consecutive pair must satisfy
     ``value_ratio <= size_ratio * tolerance``.  Comparing successive ratios
     rather than fitting a curve is the textbook separation of complexity
-    classes, and it needs no constant: doubling the size doubles a linear cost
-    and quadruples a quadratic one, and no tolerance worth using sits between
-    those.
+    classes, and it needs no constant.
 
-    ``tolerance`` covers the affine intercept -- a linear cost with fixed
-    overhead grows slightly faster than the size ratio at small sizes -- and
-    nothing else.  It is emphatically not a noise allowance: the inputs here
-    are counts and traced byte totals, which reproduce exactly, so a failure
-    is a real change in what the code does rather than a busy machine.
+    ``tolerance`` is *not* an allowance for a positive affine intercept, which
+    is the intuitive reading and the wrong one: a cost of ``a * L + b`` with
+    ``b > 0`` doubles to ``(2aL + b) / (aL + b) < 2``, so fixed overhead makes
+    the ratio *smaller* and needs nothing.  Two things do push a linear cost
+    above the size ratio.  A negative intercept -- a term like ``a(L - 1)``,
+    one factorization per level with the first merged away -- doubles to
+    ``2 + 1/(L - 1)``, or 2.016 at 64 levels.  And a constant that is itself
+    mildly size-dependent: the screening ladder bisects a data-dependent
+    number of times, so its factorizations-per-level runs between 113.0 and
+    118.0 across the sweep, a 4.4% swing on top of a worst-case ratio of
+    2.052.
+
+    Hence 1.25, allowing 2.50 on a doubling: about 22% over what is observed,
+    which covers that swing on another BLAS or a later NumPy without becoming
+    meaningless.  It still rejects everything from ``O(L^1.33)`` up, including
+    the ``O(L*sqrt(L))`` that a half-vectorised loop produces, which doubles
+    at 2.83.
+
+    Pass a tighter value on a channel that does not wobble.  ``max_elements``
+    doubles at exactly 2.0000 on the screening path, because it is structural
+    rather than search-dependent, and takes 1.05.
+
+    It is emphatically not a noise allowance.  Counts reproduce exactly, so a
+    failure is a real change in what the code does rather than a busy machine.
+    Traced byte totals carry about 1% of run-to-run jitter from incidental
+    Python object churn, an order of magnitude inside this bound.
     """
     if len(sizes) < 2:
         raise ValueError("need at least two sizes to compare growth")
@@ -545,7 +633,7 @@ def assert_grows_linearly(
 
 def report(record: CostRecord) -> str:
     """One-line-per-routine summary, for pasting into a failure message."""
-    lines = [f"peak={record.peak_bytes} bytes"]
+    lines = [f"peak={record.peak_bytes} bytes, largest array={record.max_elements()} elements"]
     for name, count in sorted(record.counts().items()):
         shapes = sorted({call.shapes for call in record.of(name)})
         lines.append(f"{name} x{count} shapes={shapes}")
