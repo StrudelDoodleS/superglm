@@ -229,7 +229,11 @@ from superglm.screening._structured import spline_cat_moments, structured_ladder
 # Every test here fits a model through the public screen, which is what
 # pyproject's ``slow`` marker is defined for.  The cost is the same class as the
 # tests already carrying it -- 0.03 to 0.46 s each, against 0.03 to 0.39 s for
-# the five slow-marked cases in tests/test_screening_worth_gate.py.
+# the five slow-marked cases in tests/test_screening_worth_gate.py.  Those two
+# figures are a RELATIVE comparison taken in one run on a shared machine, which
+# is the only form worth quoting: neither is a benchmark and neither should be
+# read as an absolute cost.  Everything else in this file is exact arithmetic or
+# a mutation result, and so is load-independent.
 pytestmark = pytest.mark.slow
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0, 400.0)
@@ -444,12 +448,14 @@ def _edge_branch(V_eff, S, lam):
 
 
 def _traces(V_eff, S, lam):
-    """Both functionals ``_edge`` can return, from one reduction of ``A``.
+    """``tr(P V_eff)`` at ``pinv``'s own cut, re-formed over the same reduction.
 
-    ``_edge`` answers ``tr(P V_eff)`` on the ``pinv`` branch and
-    ``tr(A^-1 V_eff)`` on the Cholesky one, so a test that grades its output has
-    to know which.  Both are sums of Rayleigh quotients over the eigenbasis of
-    ``A``; the truncated one restricts to the directions ``pinv`` retains.
+    This is the functional ``_edge`` returns on its ``pinv`` branch, as a sum of
+    the retained Rayleigh quotients.  There is deliberately no untruncated
+    companion: on the Cholesky branch ``_edge`` answers ``tr(A^-1 V_eff)``, and
+    an ``eigh`` reconstruction of THAT would be a second unstable reduction of a
+    ``cond = 4.4e+16`` matrix with no entitlement to agree with the first.  The
+    caller skips that branch rather than grading it.
 
     WHAT IS AND IS NOT INDEPENDENT HERE, because the earlier wording overstated
     it.  ``np.linalg.pinv(A, hermitian=True)`` reduces through
@@ -464,16 +470,15 @@ def _traces(V_eff, S, lam):
     tridiagonalisation) gives 7.000004700567314 against this route's
     7.000004364954149, a genuinely independent 3.36e-07 df apart.
 
-    Returns ``(truncated, untruncated, dropped, gap)``.
+    Returns ``(truncated, dropped, gap)``.
     """
     A = V_eff + lam * S
     w, Q = np.linalg.eigh(A)
     quot = np.einsum("ij,jk,ki->i", Q.T, V_eff, Q)
     keep = np.abs(w) > _PINV_RCOND * np.abs(w).max()
     truncated = float(np.sum(quot[keep] / w[keep]))
-    untruncated = float(np.sum(quot / w))
     gap = np.abs(w[keep]).min() / np.abs(w[~keep]).max() if (~keep).any() else np.inf
-    return truncated, untruncated, int((~keep).sum()), float(gap)
+    return truncated, int((~keep).sum()), float(gap)
 
 
 # --------------------------------------------------------------------------
@@ -646,17 +651,23 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     this pair is entirely the OTHER estimator, which reads 10.999974 there
     against 9.000019 here.
 
-    WHICH FUNCTIONAL IS GRADED FOLLOWS THE BRANCH, RATHER THAN THE BRANCH BEING
-    REQUIRED.  An earlier form asserted ``_edge_branch(...) == "pinv"``.  That
-    was wrong, and the measurement is in :func:`_edge_branch`: the smallest
-    diagonal shift that makes ``dpotrf`` succeed here is 0.26 ulp of ``A``'s
-    largest entry, and the branch flips on 2 of 600 one-ulp draws.  A build
-    that legitimately takes the Cholesky arm would have failed a test that is
-    not about it.  Both functionals come out of one reduction, so following the
-    branch costs nothing and needs no second certified constant -- the
-    same-bits comparison is a reconstruction, not an oracle.  The absolute pin
-    is skipped on the Cholesky arm, where ``tr(A^-1 V_eff)`` is the point that
-    ``r = 2.010e+03`` says nothing certifies.
+    ON THE CHOLESKY ARM THIS TEST REFUSES TO GRADE ANYTHING, AND SKIPS.  An
+    earlier form asserted ``_edge_branch(...) == "pinv"``, which was wrong: the
+    smallest diagonal shift that makes ``dpotrf`` succeed here is 0.26 ulp of
+    ``A``'s largest entry and the branch flips on 2 of 600 one-ulp draws (see
+    :func:`_edge_branch`), so a build that legitimately takes the other arm
+    would have failed a test that is not about it.  The next form graded the
+    UNTRUNCATED trace on that arm, which was also wrong and for a subtler
+    reason: ``cho_solve`` and ``eigh`` are two different unstable reductions of
+    an ``A`` at ``cond = 4.4e+16``, and nothing entitles them to agree to
+    1e-10.  This file already measures how far apart such routes land --
+    ``numpy.linalg.inv``, a third one, differs from ``pinv``'s answer by
+    1.67e-04 df, six orders past that tolerance.  So there is no reconstruction
+    to compare against on that arm and no certified constant either, ``r`` being
+    2.010e+03 at this point.  The honest move is the one the rest of the file
+    makes wherever a quantity has no bound: do not pin it.  The skip carries the
+    reason, so a build that lands there says why rather than failing on
+    round-off.
 
     The last assertion is the one that keeps the disclosure honest: the
     truncation, 2.4974e-04 df, must stay ABOVE the point's own first-order
@@ -670,10 +681,19 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     V_eff, S = _dense_matrices(grab)
     rung = _clamped(dense, "hi")
     lam, clamped = rung.lambda0, rung.edf0
-    truncated, untruncated, dropped, gap = _traces(V_eff, S, lam)
-    branch = _edge_branch(V_eff, S, lam)
+    truncated, dropped, gap = _traces(V_eff, S, lam)
     assert dropped == 4, ("pinv no longer truncates this A", dropped)
     assert gap > 1e4, ("the truncation is now marginal, not a clean gap", gap)
+    if _edge_branch(V_eff, S, lam) != "pinv":
+        pytest.skip(
+            "cho_factor accepted this A on this build, so _edge returns "
+            "tr(A^-1 V_eff) and there is nothing here that can grade it: r = 2.010e+03 "
+            "at this point so no certified constant exists, and cho_solve against an "
+            "eigh reconstruction are two unstable reductions of a cond = 4.4e+16 matrix "
+            "with no entitlement to agree -- numpy.linalg.inv, a third such route, "
+            "lands 1.67e-04 df away. This test's subject is the truncation, and on "
+            "this arm there is none."
+        )
     w = np.linalg.eigvalsh(V_eff + lam * S)
     kept = np.abs(w) > _PINV_RCOND * np.abs(w).max()
     arithmetic = (
@@ -687,22 +707,20 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
         "the same-bits arithmetic floor has grown past the bound this fixture was sized for",
         arithmetic,
     )
-    expected = truncated if branch == "pinv" else untruncated
-    assert clamped == pytest.approx(expected, abs=_SAME_BITS_TOL), (
-        f"_edge took the {branch} arm and does not reproduce the functional that arm evaluates",
+    assert clamped == pytest.approx(truncated, abs=_SAME_BITS_TOL), (
+        "_edge does not reproduce tr(P V_eff), the functional the pinv arm evaluates",
         clamped,
-        expected,
+        truncated,
     )
-    if branch == "pinv":
-        assert clamped == pytest.approx(_BS8_HI_TRUNCATED_ORACLE, abs=_BS8_HI_TRUNCATED_TOL), (
-            "the clamped rung has left the certified truncated trace by more than 10x "
-            "this functional's first-order floor",
-            clamped - _BS8_HI_TRUNCATED_ORACLE,
-        )
-        assert abs(clamped - _BS8_HI_ORACLE) > _BS8_HI_TRUNCATED_FLOOR, (
-            "the truncation has stopped being a term in the answer",
-            clamped - _BS8_HI_ORACLE,
-        )
+    assert clamped == pytest.approx(_BS8_HI_TRUNCATED_ORACLE, abs=_BS8_HI_TRUNCATED_TOL), (
+        "the clamped rung has left the certified truncated trace by more than 10x "
+        "this functional's first-order floor",
+        clamped - _BS8_HI_TRUNCATED_ORACLE,
+    )
+    assert abs(clamped - _BS8_HI_ORACLE) > _BS8_HI_TRUNCATED_FLOOR, (
+        "the truncation has stopped being a term in the answer",
+        clamped - _BS8_HI_ORACLE,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -785,7 +803,7 @@ def test_the_dense_clamped_rung_matches_the_certified_low_edge_oracle():
     V_eff, S = _dense_matrices(grab)
     rung = _clamped(dense, "lo")
     lam, got = rung.lambda0, rung.edf0
-    _, _, dropped, _ = _traces(V_eff, S, lam)
+    _, dropped, _ = _traces(V_eff, S, lam)
     assert dropped == 0, ("this edge is supposed to be truncation-free", dropped)
     assert _PS8_LO_TOL > 10 * _PS8_LO_FLOOR, "tolerance must clear the first-order floor"
     assert got == pytest.approx(_PS8_LO_ORACLE, abs=_PS8_LO_TOL)
