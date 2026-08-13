@@ -46,29 +46,41 @@ _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 
 # The base relativity cell, for the same reason and re-applied at the same
 # point.  ``C2`` is column 3, so the global loop's ``column % 3 == 0`` arm
-# claims it and renders the base at two decimal places; the value stored stays
-# exact, so no reader of the file object notices, but a human reading the sheet
-# does.  It is the one cell that multiplies EVERY row of the tariff, and under
-# ``centering="mean"`` it additionally carries the whole transferred centering
-# constant, so a reader rating off the displayed number is uniformly wrong.
-# Measured on a two-term Poisson fit: base 0.3719954211385351 displays as 0.37,
-# a 5.4e-03 relative error on every risk; 0.4027922135365106 -> 0.40 (6.9e-03)
-# in the mean-centered export of the same model.
+# claims it and renders the base at two decimal places; the value stored keeps
+# its sixteen significant digits, so no reader of the file object notices, but
+# a human reading the sheet does.  It is the one cell that multiplies EVERY row
+# of the tariff, and under ``centering="mean"`` it additionally carries the
+# whole transferred centering constant, so a reader rating off the displayed
+# number is uniformly wrong.  Measured on a two-term Poisson fit: base
+# 0.3719954211385351 displays as 0.37, a 5.4e-03 relative error on every risk;
+# 0.4027922135365106 -> 0.40 (6.9e-03) in the mean-centered export of the same
+# model.
 #
-# ``General`` rather than a fixed-decimal format, which is where this differs
-# from the piecewise columns.  Those hold log relativities, which are bounded
-# by the tariff's own design, so twelve decimals is always enough.  The base is
-# ``exp(intercept)`` and its magnitude is not bounded by anything: a low-
-# frequency Poisson fit puts it near 1e-6, where twelve decimals leaves seven
-# significant digits.  ``General`` carries eleven significant digits at every
-# magnitude, which is more than the ten this module already prints bin edges
-# and axis values at -- the base should not be the least precisely stated
-# number on a sheet whose other public strings are ``.10g``.
+# Scientific rather than a fixed-decimal format, which is where this differs
+# from the piecewise columns.  Those hold log relativities, bounded by the
+# tariff's own design, so twelve decimals is always enough.  The base is
+# ``exp(intercept)`` and its magnitude is bounded by nothing: an ordinary
+# claim-frequency Poisson fit sits near ``exp(-3)`` = 0.05 and a low-frequency
+# one near 1e-6, where twelve decimals leaves seven significant digits.
+#
+# And scientific rather than ``General``, which was the first choice here and
+# does not survive its own justification.  ECMA-376 Part 1 s18.8.30 budgets
+# ``General`` in DISPLAY CHARACTERS, not significant digits -- "max overall
+# length for cell display is 11, not including negative sign, but includes
+# leading zeros and decimal separator" -- so leading zeros are charged against
+# the same eleven, and the precision decays exactly as the base shrinks: at
+# ``exp(-3)`` those eleven characters buy eight significant digits and a
+# 7.4e-09 error.  Below a decimal exponent of -3 the same clause switches
+# ``General`` to exponential and pins no digit count at all, leaving display
+# "based on the available cell width", so there is no precision to claim.
+#
+# ``0.0000000000E+00`` is ten mantissa decimals plus the leading digit: eleven
+# significant digits at EVERY magnitude, one more than the ten this module
+# prints bin edges and axis values at, and well inside the fifteen Excel
+# retains.  The base should not be the least precisely stated number on a sheet
+# whose other public strings are ``.10g``.
 _BASE_RELATIVITY_CELL = "C2"
-_BASE_RELATIVITY_NUMBER_FORMAT = "General"
-# Significant digits Excel's ``General`` renders, given a column wide enough to
-# hold them -- ``_autosize`` sizes from ``str(value)``, so it always is.
-_GENERAL_SIGNIFICANT_DIGITS = 11
+_BASE_RELATIVITY_NUMBER_FORMAT = "0.0000000000E+00"
 
 
 def _resolve_workbook_target(
@@ -330,9 +342,9 @@ def write_rating_table_workbook(
         for cell in row:
             if cell.value is None:
                 continue
-            if cell.column % 3 == 2:
+            if cell.column % _MAIN_EFFECT_BLOCK_STRIDE == 2:
                 cell.number_format = "0.000000"
-            if cell.column % 3 == 0:
+            if cell.column % _MAIN_EFFECT_BLOCK_STRIDE == 0:
                 cell.number_format = "#,##0.00"
 
     ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT

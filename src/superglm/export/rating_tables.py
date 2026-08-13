@@ -35,9 +35,17 @@ class RatingTableBaseNotRepresentableError(OverflowError):
     exported number that has no tolerable approximation: clipping it the way
     ``_safe_exp`` clips a confidence bound would hand back a workbook that
     silently rates every risk wrong, which is precisely the failure issue #253
-    was.  A base that overflows to ``inf`` or underflows to ``0.0`` therefore
-    stops the export instead of being repaired.
+    was.  A base that overflows to ``inf``, underflows to ``0.0``, or lands in
+    the subnormal range where float64 has already dropped most of its mantissa
+    therefore stops the export instead of being repaired.
     """
+
+
+# The smallest base the export will emit: the smallest float64 that still
+# carries a full 53-bit significand.  Below it lie the subnormals, which are
+# finite and positive but progressively less precise, so an exported subnormal
+# is not the number the model asked for -- see ``_base_relativity``.
+_SMALLEST_EXACT_BASE = float(np.finfo(np.float64).tiny)
 
 
 @dataclass(frozen=True)
@@ -618,23 +626,45 @@ def _base_relativity(log_base: float) -> float:
     silent uniform error issue #253 was about; clipping is therefore refused in
     favour of failing at the export boundary.
 
-    Both tails are rejected.  ``exp`` overflows to ``inf`` above about 709.78
-    and flushes to exactly ``0.0`` below about -745.13, and a base of ``0.0``
-    is no more usable than an infinite one: it drives every exported premium to
-    zero while every relativity RATIO in the workbook still reads correctly.
+    Both tails are rejected, and the lower one stops at the smallest NORMAL
+    float rather than at zero.  ``exp`` overflows to ``inf`` above about
+    709.78, but on the way down it does not fall off a cliff: below about
+    -708.4 it returns subnormals, which are finite and strictly positive and
+    so would pass an ``isfinite``/``> 0`` check while having already lost most
+    of their mantissa.  A subnormal has no implicit leading bit, so its
+    significand shrinks with its exponent, and the exported base stops being
+    the number this function was asked for.  On the round trip:
+
+        exp(-720.0) = 2.03e-313, whose log is off by 3.0e-12
+        exp(-740.0) = 4.2e-322,  off by 2.6e-03
+        exp(-745.0) = 5e-324,    off by 5.6e-01 -- one significant bit
+
+    The last is a workbook rating every risk by a factor of 1.75, which is the
+    same silent uniform error as a clip, reached through the guard meant to
+    prevent it.  ``tiny`` is therefore the floor: it is exactly where the
+    mantissa becomes full, and it is independently where Excel stops, since
+    Excel declines to implement IEEE 754's denormals -- "denormalized numbers
+    by their very nature have a variable number of significant digits" -- and
+    publishes 2.2251E-308 as its smallest allowed positive number, this same
+    value to the five figures it prints.
+
+    ``0.0`` is caught by the same comparison and is no more usable than an
+    infinite base: it drives every exported premium to zero while every
+    relativity RATIO in the workbook still reads correctly.
     """
     # The overflow is the condition being tested for, so it is detected from
     # the result rather than announced as a warning on the way to the raise.
     with np.errstate(over="ignore", under="ignore"):
         base = float(np.exp(log_base))
-    if not np.isfinite(base) or base <= 0.0:
+    if not np.isfinite(base) or base < _SMALLEST_EXACT_BASE:
         raise RatingTableBaseNotRepresentableError(
             f"Exported base relativity is exp({log_base!r}) = {base!r}, which cannot "
             "multiply a rating table. The base is the ordered-reference intercept plus "
             "the centering constant the exported blocks gave back; a fit whose sum "
-            "leaves float64 range (roughly [-745, 709]) is quasi-separated or "
-            "mis-scaled, and the export refuses rather than emit a clipped multiplier "
-            "that would silently mis-rate every row."
+            "leaves the range float64 represents exactly (roughly [-708.4, 709.8]) is "
+            "quasi-separated or mis-scaled, and the export refuses rather than emit a "
+            "clipped, subnormal or infinite multiplier that would silently mis-rate "
+            "every row."
         )
     return base
 
@@ -727,14 +757,39 @@ def build_rating_table_payload(
     5.6e-01 if the interaction block is left out of the product -- so that
     factor is load-bearing rather than decorative.
 
+    One configuration is outside that claim, and the product cannot be formed
+    at all rather than being formed imprecisely: an interaction whose
+    categorical parent carries a ``grouping=``.  ``_categorical_block`` expands
+    that parent's main-effect table back to the ORIGINAL level labels, while
+    ``_interaction_blocks`` keys its cells on the GROUPED ones the interaction
+    was fitted over, and no block in the payload carries the map between them.
+    A consumer holding a raw row therefore has no cell to look up.  Measured on
+    a six-level territory collapsed to four: 68.7% of rows, and the same share
+    of weight, key on a label the interaction table does not have.  This is
+    pre-existing -- the interaction export predates issue #253 and centering
+    does not touch it -- and is tracked as issue #284; until it is fixed, the
+    product contract above holds for interactions whose parents are ungrouped.
+
     Lossy, by construction, for the binned blocks -- ``Spline``,
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
     distinct errors ride on those, and only the first is reported:
 
     * The binning itself, which the ``discretization_impact`` sheet quantifies.
-      It is bias-free in the exposure-weighted mean: each bin's relativity is
-      the exposure-weighted mean of the smooth log-relativity over the rows in
-      it, so the weighted mean residual is zero by construction.
+      It is bias-free in the GEOMETRY measure: each bin's relativity is the
+      geometry-weighted mean of the smooth log-relativity over the rows in it,
+      so the weighted mean residual is zero by construction in that measure and
+      the binning error is spread rather than scale.  Which measure that is
+      depends on the family, and the difference is not cosmetic.  For
+      non-Tweedie families ``sample_weight`` is frequency mass, so the geometry
+      measure IS the exposure weighting and the residual is zero in the same
+      weights the exported ``Weight`` column reports.  Tweedie weights are
+      prior precision, not case counts, so ``discretize`` deliberately gives
+      every physical row unit geometry mass and each bin's value is the
+      UNWEIGHTED mean; the identity then holds per physical row, and the
+      prior-weighted residual is not zero.  Measured on a Tweedie(p=1.5) fit
+      with weights drawn on [0.5, 20]: the residual mean is 1.2e-18 per
+      physical row and -8.7e-04 under the prior weights, and per bin 1.9e-17
+      against 6.4e-03.
     * Interval-string rounding, which the impact sheet does NOT see.  The
       impact sweep bins on the exact ``edges`` array while the exported block
       prints its bin boundaries through ``_format_interval`` at ``.10g``, so a
@@ -766,6 +821,25 @@ def build_rating_table_payload(
     blocks that were shifted contribute to the transferred constant, which is
     why it is summed from the shift each block recorded rather than assumed to
     run over every exported term.
+
+    Partial is also what the ratemaking literature asks for, so the mixture
+    above is the published convention rather than an accident of which term
+    types happened to implement a shift.  A GLM needs one aliased level per
+    FACTOR, chosen per factor (Anderson et al., *A Practitioner's Guide to
+    Generalized Linear Models*, CAS Study Note, 3rd ed. 2007, s1.127), and the
+    intercept's value is then a function of that arbitrary per-factor choice
+    (s1.129) -- which is exactly why it has to move when the choice does.
+    Goldburd, Khare, Tevet and Guller, *Generalized Linear Models for Insurance
+    Rating* (CAS Monograph 5, 2nd ed.), s2.4.3, likewise directs the actuary to
+    pick each variable's base level independently.  No source requires one
+    uniform convention across terms.
+
+    Moving the constant into the base is equally standard.  Werner and Modlin,
+    *Basic Ratemaking* (CAS, 4th ed. 2010), ch. 10 p. 173, normalises the
+    relativities and then states that "the base loss cost also needs to be
+    adjusted to reflect the normalization", worked there as a product over
+    factors -- which on the log scale is the sum over blocks taken here.
+    Chapter 14 names the adjustment the off-balance factor.
 
     Raises
     ------

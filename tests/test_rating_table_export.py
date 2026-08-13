@@ -1,4 +1,6 @@
+import math
 import warnings
+from dataclasses import replace
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -23,7 +25,8 @@ from superglm import (
 )
 from superglm.editor import EditorSession
 from superglm.export.excel import (
-    _GENERAL_SIGNIFICANT_DIGITS,
+    _BASE_RELATIVITY_NUMBER_FORMAT,
+    _PIECEWISE_NUMBER_FORMAT,
     write_rating_table_workbook,
 )
 from superglm.export.rating_tables import RatingTablePayload, build_rating_table_payload
@@ -1807,6 +1810,21 @@ def test_summary_sheet_level_activity_filter_fails_closed_on_a_renamed_field():
         _term_rows(model, source)
 
 
+# Ten significant digits, i.e. 5e-10 relative.  Not chosen: it is parity with
+# ``_format_interval`` and ``_format_axis_value``, which print this module's
+# other public numeric strings at ``.10g``.  The base is the only number on the
+# sheet that multiplies every row, so it must not be the least precisely stated
+# one on it.
+_REQUIRED_BASE_PRECISION = 5e-10
+
+# Bases spanning the magnitudes a fitted intercept actually reaches.  A Poisson
+# claim-frequency model sits around ``exp(-3)`` = 5%; ``exp(-14)`` is the
+# near-1e-6 case ``excel.py`` cites as its reason for not using a fixed-decimal
+# mask; ``exp(8)`` is a severity model's scale.  These are the magnitudes the
+# format has to hold precision at, and testing one of them tests nothing.
+_BASE_MAGNITUDES = [math.exp(k) for k in (8.0, 2.0, -1.0, -3.0, -5.0, -9.0, -14.0)]
+
+
 @pytest.mark.parametrize("centering", ["native", "mean"])
 def test_the_base_relativity_cell_is_rendered_at_full_precision(tmp_path, centering):
     """The one cell that multiplies every row must not render at two decimals.
@@ -1823,12 +1841,7 @@ def test_the_base_relativity_cell_is_rendered_at_full_precision(tmp_path, center
 
     The assertion is on what the format RESOLVES, not on how it is spelled, so
     the cell is rendered here the way Excel would and the result compared to
-    the stored value.  The required precision is not chosen: it is parity with
-    ``_format_interval`` and ``_format_axis_value``, which print this module's
-    other public numeric strings at ``.10g``.  Ten significant digits is 5e-10
-    relative, and the base -- the only number on the sheet that multiplies
-    every row -- must not be stated less precisely than the bin edges beside
-    it.  ``#,##0.00`` misses that by seven orders of magnitude.
+    the stored value.
     """
     model, X, y, w = _fit_export_model()
     output = tmp_path / f"base-{centering}.xlsx"
@@ -1838,19 +1851,131 @@ def test_the_base_relativity_cell_is_rendered_at_full_precision(tmp_path, center
     stored = float(cell.value)
     assert stored > 0.0
     displayed = _as_excel_renders(stored, cell.number_format)
-    assert displayed == pytest.approx(stored, rel=5e-10), (
+    assert displayed == pytest.approx(stored, rel=_REQUIRED_BASE_PRECISION), (
         f"base {stored!r} renders as {displayed!r} under number_format {cell.number_format!r}"
     )
 
 
-def _as_excel_renders(value: float, number_format: str) -> float:
+@pytest.mark.parametrize("base", _BASE_MAGNITUDES)
+def test_the_base_cell_holds_its_precision_at_every_magnitude_a_fit_reaches(tmp_path, base):
+    """The precision has to survive the magnitude, not just the fixture's base.
+
+    The fixture above happens to land near 0.37.  A format can hold ten
+    significant digits there and lose them three decades down -- which is
+    exactly what ``General`` does, because ECMA-376 Part 1 s18.8.30 budgets it
+    in DISPLAY CHARACTERS ("max overall length for cell display is 11, not
+    including negative sign, but includes leading zeros and decimal
+    separator"), not in significant digits.  Leading zeros are charged to the
+    same budget as digits, so the guarantee decays as the base shrinks: at
+    ``exp(-3)`` = 0.049787068367863944 the eleven characters buy eight
+    significant digits and a 7.4e-09 error, fifteen times the tolerance.
+
+    So the base is swept over the magnitudes a fitted intercept reaches.  The
+    payload is rebuilt with each one rather than fitted to it -- reaching
+    ``exp(-14)`` by fitting would need a response nobody writes -- and it goes
+    through the real renderer, so this pins the shipped format and not a copy
+    of it.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, n_bins=20)
+    output = tmp_path / f"base-{base:.3e}.xlsx"
+    _write_workbook(replace(payload, base_relativity=base), output)
+
+    cell = load_workbook(output)["Rating Tables"]["C2"]
+    # The STORED value, which is what a reconstruction reads.  Not bit-exact:
+    # the sheet serialises a float at sixteen significant digits where round-
+    # tripping a float64 takes seventeen, so a value can come back one ulp
+    # away.  Sixteen digits is 5e-16 relative at worst; 1e-15 is twice that,
+    # and six orders of magnitude inside what this test is really about.
+    assert float(cell.value) == pytest.approx(base, rel=1e-15)
+    displayed = _as_excel_renders(base, cell.number_format)
+    assert displayed is not None, (
+        f"number_format {cell.number_format!r} leaves the rendering of {base!r} "
+        "undetermined by ECMA-376, so no precision can be claimed for it"
+    )
+    assert displayed == pytest.approx(base, rel=_REQUIRED_BASE_PRECISION), (
+        f"base {base!r} renders as {displayed!r} under number_format {cell.number_format!r}"
+    )
+
+
+def test_the_formats_this_cell_did_not_get_would_each_have_lost_the_precision():
+    """The chosen format has to beat the alternatives, or the choice is arbitrary.
+
+    Without this, ``_as_excel_renders`` could model anything at all and the
+    test above would still pass on a fixture whose base happens to be benign.
+    Each rejected candidate is required to miss the tolerance somewhere in the
+    swept range, so the format actually shipped is the one that survives it.
+    """
+
+    def worst(number_format: str) -> float:
+        errors = []
+        for base in _BASE_MAGNITUDES:
+            displayed = _as_excel_renders(base, number_format)
+            if displayed is None:
+                return math.inf  # not even determined -- strictly worse than wrong
+            errors.append(abs(displayed - base) / base)
+        return max(errors)
+
+    # What the global ``column % 3 == 0`` arm would have left on C2.
+    assert worst("#,##0.00") > _REQUIRED_BASE_PRECISION
+    # The piecewise columns' fixed-decimal mask: fine for a log relativity,
+    # which is bounded, and hopeless for an unbounded exp().
+    assert worst(_PIECEWISE_NUMBER_FORMAT) > _REQUIRED_BASE_PRECISION
+    # ``General``, whose eleven characters are spent on leading zeros.
+    assert worst("General") > _REQUIRED_BASE_PRECISION
+
+    # And the one that shipped clears it everywhere.
+    assert worst(_BASE_RELATIVITY_NUMBER_FORMAT) <= _REQUIRED_BASE_PRECISION
+
+
+# Excel's ``General`` is budgeted in display characters, not significant
+# digits: ECMA-376 Part 1 s18.8.30, "Floating point rule: For general
+# formatting in cells, max overall length for cell display is 11, not including
+# negative sign, but includes leading zeros and decimal separator."
+_GENERAL_DISPLAY_CHARACTERS = 11
+# The same clause switches ``General`` to exponential once the decimal exponent
+# drops below -3, and pins no digit count for that branch -- display is left
+# "based on the available cell width".  Below this exponent ``General`` is
+# therefore not modellable, which is the point: a precision guarantee cannot be
+# built on it.
+_GENERAL_SCIENTIFIC_BELOW_EXPONENT = -3
+
+
+def _as_excel_renders(value: float, number_format: str) -> float | None:
     """The value a reader gets back off the sheet, for the formats used here.
 
-    ``General`` shows significant digits and adapts to magnitude; a
-    ``0.000...`` mask shows a fixed number of decimals and does not.  Both are
-    modelled because the point of the test is to compare them.
+    ``None`` means the format's rendering of this value is not determined by
+    ECMA-376 -- which disqualifies it from carrying a precision claim just as
+    surely as rendering it wrongly would.
     """
     if number_format == "General":
-        return float(f"{value:.{_GENERAL_SIGNIFICANT_DIGITS}g}")
+        return _as_general_renders(value)
+    mantissa = number_format.split("E")[0]
+    if "E+" in number_format or "E-" in number_format:
+        # ``0.0000000000E+00``: the zeros left of the ``E`` are mantissa digit
+        # placeholders, so the rendering is fixed-significand scientific.
+        decimals = len(mantissa.split(".")[-1]) if "." in mantissa else 0
+        return float(f"{value:.{decimals}E}")
     decimals = len(number_format.split(".")[-1]) if "." in number_format else 0
     return round(value, decimals)
+
+
+def _as_general_renders(value: float) -> float | None:
+    """``General``, per ECMA-376's eleven-CHARACTER budget.
+
+    The budget is spent on the leading ``0``, the decimal separator and every
+    leading zero before it reaches a significant digit, which is why the
+    significant digits it delivers fall as the value does:
+
+        0.36787944117144233 -> ``0.367879441``  9 sig digits, 4.7e-10
+        0.049787068367863944 -> ``0.049787068``  8 sig digits, 7.4e-09
+        0.006737946999085467 -> ``0.006737947``  7 sig digits, 1.4e-10
+    """
+    if value == 0.0:
+        return 0.0
+    exponent = math.floor(math.log10(abs(value)))
+    if exponent < _GENERAL_SCIENTIFIC_BELOW_EXPONENT:
+        return None
+    integer_characters = max(exponent + 1, 1)
+    decimals = max(_GENERAL_DISPLAY_CHARACTERS - integer_characters - 1, 0)
+    return float(f"{value:.{decimals}f}")
