@@ -69,10 +69,12 @@ jobs:
   real-data:
     name: Python 3.13 · freMTPL2 real-data suites
     runs-on: ubuntu-latest
-    # The three suites take 3.4 min pinned to one thread locally (parity 5.7s,
-    # guide 93s, mixed screening 105s) and the download 3.2s cold. Held an order
-    # of magnitude above that: a slower runner should report as a slow job, not
-    # as a timeout, and a timeout here blocks nothing.
+    # Measured HERE rather than locally, now that the job can run on a pull
+    # request: 4m11s for the three suites on ubuntu-latest, cold download, whole
+    # job under 5 minutes (run 31699041770). The local figure this comment used
+    # to carry was taken on a contended developer box and was never the number
+    # that matters. Held ~7x above the measurement: a slower runner should report
+    # as a slow job, not as a timeout, and a timeout here blocks nothing.
     timeout-minutes: 30
     env:
       SUPERGLM_DATA_DIR: ${{ github.workspace }}/data
