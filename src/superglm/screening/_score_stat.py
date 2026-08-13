@@ -41,7 +41,7 @@ derivative of that value in one ulp of the stored moments is 1.620e-02 df —
 ``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at ``e = 2^-52``, not
 a random-draw maximum; 120 random draws reached 9.4e-04, 6% of it.  It is a
 DERIVATIVE and not a bound on a finite step: bounding one needs
-``r = ||dA|| / min|eig(A)| < 1`` and here ``r`` is 2.01e+03, so a one-ulp step
+``r = ||dA|| / min|eig(A)| < 1`` and here ``r`` is 3.59e+02, so a one-ulp step
 can cross a singularity of ``A`` and nothing bounds the exact edf at this
 point.  That is why neither path is pinned against 6.9997546284 —
 tests/test_screening_edf_target.py pins the TRUNCATED functional below instead,
@@ -76,7 +76,11 @@ truncation is stable rather than marginal — the retained spectrum starts at
 to carry it.  ``pinv`` also ranks directions by ``|lambda|`` where
 :func:`_psd_rank` reads the sign, so a NEGATIVE curvature direction would be
 inverted rather than dropped; on both pairs above that is inert, each carrying
-one negative eigenvalue (-1.59e-08, -5.62e-07) below the cut.  Nothing counts
+four negative eigenvalues at -8.909e-08 and one at -1.276e-07 respectively,
+resolved at 50 digits because float64 ``eigvalsh`` does not resolve a 1e-07
+eigenvalue against a ``k eps ||A||_2`` of 8.2e-04 — it reports one and four is
+the truth, which float64 ``dsytrf`` also gets right.  All of them sit below
+their pair's cut, so all are dropped rather than inverted.  Nothing counts
 them, so inert here is not a guarantee.
 
 Measured over 703 searching rungs with a range-valid oracle — ``ps``/``cr``/

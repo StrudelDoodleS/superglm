@@ -116,7 +116,7 @@ level, seven band layouts and two seeds, each path graded at its OWN lambda:
   ``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at ``e = 2^-52``,
   evaluated in arb because ``A^-1`` in float64 is meaningless at
   ``cond(A) = 7.2e+15``.  It is a derivative and NOT a bound on a finite step:
-  that needs ``r = ||dA|| / min|eig(A)| < 1``, and here ``r = 6.12e+01``, so a
+  that needs ``r = ||dA|| / min|eig(A)| < 1``, and here ``r = 2.69e+02``, so a
   one-ulp step can cross a singularity of ``A`` and nothing — not 70.7 df, not
   a multiple of it — bounds the exact edf at this point.  The 77.54 df draw
   already exceeds the derivative.  What the moments DO determine is measured

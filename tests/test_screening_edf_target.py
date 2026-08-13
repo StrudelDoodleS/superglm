@@ -42,12 +42,24 @@ the Neumann series converges:
 so ``r < 1`` at least says the perturbed inverse exists and is bounded:
 
     point       lam         min|eig A|   ||dA||      r
-    bs(8) hi   1.065e+05    1.590e-08    3.196e-05   2.010e+03
+    bs(8) hi   1.065e+05    8.908e-08    3.196e-05   3.588e+02
     ps(8) lo   1.381e-11    1.823e-13    3.996e-15   2.192e-02
-    ps(8) hi   1.381e+09    5.616e-07    3.436e-05   6.119e+01
+    ps(8) hi   1.381e+09    1.276e-07    3.436e-05   2.692e+02
     ns(6) lo   5.895e-12    2.223e-12    6.266e-16   2.819e-04
 
-At both HIGH edges one ulp of the stored moments is 61x to 2010x the smallest
+THE TWO HIGH-EDGE ROWS ARE NOT float64 READINGS, AND THE EARLIER ONES WERE.
+``min|eig A|`` at those points is 1e-07 against a ``k eps ||A||_2`` of 8.2e-04,
+so ``eigvalsh`` does not resolve it: on the ``bs(8)`` pair float64 reports ONE
+negative eigenvalue at -7.03e-07, and at 50 digits there are FOUR, all at
+-8.909e-08.  float64 ``dsytrf`` gets the inertia right (4) where ``dsyevd`` does
+not, which is the tell.  Both high-edge rows are therefore taken at 50 digits
+and the low-edge two are float64, where the two agree to four figures
+(1.8226e-13 against 1.8230e-13, and 2.2231e-12 against 2.2231e-12).  Correcting
+them moved ``r`` from a quoted 2.010e+03 to 3.588e+02 and from 6.119e+01 to
+2.692e+02; both are still far above 1, so nothing downstream of ``r > 1``
+changes.
+
+At both HIGH edges one ulp of the stored moments is 269x to 359x the smallest
 eigenvalue of ``A``, so a one-ulp step can cross a singularity there and NOTHING
 bounds the exact edf -- not D, not a multiple of D.  Those two points are not
 pinned against ``tr(A^-1 V_eff)`` at all.
@@ -89,12 +101,22 @@ So the honest position, and the one this file now takes: **the floors below are
 exact first-order sensitivities, not certified finite-step bounds.**  What is
 known about each is stated in full:
 
-    point      D           rigorous ball   random draws    tolerance
-    ps(8) lo   5.6825e-03  1.5109          5.61e-03 (1.01x D)   6e-2   10.6x D
-    ns(6) lo   8.2863e-05  refused         1.82e-04 (2.2x D)    1e-3   12.1x D
+    point      floor       D           rigorous ball   random draws   tolerance
+    ps(8) lo   5.6825e-03  5.5544e-03   1.5109         5.61e-03       6e-2  10.8x D
+    ns(6) lo   8.2863e-05  8.2837e-05   refused        1.82e-04       1e-3  12.1x D
     bs(8) hi   -- pinned on the truncated functional instead, D = 3.0484e-05 --
     ps(8) hi   -- not pinned at all --
 
+**THE CONSTANTS IN THE "floor" COLUMN ARE ``D / (1 - r)``, NOT ``D``, AND THAT
+IS A HELD-OVER LABEL RATHER THAN A HELD-OVER ARGUMENT.**  ``D/(1-r)`` is the
+mixed-norm quantity retracted five paragraphs above; the constants were minted
+from it and kept their name.  They are retained rather than re-minted because
+the difference is 2.3% and 0.03% -- ``5.5544e-03/(1 - 2.192e-02) = 5.679e-03``
+and ``8.2837e-05/(1 - 2.819e-04) = 8.2860e-05`` -- so as a stand-in for ``D``
+each is very slightly CONSERVATIVE, which is the harmless direction for a floor
+a tolerance must clear.  Nothing rests on the difference: against the true ``D``
+the tolerances are 10.8x and 12.1x rather than 10.6x and 12.1x, and the random
+draws reach 1.01x and 2.2x of ``D`` (0.99x and 2.2x of the tabulated floor).
 The tolerances are 10x to 12x D.  That is a stated engineering choice and it is
 NOT a certification: the rigorous bound where one exists is 266x looser, and a
 6e-2 tolerance widened to 15 df would no longer distinguish the arrow path's
@@ -158,8 +180,13 @@ exact trace.
 
 ``pinv`` also scores directions by ``|lambda|`` where :func:`_psd_rank` reads
 the sign, so a NEGATIVE curvature direction is inverted rather than dropped; at
-both points that rule is inert, since each carries exactly one negative
-eigenvalue (-1.59e-08 and -5.62e-07) and both sit under the cut.  Inert here is
+both points that rule is inert, but not for the reason first recorded here.
+Resolved at 50 digits, the ``bs(8)`` pair carries FOUR negative eigenvalues, all
+at -8.909e-08, and the ``ps(8)`` pair one at -1.276e-07 -- not "one each" at
+-1.59e-08 and -5.62e-07, which were unresolved float64 readings.  Every one of
+them is below its pair's cut (3.0698e-05 and 2.1261e-05), so all are dropped
+rather than inverted, and on the ``bs(8)`` pair the four negative directions are
+exactly the four ``pinv`` discards.  Inert here is
 not inert everywhere, and nothing counts them.
 
 **THE THREE ``xfail(strict=True)`` TESTS DO NOT PIN THEIR OWN DEFECT.**  A
@@ -386,8 +413,11 @@ def _same_lambda(arrow_lam, dense_lam):
 
     The two ladders are meant to share the dense path's 1e+-10 bracket, but they
     compute the scale it hangs off by different arithmetic -- the arrow path from
-    ``profiled_trace / (tr(S_a) k_a)`` and the dense path from
-    ``tr(V_eff) / tr(S_ti)`` -- so identity is a property to CHECK.  Measured on
+    ``profiled_trace / (tr(S_a) L)``, where ``L`` is the LEVEL COUNT
+    (``p.dims[0]`` is ``U.shape[0]``), and the dense path from
+    ``tr(V_eff) / tr(S_ti)`` with ``tr(S_ti) = k_b tr(S_a)`` -- so the two agree
+    only because ``L == k_b`` on these fixtures, and identity is a property to
+    CHECK rather than a given.  Measured on
     all three fixtures the two agree to 1.4e-16, 2.3e-16 and 4.1e-16 relative,
     which is 1 to 2 ulp: the same bracket by two routes.  ``rel=1e-12`` is
     ~4500 ulp, loose enough that ulp-level arithmetic differences never fire it
@@ -486,7 +516,7 @@ def _traces(V_eff, S, lam):
 # k = 121.  At the ladder's HIGH edge, lambda = 1.06521065611e+05.
 #
 #   exact tr(A^-1 V)       6.999754628429722  (arb, 800 bits, radius 1.3e-221)
-#   NOT CERTIFIABLE        r = 2.010e+03, so no multiple of the derivative
+#   NOT CERTIFIABLE        r = 3.588e+02, so no multiple of the derivative
 #                          bounds a one-ulp step; this point is NOT pinned
 #                          against that constant, by either path.
 #   tr(P V) at pinv's cut  7.000004364954146  -- what _edge returns, and what
@@ -594,7 +624,9 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     """What the clamped rung computes, pinned as what it is.
 
     ``cho_factor`` fails on this ``A`` on every build measured -- it is
-    indefinite, smallest eigenvalue -7.03e-07 against a largest of 3.07e+10 --
+    indefinite -- four negative eigenvalues at -8.909e-08 resolved at 50 digits,
+    where float64 ``eigvalsh`` reports one at -7.03e-07, against a largest of
+    3.07e+10 --
     so ``_edge`` answers from ``numpy.linalg.pinv(A, hermitian=True)``, which
     zeroes 4 of 121 directions at ``rcond = 1e-15`` of the largest, a cut of
     3.0698e-05.  Re-forming that same functional over the same reduction
@@ -605,7 +637,7 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     untruncated value here is 6.999754628429722, and the rung sits 2.4974e-04
     df from it -- all of which is the truncation.  Both this path and the arrow
     path used to be pinned against that constant at 1e-2 df.  They are not any
-    more: ``r = 2.010e+03`` at this point, so one ulp of the stored moments can
+    more: ``r = 3.588e+02`` at this point, so one ulp of the stored moments can
     cross a singularity of ``A`` and no multiple of the derivative bounds the
     exact edf.  A tolerance there would be an assertion about a quantity
     nothing certifies.  The truncated functional is the opposite case --
@@ -664,7 +696,7 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     ``numpy.linalg.inv``, a third one, differs from ``pinv``'s answer by
     1.67e-04 df, six orders past that tolerance.  So there is no reconstruction
     to compare against on that arm and no certified constant either, ``r`` being
-    2.010e+03 at this point.  The honest move is the one the rest of the file
+    3.588e+02 at this point.  The honest move is the one the rest of the file
     makes wherever a quantity has no bound: do not pin it.  The skip carries the
     reason, so a build that lands there says why rather than failing on
     round-off.
@@ -687,7 +719,7 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     if _edge_branch(V_eff, S, lam) != "pinv":
         pytest.skip(
             "cho_factor accepted this A on this build, so _edge returns "
-            "tr(A^-1 V_eff) and there is nothing here that can grade it: r = 2.010e+03 "
+            "tr(A^-1 V_eff) and there is nothing here that can grade it: r = 3.588e+02 "
             "at this point so no certified constant exists, and cho_solve against an "
             "eigh reconstruction are two unstable reductions of a cond = 4.4e+16 matrix "
             "with no entitlement to agree -- numpy.linalg.inv, a third such route, "
@@ -734,7 +766,7 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
 #
 # HIGH edge, lambda = 1381432867.0859513:
 #   exact edf              15.888406216250933 (arb, 800 bits, radius 2.4e-220)
-#   NOT CERTIFIABLE        r = 6.119e+01
+#   NOT CERTIFIABLE        r = 2.692e+02
 #
 # THE HIGH EDGE IS NOT PINNED AGAINST EITHER ORACLE.  What is pinned is the
 # ill-posedness, and by an observable rather than by a scale comparison: the
@@ -895,8 +927,8 @@ def test_the_high_edge_divergence_grades_neither_path():
     WHAT THIS TEST NO LONGER DOES.  It used to assert
     ``|dense - oracle| < 5.06`` and ``|arrow - oracle| < 5.06``.  5.06 df was a
     10-draw lower bound on a random spread; the derivative bound at this point
-    is 70.7 df and even THAT is not a bound, because ``r = 6.119e+01`` -- one
-    ulp of the stored moments is 61x the smallest eigenvalue of ``A``, so a
+    is 70.7 df and even THAT is not a bound, because ``r = 2.692e+02`` -- one
+    ulp of the stored moments is 269x the smallest eigenvalue of ``A``, so a
     one-ulp step can cross a singularity and the exact edf is not bounded by
     any multiple of a derivative taken at the unperturbed point.  Those two
     assertions pinned a quantity nothing certifies.  They are gone.
