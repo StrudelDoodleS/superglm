@@ -22,7 +22,10 @@ from superglm import (
     export_rating_tables,
 )
 from superglm.editor import EditorSession
-from superglm.export.excel import write_rating_table_workbook
+from superglm.export.excel import (
+    _GENERAL_SIGNIFICANT_DIGITS,
+    write_rating_table_workbook,
+)
 from superglm.export.rating_tables import RatingTablePayload, build_rating_table_payload
 from superglm.export.summary import (
     SummaryExportPayload,
@@ -1818,10 +1821,14 @@ def test_the_base_relativity_cell_is_rendered_at_full_precision(tmp_path, center
     carries the whole transferred centering constant, so it is exactly the
     number a consumer would reconcile two exports with.
 
-    The format is required to resolve the stored value: the assertion is that
-    reading back the displayed digits reproduces the base to the precision the
-    reconstruction tolerance already demands, not that the format string has a
-    particular spelling.
+    The assertion is on what the format RESOLVES, not on how it is spelled, so
+    the cell is rendered here the way Excel would and the result compared to
+    the stored value.  The required precision is not chosen: it is parity with
+    ``_format_interval`` and ``_format_axis_value``, which print this module's
+    other public numeric strings at ``.10g``.  Ten significant digits is 5e-10
+    relative, and the base -- the only number on the sheet that multiplies
+    every row -- must not be stated less precisely than the bin edges beside
+    it.  ``#,##0.00`` misses that by seven orders of magnitude.
     """
     model, X, y, w = _fit_export_model()
     output = tmp_path / f"base-{centering}.xlsx"
@@ -1829,9 +1836,21 @@ def test_the_base_relativity_cell_is_rendered_at_full_precision(tmp_path, center
 
     cell = load_workbook(output)["Rating Tables"]["C2"]
     stored = float(cell.value)
-    decimals = len(cell.number_format.split(".")[-1]) if "." in cell.number_format else 0
-    displayed = round(stored, decimals)
     assert stored > 0.0
-    assert displayed == pytest.approx(stored, rel=1e-11), (
+    displayed = _as_excel_renders(stored, cell.number_format)
+    assert displayed == pytest.approx(stored, rel=5e-10), (
         f"base {stored!r} renders as {displayed!r} under number_format {cell.number_format!r}"
     )
+
+
+def _as_excel_renders(value: float, number_format: str) -> float:
+    """The value a reader gets back off the sheet, for the formats used here.
+
+    ``General`` shows significant digits and adapts to magnitude; a
+    ``0.000...`` mask shows a fixed number of decimals and does not.  Both are
+    modelled because the point of the test is to compare them.
+    """
+    if number_format == "General":
+        return float(f"{value:.{_GENERAL_SIGNIFICANT_DIGITS}g}")
+    decimals = len(number_format.split(".")[-1]) if "." in number_format else 0
+    return round(value, decimals)
