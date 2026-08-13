@@ -434,9 +434,12 @@ def test_grouped_segmented_piecewise_keeps_every_stated_break_as_a_vertex() -> N
     # representation error, a first difference of two points at most twice
     # that, and ptp is a difference of two such differences, so 4 * eps *
     # max|curve_x|; a handful of ulp for linspace's own reconstruction gives 8.
-    # Measured worst case across breaks 3..7 is 8.9e-16 against a bound of
-    # 7.1e-15, and the defect it separates -- a genuinely non-uniform grid --
-    # is of order the step itself, 0.125, thirteen orders away.
+    # The bound scales with the break, so each is measured against its OWN
+    # bound: break 3 (this fixture) 0.0 against 5.3e-15, break 4 4.4e-16
+    # against 7.1e-15, break 5 8.9e-16 against 8.9e-15, break 6 0.0 against
+    # 1.1e-14, break 7 8.9e-16 against 1.2e-14 -- tightest margin 10x, at
+    # break 5. The defect it separates -- a genuinely non-uniform grid -- is of
+    # order the step itself, 0.125, thirteen orders away.
     segment_x = curve_x[curve_x <= first_break]
     spacing_tolerance = 8 * np.finfo(np.float64).eps * float(np.abs(segment_x).max())
     assert np.ptp(np.diff(segment_x)) < spacing_tolerance
@@ -612,7 +615,15 @@ def test_grouped_polynomial_display_curve_is_the_fitted_polynomial() -> None:
     curve_x = np.asarray(ti.smooth_curve.x, dtype=np.float64)
     curve_y = np.asarray(ti.smooth_curve.log_relativity, dtype=np.float64)
 
-    assert np.ptp(np.diff(curve_x)) < 1e-12  # uniform grid, so second differences compare
+    # Uniform grid, so second differences compare. Same derivation as the
+    # segmented test's spacing bound: a point carries at most eps*max|x|, a
+    # first difference at most twice that, and ptp is a difference of two such
+    # differences, so 8 * eps * max|curve_x| once a handful of ulp is allowed
+    # for linspace's own reconstruction. That is ~1.4e-14 here, against the
+    # 1e-12 magic constant this replaces, which was ~70x looser and stated
+    # nothing.
+    spacing_tolerance = 8 * np.finfo(np.float64).eps * float(np.abs(curve_x).max())
+    assert np.ptp(np.diff(curve_x)) < spacing_tolerance
     second = np.diff(curve_y, 2)
     # Tolerance from the arithmetic, not from headroom: the (1, -2, 1) stencil
     # magnifies each entry's error at most fourfold, and allowing a handful of

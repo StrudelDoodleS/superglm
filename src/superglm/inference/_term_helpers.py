@@ -10,7 +10,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.inference._term_types import (
-    SmoothCurve,
     SplineMetadata,
     TermInference,
     _safe_exp,
@@ -148,12 +147,15 @@ def _recenter_term(
     # Re-center smooth_curve if present
     new_curve = ti.smooth_curve
     if new_curve is not None:
-        new_curve = SmoothCurve(
-            x=new_curve.x,
+        # ``replace``, not a hand-listed constructor, for the same reason as the
+        # grouped rebuild below: ``x``, ``level_x`` and ``se_log_relativity``
+        # were being copied across verbatim, so an eighth ``SmoothCurve`` field
+        # would have been dropped here silently -- centering is a SHIFT, and
+        # everything it does not shift should survive by construction.
+        new_curve = replace(
+            new_curve,
             log_relativity=np.asarray(new_curve.log_relativity, dtype=float) - shift,
             relativity=np.asarray(new_curve.relativity, dtype=float) * factor,
-            level_x=new_curve.level_x,
-            se_log_relativity=new_curve.se_log_relativity,
             ci_lower=_maybe_array(
                 new_curve.ci_lower * factor if new_curve.ci_lower is not None else None
             ),
