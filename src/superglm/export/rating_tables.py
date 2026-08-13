@@ -309,6 +309,40 @@ def _require_log_link_offset_export(model: SuperGLM) -> None:
         )
 
 
+def _require_log_link_export(model: SuperGLM) -> None:
+    """A rating table is multiplicative, which is a statement about the LINK.
+
+    Every block reports ``exp`` of a term's contribution and the payload's
+    contract multiplies them into the base.  That reproduces ``model.predict``
+    only when the link is ``log``, because only then is the mean a product of
+    per-term factors.  Under any other link the same arithmetic still runs and
+    still produces a complete-looking workbook, of the wrong quantity:
+
+        gaussian/identity: the product is ``exp(linear_predictor)``, measured
+            9.19 maximum relative error against ``model.predict``
+        binomial/logit:    the product is the ODDS, measured 3.45 -- a
+            reconstructed 2.0201 against a predicted probability of 0.6689
+
+    Neither can be repaired by applying the inverse link to the product,
+    because the result would no longer be a table of factors: there is no
+    multiplicative tariff for a logit model, so the export refuses rather than
+    emit one.  Log-link ``Gamma``, ``Tweedie`` and ``Poisson`` are unaffected,
+    which is the whole insurance-ratemaking case this module exists for.
+
+    The offset path has always required this (``_require_log_link_offset_export``,
+    which stays for its more specific message); the gap was that a model
+    without an offset never reached a check at all.
+    """
+    if not isinstance(model._link, LogLink):
+        raise ValueError(
+            "Rating-table export is supported only for log-link models, because the "
+            "exported table is multiplicative: base_relativity times one relativity "
+            f"per block reproduces model.predict only under a log link. This model "
+            f"uses {type(model._link).__name__}, for which that product would be "
+            "exp(linear predictor) rather than the prediction."
+        )
+
+
 def _resolve_export_offset(
     offset,
     model: SuperGLM,
@@ -748,6 +782,14 @@ def build_rating_table_payload(
     ``base_relativity`` times one relativity per main-effect block, times one
     per interaction block, reproduces ``model.predict``.
 
+    That is a statement about the LINK before it is one about the blocks, so
+    the export is restricted to log-link models and refuses the rest at the
+    boundary.  Every block reports ``exp`` of a term's contribution, and only
+    a log link makes the mean a product of those factors; under any other link
+    the same arithmetic produces a complete-looking workbook of the wrong
+    quantity -- ``exp(linear_predictor)`` for gaussian/identity, the ODDS for
+    binomial/logit.  See ``_require_log_link_export``.
+
     Exact to round-off for the exactly tabulable blocks -- ``Categorical``,
     ``OrderedCategorical``, ``Numeric``, ``Piecewise``, and the
     categorical-by-categorical interaction, which is a full cell table.
@@ -859,6 +901,13 @@ def build_rating_table_payload(
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     _preflight_rating_table_terms(model)
+    # After the term preflight and before anything is built.  After, because an
+    # unsupported term type is the more fundamental complaint -- a model with a
+    # ``RandomEffect`` has no rating table under any link, and hearing about the
+    # link first would send the caller to change something that was not the
+    # problem.  Before the build, because the whole payload is a product of
+    # exponentials, which is the prediction only under a log link.
+    _require_log_link_export(model)
 
     native_X = X
     frame = as_eager_frame(X)

@@ -34,6 +34,29 @@ def _frame(n: int = 4000, seed: int = 42) -> tuple[pd.DataFrame, np.ndarray]:
     return X, y
 
 
+def _log_link_frame(n: int = 4000, seed: int = 42) -> tuple[pd.DataFrame, np.ndarray]:
+    """``_frame``'s band signal as a Poisson count, for the export tests.
+
+    The rating-table export takes log-link models only -- its table is a
+    product of factors -- so the tests that go through it need a response the
+    log link can carry.  Same levels and same monotone-then-flat shape as
+    ``_frame``, so the level axis under test is unchanged.
+    """
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame({"band": rng.choice(LEVELS, n)})
+    position = {level: index for index, level in enumerate(LEVELS)}
+    mu = np.exp(
+        -1.0
+        + np.array(
+            [
+                0.02 * min(position[b], 4) ** 2 + (0.05 if position[b] > 6 else 0.0)
+                for b in X["band"]
+            ]
+        )
+    )
+    return X, rng.poisson(mu).astype(float)
+
+
 def _fit(spec: OrderedCategorical) -> SuperGLM:
     X, y = _frame()
     model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
@@ -156,9 +179,18 @@ def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> Non
     ids=["piecewise", "polynomial", "spline"],
 )
 def test_rating_table_is_one_row_per_band_for_every_basis(basis, tmp_path) -> None:
-    X, y = _frame()
+    """One row per band whatever the basis, on the link a rating table is for.
+
+    Poisson rather than this module's shared gaussian ``_fit``: the exported
+    table is multiplicative, so the export accepts log-link models only, the
+    same restriction ``test_workbook_reconstruction_is_exact_for_a_segmented_
+    term`` below already relies on.  What is under test here is the level axis
+    -- every band gets a row regardless of the basis fitted through them --
+    which the family does not touch.
+    """
+    X, y = _log_link_frame()
     model = SuperGLM(
-        family="gaussian",
+        family="poisson",
         selection_penalty=0.0,
         features={"band": OrderedCategorical(order=LEVELS, basis=basis)},
     )
