@@ -118,8 +118,17 @@ def test_the_sampler_records_every_fit_not_just_the_first() -> None:
     """
     sampler = bench._DispatchSampler(interval=0.001)
     counts = []
-    for target in (5, 10, 15):
-        _hold_open_until(sampler, target)
+    for _ in range(3):
+        # RELATIVE to the count on entry, not an absolute ladder. `samples` is
+        # cumulative, so absolute targets (5, 10, 15) are satisfied on ENTRY by
+        # one overshooting first wait -- the poll is 2 ms against a 1 ms
+        # interval, and a delayed wake-up is the same contention this rewrite
+        # exists to survive. The later holds would then skip their `while` body
+        # entirely and establish nothing, leaving `counts[i] > counts[i-1]` to
+        # rest on ticks from a thread `__exit__` flags but never joins. Asking
+        # each re-entry for five ticks OF ITS OWN is what the docstring claims
+        # and what the assertions below need.
+        _hold_open_until(sampler, sampler.samples + 5)
         counts.append(sampler.samples)
     assert counts[0] > 0
     # each re-entry must add samples, not sit at the first fit's total
@@ -142,7 +151,14 @@ def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
     short = bench._DispatchSampler(interval=0.001)
     _hold_open_until(short, 5)
     long = bench._DispatchSampler(interval=0.001)
-    _hold_open_until(long, _LONG_TICKS)
+    # The ratio has to be WAITED FOR, not hoped for. `_LONG_TICKS` alone fixes
+    # `long >= 100` and `short >= 5`, which leaves `long > short * 3` true only
+    # while `short` stays under 33 -- and `short`'s own wait bounds it below,
+    # never above. One stalled poll on the short side (measured: 3223 ticks
+    # when the sampler outran a 2 ms poll) breaks the premise while both
+    # samplers are behaving perfectly. Naming the ratio in the target makes the
+    # wait establish it.
+    _hold_open_until(long, max(_LONG_TICKS, short.samples * 3 + 1))
 
     # established by the two waits above, restated as the premise of the rest
     assert long.samples > short.samples * 3, "fixture did not produce a longer run"

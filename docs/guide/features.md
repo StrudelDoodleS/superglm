@@ -479,9 +479,13 @@ A grouped term's plot draws the fitted piecewise shape itself — the stated
 break is a vertex of the drawn line, so the kink you declared is the kink you
 see. Collapsing a `Spline` basis is the other case: a merge that moves the
 level axis leaves the fitted curve no longer lined up with the expanded
-markers, so the between-band shape there is display interpolation only, and
-the panel drops its confidence band rather than draw a band belonging to a
-curve it is not showing. Either way the rated values are the band markers
+markers, so the between-band shape there is display interpolation only. That
+interpolated curve is exported without a confidence band — `term_inference()`
+and `plot_data()` stop carrying `se_log_relativity` / `ci_lower` / `ci_upper`
+for it — rather than hand out a band computed for the fitted curve, which is
+not the line being shown. The panels themselves are unchanged: they draw the
+curve as a bare line and take their error bars per level, so no ribbon
+disappears from a plot. Either way the rated values are the band markers
 themselves, and their standard errors are unaffected.
 
 Terms with a `Piecewise` or `Polynomial` basis cannot parent interactions and
