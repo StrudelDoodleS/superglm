@@ -10,7 +10,7 @@ import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm.distributions import _VARIANCE_FLOOR
-from superglm.inference._term_helpers import _spline_se
+from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
 if TYPE_CHECKING:
@@ -72,6 +72,44 @@ def _active_subgroup_columns(
     )
 
 
+def _covariance_apply(covariance, vector: NDArray) -> NDArray:
+    """``Cov @ vector`` without materialising a compact covariance.
+
+    A structured accessor stores a factorisation, applies the inverse through
+    ``solve`` and refuses to hand back a large dense block at all -- which is
+    why the random-effect branch below reads a selected diagonal rather than a
+    submatrix.  One matvec is all the centering correction needs from it.
+    """
+    solve = getattr(covariance, "solve", None)
+    if solve is not None:
+        return np.asarray(solve(vector), dtype=np.float64)
+    return cast(NDArray, np.asarray(covariance, dtype=np.float64) @ vector)
+
+
+def _scatter_centered_variance(
+    diagonal: NDArray,
+    covariance_block: NDArray,
+    row_of_column: NDArray,
+    n_rows: int,
+) -> NDArray:
+    """``diag(C V C')`` where each report row reads at most one coefficient.
+
+    A categorical level table and an ordered-categorical step table are both
+    ``V = A Cov A'`` for a selection ``A``; ``row_of_column[j]`` is the row
+    coefficient ``j`` lands on, and the rows it never names -- the base level,
+    and any pinned level fixed at zero -- carry a zero row of ``V``.  Under
+    ``native`` that is why their SE is zero; under centering it is why they
+    come back at exactly ``p'Vp``, which is the point of the fix.
+    """
+    weights = np.full(covariance_block.shape[0], 1.0 / n_rows, dtype=np.float64)
+    column = covariance_block @ weights
+    cross = np.zeros(n_rows, dtype=np.float64)
+    cross[row_of_column] = column
+    variance = np.zeros(n_rows, dtype=np.float64)
+    variance[row_of_column] = diagonal
+    return mean_centered_variance(variance, cross, float(weights @ column))
+
+
 def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
@@ -81,8 +119,18 @@ def feature_se_from_cov(
     specs: Mapping[Any, Any],
     interaction_specs: Mapping[Any, Any],
     n_points: int = 200,
+    center: bool = False,
 ) -> NDArray:
-    """Compute feature-level SEs from a precomputed covariance matrix."""
+    """Compute feature-level SEs from a precomputed covariance matrix.
+
+    ``center=True`` returns the errors of the MEAN-CENTERED report instead:
+    the reported vector is then the estimable contrast ``C b`` with
+    ``C = I - 11'/L``, whose covariance is ``C V C'``, so the errors are a
+    different quantity rather than the same one shifted.  It is the same
+    dispatch because the map from coefficients to report is the same map; only
+    the quadratic form it is evaluated in changes.  An inactive term returns
+    zeros either way -- ``C 0 C'`` is ``0``.
+    """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
@@ -106,6 +154,7 @@ def feature_se_from_cov(
                 Cov_active,
                 x_eval=np.array(spec._ordered_levels, dtype=object),
                 reference_x=np.array([spec._base_level], dtype=object),
+                center=center,
             )
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
@@ -116,9 +165,20 @@ def feature_se_from_cov(
             Cov_orig = spec._R_inv @ Cov_g @ spec._R_inv.T
         else:
             Cov_orig = Cov_g
+        levels = list(spec._ordered_levels)
+        if center:
+            rows = np.array([levels.index(lev) for lev in spec._non_base], dtype=np.intp)
+            return cast(
+                NDArray,
+                np.sqrt(
+                    _scatter_centered_variance(
+                        np.maximum(np.diag(Cov_orig), 0.0), Cov_orig, rows, len(levels)
+                    )
+                ),
+            )
         se_nonbase = np.sqrt(np.maximum(np.diag(Cov_orig), 0.0))
-        se_all = np.zeros(len(spec._ordered_levels))
-        for i, lev in enumerate(spec._ordered_levels):
+        se_all = np.zeros(len(levels))
+        for i, lev in enumerate(levels):
             if lev != spec._base_level:
                 idx = spec._non_base.index(lev)
                 se_all[i] = se_nonbase[idx]
@@ -145,8 +205,16 @@ def feature_se_from_cov(
     if isinstance(spec, RandomEffect):
         from superglm.inference.covariance import covariance_selected_diagonal
 
-        variance = covariance_selected_diagonal(Cov_active, indices)
-        return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+        variance = np.maximum(covariance_selected_diagonal(Cov_active, indices), 0.0)
+        if center:
+            # One coefficient per level and no base, so the map is a pure
+            # selection and ``Vp`` is one matvec against the FULL covariance --
+            # the block itself is the one this accessor may refuse to form.
+            weights = np.zeros(Cov_active.shape[0], dtype=np.float64)
+            weights[indices] = 1.0 / len(indices)
+            column = _covariance_apply(Cov_active, weights)
+            variance = mean_centered_variance(variance, column[indices], float(weights @ column))
+        return cast(NDArray, np.sqrt(variance))
 
     Cov_g = Cov_active[np.ix_(indices, indices)]
 
@@ -159,21 +227,35 @@ def feature_se_from_cov(
             active_groups,
             Cov_active,
             n_points=n_points,
+            center=center,
         )
 
     if isinstance(spec, Polynomial):
         x_grid = np.linspace(spec._lo, spec._hi, n_points)
-        M = spec.transform(x_grid)
+        M = np.asarray(spec.transform(x_grid), dtype=np.float64)
+        if center:
+            M = M - M.mean(axis=0)
         Q = M @ Cov_g
         return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
 
     if isinstance(spec, Categorical):
-        se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-        se_all = np.zeros(len(spec._levels))
+        levels = list(spec._levels)
         # _non_base excludes pinned levels (declared, no effective rows); their
         # coefficient is fixed at zero, so their SE stays 0.0 like the base's.
         position = {lev: j for j, lev in enumerate(spec._non_base)}
-        for i, lev in enumerate(spec._levels):
+        if center:
+            rows = np.array([levels.index(lev) for lev in spec._non_base], dtype=np.intp)
+            return cast(
+                NDArray,
+                np.sqrt(
+                    _scatter_centered_variance(
+                        np.maximum(np.diag(Cov_g), 0.0), Cov_g, rows, len(levels)
+                    )
+                ),
+            )
+        se_nonbase = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
+        se_all = np.zeros(len(levels))
+        for i, lev in enumerate(levels):
             idx = position.get(lev)
             if idx is not None:
                 se_all[i] = se_nonbase[idx]
@@ -185,14 +267,25 @@ def feature_se_from_cov(
         # base knot.  Going through the basis rather than indexing the diagonal
         # keeps this branch a plain quadratic form: the base knot's SE is 0
         # because its contrast against itself is, not because it was special-cased.
-        M = spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices]
+        M = np.asarray(
+            spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices], dtype=np.float64
+        )
+        if center:
+            M = M - M.mean(axis=0)
         Q = M @ Cov_g
         return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
 
     if isinstance(spec, Numeric):
+        # A single reported value: ``centering="mean"`` declines to shift it,
+        # so there is no contrast to propagate and ``center`` cannot apply.
         return np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
 
-    return cast(NDArray, np.sqrt(np.maximum(np.diag(Cov_g), 0.0)))
+    variance = np.maximum(np.diag(Cov_g), 0.0)
+    if center:
+        size = variance.size
+        rows = np.arange(size, dtype=np.intp)
+        variance = _scatter_centered_variance(variance, Cov_g, rows, size)
+    return cast(NDArray, np.sqrt(variance))
 
 
 def piecewise_knot_covariance(
@@ -232,8 +325,16 @@ def simultaneous_bands(
     n_sim: int = 10_000,
     n_points: int = 200,
     seed: int = 42,
+    center: bool = False,
 ) -> pd.DataFrame:
-    """Simultaneous confidence bands for a spline feature."""
+    """Simultaneous confidence bands for a spline feature.
+
+    ``center=True`` bands the MEAN-CENTERED curve.  The critical value is the
+    quantile of ``max_x |f(x)| / se(x)`` over the whole grid, and centering
+    changes both the numerator and the denominator, so it is a different
+    number rather than the same one applied to shifted values -- which is why
+    it is computed here through the centered map rather than reused.
+    """
     from scipy.stats import norm
 
     from superglm.features.spline import _SplineBase
@@ -260,6 +361,8 @@ def simultaneous_bands(
     M = np.asarray(spec.transform(x_grid), dtype=np.float64)
     active_cols = _active_subgroup_columns(feature, feature_groups, active_subs)
     M = M[:, active_cols]
+    if center:
+        M = M - M.mean(axis=0)
 
     Q = M @ Cov_g
     se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))

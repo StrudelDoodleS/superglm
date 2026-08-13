@@ -27,12 +27,74 @@ def _maybe_array(value: NDArray | float | None) -> NDArray | None:
     return cast(NDArray, np.asarray(value))
 
 
-def _recenter_term(ti: TermInference, centering: str) -> TermInference:
+def mean_centered_variance(variance: NDArray, cross: NDArray, total: float) -> NDArray:
+    """``diag(C V C')`` for the mean-centering contrast ``C = I - 11'/L``.
+
+    ``variance`` is ``diag(V)``, ``cross`` is ``Vp`` and ``total`` is
+    ``p'Vp``, with ``p = 1/L`` the weights the shift averages over; expanding
+    ``(I - 1p')V(I - p1')`` leaves ``V_ii - 2(Vp)_i + p'Vp``.  Stated in those
+    three moments because the reports that need it -- a categorical level
+    table, a random effect -- read one coefficient per row, so ``V`` is never
+    formed and ``C V C'`` would cost a dense ``L x L`` that ``Vp`` does not.
+
+    Cancellation leaves the fit's reference level at ``-1e-17`` rather than
+    exactly zero when its whole row of ``V`` is zero, so the result is clamped
+    before any caller takes a square root.
+    """
+    return cast(NDArray, np.maximum(variance - 2.0 * cross + total, 0.0))
+
+
+def mean_centered_covariance(V: NDArray) -> NDArray:
+    """``C V C'`` for the same ``C = I - 11'/L``, formed in ``O(L^2)``.
+
+    ``(1/L)11'V`` has every row equal to ``V``'s column means and
+    ``(1/L^2)11'V11'`` is its grand mean, so the two matrix products collapse
+    to a rank-two update.  Its diagonal is :func:`mean_centered_variance` of
+    ``V``'s diagonal, column means and grand mean -- one identity, written
+    twice only because this caller holds ``V`` and the others do not.
+    """
+    values = np.asarray(V, dtype=np.float64)
+    column_means = values.mean(axis=0)
+    grand_mean = float(column_means.mean())
+    return cast(
+        NDArray,
+        values - column_means[None, :] - column_means[:, None] + grand_mean,
+    )
+
+
+def _recenter_term(
+    ti: TermInference,
+    centering: str,
+    *,
+    se_centered: NDArray | None = None,
+) -> TermInference:
     """Apply mean centering to a TermInference if requested.
 
-    Shifts log-relativities so geometric mean of relativities = 1.
-    SEs are invariant (shift on log scale).  Numeric terms (single
-    value) are skipped since centering is meaningless.
+    Shifts log-relativities so geometric mean of relativities = 1.  Numeric
+    terms (single value) are skipped since centering is meaningless.
+
+    The shift is the mean of the SAME fitted coefficients the term reports,
+    not a known constant, so the centered vector is the linear contrast
+    ``C b`` with ``C = I - 11'/L`` and its covariance is ``C V C'`` -- the
+    variance of an estimable function under a change of identifiability
+    constraint (SAS/STAT, *The Four Types of Estimable Functions*; the linear
+    case of the delta method Stata's ``nlcom`` documents as ``GVG'``).
+    Translating the interval endpoints by ``exp(-shift)`` and leaving the
+    errors untouched is valid only for a known shift, and it left the level
+    the fit happened to pin printing a point estimate away from unity with an
+    exactly zero standard error and a zero-width interval -- the reference's
+    certainty, on a report whose whole premise is that no level is the
+    reference.
+
+    ``se_centered`` is that propagated error, supplied by the caller holding
+    the coefficient covariance.  A term that publishes the covariance of its
+    own reported vector -- ``knot_covariance`` on a piecewise term -- needs no
+    separate argument: transforming that matrix puts the errors on its
+    diagonal.  Every row of ``C`` sums to zero, so each centered effect is an
+    estimable contrast and its error does not depend on which level the fit
+    dropped (Firth, "Quasi-variances in Xlisp-Stat and on the web", *JSS*
+    5(4), 2000, §5.1).  The errors are redistributed, not inflated: some
+    levels come back narrower, so nothing here may assume they widen.
 
     The constant that was removed is recorded on ``centering_shift`` -- it is
     not recoverable from the returned values, and anything that has to put it
@@ -51,6 +113,18 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
     factor = _safe_exp(-shift)
     new_log_rel = log_rel - shift
     new_rel = cast(NDArray, np.asarray(_safe_exp(new_log_rel)))
+
+    # The reported vector's own covariance, where the term carries one.  The
+    # band BETWEEN knots is a quadratic form in this matrix, so leaving it in
+    # against-base coordinates would draw a band contradicting the very knot
+    # errors it is required to pass through.
+    new_knot_cov = ti.knot_covariance
+    if new_knot_cov is not None:
+        new_knot_cov = mean_centered_covariance(new_knot_cov)
+        if se_centered is None:
+            se_centered = np.sqrt(np.maximum(np.diag(new_knot_cov), 0.0))
+
+    new_se = ti.se_log_relativity
     new_ci_lo = _maybe_array(ti.ci_lower * factor if ti.ci_lower is not None else None)
     new_ci_hi = _maybe_array(ti.ci_upper * factor if ti.ci_upper is not None else None)
     new_ci_lo_sim = _maybe_array(
@@ -59,6 +133,17 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
     new_ci_hi_sim = _maybe_array(
         ti.ci_upper_simultaneous * factor if ti.ci_upper_simultaneous is not None else None
     )
+    if se_centered is not None:
+        from scipy.stats import norm
+
+        new_se = np.asarray(se_centered, dtype=np.float64)
+        z_alpha = float(norm.ppf(1.0 - ti.alpha / 2.0))
+        new_ci_lo = _maybe_array(_safe_exp(new_log_rel - z_alpha * new_se))
+        new_ci_hi = _maybe_array(_safe_exp(new_log_rel + z_alpha * new_se))
+        if ti.critical_value_simultaneous is not None:
+            c_sim = float(ti.critical_value_simultaneous)
+            new_ci_lo_sim = _maybe_array(_safe_exp(new_log_rel - c_sim * new_se))
+            new_ci_hi_sim = _maybe_array(_safe_exp(new_log_rel + c_sim * new_se))
 
     # Re-center smooth_curve if present
     new_curve = ti.smooth_curve
@@ -81,10 +166,12 @@ def _recenter_term(ti: TermInference, centering: str) -> TermInference:
         ti,
         log_relativity=new_log_rel,
         relativity=new_rel,
+        se_log_relativity=new_se,
         ci_lower=new_ci_lo,
         ci_upper=new_ci_hi,
         ci_lower_simultaneous=new_ci_lo_sim,
         ci_upper_simultaneous=new_ci_hi_sim,
+        knot_covariance=new_knot_cov,
         smooth_curve=new_curve,
         centering_mode="mean",
         centering_shift=shift,
@@ -104,6 +191,7 @@ def _spline_se(
     n_points: int = 200,
     x_eval: NDArray | None = None,
     reference_x: NDArray | None = None,
+    center: bool = False,
 ) -> NDArray:
     """Shared public-runtime SE computation for spline-style terms.
 
@@ -114,6 +202,12 @@ def _spline_se(
         When provided, ``n_points`` is ignored.
     reference_x : array, optional
         When provided, propagate uncertainty for ``f(x_eval) - f(reference_x)``.
+    center : bool
+        Propagate uncertainty for ``f(x) - mean_x f(x)`` instead, which is what
+        ``centering="mean"`` reports.  ``C M = M - 1 (1'M/L)`` for
+        ``C = I - 11'/L``, so subtracting the map's own column means is the
+        whole of it -- the same route ``reference_x`` takes, against the grid
+        mean rather than one reference row.
     """
     n_out = len(x_eval) if x_eval is not None else n_points
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
@@ -142,6 +236,8 @@ def _spline_se(
             M = M - M_ref
         else:
             raise ValueError("reference_x must produce one row or match x_eval row count.")
+    if center:
+        M = M - M.mean(axis=0)
     Q = M @ Cov_g
     return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
 
@@ -441,5 +537,7 @@ __all__ = [
     "_resolve_group_lambda",
     "_resolve_term_lambda",
     "_spline_se",
+    "mean_centered_covariance",
+    "mean_centered_variance",
     "spline_group_enrichment",
 ]
