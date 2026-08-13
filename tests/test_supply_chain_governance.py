@@ -85,14 +85,23 @@ def test_security_workflow_collects_core_governance_evidence():
 
 
 def test_workflow_actions_are_pinned_to_full_commit_shas():
+    """Every ``uses:`` in the tree names a 40-hex commit, and some ``uses:`` exists.
+
+    The emptiness check is on the SCAN, not per file: ``WORKFLOW_FILES`` became
+    directory-derived, and a legitimate future workflow whose steps are all
+    ``run:`` would have failed a per-file ``assert refs`` on a technicality --
+    it pins nothing because it uses nothing.  Keeping one global assertion is
+    what stops the pattern silently matching nothing, which is the failure the
+    per-file version was really guarding against.
+    """
     uses_pattern = re.compile(r"uses:\s+[^@\s]+@([^\s#]+)")
 
+    scanned = 0
     for path in WORKFLOW_FILES:
-        workflow = _read(path)
-        refs = uses_pattern.findall(workflow)
-        assert refs, path
-        for ref in refs:
+        for ref in uses_pattern.findall(_read(path)):
+            scanned += 1
             assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{path} uses unpinned ref {ref}"
+    assert scanned, f"no `uses:` found in any of {WORKFLOW_FILES}; the pattern matched nothing"
 
 
 def test_security_workflow_avoids_hash_unpinned_pip_installs():
