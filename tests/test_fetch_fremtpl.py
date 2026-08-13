@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import re
 import sys
 import urllib.error
@@ -49,7 +50,7 @@ FREQ = ARTIFACTS[0]
 # ── which suites guard on a dataset, discovered rather than restated ─────────
 
 
-def _data_guarded_suites() -> dict[str, set[str]]:
+def data_guarded_suites() -> dict[str, set[str]]:
     """Map each ``tests/test_*.py`` that guards on a dataset to the files it needs.
 
     Discovered from the source, deliberately, so the workflow contract below
@@ -58,6 +59,11 @@ def _data_guarded_suites() -> dict[str, set[str]]:
     is the form the enforcement hook keys on.  Calls inside a function body do
     not qualify: ``tests/test_dataset_guard.py`` exercises ``skip_reason`` on a
     fake name and is not itself a real-data suite.
+
+    Public because ``tests/test_dataset_guard.py`` parametrizes on it too.  It
+    used to hardcode the same three modules, so a fourth suite would have been
+    covered by the workflow contract here and by nothing there -- two lists
+    that must agree and no check that they do.
     """
     found: dict[str, set[str]] = {}
     for path in sorted((_ROOT / "tests").glob("test_*.py")):
@@ -114,7 +120,7 @@ def workflow() -> str:
 
 def test_the_discovery_finds_the_suites_that_are_known_to_guard_on_data():
     """A scan that matched nothing would make every contract below vacuous."""
-    found = _data_guarded_suites()
+    found = data_guarded_suites()
     assert set(found) == {
         "test_realdata_parity.py",
         "test_screening_guide_numbers.py",
@@ -131,7 +137,7 @@ def test_the_discovery_finds_the_suites_that_are_known_to_guard_on_data():
 
 def _assert_job_runs_every_data_guarded_suite(workflow: str) -> None:
     step = _suite_step(workflow)
-    for module in _data_guarded_suites():
+    for module in data_guarded_suites():
         assert f"tests/{module}" in step, (
             f"{module} guards on a dataset but the real-data job never runs it, "
             f"so it keeps skipping in CI with nothing to report that"
@@ -181,7 +187,7 @@ def test_every_parquet_a_suite_needs_is_pinned_in_the_fetch_script():
     skip and starts being a failure, so the fetch has to cover every file the
     suites ask for, not just the one the issue was written about.
     """
-    needed = set().union(*_data_guarded_suites().values())
+    needed = set().union(*data_guarded_suites().values())
     pinned = {art.name for art in ARTIFACTS}
     assert needed <= pinned, f"unpinned datasets the suites require: {sorted(needed - pinned)}"
 
@@ -232,6 +238,30 @@ def test_the_push_trigger_still_only_fires_on_master(workflow):
     A branch push would then duplicate the pull-request run on every commit.
     """
     assert "branches: [master]" in _trigger_block(workflow, "push")
+
+
+def _assert_re_pinning_is_advised_only_for_a_confirmed_re_encode(workflow: str) -> None:
+    report = _steps(workflow)["Report the fetch failure as infrastructure, not code"]
+    assert "re-pinning" in report, "the summary no longer mentions re-pinning at all"
+    assert "two independent downloads agree" in report, (
+        "the summary advises re-pinning without naming the one diagnosis that "
+        "distinguishes a re-encoded upstream from a damaged transfer, so a truncated "
+        "download reads as an instruction to re-pin the anchors against corrupt bytes"
+    )
+    assert "Do not re-pin" in report
+
+
+def test_the_fetch_failure_summary_only_advises_re_pinning_for_a_confirmed_re_encode(workflow):
+    _assert_re_pinning_is_advised_only_for_a_confirmed_re_encode(workflow)
+
+
+def test_the_re_pin_advice_contract_rejects_an_unconditional_re_pin(workflow):
+    # The advice reverted to the undiscriminating form: any pin miss is called a
+    # re-encode, which is what sends a truncated download to the re-pin path.
+    mutant = workflow.replace("two independent downloads agree", "the pin does not match")
+    assert mutant != workflow, "mutation did not apply"
+    with pytest.raises(AssertionError, match="reads as an instruction to re-pin"):
+        _assert_re_pinning_is_advised_only_for_a_confirmed_re_encode(mutant)
 
 
 def test_the_fetch_and_the_suites_report_through_separate_steps(workflow):
@@ -339,12 +369,120 @@ def test_a_cached_file_that_matches_its_pin_is_not_re_downloaded(tmp_path, monke
 
 
 def test_a_download_that_misses_its_pin_is_a_fetch_error(tmp_path, monkeypatch):
-    _stub_download(monkeypatch, b"not what was pinned")
+    wrong = b"not what was pinned"
+    art = Artifact(**{**vars(FREQ), "size": len(wrong)})
+    _stub_download(monkeypatch, wrong)
     with pytest.raises(FetchError, match="does not match the pinned"):
-        obtain(FREQ, tmp_path)
+        obtain(art, tmp_path)
     assert not (tmp_path / f"dataset_{FREQ.openml_id}.pq").exists(), (
         "an unverified download was left where the next run would trust it"
     )
+
+
+# ── a damaged transfer must not be reported as an upstream re-encode ────────
+#
+# The re-encode branch tells the operator to re-pin, and the workflow repeats
+# that as the recommended action.  Reaching it with corrupt bytes is the worst
+# outcome this script has: it invites re-pinning the suites' six-decimal anchors
+# against data nobody checked.
+
+
+class _ShortStream:
+    """A body that stops early WITHOUT raising, as CPython's own client does.
+
+    ``http.client.HTTPResponse.read(amt)`` returns short and closes the
+    connection rather than raising ``IncompleteRead`` -- its source carries the
+    comment "Ideally, we would raise IncompleteRead if the content-length wasn't
+    satisfied, but it might break compatibility".  ``shutil.copyfileobj`` reads
+    with an ``amt``, so that is the path a truncated transfer takes, and
+    ``_download``'s retry loop -- which only covers RAISED errors -- never sees
+    it.  ``test_an_interrupted_download_leaves_neither_a_target_nor_litter``
+    covers the raising path and shares this blind spot.
+    """
+
+    def __init__(self, payload: bytes, cut: int):
+        self._buf = io.BytesIO(payload[:cut])
+
+    def read(self, amt=-1):
+        return self._buf.read(amt)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _stub_urlopen_bodies(monkeypatch, bodies):
+    """Serve *bodies* in order, one per ``urlopen`` call."""
+    remaining = list(bodies)
+
+    def fake(url, timeout=None):
+        return remaining.pop(0)
+
+    monkeypatch.setattr("scripts.fetch_fremtpl.urllib.request.urlopen", fake)
+    monkeypatch.setattr("scripts.fetch_fremtpl.time.sleep", lambda seconds: None)
+
+
+def test_a_silently_truncated_body_is_reported_as_transport_not_a_re_encode(tmp_path, monkeypatch):
+    """Measured before the fix: this reached "The upstream artifact changed"."""
+    whole = b"the whole pinned body" * 64
+    art = Artifact(
+        **{**vars(FREQ), "sha256": hashlib.sha256(whole).hexdigest(), "size": len(whole)}
+    )
+    _stub_urlopen_bodies(monkeypatch, [_ShortStream(whole, len(whole) // 2)])
+
+    with pytest.raises(FetchError) as excinfo:
+        obtain(art, tmp_path)
+    message = str(excinfo.value)
+    assert "DAMAGED TRANSFER" in message, message
+    assert "Do not re-pin" in message, message
+    assert "upstream artifact changed" not in message, message
+
+
+def test_same_length_corruption_is_reported_as_transport_not_a_re_encode(tmp_path, monkeypatch):
+    """A length check cannot see this one, so a second download decides it.
+
+    Two downloads that disagree with each other cannot both be upstream.
+    """
+    whole = b"the whole pinned body" * 64
+    art = Artifact(
+        **{**vars(FREQ), "sha256": hashlib.sha256(whole).hexdigest(), "size": len(whole)}
+    )
+    first = bytearray(whole)
+    first[7] ^= 0xFF
+    second = bytearray(whole)
+    second[9] ^= 0xFF
+    _stub_urlopen_bodies(
+        monkeypatch,
+        [_ShortStream(bytes(first), len(whole)), _ShortStream(bytes(second), len(whole))],
+    )
+
+    with pytest.raises(FetchError, match="corrupted in transit"):
+        obtain(art, tmp_path)
+
+
+def test_two_downloads_agreeing_at_the_pinned_length_is_the_re_encode_case(tmp_path, monkeypatch):
+    """The one case where "re-pin" is the right advice, and the only one that gives it."""
+    reencoded = b"upstream wrote this instead" * 49
+    art = Artifact(**{**vars(FREQ), "size": len(reencoded)})
+    _stub_urlopen_bodies(monkeypatch, [_ShortStream(reencoded, len(reencoded)) for _ in range(2)])
+
+    with pytest.raises(FetchError, match="re-pin deliberately after re-measuring"):
+        obtain(art, tmp_path)
+
+
+def test_the_second_opinion_download_leaves_no_litter_in_the_cached_directory(
+    tmp_path, monkeypatch
+):
+    """The raw directory is what ``actions/cache`` stores; a stray file rides along."""
+    reencoded = b"upstream wrote this instead" * 49
+    art = Artifact(**{**vars(FREQ), "size": len(reencoded)})
+    _stub_urlopen_bodies(monkeypatch, [_ShortStream(reencoded, len(reencoded)) for _ in range(2)])
+
+    with pytest.raises(FetchError):
+        obtain(art, tmp_path)
+    assert list(tmp_path.iterdir()) == [], f"left behind {list(tmp_path.iterdir())}"
 
 
 # ── retry only what a retry can fix ────────────────────────────────────────
@@ -455,6 +593,67 @@ def test_normalise_gives_the_dtypes_a_local_copy_carries(tmp_path):
     assert sorted(frame["VehGas"].astype(str).unique()) == ["Diesel", "Regular"], (
         "an ARFF round-trip's literal quotes survived into the level labels"
     )
+
+
+def test_every_artifact_declares_the_dtypes_it_promises(tmp_path):
+    """The sev artifact carried a pin and no schema contract, and freq carried both.
+
+    That asymmetry is the finding: ``normalise`` exists because "a dtype is what
+    a discrete or categorical path dispatches on", and that argument was applied
+    to one of the two files.  ``float_columns`` is the contract, ASSERTED rather
+    than cast, and it is non-empty for both.
+    """
+    for art in ARTIFACTS:
+        assert art.float_columns, f"{art.name} promises nothing about its dtypes"
+        assert set(art.float_columns) <= set(art.columns)
+        assert not set(art.float_columns) & set(art.integer_columns)
+
+
+def test_the_two_artifacts_agree_on_the_column_the_suites_join_them_on():
+    """``_load_gamma_data`` merges freq onto sev on ``IDpol``.
+
+    Measured on the fetched pair: both sides ``float64``, 24,944 joined rows.
+    Pinning it on both sides is what stops a future re-pin quietly making that a
+    cross-dtype join.
+    """
+    joined = {art.name: art for art in ARTIFACTS}
+    freq, sev = joined["freMTPL2freq.parquet"], joined["freMTPL2sev.parquet"]
+    assert "IDpol" in freq.float_columns and "IDpol" in sev.float_columns
+
+
+def test_normalise_rejects_a_dtype_the_artifact_did_not_promise(tmp_path):
+    """A cast would hide this; the point is to report it.
+
+    The raw bytes are pinned, so the only thing that can move a dtype is the
+    reader -- and the reader is exactly what differs between a developer's
+    machine and the locked CI environment.
+    """
+    art = _tiny_artifact(float_columns=("IDpol", "ClaimNb"))
+    with pytest.raises(FetchError, match="ClaimNb is int64 after normalisation"):
+        normalise(art, _tiny_freq(tmp_path), tmp_path / "dest")
+
+
+def test_normalise_leaves_no_partial_file_where_the_loader_would_trust_it(tmp_path, monkeypatch):
+    """``usable()`` accepts a path on existence alone, so a half-written parquet
+    is not re-fetched -- it raises from inside a test body on the next run, one
+    step removed from the thing that broke."""
+    from . import _datasets
+
+    raw = _tiny_freq(tmp_path)  # built BEFORE to_parquet is sabotaged
+    dest = tmp_path / "dest"
+
+    def explode(self, path, *args, **kwargs):
+        Path(path).write_bytes(b"half a parquet")
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", explode)
+    with pytest.raises(OSError, match="no space left"):
+        normalise(_tiny_artifact(), raw, dest)
+    monkeypatch.undo()
+
+    monkeypatch.setattr(_datasets, "_SEARCH_DIRS", [dest])
+    assert _datasets.find(FREQ.name) is None, f"a partial write is at {dest / FREQ.name}"
+    assert list(dest.iterdir()) == [], f"left behind {list(dest.iterdir())}"
 
 
 def test_normalise_rejects_a_frame_with_the_wrong_row_count(tmp_path):

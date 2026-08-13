@@ -35,6 +35,17 @@ The guide's anchors then agree exactly: ``sum_sample_weight``,
 ``mains_deviance``, ``mains_edf`` 52.867789482508, ``phi`` and the Pearson sum
 all reproduce at 0.000e+00 relative difference, against a 1e-5 test tolerance.
 
+``freMTPL2sev.parquet`` gets the same statement, because a pin without a schema
+contract is only half the guarantee and the asymmetry read as an oversight.
+There is no older developer copy of it to compare against -- the pair the suites
+ran on IS the fetched pair, both raw hashes matching the pins above -- so what
+is recorded is what was measured on the mirror: 26,639 rows, ``IDpol`` and
+``ClaimAmount`` both ``float64``, nothing to cast.  ``IDpol`` is the key
+``tests/test_realdata_parity._load_gamma_data`` joins the two files on, and it
+is ``float64`` on the freq side too, so that join is same-dtype and lossless.
+:data:`Artifact.float_columns` now asserts it on both sides rather than leaving
+it as a property of two separate silences.
+
 Usage::
 
     python scripts/fetch_fremtpl.py --dest data/
@@ -59,6 +70,14 @@ from pathlib import Path
 #: Bump when the normalisation below changes, so a cache from the previous
 #: encoding cannot be reused.  The raw downloads are pinned by hash and so
 #: cannot drift, but the schema we derive from them can.
+#:
+#: Deliberate belt and braces, and it costs something, so it is written down
+#: rather than left to look like an oversight: the cache holds RAW bytes, which
+#: this revision provably cannot change, so bumping it forces one re-download of
+#: bytes that are identical.  That is ~2s once.  The alternative -- a key that
+#: cannot express a normalisation change -- is a cache that silently survives
+#: one, and the workflow header would then be describing a guarantee the key
+#: does not give.  Cheap insurance beats a correct-today comment.
 SCHEMA_REVISION = 1
 
 _RETRY_DELAYS = (2, 5, 15, 30)
@@ -83,6 +102,10 @@ class Artifact:
     url: str
     #: SHA-256 of the bytes at ``url``, measured 2026-08-11.
     sha256: str
+    #: Byte length of the bytes at ``url``.  Pinned beside the hash because the
+    #: two answer different questions: a hash says "not the artifact", a length
+    #: says WHY not.  See :func:`obtain`.
+    size: int
     rows: int
     #: Full expected column order after normalisation.
     columns: tuple[str, ...]
@@ -92,6 +115,13 @@ class Artifact:
     integer_columns: tuple[str, ...] = ()
     #: Columns an ARFF round-trip can leave wrapped in literal quotes.
     string_columns: tuple[str, ...] = ()
+    #: Columns that must still be ``float64`` after normalisation.  ASSERTED,
+    #: never cast: a cast would hide the change this exists to report.  This is
+    #: what makes the sev artifact carry a schema contract and not only a pin --
+    #: ``IDpol`` is the key ``test_realdata_parity`` joins the two files on, and
+    #: it appears here on both sides, so "the join key agrees" is one line to
+    #: read rather than a property of two separate absences.
+    float_columns: tuple[str, ...] = ()
 
 
 ARTIFACTS: tuple[Artifact, ...] = (
@@ -100,6 +130,7 @@ ARTIFACTS: tuple[Artifact, ...] = (
         openml_id=41214,
         url="https://data.openml.org/datasets/0004/41214/dataset_41214.pq",
         sha256="aead80a9ac68baf2c78fc1beaa287441d88d06cc11be60a1f226784d164c6dd7",
+        size=7469711,
         rows=678013,
         columns=(
             "IDpol",
@@ -117,14 +148,23 @@ ARTIFACTS: tuple[Artifact, ...] = (
         ),
         integer_columns=("ClaimNb", "VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"),
         string_columns=("VehGas",),
+        float_columns=("IDpol", "Exposure"),
     ),
     Artifact(
         name="freMTPL2sev.parquet",
         openml_id=41215,
         url="https://data.openml.org/datasets/0004/41215/dataset_41215.pq",
         sha256="c721d570c42eeaf4a70cc12f4c1e04095a6046f6cdbc01fad919274879783e60",
+        size=277195,
         rows=26639,
         columns=("IDpol", "ClaimAmount"),
+        # Measured, not assumed: the mirror stores both of these as float64
+        # already, so there is nothing here to CAST -- which is why this
+        # artifact carried no schema contract at all and freq carried one.
+        # Casting ``IDpol`` to int64 "for symmetry" would be actively wrong: it
+        # would manufacture the int64-against-float64 join that
+        # ``_load_gamma_data`` does not currently do.
+        float_columns=("IDpol", "ClaimAmount"),
     ),
 )
 
@@ -189,6 +229,58 @@ def _download(art: Artifact, target: Path) -> None:
     raise FetchError(f"{art.name}: could not download {art.url}: {last}")
 
 
+def _diagnose_pin_miss(art: Artifact, raw: Path, found: str) -> FetchError:
+    """Say WHICH failure a freshly downloaded, wrongly hashed file is.
+
+    Two very different things reach this point, and they need opposite actions:
+    a damaged transfer (re-run) and a re-encoded upstream (re-measure, then
+    re-pin).  Reporting the first as the second is the worst outcome this script
+    has, because the advice is "re-pin" and the bytes are corrupt.
+
+    A damaged transfer is not exotic and does not raise.  ``_download``'s retry
+    loop only covers *raised* transport errors, and CPython does not raise on a
+    short body: ``http.client.HTTPResponse.read(amt)`` returns short and closes
+    the connection instead, carrying the comment "Ideally, we would raise
+    IncompleteRead if the content-length wasn't satisfied, but it might break
+    compatibility".  ``shutil.copyfileobj`` reads with an ``amt``, so a proxy or
+    a mid-body close lands a complete-LOOKING file.  Measured: it reached the
+    re-pin message.
+
+    Two discriminators, because neither alone is complete:
+
+    * the pinned byte length -- decides every truncation, including one a proxy
+      makes at the same offset every time, which a repeat download would not;
+    * a second, independent download -- decides same-length corruption, which a
+      length check cannot see.  Two downloads agreeing with each other and not
+      with the pin is upstream; two downloads disagreeing is transport.
+    """
+    size = raw.stat().st_size
+    raw.unlink(missing_ok=True)
+    if size != art.size:
+        return FetchError(
+            f"{art.name}: got {size} bytes, expected {art.size} ({found[:12]} != "
+            f"{art.sha256[:12]}). A short or overlong body is a DAMAGED TRANSFER, not a "
+            f"re-encoded upstream -- re-run the fetch. Do not re-pin against these bytes."
+        )
+    second = raw.parent / f"{raw.name}.recheck"
+    try:
+        _download(art, second)
+        again = _sha256(second)
+    finally:
+        second.unlink(missing_ok=True)
+    if again != found:
+        return FetchError(
+            f"{art.name}: two downloads of the pinned length disagreed ({found[:12]} then "
+            f"{again[:12]}), so the body is being corrupted in transit -- re-run the fetch. "
+            f"Do not re-pin against these bytes."
+        )
+    return FetchError(
+        f"{art.name}: sha256 {found} does not match the pinned {art.sha256}, and two "
+        f"independent downloads agree on it at the pinned length. The upstream artifact "
+        f"changed; re-pin deliberately after re-measuring the suites' anchors against it."
+    )
+
+
 def obtain(art: Artifact, raw_dir: Path) -> Path:
     """Return a verified raw copy of *art*, downloading only if needed.
 
@@ -208,12 +300,7 @@ def obtain(art: Artifact, raw_dir: Path) -> Path:
     _download(art, raw)
     found = _sha256(raw)
     if found != art.sha256:
-        raw.unlink(missing_ok=True)
-        raise FetchError(
-            f"{art.name}: sha256 {found} does not match the pinned {art.sha256}. "
-            f"The upstream artifact changed; re-pin deliberately after re-measuring "
-            f"the suites' anchors against it."
-        )
+        raise _diagnose_pin_miss(art, raw, found)
     print(f"{art.name}: verified sha256 {found[:12]}", flush=True)
     return raw
 
@@ -239,9 +326,26 @@ def normalise(art: Artifact, raw: Path, dest: Path) -> Path:
         frame[column] = frame[column].astype("int64")
     for column in art.string_columns:
         frame[column] = frame[column].astype(str).str.strip("'")
+    for column in art.float_columns:
+        if frame[column].dtype != "float64":
+            raise FetchError(
+                f"{art.name}: {column} is {frame[column].dtype} after normalisation, expected "
+                f"float64. The raw bytes are pinned, so this is the reader disagreeing with "
+                f"the copy the suites' anchors were measured on; a dtype is what a discrete "
+                f"or categorical path dispatches on."
+            )
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / art.name
-    frame.to_parquet(out, index=False)
+    # Written aside and moved into place, like the raw download and for the same
+    # reason: ``tests/_datasets.usable`` accepts a path on existence alone, so a
+    # write interrupted here leaves a truncated parquet that the next run does
+    # NOT re-fetch and that raises from inside a test body instead.
+    tmp = dest / f".{art.name}.partial"
+    try:
+        frame.to_parquet(tmp, index=False)
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
     print(f"{art.name}: wrote {out} ({len(frame)} rows)", flush=True)
     return out
 

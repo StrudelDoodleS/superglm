@@ -135,6 +135,12 @@ jobs:
       # is then skipped and no assertion in superglm was ever evaluated.  A red
       # X on a download and a red X on a numeric assertion need different
       # people, so say which one this is.
+      #
+      # A hash mismatch is NOT self-explanatory, which is why the advice below
+      # is split.  A silently truncated body reaches the same mismatch as a
+      # re-encoded upstream, so telling every mismatch to re-pin invites
+      # re-pinning six-decimal anchors against corrupt bytes.  The script
+      # discriminates the two and says which it found; this block routes on that.
       - name: Report the fetch failure as infrastructure, not code
         if: failure() && steps.fetch.outcome == 'failure'
         run: |
@@ -142,15 +148,23 @@ jobs:
             echo "## freMTPL2 download failed — this is NOT a test failure"
             echo
             echo "The pinned datasets could not be fetched, or did not match their"
-            echo "SHA-256 pins, so the real-data suites never ran. No assertion in"
+            echo "pins, so the real-data suites never ran. No assertion in"
             echo "superglm was evaluated by this job, and nothing here says the"
             echo "code is wrong."
             echo
-            echo "- Transient OpenML outage: re-run this job."
-            echo "- Pin mismatch: upstream re-encoded the artifact. Re-measure the"
-            echo "  suites' anchors against the new bytes *before* re-pinning"
-            echo "  \`scripts/fetch_fremtpl.py\`; the anchors are pinned to six"
-            echo "  decimals and a re-encode can move them."
+            echo "Read the step's own message and act on **that**, not on the word"
+            echo "\"mismatch\":"
+            echo
+            echo "- Transient outage, or \`DAMAGED TRANSFER\`, or"
+            echo "  \`corrupted in transit\`: re-run this job. **Do not re-pin** —"
+            echo "  those bytes are not the artifact."
+            echo "- \`two independent downloads agree\`: upstream re-encoded it."
+            echo "  Re-measure the suites' anchors against the new bytes *before*"
+            echo "  re-pinning \`scripts/fetch_fremtpl.py\`; the anchors are pinned"
+            echo "  to six decimals and a re-encode can move them."
+            echo "- A dtype, column or row-count message: the pinned bytes are"
+            echo "  intact and the reader disagrees with them. That is a schema"
+            echo "  regression in the environment, not a fetch problem."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report the suite failure as code
