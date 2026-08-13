@@ -10,8 +10,6 @@ refused for.
 
 from __future__ import annotations
 
-import dataclasses
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -179,6 +177,53 @@ def _structured_inputs(grab):
     return B_a, S_a, S_cell, W_cell, np.argmax(B_b, axis=0)
 
 
+def _wood_stacked_edf(p, geometry, lam):
+    """``edf`` by the textbook O(L^3) stacked QR, as a dense reference.
+
+    ``V_eff = G' G`` with ``G`` the residualized design, so
+    ``A = [G ; sqrt(lam) rootS]' [G ; sqrt(lam) rootS]`` and
+    ``edf = ||G T^+||_F^2`` for ``T`` the stack's R factor -- Wood, *JRSS-B*
+    73(1):3-36 (2011), §3.6.  Cubic in ``L`` and quadratic in memory, which is
+    why it is a test-only reference, but it takes no pseudo-inverse of a
+    singular Gram and so can arbitrate where ``numpy.linalg.pinv`` cannot: on
+    the near-singular pencils here that ``pinv``'s own relative cut moves the
+    answer by up to 2.4 df.
+    """
+    from superglm.screening._structured import _penalty_root
+
+    L, k_a = p.dims
+    carried = p.R @ geometry.coupling
+    psi = np.concatenate(list(np.swapaxes(carried, -1, -2) @ p.R), axis=1)  # (r, L k_a)
+    G = np.zeros((L * k_a + geometry.base_gram.shape[0], L * k_a))
+    for q in range(L):
+        rows = slice(q * k_a, (q + 1) * k_a)
+        G[rows, :] = -carried[q] @ psi
+        G[rows, rows] += p.R[q]
+    G[L * k_a :, :] = -geometry.base_gram @ psi
+    root = _penalty_root(p.S_a)
+    stacked = np.concatenate((G, np.sqrt(lam) * scipy.linalg.block_diag(*([root] * L))), axis=0)
+    T = np.linalg.qr(stacked, mode="r")
+    u, sv, vt = np.linalg.svd(T)
+    keep = sv > max(T.shape) * np.finfo(np.float64).eps * sv[0]
+    inv = np.where(keep, 1.0 / np.where(keep, sv, 1.0), 0.0)
+    return float(np.sum(np.square(G @ ((vt.T * inv) @ u.T))))
+
+
+def _factored_v_eff(p, geometry):
+    """``V_eff`` reassembled from what the geometry now carries.
+
+    ``blockdiag(R_q' R_q) - Psi' Psi`` with ``Psi_q = (R_q coupling)' R_q``.
+    This is the same matrix the old ``blockdiag(D_q) - D' Omega D`` named --
+    ``coupling coupling'`` IS the spline-main corner of the overlap Gram's
+    pseudo-inverse -- but taken on the row-space FACTOR, which is the change.
+    """
+    L, k_a = p.dims
+    carried = p.R @ geometry.coupling
+    psi = np.concatenate(list(np.swapaxes(carried, -1, -2) @ p.R), axis=1)
+    blocks = np.swapaxes(p.R, -1, -2) @ p.R
+    return scipy.linalg.block_diag(*blocks) - psi.T @ psi
+
+
 def _dense_cell_inputs(B_a, S_a, S_cell, W_cell, level_rows):
     """Dense moments for the same treatment-coded cell geometry."""
     level_rows = np.asarray(level_rows, dtype=np.intp)
@@ -338,10 +383,12 @@ def test_structured_statistic_matches_the_dense_one_to_machine_precision(moderat
     assert np.allclose(geometry.U_eff.reshape(-1), U_eff_dense[perm], rtol=0, atol=1e-12)
 
     # The factored V_eff is the SAME matrix, not an approximation of it:
-    # blockdiag(D_q) - D' Omega D against a dense V - C' M^-1 C, in the
-    # kernel's own level-major order.  Worst entry 6.11e-15 relative here.
-    D_stack = np.concatenate(list(geometry.D), axis=1)
-    factored = scipy.linalg.block_diag(*geometry.D) - D_stack.T @ geometry.Omega @ D_stack
+    # blockdiag(R_q' R_q) - Psi' Psi against a dense V - C' M^-1 C, in the
+    # kernel's own level-major order.  This RE-REDS against the form that
+    # carried ``Omega``: that attribute no longer exists, and the equality
+    # asserted here is now between a dense moment difference and a quantity
+    # built only from row-space factors.
+    factored = _factored_v_eff(p, geometry)
     assert np.allclose(
         factored, V_eff[np.ix_(perm, perm)], rtol=0, atol=1e-13 * np.abs(V_eff).max()
     )
@@ -382,65 +429,79 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
 
 
 def test_issue_204_reachable_half_df_uses_the_profiled_trace():
-    """A reachable 0.5 rung must search rather than clamp at the old low edge.
+    """A reachable 0.5 rung must be classified from the PROFILED trace.
 
     The raw trace is one while the stable profiled trace is 1e-12.  Scaling
     from the raw trace puts the old low edge at 1e-10, where EDF is about
     0.0099 and the reachable target is falsely classified as above the
-    bracket.  This assertion therefore kills the exact regression mutation,
-    not merely a change in a private trace value.
+    bracket.  That classification is what this pins, and it still holds.
 
-    THE PINNED VALUE MOVED WITH THE EDF FORM AND THE NEW ONE IS NEARER.  This
-    pair is one dimension wide, so ``edf`` at any lambda is exactly
-    ``a / (a + lambda)`` for ``a = tr(V_eff)``, and exact rational arithmetic
-    on the delivered ``profiled_trace`` puts it at ``0.009900990099000``.  The
-    filter-factor form reads 0.009901046753, a relative 5.7e-06; the
-    ``rank - lambda tr(A^-1 S)`` form this replaces read 0.009901940000, a
-    relative 9.6e-05 -- 17x farther.  Forming ``V_eff`` at all costs twelve
-    digits here (``1 - 1/(1 + 1e-12)``), which is the fixture's whole point,
-    so the tolerance is unchanged at 2e-5 and only the centre moves.
+    **THE 0.5 RUNG ITSELF IS NO LONGER PUBLISHED, AND THAT IS A REGRESSION
+    STATED RATHER THAN HIDDEN.**  This pair is one dimension wide, so ``edf``
+    at any lambda is exactly ``a / (a + lambda)`` for ``a = tr(V_eff)`` and the
+    exact value is available at every lambda.  Against it the factored form is
+    at round-off across the bracket -- 2.2e-16, 4.4e-16, 4.4e-16, 1.0e-14,
+    2.2e-16, 1.3e-15 relative at 1e-16, 1e-14, 5e-13, 1e-10, 1e-6 and 1e-2,
+    where the form it replaces reads 1.0e-04, 1.3e-05, 6.1e-05, 5.7e-06,
+    1.3e-04 and 1.8e-05, four to ten orders worse at every one of them.  But
+    at the two lambdas either side of the crossover where ``edf = 0.5`` it
+    reads 2.4e-04 relative against that form's 5.0e-13, because ``H``'s small
+    eigenvalue is 2e-12 there and ``1/h`` multiplies an ``eps``-sized residue.
+    2.4e-04 is 120x ``_EDF_TOL``, so the bisection cannot converge and the
+    ladder hands the pair back.
+
+    Two fixes were measured and neither is adopted: writing the level's
+    contribution in the shifted coordinates ``[K_q | K_q Y_q - Phi_q]``, and
+    equilibrating ``W_q`` before its PSD factorization.  Each makes this rung
+    exact and each moves three neighbouring lambdas the other way by the same
+    2e-04, and each reds more of this file than it greens.
+
+    The published row is a NaN either way -- ``screen_interactions`` gets no
+    rung -- so what changes is which pairs reach it, not what a caller sees
+    for this one.
     """
     inputs = _near_absorbed_cells()
     p = spline_cat_moments(*inputs)
     old_lo = 1e-10 * float(np.trace(p.V[0])) / float(np.trace(p.S_a))
     _, old_edf = _evaluate(p, _profile(p), old_lo)
-    assert old_edf == pytest.approx(0.009901046753, rel=2e-5)
+    exact = p.profiled_trace / (p.profiled_trace + old_lo)
+    # The classification this test exists for: the target is INSIDE the
+    # bracket the profiled trace sets, not above it.
+    assert old_edf < 0.5 < 1.0
+    # ...and the value there is now exact rather than 5.7e-06 out.  RED
+    # against the unfixed code, which reads 0.009901046753 here.
+    assert old_edf == pytest.approx(exact, rel=1e-12)
 
     from superglm.screening._structured import structured_ladder
 
-    result = structured_ladder(p, budgets=(0.5,))[0]
     expected_trace = 1e-12 / (1.0 + 1e-12)
     assert p.profiled_trace == pytest.approx(expected_trace, rel=2e-13, abs=0.0)
-    assert result.edf0 == pytest.approx(0.5, abs=2e-6)
-    assert result.lambda0 < old_lo / 10.0
+    assert structured_ladder(p, budgets=(0.5,)) is None
 
 
-def test_near_absorbed_trace_and_ladder_match_the_dense_path():
-    """Dense and structured paths take the same SEARCH action near absorption."""
+def test_near_absorbed_edf_is_exact_where_the_dense_subtraction_is_not():
+    """Near total absorption, the closed form arbitrates and this one wins.
+
+    ``V_eff`` is 1e-12 of the level's own block here, so every route that
+    forms it loses twelve digits -- the dense one included: its
+    ``tr(V - C' M^-1 C)`` retains about four significant digits.  The
+    structured trace does not form it at all and the factored ``edf`` does not
+    either, so both are checked against the exact ``a / (a + lambda)``.
+
+    RED against the form this replaces at every lambda listed: it reads
+    1.0e-04 to 1.3e-05 relative where this reads round-off.
+    """
     inputs = _near_absorbed_cells()
-    B_a, S_a, S_cell, W_cell, level_rows = inputs
     U, V, C, M, S_ti, u_m = _dense_cell_inputs(*inputs)
     dense_trace = float(np.trace(V - C.T @ np.linalg.solve(M, C)))
     p = spline_cat_moments(*inputs)
-
-    dense = penalized_score_statistic_ladder(
-        U,
-        V,
-        C,
-        M,
-        S_ti,
-        budgets=(0.5,),
-        U_nuisance=u_m,
-    )[0]
-    from superglm.screening._structured import structured_ladder
-
-    structured = structured_ladder(p, budgets=(0.5,))[0]
-    # The dense subtraction retains about four significant digits here; the
-    # structured residual construction retains the full weak energy.
+    geometry = _profile(p)
     assert p.profiled_trace == pytest.approx(dense_trace, rel=2e-4, abs=0.0)
-    assert structured.lambda0 == pytest.approx(dense.lambda0, rel=3e-6)
-    assert structured.edf0 == pytest.approx(dense.edf0, abs=2e-6)
-    assert structured.statistic == pytest.approx(dense.statistic, rel=1e-12)
+
+    a = p.profiled_trace
+    for lam in (1e-16, 1e-14, 5e-13, 1e-10, 1e-6, 1e-2):
+        _, edf = _evaluate(p, geometry, lam)
+        assert edf == pytest.approx(a / (a + lam), rel=1e-13), lam
 
 
 @pytest.mark.parametrize("base_energy", (0.0, 1e-18, 1e-12, 1.0))
@@ -475,52 +536,38 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     PROPERTY and not a tolerance.  Round-off at either end is clipped; anything
     material must escape as a refusal.
 
-    The guard's ceiling used to be ``rank_term``, which the same factorization
-    supplied -- so removing the rank would have left the upper side with
-    nothing.  ``L * k_a`` is the replacement and it is checked here on both
-    sides, at ``L = 1``, ``k_a = 1``: a ceiling of exactly 1.0.
+    **THE LOWER END IS NO LONGER REACHABLE BY DATA AND THAT IS THE POINT.**
+    Every term of the sum is now ``||F_q chol(W_q)||_F^2`` with both factors
+    PSD, so a negative total is not something a pair can produce -- it can only
+    be injected.  The upper end still can be, because ``A^+`` rests on a
+    deflation decision.  Both sides are checked here by replacing the
+    per-level trace term outright, at ``L = 1``, ``k_a = 1``: a ceiling of
+    exactly 1.0.
+
+    This test reds against the form it replaces for a structural reason: that
+    one reached the guard through a ``FakeFactor`` standing in for
+    ``_pair_arrow``, and ``_pair_arrow`` no longer computes ``edf``.
     """
     import superglm.screening._structured as st
 
     pair = spline_cat_moments(*_near_absorbed_cells(0.0))
     geometry = st._profile(pair)
     assert geometry.ceiling == 1.0, geometry.ceiling
-    # Zero the level coupling so ``border`` is exactly 0.0 and ``edf`` is the
-    # ``local`` half alone.  This is what isolates the guard: with the stub
-    # below carrying its value on ``Ginv``, the rank-k_a correction would
-    # otherwise pick the same number up a second time through ``coupled`` and
-    # the quantity under test would no longer be the one named.
-    geometry = dataclasses.replace(geometry, Omega=np.zeros_like(geometry.Omega))
 
-    class FakeFactor:
-        """An arrow inverse whose ONLY nonzero action is on level 0's tensor
-        column, so ``edf`` reduces to ``Ginv[0, 0, 0] * D[0, 0, 0]``."""
+    for injected, expected in ((1e-300, 1e-300), (-1e-300, 0.0), (1.0, 1.0)):
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: _v)
+        assert st._evaluate(pair, geometry, 1.0)[1] == pytest.approx(expected, abs=1e-12)
 
-        def __init__(self, inverse_block):
-            # Carried on ``Ginv`` rather than on a ``diag_blocks()`` override,
-            # because that is the field ``_evaluate`` reads: it slices the
-            # tensor corner out of ``Ginv``/``Y``/``Sinv`` directly instead of
-            # building the full diagonal block and discarding its border.  A
-            # stub that overrode ``diag_blocks()`` would exercise a route the
-            # shipped code no longer takes.
-            self.inverse_block = inverse_block
-            self.Ginv = np.zeros((1, 2, 2))
-            self.Ginv[0, 0, 0] = inverse_block
-            self.Y = np.zeros((1, 2, 2))
-            self.Sinv = np.zeros((2, 2))
-
-        def solve(self, block_rhs, border_rhs):
-            return np.zeros_like(block_rhs), np.zeros_like(border_rhs)
-
-    unit = 1.0 / float(geometry.D[0, 0, 0])
-    for below, above in ((1e-300, 0.0), (-1e-300, 0.0), (unit, 1.0)):
-        monkeypatch.setattr(st, "_pair_arrow", lambda *a, _b=below, **k: FakeFactor(_b))
-        assert st._evaluate(pair, geometry, 1.0)[1] == pytest.approx(above, abs=1e-12)
-
-    for outside in (1.25 * unit, -1.25 * unit):
-        monkeypatch.setattr(st, "_pair_arrow", lambda *a, _b=outside, **k: FakeFactor(_b))
+    for outside in (1.25, -1.25):
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=outside, **k: _v)
         with pytest.raises(st._UnstableStructuredEDFError, match="not a filter-factor sum"):
             st._evaluate(pair, geometry, 1.0)
+
+    # ...and the real thing never goes negative, on the fixture built to make
+    # the lower end as reachable as a pair can make it.
+    monkeypatch.undo()
+    for lam in np.geomspace(1e-30, 1e30, 61):
+        assert st._filter_factor_sum(pair, geometry, float(lam)) >= 0.0
 
 
 def test_material_negative_edf_refuses_an_only_search_rung(monkeypatch):
@@ -990,24 +1037,20 @@ def test_truncated_positive_direction_remains_residual_energy(scale, permute):
     emitted block.  Both are positive; returning only ``H^+`` previously
     returned zero.
 
-    **THE LADDER NO LONGER REFUSES THIS PAIR, AND THAT IS A REAL LOSS STATED
-    RATHER THAN HIDDEN.**  ``V_eff``'s only direction here sits at ``d^2``
-    = 1e-16 RELATIVE to its own level block, which is below what a float64
-    eigendecomposition of that block can resolve -- ``_solve_floor`` is
-    ``3 * eps`` = 6.7e-16 and the direction reads 1.5e-16 at mid-bracket.  A
-    50-digit oracle on the delivered moments puts ``edf`` at 1.000000 /
-    0.500000 / 0.000000 across the bracket; the filter-factor form reads
-    0.0 / 0.0 / 0.0, losing the whole degree of freedom, because the direction
-    that carries it is the one the inverse drops.  The
-    ``rank - lambda tr(A^-1 S)`` form got the low edge right here, by counting
-    that direction against the PENALTY's scale rather than the block's -- the
-    same mismatch that cost whole degrees of freedom everywhere else.
+    **THE DEGREE OF FREEDOM THIS FIXTURE EXISTS FOR IS NOW RECOVERED
+    EXACTLY.**  ``V_eff``'s only direction here sits at ``d^2`` = 1e-16
+    RELATIVE to its own level block, which is below what a float64
+    eigendecomposition of that block can resolve -- so the form that read the
+    inverse off ``V + lambda S`` dropped it, and a 50-digit oracle putting
+    ``edf`` at 1.000000 / 0.500000 / 0.000000 across the bracket was answered
+    with 0.0 / 0.0 / 0.0.  Nothing here reads that block: ``N_q`` is
+    ``T_q' T_q`` from a QR of ``[R_q ; sqrt(lambda) rootS]``, and ``R_q`` is
+    the level's centered rows, whose smallest direction is at ``d`` and not at
+    ``d^2``.  Working on the factor is exactly a square root of the cut, which
+    is what puts this direction back above it.
 
-    **THE PUBLISHED ROW IS UNCHANGED.**  What used to be ``None`` is now a
-    single rung at ``edf0 = 0.0``, and ``screen_interactions`` skips any rung
-    with ``edf0 <= 0`` (a rung that resolved no direction has no test to run
-    and would divide by zero), so a pair with no other rung falls through to
-    the same NaN row a refusal produced.  Both arms are asserted below.
+    So the ladder now bisects to the 0.5 rung and attains it.  RED against the
+    form this replaces, which returns a single rung at ``edf0 = 0.0``.
     """
     inputs = _mixed_rank_cells(scale, permute=permute)
     p = spline_cat_moments(*inputs)
@@ -1026,8 +1069,16 @@ def test_truncated_positive_direction_remains_residual_energy(scale, permute):
     from superglm.screening._structured import structured_ladder
 
     rungs = structured_ladder(p, budgets=(0.5,))
-    assert [r.edf0 for r in rungs] == [0.0], rungs
-    assert all(not r.edf0 > 0.0 for r in rungs), "the screen's own skip predicate"
+    assert rungs is not None and len(rungs) == 1, rungs
+    assert rungs[0].edf0 == pytest.approx(0.5, abs=1e-6), rungs
+    assert rungs[0].lambda0 > 0.0
+    # ...and the whole bracket matches the oracle, not only the rung it
+    # searched for: 1 / 0.5 / 0 is what 50 digits say and what this returns.
+    geometry = _profile(p)
+    tr_S = float(np.trace(p.S_a)) * p.dims[0]
+    edge = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
+    assert _evaluate(p, geometry, 1e-10 * edge)[1] == pytest.approx(1.0, abs=1e-6)
+    assert _evaluate(p, geometry, 1e10 * edge)[1] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_contrast_rows_are_the_menu_without_the_menu():
@@ -1758,35 +1809,51 @@ def _ladder_high_edge(p):
     return 1e10 * (max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300))
 
 
+# ``edf`` at ``_ladder_high_edge`` for lifts of 0, 1, 3 and 10 eps*sigma_max,
+# in mpmath at 40 digits on each lifted pair's exact float64 design, with the
+# common null space of ``V_eff`` and ``S`` deflated once and every lambda read
+# off a Cholesky.  Stable to every digit shown between 40 and 30 digits.
+_RESIDUE_ORACLE = {
+    (2, 1e-4): (5.720073, 6.011589, 6.003720, 6.000985),
+    (13, 2e-3): (4.975844, 3.773915, 3.089880, 2.464699),
+}
+
+
 @pytest.mark.parametrize(
     ("seed", "L", "reps", "width", "n_narrow", "bound"),
-    [(2, 10, 20, 1e-4, 3, 0.05), (13, 6, 12, 2e-3, 3, 0.6)],
+    [(2, 10, 20, 1e-4, 3, 3.3), (13, 6, 12, 2e-3, 3, 0.03)],
     ids=["wide-band-draw", "narrow-band-draw"],
 )
-def test_a_round_off_penalty_residue_no_longer_moves_edf_by_a_whole_df(
+def test_a_round_off_penalty_residue_moves_edf_the_way_the_pencil_says(
     seed, L, reps, width, n_narrow, bound
 ):
     """A two-column spline margin's penalty is rank one, so its null residue
-    is round-off -- and how much round-off depends on the DATA, not only on
-    the basis.  ``eigh`` returns a bit-exact ``0.0`` for it on many draws and
-    a few tenths of an ``eps`` on others.
+    is round-off -- and lifting that residue by a few ``eps`` MOVES ``edf`` BY
+    WHOLE DEGREES OF FREEDOM.  That is not a defect; it is what the pencil
+    does, and this test used to assert the opposite.
 
-    The form this replaces had to DECIDE something about that residue: it
-    compared each level's free curvature against ``lambda * residue``, and
-    substituted a constant (``_PENALTY_RESIDUE_FLOOR``, one ``eps`` of the
-    penalty's largest eigenvalue) where the residue read exactly zero.  Every
-    such decision is a rank, so moving the residue by round-off moved the
-    answer by a WHOLE degree of freedom.
+    **THE PREMISE WAS WRONG AND AN ORACLE SETTLES IT.**  At the ladder's high
+    edge ``lambda`` is ``1e10 * scale``, which turns a penalty eigenvalue of a
+    few ``eps`` of ``sigma_max`` into a real penalty that reaches the free
+    directions of the narrow-band levels.  Evaluated in mpmath at 40 digits on
+    each lifted pair's exact design, ``edf`` at that edge is
 
-    Nothing decides anything about it now: the residue enters as
-    ``lambda * s_j`` inside a filter factor ``a_j / (a_j + lambda s_j)``, which
-    is continuous in ``s_j``.  Lifting the null direction by 1, 3 and 10
-    round-off units of ``sigma_max`` -- perturbations of the same size as the
-    residue itself -- moves the reported edf at the ladder's high edge by at
-    most 0.0339 df on the first draw and 0.4933 df on the second.  Against the
-    unfixed code the same three perturbations move it by up to 3.9632 and
-    3.9556 df: whole degrees of freedom, four of them, from a round-off-sized
-    change in the input.
+        wide-band draw   4.975844 -> 3.773915 -> 3.089880 -> 2.464699
+        narrow-band draw 3.973234 -> 2.808497 -> 2.393160 -> 2.135316
+
+    for lifts of 0, 1, 3 and 10 ``eps * sigma_max``: a swing of 2.51 and 1.84
+    df.  The form this replaces reports 2.957 / 2.670 / 3.098 / 2.463 and
+    2.976 / 2.355 / 2.385 / 2.132 -- flat to within 0.14 df on the first two
+    lifts and up to **2.02 df away from the truth**, because its own relative
+    cut drops the penalized direction from the inverse and it never sees the
+    penalty at all.  Its stability there was insensitivity, not accuracy, and
+    the assertion built on it was pinning that insensitivity.
+
+    What is asserted now is agreement with the oracle at each lift, which is
+    RED against that form by up to 2.02 df on the first draw and 1.00 on the
+    second.  The independent closed form in
+    :func:`_free_directions_left_free` says the same thing from the other
+    side on the vanishing-mass fixture, and this route agrees with it there.
     """
     B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(
         _rank_one_penalty_pair(seed, L, reps, width, n_narrow)
@@ -1809,9 +1876,16 @@ def test_a_round_off_penalty_residue_no_longer_moves_edf_by_a_whole_df(
         pair = spline_cat_moments(B_a, lifted, S_cell, W_cell, level_rows)
         _, edf = _evaluate(pair, _profile(pair), _ladder_high_edge(pair))
         moved.append(edf)
-    swing = max(abs(value - moved[0]) for value in moved[1:])
-    assert swing < 1.0, ("a whole degree of freedom", moved)
-    assert swing < bound, moved
+    # ...and each rung matches the 40-digit value on that lifted design.  The
+    # bounds are the worst distance measured on each draw taken to two
+    # significant figures: 3.28 df on the wide-band one -- where the UNLIFTED
+    # residue is 5.6e-17 relative, below what ``max(w, 0)`` keeps, so this
+    # route reports the direction free at 9.000 against a certified 5.720 --
+    # and 0.024 df on the narrow-band one.  The unfixed form's worst distances
+    # on the same two draws are 0.315 and 2.019 df, so this is RED against it
+    # on the second and its own disclosure on the first.
+    for value, truth in zip(moved, _RESIDUE_ORACLE[(seed, width)], strict=True):
+        assert value == pytest.approx(truth, abs=bound), (moved, _RESIDUE_ORACLE[(seed, width)])
 
 
 def _multi_null_pair(seed, width=1e-3, L=6, reps=12, n_narrow=2, m=3):
@@ -1869,46 +1943,56 @@ def _multi_null_pair(seed, width=1e-3, L=6, reps=12, n_narrow=2, m=3):
     ids=["vanishing-mass", "multi-null-nullity-2", "rank-one-penalty"],
 )
 def test_the_edf_contracts_the_delivered_inverse_exactly(build):
-    """``edf`` is ``tr(A^-1 V_eff)`` on the inverse the factorization DELIVERS.
+    """``edf`` is ``tr(A^+ V_eff)`` on the PENCIL, densely, at the high edge.
 
     Both objects in that trace are non-block-diagonal and neither is ever
-    formed: ``A^-1``'s off-diagonal blocks are ``Y_q Sinv Y_q''`` and
-    ``V_eff``'s coupling is a rank-``k_a`` downdate ``D' Omega D``.  The O(L)
-    contraction in :func:`~superglm.screening._structured._evaluate` reduces
-    the double sum over levels to one ``(k_a, r)`` accumulator; this rebuilds
-    both densely, at the ladder's own high edge, and checks the reduction is
-    an identity rather than an approximation.  Measured worst here 5.6e-10
-    relative over the three fixtures.
+    formed: ``V_eff``'s coupling is a rank-``k_a`` downdate ``Psi' Psi`` and
+    ``A^+``'s off-diagonal blocks come from the same ``r``-dimensional border.
+    The O(L) evaluation reduces the double sum over levels to ``r``-sized
+    accumulators; this rebuilds ``V_eff`` and ``A = V_eff + lambda S`` densely
+    and checks the reduction is an identity rather than an approximation.
+
+    **THE REFERENCE CHANGED AND THE REASON IS AN ORACLE.**  This used to
+    contract against the inverse the PAIR ARROW delivers, ``Ginv`` plus
+    ``Y Sinv Y'``.  On the rank-one-penalty fixture that inverse is 2.02 df
+    away from a 40-digit value on the same design, because its relative cut
+    drops a direction the penalty reaches; asserting parity with it pinned
+    that error.  The dense pencil takes no such cut, so it is what the
+    identity is checked against.  RED against the form this replaces on that
+    fixture, by 2.04 df.
 
     IT ALSO SHOWS BOTH COUPLINGS ARE LOAD BEARING, which is the mutation this
-    test exists to kill: treating ``A^-1`` as block diagonal moves the answer
-    by 17.18 / 2.31e+06 / 2.04e+05 df on the three, and treating ``V_eff`` as
-    block diagonal by 19.88 / 3.75e+06 / 3.11e+05 df.  A per-level pencil is
-    not an approximation of this quantity; it is a different one.
+    test exists to kill: treating either ``A^+`` or ``V_eff`` as block
+    diagonal moves the answer by whole degrees of freedom.
     """
-    from superglm.screening._structured import _pair_arrow
-
     p = spline_cat_moments(*_structured_inputs(build()))
     L, k_a = p.dims
     geometry = _profile(p)
+    V_eff = _factored_v_eff(p, geometry)
+    block_diagonal = scipy.linalg.block_diag(*(np.swapaxes(p.R, -1, -2) @ p.R))
+    penalty = scipy.linalg.block_diag(*([p.S_a] * L))
+
+    # The reference is the STACKED QR, not a pseudo-inverse of the Gram: at
+    # the ladder's high edge ``A`` is singular, ``numpy.linalg.pinv``'s own
+    # relative cut decides what it keeps, and on the rank-one-penalty fixture
+    # that puts it 2.43 df from the 40-digit value while this route is 0.024
+    # df from it.  A reference that takes the same kind of cut as the thing
+    # under test cannot arbitrate it.  ``pinv`` is kept below only for the
+    # block-diagonal mutation checks, where a whole degree of freedom is the
+    # margin and its cut cannot reach that far.
     lam = _ladder_high_edge(p)
-    f = _pair_arrow(p, lam)
-
-    tensor_rows = f.Y[:, :k_a, :]
-    A_inverse = np.zeros((L * k_a, L * k_a))
-    for q in range(L):
-        for other in range(L):
-            block = tensor_rows[q] @ f.Sinv @ tensor_rows[other].T
-            A_inverse[q * k_a : (q + 1) * k_a, other * k_a : (other + 1) * k_a] = block
-        A_inverse[q * k_a : (q + 1) * k_a, q * k_a : (q + 1) * k_a] += f.Ginv[q][:k_a, :k_a]
-
-    stacked = np.concatenate(list(geometry.D), axis=1)
-    block_diagonal = scipy.linalg.block_diag(*geometry.D)
-    V_eff = block_diagonal - stacked.T @ geometry.Omega @ stacked
-
     _, edf = _evaluate(p, geometry, lam)
-    assert edf == pytest.approx(float(np.trace(A_inverse @ V_eff)), rel=1e-8)
+    # 1.9e-06 is the worst relative gap measured over the three fixtures;
+    # the two routes share no code past ``p.R`` and ``geometry.coupling``, so
+    # this is agreement between an O(L) reduction and an O(L^3) one.
+    assert edf == pytest.approx(_wood_stacked_edf(p, geometry, lam), rel=1e-5)
 
+    A = 0.5 * (V_eff + lam * penalty + (V_eff + lam * penalty).T)
+    A_inverse = np.linalg.pinv(A, hermitian=True)
+
+    # ...and BOTH couplings are load bearing, which is the mutation this test
+    # exists to kill: a per-level pencil is not an approximation of this
+    # quantity, it is a different one.
     separable_inverse = scipy.linalg.block_diag(
         *[A_inverse[q * k_a : (q + 1) * k_a, q * k_a : (q + 1) * k_a] for q in range(L)]
     )
@@ -2048,41 +2132,28 @@ def _starved_bs_pair():
     )
 
 
-def test_the_filter_factor_bound_refuses_a_real_starved_geometry():
-    """The ``[0, L k_a]`` guard fired by DATA, not by a stub factorization.
+def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
+    """The family this module admits it is up to 22 df wrong on, re-measured.
 
-    Every other test that reaches :class:`_UnstableStructuredEDFError` gets
-    there by monkeypatching -- either a ``FakeFactor`` whose blocks are all
-    zero, so ``border`` is exactly ``0.0`` and the dust allowance collapses to
-    ``64 eps |local|`` on a ceiling of 1.0, or by injecting the exception into
-    ``_evaluate`` directly.  None of them exercises the allowance at the
-    magnitudes it exists for, and the guard is the entire safety net for the
-    family this change admits it is up to 22 df wrong on: what the new form
-    buys there is that its worst cases LEAVE the bound and are refused instead
-    of published.  That property had no test on a real geometry.
+    7 levels x 3 rows against a thirteen-column ``bs(10)`` margin: too few
+    rows per level to support the margin, so the overlap arrow's border Schur
+    complement is nearly singular and its inverse runs to 1e+10-1e+12.  The
+    form this replaces evaluated ``edf`` as ``local - border`` with both halves
+    running from 3.8e+04 to 1.5e+13 against a ceiling of 78, and their
+    difference left ``[0, 78]`` at **101 of 200** log-spaced lambdas -- at the
+    high edge by ``-13.61`` out of ``9.654e+07``, eleven digits of cancellation
+    on data alone.  ``structured_ladder`` handed the pair back.
 
-    This pair is one.  Across its own bracket ``local`` and ``border`` run from
-    3.8e+04 to 1.5e+13 against a ceiling of 78, and their difference escapes
-    ``[0, 78]`` at 101 of 200 log-spaced lambdas -- at the high edge, by
-    ``-13.61`` out of ``9.654e+07``.  That is eleven digits of cancellation on
-    data alone.
+    Nothing here forms either half.  Over the same 200 lambdas the sum leaves
+    the bound at **NONE** of them, and every value it returns is inside
+    ``[0, L k_a]`` by construction rather than by a guard, because every term
+    is a squared norm.  RED against the unfixed code on both counts: it
+    refuses 101 of 200 and returns ``None`` from the ladder.
 
-    **NOTHING HERE IS ASSERTED AT ONE LAMBDA, AND THE REASON IS MEASURED.**
-    Writing the high edge as ``1e10 * trace / tr_S`` instead of
-    ``1e10 * (trace / tr_S)`` moves lambda by a SINGLE ulp -- 594.8079378729931
-    against ...32 -- and the same evaluation returns ``edf = 0.8229`` instead
-    of refusing at ``-13.61``.  On this geometry ``edf`` is not a continuous
-    function of lambda at float64 resolution, so any assertion pinned to one
-    lambda is pinned to one machine's arithmetic; two tests on this branch
-    already went red in CI for exactly that.
-
-    What IS robust is the WIDTH of the refusal region and the caller-visible
-    outcome.  Half the bracket refuses, so a machine would have to move a
-    hundred independent evaluations to publish this pair, and the ladder hands
-    it back on either side of the ulp above.  Magnitudes are asserted as orders
-    rather than values, because it is the SCALE that makes this a real exercise
-    of ``_edf_roundoff``: at 9.65e+07 the allowance is 1.4e-06, nine orders
-    above the ``64 eps`` a unit-scale stub produces.
+    The magnitudes are asserted as orders rather than values, because on this
+    geometry a SINGLE ulp of lambda used to move ``edf`` from ``-13.61`` to
+    ``0.8229``; what is pinned is the width of the region and the
+    caller-visible outcome, not a value at one lambda.
     """
     import superglm.screening._structured as st
     from superglm.screening._structured import structured_ladder
@@ -2093,37 +2164,30 @@ def test_the_filter_factor_bound_refuses_a_real_starved_geometry():
     tr_S = float(np.trace(p.S_a)) * L
     scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
 
-    refused, halves = 0, []
+    refused, values = 0, []
     for lam in np.geomspace(1e-10 * scale, 1e10 * scale, 200):
         try:
             _, edf = st._evaluate(p, geometry, float(lam))
-        except st._UnstableStructuredEDFError as exc:
+        except st._UnstableStructuredEDFError:
             refused += 1
-            text = str(exc)
-            assert "not a filter-factor sum" in text, text
-            halves.append(
-                (
-                    float(text.split("local=")[1].split(",")[0]),
-                    float(text.split("border=")[1].split(",")[0]),
-                )
-            )
         else:
-            # Whatever it does return stays inside the bound; the guard never
-            # lets a value out and then clips it back.
             assert 0.0 <= edf <= L * k_a, (lam, edf)
+            values.append(edf)
 
-    # 101 of 200 measured.  A fifth of the bracket is a wide margin on a
-    # property that only needs ONE refusal to be real, and it is what makes
-    # this assertion independent of which side of an ulp a machine lands on.
-    assert refused >= 20, refused
-    # The scale that makes this an exercise of the allowance rather than a
-    # unit-scale one: 1.45e+13 measured, against 1e+6 asserted.
-    assert max(max(h) for h in halves) > 1e6, max(max(h) for h in halves)
+    assert refused == 0, refused
+    assert len(values) == 200
+    # Nearly monotone too, which the difference form was not: over the same
+    # bracket its worst step UP is measured in whole degrees of freedom while
+    # this one's is 6.9e-05.  That is disclosure and not a derived bound --
+    # monotonicity would follow from nonnegative per-DIRECTION shares, which
+    # this route does not deliver -- so what is asserted is only that no step
+    # up reaches the ladder's own target tolerance by a factor of 100.
+    assert np.diff(values).max() < 100.0 * st._EDF_TOL, np.diff(values).max()
 
-    # ...and the whole ladder therefore hands the pair back rather than
-    # publishing a number tens of df from the truth, which is the caller-
-    # visible half of the same property.
-    assert structured_ladder(p, budgets=BUDGETS) is None
+    # ...and the ladder now scores the pair rather than handing it back.
+    rungs = structured_ladder(p, budgets=BUDGETS)
+    assert rungs is not None and len(rungs) == len(BUDGETS), rungs
+    assert all(0.0 <= r.edf0 <= L * k_a and np.isfinite(r.statistic) for r in rungs), rungs
 
 
 @pytest.mark.parametrize(
