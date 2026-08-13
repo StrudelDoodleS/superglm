@@ -424,7 +424,22 @@ def test_grouped_segmented_piecewise_keeps_every_stated_break_as_a_vertex() -> N
     # ~1e-04, eleven orders away.
     first_break = level_x[levels.index("Mi004")]
     segment = curve_y[curve_x <= first_break]
-    assert np.ptp(np.diff(curve_x[curve_x <= first_break])) == 0.0
+    # The sub-grid is uniform TO MACHINE PRECISION, not exactly: this fixture's
+    # first segment is linspace(0, 3, 25) and 3/24 = 0.125 is dyadic, so every
+    # point lands exact -- but that is a property of where the break sits, not
+    # of the grid construction. Move the break one level and the step is 4/24 =
+    # 1/6, which is not representable; measured ptp(diff) is then 4.44e-16 and
+    # an exact test would fail on grid spacing before the quadratic it guards
+    # was ever examined. Tolerance: each point carries at most eps*max|x| of
+    # representation error, a first difference of two points at most twice
+    # that, and ptp is a difference of two such differences, so 4 * eps *
+    # max|curve_x|; a handful of ulp for linspace's own reconstruction gives 8.
+    # Measured worst case across breaks 3..7 is 8.9e-16 against a bound of
+    # 7.1e-15, and the defect it separates -- a genuinely non-uniform grid --
+    # is of order the step itself, 0.125, thirteen orders away.
+    segment_x = curve_x[curve_x <= first_break]
+    spacing_tolerance = 8 * np.finfo(np.float64).eps * float(np.abs(segment_x).max())
+    assert np.ptp(np.diff(segment_x)) < spacing_tolerance
     tolerance = 16 * np.finfo(np.float64).eps * float(np.abs(curve_y).max())
     assert np.ptp(np.diff(segment, 2)) < tolerance
 
