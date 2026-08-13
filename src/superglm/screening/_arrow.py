@@ -25,11 +25,15 @@ would mean a Python loop over exactly the axis this module exists to keep
 out of Python.  For ``K`` symmetric PSD the generalized Schur complement
 ``O - E G^+ E'`` is exact, because PSD forces ``range(E') <= range(G)``.
 
-That ``rcond`` cut is relative to each block's own largest eigenvalue, which
-is the only scale it has, and it is therefore NOT a reliable rank test when
-the caller's blocks are sums of PSD terms on far-apart scales.  A caller
-whose rank has to agree with this inverse should count it against the terms
-themselves and hand it in — see ``block_ranks`` on :func:`factor_arrow`.
+**This module counts nothing.**  It used to return a rank alongside the
+inverse, because its one caller wrote ``edf`` as ``rank(A) - lambda
+tr(A^-1 S)`` and needed the two halves to agree.  That difference is gone —
+:mod:`superglm.screening._structured` now evaluates the same ``edf`` as a sum
+of Tikhonov filter factors, every term in ``[0, 1]``, with no rank anywhere —
+so the only cut left is :func:`_solve_floor`, which decides what an inverse
+may RESOLVE.  A cut chosen to make a rank robust was always the wrong cut for
+an inverse and vice versa; with the rank gone there is one question and one
+answer.
 """
 
 from __future__ import annotations
@@ -39,70 +43,53 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-_RCOND = 1e-12
-
 
 def _solve_floor(n: int) -> float:
-    """Relative cut for what an inverse may RESOLVE, as opposed to count.
+    """Relative cut for what an inverse may RESOLVE.
 
-    ``max(n, 1) * eps`` -- round-off, and deliberately far below
-    :data:`_RCOND`.  A cut chosen to make a RANK robust is the wrong cut for
-    an INVERSE: dropping a direction there does not round the answer, it
-    deletes the direction's whole contribution.
+    ``max(n, 1) * eps`` — round-off, LAPACK's convention and
+    ``numpy.linalg.matrix_rank``'s own tolerance.  Dropping a direction here
+    does not round the answer, it deletes the direction's whole contribution,
+    so the cut is set at the point below which the arithmetic is meaningless
+    rather than at the point below which an answer is "small".
 
-    ``edf`` is ``rank - lambda * tr(A^-1 S)``, so a direction the rank COUNTS
-    and the inverse DROPS contributes ``1 - 0`` -- a whole degree of freedom
-    with no penalty offset -- and contributes nothing to the statistic either.
-    Both symptoms are the same mismatch.  Measured on a 20-level pair with one
-    level at 1/1000th the weight, block size 12: at 1e-12 the inverse resolves
-    227 directions where ``block_ranks`` and ``numpy.linalg.matrix_rank`` both
-    read 228, and the reported ``edf`` at the ladder's low edge is 208.9999
-    against a stable closed-form reference of 207.9999 -- exactly one degree
-    of freedom.  At this floor the inverse resolves 228 at every bracket edge
-    and every weight tried, so the count and the inverse agree by construction
-    and that error falls to 8.1e-09.
+    ``rcond`` is RELATIVE to each matrix's own largest eigenvalue, which is
+    the only scale a batched routine has, and a sum of two PSD terms on wildly
+    different scales defeats any such cut: at the ladder's high edge the block
+    is ``V_q + lambda S_a`` with ``lambda`` at ``1e10`` times the pair's
+    scale, so the directions the penalty does not reach sit around ``1e-10``
+    of the block's largest eigenvalue for a level carrying its share of the
+    weight — but around ``1e-10`` TIMES that level's weight share for one that
+    does not, and a rare level's share is bounded only by the data.
 
-    The price is at the HIGH edge, where resolving directions the penalty has
-    flattened amplifies ``1/w`` inside ``tr(A^-1 S)``: that edf's error moves
-    from 1.2e-05 to 1.1e-03 against the same reference.  Three orders smaller
-    than the error it removes, and on a 19-df block 6e-05 relative.
+    That used to matter because a direction the caller's RANK counted and this
+    inverse dropped contributed ``1 - 0`` to ``edf``: a whole degree of freedom
+    with no penalty offset.  Nothing subtracts a rank from this inverse any
+    more, so a dropped direction now contributes its filter factor of zero and
+    nothing else — the error is bounded by the direction's own share rather
+    than by a whole count.
     """
     return max(int(n), 1) * float(np.finfo(np.float64).eps)
 
 
-def _psd_pinv(A: NDArray, rcond: float | None = None) -> tuple[NDArray, NDArray]:
-    """Batched PSD (pseudo-)inverse and per-matrix rank.
+def _psd_pinv(A: NDArray) -> NDArray:
+    """Batched PSD (pseudo-)inverse.
 
     ``A`` is ``(..., n, n)`` and symmetric.  Directions below the cut are
     dropped rather than inverted, which is the pseudo-inverse and is what the
-    dense path's own ``pinv`` fallback does for the same matrices.
-
-    ``rcond`` is RELATIVE to each matrix's own largest eigenvalue, and a sum
-    of two PSD terms on wildly different scales defeats any such cut: at the
-    ladder's high edge the block is ``V_q + lambda S_a`` with ``lambda`` at
-    ``1e10`` times the pair's scale, so the directions the penalty does not
-    reach sit around ``1e-10`` of the block's largest eigenvalue for a level
-    carrying its share of the weight — but around ``1e-10`` TIMES that
-    level's weight share for one that does not, and a rare level's share is
-    bounded only by the data.  Measured on a 20-level pair, one level
-    weighted 0.01 against the rest: the block-rank sum reads 227 at the high
-    edge and 227 at the low one where the true value is 228.
-
-    Nothing chosen for ``rcond`` fixes that, because on this matrix the two
-    populations are not separated at all.  So the cut here is left to govern
-    only what it can — which directions are safe to INVERT, where dropping a
-    direction the penalty has already flattened moved the statistic by a
-    relative 2e-5 on that same pair — and rank, where a whole degree of
-    freedom rides on the answer, is counted elsewhere: see ``block_ranks`` on
-    :func:`factor_arrow`.
+    dense path's own ``pinv`` fallback does for the same matrices.  The cut is
+    :func:`_solve_floor`, and it is NOT selectable: this took an ``rcond``
+    override while the caller counted a rank, so that the count and the
+    inverse could be given different cuts.  Nothing counts any more -- there
+    is one question about this matrix and one answer -- so a second cut is
+    surface with no meaning behind it.
     """
     w, Q = np.linalg.eigh(A)
-    if rcond is None:
-        rcond = _solve_floor(A.shape[-1])
+    rcond = _solve_floor(A.shape[-1])
     scale = np.maximum(w[..., -1:], np.finfo(np.float64).tiny)
     keep = w > rcond * scale
     inv = np.where(keep, 1.0 / np.where(keep, w, 1.0), 0.0)
-    return (Q * inv[..., None, :]) @ np.swapaxes(Q, -1, -2), keep.sum(axis=-1)
+    return (Q * inv[..., None, :]) @ np.swapaxes(Q, -1, -2)
 
 
 @dataclass(frozen=True)
@@ -112,7 +99,6 @@ class ArrowFactor:
     Ginv: NDArray  # (L, g, g) — block (pseudo-)inverses
     Y: NDArray  # (L, g, r) — G_q^{-1} E_q'
     Sinv: NDArray  # (r, r)   — inverse of the border Schur complement
-    rank: int  # rank of the whole arrow matrix
 
     def solve(self, b_blocks: NDArray, b_border: NDArray) -> tuple[NDArray, NDArray]:
         """Solve ``K [x; z] = [b_blocks; b_border]``.
@@ -129,10 +115,12 @@ class ArrowFactor:
         """The ``(L, g, g)`` diagonal blocks of ``K^{-1}``.
 
         ``[K^-1]_qq = G_q^-1 + G_q^-1 E_q' Sigma^-1 E_q G_q^-1``.  Reading
-        these back is what makes ``tr(K^-1 S)`` affordable for a block-
-        diagonal ``S`` — no other entry of the inverse is ever needed, and
+        these back is what makes ``tr(K^-1 X)`` affordable for a block-
+        diagonal ``X`` — no other entry of the inverse is ever needed, and
         forming the whole inverse would cost the quadratic memory this module
-        exists to avoid.
+        exists to avoid.  The OFF-diagonal blocks are ``Y_q Sigma^-1 Y_q'``,
+        which a caller that needs them can contract itself out of
+        :attr:`Y` and :attr:`Sinv` without ever forming one.
         """
         return self.Ginv + self.Y @ self.Sinv @ np.swapaxes(self.Y, -1, -2)
 
@@ -141,32 +129,12 @@ def factor_arrow(
     G: NDArray,
     E: NDArray,
     border: NDArray,
-    rcond: float | None = None,
-    block_ranks: NDArray | None = None,
 ) -> ArrowFactor:
     """Factor the arrow matrix with blocks ``G`` (L, g, g), coupling ``E``
     (L, r, g) and border (r, r) — ``O`` in the layout at the top of the
     module.
-
-    ``block_ranks`` overrides the per-block ranks counted here.  Supply it
-    when ``G`` is a sum of PSD terms whose scales are far apart, and count it
-    against those terms rather than against their float sum, in which the
-    smaller one has already been lost: the reasoning is in :func:`_psd_pinv`,
-    and the caller's side of it in
-    :func:`superglm.screening._structured.block_ranks`.  It is the CALLER's
-    job to make that count agree with what this inverse can resolve, since
-    the two are subtracted from each other.  The border's own rank is still
-    counted from the factorization, which is where it becomes available.
     """
-    Ginv, counted = _psd_pinv(G, rcond)
-    if block_ranks is None:
-        block_ranks = counted
+    Ginv = _psd_pinv(G)
     Y = Ginv @ np.swapaxes(E, -1, -2)
     Sigma = border - np.einsum("lrg,lgs->rs", E, Y, optimize=True)
-    Sinv, border_rank = _psd_pinv(0.5 * (Sigma + Sigma.T), rcond)
-    return ArrowFactor(
-        Ginv=Ginv,
-        Y=Y,
-        Sinv=Sinv,
-        rank=int(np.sum(block_ranks)) + int(border_rank),
-    )
+    return ArrowFactor(Ginv=Ginv, Y=Y, Sinv=_psd_pinv(0.5 * (Sigma + Sigma.T)))
