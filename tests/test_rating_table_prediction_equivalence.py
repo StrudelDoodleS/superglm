@@ -143,7 +143,9 @@ def _interaction_frame(
     """A frame for the interaction fixture, kept separate from ``_frame``.
 
     Its own columns and its own response, so that adding an interaction cannot
-    move the fitted values the exactness and shift-accounting tests above pin.
+    move the fitted values ``test_the_exactly_tabulable_workbook_reproduces_
+    the_predictions`` and ``test_the_base_relativity_moves_by_exactly_the_
+    shift_the_blocks_applied`` pin.
     Both interacting columns are plain ``Categorical``: that is the pair the
     export tabulates as a full cell table, and the grouped ``territory`` of the
     main fixture is deliberately not used, because the exported interaction
@@ -579,7 +581,8 @@ def _rebinning_bias_bound(payload, X: pd.DataFrame, sample_weight: np.ndarray) -
 def test_the_binned_reconstruction_carries_no_uniform_scale_error():
     """Binned blocks cannot be exact, but they must not be BIASED.
 
-    The centering-invariance test beside this one compares the two centerings
+    ``test_the_reconstruction_does_not_depend_on_the_reporting_centering``
+    compares the two centerings
     against each other, so a constant dropped from the binned path -- the exact
     shape of issue #253, on the one path this fix does not route through
     ``centering_shift`` -- cancels and passes.  The exact fixture never reaches
@@ -590,8 +593,9 @@ def test_the_binned_reconstruction_carries_no_uniform_scale_error():
 
     The tolerance is the derived re-binning bound, not the observed residual.
     On this fixture it is 8.1e-02 against a measured bias of 5.9e-04, and the
-    smallest constant this export actually transfers is the 0.5 the
-    shift-accounting test below fixes -- six times the bound.  So the check
+    smallest constant this export actually transfers is the 0.5 that
+    ``test_the_base_relativity_moves_by_exactly_the_shift_the_blocks_applied``
+    fixes -- six times the bound.  So the check
     bites on a real regression and is not sized to the headroom it happens to
     have.  It does NOT catch a scale error smaller than the bound; that is what
     the exactly tabulable sweep is for, on the paths where exactness is
