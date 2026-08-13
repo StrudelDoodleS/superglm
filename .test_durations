@@ -7264,6 +7264,8 @@
  "tests/test_term_inference.py::TestTermInferenceConstructorContract::test_the_appended_field_defaults_to_no_shift": 0.00018144294153898954,
  "tests/test_rating_table_prediction_equivalence.py::test_the_exported_table_keeps_going_where_the_model_saturates": 0.02,
  "tests/test_rating_table_prediction_equivalence.py::test_a_saturated_export_frame_stops_the_export": 0.02,
- "tests/test_rating_table_prediction_equivalence.py::test_a_log_link_binomial_whose_mean_is_clamped_cannot_be_exported": 0.26,
- "tests/test_rating_table_prediction_equivalence.py::test_the_impact_sheet_does_not_cover_a_continuous_interaction": 0.11
+ "tests/test_rating_table_prediction_equivalence.py::test_the_impact_sheet_does_not_cover_a_continuous_interaction": 0.11,
+ "tests/test_rating_table_prediction_equivalence.py::test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like": 0.27,
+ "tests/test_rating_table_prediction_equivalence.py::test_a_continuous_offset_exports_a_binned_block_that_is_not_a_row_exact_factor": 0.27,
+ "tests/test_rating_table_prediction_equivalence.py::test_a_clipped_relativity_stops_the_export": 0.05
 }
