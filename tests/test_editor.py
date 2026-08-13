@@ -153,6 +153,18 @@ def _to_polars(frame: pd.DataFrame) -> pl.DataFrame:
     return pl.DataFrame({name: frame[name].to_numpy() for name in frame.columns})
 
 
+def _editor_features() -> dict:
+    return {
+        "x_spline": Spline(n_knots=8),
+        "x_poly": Polynomial(degree=2),
+        "x_num": Numeric(),
+        "region": Categorical(base="first"),
+        "band": OrderedCategorical(
+            order=["low", "medium", "high"], basis=Spline(kind="ps", n_knots=2), base="first"
+        ),
+    }
+
+
 @pytest.fixture
 def editor_model(editor_frame):
     X, y = editor_frame
@@ -160,15 +172,47 @@ def editor_model(editor_frame):
         family="gaussian",
         selection_penalty=0.0,
         spline_penalty=0.1,
-        features={
-            "x_spline": Spline(n_knots=8),
-            "x_poly": Polynomial(degree=2),
-            "x_num": Numeric(),
-            "region": Categorical(base="first"),
-            "band": OrderedCategorical(
-                order=["low", "medium", "high"], basis=Spline(kind="ps", n_knots=2), base="first"
-            ),
-        },
+        features=_editor_features(),
+    )
+    model.fit(X, y)
+    return model
+
+
+@pytest.fixture
+def editor_log_link_frame(editor_frame):
+    """``editor_frame``'s signal as a Poisson count, on the same covariates.
+
+    Only the rating-table export tests need this.  That export is
+    multiplicative -- base times one relativity per block -- so it accepts
+    log-link models only, and the shared ``editor_model`` is gaussian/identity,
+    for which the product would be ``exp(linear predictor)`` rather than the
+    prediction.  Same columns and the same linear predictor, so what the export
+    tests assert about the workbook is unchanged.
+    """
+    X, _ = editor_frame
+    rng = np.random.default_rng(20260813)
+    eta = (
+        -0.6
+        + 0.18 * np.sin(X["x_spline"].to_numpy() / 1.8)
+        + 0.08 * X["x_poly"].to_numpy() ** 2
+        + 0.12 * X["x_num"].to_numpy()
+        + 0.25 * (X["region"].to_numpy() == "B")
+        - 0.18 * (X["region"].to_numpy() == "C")
+        + 0.15 * (X["band"].to_numpy() == "medium")
+        + 0.32 * (X["band"].to_numpy() == "high")
+    )
+    return X, rng.poisson(np.exp(eta)).astype(np.float64)
+
+
+@pytest.fixture
+def editor_log_link_model(editor_log_link_frame):
+    """``editor_model`` under a log link, for the tests that export a workbook."""
+    X, y = editor_log_link_frame
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features=_editor_features(),
     )
     model.fit(X, y)
     return model
@@ -5917,12 +5961,12 @@ def test_widget_http_download_export_joblib_is_validated_and_revision_pinned(
     assert not np.allclose(predictions, editor_model.predict(X.iloc[:17]))
 
 
-def test_widget_http_download_export_excel_has_structured_summary(editor_model):
+def test_widget_http_download_export_excel_has_structured_summary(editor_log_link_model):
     import io
 
     from openpyxl import load_workbook
 
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         request = urllib.request.Request(
@@ -5950,18 +5994,20 @@ def test_widget_http_download_export_excel_has_structured_summary(editor_model):
     assert summary["C4"].value == "Value"
 
 
-def test_excel_export_materializes_edited_model_on_training_split(editor_model, editor_frame):
+def test_excel_export_materializes_edited_model_on_training_split(
+    editor_log_link_model, editor_log_link_frame
+):
     import io
 
     from openpyxl import load_workbook
 
-    X, y = editor_frame
+    X, y = editor_log_link_frame
     train_X = X.iloc[:37].copy()
     train_y = y[:37].copy()
     validation_X = X.iloc[-29:].copy()
     validation_y = y[-29:].copy()
     session = EditorSession.from_model(
-        editor_model,
+        editor_log_link_model,
         terms=["x_spline"],
         train_data=(train_X, train_y),
         validation_data=(validation_X, validation_y),
@@ -6017,11 +6063,11 @@ def test_widget_http_download_export_excel_without_training_data_is_400():
     assert "retained fit data" in payload["error"]
 
 
-def test_widget_export_file_writes_joblib_and_excel(editor_model, tmp_path):
+def test_widget_export_file_writes_joblib_and_excel(editor_log_link_model, tmp_path):
     import joblib
     from openpyxl import load_workbook
 
-    session = EditorSession.from_model(editor_model, terms=["x_spline"])
+    session = EditorSession.from_model(editor_log_link_model, terms=["x_spline"])
     widget = session.widget()
     try:
         model_payload = _post_json(
