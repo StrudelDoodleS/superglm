@@ -132,6 +132,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.linalg
 
 import superglm.model.screening_ops as ops
 from superglm import SuperGLM
@@ -235,6 +236,51 @@ def _dense_matrices(grab):
     V = 0.5 * (V + V.T)
     V_eff = V - C.T @ _solve_psd(M, C)
     return 0.5 * (V_eff + V_eff.T), 0.5 * (S_ti + S_ti.T)
+
+
+def _clamped(rungs, edge):
+    """The rung for the budget the ladder must CLAMP, chosen by kind not by value.
+
+    :func:`penalized_score_statistic_ladder` emits exactly one rung per budget,
+    in order, so the budget identifies the rung.  ``BUDGETS[0] = 2.0`` is below
+    every high-edge edf these fixtures reach and ``BUDGETS[-1] = 400.0`` is above
+    every low-edge one, so those two budgets clamp by construction.
+
+    Picking "the clamped rung" as the min or max of ``edf0`` at a fixed lambda
+    would work today only because the two dense estimators happen to sit
+    7.000004 below 9.000019 -- and a searching rung genuinely does land on the
+    bracket edge here, since ``_lambda_for_edf`` returns the edge itself when the
+    pencil's bracket disagrees with ``_edge``'s.  Once #257's estimator split is
+    fixed, a value-based pick would silently start grading the other estimator
+    under this name.  The lambda is asserted rather than assumed so that a
+    fixture which stopped clamping fails here instead of downstream.
+    """
+    want = max if edge == "hi" else min
+    rung = rungs[0] if edge == "hi" else rungs[-1]
+    assert rung.lambda0 == want(r.lambda0 for r in rungs), (
+        f"budget {BUDGETS[0] if edge == 'hi' else BUDGETS[-1]} no longer clamps to the {edge} edge",
+        rung.lambda0,
+    )
+    return rung
+
+
+def _edge_branch(V_eff, S, lam):
+    """Which arm of :func:`_edge` this ``(V_eff, S, lam)`` takes.
+
+    ``_edge`` factors with ``cho_factor`` and falls back to ``pinv``, and the two
+    answer DIFFERENT functionals -- ``tr(A^-1 V)`` against ``tr(P V)``.  Which
+    one runs is decided by whether ``dpotrf`` meets a non-positive pivot, and at
+    the high edge ``A``'s smallest eigenvalue is -7.03e-07 against a largest of
+    3.07e+10, which is -2.3e-17 relative: round-off, and NOT the five-order
+    margin the ``pinv`` rank decision enjoys.  A build that took the other arm
+    would grade a different quantity against these constants, so the tests state
+    which arm they assume and fail legibly rather than numerically if it moves.
+    """
+    try:
+        scipy.linalg.cho_factor(V_eff + lam * S, check_finite=False)
+    except scipy.linalg.LinAlgError:
+        return "pinv"
+    return "cholesky"
 
 
 def _truncated_trace(V_eff, S, lam):
@@ -401,9 +447,13 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     grab = _band_pair(**_BS8)
     dense, _ = _both(grab)
     V_eff, S = _dense_matrices(grab)
-    lam = max(r.lambda0 for r in dense)
-    clamped = min(r.edf0 for r in dense if r.lambda0 == lam)
+    rung = _clamped(dense, "hi")
+    lam, clamped = rung.lambda0, rung.edf0
     trace, dropped, gap = _truncated_trace(V_eff, S, lam)
+    assert _edge_branch(V_eff, S, lam) == "pinv", (
+        "cho_factor now accepts this A, so _edge answers tr(A^-1 V_eff) and the "
+        "constants below grade tr(P V_eff) -- a different quantity"
+    )
     assert dropped == 4, ("pinv no longer truncates this A", dropped)
     assert gap > 1e4, ("the truncation is now marginal, not a clean gap", gap)
     assert 1e-10 > 3.0e-13, "the same-bits arithmetic floor must sit under the bound"
@@ -468,10 +518,14 @@ def test_the_dense_clamped_rung_matches_the_certified_low_edge_oracle():
     grab = _band_pair(**_PS8)
     dense, _ = _both(grab)
     V_eff, S = _dense_matrices(grab)
-    lam = min(r.lambda0 for r in dense)
+    rung = _clamped(dense, "lo")
+    lam, got = rung.lambda0, rung.edf0
     _, dropped, _ = _truncated_trace(V_eff, S, lam)
     assert dropped == 0, ("this edge is supposed to be truncation-free", dropped)
-    got = max(r.edf0 for r in dense if r.lambda0 == lam)
+    assert _edge_branch(V_eff, S, lam) == "cholesky", (
+        "cho_factor now refuses this A, so this rung is a truncated trace and not "
+        "the tr(A^-1 V_eff) the oracle certifies"
+    )
     assert _PS8_LO_TOL > 10 * _PS8_LO_FLOOR, "tolerance must clear the certified floor"
     assert got == pytest.approx(_PS8_LO_ORACLE, abs=_PS8_LO_TOL)
 
@@ -527,6 +581,7 @@ def test_the_arrow_ladder_matches_the_certified_low_edge_oracle():
     assert arrow is not None
     lam = min(r.lambda0 for r in arrow)
     got = max(r.edf0 for r in arrow if r.lambda0 == lam)
+    assert _PS8_LO_TOL > 10 * _PS8_LO_FLOOR, "tolerance must clear the certified floor"
     assert got == pytest.approx(_PS8_LO_ORACLE, abs=_PS8_LO_TOL)
 
 
@@ -592,7 +647,7 @@ def test_the_high_edge_is_not_determined_by_the_assembled_moments():
     assert n_hi >= 1 and mass_hi > 1.0, ("the high edge is determined after all", n_hi, mass_hi)
     assert n_lo == 0 and mass_lo == 0.0, ("the low edge is not determined either", n_lo, mass_lo)
 
-    d = min(r.edf0 for r in dense if r.lambda0 == lam_hi)
+    d = _clamped(dense, "hi").edf0
     a = max(r.edf0 for r in arrow if r.lambda0 == max(x.lambda0 for x in arrow))
     assert abs(d - a) < mass_hi + abs(d - _PS8_HI_ORACLE), (
         "the divergence now exceeds what the round-off subspace can explain",
@@ -671,8 +726,8 @@ def test_the_two_dense_estimators_agree_where_the_pencil_is_conditioned():
     for r in dense:
         other, _ = _edge(V_eff, S, r.lambda0)
         worst = max(worst, abs(float(other) - r.edf0))
-    assert 1e-2 > 100 * _NS6_LO_FLOOR, "tolerance must clear the certified floor"
-    assert worst < 1e-2, ("dense estimators disagree by", worst)
+    assert _NS6_LO_TOL > 10 * _NS6_LO_FLOOR, "tolerance must clear the certified floor"
+    assert worst < _NS6_LO_TOL, ("dense estimators disagree by", worst)
 
 
 def test_the_arrow_ladder_low_edge_collapses_on_a_full_rank_penalty():
