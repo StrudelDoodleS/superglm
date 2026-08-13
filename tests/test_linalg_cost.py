@@ -186,6 +186,25 @@ def test_every_registered_routine_still_exists_upstream():
     assert FACTORIZATIONS <= registered, sorted(FACTORIZATIONS - registered)
 
 
+def test_a_routine_whose_leading_axes_are_not_a_batch_is_not_counted_as_work():
+    """``tensorsolve`` reshapes, so the batch/core split does not describe it.
+
+    Recorded, because a path reaching for it should be visible; excluded from
+    the work metric, because counting it there would be counting a number that
+    is wrong.  ``(2, 3, 4, 24)`` is one 24 x 24 solve, not six 4 x 24 ones.
+    """
+    identity = np.eye(24).reshape(2, 3, 4, 24)
+    rhs = np.random.default_rng(0).normal(size=(2, 3, 4))
+
+    with record_linalg_calls() as record:
+        np.linalg.tensorsolve(identity, rhs)
+
+    (call,) = record.of("numpy.linalg.tensorsolve")
+    assert call.batch == 6, "the misreading this exclusion exists for"
+    assert record.factorizations() == ()
+    assert record.elementary_factorizations() == 0
+
+
 def test_the_summary_names_every_routine_with_its_shapes():
     """``report`` only ever runs inside a failure message, so it needs its own.
 
