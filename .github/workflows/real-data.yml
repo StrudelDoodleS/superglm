@@ -15,17 +15,28 @@ name: Real data
 # the bottom of the job.
 #
 # Its reach, said plainly, because a workflow that overstates its own coverage
-# is the same defect as a test that does.  The triggers below are filtered to
-# `branches: [master]`, so this job does NOT run on a pull request whose base is
-# another branch: a stacked PR gets these suites when its stack reaches master,
-# and not before.
+# is the same defect as a test that does.
 #
-# That filter is copied from ci.yml and dev-ci.yml rather than chosen here, and
-# it is not unanimous -- security.yml takes a bare `pull_request:` and so runs
-# on every PR whatever its base.  Widening this one alone would decide a
-# question that belongs to all three at once, so it is recorded rather than
-# diverged from.  The counterexample is named because the next reader should
-# know the option exists.
+# `pull_request:` carries NO branch filter, unlike ci.yml and dev-ci.yml, so
+# this job runs on every pull request whatever its base.  Deliberate, and this
+# workflow's own call: a job that cannot run on the pull request introducing it
+# reports nothing and reads as "not applicable", which is the exact shape of the
+# defect the job exists to end.  Stacked pull requests are the ones
+# `branches: [master]` excludes, and they are the ones this repository uses.
+# security.yml already takes a bare `pull_request:`, so this is an existing form
+# here rather than a new one.  The job is not a required check: on a stacked
+# branch it is signal, never a gate.
+#
+# `push:` keeps `branches: [master]` so a merge runs it once, and a branch push
+# does not duplicate the pull-request run.
+#
+# ci.yml and dev-ci.yml are NOT changed here and still filter to
+# `branches: [master]`: a stacked pull request gets no unit suite, no type check
+# and no lint from a runner, and picks all three up at the root pull request,
+# whose base IS master.  Widening those two multiplies ~15 jobs across every
+# stacked pull request and is a repository cost decision, not a consequence of
+# this one.  Deferred signal, said out loud, rather than a green tick a reader
+# has to interpret.
 
 on:
   push:
@@ -38,7 +49,6 @@ on:
       - "uv.lock"
       - ".github/workflows/real-data.yml"
   pull_request:
-    branches: [master]
     paths:
       - "src/**"
       - "tests/**"

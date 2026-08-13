@@ -189,6 +189,51 @@ def test_every_parquet_a_suite_needs_is_pinned_in_the_fetch_script():
 # ── a fetch failure has to be legible as a fetch failure ────────────────────
 
 
+def _trigger_block(workflow: str, trigger: str) -> str:
+    """The body of one ``on:`` trigger, up to the next key at its indentation."""
+    match = re.search(rf"(?m)^  {trigger}:\n((?:(?:    .*)?\n)*)", workflow)
+    assert match, f"no `{trigger}:` trigger in {_WORKFLOW.name}"
+    return match.group(1)
+
+
+def _assert_the_job_runs_on_a_stacked_pull_request(workflow: str) -> None:
+    step = _trigger_block(workflow, "pull_request")
+    assert "branches:" not in step, (
+        "the pull_request trigger filters on the base branch, so this job cannot run "
+        "on a stacked pull request -- including the one that introduces it. A workflow "
+        "that never runs reports nothing, and nothing reads as a pass"
+    )
+
+
+def test_the_job_runs_on_a_pull_request_whatever_its_base(workflow):
+    """The job has to be able to run on the pull request that changes it.
+
+    ``ci.yml`` and ``dev-ci.yml`` filter ``pull_request`` to ``branches:
+    [master]``, so a stacked pull request gets neither.  Measured on #284 before
+    this change: all six checks reporting were ``security.yml``'s supply-chain
+    jobs, and "6/6 pass" said nothing whatever about the suites.  This workflow
+    declines that filter, which is a choice it can make alone: ``security.yml``
+    already takes a bare ``pull_request:``.
+    """
+    _assert_the_job_runs_on_a_stacked_pull_request(workflow)
+
+
+def test_the_stacked_pull_request_contract_rejects_a_base_branch_filter(workflow):
+    """The check above must bite; it is one line away from being a tautology."""
+    mutant = workflow.replace("  pull_request:\n", "  pull_request:\n    branches: [master]\n")
+    assert mutant != workflow, "mutation did not apply"
+    with pytest.raises(AssertionError, match="cannot run on a stacked pull request"):
+        _assert_the_job_runs_on_a_stacked_pull_request(mutant)
+
+
+def test_the_push_trigger_still_only_fires_on_master(workflow):
+    """Widening ``pull_request`` must not silently widen ``push`` as well.
+
+    A branch push would then duplicate the pull-request run on every commit.
+    """
+    assert "branches: [master]" in _trigger_block(workflow, "push")
+
+
 def test_the_fetch_and_the_suites_report_through_separate_steps(workflow):
     """A red X on a download and a red X on an assertion need different people."""
     blocks = _steps(workflow)
