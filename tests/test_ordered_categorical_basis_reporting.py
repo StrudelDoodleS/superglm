@@ -255,33 +255,232 @@ def _grouped_curve(X, y, basis, groups: dict[str, list[str]]):
     return inference
 
 
-def test_grouped_display_curve_drops_bands_it_cannot_align() -> None:
-    """A grouped term's REBUILT display curve never carries foreign band arrays.
+def test_grouped_display_curve_drops_bands_when_it_redraws_the_curve() -> None:
+    """A REBUILT grouped display curve never carries the fitted curve's bands.
 
     A collapse that moves the display axis leaves the fitted curve undrawable
     against the expanded markers, so that expansion interpolates a fresh curve
-    -- and the pre-expansion bands belong to the pre-expansion grid. They
-    survive exactly when the rebuilt grid IS that grid: merging an INTERIOR
-    pair leaves the axis endpoints alone and both grids are the same 200-point
-    linspace, while merging the FIRST pair moves the grouped boundary off the
-    original one and the two disagree. Per-level SEs -- the rated quantities --
-    stay expanded either way.
+    through them -- and a band is a statement about the curve it is drawn
+    around, so it cannot outlive a change to that curve's VALUES.
+
+    The former rule tested the GRIDS, which is the weaker question: it asks
+    whether the arrays zip, not whether they describe the same function. For
+    the common ``order=`` spline both grids ARE the same 200-point linspace,
+    so an INTERIOR merge kept bands that had been computed for the fitted
+    curve and exported them around interpolated values. Measured here on
+    ``Spline(kind="cr", n_knots=4)`` merging ``Mi001+Mi002``: the drawn curve
+    ran up to 0.0477 in log-relativity (4.65% in relativity) from the fitted
+    one against a band half-width of at most 0.00302 -- 68.8 standard errors
+    -- and 61 of the 200 drawn points fell strictly outside their own exported
+    band, while the band centre reproduced the FITTED curve to 1.1e-16.
+    Merging ``Mi003+Mi004`` gave 0.0558 (5.74%), 59.2 standard errors and 60
+    of 200. Per-level SEs -- the rated quantities -- stay expanded either way.
 
     A hosted Piecewise no longer appears here: its level axis is positions
     0..L-1 and a collapse does not move it, so nothing is rebuilt and the
-    fitted bands stay on their own fitted grid. That case is pinned by
+    fitted bands stay on their own fitted curve. That case is pinned by
     ``test_grouped_display_curve_keeps_the_stated_c0_corner`` below.
     """
     X, y = _frame()
 
-    moved = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), {"Mi000+Mi001": ["Mi000", "Mi001"]})
-    assert moved.smooth_curve.se_log_relativity is None
-    assert moved.smooth_curve.ci_lower is None
-    assert moved.smooth_curve.ci_upper is None
+    for merge in ({"Mi000+Mi001": ["Mi000", "Mi001"]}, {"Mi001+Mi002": ["Mi001", "Mi002"]}):
+        ti = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), merge)
+        assert ti.smooth_curve.se_log_relativity is None, merge
+        assert ti.smooth_curve.ci_lower is None, merge
+        assert ti.smooth_curve.ci_upper is None, merge
+        # the rated quantities are untouched by any of this
+        assert ti.se_log_relativity is not None
+        assert len(ti.se_log_relativity) == len(ti.levels)
 
-    kept = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), {"Mi001+Mi002": ["Mi001", "Mi002"]})
-    assert kept.smooth_curve.se_log_relativity is not None
-    assert len(kept.smooth_curve.se_log_relativity) == len(kept.smooth_curve.x)
+
+def test_a_grouped_display_band_brackets_the_curve_it_is_drawn_around() -> None:
+    """Wherever a grouped panel exports a band, the drawn line is inside it.
+
+    This is the invariant behind the rule above, stated on the values rather
+    than on which branch produced them: ``ci_lower`` and ``ci_upper`` are
+    ``exp(log_relativity -/+ z * se)``, so the curve they describe lies between
+    them by construction. Exporting the fitted curve's band beside a rebuilt
+    curve breaks it -- on the ``Mi001+Mi002`` spline case 61 of 200 points sat
+    strictly outside, which a renderer draws as the line leaving its own
+    ribbon.
+
+    The tolerance is the round-trip error of that construction, not observed
+    headroom: ``relativity`` and the two edges each come from one ``exp`` of a
+    quantity carrying at most a couple of rounding errors, so 8 ulp of the
+    larger magnitude bounds any legitimate crossing. It is a null allowance
+    against the failure it is here for, which is 1.4e14 ulp.
+    """
+    X, y = _frame()
+    cases = [
+        ("piecewise, merge after the break", Piecewise(breaks=["Mi004"]), ["Mi007", "Mi008"]),
+        ("polynomial, interior merge", Polynomial(powers=[1, 2]), ["Mi001", "Mi002"]),
+        ("spline, interior merge", Spline(kind="cr", n_knots=4), ["Mi001", "Mi002"]),
+        ("spline, first-pair merge", Spline(kind="cr", n_knots=4), ["Mi000", "Mi001"]),
+    ]
+    banded = 0
+    for label, basis, members in cases:
+        curve = _grouped_curve(X, y, basis, {"+".join(members): members}).smooth_curve
+        if curve.se_log_relativity is None:
+            assert curve.ci_lower is None and curve.ci_upper is None, label
+            continue
+        banded += 1
+        rel = np.asarray(curve.relativity, dtype=np.float64)
+        lo = np.asarray(curve.ci_lower, dtype=np.float64)
+        hi = np.asarray(curve.ci_upper, dtype=np.float64)
+        assert len(lo) == len(hi) == len(rel) == len(curve.x), label
+        slack = 8 * np.finfo(np.float64).eps * np.maximum(np.abs(rel), np.abs(hi))
+        outside = int(np.count_nonzero((rel < lo - slack) | (rel > hi + slack)))
+        assert outside == 0, f"{label}: {outside}/{len(rel)} drawn points outside their own band"
+    # not vacuous: at least the two kept-curve cases must still export bands
+    assert banded >= 2, f"no grouped case exported a band; the check ran on nothing ({banded})"
+
+
+def test_a_grouping_that_merges_nothing_leaves_the_spline_curve_alone() -> None:
+    """An identity collapse moves no level, so it may not redraw the curve.
+
+    ``_grouping`` makes every uncovered level a singleton, so a grouping with
+    no merges at all is the identity: ``grouped_ltv[glev]`` copies the original
+    value and a singleton's ``np.mean`` returns its one element unchanged, so
+    the expanded positions ARE the fitted curve's ``level_x``. This is a spline
+    -- the basis whose collapse path is otherwise unchanged -- and it lands on
+    the kept-curve branch for the geometric reason, not because of the basis
+    name.
+
+    Before, the identity grouping went through the same 200-point PCHIP as a
+    real merge: same grid, different function. Measured here, the drawn curve
+    now reproduces the ungrouped fit to 0.0 on all of x, log_relativity,
+    relativity, level_x and the bands.
+    """
+    X, y = _frame()
+    plain = OrderedCategorical(order=LEVELS, basis=Spline(kind="cr", n_knots=4))
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": plain})
+    model.fit(X, y)
+    ungrouped = model.term_inference("band", with_se=True).smooth_curve
+
+    identity = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), {}).smooth_curve
+
+    for field in ("x", "log_relativity", "relativity", "level_x", "se_log_relativity"):
+        theirs = getattr(ungrouped, field)
+        ours = getattr(identity, field)
+        assert (theirs is None) == (ours is None), field
+        if theirs is None:
+            continue
+        np.testing.assert_array_equal(
+            np.asarray(ours, dtype=np.float64),
+            np.asarray(theirs, dtype=np.float64),
+            err_msg=f"identity grouping changed {field}",
+        )
+    # the bands are real, so the equality above is not equality of two Nones
+    assert identity.se_log_relativity is not None
+
+
+def test_grouped_segmented_piecewise_keeps_every_stated_break_as_a_vertex() -> None:
+    """The headline claim on the SEGMENTED grid, not just the all-degree-1 one.
+
+    ``reconstruct`` returns the knots themselves when every segment is linear,
+    which is the easy case; ``_reconstruct_segmented`` builds a 25-point
+    linspace per curved segment and unions them, so the grid is 27 points here
+    and the breaks have to survive that union. This module's own fixture is
+    ``degrees=[2, 1, 0]``, and grouping ``Mi002+Mi003`` merges INSIDE the first
+    segment, which is allowed and slides both breaks down one position.
+
+    Measured on this fit: breaks at positions 3.0 and 6.0, both exact vertices
+    of the 27-point grid, bands of matching length, and a first segment that is
+    a genuine quadratic -- constant second difference to 2.50e-16 spread on a
+    mean of 1.2359e-03, where the PCHIP rebuild this replaced left ~1e-04.
+    """
+    X, y = _frame()
+    ti = _grouped_curve(
+        X,
+        y,
+        Piecewise(breaks=["Mi004", "Mi007"], degrees=[2, 1, 0]),
+        {"Mi002+Mi003": ["Mi002", "Mi003"]},
+    )
+    curve = ti.smooth_curve
+    curve_x = np.asarray(curve.x, dtype=np.float64)
+    curve_y = np.asarray(curve.log_relativity, dtype=np.float64)
+    level_x = np.asarray(curve.level_x, dtype=np.float64)
+    levels = list(ti.levels)
+    by_position = dict(zip(level_x.tolist(), np.asarray(ti.log_relativity, dtype=np.float64)))
+
+    assert len(curve_x) > 4, "a segmented grid is denser than its knots; this one is not"
+    for name in ("Mi004", "Mi007"):
+        position = level_x[levels.index(name)]
+        assert np.any(curve_x == position), (
+            f"the stated break {name} sits at x={position} but is not a vertex of {curve_x!r}"
+        )
+        corner = int(np.flatnonzero(curve_x == position)[0])
+        assert curve_y[corner] == by_position[position]
+
+    # the bands belong to the curve being drawn, so they zip against it
+    assert curve.se_log_relativity is not None
+    assert len(curve.se_log_relativity) == len(curve_x)
+
+    # The degree-2 segment is a quadratic on a uniform sub-grid, so its second
+    # difference is constant. Tolerance: the second-difference stencil is
+    # (1, -2, 1), so it magnifies each entry's representation error at most
+    # fourfold; allowing a handful of ulp for the reconstruction that produced
+    # the entries gives 16 * eps * max|curve_y|. The defect it separates is
+    # ~1e-04, eleven orders away.
+    first_break = level_x[levels.index("Mi004")]
+    segment = curve_y[curve_x <= first_break]
+    assert np.ptp(np.diff(curve_x[curve_x <= first_break])) == 0.0
+    tolerance = 16 * np.finfo(np.float64).eps * float(np.abs(curve_y).max())
+    assert np.ptp(np.diff(segment, 2)) < tolerance
+
+
+def test_grouped_piecewise_with_specials_smooths_only_the_ordered_levels() -> None:
+    """Grouping, ``specials=`` and a ``Piecewise`` basis in one term.
+
+    The interaction is correct but load-bearing across two files: the special
+    is masked out of ``smooth_levels`` BEFORE the expanded positions are built,
+    and ``_install_position_axis`` maps only the declared smooth levels, so a
+    special is never looked up in a map with no key for it. Nothing combined
+    all three, so a change on either side would have surfaced as a ``KeyError``
+    out of the public ``term_inference`` path rather than as a test failure.
+
+    Measured: 11 reported levels, one of them special, ``level_x`` covering the
+    10 smoothed ones only, and the stated break still a vertex of [0, 4, 8].
+    """
+    X, y = _frame()
+    rng = np.random.default_rng(9)
+    X = X.copy()
+    X.loc[rng.random(len(X)) < 0.08, "band"] = "MISSING"
+
+    from superglm.features.grouping import collapse_levels
+
+    universe = LEVELS + ["MISSING"]
+    members = {"Mi007+Mi008": ["Mi007", "Mi008"]}
+    covered = {m for group in members.values() for m in group}
+    full = dict(members)
+    for level in universe:
+        if level not in covered:
+            full[level] = [level]
+    grouping = collapse_levels(X["band"].to_numpy(dtype=object), groups=full, order=universe)
+
+    spec = OrderedCategorical(
+        order=LEVELS,
+        basis=Piecewise(breaks=["Mi004"]),
+        specials=["MISSING"],
+        grouping=grouping,
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(X, y)
+    ti = model.term_inference("band", with_se=True)
+    curve = ti.smooth_curve
+
+    special = np.asarray(ti.level_is_special, dtype=bool)
+    assert list(ti.levels) == universe
+    assert special.sum() == 1 and special[list(ti.levels).index("MISSING")]
+    # level_x carries the SMOOTHED levels only; the special keeps a detached row
+    assert len(curve.level_x) == int((~special).sum())
+    np.testing.assert_array_equal(
+        np.asarray(curve.level_x, dtype=np.float64), [0, 1, 2, 3, 4, 5, 6, 7, 7, 8]
+    )
+    # and the fitted corner is still drawn, not interpolated around
+    np.testing.assert_array_equal(np.asarray(curve.x, dtype=np.float64), [0.0, 4.0, 8.0])
+    assert curve.se_log_relativity is not None
+    assert len(curve.se_log_relativity) == len(curve.x)
 
 
 def test_grouped_display_curve_keeps_the_stated_c0_corner() -> None:
@@ -400,7 +599,13 @@ def test_grouped_polynomial_display_curve_is_the_fitted_polynomial() -> None:
 
     assert np.ptp(np.diff(curve_x)) < 1e-12  # uniform grid, so second differences compare
     second = np.diff(curve_y, 2)
-    assert np.ptp(second) < 1e-14 * abs(float(second.mean())) + 1e-15
+    # Tolerance from the arithmetic, not from headroom: the (1, -2, 1) stencil
+    # magnifies each entry's error at most fourfold, and allowing a handful of
+    # ulp for the reconstruction that produced the entries gives
+    # 16 * eps * max|curve_y|. Measured spread 2.8e-16 against a bound of
+    # 1.1e-15; the defect it separates is 9.59e-05, eleven orders away.
+    tolerance = 16 * np.finfo(np.float64).eps * float(np.abs(curve_y).max())
+    assert np.ptp(second) < tolerance
 
 
 def test_plateau_bands_share_one_table_row_value(segmented_model) -> None:
