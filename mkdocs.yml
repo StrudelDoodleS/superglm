@@ -103,6 +103,7 @@ nav:
     - REML & Solvers: guide/optimization.md
   - Development:
     - Releases: development/releases.md
+    - Cost Claims and the Clock: development/cost-and-timing.md
     - Python Support Policy: development/python-support.md
     - Data and Solver Boundaries: development/data-and-solver-boundaries.md
     - Editor Frontend for Python Developers: editor_frontend.md
