@@ -71,21 +71,28 @@ level, seven band layouts and two seeds, each path graded at its OWN lambda:
   moves the exact high-edge edf by 1.30 to 145.87 df across the geometries
   measured, and by 11.11, 31.83 and 77.54 df on the very pair whose 11.57 df
   this docstring quotes — 40 draws at each of three generator seeds, and a max
-  over finitely many draws is a LOWER bound on the spread.  The BOUND on that
-  spread is derived rather than drawn, and it is 7.073e+01 df on that pair:
+  over finitely many draws is a LOWER bound on the spread.  The DERIVATIVE of
+  the exact edf in one ulp of the stored moments is 7.073e+01 df on that pair:
   ``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at ``e = 2^-52``,
   evaluated in arb because ``A^-1`` in float64 is meaningless at
-  ``cond(A) = 7.2e+15``.  The 77.54 df draw reaches 1.10x of it, so the
-  linearization is at its own limit here too — one ulp of the stored penalty,
-  ``lam e |S|_2 = 4.72e-06``, is 8.4x the smallest-magnitude eigenvalue of
-  ``A``.  The divergence is inside the noise floor, not above it.  Where the
+  ``cond(A) = 7.2e+15``.  It is a derivative and NOT a bound on a finite step:
+  that needs ``r = ||dA|| / min|eig(A)| < 1``, and here ``r = 6.12e+01``, so a
+  one-ulp step can cross a singularity of ``A`` and nothing — not 70.7 df, not
+  a multiple of it — bounds the exact edf at this point.  The 77.54 df draw
+  already exceeds the derivative.  What the moments DO determine is measured
+  instead, and is an observable rather than a scale: the directions of ``A``
+  below ``lam eps |S|_2 = 4.72e-06`` carry 3.11 df of ``V_eff``'s mass at this
+  high edge and 0 df at the same pair's low edge.  Three degrees of freedom of
+  the answer rest on a direction whose own eigenvalue is round-off.  The
+  divergence is inside that, not above it.  Where the
   high edge IS determined — no narrow band, spread 1.0e-04 df — both paths are
   right: 18.999995 and 18.999936 against a certified 18.999990.
-* **The low edge IS determined**, to a derived 5.554e-03 df on the ``ps(8)``
-  pair and 8.284e-05 df on the ``ns(6)`` one below (random draws reached
-  6.78e-03 and 1.82e-04, 1.2x and 2.2x those bounds, which is what a
-  max-minus-min spread should show against a one-sided bound), and
-  there THIS path is the wrong one.  Over the
+* **The low edge IS determined, and CERTIFIABLY so** — ``r`` is 2.19e-02 on
+  the ``ps(8)`` pair and 2.82e-04 on the ``ns(6)`` one below, both far under
+  1, so ``D / (1 - r)`` really does bound a one-ulp step there: 5.683e-03 and
+  8.286e-05 df (random draws reached 6.78e-03 and 1.82e-04, 1.2x and 2.2x,
+  which is what a max-minus-min spread should show against a one-sided bound).
+  And there THIS path is the wrong one.  Over the
   20 sweep points where both paths clamp to one lambda and the answer is
   attainable to 1e-2 df, the arrow error has median 1.17 df and maximum
   30.74 df and lands inside the attainable band on 3 of 20; the dense path's
@@ -124,10 +131,12 @@ this path against an arb evaluation of ``tr(A^-1 V_eff)`` with a TRUE inverse,
 and the dense path it is compared to does not compute that.
 :func:`superglm.screening._score_stat._edge` falls back to
 ``numpy.linalg.pinv``, which zeroes rather than inverts every direction below
-``max(M, N) eps`` of the largest singular value, and at the high edge that
-fallback is the branch that runs — 4 of 209 directions dropped on the ``ps(8)``
-pair above, worth -8.8838e-01 df of the gap between the dense reading and the
-certified oracle.  At the LOW edge, where this path's own error is graded,
+``1e-15`` of the largest singular value — NumPy's back-compatible default for a
+call that passes neither ``rcond`` nor ``rtol`` — and at the high edge that
+fallback is the branch that runs: 4 of 209 directions dropped on the ``ps(8)``
+pair above at a cut of 2.1261e-05, worth -8.8838e-01 df of the gap between the
+dense reading and the certified oracle.  At the LOW edge, where this path's own
+error is graded,
 ``cho_factor`` succeeds on both pairs and ``pinv`` would drop nothing, so the
 low-edge verdict is unaffected — but any fix that adopts the dense path's
 estimator adopts its truncation with it, and that has to be a decision rather

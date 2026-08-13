@@ -36,24 +36,35 @@ they are one number — and they are not.  On a ``bs(8)`` pair with 12 levels,
 30 rows in each and four inside a 1e-6 band of the covariate, one ladder
 returns 7.000004 for the budgets that clamp and 9.000019 for the budget that
 searches, both at ``lambda = 1.0652e+05``, where arb ball arithmetic puts the
-exact value at 6.9997546284 (enclosure radius 1.3e-221 at 800 bits).  One ulp
-of the stored moments moves that exact value by at most 1.620e-02 df — a
-DERIVED bound, ``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at
-``e = 2^-52``, not a random-draw maximum; 120 random draws reached 9.4e-04,
-6% of it.  The clamped estimator is 2.5e-04 df from the exact value and the
-searching one is 2.000265 df from it, so the disagreement is 123x the bound
-and the searching rung is the one outside it.
+exact value at 6.9997546284 (enclosure radius 1.3e-221 at 800 bits).  The
+derivative of that value in one ulp of the stored moments is 1.620e-02 df —
+``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at ``e = 2^-52``, not
+a random-draw maximum; 120 random draws reached 9.4e-04, 6% of it.  It is a
+DERIVATIVE and not a bound on a finite step: bounding one needs
+``r = ||dA|| / min|eig(A)| < 1`` and here ``r`` is 2.01e+03, so a one-ulp step
+can cross a singularity of ``A`` and nothing bounds the exact edf at this
+point.  That is why neither path is pinned against 6.9997546284 —
+tests/test_screening_edf_target.py pins the TRUNCATED functional below instead,
+whose own ``r`` is 2.7e-05.  The clamped estimator sits 2.5e-04 df from the
+exact value and the searching one 2.000265 df from it.
 
 **WHAT THE CLAMPED RUNG COMPUTES IS NOT LITERALLY ``tr(A^-1 V_eff)``.**
 :func:`_edge` factors ``A`` with ``cho_factor`` and falls back to
 ``numpy.linalg.pinv(A, hermitian=True)``, so on the fallback branch the answer
-is ``tr(P V_eff)`` for a pseudo-inverse that ZEROES every direction below
-``max(M, N) eps`` of the largest singular value rather than inverting it.  At
+is ``tr(P V_eff)`` for a pseudo-inverse that ZEROES every direction below its
+``rcond`` times the largest singular value rather than inverting it.  Called
+with neither ``rcond`` nor ``rtol``, that ``rcond`` is NumPy's
+back-compatible ``1e-15`` — NOT the Array API's ``max(M, N) eps``, which
+applies only when ``rtol=None`` is passed explicitly, and NOT
+:func:`_rank_floor`, which is ``k eps`` and 27x larger at ``k = 121``.  At
 the high edge the fallback is what runs — ``A`` is indefinite there and
 ``cho_factor`` raises — and the truncation is a term in the answer, not a
-rounding of it: 4 of 121 directions at a cut of 8.25e-04 on the pair above,
-worth +2.4974e-04 df, and 4 of 209 at 9.87e-04 on a ``ps(8)`` pair at
-``lambda = 1.38e+09``, worth -8.8838e-01 df.  ALL of the 2.5e-04 df above is
+rounding of it: 4 of 121 directions at a cut of 3.0698e-05 on the pair above,
+worth +2.4974e-04 df, and 4 of 209 at 2.1261e-05 on a ``ps(8)`` pair at
+``lambda = 1.38e+09``, worth -8.8838e-01 df.  (Either cut names the same four
+directions on both pairs — the spectral gap across them is 2.9e+05 and 8.6e+04
+— so the measurements do not depend on which rule is named.  The description
+did.)  ALL of the 2.5e-04 df above is
 that truncation: reconstructing ``tr(P V_eff)`` from ``eigh`` at ``pinv``'s
 own cut reproduces the reported rung to 3.6e-15 df, and in arb to all 16
 digits, so the clamped rung is EXACT for the functional it evaluates.  The
@@ -464,10 +475,12 @@ def _edge(
     ON THE PENALIZED BRANCH THE RETURNED TRACE IS ``tr(P V)``, NOT
     ``tr(A^-1 V)``, WHENEVER ``cho_factor`` REFUSES ``A``.  ``apply`` is then
     ``pinv``'s, and ``pinv`` makes a rank decision of its own: it zeroes every
-    direction below ``max(M, N) eps`` of the largest singular value.  That is
-    numerically the same cut as :func:`_rank_floor`, but it is applied by a
-    different rule — by ``|lambda|``, so a negative direction above it is
-    INVERTED rather than dropped — and nothing here counts what it discarded.
+    direction below ``rcond`` times the largest singular value, where ``rcond``
+    is NumPy's back-compatible ``1e-15`` for a call that passes neither
+    ``rcond`` nor ``rtol``.  That is NOT :func:`_rank_floor`'s ``k eps`` — the
+    two are 27x apart at ``k = 121`` — and it is applied by a different rule
+    besides, by ``|lambda|``, so a negative direction above it is INVERTED
+    rather than dropped.  Nothing here counts what it discarded.
     The branch is not exotic at the ladder's high edge: ``lambda S`` inherits
     an indefiniteness of order ``lambda eps sigma_max(S)`` from a float64
     spline penalty, ``A`` is then indefinite, and ``cho_factor`` raises.
