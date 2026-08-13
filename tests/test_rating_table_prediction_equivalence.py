@@ -35,6 +35,7 @@ prediction by a uniform factor that no ratio-based spot check can see.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from functools import cache
 
@@ -59,7 +60,8 @@ from superglm.export.rating_tables import (
 )
 from superglm.features.grouping import collapse_levels
 from superglm.features.piecewise import Piecewise
-from superglm.links import LogLink
+from superglm.links import LogLink, stabilize_eta
+from superglm.model.base import predict_eta_raw_exact
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -139,7 +141,6 @@ def _every_term_type_features() -> dict:
     return features
 
 
-@cache
 def _fit_binned_family(family) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
     """A binned fit under a chosen family, for the geometry-measure comparison.
 
@@ -147,6 +148,11 @@ def _fit_binned_family(family) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.n
     weights, so both arms need a response the family can actually carry -- a
     Poisson count and a Tweedie's point mass at zero with a continuous positive
     part -- fitted on identical covariates.
+
+    Not ``@cache``d, unlike ``_fit``.  The Tweedie arm is called as
+    ``families.tweedie(p=1.5)``, a fresh object with identity hashing at each
+    call site, so that entry could never be hit again and only pinned a fitted
+    model for the process lifetime.  One caller, two fits.
     """
     rng = np.random.default_rng(20260813)
     n = 900
@@ -585,9 +591,34 @@ def test_a_grouped_interaction_parent_keys_its_two_blocks_differently():
     assert raw_levels - set(interaction_keys) == {"t2", "t3", "t4", "t5"}
 
     # No block anywhere in the payload carries the original-to-group map, so
-    # the gap cannot be closed by a consumer reading the workbook.
-    for block in payload.main_effects:
-        assert "t2+t3" not in {str(value) for value in block.table.iloc[:, 0]}
+    # the gap cannot be closed by a consumer reading the workbook.  Scanned over
+    # every CELL and every column HEADER of every main-effect and interaction
+    # block -- not the first column of the main effects alone, which would leave
+    # a map green if it arrived as an extra column, an interaction-block column
+    # or a sheet of its own, and so would promise a tripwire for two of #286's
+    # three remedies without having one.
+    grouped_label = "t2+t3"
+    carriers = sorted(
+        block.name
+        for block in (*payload.main_effects, *payload.interactions)
+        if grouped_label
+        in {str(value) for column in block.table.columns for value in block.table[column]}
+        | {str(column) for column in block.table.columns}
+    )
+    assert carriers == ["territory:segment"], (
+        f"{grouped_label!r} should appear only where the interaction keys it; found {carriers}"
+    )
+
+    # And the map cannot arrive as a new payload FIELD without coming through
+    # here either, which is #286's third shape.
+    assert {field.name for field in dataclasses.fields(payload)} == {
+        "base_relativity",
+        "selected_n_bins",
+        "main_effects",
+        "interactions",
+        "discretization_impact",
+        "summary",
+    }
 
     # And the consequence: the documented reconstruction cannot be performed.
     with pytest.raises(KeyError):
@@ -949,19 +980,46 @@ def test_the_smallest_base_the_export_accepts_is_the_smallest_exact_one():
 
     A cutoff that only ever rejects is untestable in the direction that
     matters: ``base < 1.0`` would satisfy the test above and refuse most real
-    Poisson tariffs.  So the accepted side is fixed here too, one ULP-of-the-
-    exponent apart, and the accepted base is required to be exact rather than
-    merely non-raising.
+    Poisson tariffs.  So the accepted side is fixed here too.
+
+    Both sides are addressed through ``log``, and ``exp(log(v))`` is NOT the
+    identity down here.  Half an ulp of a number near 708.4 is 5.7e-14
+    ABSOLUTE, and an absolute error in an exponent is a RELATIVE error in its
+    ``exp``, so the round trip can carry ~256 ulps of ``tiny``; measured on this
+    build it lands 124 ulps high, a relative error of 2.75e-14.  The accepted
+    and rejected sides are therefore separated by a FACTOR OF TWO, 1.8e13 times
+    that smear, so no libm whose ``log`` is within an ulp can make them swap --
+    and nothing finer than that may be asserted about the value handed back.
+
+    The previous form asserted ``approx(tiny, rel=1e-15)``, finer by eleven
+    orders of magnitude than the round trip it measured, and passed anyway --
+    see the tolerance note below, which is the reason and is pinned so it
+    cannot come back.
     """
     model, X, y, sample_weight = _fit("exact")
     tiny = float(np.finfo(np.float64).tiny)
 
-    # Just inside: the smallest float64 that still carries a full mantissa.
-    accepted = rating_tables._base_relativity(float(np.log(tiny)))
-    assert accepted == pytest.approx(tiny, rel=1e-15)
-    assert accepted >= tiny
+    # The cutoff constant itself, which no round trip is involved in.
+    assert rating_tables._SMALLEST_EXACT_BASE == tiny
 
-    # Just outside: the largest subnormal, one exponent step below.
+    # ``abs=0.0`` is load-bearing, not decoration.  ``pytest.approx`` applies an
+    # ABSOLUTE tolerance of 1e-12 by default and accepts a value within EITHER
+    # tolerance, so at 2.2e-308 the default is 4.5e+295 times the number being
+    # compared and admits anything at all -- including ``0.0``, the one value
+    # this guard exists to reject.  Both directions are pinned so that dropping
+    # the argument fails here rather than silently emptying the assertion.
+    assert 0.0 == pytest.approx(tiny, rel=1e-15)
+    assert 0.0 != pytest.approx(tiny, rel=1e-15, abs=0.0)
+
+    # Just inside, one exponent step above the cutoff.  Tolerance derived: half
+    # an ulp of |log(2*tiny)| is 5.7e-14 relative, a full ulp of drift on
+    # another libm is 1.1e-13, plus exp's own <= 1 ulp -- so 1e-12 is 5.5x the
+    # worst case and still 5.5e11 times tighter than the factor of two.
+    accepted = rating_tables._base_relativity(float(np.log(2.0 * tiny)))
+    assert accepted >= tiny
+    assert accepted == pytest.approx(2.0 * tiny, rel=1e-12, abs=0.0)
+
+    # Just outside: one exponent step below, in the subnormals.
     with pytest.raises(RatingTableBaseNotRepresentableError, match="base relativity"):
         rating_tables._base_relativity(float(np.log(tiny / 2.0)))
 
@@ -1063,6 +1121,187 @@ def test_the_log_link_families_this_export_exists_for_are_not_refused():
             rtol=_RECONSTRUCTION_RTOL,
             atol=0.0,
         )
+
+
+# ── The product contract is also a statement about the RANGE ───────────────
+
+
+@cache
+def _saturating_fit():
+    """A converged log-link Poisson fit whose own frame stays inside the clip.
+
+    Nothing here is degenerate: ``sum_insured`` runs over [0, 10], the fitted
+    predictor reaches 19.0, and the exported base relativity is an ordinary
+    number, so no existing guard has anything to say.  What reaches the
+    stabilization boundary is applying the exported table to LARGER risks --
+    which is what a filed tariff is for -- because a ``Numeric`` block is one
+    per-unit relativity raised to whatever the consumer holds.
+    """
+    rng = np.random.default_rng(11)
+    n = 800
+    x = rng.uniform(0.0, 10.0, n)
+    X = pd.DataFrame({"sum_insured": x})
+    y = rng.poisson(np.minimum(np.exp(-1.0 + 2.0 * x), 1e12)).astype(np.float64)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"sum_insured": Numeric()})
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_the_exported_table_keeps_going_where_the_model_saturates():
+    """Inside the stabilization range the contract holds; outside it is exact too.
+
+    ``model.predict`` clips a log-link predictor to [-80, 80] before the inverse
+    link.  The workbook has no such bound, because a clamp is not a factor and
+    no block could carry one.  So the two agree to round-off below the clip and
+    diverge above it by exactly ``exp(eta - 80)`` -- not by "some amount", which
+    is the difference between a measurement and a hedge, and is what lets the
+    payload contract state the boundary instead of shrugging at it.
+
+    Measured here: 1.78e+08 at eta 99.0, first breaching the round-off claim at
+    eta 80.41.  The export refuses a frame that saturates
+    (``test_a_saturated_export_frame_stops_the_export``); this is the case that
+    guard cannot reach, because the payload is frame-independent and these rows
+    are rated after it is written.
+    """
+    model, X, y = _saturating_fit()
+    payload = build_rating_table_payload(model, X, y, n_bins=10, impact_bins=(10,))
+    assert payload.base_relativity > 1e-6, "an ordinary base; no existing guard fires"
+
+    rated = pd.DataFrame({"sum_insured": np.linspace(0.0, 50.0, 200)})
+    eta = predict_eta_raw_exact(model, rated)
+    stabilized = stabilize_eta(eta, model._link)
+    inside = eta == stabilized
+    assert inside.any() and not inside.all(), "the sweep must straddle the clip"
+
+    reconstructed = _predict_from_payload(payload, rated)
+    predicted = model.predict(rated)
+
+    # This fixture does NOT get the 32 eps the exactly-tabulable one derives.
+    # A power amplifies the relative error of its base by the exponent: the
+    # numeric block's multiplier is ``relativity ** sum_insured``, so one
+    # rounding of ``exp`` in ``relativity`` becomes about ``x`` of them in the
+    # multiplier, and ``x`` runs to 50 here rather than staying O(1).  Budget:
+    # ``x`` for the amplification, one each for the power's own rounding, the
+    # base ``exp`` and the product, three on the model's side (dot product and
+    # ``exp``), and two for the comparison -- ``x + 8``, rounded up to the next
+    # power of two for headroom on a differently ordered BLAS.
+    power_rtol = 64 * _EPS
+    assert power_rtol >= (float(rated["sum_insured"].max()) + 8.0) * _EPS
+
+    np.testing.assert_allclose(reconstructed[inside], predicted[inside], rtol=power_rtol, atol=0.0)
+    # Outside, the ratio is the clip and nothing else.  Compared against
+    # ``stabilize_eta``'s own output rather than a literal 80, so the assertion
+    # follows the rule ``predict`` applies instead of a copy of it.
+    ratio = reconstructed[~inside] / predicted[~inside]
+    np.testing.assert_allclose(
+        ratio, np.exp(eta[~inside] - stabilized[~inside]), rtol=power_rtol, atol=0.0
+    )
+    assert float(ratio.max()) > 1e8, "and it is a mis-rating, not a rounding difference"
+
+
+def test_a_saturated_export_frame_stops_the_export():
+    """The rows the export CAN see are refused rather than shipped.
+
+    Same fitted model as above, exported on the frame that saturates it.  The
+    workbook would disagree with ``model.predict`` on the very data it was built
+    from, which is the shape of failure this module exists to refuse -- a
+    complete-looking sheet whose numbers are not the model's.
+    """
+    model, _, _ = _saturating_fit()
+    rated = pd.DataFrame({"sum_insured": np.linspace(0.0, 50.0, 200)})
+    eta = predict_eta_raw_exact(model, rated)
+    assert (eta != stabilize_eta(eta, model._link)).sum() == 38
+
+    with pytest.raises(ValueError, match="saturates on this frame"):
+        build_rating_table_payload(model, rated, model.predict(rated), n_bins=10, impact_bins=(10,))
+
+
+def test_a_log_link_binomial_whose_mean_is_clamped_cannot_be_exported():
+    """``clip_mu`` is the second saturation, and a log-link binomial is its only reach.
+
+    ``clip_mu`` clamps a ``Binomial`` mean into [1e-7, 1 - 1e-7].  For the
+    positive families the band is [1e-50, 1e50], which the eta clip already sits
+    strictly inside -- ``exp(+/-80)`` is [1.8e-35, 5.5e34] -- and ``Gaussian`` is
+    not clamped, so no other family can reach this gate through a log link.
+
+    A level with a 100% event rate is all it takes: the MLE puts it at ``mu = 1``
+    and the fit lands slightly above, at eta +0.3647, so ``exp`` returns a
+    "probability" of 1.4401 where ``predict`` returns 0.9999999.  Measured
+    before the gate: 974 of 3000 rows rewritten by the clamp and 4.40e-01
+    maximum relative error, against a documented round-off claim of 7.1e-15.
+
+    Note this is the UPPER clamp.  The lower one is out of reach: a zero-event
+    level converges to eta -15.03, a mean of 2.98e-07, which is above the 1e-7
+    floor -- measured at 8000 rows, 0 clamped.
+    """
+    rng = np.random.default_rng(3)
+    n = 3000
+    region = rng.choice(["A", "B", "C"], n)
+    X = pd.DataFrame({"region": region})
+    p = np.where(region == "A", 0.30, np.where(region == "B", 0.10, 1.0))
+    y = (rng.random(n) < p).astype(np.float64)
+
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first")},
+    )
+    model.fit(X, y)
+    assert isinstance(model._link, LogLink), "the link gate must not be what refuses this"
+
+    # The clamp is what bites, not the eta clip: the predictor is nowhere near 80.
+    eta = predict_eta_raw_exact(model, X)
+    assert float(np.abs(eta).max()) < 80.0
+    assert float(np.exp(eta).max()) > 1.0, "a mean above one is what the clamp catches"
+
+    with pytest.raises(ValueError, match="saturates on this frame"):
+        build_rating_table_payload(model, X, y, n_bins=10, impact_bins=(10,))
+
+
+def test_the_impact_sheet_does_not_cover_a_continuous_interaction():
+    """The binning the sheet reports is the MAIN EFFECTS' binning only.
+
+    ``_impact_sweep`` is handed ``_continuous_features``, which scans
+    ``model._feature_order`` and never ``model._interaction_order``, while
+    ``_continuous_interaction_block`` samples a continuous-by-continuous
+    interaction onto the same lossy ``n_bins`` grid.  So a workbook can carry a
+    materially approximated interaction whose error the sheet does not
+    quantify.
+
+    Pre-existing -- the interaction export predates issue #253 and centering
+    does not touch it -- and tracked as issue #287.  This is a characterisation
+    of the current shape, so it is written to FAIL once the sweep starts
+    covering the interaction, which is the point: whoever closes #287 has to
+    correct the payload contract beside it.
+    """
+    rng = np.random.default_rng(5)
+    n = 600
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "density": rng.uniform(0.0, 10.0, n)})
+    mu = np.exp(-1.0 + 0.02 * X["age"] + 0.05 * X["density"] + 0.004 * X["age"] * X["density"])
+    y = rng.poisson(mu).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6), "density": Spline(n_knots=6)},
+        interactions=[("age", "density")],
+    )
+    model.fit(X, y)
+
+    assert list(model._interaction_order) == ["age:density"]
+    assert rating_tables._continuous_features(model) == ["age", "density"]
+
+    payload = build_rating_table_payload(model, X, y, n_bins=20, impact_bins=(10,))
+
+    # The interaction really is exported, and really is on the lossy grid.
+    interaction = next(block for block in payload.interactions)
+    assert interaction.name == "age:density"
+    assert interaction.table.shape == (20, 21)
+
+    # And no row of the sheet is about it.
+    reported = set(payload.discretization_impact["feature"])
+    assert reported == {"age", "density"}
+    assert not any("age:density" in str(feature) for feature in reported)
 
 
 # ── ``centering=`` is validated where it is accepted ───────────────────────
