@@ -346,13 +346,56 @@ def _expand_grouped_term(
         # V-shaped signal: the PCHIP rendered the C0 corner 6.3x too shallow
         # (slope jump +0.0743 against the fitted +0.4703) and ran 0.0393 in
         # log-relativity -- 4.0% in relativity -- away from the fitted shape one
-        # band before the break.  PCHIP is C1 by construction, so the corner is
-        # not merely rounded, it cannot be drawn at all.  That contradicts the
-        # term's headline feature at the very break it states, so the fitted
-        # curve is kept and only the markers move.  The test is the geometry
-        # itself, not the basis name: any expansion that genuinely re-spreads the
-        # levels (a spline's ``order=`` linspace or ``values=`` spacing, where
-        # the grouped curve sits on group MEANS) fails it and rebuilds.
+        # band before the break.
+        #
+        # That flattening is the interpolant's CONSTRUCTION, not a resolution
+        # artefact, and the literature names it exactly.  SciPy's
+        # ``PchipInterpolator`` implements the local slope formula of Fritsch &
+        # Butland, "A method for constructing local monotone piecewise cubic
+        # interpolants", SIAM J. Sci. Stat. Comput. 5(2):300-304 (1984)
+        # (doi:10.1137/0905021) -- the monotone piecewise cubic FAMILY is
+        # Fritsch & Carlson, SIAM J. Numer. Anal. 17(2):238-246 (1980).  Moler,
+        # *Numerical Computing with MATLAB* (SIAM 2004) sets out the rule in
+        # section 3.4: "If delta_k and delta_{k-1} have opposite signs or if
+        # either of them is zero, then x_k is a discrete local minimum or
+        # maximum, so we set d_k = 0."  A stated break is precisely a sign
+        # change, so the vertex is assigned slope ZERO by rule.  Measured
+        # against the installed SciPy: a V-shaped break whose fitted secants
+        # jump by +0.60 is drawn with derivative exactly 0.0 at the vertex, and
+        # a same-sign break -0.5 -> -0.05 is drawn at -0.0909 -- the
+        # Fritsch-Butland weighted harmonic mean, within a factor of two of the
+        # SHALLOWER secant rather than anywhere near the steeper one.
+        #
+        # And the corner is undrawable rather than merely mis-drawn: PCHIP is C1
+        # by construction ("the first derivatives are guaranteed to be
+        # continuous, but the second derivatives may jump" -- SciPy docs; "the
+        # spline has two continuous derivatives, while pchip has only one" --
+        # Moler section 3.7), while a stated break is a C0 kink.  No sampling
+        # density recovers it.
+        #
+        # That contradicts the term's headline feature at the very break it
+        # states, so the fitted curve is kept and only the markers move.  The
+        # test is the geometry itself, not the basis name: any expansion that
+        # genuinely re-spreads the levels (a spline's ``order=`` linspace or
+        # ``values=`` spacing, where the grouped curve sits on group MEANS)
+        # fails it and rebuilds.
+        #
+        # Evaluating the fitted function on a grid is the ordinary practice, not
+        # a local invention: gratia (MIT) evaluates a smooth at evenly spaced
+        # values over the covariate's range, pyGAM (Apache-2.0) computes term
+        # functions on a generated grid, and Fox, "Effect Displays in R for
+        # Generalised Linear Models", J. Stat. Soft. 8(15) (2003) computes
+        # fitted values over a grid.  Breaking the drawn curve at known
+        # non-smooth points is equally standard outside statistics: Wolfram's
+        # ``Plot`` splits at detected discontinuities unless told
+        # ``Exclusions -> None``, and Remacle, Chevaugeon, Marchandise &
+        # Geuzaine, Int. J. Numer. Meth. Engng. 69(4):750-771 (2007) tessellate
+        # high-order fields per element because the field is smooth within an
+        # element and not across its boundary.  What no source warns about is
+        # substituting a C1 interpolant for a fitted C0 term -- and the reason
+        # is structural: penalised regression splines are C1 or better by
+        # construction, so the display routines above never meet this case.
+        # This one is ours.
         #
         # Exact equality is deliberate, and it is exact BY CONSTRUCTION on both
         # sides rather than approximately equal by luck: a position axis is
@@ -399,7 +442,14 @@ def _expand_grouped_term(
             #
             # Per-level SEs -- the rated quantities -- are expanded above and
             # stay; it is only the display band that goes.
-            curve = SmoothCurve(
+            # ``replace``, not a hand-listed constructor, for the same reason as
+            # the two kept-curve branches and the return below: a field added to
+            # ``SmoothCurve`` later would silently take its DEFAULT here instead
+            # of the value this curve carries.  It also states the intent the
+            # comment above argues for -- keep everything, null the bands --
+            # rather than restating the whole type to change four fields.
+            curve = replace(
+                curve,
                 x=new_x,
                 log_relativity=new_log_rel,
                 relativity=np.exp(new_log_rel),
