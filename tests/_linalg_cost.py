@@ -146,10 +146,18 @@ SCIPY_ROUTINES = (
     "svdvals",
 )
 
-#: Routines whose cost is at least quadratic in an operand dimension.  These
-#: are the calls a complexity claim is made about; the cheap remainder
-#: (``norm``, ``det``, ``block_diag``, the ``get_*_funcs`` lookups) is still
-#: recorded, but counting it alongside a Cholesky would compare unlike work.
+#: Routines whose cost is at least quadratic in an operand dimension *and*
+#: whose leading axes are a batch.  These are the calls a complexity claim is
+#: made about; the cheap remainder (``norm``, ``det``, ``block_diag``, the
+#: ``get_*_funcs`` lookups) is still recorded, but counting it alongside a
+#: Cholesky would compare unlike work.
+#:
+#: ``tensorsolve`` and ``tensorinv`` are excluded despite being expensive:
+#: they reshape, so their leading axes are tensor structure rather than a
+#: stack, and the batch/core split would misread ``(2, 3, 4, 24)`` as six
+#: factorizations of a ``4 x 24`` when it is one of a ``24 x 24``.  They stay
+#: in the registry, so a path that starts using them is visible in the log --
+#: at which point this split needs revisiting rather than trusting.
 FACTORIZATIONS = frozenset(
     f"{module}.{name}"
     for module, names in (
@@ -170,8 +178,6 @@ FACTORIZATIONS = frozenset(
                 "slogdet",
                 "solve",
                 "svd",
-                "tensorinv",
-                "tensorsolve",
             ),
         ),
         (
