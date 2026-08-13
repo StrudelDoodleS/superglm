@@ -60,14 +60,54 @@ the same quantity.  An 882-point sweep, 853 of them scored by both paths, over
 level, seven band layouts and two seeds, each path graded at its OWN lambda:
 
 * **The high edge is not determined by the assembled moments.**  ``lambda`` is
-  1e10 times the pair's scale there, and a spline penalty assembled in float64
-  carries a smallest eigenvalue that is round-off of either sign, so
-  ``lambda S_a`` inherits an indefiniteness of order ``lambda eps sigma_max``.
+  1e10 times the pair's scale there, and ``fl(lambda * S_a)`` acquires negative
+  curvature of order ``lambda eps sigma_max`` in the penalty's null space.
+  THE MECHANISM IS THE MULTIPLY, NOT THE BUILDER, and an earlier form of this
+  paragraph had that wrong — it said a float64 spline penalty "carries a
+  smallest eigenvalue that is round-off of either sign", which is true of one of
+  the two builders and false of the other.  Measured by exact rational LDL on
+  the stored float64 bytes rather than by an eigensolver, whose own backward
+  error at these scales is larger than the quantity being judged:
+
+  - ``build_difference_penalty`` (``ps``, ``ns``) is EXACTLY positive
+    semidefinite as stored, with exactly ``m`` zero pivots, at all eight shapes
+    tried — (11,2), (8,2), (11,3), (5,2), (20,2), (8,3), (40,3), (21,2).  It is
+    a Gram matrix of an integer difference operator, so float64 stores it
+    exactly; the -1e-15 an eigensolver reports for its smallest eigenvalue is
+    the EIGENSOLVER'S backward error, not the matrix's.
+  - ``build_integrated_derivative_penalty`` (``bs``, ``cr``) IS genuinely
+    indefinite as assembled — exact inertia (6,-2,0) at K=8 order 2, (7,-2,0) at
+    K=9 order 2, (10,-1,0) at K=11 order 1, most negative exact pivot
+    -3.1e-13 — and where it is definite it has NO null space at all, exact
+    inertia (11,0,0) at K=11 order 2 where the analytic nullity is 2.  It is
+    accumulated by quadrature, so neither its PSD-ness nor its rank survives.
+  - What is common to all four bases is the SCALING.  ``fl(lambda * S_a)``
+    rounds each entry independently, so the product is not a scalar multiple of
+    ``S_a``: on the exactly-PSD difference penalty it carries a negative exact
+    pivot at 10 of 32 lambdas across the ladder's bracket for (11,2), 22 of 32
+    for (8,2), 13 of 32 for (40,3) — never more negative pivots than the
+    nullity, and at powers of two, where the multiply is exact, never at all.
+
   On the geometry above that is 4.7e-06 against a ``V_eff`` whose own smallest
-  eigenvalues are 1e-15: the exact ``V_eff + lambda S`` is INDEFINITE, its
-  filter factors leave [0, 1], and the exact edf falls outside ``[0, k]`` on 12
-  of the 853 scored points — as far out as 524.70 on a ``k = 209`` pair and
-  -69.49 on a ``k = 35`` one.  A ONE-ULP symmetric perturbation of ``S_a``
+  eigenvalues are 1e-15: the exact ``V_eff + lambda S`` is INDEFINITE and its
+  filter factors leave [0, 1].  The consequence is that the EXACT edf can leave
+  ``[0, k]``, which was reported as 12 of the 853 scored points.  That count is
+  from a sweep whose harness is not committed, so it has been re-measured on a
+  narrower grid that is: 192 high-edge points, ``ps``/``bs``/``cr``/``ns`` at
+  4/6/8 knots, ``L`` in 6/12 at 12 rows per level, four band layouts, two seeds,
+  each graded by an independent high-precision evaluation of ``tr(A^-1 V_eff)``
+  at 120 digits (checked to be converged against 60 and 250).  ONE of the 192
+  leaves the range, and it is the same one the original figure names: a ``cr``
+  pair at 6 knots, 6 levels, 12 rows in each, four inside a 1e-3 band, seed 3,
+  ``k = 35``, at ``lambda = 9.678e+13``, where the exact edf is **-69.486**.
+  The basis is not incidental — ``cr`` is one of the two whose penalty is
+  genuinely indefinite as assembled, and its neighbours on the same grid sit at
+  0.4577, 0.0603 and 0.000773, repeatedly within a hair of the same boundary.
+  The rate here is 1 in 192 against the original 12 in 853, the same order on a
+  grid that is not the same.  **The +524.70 excursion on a ``k = 209`` pair is
+  NOT re-verified** — this grid caps ``k`` at 130 because the high-precision
+  oracle is O(k^3) — and it should be read as unconfirmed.
+  A ONE-ULP symmetric perturbation of ``S_a``
   moves the exact high-edge edf by 1.30 to 145.87 df across the geometries
   measured, and by 11.11, 31.83 and 77.54 df on the very pair whose 11.57 df
   this docstring quotes — 40 draws at each of three generator seeds, and a max

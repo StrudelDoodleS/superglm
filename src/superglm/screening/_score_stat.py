@@ -46,7 +46,9 @@ can cross a singularity of ``A`` and nothing bounds the exact edf at this
 point.  That is why neither path is pinned against 6.9997546284 —
 tests/test_screening_edf_target.py pins the TRUNCATED functional below instead,
 whose own ``r`` is 2.7e-05.  The clamped estimator sits 2.5e-04 df from the
-exact value and the searching one 2.000265 df from it.
+exact value and the searching one 2.000265 df from it — on this interpreter.
+Those two READINGS do not travel equally, and the table further down says which
+one does; the DISAGREEMENT travels, which is what makes it a defect.
 
 **WHAT THE CLAMPED RUNG COMPUTES IS NOT LITERALLY ``tr(A^-1 V_eff)``.**
 :func:`_edge` factors ``A`` with ``cho_factor`` and falls back to
@@ -89,19 +91,39 @@ because the ladder decides a rung SEARCHES from :func:`_edge`'s bracket and
 then searches inside the PENCIL's, and the two brackets differ.
 
 The mechanism is documented rather than inferred.  :func:`_build_pencil` calls
-``scipy.linalg.eigh(V, G)``, LAPACK's ``?sygv``, whose error bound degrades
-with the condition number of the second operand — "there may be a significant
-loss of accuracy if B is ill-conditioned with respect to inversion" (LAPACK
+``scipy.linalg.eigh(V, G)``.  SciPy 1.18 chooses the driver as
+``"evr" if b is None else ("gvx" if subset else "gvd")``, so with a second
+operand and no subset that is LAPACK's ``?sygvd``.  Its error bound degrades
+with the condition number of that operand: "These error bounds are large when B
+is ill-conditioned with respect to inversion", and the backward stability the
+bound assumes "is not necessarily true when B is ill-conditioned" (LAPACK
 Users' Guide, *Further Details: Error Bounds for the Generalized Symmetric
 Definite Eigenproblem*).  ``cond(G)`` measures 5.58e+12 on the pair above and
 up to 1.77e+13 across the sweep, against 6.41e+02 on an ``ns`` pair, whose
-penalty is full rank — which is exactly the split in the firing rates.  LAPACK
-names the alternative for a positive-definite ``A``: Cholesky both operands and
-take the GSVD of the pair, "a tighter error bound than the above bounds when B
-is ill conditioned but A+B is well-conditioned", which is this pencil's case.
-That is Van Loan, *Generalizing the Singular Value Decomposition*, SIAM J.
-Numer. Anal. 13(1):76-83 (1976), and it computes the same filter factors
-without inverting anything ill conditioned.  It is not what this module does.
+penalty is full rank — which is exactly the split in the firing rates.  The
+same section names the alternative: Cholesky both operands with ``xPOTRF`` and
+take the generalized SVD of the pair with ``xTGSJA``, which "can give a tighter
+error bound than the above bounds when B is ill conditioned but A + B is
+well-conditioned" — this pencil's case.  That decomposition is Van Loan,
+*Generalizing the Singular Value Decomposition*, SIAM J. Numer. Anal.
+13(1):76-83 (1976), doi:10.1137/0713009; it computes the same filter factors
+without inverting anything ill conditioned, and it is not what this module does.
+
+**EVERY MAGNITUDE ABOVE IS ONE INTERPRETER'S.**  Same numpy 2.4.2 and scipy
+1.18.0, same fixtures and seeds; only the interpreter and the runner differ:
+
+    quantity                             local 3.14   CI 3.12    CI 3.14
+    clamped rung, bs(8) hi               7.0000044    7.0000028  —
+    searching rung, bs(8) hi             9.0000193    10.999974  —
+    two-estimator gap, bs(8) hi          2.0000 df    4.0000 df  —
+    dense clamped rung, ps(8) lo         172.90469    passed     172.90447
+
+So the CLAMPED estimator is reproducible — 1.5e-06 df between interpreters, 5%
+of its own first-order floor — and the SEARCHING one is not: it moves by 2 df on
+the same bytes, which is the ``?sygvd`` error bound above being realised rather
+than a second defect.  The gap between them is therefore a lower bound on the
+disagreement, not a measurement of it, and any fix to either estimator has to be
+validated on more than one interpreter.
 
 Pins, the certified constants and the derived noise floor of every point they
 are pinned at are in tests/test_screening_edf_target.py.
@@ -481,9 +503,18 @@ def _edge(
     two are 27x apart at ``k = 121`` — and it is applied by a different rule
     besides, by ``|lambda|``, so a negative direction above it is INVERTED
     rather than dropped.  Nothing here counts what it discarded.
-    The branch is not exotic at the ladder's high edge: ``lambda S`` inherits
-    an indefiniteness of order ``lambda eps sigma_max(S)`` from a float64
-    spline penalty, ``A`` is then indefinite, and ``cho_factor`` raises.
+    The branch is not exotic at the ladder's high edge, and the reason is the
+    SCALING rather than the penalty.  ``fl(lambda * S)`` rounds every entry
+    independently, so the product is not a scalar multiple of ``S`` and a
+    penalty with a null space acquires negative curvature of order
+    ``lambda eps sigma_max(S)`` in it.  Measured by exact rational LDL on the
+    stored float64 bytes: the ``ps``/``ns`` difference penalty is EXACTLY
+    positive semidefinite with exactly ``m`` zero pivots, yet
+    ``fl(lambda * S)`` carries a negative exact pivot at 10 of 32 lambdas
+    spanning the ladder's bracket for ``(11, 2)`` and 22 of 32 for ``(8, 2)``,
+    never more of them than the nullity — and at powers of two, where the
+    multiply is exact, never at all.  ``A = V_eff + lambda S`` is then
+    indefinite and ``cho_factor`` raises.
     Measured on the two pairs pinned in tests/test_screening_edf_target.py,
     the fallback ran on both high edges and the Cholesky branch on both low
     edges, and the truncation was worth +2.4974e-04 df on one and

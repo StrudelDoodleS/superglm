@@ -52,6 +52,25 @@ eigenvalue of ``A``, so a one-ulp step can cross a singularity there and NOTHING
 bounds the exact edf -- not D, not a multiple of D.  Those two points are not
 pinned against ``tr(A^-1 V_eff)`` at all.
 
+WHERE THAT SMALLEST EIGENVALUE COMES FROM, since the answer decides whether it
+is fixable.  It is the SCALING and not the penalty builder.  Measured by exact
+rational LDL on the stored float64 bytes, because an eigensolver's own backward
+error here is larger than the quantity being judged:
+``build_difference_penalty`` (``ps``, ``ns``) is EXACTLY positive semidefinite
+with exactly ``m`` zero pivots at all eight shapes tried -- it is the Gram
+matrix of an integer difference operator, so float64 holds it exactly, and the
+-1e-15 an eigensolver reports is the eigensolver's.
+``build_integrated_derivative_penalty`` (``bs``, ``cr``) is a different story:
+assembled by quadrature, it is genuinely indefinite at K=8 order 2 (exact
+inertia 6 positive, 2 negative), K=9 order 2 and K=11 order 1, and where it is
+definite it has no null space at all -- exact inertia (11, 0, 0) at K=11 order 2
+where the analytic nullity is 2.  What is common to all four bases is
+``fl(lambda * S_a)``: rounding each entry independently means the product is not
+a scalar multiple of ``S_a``, and on the exactly-PSD difference penalty it
+carries a negative exact pivot at 10 of 32 lambdas spanning the ladder's bracket
+for (11,2) and 22 of 32 for (8,2) -- never more of them than the nullity, and at
+powers of two, where the multiply is exact, never at all.
+
 **AND WHERE r < 1, D / (1 - r) IS STILL NOT A THEOREM.**  ``r`` bounds the
 perturbed inverse in an OPERATOR norm; D is an entrywise contraction of the
 derivative at the unperturbed ``A``, and dividing one by the other mixes two
@@ -160,6 +179,16 @@ runner differ:
     arrow error, ps(8) lo               -0.525 df    -2.780 df  +0.0825 df
     arrow error, ns(6) lo               -30.74 df    -0.0358 df --
     round-off V-mass, ps(8) hi          3.108 df     0.963 df   --
+
+NOT EVERYTHING IN THAT TABLE MOVES, AND WHICH HALF MOVES IS THE POINT.  CI's
+3.12 reported the ``bs(8)`` high-edge pair as 7.000002839965082 against
+10.999974250213997.  So of the two dense estimators the CLAMPED one is
+reproducible -- 1.5e-06 df from this machine's 7.000004364954146, which is 0.05x
+its own first-order floor -- and the SEARCHING one moved by 2 df on the same
+bytes.  The 4.0000 df gap is not "the defect got bigger there"; it is the
+pencil's ``?sygvd`` error bound being realised at ``cond(G) = 5.58e+12``, and it
+is why the clamped rung CAN carry an absolute pin below while nothing else at
+these edges can.
 
 Two things die there.  On CI's 3.12 the ``ns(6)`` arrow reading does not
 collapse at all -- 30.9529 against a certified 30.9887 -- where here it reads
@@ -309,16 +338,79 @@ def _clamped(rungs, edge):
     bracket edge here, since ``_lambda_for_edf`` returns the edge itself when the
     pencil's bracket disagrees with ``_edge``'s.  Once #257's estimator split is
     fixed, a value-based pick would silently start grading the other estimator
-    under this name.  The lambda is asserted rather than assumed so that a
-    fixture which stopped clamping fails here instead of downstream.
+    under this name.
+
+    TWO things are therefore checked rather than assumed, because the lambda
+    alone does not identify a clamped rung -- a SEARCHING rung that lands on the
+    bracket edge has the extreme lambda too, and on the ``bs(8)`` pair one does
+    (budget 8.0, at the same 1.065e+05).  The second check is the clamping
+    certificate: a rung clamps at the high edge precisely because the edge value
+    it reaches still EXCEEDS its budget, and at the low edge because it falls
+    SHORT of it.
+
+    WHY IT IS DIRECTIONAL AND WHAT IT DOES NOT CATCH.  "``edf0 != budget``" was
+    the obvious form and it does not work: budget 8.0's searching rung reads
+    9.000019, so it differs from its budget too.  The directional form catches a
+    searching rung at the edge that UNDERSHOOTS -- which is the case
+    ``_lambda_for_edf`` can produce, since it returns the edge itself when the
+    pencil's bracket disagrees with ``_edge``'s, and it is exactly the residual
+    the lambda check misses.  Exercised directly: a hi-edge rung reading 1.8
+    against budget 2.0 is refused, and a lo-edge rung reading 400.0 against
+    budget 400.0 is refused.  A searching rung at the edge that OVERSHOOTS its
+    budget still passes, and nothing here separates that case; the protection is
+    that the rung is chosen by BUDGET INDEX rather than by value, so an
+    overshooting rung is never the one returned.
     """
     want = max if edge == "hi" else min
     rung = rungs[0] if edge == "hi" else rungs[-1]
+    budget = BUDGETS[0] if edge == "hi" else BUDGETS[-1]
     assert rung.lambda0 == want(r.lambda0 for r in rungs), (
-        f"budget {BUDGETS[0] if edge == 'hi' else BUDGETS[-1]} no longer clamps to the {edge} edge",
+        f"budget {budget} no longer clamps to the {edge} edge",
         rung.lambda0,
     )
+    reached = rung.edf0 > budget if edge == "hi" else rung.edf0 < budget
+    assert reached, (
+        f"budget {budget} is no longer unreachable at the {edge} edge, so this rung "
+        f"may have SEARCHED rather than clamped and would grade the other estimator",
+        rung.edf0,
+    )
     return rung
+
+
+def _same_lambda(arrow_lam, dense_lam):
+    """Both paths must be read at ONE lambda or the comparison means nothing.
+
+    The two ladders are meant to share the dense path's 1e+-10 bracket, but they
+    compute the scale it hangs off by different arithmetic -- the arrow path from
+    ``profiled_trace / (tr(S_a) k_a)`` and the dense path from
+    ``tr(V_eff) / tr(S_ti)`` -- so identity is a property to CHECK.  Measured on
+    all three fixtures the two agree to 1.4e-16, 2.3e-16 and 4.1e-16 relative,
+    which is 1 to 2 ulp: the same bracket by two routes.  ``rel=1e-12`` is
+    ~4500 ulp, loose enough that ulp-level arithmetic differences never fire it
+    and tight enough that a bracket which genuinely MOVED does.
+
+    Without this, ``|dense - arrow| > 1e-3`` stays green for a reason that has
+    nothing to do with #257: a repaired arrow path whose bracket also shifted
+    would still "disagree", which is the exact failure the pairing exists to
+    prevent.
+
+    THE RATIO IS FORMED DIRECTLY RATHER THAN THROUGH ``pytest.approx``, and the
+    reason is a bug this helper shipped with for one revision.
+    ``pytest.approx(x, rel=1e-12)`` also carries a DEFAULT ``abs=1e-12`` and
+    takes the LOOSER of the two.  The low-edge lambdas here are 1.4e-11 and
+    5.9e-12, so that default absolute tolerance is of the same order as the
+    lambdas themselves and the check was vacuous at exactly the two points it
+    was added for -- a mutation that moved the arrow bracket by 1e-6 relative
+    was caught at the high edge and sailed through both low edges.
+    """
+    rel = abs(arrow_lam - dense_lam) / max(abs(dense_lam), np.finfo(float).tiny)
+    assert rel < 1e-12, (
+        "the two paths are no longer scoring the same lambda, so their difference "
+        "is not evidence about their algorithms",
+        arrow_lam,
+        dense_lam,
+        rel,
+    )
 
 
 def _edge_branch(V_eff, S, lam):
@@ -326,12 +418,23 @@ def _edge_branch(V_eff, S, lam):
 
     ``_edge`` factors with ``cho_factor`` and falls back to ``pinv``, and the two
     answer DIFFERENT functionals -- ``tr(A^-1 V)`` against ``tr(P V)``.  Which
-    one runs is decided by whether ``dpotrf`` meets a non-positive pivot, and at
-    the high edge ``A``'s smallest eigenvalue is -7.03e-07 against a largest of
-    3.07e+10, which is -2.3e-17 relative: round-off, and NOT the five-order
-    margin the ``pinv`` rank decision enjoys.  A build that took the other arm
-    would grade a different quantity against these constants, so the tests state
-    which arm they assume and fail legibly rather than numerically if it moves.
+    one runs is decided by whether ``dpotrf`` meets a non-positive pivot.
+
+    THAT DECISION IS ROUND-OFF ON THIS FIXTURE AND IS NOT ASSERTED.  It was,
+    and the measurement says it should not have been.  ``dpotrf`` fails at the
+    111th leading minor with a pivot of -3.9e-07, where the ten pivots before it
+    are all 3.07e+07 -- so the failure is not a large negative pivot, it is the
+    first one that has collapsed to round-off, and it sits at 0.48x the local
+    accumulation bound ``k eps`` times the neighbouring pivot.  Three probes:
+    the smallest uniform diagonal shift that makes ``dpotrf`` succeed is
+    9.54e-07, which is **0.26 ulp** of ``A``'s largest entry; under the file's
+    own one-ulp perturbation model of the stored moments the branch flips on
+    2 of 600 draws across three seeds; and a blocked right-looking factorization
+    run at ten block sizes from 1 to 121 keeps failing at minor 111 but with the
+    failing pivot ranging over -1.5e-06 to -5.4e-06 and one variant reaching
+    exactly 0.  The step is stable, the margin is not.  A supported build may
+    legitimately take the other arm, so the tests select the reference
+    FUNCTIONAL by the arm actually taken instead of requiring one.
     """
     try:
         scipy.linalg.cho_factor(V_eff + lam * S, check_finite=False)
@@ -340,22 +443,37 @@ def _edge_branch(V_eff, S, lam):
     return "cholesky"
 
 
-def _truncated_trace(V_eff, S, lam):
-    """``tr(P V_eff)`` at ``pinv``'s own cut, reached by a different route.
+def _traces(V_eff, S, lam):
+    """Both functionals ``_edge`` can return, from one reduction of ``A``.
 
-    ``pinv`` reduces with ``eigh`` and then forms a matrix product; this sums
-    the retained Rayleigh quotients directly.  Same functional, same bits in,
-    independent arithmetic -- so a disagreement is the estimator changing, not
-    the moments moving.  Returns the trace, how many directions were dropped,
-    and the spectral gap across the cut.
+    ``_edge`` answers ``tr(P V_eff)`` on the ``pinv`` branch and
+    ``tr(A^-1 V_eff)`` on the Cholesky one, so a test that grades its output has
+    to know which.  Both are sums of Rayleigh quotients over the eigenbasis of
+    ``A``; the truncated one restricts to the directions ``pinv`` retains.
+
+    WHAT IS AND IS NOT INDEPENDENT HERE, because the earlier wording overstated
+    it.  ``np.linalg.pinv(A, hermitian=True)`` reduces through
+    ``svd(..., hermitian=True)``, which IS ``eigh`` -- the same LAPACK
+    ``?syevd`` on the same matrix as the ``np.linalg.eigh`` below.  So the
+    REDUCTION is shared bit for bit and only the trace FORMATION is independent:
+    this sums quotients where ``pinv`` forms a matrix product.  A common-mode
+    drift in ``?syevd`` would move both together and this comparison would not
+    see it.  That is why the certified absolute pin below exists, and it is not
+    a formality -- reducing the same ``A`` through ``?gesdd`` instead
+    (``np.linalg.svd`` with no ``hermitian=``, a bidiagonalisation rather than a
+    tridiagonalisation) gives 7.000004700567314 against this route's
+    7.000004364954149, a genuinely independent 3.36e-07 df apart.
+
+    Returns ``(truncated, untruncated, dropped, gap)``.
     """
     A = V_eff + lam * S
     w, Q = np.linalg.eigh(A)
+    quot = np.einsum("ij,jk,ki->i", Q.T, V_eff, Q)
     keep = np.abs(w) > _PINV_RCOND * np.abs(w).max()
-    Qk = Q[:, keep]
-    trace = float(np.sum(np.einsum("ij,jk,ki->i", Qk.T, V_eff, Qk) / w[keep]))
+    truncated = float(np.sum(quot[keep] / w[keep]))
+    untruncated = float(np.sum(quot / w))
     gap = np.abs(w[keep]).min() / np.abs(w[~keep]).max() if (~keep).any() else np.inf
-    return trace, int((~keep).sum()), float(gap)
+    return truncated, untruncated, int((~keep).sum()), float(gap)
 
 
 # --------------------------------------------------------------------------
@@ -370,8 +488,20 @@ def _truncated_trace(V_eff, S, lam):
 #                          IS certifiable: r_trunc = 2.745e-05 against the
 #                          retained spectrum, first-order floor 3.0484e-05 df.
 _BS8_HI_ORACLE = 6.999754628429722
+_BS8_HI_TRUNCATED_ORACLE = 7.000004364954146
 _BS8_HI_TRUNCATED_FLOOR = 3.0484e-05
+# 10x the truncated functional's own first-order floor, which is the convention
+# the module docstring states for every tolerance in this file.  It is NOT set
+# from observed headroom: the two readings it has to cover are 0.0 df here (the
+# reconstruction is exact) and 1.5e-06 df on CI's 3.12, which reported this rung
+# as 7.000002839965082 -- 0.05x the floor and 200x inside this bound.
+_BS8_HI_TRUNCATED_TOL = 10 * _BS8_HI_TRUNCATED_FLOOR
 _BS8 = dict(L=12, reps=30, kind="bs", n_knots=8, n_band=4, width=1e-6, seed=0)
+# Same bits into both routes, so no input perturbation enters and what remains is
+# arithmetic: at most log2(k) k eps ||V||_2 / min_kept|w| = 5.5e-13 df for the
+# summation and the Rayleigh quotients.  Named once because it is asserted at two
+# places and the guard exists to stop the two drifting apart.
+_SAME_BITS_TOL = 1e-10
 
 
 @pytest.mark.xfail(
@@ -394,14 +524,19 @@ def test_the_dense_ladder_reports_one_edf_per_lambda():
     ``lambda = 106521.06561131448``.
 
     Mechanism, and it is documented rather than inferred.  ``_build_pencil``
-    calls ``scipy.linalg.eigh(V_eff, G)``, LAPACK's ``?sygv``, whose error
-    bound degrades with the condition number of the second operand -- "there
-    may be a significant loss of accuracy if B is ill-conditioned with respect
-    to inversion" (LAPACK Users' Guide, Error Bounds for the Generalized
-    Symmetric Definite Eigenproblem).  ``cond(G)`` measures 5.58e+12 here.
-    LAPACK's own recommended alternative for a positive-definite A is the GSVD
-    of the two Cholesky factors, which is Van Loan (1976) and is exactly the
-    cancellation-free filter-factor form; it is not what this module does.
+    calls ``scipy.linalg.eigh(V_eff, G)``.  SciPy 1.18 selects the driver as
+    ``"evr" if b is None else ("gvx" if subset else "gvd")``, so with a second
+    operand and no subset that is LAPACK's ``?sygvd``.  Its error bound degrades
+    with the condition number of that operand: "These error bounds are large
+    when B is ill-conditioned with respect to inversion", and the backward
+    stability the bound rests on "is not necessarily true when B is
+    ill-conditioned" (LAPACK Users' Guide, *Further Details: Error Bounds for
+    the Generalized Symmetric Definite Eigenproblem*).  ``cond(G)`` measures
+    5.58e+12 here.  The same section names the alternative -- Cholesky both
+    operands with ``xPOTRF`` and take the generalized SVD of the pair with
+    ``xTGSJA``, which "can give a tighter error bound than the above bounds when
+    B is ill conditioned but A + B is well-conditioned".  That is the
+    cancellation-free filter-factor form, and it is not what this module does.
 
     Measured over 703 searching rungs with a range-valid oracle, across
     ps/cr/bs/ns at 3 to 8 knots, L in 6/12/20, 12 and 30 rows per level, five
@@ -413,9 +548,12 @@ def test_the_dense_ladder_reports_one_edf_per_lambda():
 
     THIS TEST CANNOT SAY THE DEFECT IS STILL THE DOCUMENTED ONE.  A strict
     xfail records only that the assertion fails, so a ladder that returned 700
-    instead of 9.000019 would keep it green.  The magnitude is bracketed by
-    ``test_the_dense_ladder_two_estimator_gap_is_two_degrees_of_freedom``,
-    which is an ordinary passing test and goes red both ways.
+    instead of 9.000019 would keep it green.  Its EXISTENCE is paired with
+    ``test_the_dense_ladder_two_estimators_still_disagree_at_one_lambda``, an
+    ordinary passing test that goes red when #257 is fixed.  Its MAGNITUDE is
+    not pinned by anything, here or there, and cannot portably be: CI's 3.12
+    reads this pair as 7.000002839965082 against 10.999974250213997, a 4.0000 df
+    gap where this machine measures 2.0000.
     """
     dense, _ = _both(_band_pair(**_BS8))
     lam = max(r.lambda0 for r in dense)
@@ -450,13 +588,13 @@ def test_the_dense_ladder_two_estimators_still_disagree_at_one_lambda():
 def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     """What the clamped rung computes, pinned as what it is.
 
-    ``cho_factor`` FAILS on this ``A`` -- it is indefinite, smallest eigenvalue
-    -7.03e-07 against a largest of 3.07e+10 -- so ``_edge`` answers from
-    ``numpy.linalg.pinv(A, hermitian=True)``, which zeroes 4 of 121 directions
-    at ``rcond = 1e-15`` of the largest, a cut of 3.0698e-05.  Reconstructing
-    that same functional by an independent route reproduces the reported rung
-    to 3.6e-15 df.  The rung is not approximately right for ``tr(P V_eff)``;
-    it is exact for it.
+    ``cho_factor`` fails on this ``A`` on every build measured -- it is
+    indefinite, smallest eigenvalue -7.03e-07 against a largest of 3.07e+10 --
+    so ``_edge`` answers from ``numpy.linalg.pinv(A, hermitian=True)``, which
+    zeroes 4 of 121 directions at ``rcond = 1e-15`` of the largest, a cut of
+    3.0698e-05.  Re-forming that same functional over the same reduction
+    reproduces the reported rung to 3.6e-15 df.  The rung is not approximately
+    right for ``tr(P V_eff)``; it is exact for it.
 
     WHY THIS REPLACED TWO PINS AGAINST ``tr(A^-1 V_eff)``.  The certified
     untruncated value here is 6.999754628429722, and the rung sits 2.4974e-04
@@ -469,13 +607,17 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     ``r_trunc = 2.745e-05`` against a retained spectrum starting at 1.1644 --
     and it is what the ladder actually reports.
 
-    THE TOLERANCE IS 1e-10 AND IT IS NOT THE 3.0484e-05 df FLOOR.  Those are
-    different comparisons.  The floor answers "how far can the ANSWER move when
-    the moments are reassembled elsewhere"; this test feeds both routes the
-    SAME bits, so no input perturbation enters and what remains is arithmetic:
-    at most ``log2(k) k eps ||V||_2 / min_kept|w|`` = 5.5e-13 df for the
-    summation and the Rayleigh quotients.  1e-10 is 180x that.  The floor is
-    still asserted below, against the tolerance, so the two cannot be confused.
+    THE TWO TOLERANCES ANSWER DIFFERENT QUESTIONS AND ARE NAMED SEPARATELY.
+    ``_SAME_BITS_TOL`` = 1e-10 grades the reconstruction, which feeds both
+    routes the SAME bits, so no input perturbation enters and what remains is
+    arithmetic: at most ``log2(k) k eps ||V||_2 / min_kept|w|`` = 5.5e-13 df for
+    the summation and the Rayleigh quotients.  1e-10 is 180x that, and the test
+    asserts that relation from the fixture rather than trusting it.
+    ``_BS8_HI_TRUNCATED_TOL`` = 3.0484e-04 grades the ABSOLUTE pin, and answers
+    the other question -- how far can the answer move when the moments are
+    reassembled elsewhere -- at 10x the 3.0484e-05 df floor.  Neither is fitted
+    to observed headroom: one is 180x a computed arithmetic bound, the other 10x
+    a computed sensitivity.
 
     It bites three ways.  Replacing the clamped rung's ``_edge`` trace with the
     searching rung's ``_pencil_edf`` reports 9.000019310394286 and fails by
@@ -492,8 +634,32 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     that is recorded rather than claimed: the two cuts drop the same four
     directions because the gap across them is 2.92e+05.
 
+    THE SAME-BITS CHECK CANNOT SEE A COMMON-MODE DRIFT, WHICH IS WHY THERE IS
+    ALSO AN ABSOLUTE PIN.  ``pinv`` and the reconstruction share their reduction
+    -- both are ``?syevd`` on the same ``A`` (see :func:`_traces`) -- so if that
+    driver drifted, both routes would move together and agree anyway.  The
+    reported rung is therefore ALSO pinned against the certified
+    ``tr(P V_eff) = 7.000004364954146``, at 10x this functional's own
+    3.0484e-05 df first-order floor.  That pin is portable, which is not an
+    assumption: CI's Python 3.12 reported this rung as 7.000002839965082, a
+    move of 1.5e-06 df -- 0.05x the floor.  The 4.0000 df gap CI measures on
+    this pair is entirely the OTHER estimator, which reads 10.999974 there
+    against 9.000019 here.
+
+    WHICH FUNCTIONAL IS GRADED FOLLOWS THE BRANCH, RATHER THAN THE BRANCH BEING
+    REQUIRED.  An earlier form asserted ``_edge_branch(...) == "pinv"``.  That
+    was wrong, and the measurement is in :func:`_edge_branch`: the smallest
+    diagonal shift that makes ``dpotrf`` succeed here is 0.26 ulp of ``A``'s
+    largest entry, and the branch flips on 2 of 600 one-ulp draws.  A build
+    that legitimately takes the Cholesky arm would have failed a test that is
+    not about it.  Both functionals come out of one reduction, so following the
+    branch costs nothing and needs no second certified constant -- the
+    same-bits comparison is a reconstruction, not an oracle.  The absolute pin
+    is skipped on the Cholesky arm, where ``tr(A^-1 V_eff)`` is the point that
+    ``r = 2.010e+03`` says nothing certifies.
+
     The last assertion is the one that keeps the disclosure honest: the
-    truncation, 2.4974e-04 df, must stay ABOVE the point's own certified
+    truncation, 2.4974e-04 df, must stay ABOVE the point's own first-order
     3.0484e-05 df floor -- 8.19x it -- so it cannot be read as a rounding.  If
     a future ``pinv`` cut left it under the floor, the claim that the
     truncation is a term in the answer would stop being supported, and this
@@ -504,11 +670,8 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
     V_eff, S = _dense_matrices(grab)
     rung = _clamped(dense, "hi")
     lam, clamped = rung.lambda0, rung.edf0
-    trace, dropped, gap = _truncated_trace(V_eff, S, lam)
-    assert _edge_branch(V_eff, S, lam) == "pinv", (
-        "cho_factor now accepts this A, so _edge answers tr(A^-1 V_eff) and the "
-        "constants below grade tr(P V_eff) -- a different quantity"
-    )
+    truncated, untruncated, dropped, gap = _traces(V_eff, S, lam)
+    branch = _edge_branch(V_eff, S, lam)
     assert dropped == 4, ("pinv no longer truncates this A", dropped)
     assert gap > 1e4, ("the truncation is now marginal, not a clean gap", gap)
     w = np.linalg.eigvalsh(V_eff + lam * S)
@@ -520,15 +683,26 @@ def test_the_dense_clamped_rung_is_exactly_the_truncated_trace_it_evaluates():
         * float(np.linalg.norm(V_eff, 2))
         / float(np.abs(w[kept]).min())
     )
-    assert 1e-10 > 10 * arithmetic, (
+    assert _SAME_BITS_TOL > 10 * arithmetic, (
         "the same-bits arithmetic floor has grown past the bound this fixture was sized for",
         arithmetic,
     )
-    assert clamped == pytest.approx(trace, abs=1e-10)
-    assert abs(clamped - _BS8_HI_ORACLE) > _BS8_HI_TRUNCATED_FLOOR, (
-        "the truncation has stopped being a term in the answer",
-        clamped - _BS8_HI_ORACLE,
+    expected = truncated if branch == "pinv" else untruncated
+    assert clamped == pytest.approx(expected, abs=_SAME_BITS_TOL), (
+        f"_edge took the {branch} arm and does not reproduce the functional that arm evaluates",
+        clamped,
+        expected,
     )
+    if branch == "pinv":
+        assert clamped == pytest.approx(_BS8_HI_TRUNCATED_ORACLE, abs=_BS8_HI_TRUNCATED_TOL), (
+            "the clamped rung has left the certified truncated trace by more than 10x "
+            "this functional's first-order floor",
+            clamped - _BS8_HI_TRUNCATED_ORACLE,
+        )
+        assert abs(clamped - _BS8_HI_ORACLE) > _BS8_HI_TRUNCATED_FLOOR, (
+            "the truncation has stopped being a term in the answer",
+            clamped - _BS8_HI_ORACLE,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -553,27 +727,51 @@ _PS8 = dict(L=20, reps=30, kind="ps", n_knots=8, n_band=4, width=1e-3, seed=3)
 _PS8_LO_ORACLE = 172.90456267038329
 _PS8_LO_FLOOR = 5.6825e-03
 _PS8_LO_TOL = 6e-2  # 10.6x the first-order floor; the arrow rung misses by 0.525 df
-_PS8_HI_ORACLE = 15.888406216250933
+# There is deliberately no _PS8_HI_ORACLE constant.  One existed, was orphaned
+# when the high-edge pins were dropped, revived by a bracket, and orphaned again
+# when that bracket went.  The value is in the comment block above, where a
+# reader wants it; a module-level constant that nothing reads is not flagged by
+# ruff and reads as a pin that is no longer made.
 
 
 def test_the_dense_clamped_rung_matches_the_certified_low_edge_oracle():
     """At the LOW edge the dense clamped rung is right to 1.27e-04 df.
 
-    Pinned at ``_PS8_LO_TOL`` = 6e-2, which is 10.6x this point's CERTIFIED
-    finite-perturbation floor of 5.6825e-03 df and 8.75x below the 0.525 df the
-    arrow path misses it by.  ``r = 2.192e-02`` here, so the perturbed inverse at least exists and is
-    bounded -- but see the module docstring: that is not a certification, and
-    the rigorous ball radius at this point is 1.5109 df, 266x D.
+    Pinned at ``_PS8_LO_TOL`` = 6e-2, which is 10.6x this point's FIRST-ORDER
+    floor of 5.6825e-03 df and 8.75x below the 0.525 df the arrow path misses it
+    by.  ``r = 2.192e-02`` here, so the perturbed inverse at least exists and is
+    bounded.
 
-    The tolerance was 1e-2, which is 1.8x the floor -- not inverted like the
-    two high-edge pins were, but not a margin either, and an independent
-    re-derivation of ``_PS8_LO_ORACLE`` on another machine moved the point by
-    1.09e-04 df, so the constant itself is only good to a few floor-widths.
+    THAT TOLERANCE IS AN ENGINEERING CHOICE AND IS NOT CERTIFIED, and the
+    distinction is not cosmetic.  It was called a "certified finite-perturbation
+    floor"; it is not one.  The floor is a derivative at the unperturbed ``A``,
+    the only rigorous enclosure this point admits is the one-ulp ball radius of
+    1.5109 df -- 266x D and 25x this tolerance -- and no analysis here bounds
+    the exact edf inside 6e-2 on a build that reassembles these near-singular
+    moments differently.  What supports it is evidence rather than proof, and
+    the evidence is stated so a reader can weigh it: three interpreters have
+    graded this rung against this constant, with errors of 1.27e-04 df here and
+    9.4e-05 df on CI's 3.14 -- CI's 3.12 passed, and its value is not recorded
+    because only failures print theirs; a re-derivation of the oracle by an
+    independent high-precision route moved the point by 1.09e-04 df; and 40
+    random one-ulp draws reached 5.61e-03 df, 1.01x D, so D is very nearly
+    attained rather than an underestimate.  The gap between "6e-2 has never been
+    approached in any grading yet run" and "the exact edf is provably within
+    6e-2" is real, and this file claims only the first.  The tolerance was 1e-2,
+    which is 1.8x the floor -- not inverted like the two high-edge pins were,
+    but not a margin either.
 
     ``_edge`` takes the CHOLESKY branch here -- ``A`` is positive definite at
-    ``lambda = 1.38e-11`` and ``pinv`` would discard 0 of 209 directions -- so
-    unlike the high edge this rung really does evaluate ``tr(A^-1 V_eff)``
-    with no truncation in it.
+    ``lambda = 1.38e-11`` -- but the branch is NOT asserted, because at this
+    edge it does not matter which arm runs.  ``pinv`` would discard 0 of 209
+    directions, so ``P`` is a true inverse and ``tr(P V_eff)`` and
+    ``tr(A^-1 V_eff)`` are the SAME functional; ``dropped == 0`` below is what
+    makes that so, and it is asserted.  This is the load-bearing difference from
+    the high edge, where the two arms answer different quantities and the branch
+    decision sits at 0.26 ulp.  For the record the margin here is larger but not
+    itself certified: ``A``'s smallest eigenvalue is 1.82e-13 against a
+    ``k eps ||A||_2`` backward-error scale of 1.70e-13, a ratio of 1.07, and
+    600 one-ulp draws across three seeds flipped it 0 times.
 
     Measured over 20 sweep points where both paths clamp to one lambda AND the
     exact answer is attainable to 1e-2 df, the clamped rung's error has median
@@ -587,12 +785,8 @@ def test_the_dense_clamped_rung_matches_the_certified_low_edge_oracle():
     V_eff, S = _dense_matrices(grab)
     rung = _clamped(dense, "lo")
     lam, got = rung.lambda0, rung.edf0
-    _, dropped, _ = _truncated_trace(V_eff, S, lam)
+    _, _, dropped, _ = _traces(V_eff, S, lam)
     assert dropped == 0, ("this edge is supposed to be truncation-free", dropped)
-    assert _edge_branch(V_eff, S, lam) == "cholesky", (
-        "cho_factor now refuses this A, so this rung is a truncated trace and not "
-        "the tr(A^-1 V_eff) the oracle certifies"
-    )
     assert _PS8_LO_TOL > 10 * _PS8_LO_FLOOR, "tolerance must clear the first-order floor"
     assert got == pytest.approx(_PS8_LO_ORACLE, abs=_PS8_LO_TOL)
 
@@ -610,13 +804,19 @@ def test_the_arrow_ladder_still_disagrees_with_the_dense_path_at_the_low_edge():
     172.37960656016872 against a dense 172.90468989250675, 0.525 df LOW; on
     CI's 3.12 it is 2.780 df low; on CI's 3.14 it is 172.9870 against 172.9045,
     0.0825 df HIGH.  See the module docstring.
+
+    The two readings are checked to be at ONE lambda first -- see
+    :func:`_same_lambda`.  Without that the disagreement is not evidence about
+    the algorithms at all.
     """
     grab = _band_pair(**_PS8)
     dense, arrow = _both(grab)
     assert arrow is not None
     lam = min(r.lambda0 for r in arrow)
     got = max(r.edf0 for r in arrow if r.lambda0 == lam)
-    reference = _clamped(dense, "lo").edf0
+    rung = _clamped(dense, "lo")
+    _same_lambda(lam, rung.lambda0)
+    reference = rung.edf0
     assert abs(reference - got) > 1e-3, ("the two paths now agree at the low edge", got, reference)
 
 
@@ -629,16 +829,20 @@ def test_the_arrow_ladder_still_disagrees_with_the_dense_path_at_the_low_edge():
     ),
 )
 def test_the_arrow_ladder_matches_the_certified_low_edge_oracle():
-    """The arrow ladder's LOW edge is wrong, and by how much is bracketed above.
+    """The arrow ladder's LOW edge is wrong; its EXISTENCE is paired above.
 
     172.37960656016872 against a certified 172.90456267038329 -- 0.525 df low,
-    92x this point's certified 5.6825e-03 df floor.  Nothing about the moments
+    92x this point's first-order 5.6825e-03 df floor.  Nothing about the moments
     excuses it: both paths receive the same ones and the dense path reads
     172.90468989250675 from them.
 
-    The tolerance is the same certified ``_PS8_LO_TOL`` the dense pin above
-    uses, so that when the arrow path is fixed this xfail flips against a bound
-    that is 10.6x the floor rather than 1.8x it.
+    That 0.525 df is NOT pinned, here or in the paired test, and cannot be: on
+    CI's 3.14 the same fixture reads 0.0825 df HIGH.  What the pair asserts is
+    that a disagreement is still there.
+
+    The tolerance is the same ``_PS8_LO_TOL`` the dense pin above uses -- an
+    engineering choice at 10.6x the first-order floor rather than 1.8x it, not a
+    certification; the reasoning is in that test's docstring.
 
     Over 20 sweep points where both paths clamp to one lambda and the point is
     attainable to 1e-2 df, the arrow error has median 1.17 df and maximum
@@ -653,9 +857,19 @@ def test_the_arrow_ladder_matches_the_certified_low_edge_oracle():
     assert got == pytest.approx(_PS8_LO_ORACLE, abs=_PS8_LO_TOL)
 
 
-def test_the_high_edge_is_not_determined_by_the_assembled_moments():
-    """#257's headline number is BELOW this point's own noise floor.
+def test_the_high_edge_divergence_grades_neither_path():
+    """The two paths disagree at the high edge, and nothing here says which is right.
 
+    NAMED FOR WHAT IT ASSERTS.  This was
+    ``test_the_high_edge_is_not_determined_by_the_assembled_moments``, and that
+    name described the ARGUMENT below rather than the assertion: a
+    ``|dense - arrow| > 1e-3`` check can stay green after the point becomes
+    well-conditioned, and can go red while it stays uncertifiable, so it does not
+    establish non-determinacy.  The argument is still the reason there is nothing
+    better to assert, and it is kept in full for that reason -- but the test now
+    claims only the divergence it checks.
+
+    #257's headline number is BELOW this point's own noise floor.
     The issue reports 11.57 df of arrow-vs-dense divergence at the high edge and
     treats it as a defect.  On this geometry the two paths differ by 3.71 df --
     15.000025261210718 against 18.706953863891897.
@@ -703,18 +917,24 @@ def test_the_high_edge_is_not_determined_by_the_assembled_moments():
     3300x less on a pair whose lambda is just as extreme, which is the evidence
     that extreme lambda is not the sufficient condition.
 
-    WHAT IS ASSERTED is the divergence itself, as a BRACKET, the same shape this
-    file uses everywhere a quantity has no derived bound: 3.0 < |dense - arrow|
-    < 4.5 against a measured 3.7069 df.  It goes red if either path moves at
-    this edge, which is all a test can honestly do here, and it is the form
-    #257's correction takes: the disagreement is real, it is 3.71 df, and
-    nothing certifies which side is right.
+    WHAT IS ASSERTED is only that the two paths still disagree at one lambda,
+    ``|dense - arrow| > 1e-3`` against a measured 3.7069 df.  Not a bracket: an
+    earlier form asserted ``3.0 < |dense - arrow| < 4.5``, and CI refuted
+    magnitude pins on the sibling fixtures by moving them 859x and reversing
+    their sign, so no magnitude is claimed at this edge either.  This assertion
+    catches the paths CONVERGING and nothing else -- it does not catch either
+    one worsening, and it does not say which is right.  Saying which would need
+    a bound at this point, and the paragraphs above are the record that there is
+    not one.
     """
     grab = _band_pair(**_PS8)
     dense, arrow = _both(grab)
     assert arrow is not None
-    d = _clamped(dense, "hi").edf0
-    a = max(r.edf0 for r in arrow if r.lambda0 == max(x.lambda0 for x in arrow))
+    rung = _clamped(dense, "hi")
+    d = rung.edf0
+    lam = max(x.lambda0 for x in arrow)
+    _same_lambda(lam, rung.lambda0)
+    a = max(r.edf0 for r in arrow if r.lambda0 == lam)
     assert abs(d - a) > 1e-3, ("the two paths now agree at the high edge", d, a)
 
 
@@ -730,6 +950,12 @@ def test_the_high_edge_is_not_determined_by_the_assembled_moments():
 _NS6 = dict(L=6, reps=12, kind="ns", n_knots=6, n_band=2, width=1e-1, seed=3)
 _NS6_LO_ORACLE = 30.988667391753435
 _NS6_LO_FLOOR = 8.2863e-05
+# TWO tolerances, not one shared constant.  They happen to want the same number
+# today and they are not the same quantity: one bounds how far the two DENSE
+# estimators may sit apart at a lambda, the other how far the arrow rung may sit
+# from the certified oracle.  Sharing a name means tightening either one
+# silently retargets the other.
+_NS6_PENCIL_TOL = 1e-3  # 12.1x the largest first-order floor the ladder ranges over
 _NS6_LO_TOL = 1e-3  # 12.1x the first-order floor; the arrow rung misses by 30.74 df
 
 
@@ -747,7 +973,7 @@ def test_the_two_dense_estimators_agree_where_the_pencil_is_conditioned():
     a family where it holds rather than asserted everywhere.  It is silent on
     0 of 232 ``ns`` searching rungs and 0 of 120 without a narrow band, and
     fires on 32.8% of the banded ones -- exactly the split LAPACK's error bound
-    for ``?sygv`` predicts, since ``ns``'s penalty is full rank so ``G`` stays
+    for ``?sygvd`` predicts, since ``ns``'s penalty is full rank so ``G`` stays
     conditioned (``cond(G) = 6.41e+02`` here against 5.58e+12 on the ``bs(8)``
     pair above).
 
@@ -770,14 +996,17 @@ def test_the_two_dense_estimators_agree_where_the_pencil_is_conditioned():
     test nor ``test_screening_is_invariant_to_the_units_of_a_numeric_margin``,
     which is a gap this test does not close either.
 
-    The 1e-2 here is 121x this pair's first-order floor, and deliberately loose
-    rather than derived-tight.  The assertion ranges over all five rungs, whose
-    floors span nine orders -- 9.16e-14 df at ``lambda = 74.3`` up to 8.29e-05
-    at ``lambda = 5.9e-12`` -- and it exists to catch 6.361 and 30.033 df
-    mutations, so a bound anywhere between 1e-3 and 1 does the same work.  The
-    observed worst over the ladder is 1.65e-13 df.  What matters is that 1e-2
-    is ABOVE the largest floor it ranges over, which is the property the
-    high-edge tolerances lacked.
+    ``_NS6_PENCIL_TOL`` IS 1e-3, WHICH IS 12.1x THIS PAIR'S LARGEST FIRST-ORDER
+    FLOOR.  This paragraph argued 1e-2 and 121x after the constant had already
+    been tightened by a round of review, so both figures were wrong by an order.
+    The assertion ranges over all five rungs, whose floors span nine orders --
+    9.16e-14 df at ``lambda = 74.3`` up to 8.29e-05 df at ``lambda = 5.9e-12``
+    -- and it exists to catch 6.361 and 30.033 df mutations.  So any bound
+    between the largest floor it ranges over (8.29e-05) and the smallest
+    mutation it must catch (6.361) does the same work: 1e-3 sits 12.1x above the
+    first and 6.4e+03 x below the second.  The observed worst over the ladder is
+    1.65e-13 df.  What matters is that the bound is ABOVE the largest floor it
+    ranges over, which is the property the high-edge tolerances lacked.
     """
     from superglm.screening._score_stat import _edge
 
@@ -788,8 +1017,8 @@ def test_the_two_dense_estimators_agree_where_the_pencil_is_conditioned():
     for r in dense:
         other, _ = _edge(V_eff, S, r.lambda0)
         worst = max(worst, abs(float(other) - r.edf0))
-    assert _NS6_LO_TOL > 10 * _NS6_LO_FLOOR, "tolerance must clear the first-order floor"
-    assert worst < _NS6_LO_TOL, ("dense estimators disagree by", worst)
+    assert _NS6_PENCIL_TOL > 10 * _NS6_LO_FLOOR, "tolerance must clear the first-order floor"
+    assert worst < _NS6_PENCIL_TOL, ("dense estimators disagree by", worst)
 
 
 def test_the_arrow_ladder_still_disagrees_on_a_full_rank_penalty():
@@ -818,7 +1047,9 @@ def test_the_arrow_ladder_still_disagrees_on_a_full_rank_penalty():
     assert arrow is not None
     lam = min(r.lambda0 for r in arrow)
     got = max(r.edf0 for r in arrow if r.lambda0 == lam)
-    reference = _clamped(dense, "lo").edf0
+    rung = _clamped(dense, "lo")
+    _same_lambda(lam, rung.lambda0)
+    reference = rung.edf0
     assert abs(reference - got) > 1e-3, ("the two paths now agree at the low edge", got, reference)
 
 
@@ -832,13 +1063,18 @@ def test_the_arrow_ladder_still_disagrees_on_a_full_rank_penalty():
 def test_the_arrow_ladder_low_edge_survives_a_full_rank_penalty():
     """The arrow path should read this well-posed point, and does not.
 
-    Pinned at ``_NS6_LO_TOL`` = 1e-3, 12.1x the certified 8.2863e-05 df floor,
+    Pinned at ``_NS6_LO_TOL`` = 1e-3, 12.1x the first-order 8.2863e-05 df floor,
     which TIGHTENS the 1e-2 this landed with: the point is determined 121x
     better than that bound admitted, and when the arrow path is fixed this
     xfail should flip against a bound the point can actually support.  The
     dense path already reads it to 1.18e-05 df, inside the new bound by 85x.
+    ``r = 2.819e-04`` here, the smallest of the four points, but the one-ulp
+    ball still REFUSES this one, so 12.1x a derivative is an engineering choice
+    here as everywhere else in this file and not a certification.
 
-    The magnitude of today's failure is bracketed by
+    Today's failure size is NOT pinned, here or anywhere: CI's 3.12 reads the
+    same fixture 0.036 df low against 30.74 df here, an 859x spread.  Its
+    EXISTENCE is paired with
     ``test_the_arrow_ladder_still_disagrees_on_a_full_rank_penalty``.
     """
     _, arrow = _both(_band_pair(**_NS6))
