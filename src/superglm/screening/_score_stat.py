@@ -409,12 +409,14 @@ def _edge(
     200.  Through the public screen the same layout reported 209 on 3 of 12
     seeds, moving ``z`` by +0.050; at 4 df of 5 the same flip moved it by
     +0.29, since ``z`` divides by ``sqrt(2 * edf0)``.
-    :func:`_psd_rank` is the counter, at :func:`_rank_floor` rather than the
-    arrow kernel's own constant: same RULE — count eigenvalues, respect their
-    sign — at a cut each path can justify.  Here that is a raw profiled block
-    on which only round-off is a scale.  The arrow kernel's blocks carry a
-    penalty and need a different instrument again;
-    :func:`superglm.screening._structured.block_ranks` is theirs.
+    :func:`_psd_rank` is the counter, at :func:`_rank_floor`: count
+    eigenvalues, respect their sign, at a cut this path can justify — a raw
+    profiled block on which only round-off is a scale.  This rank is THIS
+    path's alone.  The arrow kernel used to carry one too and no longer does:
+    :mod:`superglm.screening._structured` evaluates the same ``edf`` as a sum
+    of Tikhonov filter factors, which takes no rank decision at all.  Doing
+    the same here would mean simultaneously diagonalizing the dense pencil,
+    which is the cost this rung exists to avoid.
 
     The cut here was a fixed 1e-12 when this counting first landed, then a
     fixed 1e-15; both were wrong and in opposite directions, which is why it

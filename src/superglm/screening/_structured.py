@@ -28,12 +28,42 @@ same pair's blocks are 48 MB.
 The two quantities the ladder needs both read off one such factorization:
 
     T(lambda)   = U_eff' A(lambda)^-1 U_eff
-    edf(lambda) = rank(A) - lambda * tr(A(lambda)^-1 S)
+    edf(lambda) = tr(A(lambda)^-1 V_eff)
 
-the second because ``V_eff = A - lambda S`` identically, which trades a trace
-against a DENSE ``V_eff`` for one against a block-diagonal ``S`` — and a
-block-diagonal ``S`` needs only the diagonal blocks of the inverse, which the
-arrow factorization already has.
+**THE SECOND IS A SUM, NOT A DIFFERENCE, AND THAT IS THE WHOLE POINT.**
+Diagonalize the pencil and ``tr(A^-1 V_eff)`` is ``sum_j a_j / (a_j + lambda
+s_j)`` — one Tikhonov filter factor per direction, every term in ``[0, 1]``,
+bounded and cancellation-free.  That is the standard form for the effective
+degrees of freedom of a regularized fit: Golub, Heath & Wahba,
+*Technometrics* 21:215-223 (1979); Elden, *BIT* 17:134-145 (1977) and 22:487-
+502 (1982); Hansen, Nagy & O'Leary, *Deblurring Images* (SIAM 2006), ch. 6.
+
+This used to be written ``rank(A) - lambda tr(A^-1 S)``, using
+``V_eff = A - lambda S``, which is the same number as a DIFFERENCE of two
+independently thresholded quantities — an integer rank against a trace.  A
+direction the rank counted and the inverse dropped contributed ``1 - 0``: a
+whole degree of freedom with no penalty offset, and no bound on the error
+because the two halves were decided by different cuts.  Roughly 300 lines of
+this module existed to make those two cuts agree; they are gone, and with them
+issues #249, #258, #263's stated mechanism, #265 and #271, all of which are
+statements about a rank that no longer exists.
+
+``V_eff`` is dense, so evaluating the trace against it needs its structure
+rather than the matrix.  Profiling the level contrasts out of each block
+leaves
+
+    V_eff = blockdiag(D_q) - D' Omega D,     D_q = V_q - c_q c_q' / m_q
+
+with ``Omega`` the ``(k_a, k_a)`` spline-main corner of ``Sigma_M^-1``, the
+border Schur complement of the OVERLAP arrow — verified against a dense
+``V - C' M^+ C`` to 4.8e-14 relative.  **``V_eff`` IS NOT BLOCK DIAGONAL**:
+the correction has rank exactly ``k_a`` whatever ``L`` is, but it is not
+small, so anything that treats the levels as separable is missing a
+first-order term.  Both halves contract through the arrow inverse's own
+blocks in O(L): the block-diagonal half against ``diag_blocks()``, and the
+rank-``k_a`` half against ``Y`` and ``Sinv``, since
+``[A^-1]_qq' = delta_qq' Ginv_q + Y_q Sinv Y_q''`` is all the off-diagonal
+structure there is.
 
 This path is entered only where the dense path is refused, so no production
 pair is ever scored twice and nothing at runtime cross-checks the two.  What
@@ -43,88 +73,177 @@ bit-for-bit equality: away from the bracket the two agree to round-off, at
 the edges they agree to the tolerances measured there.
 
 **KNOWN DIVERGENCE, NOT CLOSED.**  That parity is measured on the fixtures the
-suite carries and does not generalize.  On a ``ps(8)`` pair with 20 levels, 30
-rows in every level, unit weights and four levels squeezed into a narrow band
-of the covariate, ``|arrow - dense|`` at the ladder's high edge reaches
-11.57 df — 0.62 RELATIVE, against the 1e-5 relative the suite's parity test
-pins where both paths can score.  Neither path is reliably the better one
-there either: at a width of 3e-4 the arrow value sits 6.93 df above the dense
-one and at 5e-4 it sits 4.89 df below it.
+suite carries and does not generalize; on narrow-band geometries the two paths
+part by whole degrees of freedom at the ladder's high edge, and neither is
+reliably the better one.  This change does not close that class — it moves the
+arrow side of it and the measurements below say by how much and in which
+direction.  Parity is therefore no longer the top-level evidence: every claim
+here is against a high-precision oracle on the delivered moments, which can
+arbitrate where parity cannot.
 
-**WHAT THE REACH-AWARE COUNT IS WORTH, MEASURED WIDE RATHER THAN ON ONE
-GEOMETRY.**  Against a 50-digit oracle evaluated at each path's own lambda,
-over 6 levels x 12 rows at unit weight with two levels squeezed into a band of
-``x`` of 16 widths from 1e-1 to 1e-6, at 3, 4, 6 and 8 knots in all five bases
-this library assembles (``ps``, ``cr``, ``bs``, cardinal ``cr``, ``ns``): of
-312 well-posed points the reach-aware count in :func:`block_ranks` is nearer
-the oracle at the high edge on 86, farther on 12 and unchanged on 214, and the
-worst error it INTRODUCES anywhere is 1.0 df.  Well posed excludes the 8 of
-those 320 where this path refuses at the bracket's high edge, and 2 of the 8
-refuse only HERE: at ``bs(6)`` width 1e-5 and ``bs(8)`` width 2.15e-4 the
-reach-aware count is one rank lower than the one it replaces, the penalty
-trace it is subtracted from is bit-identical, and the difference puts the edf
-0.18 and 0.34 df BELOW zero — past round-off, so
-:class:`_UnstableStructuredEDFError` declines a value that was returned before
-(0.824 and 0.664 df).  Nothing moved the other way.  That refusal is the
-bracket's own EDGE rather than a budget bisecting inside it, and it is
-user-visible on one of the two: at ``bs(8)``/2.15e-4 a four-budget
-:func:`structured_ladder` goes from a malformed single rung of 16.0 df to
-``None``.  On the narrower family the residue floor governs — a two-column
-``cr`` margin over 24 seeds x 4 level layouts, 96 points — it is nearer on
-29, farther on 16 and unchanged on 51, and the worst error introduced is
-2.0 df.  The class is narrowed and NOT closed.
+**WHAT THE FILTER-FACTOR FORM IS WORTH, MEASURED.**  Against an mpmath oracle
+on each pair's DELIVERED float moments — the pencil simultaneously diagonalized
+once and every lambda read off the filter factors, evaluated at 50 and 70
+digits and identical to every digit quoted below at both — over 22 pairs at the
+bracket's low edge, mid-bracket and high edge.  The pairs are ``ps``/``cr``/
+``bs``/``ns`` margins at 5 to 10 knots, ``L`` from 5 to 39, 3 to 40 rows per
+level, unit and 1e-12 weights, narrow-band and not, plus a real
+``freMTPL2freq`` pair.  Of the 57 points where both forms return a value the
+new one is nearer on 32, farther on 23 and identical on 2, and the worst error
+anywhere falls from 53.08 df to 22.01 df.
 
-**THE LOW EDGE IS ALMOST, BUT NOT ENTIRELY, UNTOUCHED.**  Over those same 320
-points the arrow value at the ladder's LOW edge moved on 2, and moved AWAY
-from the oracle on both — ``cr`` at 8 knots, band widths 2.15e-6 and 1e-6,
-error 2.149 -> 3.149 df and 1.277 -> 2.277 df.  It is bit-identical on the
-other 318, on all 96 of the two-column ``cr`` points, and on every fixture
-this suite carries.
+That summary hides the shape, so the shape is stated by edge:
 
-On the ``ps(8)`` pair of the first paragraph, walked across eleven band widths
-from 1e-1 to 1e-4, the level ranks counted here still disagree with what
-:func:`superglm.screening._arrow._psd_pinv` keeps, by up to +3 at the high
-edge and on 6 of those 11 widths (9 of 11 before the reach-aware count).  The
-invariant :func:`block_ranks` is written to satisfy — count what the inverse
-resolves, no more — is improved, not achieved.
+* **LOW edge**, which is where the largest budgets clamp: nearer on 15 of 19.
+  On a 19-level ``ps(8)`` pair 3.998 -> 0.0068 df, 588x; on 5-level ``ps``/
+  ``cr`` pairs 4.235 -> 0.700, 3.100 -> 0.747, 3.114 -> 0.695, 1.092 -> 0.754.
+  On the starved family below, nearer on 9 of 9, worst 44.39 -> 22.01 df.
+* **HIGH edge**: nearer on 8 of 18.  On the wide two-column pairs this kernel
+  exists for, 2.34e-04 -> 1.63e-05 df (14x) and 6.07e-05 -> 2.64e-05.  Farther
+  on the 5-level narrow-band pairs, worst 1.000 -> 2.000 df.
+* **MID-bracket**: FARTHER on 9 of 10 well-posed pairs, 1.1e-09 -> 1.1e-05 df.
+  That is the price of the one subtraction this form still carries — the
+  block-diagonal half of ``V_eff`` against its rank-``k_a`` correction — and on
+  the WELL-POSED family it is five orders below the errors it removes.  It is
+  not five orders below them everywhere; see the tail below.
 
-**THAT +3 IS ONE GEOMETRY'S NUMBER AND NOT A BOUND**, so the measured range is
-stated instead.  Over 192 further pipeline configurations (``ps``/``cr``/
-``bs``/``ns`` at 3 to 8 knots, ``L`` in 6 to 20, 3 to 30 rows per level, with
-and without a narrow band, two seeds, two widths) the worst HIGH-edge
-disagreement is also +3; on the four wide pairs of the shape this kernel
-exists for it is +10, +9, +9 and +9 at the lambda each clamps to; and at the
-LOW edge, on pairs carrying levels with fewer distinct covariate values than
-the margin has columns, it reaches +63.
+On 8 of the 66 points the new value lands outside ``[0, L k_a]`` and is refused
+where the old form PUBLISHED numbers wrong by 0.998 to 53.08 df; on one the old
+form refused and the new one returns a value 2.23 df from the oracle.
 
-A NONZERO DISAGREEMENT IS NOT BY ITSELF AN EDF ERROR, and on the wide pairs
-the disagreeing count is the accurate one.  ``block_ranks`` enters ``edf``
-only through ``rank_term``, so ``edf`` counted here and ``edf`` counted from
-the inverse's own keep differ by exactly that disagreement.  Against a
-40-digit oracle for ``tr((V_eff + lambda S)^-1 V_eff)`` on the delivered
-moments (108.996797 / 108.998928 / 107.999757 / 109.000276) the four wide
-pairs come back at 108.985705 / 108.997280 / 108.005895 / 109.001261 — inside
-0.012 df — while adopting the inverse's own count would put them 9 to 10 df
-low.  The low-edge disagreement is a different, PRE-EXISTING defect: it is the
-unconditional contrast term ``np.where(p.m > 0.0, 1, 0)`` counting a dimension
-the pair does not have, ``rank(M)`` counts it too so it does not cancel, and
-``origin/master`` reproduces it identically.  It is not this branch's to fix
-and is tracked separately.
+**THE ADVERSARIAL TAIL, MEASURED SEPARATELY AND PARTLY AGAINST THIS CHANGE.**
+The 22-pair sample above is a cross-section; it is not the worst case, and
+three of its lines read better than the truth because of which pairs it holds.
+A second, deliberately hostile sample — 12 pairs, all narrow-band ``cr(3)``,
+nullity-two ``ps(5, m=3)`` and starved ``ps(8)``/``cr(5)`` geometries — was
+measured at the same three bracket points against ARB BALL ARITHMETIC
+(python-flint) on each pair's exact design at 320 AND 640 bits, agreeing to
+every digit reported and returning balls of radius 1e-137 or smaller.  On those
+36 points **the two forms split 18/18**.  What the new one buys is the tail:
+the worst error anywhere falls 7.995 -> 3.108 df (2.6x), and per edge
 
-The ladder's edf is also not monotone in lambda on that same pair, and that
-predates any of this: walking 81 lambdas across the bracket, the arrow edf
-INCREASES at 14 of the 80 steps, by as much as 47.36 df, identically before
-and after the reach-aware count.  A budget inside the bracket bisects rather
-than clamps, so lowering ``edf_hi`` converts clamped rungs into searching
-ones and a search can land on a step it cannot attain — the pair then comes
-back as a NaN row instead of four scored rungs.  The defect is reached by
-that change, not caused by it.
+* LOW: nearer on 5 of 12; worst 7.995 -> 2.746 df.  The starved ``ps(8)``
+  8-levels-by-3-rows pair goes 7.995 -> 0.401 (19.9x) — that is the case this
+  form exists for.  Against it, ``cr(3)`` at band 1e-4 goes 5.4e-04 -> 0.911
+  and ``cr(5)`` starved goes 2.5e-04 -> 0.148.
+* MID: nearer on 5 of 12, and **FARTHER ON ALL SEVEN NARROW-BAND PAIRS**, by
+  up to 0.513 df (``cr(3)``, band 1e-4, 2.1e-08 -> 0.513) and 0.170 df (band
+  1e-4 at ``L = 5``).  The "1.1e-09 -> 1.1e-05" line above is the well-posed
+  family only and must not be read as the mid-bracket cost in general.
+* HIGH: nearer on 8 of 12; worst 5.410 -> 3.108 df.  **The published high-edge
+  value REGRESSES by up to +2.017 df** (``cr(3)``, band 2e-3, 1.7e-03 ->
+  2.019) and by +0.232 df on nullity-two ``ps(5, m=3)``.  Against that it goes
+  1.753 -> 0.053, 2.156 -> 0.456, 5.410 -> 3.108 and 0.708 -> 0.0026 elsewhere
+  on the same sample.
+
+The same regression is visible on the suite's own ``_thin_level_pair`` at both
+edges: the high edge goes 2.15e-05 -> 3.90e-05 at unit weight and 6.11e-06 ->
+1.20e-04 at 0.01 (19.6x), improving only at 0.001 (1.31e-03 -> 5.60e-04); the
+LOW edge goes 6.97e-09 -> 3.96e-11 at unit weight (175x nearer) and **2.69e-09
+-> 1.29e-07 at 0.001, 47.8x FARTHER**.  All six are inside the derived bounds
+that fixture asserts, which is why they are disclosure and not a defect, and
+all six are stated in
+``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom``.
+
+**THE ZERO-PENALTY RUNG STOPS BEING AN INTEGER, DELIBERATELY.**  Where ``S_a``
+is absent or identically zero the ladder publishes one rung at ``lambda = 0``.
+The old form returned ``rank(A)`` there, so that rung was an integer by
+construction; ``tr(A^-1 V_eff)`` is ``tr(V_eff^+ V_eff)``, which IS
+``rank(V_eff)`` in exact arithmetic but is whatever the inverse resolves in
+float64.  THE INTEGER WAS NEVER THE ACCURACY: against the dense path's own
+counted rank over twelve near-rank fixtures the old integer disagreed by up to
+3.000 df and this disagrees by at most 0.9965, nearer on 6 and farther on 4,
+both exact on the two well-posed ones (1.7e-12 and 7.2e-11).  Restoring an
+integer would restore the larger disagreement.  Rank is simply not well defined
+on these geometries: on one ``cr(3)`` pair the dense path counts 9,
+``numpy.linalg.matrix_rank`` on the residualized design counts 10, and the old
+arrow form counted 6.  On a nullity-two pair the ``lambda = 0`` value is only
+determined to 1.98e-02 under exact relabeling, so it is not pinnable tighter
+than two decimals by any implementation.
+
+**WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
+leaves ``edf`` unchanged in exact arithmetic and changes only the order of
+every reduction — which is what a different BLAS kernel or thread count does.
+Over 40 such relabelings of ``_thin_level_pair`` the OLD form's HIGH-edge value
+spreads 1.54e-04, 6.30e-04 and 3.07e-03 df across the three weights; the last
+is LARGER than the 3e-3 parity bound the suite asserts there, so that assertion
+was sitting on its own noise floor and would have gone red on a machine that
+reduced in a different order.  This form spreads 1.44e-12, 1.29e-12 and
+8.24e-13.  Its low-edge spread moves the other way, 0.0 -> 2.8e-09, which is
+3600x inside the bound asserted there.
+
+**WHAT IT IS NOT WORTH: MONOTONICITY.**  ``edf`` is decreasing in lambda for a
+DEFINITE pencil (Kaufman & Rosset, *Biometrika* 101:771-784, 2014); this one is
+not always definite, and evaluating the right identity does not make it so.
+Walking 81 lambdas across the bracket of issue #263's own geometry — ``ps(8)``,
+20 levels, 30 rows each, four squeezed into a narrow band — at band width 1e-3
+the old form increases at 12 of the 80 steps with a worst increase of +6.17 df
+and the new one at 4 of 80 with +0.75; at width 1e-4, 19 of 80 with +70.78
+against 16 of 80 with +37.89.  On the vanishing-mass pairs both sit at 1 to 2
+of 80 and every increase is +0.0000.  On a nullity-2 ``m = 3`` family the old
+form increases at 30 of 76 with +7.56 and refuses 2 points; the new one at 35
+of 80 with +1.36 and refuses none.  So the worst increase falls 1.9x to 8.3x
+and the refusals go, but the COUNT does not improve.  **#263 is reduced and NOT
+closed**, and a bisection over this curve can still land on a step it cannot
+attain.  Monotonicity would follow from delivering NONNEGATIVE per-direction
+shares, which this route does not.
+
+**WHERE THE ARITHMETIC IS BEYOND EVERY FORM.**  Give a pair 8 levels with 3
+rows in each against an eleven-column margin and the overlap arrow's border
+Schur complement is nearly singular; its inverse then runs to 1e+10-1e+12 and
+every organization of this quantity loses eleven digits.  The three traces the
+old form summed measure 6.7e+10, -1.3e+11 and 6.7e+10 against an answer of 8.1.
+Both forms are wrong there — the old by up to 53.08 df, the new by up to
+22.01 — and what the new one buys is that its worst cases leave ``[0, L k_a]``
+and are refused instead of published.  That is a defect in the FACTORIZATION's
+border cut rather than in the edf form, and it is not fixed here.
+
+**HOW FAR BEYOND: ONE ULP OF LAMBDA DECIDES IT.**  On a 7-level ``bs(10)``
+pair with 3 rows per level, ``local`` and ``border`` both measure 9.654e+07 at
+the ladder's high edge and their difference is ``-13.61``.  Move lambda by a
+SINGLE ulp — 594.8079378729931 against ...32, which is just the difference
+between ``1e10 * a / b`` and ``1e10 * (a / b)`` — and the same evaluation
+returns ``edf = 0.8229`` instead.  ``edf`` is not a continuous function of
+lambda at float64 resolution on this family, so no bound on the VALUE is
+available there and none is claimed; the guard is what carries it, and
+``structured_ladder`` refuses the pair on either side of that ulp.
+``tests/test_structured_screening.py`` pins that refusal on this geometry.
+
+**WHAT A DROPPED DIRECTION COSTS NOW.**  The inverse's relative cut still
+drops directions, and where one carries a filter factor near 1 the answer
+loses it.  ``_mixed_rank_cells`` in the suite is built to sit exactly there —
+its only ``V_eff`` direction is ``1e-16`` RELATIVE to its own level block,
+under ``_solve_floor``'s ``3 eps`` — and a 50-digit oracle puts ``edf`` at
+1.000000 / 0.500000 / 0.000000 across the bracket where this reads
+0.0 / 0.0 / 0.0.  The form it replaces got that fixture's low edge right by
+counting the direction against the PENALTY's scale rather than the block's,
+which is the same mismatch that cost whole degrees of freedom elsewhere.  The
+published row is unchanged: ``screen_interactions`` skips a rung with
+``edf0 <= 0``, so the pair takes the same NaN row the old refusal produced.
 
 The dense path carries its own version of the same failure and it is not
 touched here: on one of four wide pairs of the shape this kernel exists for
 it reports 1.03 df BELOW a high-precision oracle at the high edge, where
 ``numpy.linalg.pinv``'s inherited default ``rcond`` drops a direction the
 penalty leaves free.
+
+**WHAT THIS SETTLES AND WHAT IT DOES NOT.**  #249, #258, #265 and #271 are all
+statements about ``block_ranks`` -- an unconditional contrast term, a
+disagreement with what the inverse resolves, a global-versus-per-block
+reference scale, and that disagreement turning out to be two-signed.  There is
+no rank here to make any of those statements about, so they go with it; #271
+in particular asked whether the invariant was one-signed, and an invariant
+between a count and an inverse cannot be violated in either direction once
+there is no count.  #263 is REDUCED, NOT closed, with the numbers above.
+#262's three geometries were re-measured on both forms: at ``bs(6)``/1e-5 the
+old form refuses at the high edge and the whole ladder returns ``None``, while
+this one returns 3.0003 and one rung -- that refusal is lifted; at
+``cr(4)``/4.64e-5 both publish one rung, 2.5336 against 3.0038; but at
+``bs(8)``/2.15e-4 the old form publishes three rungs (3.0, 8.0, 16.0) and this
+one publishes one, because its lower high edge (3.0001 against 3.0000, with a
+low edge of 28.24 against 35.22) leaves two budgets bisecting over the
+non-monotone curve #263 describes, and they fail.  So #262 moves in both
+directions and stays open.
 """
 
 from __future__ import annotations
@@ -135,15 +254,8 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.screening._arrow import _RCOND, _solve_floor, factor_arrow
+from superglm.screening._arrow import factor_arrow
 from superglm.screening._score_stat import ScreenedPair
-
-# What to believe about an assembled ``S_a``'s residue in a direction its own
-# eigendecomposition reports as an EXACT zero -- and only then, since a small
-# nonzero residue is a measurement and this is not.  One round-off unit on the
-# penalty's largest eigenvalue.  The regime, the evidence that it is real, and
-# the error this carries are all in :func:`block_ranks`.
-_PENALTY_RESIDUE_FLOOR = float(np.finfo(np.float64).eps)
 
 _EDF_TOL = 1e-6
 _EDF_ROUNDOFF_FACTOR = 64.0
@@ -162,7 +274,7 @@ _MAX_STEPS_PER_RUNG = min(_MAX_BISECT, 46)
 
 
 class _UnstableStructuredEDFError(FloatingPointError):
-    """The arrow rank and inverse disagree by more than numerical dust."""
+    """A filter-factor sum came back outside ``[0, k]``, so it is not one."""
 
 
 def _edf_roundoff(*values: float) -> float:
@@ -565,259 +677,43 @@ def _unpenalized_blocks(p: SplineCatPair) -> NDArray:
 
 
 @dataclass(frozen=True)
-class _RankGeometry:
-    """:func:`block_ranks` with the ``lambda`` divided out of it.
+class _PairGeometry:
+    """Everything the ladder needs that does NOT depend on ``lambda``.
 
-    The free set is the SAME at every positive ``lambda``: both sides of
-    ``reach <= _solve_floor(k_a + 1) * top`` carry one factor of it, so it
-    cancels.  Everything the mask then selects is ``lambda``-free too — the
-    projection ``N``, the Schur complement, and the batched eigendecomposition
-    of it, which is the expensive part.  Only the threshold moves, and it moves
-    by a scalar, so a rung reached by bisection can rescale rather than rebuild.
+    ``V_eff`` is dense, but it is a rank-``k_a`` downdate of a block-diagonal
+    matrix and both pieces are level-local::
 
-    ``unit_top`` and ``unit_residue`` are the two thresholds at ``lambda = 1``;
-    at any other they are ``lam`` times these.  They are held apart from the
-    eigenvalues for exactly that reason.
+        V_eff = blockdiag(D_q) - D' Omega D,     D_q = V_q - c_q c_q' / m_q
+
+    ``D_q`` is level q's own curvature after its own contrast has absorbed what
+    it can; ``Omega`` is the spline-main corner of ``Sigma_M^-1``, the border
+    Schur complement of the OVERLAP arrow, and it is what couples the levels.
+    Both come out of the one ``M`` factorization :func:`_profile` already
+    builds for ``U_eff``, so this costs nothing beyond the ``(L, k_a, k_a)``
+    array itself -- linear in ``L``, like everything else here.
+
+    ``ceiling`` is ``L * k_a``: the number of Tikhonov filter factors summed,
+    each in ``[0, 1]``, hence an exact bound on ``edf`` that takes no rank
+    decision.  **A TIGHTER BOUND WAS TRIED AND IS NOT SAFE.**  ``rank(V_eff)``
+    is the mathematically right ceiling and is 10 to 65 df tighter here, but
+    every way of computing it in O(L) is a numerical rank, and a numerical rank
+    that comes out LOW refuses true values: counted by Guttman additivity off
+    the unpenalized arrow -- ``rank(K(0)) - rank(M)`` -- it reads 12 on a
+    7-level ``cr(5)`` pair with 3 rows per level whose certified ``edf`` at the
+    ladder's low edge is 17.618, and 36 against a certified rank of 45 on a
+    5-level ``ps(8)`` pair.  Evaluating this module's own ``edf`` at
+    ``lambda = 0`` is no better: 30.014 on a pair whose low-edge ``edf`` is
+    30.072, so it refuses that pair's own bracket.  The loose bound that cannot
+    lie is preferred to the tight one that can.
     """
 
-    ranks: NDArray  # (L,)  contrast + the directions the penalty reaches
-    curvature_eigs: NDArray  # (L, d) ascending, the free block's own spectrum
-    dust: NDArray  # (L,)  ``_RCOND`` on the level's raw moments
-    unit_top: float
-    unit_residue: float
-    any_free: bool
+    U_eff: NDArray  # (L, k_a)      the profiled score
+    D: NDArray  # (L, k_a, k_a) per-level curvature, own contrast absorbed
+    Omega: NDArray  # (k_a, k_a)    what couples the levels through V_eff
+    ceiling: float  # L * k_a
 
 
-def _rank_geometry(p: SplineCatPair, all_free: bool = False) -> _RankGeometry:
-    """Build the ``lambda``-free half of :func:`block_ranks` once.
-
-    ``all_free`` is the zero-``lambda`` reading, where no direction is reached
-    at all and the count is the unpenalized block's own rank.  It is a separate
-    argument rather than a ``lambda`` of 0 flowing through the comparison
-    because the two give different masks and only one of them can be cached.
-    """
-    _, k_a = p.dims
-    S_a = 0.5 * (p.S_a + p.S_a.T)
-    sigma, directions = np.linalg.eigh(S_a)
-    unit_reach = np.abs(sigma)
-    unit_top = float(unit_reach.max()) if unit_reach.size else 0.0
-    free = (
-        np.ones(unit_reach.shape, dtype=bool)
-        if all_free
-        else unit_reach <= _solve_floor(k_a + 1) * unit_top
-    )
-    ranks = np.where(p.m > 0.0, 1, 0) + int(np.count_nonzero(~free))
-    if not free.any():
-        empty = np.zeros((p.dims[0], 0), dtype=np.float64)
-        return _RankGeometry(ranks, empty, empty, unit_top, 0.0, False)
-
-    N = directions[:, free]
-    mass = np.where(p.m > 0.0, p.m, 1.0)
-    projected = p.c @ N
-    curvature = np.einsum("ip,lij,jq->lpq", N, p.V, N, optimize=True)
-    curvature -= (projected[:, :, None] * projected[:, None, :]) / mass[:, None, None]
-    curvature = 0.5 * (curvature + np.swapaxes(curvature, -1, -2))
-    return _RankGeometry(
-        ranks,
-        np.linalg.eigvalsh(curvature),
-        _RCOND * (np.einsum("lpp->l", p.V) + p.m),
-        unit_top,
-        float(unit_reach[free].max()),
-        True,
-    )
-
-
-def block_ranks(p: SplineCatPair, lam: float, geometry: _RankGeometry | None = None) -> NDArray:
-    """Every level block's rank, counted to AGREE with the inverse at ``lam``.
-
-    ``edf`` is ``rank(A) - lambda tr(A^-1 S)`` and the two halves have to be
-    counted against each other: a direction the rank COUNTS and the inverse
-    DROPS contributes ``1 - 0``, a whole degree of freedom with no penalty
-    offset.  ``_solve_floor`` in :mod:`superglm.screening._arrow` states the
-    inverse's side of that bargain; this is the rank's.
-
-    The penalty splits the block.  Where ``S_a`` has a genuine eigenvalue the
-    inverse normally resolves that direction and ``tr(A^-1 S)`` subtracts the
-    right share back, so it is counted — as is the level's own contrast, which
-    cancels against ``rank(M)``.
-
-    NORMALLY, NOT ALWAYS, and the exception is named rather than assumed away.
-    An earlier form of this paragraph claimed ``lambda sigma_j`` was above the
-    inverse's own resolution EVERYWHERE the ladder brackets; it is not, and the
-    counterexample is a level carrying fewer distinct covariate values than the
-    margin has columns.  On ``Categorical() x Spline(kind="ps", n_knots=5)``,
-    8 categorical levels — 7 level blocks after treatment coding — 3 rows in
-    each, 4 of them inside a 1e-3 band of ``x``, unit weights,
-    ``default_rng(3)``, at the ladder's LOW edge:
-    ``lambda min|sigma_genuine|`` is ``4.14e-15`` against
-    :func:`~superglm.screening._arrow._psd_pinv`'s own cut of ``6.28e-15`` to
-    ``7.89e-15`` on the blocks it inverts — BELOW it on all seven levels, and
-    the two counts part, 63 here against 56 there.  Populate the same margin
-    properly (``ps(8)``, 20 levels, 30 rows each) and the claim holds as
-    written: ``2.69e-13`` against cuts of ``8.02e-14`` to ``1.09e-13``.  The
-    low-edge disagreement is not this function's to fix — it is driven by the
-    unconditional contrast term below, ``rank(M)`` counts the same dimension,
-    and ``origin/master`` produces it identically — but it is not covered by
-    the guarantee this paragraph used to state, so the guarantee is withdrawn.
-
-    What is left is ``null(S_a)``, and there the RANK is the whole answer,
-    because at the ladder's high edge the block's largest eigenvalue is
-    ``lambda sigma_max`` and a free direction sits below the relative cut of
-    any inverse.  Its exact contribution is ``v / (v + lambda s)``, so it is
-    counted when the level's own curvature beats the penalty still reaching
-    it and dropped when it does not.  ``v`` is the block's own Schur
-    complement ``V_q - c_q c_q' / m_q`` — the level's curvature after its own
-    contrast has absorbed what it can, which is what the pair's rank turns
-    on, and the only place a level's SHARE OF THE WEIGHT enters.
-
-    Scaling each block by its own trace, which is how this was counted
-    before, divides that share out by construction.  Measured on
-    ``_vanishing_mass_pair(1e-12)``: a level holding 6.2e-14 of the weight
-    (free curvature 1.7e-12) and one holding 6.2e-02 of it (free curvature
-    2.1e+00) present balanced free eigenvalues of 5.51e-03 and 5.67e-03 —
-    indistinguishable, with twelve orders between them in the quantity that
-    decides.  Three such levels bought that pair three degrees of freedom it
-    did not have.
-
-    ``reach[free].max()`` IS A SCALAR ON PURPOSE, AND IT IS DECISIVE ONLY
-    ABOVE NULLITY ONE.  Where the free subspace has more than one dimension
-    the free reaches differ, and the whole subspace is still judged against
-    the LARGEST of them rather than each direction against its own.  That is
-    not a coarsening of a finer rule available for free — it is the matching
-    half of the bargain at the top of this docstring.  ``_psd_pinv``'s cut is
-    likewise ONE number per block, relative to that block's own largest
-    eigenvalue, so a per-direction refinement of the rank's side refines
-    against a reference the inverse does not share, and every direction it
-    adds arrives as ``1 - 0``.  Measured on
-    ``Categorical() x Spline(kind="ps", k=5, degree=3, m=3)`` — ``k_a = 4``,
-    nullity 2 — 6 levels, 12 rows in each, two inside a 1e-3 band, over seeds
-    0 to 39 at the ladder's high edge: the arrow inverse resolves 23
-    directions on every one of the 40, this rule counts 23 or 24, and a
-    per-direction rule (each free direction against the reach it carries,
-    i.e. the generalized eigenvalues of ``(curvature_q, diag(reach_free))``
-    above one) counts 24 on all 40 — above what the inverse resolves
-    everywhere.  It disagrees with this rule on 15 of the 40, always by
-    exactly +1.000000 df, and against a 50-digit oracle for
-    ``tr((V_eff + lambda S)^-1 V_eff)`` (cross-checked at 90 digits) it is
-    nearer on 7 of those 15 and farther on 8 — but the split is not luck:
-    on the 5 draws where this rule is already within 0.5 df of the oracle it
-    is farther on 5 of 5, turning 0.059 df of error into 1.059.  Its wins are
-    a fixed +1 partially cancelling the route's OWN error, which on that
-    narrow-band family runs to 8.00 df at the high edge.  Nullity above one is
-    reached by no shipped default — measured on the centered ``S_a`` this
-    receives, nullity is ``m - 1`` for ``ps`` (0, 1, 2, 3 at ``m`` = 1 to 4)
-    and for ``bs`` (``m = 4`` refused, order > degree), but ``cr`` stops at 1
-    (``m = 3`` still gives 1, ``m = 4`` refused) and ``ns`` is 0 until
-    ``m = 4`` — so at the default ``m = 2`` every one of the four is nullity 1
-    or 0 and this collapse is a no-op.  The choice is pinned by
-    ``test_a_multi_null_penalty_is_ranked_against_one_reach_not_per_direction``,
-    which had to reach for ``m = 3`` to test it at all.
-
-    ``s`` IS THE EIGENSOLVER'S OWN ANSWER, WHATEVER ITS SIGN.  A spline
-    penalty's null space is null in exact arithmetic and round-off in float,
-    and how much round-off depends on the DATA as well as on the basis, so the
-    geometry has to be named with the number.  On 6 levels, 12 rows in every
-    level, unit weights and ``x`` uniform on [0.05, 0.95] from
-    ``default_rng(3)``, scored as ``Categorical() x Spline(kind, n_knots=k)``,
-    ``|sigma_min| / sigma_max`` comes out at 0.0100, 0.0391, 0.0486, 0.0512,
-    0.0567, 0.0847, 0.0887, 0.1474, 0.2076, 0.2159, 0.4337 and 0.6157 times
-    ``eps`` over the twelve ``ps``/``cr``/``bs`` margins at 3, 4, 6 and 8
-    knots, with the sign varying between them (``ns`` is full rank at all four
-    and has no free direction at all).  Read that as a tenth of a round-off
-    unit to a whole one rather than as a bound: the same twelve margins drawn
-    from ``default_rng(11)`` instead measure 0.0547 to 0.3340 eps, and the
-    margin that is smallest on one draw is not the smallest on the other.
-    Spelling the knot count ``k=``
-    is a different experiment — ``ps`` and ``bs`` reject ``k=3`` and ``k=4``
-    outright, needing 5 at degree 3, so only eight of those twelve margins
-    exist, and ``cr(k=3)``, the two-column margin, lands in the exact-zero
-    regime below rather than resolving anything.
-
-    Round-off is therefore what the reach IS here, and ``np.abs`` is taken
-    before anything else: clamping a negative residue up to zero would report
-    no residue at all and substitute the floor for one the eigensolver DID
-    resolve.  Measured on the ``cr(n_knots=3)`` family
-    tests/test_structured_screening.py draws, replacing ``np.abs(sigma)`` with
-    ``np.maximum(sigma, 0.0)`` is invisible on the seeds whose residue happens
-    to come out positive and costs exactly 1.000000 df on four of the twelve
-    scanned — the seeds where the sign is negative AND a level's curvature
-    sits between the residue and the floor.  The same round-off decides which
-    directions are free at all: ``_solve_floor``, the inverse's own cut, is
-    ``(k_a + 1) eps`` of the largest reach, which is 13x the residue at the
-    margin where the two come closest (``bs`` at 4 knots) and 797x it where
-    they are farthest (``ps`` at 4 knots), so the split is not close.
-
-    :data:`_PENALTY_RESIDUE_FLOOR` replaces that reach in ONE case: where the
-    eigensolver returned an EXACT zero for every free direction.  ``reach`` is
-    already an absolute value, so ``reach[free].max() == 0.0`` is exactly that
-    case and no tolerance is involved — deliberately, because a residue merely
-    SMALL is still a measurement and overriding it is what drops real degrees
-    of freedom.  Measured against an exact-rational oracle (agreeing with
-    80-digit mpmath to nine decimals) on a ``cr(3)`` pair, 6 levels, 12 rows
-    in every one, unit weights, two levels inside a 2e-3 band of ``x``: an
-    unconditional floor cost exactly 1.000000 df on three of eight seeds, one
-    of them a 435x accuracy regression (0.0023 df of error becoming 1.0023),
-    on directions whose exact shares were 0.946, 1.000 and 1.000.
-
-    The exact-zero regime is REAL and is not exotic.  A two-column spline
-    margin carries a rank-one penalty, and ``eigh`` returned an exact 0.0 for
-    its residue on 52 of 192 ``cr(k=3) x Categorical`` fixtures scanned,
-    while exact rational arithmetic on the same float matrix put that residue
-    at ``0.0012`` to ``0.1773 eps`` times ``sigma_max`` — nonzero every time.
-    Believing the zero costs whole degrees of freedom: of four wide pairs of
-    the shape this kernel exists for (hundreds of levels, a two-column
-    margin), three report an exact zero, and with the floor removed they come
-    back at 114.00 / 113.01 / 114.00 against a high-precision oracle's
-    109.00 / 108.00 / 109.00 — five each.  The fourth, whose residue the
-    eigensolver DOES resolve at 8.7e-19 of ``sigma_max``, never reads the
-    floor and is unmoved either way.
-
-    THE FLOOR IS A BOUNDED-ERROR CONVENTION, NOT AN UNDECIDABLE CASE, and the
-    band is stated rather than hidden.  ``1 eps`` over-states every residue
-    measured above by 5.6x to 830x, so a direction whose curvature sits just
-    under the floor is dropped although the exact share it carries is close to
-    one: over those 52 fixtures the largest exact share actually discarded was
-    ``0.9910``.  Inflating the floor is worse in the same currency: eleven
-    directions over those same fixtures fall in the ``(1, 3] eps`` band, their
-    exact shares run from ``0.9641`` to ``0.9954``, and a 3x floor discards
-    all eleven.  A RANGE over a stated number of directions is what that scan
-    supports; an earlier form of this sentence claimed ``0.9942`` as a lower
-    bound on them, which was the artefact of a max taken over per-fixture
-    MINIMA — an upper bound on the minimum, the opposite of what was wanted.
-    Both sides of the constant are pinned in
-    tests/test_structured_screening.py rather than left free.
-
-    The second floor is the one this always had.  ``_RCOND`` times the block's
-    own trace keeps a direction whose curvature is round-off of the level's
-    raw moments out of the count at the LOW edge, where the reach is
-    negligible and the Schur complement above is a cancelling difference.
-    """
-    lam = float(lam)
-    # A zero lambda frees EVERY direction rather than the ones the spectrum
-    # picks out -- the unpenalized block's own rank, which is what that rung
-    # reports -- so it is asked for explicitly instead of emerging from a
-    # ``0 <= 0`` comparison, and it never reads a cache built the other way.
-    geometry = (
-        _rank_geometry(p, all_free=lam <= 0.0) if geometry is None or lam <= 0.0 else geometry
-    )
-    if not geometry.any_free:
-        return geometry.ranks
-
-    # ``unit_reach`` is already an absolute value, so ``residue`` is 0.0 here
-    # only where the eigensolver returned a signed zero for EVERY free
-    # direction -- the one case where it has reported no residue at all rather
-    # than a small one.  A comparison against a tolerance would not do: a
-    # residue below the floor is still a MEASUREMENT, and substituting the
-    # floor for it is what loses whole degrees of freedom.  Taking the absolute
-    # value first is equally load bearing, since the residue is signed.
-    top = lam * geometry.unit_top
-    residue = lam * geometry.unit_residue
-    flattened = residue if residue > 0.0 else _PENALTY_RESIDUE_FLOOR * top
-    floor = np.maximum(flattened, geometry.dust)
-    return geometry.ranks + (geometry.curvature_eigs > floor[:, None]).sum(axis=-1)
-
-
-def _pair_arrow(p: SplineCatPair, lam: float, ranks: NDArray | None = None):
+def _pair_arrow(p: SplineCatPair, lam: float):
     """``K(lambda)`` in arrow form: one ``(k_a + 1)`` block per level.
 
     Level q's block holds its tensor coefficients beside its own contrast;
@@ -835,75 +731,107 @@ def _pair_arrow(p: SplineCatPair, lam: float, ranks: NDArray | None = None):
     E[:, 0, k_a] = p.m
     E[:, 1:, :k_a] = p.V
     E[:, 1:, k_a] = p.c
-    return factor_arrow(G, E, p.border, block_ranks=ranks)
+    return factor_arrow(G, E, p.border)
 
 
-def _profile(p: SplineCatPair) -> tuple[NDArray, int]:
-    """``(U_eff, rank(M))`` — the whole lambda-independent half of the work.
+def _profile(p: SplineCatPair) -> _PairGeometry:
+    """The whole lambda-independent half of the work, from ONE ``M`` factor.
 
     ``U_eff = U - C' M^-1 u_m``.  Column ``(p, q)`` of ``C`` is nonzero in
     exactly three places — the intercept row, the spline-main rows, and level
     q's own contrast row — so the contraction never touches a level other
     than its own.  ``M`` depends on no lambda, so this is computed once and
     every rung of the ladder reuses it.
+
+    The same factorization delivers ``V_eff``.  Writing ``M``'s inverse in
+    arrow form and contracting ``C' M^-1 C`` through it, every level's contrast
+    row cancels against its own block and what survives is
+
+        C' M^-1 C = blockdiag(c_q c_q' / m_q) + D' Omega D
+
+    with ``Omega = Sigma_M^-1[1:, 1:]`` — the spline-main corner, because the
+    intercept row of ``C - Y' C_cat`` is identically zero.  Subtracting that
+    from the block-diagonal ``V`` gives the decomposition in
+    :class:`_PairGeometry`.  A level holding no mass contributes an exact zero
+    ``D_q``, since its ``c_q`` and ``V_q`` are already zero.
     """
     f = _overlap_arrow(p)
-    L, _ = p.dims
+    L, k_a = p.dims
     w_cat, w_border = f.solve(p.u_cat.reshape(L, 1), p.u_border)
     U_eff = p.U - (p.c * (w_border[0] + w_cat.reshape(L))[:, None] + p.V @ w_border[1:])
-    return U_eff, f.rank
+    mass = np.where(p.m > 0.0, p.m, 1.0)
+    D = p.V - (p.c[:, :, None] * p.c[:, None, :]) / mass[:, None, None]
+    D += np.swapaxes(D, -1, -2)
+    D *= 0.5
+    return _PairGeometry(U_eff=U_eff, D=D, Omega=f.Sinv[1:, 1:], ceiling=float(L * k_a))
 
 
-def _evaluate(
-    p: SplineCatPair,
-    U_eff: NDArray,
-    rank_m: int,
-    lam: float,
-    ranks: NDArray | None = None,
-    geometry: _RankGeometry | None = None,
-) -> tuple[float, float]:
+def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
     """``(T, edf)`` at one lambda, from ONE arrow factorization.
 
-    ``rank(V_eff + lambda S)`` is Guttman rank additivity on the bordered
-    system — ``rank(K) = rank(M) + rank(A)``.  ``ranks`` carries the level
-    blocks' contribution, counted by :func:`block_ranks` AT THIS LAMBDA
-    because that is what makes it agree with the inverse the same
-    factorization supplies; the border's own rank comes from this
-    factorization.
+    ``edf = tr(A^-1 V_eff)`` is the sum of the pencil's Tikhonov filter
+    factors.  ``V_eff``'s block-diagonal half contracts against the inverse's
+    diagonal blocks; its rank-``k_a`` half needs the OFF-diagonal blocks too,
+    and ``[A^-1]_qq' = delta_qq' Ginv_q + Y_q Sinv Y_q''`` reduces the whole
+    double sum over levels to one ``(k_a, r)`` accumulator ``Z``.  Nothing
+    here loops over ``L`` and nothing here counts.
     """
     L, k_a = p.dims
-    f = _pair_arrow(p, lam, block_ranks(p, lam, geometry) if ranks is None else ranks)
+    f = _pair_arrow(p, lam)
     b = np.zeros((L, k_a + 1), dtype=np.float64)
-    b[:, :k_a] = U_eff
+    b[:, :k_a] = geometry.U_eff
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
-    T = float(np.sum(U_eff * x[:, :k_a]))
-    blocks = f.diag_blocks()[:, :k_a, :k_a]
-    rank_term = float(f.rank - rank_m)
-    penalty_term = lam * float(np.einsum("lpr,rp->", blocks, p.S_a, optimize=True))
-    edf = rank_term - penalty_term
-    # A PSD penalty and inverse require both penalty_term >= 0 and
-    # 0 <= edf <= rank_term.  Violating either side means the factorization's
-    # numerical rank and inverse action disagree, and accepting it can make a
-    # ladder search converge to a plausible but wrong row.  Correct only
-    # round-off at an endpoint; signal anything material so the caller refuses
-    # this structured route.
-    roundoff = _edf_roundoff(rank_term, penalty_term)
-    if (
-        not np.isfinite(penalty_term)
-        or not np.isfinite(edf)
-        or penalty_term < -roundoff
-        or edf < -roundoff
-        or edf > rank_term + roundoff
-    ):
+    T = float(np.sum(geometry.U_eff * x[:, :k_a]))
+
+    D = geometry.D
+    # ``[A^-1]_qq = Ginv_q + Y_q Sinv Y_q'`` restricted to the tensor
+    # coordinates, which is all ``V_eff`` lives on.  Sliced BEFORE the product
+    # rather than after: ``diag_blocks()`` would build the full ``(L, g, g)``
+    # inverse block and then discard its border row and column.  Measured
+    # bit-identical to that route at both bracket edges on the thin-level,
+    # vanishing-mass and narrow-band pairs, so this is a temporary removed and
+    # not a different number.
+    Yt = f.Y[:, :k_a, :]
+    diag = f.Ginv[:, :k_a, :k_a] + Yt @ f.Sinv @ np.swapaxes(Yt, -1, -2)
+    local = float(np.einsum("lpq,lqp->", diag, D, optimize=True))
+    Z = np.einsum("lpq,lqr->pr", D, Yt, optimize=True)
+    coupled = np.einsum("lpq,lqs,lst->pt", D, f.Ginv[:, :k_a, :k_a], D, optimize=True)
+    coupled += Z @ f.Sinv @ Z.T
+    border = float(np.einsum("pq,qp->", geometry.Omega, coupled, optimize=True))
+    edf = local - border
+
+    # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
+    # with both parts nonnegative, so the sum lies in ``[0, L * k_a]`` for
+    # every lambda and every pair -- a property of the identity, not a
+    # tolerance.
+    #
+    # THAT IS A PROPERTY OF THE EXACT IDENTITY, WHICH IS WHY THIS IS A GUARD
+    # AND NOT AN ASSERTION.  The two ``V_eff`` in ``tr(A^-1 V_eff)`` reach
+    # float64 by different routes: the one in the numerator is built above
+    # from the OVERLAP arrow (``D`` from the level moments, ``Omega`` from
+    # that arrow's ``Sinv``), while the one inside ``A^-1`` is whatever the
+    # PAIR arrow's own cut leaves of ``V + lambda S - C' M^-1 C``.  They are
+    # the same matrix in exact arithmetic and two independent numerical
+    # objects here, so the computed sum is not the filter-factor sum of any
+    # ONE pencil and the bound can be left.  That mismatch is the structural
+    # reason ``_mixed_rank_cells`` reads 0.0 where the oracle reads 1.0 -- the
+    # pair arrow drops the direction from ``Ginv`` while ``D`` still carries
+    # it -- and it is the most likely source of the mid-bracket error too.
+    #
+    # Outside the bound the two halves have cancelled away the answer, and
+    # accepting the residue can make a ladder search converge to a plausible
+    # but wrong row.  The dust allowance is taken on the two halves rather
+    # than on the result, because it is their magnitude that bounds the
+    # cancellation: at the ladder's low edge on a starved pair they run to 5e5
+    # against an answer of 73, and on the ``bs(10)`` pair in the suite to
+    # 9.65e7 against a residue of -13.6.
+    roundoff = _edf_roundoff(local, border)
+    if not np.isfinite(edf) or edf < -roundoff or edf > geometry.ceiling + roundoff:
         raise _UnstableStructuredEDFError(
-            f"structured EDF is numerically inconsistent: {edf} "
-            f"(rank={rank_term}, penalty trace={penalty_term})"
+            f"structured EDF is not a filter-factor sum: {edf} "
+            f"(local={local}, border={border}, ceiling={geometry.ceiling})"
         )
-    if penalty_term < 0.0 or edf > rank_term:
-        edf = rank_term
-    if edf < 0.0:
-        edf = 0.0
-    return T, edf
+    return T, min(max(edf, 0.0), geometry.ceiling)
 
 
 def structured_ladder(
@@ -936,33 +864,47 @@ def structured_ladder(
     same NaN row an unaffordable dense pair gets.  ``max_evaluations=None``
     means unbounded.
 
-    **A SEARCHING ladder pays for the rank count, because :func:`block_ranks`
-    depends on lambda and so runs once per evaluation rather than once per
-    pair.**  Measured on an ``L = 100`` ``ps(8)`` pair with four budgets forced
-    to search, ``time.process_time`` with all six thread pools pinned to one,
-    interleaved A/B/B/A over 8 pairs: 0.1682 s per ladder against 0.1547 s for
-    the lambda-independent count that preceded it, +9.2% at the median of the
-    8 paired ratios and slower in every one of them (+5.3% to +14.5%; the
-    first four pairs' arm ranges are disjoint, the pooled eight overlap by
-    1.4% because the machine's load fell between rounds).  A CLAMPED ladder is
-    two evaluations whatever it counts, and ``ns`` returns before any of this,
-    so the cost lands only where the bisection does.
+    **EVERY EVALUATION NOW COSTS THE SAME, BECAUSE NOTHING LAMBDA-DEPENDENT IS
+    COUNTED.**  The form this replaces ran a batched eigendecomposition per
+    evaluation to count the level ranks at that lambda; this one contracts
+    ``V_eff`` against the factorization the evaluation already built.  Whole
+    ladders, ``time.process_time`` with all six thread pools pinned to one,
+    median of five, filter factors against ``rank - lambda tr(A^-1 S)``:
+    clamped ``ps(8)`` at ``L = 200`` 5.51 ms against 5.97 (0.92x), the same at
+    ``L = 2000`` 50.87 against 45.52 (1.12x), clamped ``cr(3)`` at ``L = 2000``
+    7.03 against 7.26 (0.97x), a ``ps(8)`` ladder driven to bisect four rungs
+    345.2 against 318.5 (1.08x), and ``ns(8)``, whose full-rank penalty makes
+    every rung search, 195.8 against 176.4 (1.11x).  0.92x to 1.12x, and the
+    +9.2% a searching ladder used to pay for its per-lambda count is gone.
 
-    **WHICH IS A GEOMETRY THAT HAD TO BE FORCED, AND THE COUNT SAYS SO.**
-    That regression is real but the budgets it needs are not the ones
-    screening uses.  Arrow factorizations for a WHOLE ladder at the default
-    ``(2, 4, 8, 16)``, counted by instrumenting :func:`_pair_arrow`: 2 for
-    each of four wide real pairs (``L = 118``, two-column margin), and 2 for
-    ``ps(8)`` at ``L = 50`` and ``L = 100``, ``cr(6)`` at ``L = 100``,
-    ``bs(6)`` at ``L = 50`` and ``ps(8)`` at ``L = 20``.  Their edf at maximum
-    penalty is 49.00, 99.00 and 108.01 to 109.00 respectively — far above
-    every budget in use, so no rung's target falls inside the bracket and
-    every one of them clamps.  The same ``ps(8)`` ``L = 100`` pair
-    driven at ``(150, 250, 400, 600)``, which is the paragraph above, pays
-    120.  The one margin that searches by default is ``ns``: its penalty is
-    full rank, edf at maximum penalty is 0, and ``L = 100`` pays 106 — but
-    ``free`` is then empty and :func:`block_ranks` returns before any of the
-    work this paragraph is about.
+    **THAT IS THE KERNEL, WHICH IS NOT THE THING A CALLER PAYS.**  The same
+    four configurations through the PUBLIC entry -- ``fit_reml`` then
+    ``screen_interactions`` -- with dispatch counted at both kernels, CPU the
+    median of five whole screens, memory the ``tracemalloc`` peak over one:
+
+      ps(8) L=400     198.86 ms against 210.13   0.95x   peak 34.42 MiB
+      ps(8) L=2000    294.76 against 293.00      1.01x   peak 25.42 MiB
+      cr(3) L=2000    248.11 against 240.74      1.03x   peak 22.07 MiB
+      ns(8) L=200     238.30 against 232.36      1.03x   peak 11.91 MiB
+
+    Peak allocation is IDENTICAL TO THE BYTE on all four, so the per-level
+    ``D`` and the contraction temporaries do not move it; the arrays they
+    replace were the same size.  Dispatch is identical too -- one structured
+    call, zero dense calls, zero refusals on every configuration -- so the
+    production route is unchanged and these are the same pairs being scored.
+    Of the published columns, ``statistic`` and ``lambda0`` are BIT-IDENTICAL
+    on all four; ``edf0`` moves 1.75e-03, 1.18e-02, 4.75e-03 and 4.8e-12, and
+    the ``z`` the screen ranks on moves 9.11e-05, 2.81e-04, 1.13e-04 and
+    1.3e-12.  That is the user-visible size of this change on wide pairs.
+
+    Arrow factorizations for a WHOLE ladder at the default ``(2, 4, 8, 16)``,
+    counted by instrumenting :func:`_pair_arrow`: 2 for ``ps(8)`` at ``L = 50``
+    and ``L = 100``, ``cr(6)`` at ``L = 100``, ``bs(6)`` at ``L = 50`` and
+    ``ps(8)`` at ``L = 20``.  Their edf at maximum penalty is far above every
+    budget in use, so no rung's target falls inside the bracket and every one
+    of them clamps.  The one margin that searches by default is ``ns``: its
+    penalty is full rank, edf at maximum penalty is 0, and ``L = 100`` pays
+    106.
 
     A numerical failure reached while bisecting one target refuses that target,
     not independent targets or already certified edge clamps.  The returned
@@ -973,29 +915,31 @@ def structured_ladder(
     if p.profiled_trace is None:
         return None
 
-    U_eff, rank_m = _profile(p)
-    # Built once for the whole ladder.  Every lambda this evaluates is strictly
-    # positive -- the bracket's own low edge is ``1e-10 * scale`` and the
-    # zero-penalty pair returns below without reaching here -- so the cached
-    # free set is the one each rung would have computed for itself.
-    geometry = _rank_geometry(p)
+    # One M factorization for the whole ladder: it carries U_eff and both
+    # halves of V_eff, none of which depends on lambda.
+    geometry = _profile(p)
 
     def evaluate(lam: float) -> tuple[float, float] | None:
         try:
-            return _evaluate(p, U_eff, rank_m, lam, geometry=geometry)
+            return _evaluate(p, geometry, lam)
         except _UnstableStructuredEDFError:
             return None
 
     if not np.any(p.S_a):
         # No penalty to scan, exactly the predicate the dense ladder applies:
-        # one rung, at the block's own achieved rank, with lambda0 = 0.  A
+        # one rung, at the block's own achieved edf, with lambda0 = 0.  That
+        # edf is `tr(V_eff^+ V_eff)`, which IS `rank(V_eff)` in exact
+        # arithmetic -- but it is not counted, and on a near-rank pair it is
+        # not an integer; see the module docstring, which measures how far
+        # that lands from the dense path's counted rank and why the trace is
+        # the better of the two.  A
         # zero penalty would otherwise make the bracket below infinite and
         # every rung NaN, since inf * 0 is not a number.
         evaluated = evaluate(0.0)
         if evaluated is None:
             return None
-        stat, rank = evaluated
-        return [ScreenedPair(statistic=stat, edf0=rank, lambda0=0.0) for _ in budgets]
+        stat, edf = evaluated
+        return [ScreenedPair(statistic=stat, edf0=edf, lambda0=0.0) for _ in budgets]
 
     # Use the curvature the pencil actually turns on.  ``profiled_trace`` is
     # assembled from nonnegative centered residual energies in
