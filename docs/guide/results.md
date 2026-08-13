@@ -189,11 +189,28 @@ model.export_rating_tables(
 )
 ```
 
+The exported table is **multiplicative**: a base relativity times one relativity per block
+reproduces `model.predict` row by row. That only holds under a **log link**, because only then is
+the mean a product of per-term factors — so the export is restricted to log-link models and raises
+`ValueError` for anything else. Under an identity link the same arithmetic would return
+`exp(linear predictor)` rather than the prediction, and under a logit link it would return the
+odds. Poisson, Gamma, Tweedie and negative-binomial fits all take the log link by default and are
+unaffected; a Gaussian or binomial fit left on its own default link is refused.
+
+For the same reason the export refuses a fit that **saturates**. `model.predict` clips a log-link
+predictor to `[-80, 80]`, and a clamp is not a factor, so no table can carry one; a frame that
+already reaches the clip would produce a workbook that silently disagrees with the model it came
+from. Such a fit is quasi-separated or mis-scaled — refit or rescale rather than export it.
+
 The workbook includes selected-bin rating tables, a discretization impact sweep for
-`20, 50, 100, 200, 250` bins, and a structured Model Summary sheet. The `ModelOverview` and
+`20, 50, 100, 200, 250` bins, and a structured Model Summary sheet. The impact sweep covers
+main-effect spline and polynomial terms; a continuous-by-continuous interaction is binned onto the
+same grid but is not itself reported there ([#287](https://github.com/StrudelDoodleS/superglm/issues/287)).
+The `ModelOverview` and
 `TermInference` Excel tables use typed cells for metrics, estimates, intervals, and p-values instead
 of storing the formatted console summary as one text column. The editor exposes the same workbook
-through **Export > Excel rating workbook** when explicit training or retained fit data is available.
+through **Export > Excel rating workbook** when explicit training or retained fit data is available
+and the session's model meets the log-link requirement above.
 
 Excel export remains expanded over the exact original categorical levels, regardless of the most
 recent summary view. `export_rating_tables()` does not accept `level_display` and does not emit the

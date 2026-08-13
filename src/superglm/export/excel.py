@@ -29,9 +29,17 @@ _TERM_NUMERIC_COLUMNS = frozenset(
     {"Estimate", "Std Error", "Statistic", "P Value", "CI Lower", "CI Upper", "EDF", "Lambda"}
 )
 
-# Main-effect blocks sit on a fixed three-column stride and the number-format
-# loop below keys on ``cell.column % 3``.  Both are named here rather than
-# repeated as bare 3s so a future widening has one place to change.
+# Main-effect blocks sit on a fixed three-column stride, named here rather than
+# repeated as a bare 3.  It is NOT sufficient for a widening: the number-format
+# loop below takes it as the modulus but still hard-codes the remainders ``2``
+# and ``0``, which mean "second and third column of a THREE-wide block".  Set
+# this to 4 and blocks start at columns 1, 5, 9, so their columns are congruent
+# to 1, 2, 3 (mod 4) -- ``% 4 == 2`` still finds the Relativity column but
+# ``% 4 == 0`` matches nothing and the third column silently loses its format.
+# ``test_main_effect_blocks_keep_a_three_column_stride_and_their_number_formats``
+# keeps its own literal 3 and asserts both formats by hand, so a widening fails
+# there loudly; that test is the actual guard, and this constant is only the
+# name.
 _MAIN_EFFECT_BLOCK_STRIDE = 3
 _MAIN_EFFECT_TITLE_ROW = 5
 _MAIN_EFFECT_NOTE_ROW = 6
