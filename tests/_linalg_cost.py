@@ -50,11 +50,17 @@ trigger the lazy submodule loading that attribute access on SciPy would.
 Three limits are worth stating rather than hiding.
 
 Matrix multiplication is invisible.  ``A @ B`` is a bytecode operator, not a
-registered call, so a dense temporary built that way never appears in the log
--- and no interception mechanism catches it, including ``sys.monitoring``.
-This is exactly why ``peak_bytes`` is not optional: allocation is the
-implementation-independent backstop that sees a dense temporary however it was
-built.  Counts say which call did it; the peak says that it happened.
+call, so a dense temporary built that way never appears in the log.
+``sys.monitoring`` can at least *detect* it, by subscribing to ``INSTRUCTION``
+and recognising the ``BINARY_OP``, but that event carries no operands, so it
+answers "a product happened here" and never "how big".  This is why
+``peak_bytes`` is not optional: allocation sees a dense temporary however it
+was built.  Counts say which call did it; the peak says that it happened.
+
+That backstop is not unconditional either.  ``tracemalloc`` sees NumPy buffers
+because NEP 49 has NumPy register them, and it sees whatever LAPACK workspace
+SciPy allocates as an array.  A compiled extension allocating through its own
+allocator is invisible to both halves of this instrument.
 
 Calls below the registry are not individually recorded -- a raw LAPACK wrapper
 obtained from ``scipy.linalg.get_lapack_funcs``, or a call from inside compiled
@@ -302,11 +308,15 @@ class LinalgCall:
     def batch(self) -> int:
         """Independent factorizations this call performs.
 
-        Read off the first operand, which is the matrix in every LAPACK-shaped
-        signature here.  One for an unbatched call, and for a call with no
+        The largest batch over *all* operands, not the first one's.  NumPy
+        broadcasts the stacked axes, so ``solve`` with an ``(n, n)`` matrix
+        and an ``(L, n, 1)`` right-hand side does ``L`` solves while its first
+        operand looks unbatched -- reading only the matrix would undercount
+        that by a factor of ``L``, and quietly, since nothing else about the
+        call changes.  One for a wholly unbatched call, and for a call with no
         array operands at all.
         """
-        return self.operands[0].batch if self.operands else 1
+        return max((operand.batch for operand in self.operands), default=1)
 
     @property
     def max_core_dim(self) -> int:
@@ -463,7 +473,16 @@ def record_linalg_calls(
         (``numpy.lib.tracemalloc_domain``, NEP 49) rather than domain 0;
         ``get_traced_memory`` aggregates every domain, so no filtering is
         needed here, but a ``DomainFilter`` on domain 0 elsewhere would report
-        zero bytes and look green.  An outer tracer, if any, is left running.
+        zero bytes and look green.
+
+        An outer tracer is left running, but **its peak does not survive**:
+        ``reset_peak`` is global and there is no API to put a high-water mark
+        back, so an enclosing memory benchmark -- or an enclosing
+        ``record_linalg_calls`` -- reads a peak that starts from this block
+        rather than from its own beginning.  Resetting is not optional; a peak
+        that includes everything allocated before the block would not measure
+        the block.  Do not nest these, and pass ``trace_memory=False`` when
+        something outer is measuring memory.
 
     Yields
     ------
@@ -604,9 +623,18 @@ def assert_grows_linearly(
     the ``O(L*sqrt(L))`` that a half-vectorised loop produces, which doubles
     at 2.83.
 
-    Pass a tighter value on a channel that does not wobble.  ``max_elements``
-    doubles at exactly 2.0000 on the screening path, because it is structural
-    rather than search-dependent, and takes 1.05.
+    That swing is also the floor on how sharp this channel can be, and it sits
+    above what separating ``O(L)`` from ``O(L log L)`` would need: ``L log L``
+    doubles at 2.25 to 2.33 over this sweep, so rejecting it would take a
+    bound of about 1.12 -- tighter than the constant's own variation, which
+    would fail on correct code.  **The factorization count cannot distinguish
+    linear from log-linear here, and no tolerance makes it able to.**
+
+    Pass a tighter value on a channel that does not wobble, which is where
+    that distinction is actually available.  ``max_elements`` is structural
+    rather than search-dependent, doubles at exactly 2.0000 on the screening
+    path, and takes 1.05 -- rejecting from ``O(L^1.07)`` up, ``L log L``
+    included.
 
     It is emphatically not a noise allowance.  Counts reproduce exactly, so a
     failure is a real change in what the code does rather than a busy machine.
