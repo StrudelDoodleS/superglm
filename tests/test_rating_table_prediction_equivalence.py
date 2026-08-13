@@ -17,9 +17,11 @@ Three claims are separated on purpose, because only the first can be exact:
   to report.  Two things are asserted of them.  Centering INVARIANCE: the
   reconstructed prediction may not equal ``model.predict``, but it must not
   depend on which reporting centering was asked for.  And ABSENCE OF BIAS: the
-  binning error is spread, not scale, so the exposure-weighted mean log ratio
-  must stay inside a bound derived from the bin geometry.  The second exists
-  because the first cannot see a constant dropped from the binned path -- both
+  binning error is spread, not scale, so the mean log ratio must stay inside a
+  bound derived from the bin geometry -- measured in the geometry weighting
+  ``discretize`` bins in, which is the exposure weights for a frequency family
+  and unit mass per physical row for ``Tweedie``.  The second exists because
+  the first cannot see a constant dropped from the binned path -- both
   centerings drop it, so the comparison cancels.
 * **The base relativity** is neither: it is the one number with no tolerable
   approximation, so an unrepresentable one has to stop the export rather than
@@ -47,7 +49,9 @@ from superglm import (
     Polynomial,
     Spline,
     SuperGLM,
+    families,
 )
+from superglm.diagnostics.discretize import _validated_discretization_weights
 from superglm.export import rating_tables
 from superglm.export.rating_tables import (
     RatingTableBaseNotRepresentableError,
@@ -134,11 +138,39 @@ def _every_term_type_features() -> dict:
     return features
 
 
+@cache
+def _fit_binned_family(family) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
+    """A binned fit under a chosen family, for the geometry-measure comparison.
+
+    Its own frame rather than ``_frame``'s: the point of the comparison is the
+    weights, so both arms need a response the family can actually carry -- a
+    Poisson count and a Tweedie's point mass at zero with a continuous positive
+    part -- fitted on identical covariates.
+    """
+    rng = np.random.default_rng(20260813)
+    n = 900
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "density": rng.uniform(0.0, 1.0, n)})
+    mu = np.exp(-1.2 + 0.15 * np.sin(X["age"].to_numpy() / 8.0) + 0.20 * X["density"].to_numpy())
+    weight = rng.uniform(0.5, 2.0, n)
+    y = (
+        rng.poisson(mu * weight).astype(np.float64)
+        if family == "poisson"
+        else rng.gamma(shape=2.0, scale=mu / 2.0) * (rng.random(n) > 0.3)
+    )
+    model = SuperGLM(
+        family=family,
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=8), "density": Numeric()},
+    )
+    model.fit(X, y, sample_weight=weight)
+    return model, X, y, weight
+
+
 _SEGMENT_LEVELS = ["s1", "s2", "s3"]
 
 
 def _interaction_frame(
-    n: int = 1200, seed: int = 20260813
+    n: int = 1200, seed: int = 20260813, *, grouped_parent: bool = False
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """A frame for the interaction fixture, kept separate from ``_frame``.
 
@@ -146,36 +178,45 @@ def _interaction_frame(
     move the fitted values ``test_the_exactly_tabulable_workbook_reproduces_
     the_predictions`` and ``test_the_base_relativity_moves_by_exactly_the_
     shift_the_blocks_applied`` pin.
-    Both interacting columns are plain ``Categorical``: that is the pair the
-    export tabulates as a full cell table, and the grouped ``territory`` of the
-    main fixture is deliberately not used, because the exported interaction
-    table is keyed on GROUPED levels while its main-effect block is keyed on the
-    original ones, and the grouping map is not in the workbook.
+
+    The default pair is two plain ``Categorical`` columns: that is the pair the
+    export tabulates as a full cell table and the one the payload's exactness
+    claim covers.  ``grouped_parent=True`` swaps the first for a ``territory``
+    that will carry a ``grouping=``, which is the configuration OUTSIDE that
+    claim -- the interaction table is keyed on grouped levels while the
+    main-effect block is keyed on the original ones and the workbook carries no
+    map between them.  Both arms exist so the exactness claim and its exception
+    are each fitted rather than one being an unexplained absence.
     """
     rng = np.random.default_rng(seed)
+    first = "territory" if grouped_parent else "region"
+    first_levels = _TERRITORY_LEVELS if grouped_parent else ["A", "B", "C"]
     X = pd.DataFrame(
         {
-            "region": rng.choice(["A", "B", "C"], n),
+            first: rng.choice(first_levels, n),
             "segment": rng.choice(_SEGMENT_LEVELS, n),
             "density": rng.uniform(0.0, 1.0, n),
             "x": rng.uniform(0.0, 10.0, n),
         }
     )
-    region = X["region"].to_numpy()
+    parent = X[first].to_numpy()
     segment = X["segment"].to_numpy()
     eta = (
         -1.2
-        + 0.25 * (region == "B")
-        + 0.45 * (region == "C")
+        + 0.25 * (parent == first_levels[1])
+        + 0.45 * (parent == first_levels[-1])
         + 0.30 * (segment == "s2")
         + 0.55 * (segment == "s3")
         # The interaction proper: a cell that is not the sum of its margins.
-        + 0.40 * ((region == "C") & (segment == "s3"))
+        + 0.40 * ((parent == first_levels[-1]) & (segment == "s3"))
         + 0.20 * X["density"].to_numpy()
         + 0.03 * X["x"].to_numpy()
     )
     sample_weight = rng.uniform(0.5, 2.0, n)
     y = rng.poisson(np.exp(eta) * sample_weight).astype(np.float64)
+    if grouped_parent:
+        # ``x`` would add a Piecewise block that this fixture has no use for.
+        X = X.drop(columns=["x"])
     return X, y, sample_weight
 
 
@@ -199,10 +240,18 @@ def _fit(kind: str) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
     one interaction kind the export tabulates as a full cell table, and so the
     only one for which the payload's product claim can be exact.
     """
-    if kind == "interaction":
+    if kind == "grouped_interaction":
+        X, y, sample_weight = _interaction_frame(grouped_parent=True)
+        features: dict = {
+            "territory": Categorical(base="first", grouping=_territory_grouping()),
+            "segment": Categorical(base="first"),
+            "density": Numeric(),
+        }
+        interactions: list[tuple[str, str]] | None = [("territory", "segment")]
+    elif kind == "interaction":
         X, y, sample_weight = _interaction_frame()
-        features: dict = _interaction_features()
-        interactions: list[tuple[str, str]] | None = [("region", "segment")]
+        features = _interaction_features()
+        interactions = [("region", "segment")]
     else:
         X, y, sample_weight = _frame()
         features = _exactly_tabulable_features() if kind == "exact" else _every_term_type_features()
@@ -500,6 +549,56 @@ def test_the_interaction_factor_is_load_bearing_not_decorative():
     assert np.abs(np.log(cells)).max() > 0.05
 
 
+def test_a_grouped_interaction_parent_keys_its_two_blocks_differently():
+    """The exactness claim above stops at a grouped parent, and this says where.
+
+    The interaction fixture uses two ungrouped ``Categorical`` parents, and its
+    own docstring says the grouped ``territory`` is avoided deliberately.  That
+    is an absence, and an absence pins nothing: the payload docstring claims a
+    product contract over "the categorical-by-categorical interaction" with no
+    qualification a reader could act on, and nothing here would have noticed.
+
+    So the excluded configuration is fitted and its shape fixed.
+    ``_categorical_block`` expands the main effect back to the six original
+    levels while ``_interaction_blocks`` keys cells on the four grouped ones,
+    and no block carries the map, so a consumer starting from a raw row has
+    nothing to look up.  This is a characterisation of a pre-existing gap
+    (issue #284) rather than a fix: it fails the moment the export starts
+    emitting the mapping or the original-level cells, which is the point --
+    whoever does that has to come here and correct the contract beside it.
+    """
+    model, X, y, sample_weight = _fit("grouped_interaction")
+    payload = _payload(model, X, y, sample_weight, "native")
+
+    main = next(block for block in payload.main_effects if block.name == "territory")
+    interaction = next(block for block in payload.interactions)
+    assert interaction.name == "territory:segment"
+
+    main_keys = [str(level) for level in main.table["territory"]]
+    interaction_keys = [str(key) for key in interaction.table[interaction.table.columns[0]]]
+    raw_levels = {str(value) for value in X["territory"]}
+
+    # The main effect is keyed on what the frame holds; the interaction is not.
+    assert main_keys == _TERRITORY_LEVELS
+    assert interaction_keys == ["t1", "t2+t3", "t4+t5", "t6"]
+    assert raw_levels - set(interaction_keys) == {"t2", "t3", "t4", "t5"}
+
+    # No block anywhere in the payload carries the original-to-group map, so
+    # the gap cannot be closed by a consumer reading the workbook.
+    for block in payload.main_effects:
+        assert "t2+t3" not in {str(value) for value in block.table.iloc[:, 0]}
+
+    # And the consequence: the documented reconstruction cannot be performed.
+    with pytest.raises(KeyError):
+        _interaction_multiplier(interaction, X)
+
+    # The share it costs, so the entry is a measurement and not an anecdote.
+    absent = np.array(
+        [str(value) not in set(interaction_keys) for value in X["territory"]], dtype=bool
+    )
+    assert float(sample_weight[absent].sum() / sample_weight.sum()) > 0.6
+
+
 def test_an_interaction_block_carries_no_centering_shift_of_its_own():
     """Interactions are reconstructed from beta and never recentered.
 
@@ -528,15 +627,34 @@ def test_an_interaction_block_carries_no_centering_shift_of_its_own():
 # ── The binned path's ABSOLUTE accuracy ────────────────────────────────────
 
 
-def _rebinning_bias_bound(payload, X: pd.DataFrame, sample_weight: np.ndarray) -> float:
-    """A worst-case bound on the exposure-weighted log bias of the binned blocks.
+def _geometry_weight(model, sample_weight: np.ndarray) -> np.ndarray:
+    """The measure ``discretize`` bins and averages in, read the way it reads it.
+
+    Not the same thing as ``sample_weight``, and the difference is a family
+    branch rather than a detail: non-Tweedie weights are frequency mass, so the
+    geometry measure is the weighting itself, while Tweedie weights are prior
+    precision and every physical row is given unit geometry mass instead.  The
+    zero-bias identity below is a statement about THIS measure, so it is read
+    from the same function ``discretize`` reads it from rather than assumed to
+    be the caller's weights.
+    """
+    return _validated_discretization_weights(model, sample_weight, len(sample_weight))[1]
+
+
+def _rebinning_bias_bound(payload, X: pd.DataFrame, geometry_weight: np.ndarray) -> float:
+    """A worst-case bound on the geometry-weighted log bias of the binned blocks.
 
     Derived, not observed.  ``discretize`` sets each bin's log relativity to the
-    exposure-weighted MEAN of the smooth log relativity over the rows in that
+    geometry-weighted MEAN of the smooth log relativity over the rows in that
     bin, so within a bin the weighted residual sums to zero identically, and
     therefore so does the weighted mean residual over the whole column.  The
-    binning error is spread, not bias: it cannot move the exposure-weighted
+    binning error is spread, not bias: it cannot move the geometry-weighted
     geometric mean of the reconstruction at all.
+
+    The measure is ``_geometry_weight``, not the caller's ``sample_weight``.
+    They coincide for every non-Tweedie family, which is why this read the
+    weights directly and was right by accident; on a Tweedie fit they differ
+    and the identity holds only in the former.
 
     One thing breaks that identity, and only one: a row that the workbook bins
     differently from ``discretize``.  The block prints its edges through
@@ -573,7 +691,7 @@ def _rebinning_bias_bound(payload, X: pd.DataFrame, sample_weight: np.ndarray) -
         displaceable = np.zeros(len(values), dtype=bool)
         for edge, half_width in zip(edges, band):
             displaceable |= np.abs(values - edge) <= half_width
-        share = float(sample_weight[displaceable].sum() / sample_weight.sum())
+        share = float(geometry_weight[displaceable].sum() / geometry_weight.sum())
         total += share * step
     return total
 
@@ -600,17 +718,90 @@ def test_the_binned_reconstruction_carries_no_uniform_scale_error():
     have.  It does NOT catch a scale error smaller than the bound; that is what
     the exactly tabulable sweep is for, on the paths where exactness is
     available.
+
+    ``bound < 0.1`` is a guard against the bound going vacuous, and its margin
+    is the fixture's, not a general one.  The bound is a weight share times a
+    step, summed over blocks, and the share grows with the number of edges: at
+    the committed ``n_bins=150`` it measures 8.1e-02, and on this same fixture
+    it reaches 1.2e-01 at ``n_bins=200`` and 3.1e-01 at 400.  So a future author
+    who raises ``n_bins`` here, or refits onto a denser frame, will see this
+    guard trip -- and it means the bound has stopped discriminating, not that
+    the export regressed.  The fix in that case is a tighter bound, not a
+    larger constant.
     """
     model, X, y, sample_weight = _fit("all")
     predicted = model.predict(X)
+    geometry_weight = _geometry_weight(model, sample_weight)
 
     for centering in _CENTERINGS:
         payload = _payload(model, X, y, sample_weight, centering)
         reconstructed = _predict_from_payload(payload, X)
-        bias = float(np.average(np.log(reconstructed) - np.log(predicted), weights=sample_weight))
-        bound = _rebinning_bias_bound(payload, X, sample_weight)
+        bias = float(np.average(np.log(reconstructed) - np.log(predicted), weights=geometry_weight))
+        bound = _rebinning_bias_bound(payload, X, geometry_weight)
         assert bound < 0.1, f"{centering}: bound {bound} is too loose to discriminate"
         assert abs(bias) <= bound, f"{centering}: bias {bias} exceeds derived bound {bound}"
+
+
+def test_the_binning_measure_is_physical_rows_for_tweedie_and_the_weights_otherwise():
+    """The zero-bias identity above is in the GEOMETRY measure, which is family-scoped.
+
+    ``build_rating_table_payload``'s docstring states the binned blocks are
+    bias-free in the mean.  In which mean is not a detail: ``discretize`` bins
+    and averages in ``geometry_weight``, which is ``sample_weight`` for the
+    frequency families and unit mass per physical row for ``Tweedie``, whose
+    weights are prior precision rather than case counts.  Stated
+    unconditionally the claim is false -- measured on a Tweedie(p=1.5) fit with
+    weights on [0.5, 20], the residual mean is 1.2e-18 per physical row and
+    -8.7e-04 under the prior weights, and per bin 1.9e-17 against 6.4e-03.
+
+    Asserted through the observable consequence rather than by re-deriving the
+    average: if a family bins on physical rows then its binned relativities
+    cannot depend on the weights at all, so handing the same fit two very
+    different weight vectors has to leave the table bit-identical.  For a
+    frequency family the same comparison has to MOVE it, or the test would pass
+    on an export that ignored weights everywhere.
+    """
+
+    def binned(model, X, y, weight):
+        return model.discretization_impact(
+            X, y, sample_weight=weight, n_bins=20, features=["age"]
+        ).tables["age"]
+
+    for family, expect_invariant in (("poisson", False), (families.tweedie(p=1.5), True)):
+        model, X, y, fitted_weight = _fit_binned_family(family)
+        flat = np.ones(len(X), dtype=np.float64)
+        spread = np.linspace(0.5, 20.0, len(X))
+
+        assert np.allclose(_geometry_weight(model, flat), 1.0)
+        assert np.allclose(_geometry_weight(model, spread), 1.0 if expect_invariant else spread)
+
+        under_flat = binned(model, X, y, flat)
+        under_spread = binned(model, X, y, spread)
+
+        # The exported Weight column is the EVALUATION weight, so it moves for
+        # both families -- which is what makes the relativity comparison a real
+        # one rather than a comparison of two identical calls.
+        assert not np.array_equal(
+            under_flat["sample_weight"].to_numpy(), under_spread["sample_weight"].to_numpy()
+        )
+
+        moved = float(
+            np.max(
+                np.abs(
+                    np.log(under_flat["relativity"].to_numpy(dtype=np.float64))
+                    - np.log(under_spread["relativity"].to_numpy(dtype=np.float64))
+                )
+            )
+        )
+        if expect_invariant:
+            np.testing.assert_array_equal(
+                under_flat["bin_from"].to_numpy(), under_spread["bin_from"].to_numpy()
+            )
+            assert moved == 0.0, f"tweedie binned on the weights: max |dlog rel| {moved}"
+        else:
+            # Measured 2.1e-02; the floor is an order of magnitude below, so a
+            # refit that happens to shrink the effect does not flake it.
+            assert moved > 2e-03, f"poisson ignored the weights: max |dlog rel| {moved}"
 
 
 # ── The other mean centering ───────────────────────────────────────────────
@@ -704,6 +895,79 @@ def test_a_representable_base_is_left_exactly_alone():
         )
     )
     assert payload.base_relativity == expected
+
+
+@pytest.mark.parametrize("intercept", [-709.0, -720.0, -740.0, -744.0, -745.0])
+def test_a_subnormal_base_relativity_stops_the_export(monkeypatch, intercept):
+    """Between about -708.4 and -745.1, ``exp`` returns a SUBNORMAL, not zero.
+
+    ``isfinite`` is true and the value is strictly positive, so the guard used
+    to pass it -- but a subnormal has no implicit leading mantissa bit, so it
+    carries fewer than the full 53 significant bits, and the deficit grows as
+    the value shrinks.  The base is therefore not the number the export says it
+    is.  Measured on the round trip ``log(exp(x))``, which is the relative
+    error of the exported multiplier:
+
+        exp(-720.0) -> 2.03e-313, off by 3.0e-12
+        exp(-740.0) -> 4.2e-322,  off by 2.6e-03
+        exp(-744.0) -> 1e-323,    off by 2.5e-01
+        exp(-745.0) -> 5e-324,    off by 5.6e-01, one significant bit left
+
+    That last one is a workbook whose every premium is out by a factor of
+    ``exp(0.56)`` = 1.75 -- precisely the silent uniform mis-rating this guard
+    exists to refuse, arriving through the branch that was meant to catch it.
+
+    The cutoff is derived twice over and fitted to nothing.  ``tiny`` is the
+    smallest float64 with a full mantissa, so it is exactly where the round
+    trip stops degrading; and it is also, to the five figures Microsoft
+    publishes, Excel's "smallest allowed positive number" 2.2251E-308, because
+    Excel declines to implement IEEE 754's denormals for this very reason
+    ("denormalized numbers by their very nature have a variable number of
+    significant digits", *Floating-point arithmetic may give inaccurate result
+    in Excel*) and flushes anything smaller to zero on load.
+    """
+    model, X, y, sample_weight = _fit("exact")
+    monkeypatch.setattr(
+        rating_tables,
+        "ordered_reference_intercept",
+        lambda *args, **kwargs: intercept,
+    )
+
+    # The premise: this really is the subnormal window, not the flush-to-zero
+    # one the finite/positive check already covered.
+    with np.errstate(under="ignore"):
+        base = float(np.exp(intercept))
+    assert 0.0 < base < np.finfo(np.float64).tiny
+
+    with pytest.raises(RatingTableBaseNotRepresentableError, match="base relativity"):
+        _payload(model, X, y, sample_weight, "mean")
+
+
+def test_the_smallest_base_the_export_accepts_is_the_smallest_exact_one():
+    """The guard rejects subnormals and nothing above them -- both sides pinned.
+
+    A cutoff that only ever rejects is untestable in the direction that
+    matters: ``base < 1.0`` would satisfy the test above and refuse most real
+    Poisson tariffs.  So the accepted side is fixed here too, one ULP-of-the-
+    exponent apart, and the accepted base is required to be exact rather than
+    merely non-raising.
+    """
+    model, X, y, sample_weight = _fit("exact")
+    tiny = float(np.finfo(np.float64).tiny)
+
+    # Just inside: the smallest float64 that still carries a full mantissa.
+    accepted = rating_tables._base_relativity(float(np.log(tiny)))
+    assert accepted == pytest.approx(tiny, rel=1e-15)
+    assert accepted >= tiny
+
+    # Just outside: the largest subnormal, one exponent step below.
+    with pytest.raises(RatingTableBaseNotRepresentableError, match="base relativity"):
+        rating_tables._base_relativity(float(np.log(tiny / 2.0)))
+
+    # And an ordinary fit is nowhere near either edge, so the guard is not
+    # quietly rejecting the models this export exists for.
+    payload = _payload(model, X, y, sample_weight, "mean")
+    assert payload.base_relativity > 1e-6
 
 
 # ── ``centering=`` is validated where it is accepted ───────────────────────

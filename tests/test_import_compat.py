@@ -59,6 +59,42 @@ def test_toplevel_reexports():
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
 
 
+def test_an_exception_raised_by_a_root_export_is_catchable_from_the_root():
+    """A caller must be able to catch what the top-level API can raise.
+
+    ``export_rating_tables`` is exported from the package root, so a user
+    following the documented surface writes ``from superglm import
+    export_rating_tables`` and never imports ``superglm.export`` at all.  If the
+    exception it raises lives only on the submodule, that user cannot name the
+    failure mode in an ``except`` clause without reaching past the API they were
+    given.  Asserted as a rule over the raising functions rather than as one
+    hard-coded pair, so the next exception added to this module is covered by
+    the same check instead of needing a new test.
+    """
+    import superglm
+    from superglm import export as export_module
+
+    assert "export_rating_tables" in superglm.__all__
+    raisable = [
+        name
+        for name in export_module.__all__
+        if isinstance(getattr(export_module, name), type)
+        and issubclass(getattr(export_module, name), Exception)
+    ]
+    assert raisable, "superglm.export exports no exception, so this rule pins nothing"
+
+    for name in raisable:
+        assert hasattr(superglm, name), (
+            f"{name} can be raised through the root-exported export_rating_tables "
+            f"but is not importable from superglm"
+        )
+        assert name in superglm.__all__, f"{name} is reachable but undocumented in __all__"
+        assert getattr(superglm, name) is getattr(export_module, name), (
+            f"superglm.{name} is a different object from superglm.export.{name}, so "
+            "an except clause written against one would not catch the other"
+        )
+
+
 def test_public_model_signatures_do_not_expose_private_frame_adapter():
     from superglm import SuperGLM
 
