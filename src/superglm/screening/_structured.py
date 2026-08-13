@@ -71,12 +71,20 @@ level, seven band layouts and two seeds, each path graded at its OWN lambda:
   moves the exact high-edge edf by 1.30 to 145.87 df across the geometries
   measured, and by 11.11, 31.83 and 77.54 df on the very pair whose 11.57 df
   this docstring quotes — 40 draws at each of three generator seeds, and a max
-  over finitely many draws is a LOWER bound on the spread.  The divergence is
-  inside the noise floor, not above it.  Where the high edge IS determined — no
-  narrow band, spread 1.0e-04 df — both paths are right: 18.999995 and
-  18.999936 against a certified 18.999990.
-* **The low edge IS determined**, to a median 3.8e-04 and a worst 6.8e-03 df
-  under a 1-ulp perturbation of ``V`` (``S_a`` moves it by 0.0e+00 there), and
+  over finitely many draws is a LOWER bound on the spread.  The BOUND on that
+  spread is derived rather than drawn, and it is 7.073e+01 df on that pair:
+  ``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at ``e = 2^-52``,
+  evaluated in arb because ``A^-1`` in float64 is meaningless at
+  ``cond(A) = 7.2e+15``.  The 77.54 df draw reaches 1.10x of it, so the
+  linearization is at its own limit here too — one ulp of the stored penalty,
+  ``lam e |S|_2 = 4.72e-06``, is 8.4x the smallest-magnitude eigenvalue of
+  ``A``.  The divergence is inside the noise floor, not above it.  Where the
+  high edge IS determined — no narrow band, spread 1.0e-04 df — both paths are
+  right: 18.999995 and 18.999936 against a certified 18.999990.
+* **The low edge IS determined**, to a derived 5.554e-03 df on the ``ps(8)``
+  pair and 8.284e-05 df on the ``ns(6)`` one below (random draws reached
+  6.78e-03 and 1.82e-04, 1.2x and 2.2x those bounds, which is what a
+  max-minus-min spread should show against a one-sided bound), and
   there THIS path is the wrong one.  Over the
   20 sweep points where both paths clamp to one lambda and the answer is
   attainable to 1e-2 df, the arrow error has median 1.17 df and maximum
@@ -111,8 +119,23 @@ routing threshold is therefore unfavourable rather than benign — but it is
 still an extrapolation, since an arb oracle is ``O(k^3)`` in ball arithmetic
 and ``k = 869`` already costs 319 s.
 
+**WHAT "THE TARGET IS ``tr(A^-1 V_eff)``" HIDES.**  The comparison above grades
+this path against an arb evaluation of ``tr(A^-1 V_eff)`` with a TRUE inverse,
+and the dense path it is compared to does not compute that.
+:func:`superglm.screening._score_stat._edge` falls back to
+``numpy.linalg.pinv``, which zeroes rather than inverts every direction below
+``max(M, N) eps`` of the largest singular value, and at the high edge that
+fallback is the branch that runs — 4 of 209 directions dropped on the ``ps(8)``
+pair above, worth -8.8838e-01 df of the gap between the dense reading and the
+certified oracle.  At the LOW edge, where this path's own error is graded,
+``cho_factor`` succeeds on both pairs and ``pinv`` would drop nothing, so the
+low-edge verdict is unaffected — but any fix that adopts the dense path's
+estimator adopts its truncation with it, and that has to be a decision rather
+than an inheritance.
+
 The pins are in tests/test_screening_edf_target.py, three of them
-``xfail(strict=True)`` because they are the defect rather than the contract.
+``xfail(strict=True)`` because they are the defect rather than the contract,
+and each one carries the DERIVED noise floor of its own point beside it.
 
 **WHAT THE REACH-AWARE COUNT IS WORTH, MEASURED WIDE RATHER THAN ON ONE
 GEOMETRY.**  Against a 50-digit oracle evaluated at each path's own lambda,

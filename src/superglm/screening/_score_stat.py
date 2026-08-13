@@ -36,9 +36,35 @@ they are one number — and they are not.  On a ``bs(8)`` pair with 12 levels,
 30 rows in each and four inside a 1e-6 band of the covariate, one ladder
 returns 7.000004 for the budgets that clamp and 9.000019 for the budget that
 searches, both at ``lambda = 1.0652e+05``, where arb ball arithmetic puts the
-exact value at 6.9997546284 (enclosure radius 1.3e-221 at 800 bits) and a
-1-ulp perturbation of ``S_a`` moves it by only 6.6e-04 df.  The clamped
-estimator is 2.5e-04 df out; the searching one is 2.000265 df out.
+exact value at 6.9997546284 (enclosure radius 1.3e-221 at 800 bits).  One ulp
+of the stored moments moves that exact value by at most 1.620e-02 df — a
+DERIVED bound, ``lam e (sum |A^-1 S A^-1| |V| + sum |A^-1 V A^-1| |S|)`` at
+``e = 2^-52``, not a random-draw maximum; 120 random draws reached 9.4e-04,
+6% of it.  The clamped estimator is 2.5e-04 df from the exact value and the
+searching one is 2.000265 df from it, so the disagreement is 123x the bound
+and the searching rung is the one outside it.
+
+**WHAT THE CLAMPED RUNG COMPUTES IS NOT LITERALLY ``tr(A^-1 V_eff)``.**
+:func:`_edge` factors ``A`` with ``cho_factor`` and falls back to
+``numpy.linalg.pinv(A, hermitian=True)``, so on the fallback branch the answer
+is ``tr(P V_eff)`` for a pseudo-inverse that ZEROES every direction below
+``max(M, N) eps`` of the largest singular value rather than inverting it.  At
+the high edge the fallback is what runs — ``A`` is indefinite there and
+``cho_factor`` raises — and the truncation is a term in the answer, not a
+rounding of it: 4 of 121 directions at a cut of 8.25e-04 on the pair above,
+worth +2.4974e-04 df, and 4 of 209 at 9.87e-04 on a ``ps(8)`` pair at
+``lambda = 1.38e+09``, worth -8.8838e-01 df.  ALL of the 2.5e-04 df above is
+that truncation: reconstructing ``tr(P V_eff)`` from ``eigh`` at ``pinv``'s
+own cut reproduces the reported rung to 3.6e-15 df, and in arb to all 16
+digits, so the clamped rung is EXACT for the functional it evaluates.  The
+truncation is stable rather than marginal — the retained spectrum starts at
+1.16 against dropped directions at 3.98e-06 — but any recommendation to
+"target ``tr(A^-1 V_eff)``, which is what :func:`_edge` already computes" has
+to carry it.  ``pinv`` also ranks directions by ``|lambda|`` where
+:func:`_psd_rank` reads the sign, so a NEGATIVE curvature direction would be
+inverted rather than dropped; on both pairs above that is inert, each carrying
+one negative eigenvalue (-1.59e-08, -5.62e-07) below the cut.  Nothing counts
+them, so inert here is not a guarantee.
 
 Measured over 703 searching rungs with a range-valid oracle — ``ps``/``cr``/
 ``bs``/``ns`` at 3 to 8 knots, ``L`` in 6/12/20, 12 and 30 rows per level, five
@@ -66,7 +92,8 @@ That is Van Loan, *Generalizing the Singular Value Decomposition*, SIAM J.
 Numer. Anal. 13(1):76-83 (1976), and it computes the same filter factors
 without inverting anything ill conditioned.  It is not what this module does.
 
-Pins and the certified constants are in tests/test_screening_edf_target.py.
+Pins, the certified constants and the derived noise floor of every point they
+are pinned at are in tests/test_screening_edf_target.py.
 
 ``G`` is the right thing to whiten by, rather than ``V_eff``: where ``V_eff``
 is singular but ``V_eff + lambda S`` is not, those directions still contribute
@@ -433,6 +460,23 @@ def _edge(
     on -- measured at 58% of a wide pair's total time against 17% for the
     factorizations themselves.  One factorization per edge, reused, removes
     both duplicates.
+
+    ON THE PENALIZED BRANCH THE RETURNED TRACE IS ``tr(P V)``, NOT
+    ``tr(A^-1 V)``, WHENEVER ``cho_factor`` REFUSES ``A``.  ``apply`` is then
+    ``pinv``'s, and ``pinv`` makes a rank decision of its own: it zeroes every
+    direction below ``max(M, N) eps`` of the largest singular value.  That is
+    numerically the same cut as :func:`_rank_floor`, but it is applied by a
+    different rule — by ``|lambda|``, so a negative direction above it is
+    INVERTED rather than dropped — and nothing here counts what it discarded.
+    The branch is not exotic at the ladder's high edge: ``lambda S`` inherits
+    an indefiniteness of order ``lambda eps sigma_max(S)`` from a float64
+    spline penalty, ``A`` is then indefinite, and ``cho_factor`` raises.
+    Measured on the two pairs pinned in tests/test_screening_edf_target.py,
+    the fallback ran on both high edges and the Cholesky branch on both low
+    edges, and the truncation was worth +2.4974e-04 df on one and
+    -8.8838e-01 df on the other.  Both are the difference between what this
+    function returns and the certified ``tr(A^-1 V)``, so a caller comparing
+    this against an exact-arithmetic target must subtract it first.
 
     ``S = None`` is the unpenalized block, where ``A`` IS ``V`` and the edf is
     its RANK — so it is counted, not traced.  ``tr(A^-1 V)`` reports the rank
