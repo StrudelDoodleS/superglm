@@ -156,12 +156,18 @@ def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
     # while `short` stays at or under 33, and `short`'s own wait bounds it
     # below, never above.
     #
-    # Scaling the long target with `short.samples` would establish it, but that
-    # target is unbounded above and so trades a wrong assertion for a
-    # misattributed timeout: one stalled 2 ms poll took a short side to 3223
-    # ticks in measurement, i.e. a 9670-tick target, which at the 50 ms/tick
-    # this branch documents from a hosted runner is ~480 s against a 120 s
-    # budget -- failing the LONG sampler for a stall on the SHORT one.
+    # Scaling the long target with `short.samples` would establish it, but at
+    # the cost of making the long side's WORK scale with a quantity that has no
+    # upper bound -- `short.samples` is bounded below by its own wait and not
+    # bounded above at all. That trades a wrong assertion for a misattributed
+    # timeout: the long sampler is failed by `_TICK_TIMEOUT` for a stall on the
+    # short side, while both samplers are behaving. The bound is the point, not
+    # any particular overshoot: at the 50 ms/tick this file documents from a
+    # hosted runner, a short side of merely 800 ticks already exceeds the 120 s
+    # budget.  (A short side in the thousands is reachable only by making a
+    # tick artificially cheap -- forcing it that way is how the branch was
+    # demonstrated -- but nothing has to be reachable for an unbounded target
+    # to be the wrong shape.)
     #
     # A short side that overshot a 5-tick target by orders of magnitude is a
     # broken measurement, not a reason to triple the long side's work, so it is
