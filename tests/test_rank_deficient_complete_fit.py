@@ -124,10 +124,13 @@ def test_the_sampler_records_every_fit_not_just_the_first() -> None:
         # one overshooting first wait -- the poll is 2 ms against a 1 ms
         # interval, and a delayed wake-up is the same contention this rewrite
         # exists to survive. The later holds would then skip their `while` body
-        # entirely and establish nothing, leaving `counts[i] > counts[i-1]` to
-        # rest on ticks from a thread `__exit__` flags but never joins. Asking
-        # each re-entry for five ticks OF ITS OWN is what the docstring claims
-        # and what the assertions below need.
+        # entirely, and `counts[i] > counts[i-1]` would be left to the race
+        # between a freshly started sampler thread and the `_stop` flag that
+        # `__exit__` sets microseconds later: `__exit__` sets the flag and then
+        # JOINS (`benchmarks/rank_deficient_complete_fit.py`), so a thread that
+        # loses that race records nothing at all and the assertion fires on a
+        # sampler that is working. Asking each re-entry for five ticks OF ITS
+        # OWN is what the docstring claims and what the assertions below need.
         _hold_open_until(sampler, sampler.samples + 5)
         counts.append(sampler.samples)
     assert counts[0] > 0
@@ -148,17 +151,34 @@ def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
     ticks are what a per-tick store would retain, and a sleep only buys them on
     an idle machine.
     """
-    short = bench._DispatchSampler(interval=0.001)
-    _hold_open_until(short, 5)
-    long = bench._DispatchSampler(interval=0.001)
-    # The ratio has to be WAITED FOR, not hoped for. `_LONG_TICKS` alone fixes
+    # The ratio has to be ESTABLISHED, not hoped for: `_LONG_TICKS` fixes
     # `long >= 100` and `short >= 5`, which leaves `long > short * 3` true only
-    # while `short` stays under 33 -- and `short`'s own wait bounds it below,
-    # never above. One stalled poll on the short side (measured: 3223 ticks
-    # when the sampler outran a 2 ms poll) breaks the premise while both
-    # samplers are behaving perfectly. Naming the ratio in the target makes the
-    # wait establish it.
-    _hold_open_until(long, max(_LONG_TICKS, short.samples * 3 + 1))
+    # while `short` stays at or under 33, and `short`'s own wait bounds it
+    # below, never above.
+    #
+    # Scaling the long target with `short.samples` would establish it, but that
+    # target is unbounded above and so trades a wrong assertion for a
+    # misattributed timeout: one stalled 2 ms poll took a short side to 3223
+    # ticks in measurement, i.e. a 9670-tick target, which at the 50 ms/tick
+    # this branch documents from a hosted runner is ~480 s against a 120 s
+    # budget -- failing the LONG sampler for a stall on the SHORT one.
+    #
+    # A short side that overshot a 5-tick target by orders of magnitude is a
+    # broken measurement, not a reason to triple the long side's work, so it is
+    # re-taken instead. 33 is `_LONG_TICKS // 3`, the largest short count the
+    # fixed long target can still dominate: 33 * 3 = 99 < 100.
+    ceiling = _LONG_TICKS // 3
+    for _ in range(3):
+        short = bench._DispatchSampler(interval=0.001)
+        _hold_open_until(short, 5)
+        if short.samples <= ceiling:
+            break
+    assert short.samples <= ceiling, (
+        f"short sampler overshot its 5-tick target to {short.samples} on every attempt "
+        f"(ceiling {ceiling}); the poll stalled, so this fixture cannot establish the ratio"
+    )
+    long = bench._DispatchSampler(interval=0.001)
+    _hold_open_until(long, _LONG_TICKS)
 
     # established by the two waits above, restated as the premise of the rest
     assert long.samples > short.samples * 3, "fixture did not produce a longer run"
