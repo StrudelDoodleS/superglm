@@ -195,12 +195,29 @@ the mean a product of per-term factors — so the export is restricted to log-li
 `ValueError` for anything else. Under an identity link the same arithmetic would return
 `exp(linear predictor)` rather than the prediction, and under a logit link it would return the
 odds. Poisson, Gamma, Tweedie and negative-binomial fits all take the log link by default and are
-unaffected; a Gaussian or binomial fit left on its own default link is refused.
+unaffected; a Gaussian fit left on its own default link is refused.
+
+`Binomial` is refused outright, whatever its link. `model.predict` finishes by clamping a binomial
+mean into `[1e-7, 1 - 1e-7]`, and a clamp is not a factor, so no multiplicative table can carry it.
+Even on a log link the two agree only for `-16.118 <= eta <= -1e-7` — 20.1% of the permitted range —
+and outside it the workbook returns a "probability" above one, or below the clamp, while the model
+returns the clamped value. Predicting above one out of sample is the characteristic behaviour of
+log-binomial regression, so this is refused by family rather than checked per frame: the exported
+table is applied to risks the export never saw.
 
 For the same reason the export refuses a fit that **saturates**. `model.predict` clips a log-link
-predictor to `[-80, 80]`, and a clamp is not a factor, so no table can carry one; a frame that
-already reaches the clip would produce a workbook that silently disagrees with the model it came
-from. Such a fit is quasi-separated or mis-scaled — refit or rescale rather than export it.
+predictor to `[-80, 80]`, and a clip is not a factor either; a frame that already reaches it would
+produce a workbook that silently disagrees with the model it came from. Such a fit is
+quasi-separated or mis-scaled — refit or rescale rather than export it. The same applies to an
+individual relativity: a factor large enough that `superglm` had to clip it is refused rather than
+exported, because two blocks whose contributions cancel can leave the prediction healthy while
+neither factor is the model's.
+
+The **offset multiplier** block is exact only while the fit carries fewer than 20 distinct offset
+multipliers. Above that — the normal case for a continuous exposure — it is binned like a spline
+block, with rows keyed on interval strings and each carrying its bin's exposure-weighted average, so
+it is a summary rather than a per-row lookup. Pass `offset_source=` to export the exact form, keyed
+on a raw column of the frame.
 
 The workbook includes selected-bin rating tables, a discretization impact sweep for
 `20, 50, 100, 200, 250` bins, and a structured Model Summary sheet. The impact sweep covers
