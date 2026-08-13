@@ -13,6 +13,14 @@ name: Real data
 # a third-party dependency: a transient OpenML outage must never read as "the
 # code is broken", and must never block a merge.  See the two failure paths at
 # the bottom of the job.
+#
+# Its reach, said plainly, because a workflow that overstates its own coverage
+# is the same defect as a test that does.  Like ci.yml and dev-ci.yml, the
+# triggers below are filtered to `branches: [master]`, so this job does NOT run
+# on a pull request whose base is another branch.  A stacked PR gets these
+# suites when its stack reaches master, and not before.  That is a repo-wide
+# convention rather than a property of this workflow, so it is recorded here
+# rather than diverged from here.
 
 on:
   push:
