@@ -470,6 +470,12 @@ def test_the_interaction_factor_is_load_bearing_not_decorative():
     -- would leave the test above asserting only that the main effects are
     right.  This fixes how far the reconstruction moves without it, so the
     exactness claim is a discriminating measurement.
+
+    Measured on this fixture: 5.59e-01 maximum relative error without the
+    block, against 6.2e-16 with it.  The thresholds are floors on "the
+    interaction does something", set an order of magnitude below that so a
+    refit which happens to shrink the effect does not turn this into a flake;
+    they are not tuned to the observed value.
     """
     model, X, y, sample_weight = _fit("interaction")
     payload = _payload(model, X, y, sample_weight, "mean")

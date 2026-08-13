@@ -721,9 +721,11 @@ def build_rating_table_payload(
     Exact to round-off for the exactly tabulable blocks -- ``Categorical``,
     ``OrderedCategorical``, ``Numeric``, ``Piecewise``, and the
     categorical-by-categorical interaction, which is a full cell table.
-    Measured on the equivalence fixtures: 5.0e-16 maximum relative error with
-    an interaction present, against 4.2e-01 if its block is left out of the
-    product, so the interaction factor is load-bearing rather than decorative.
+    Measured on the interaction fixture in
+    ``tests/test_rating_table_prediction_equivalence.py``: 4.4e-16 (native) and
+    6.2e-16 (mean) maximum relative error against ``model.predict``, and
+    5.6e-01 if the interaction block is left out of the product -- so that
+    factor is load-bearing rather than decorative.
 
     Lossy, by construction, for the binned blocks -- ``Spline``,
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
