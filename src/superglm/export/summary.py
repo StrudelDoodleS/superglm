@@ -19,7 +19,7 @@ from superglm.inference._term_helpers import spline_groups
 # The legend's wording is imported rather than restated: it was a second string
 # literal here, and that is how it came to describe a rule neither module
 # implements (issue #239).
-from superglm.inference.summary import _LOW_CREDIBILITY_NOTE
+from superglm.inference.summary import _LOW_CREDIBILITY_NOTE_BODY
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
@@ -92,19 +92,20 @@ _EDITOR_OFFSET_NOTE = (
     "Inference is conditional on those fixed offsets."
 )
 # The workbook's short cell values, one per trigger.  The two are deliberately
-# distinct because this cell travels WITHOUT the legend: it lands in a
+# distinct because this cell travels WITHOUT the note: it lands in a
 # spreadsheet column that a downstream consumer reads on its own, so it has to
-# be a true row-level statement rather than the union of two.
+# be a true row-level statement rather than the union of two.  Calling an
+# SE-flagged row "Low credibility" would assert a shortage of data about a row
+# that may have none -- that branch's threshold is not scale-invariant, so a
+# predictor in very small units trips it with the whole sample behind it and an
+# unchanged z and p-value.
 #
-# The branches are disjoint and the row says which one fired: the SE fallback
-# skips any row that has per-level counts, so ``level_n_obs is not None`` is
-# exactly the volume branch.  Calling the other one "Low credibility" would
-# assert a shortage of data about a row that may have none -- the trigger is
-# this model's median parametric SE times fifty, which is not scale-invariant,
-# so a predictor in very small units trips it with the whole sample behind it
-# and an unchanged z and p-value.
+# WHICH one fired is read off the row's ``advisory_trigger``, recorded where
+# the flag is set; ``_advisory_warning`` says why it is not re-derived here.
+# An unrecognised value gets the neutral third value rather than either claim.
 _THIN_LEVEL_WARNING = "Low credibility"
 _OUTSIZED_SE_WARNING = "Outsized standard error"
+_UNKNOWN_ADVISORY_WARNING = "Advisory"
 
 
 def _finite_float(value: Any) -> float | None:
@@ -361,7 +362,7 @@ def _advisory_warning(row: _CoefRow, quasi_separated: bool) -> str:
     """
     if not quasi_separated:
         return ""
-    return _ADVISORY_WARNINGS.get(row.advisory_trigger, _THIN_LEVEL_WARNING)
+    return _ADVISORY_WARNINGS.get(row.advisory_trigger, _UNKNOWN_ADVISORY_WARNING)
 
 
 def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryTermRow, ...]:
@@ -460,7 +461,7 @@ def _summary_notes(
             notes.append(_GROUP_WALD_NOTE)
         notes.append(_PARAMETRIC_WALD_NOTE)
     if any(row.warning for row in terms):
-        notes.append(_LOW_CREDIBILITY_NOTE)
+        notes.append(_LOW_CREDIBILITY_NOTE_BODY)
     return tuple(notes)
 
 

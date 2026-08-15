@@ -396,9 +396,10 @@ def _editor_row(model, name):
 class TestTheFlagIsAdvisoryOnEveryRenderer:
     """The flag says "thin cell"; no renderer may report it as a verdict.
 
-    The rule that sets it reads ``level_n_obs`` and ``level_exposure_share``
-    and nothing else -- not the coefficient, not its standard error, not its
-    p-value, not the link.  A level can therefore be both strongly significant
+    Its primary rule reads ``level_n_obs`` and ``level_exposure_share`` and
+    nothing else -- not the coefficient, not its p-value, not the link -- and
+    the fallback beside it reads a standard error and nothing else.  Neither
+    reads the response.  A level can therefore be both strongly significant
     and flagged, and the console has always said so while the export and the
     editor replaced the significance code with the flag (issue #239).
     """

@@ -180,8 +180,11 @@ _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 # likelihood estimates", Biometrika 80(1), 1993, 27-38).  That is what a reader
 # may act on, so that is what the note says.
 _LOW_CREDIBILITY_TAG = "LC"
-_LOW_CREDIBILITY_NOTE = (
-    "LC: low credibility — flagged when a categorical level carries fewer than\n"
+# Split so the workbook can carry the note without the column tag: ``LC`` is a
+# column on the console and in the editor and does not exist in the workbook,
+# whose advisory lives in a Warning cell.
+_LOW_CREDIBILITY_NOTE_BODY = (
+    "Low credibility — flagged when a categorical level carries fewer than\n"
     "20 observations or under 0.05% of exposure, or, for a row that has no\n"
     "per-level counts, when its standard error is both far above this model's\n"
     "typical one and above a fixed floor. The estimate, interval and p-value\n"
@@ -193,6 +196,9 @@ _LOW_CREDIBILITY_NOTE = (
     "reading it as a shortage of data. The floor makes this column a screen\n"
     "rather than a ranking: a coefficient can be many times the typical width\n"
     "and go unflagged."
+)
+_LOW_CREDIBILITY_NOTE = (
+    "LC: " + _LOW_CREDIBILITY_NOTE_BODY[0].lower() + _LOW_CREDIBILITY_NOTE_BODY[1:]
 )
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
