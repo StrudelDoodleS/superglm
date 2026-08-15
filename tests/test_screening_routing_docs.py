@@ -144,6 +144,12 @@ def test_a_too_wide_spline_cat_pair_is_retried_not_refused():
     """
     assert "refused with a NaN row by the same" not in DOC
     assert "RETRIED through the arrow kernel" in DOC
+    # ...and the replacement is pinned positively, or deleting it outright
+    # leaves this module green while the reader loses the diagnostic.
+    assert "A NaN row is not by itself a routing signal" in DOC
+    assert "on EITHER path" in DOC
+    # the same counting correction, one paragraph down, for numeric_cat
+    assert "1710 UNPINNED levels" in DOC
 
     # A library-default Spline() margin is 13 columns wide in the probe, so it
     # crosses the 1357 cap at 105 contrasts: 13 * 104 = 1352, 13 * 105 = 1365.
