@@ -4283,6 +4283,7 @@
   "tests/test_quasi_separation.py::TestTheNoteIsTrueOfTheSecondTriggerToo::test_the_note_sends_the_reader_to_the_units_first": 0.016366113210096955,
   "tests/test_quasi_separation.py::TestTheNoteIsTrueOfTheSecondTriggerToo::test_the_threshold_has_an_absolute_floor_the_note_declares": 0.016102894907817245,
   "tests/test_quasi_separation.py::TestWellDeterminedUnaffected::test_well_determined_se_reasonable": 0.07509946401114576,
+  "tests/test_quasi_separation.py::TestWholeTermStarsSitUnderSig::test_a_significant_smooths_stars_are_in_the_sig_column": 0.019462825264781713,
   "tests/test_quasi_separation.py::TestZeroWeightDiagnostics::test_zero_weight_row_does_not_inflate_ratio[0.0-superglm.solvers.irls_direct]": 0.006299025029875338,
   "tests/test_quasi_separation.py::TestZeroWeightDiagnostics::test_zero_weight_row_does_not_inflate_ratio[0.01-superglm.solvers.pirls]": 0.0051623929757624865,
   "tests/test_random_effect.py::TestDeclaredUniverse::test_declared_levels_win_over_the_other_sources": 0.0002247499069198966,
