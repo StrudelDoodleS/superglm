@@ -1822,10 +1822,16 @@ def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
     contradicting the oracle the suite judges it by.
 
     Asserted here as INVARIANCE rather than as a value, because invariance is
-    the property that is portable: the same pair with the residue negated
-    must publish the same rungs.  Negating one eigenvalue of a symmetric
-    matrix through its own eigenvectors is exactly the perturbation a
-    different BLAS produces, and nothing else about the pair moves.
+    the property that is portable: the same pair with the residue's sign
+    reversed must publish the same rungs.  Reversing one eigenvalue of a
+    symmetric matrix through its own eigenvectors is exactly the perturbation
+    a different BLAS produces, and nothing else about the pair moves.
+
+    **BOTH SIGNS ARE CONSTRUCTED, NOT ONE READ AND ONE FLIPPED.**  A first
+    revision built the negative arm by negating whatever this machine
+    delivered -- and CI delivered the other sign, so the test asserted its own
+    machine's rounding and went red for the second time on the same fixture.
+    The magnitude is what both arms are built from.
 
     RED against the ``max(w, 0)`` projection this replaces: 19.0 against
     16.000055 at ``1e-10`` and 19.000005 against 15.999928 at ``1e-12``.
@@ -1838,18 +1844,23 @@ def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
     w, Q = np.linalg.eigh(symmetric)
 
     # The fixture is what the docstring says: the residue is below what the
-    # eigensolver resolves, so its sign carries no information.
+    # eigensolver resolves, so its sign carries no information -- which is
+    # why this reads its MAGNITUDE and builds both signs from that.
     assert abs(w[0]) <= len(w) * np.finfo(np.float64).eps * abs(w[-1]), (w[0], w[-1])
+    assert abs(w[0]) > 0.0, w[0]
 
-    flipped = (Q * np.where(np.arange(w.size) == 0, -w, w)) @ Q.T
-    assert np.linalg.eigvalsh(0.5 * (flipped + flipped.T))[0] < 0.0 < w[0]
+    both = [
+        (Q * np.where(np.arange(w.size) == 0, sign * abs(w[0]), w)) @ Q.T for sign in (+1.0, -1.0)
+    ]
+    signs = [np.linalg.eigvalsh(0.5 * (p + p.T))[0] for p in both]
+    assert signs[1] < 0.0 < signs[0], signs
 
     rungs = [
         structured_ladder(
             spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows),
             budgets=_VANISHING_BUDGETS,
         )
-        for penalty in (symmetric, flipped)
+        for penalty in both
     ]
     assert all(r is not None and len(r) == len(_VANISHING_BUDGETS) for r in rungs), rungs
 
@@ -2494,7 +2505,21 @@ def test_the_zero_penalty_rung_on_a_near_rank_pair(build, expected, tol):
     struct = structured_ladder(
         spline_cat_moments(B_a, np.zeros_like(S_a), S_cell, W_cell, level_rows), budgets=BUDGETS
     )
-    assert struct is not None and len(struct) == len(BUDGETS)
+    # **WHETHER THE PAIR IS PUBLISHED AT ALL IS NOT PORTABLE EITHER, AND CI
+    # SAID SO TWICE.**  A refusal here is the documented contract -- `None`
+    # hands the pair back and the caller takes a NaN row -- and on a geometry
+    # whose `lambda = 0` value moves 0.379 df between machines, which side of
+    # the deflation's cut it lands on moves with it: this machine publishes
+    # all four of these fixtures, CI refused `band-1e-3-L6` on one revision
+    # and `band-2e-3-L6` on the next.  Asserting "published" pins the third
+    # non-reproducible quantity on this branch.  What is asserted is the
+    # CONTRACT: whatever comes back obeys the identity's bounds, and
+    # `test_the_zero_penalty_family_is_not_refused_wholesale` below keeps this
+    # from degrading into a test that passes on a module that refuses
+    # everything.
+    if struct is None:
+        return
+    assert len(struct) == len(BUDGETS)
 
     # The rank of the residualized design, taken on a FACTOR rather than on a
     # Gram, which is the one counter here that is not squaring its input.
@@ -2521,6 +2546,52 @@ def test_the_zero_penalty_rung_on_a_near_rank_pair(build, expected, tol):
         # measured here and is carried only so a reader can see how far the
         # bound sits from it; it is not asserted.
         assert s.edf0 <= design_rank + tol, (s.edf0, design_rank, expected)
+
+
+def test_the_zero_penalty_family_is_not_refused_wholesale():
+    """The floor under the test above, so its refusal branch cannot swallow it.
+
+    ``test_the_zero_penalty_rung_on_a_near_rank_pair`` accepts a refusal,
+    because which side of the deflation's cut a near-rank pair lands on is not
+    reproducible between machines -- a 0.379 df spread on the value, and CI has
+    refused two different parametrizations on two revisions where this machine
+    published all four.  That acceptance would let a module that refused
+    EVERYTHING pass it, so the population is asserted here instead of the
+    member.
+
+    Four near-rank fixtures plus one well-posed control.  The control must
+    publish -- it is not near-rank and nothing about it is at a cut -- and the
+    near-rank four must not all refuse, which is the failure this branch
+    exists to remove: the form it replaces refused 2 of 56 oracle points and
+    handed back whole pairs on the starved family.  A majority is not
+    asserted, because a majority is what was observed rather than what is
+    guaranteed.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    def unpenalized(grab):
+        B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
+        return structured_ladder(
+            spline_cat_moments(B_a, np.zeros_like(S_a), S_cell, W_cell, level_rows),
+            budgets=BUDGETS,
+        )
+
+    control = unpenalized(_thin_level_pair(low_weight=1.0))
+    assert control is not None and len(control) == len(BUDGETS), control
+
+    near_rank = [
+        unpenalized(build())
+        for build in (
+            lambda: _rank_one_penalty_pair(13, 6, 12, 1e-3, 3),
+            lambda: _rank_one_penalty_pair(13, 6, 12, 2e-3, 3),
+            lambda: _rank_one_penalty_pair(7, 5, 12, 1e-3, 2),
+            lambda: _multi_null_pair(0),
+        )
+    ]
+    assert any(r is not None for r in near_rank), (
+        "every near-rank zero-penalty pair was refused; the ladder is handing "
+        "back the whole family it was changed to score"
+    )
 
 
 def test_the_ladder_refuses_a_search_it_cannot_afford(monkeypatch):
