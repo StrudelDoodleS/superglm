@@ -681,10 +681,13 @@ class ModelSummary:
                     # right border leaves the box.  Truncating keeps both
                     # invariants for any label; the elided tail is the p-value,
                     # which the row's own data still carries.
-                    # Two for the gap after the term name, one so the stars are
-                    # never flush against the label the way the header's own
-                    # " Sig" is not.
-                    room = sig_col - len(row_prefix) - 3
+                    # Exactly the room before Sig: two characters go to the gap
+                    # after the term name and the rest is the label's.  Not one
+                    # less for a cosmetic gap -- a label that ends flush against
+                    # the stars is what a full-width numeric field looks like
+                    # too, and spending a column on air would elide a label that
+                    # fits, which is a real loss for a cosmetic gain.
+                    room = sig_col - len(row_prefix) - 2
                     overflow = len(spline_text) - room
                     if overflow > 0:
                         # The KIND is elided, not the tail.  The tail is
