@@ -626,6 +626,49 @@ class TestTheNoteIsTrueOfTheSecondTriggerToo:
         assert _editor_row(thin, "cat[RARE]")["advisory_kind"] == "thin_level"
 
 
+class TestWholeTermStarsSitUnderSig:
+    """A group test's stars must land in the Sig column, not the advisory one.
+
+    A whole-term row hand-builds its line rather than going through
+    ``_coef_fields``, and it padded for ONE trailing 3-wide field where the
+    header declares two.  Its stars therefore landed in the last column -- the
+    advisory -- so every significant smooth read as flagged, on a row kind the
+    detection never touches.  Asserted by COLUMN POSITION against the header,
+    which is what a reader lines up by.
+    """
+
+    def test_a_significant_smooths_stars_are_in_the_sig_column(self):
+        rng = np.random.default_rng(7)
+        n = 800
+        X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n)})
+        y = 1.0 + np.sin(X["age"].to_numpy() / 8.0) + rng.normal(0, 0.3, n)
+        from superglm.features.spline import Spline
+
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, features={"age": Spline(n_knots=8)}
+        )
+        model.fit(X, y)
+
+        lines = str(model.summary()).split("\n")
+        header = next(line for line in lines if "P>|z|" in line)
+        group_line = next(line for line in lines if "chi2(" in line)
+
+        sig_start = header.index("Sig")
+        advisory_start = header.index("LC", sig_start)
+        assert advisory_start > sig_start
+
+        stars = group_line.index("***")
+        assert sig_start <= stars < advisory_start, (
+            f"stars at {stars} fall outside Sig [{sig_start}, {advisory_start})"
+        )
+        # And the advisory field is blank for a row the rule never inspects.
+        assert group_line[advisory_start : advisory_start + 3].strip() == ""
+
+        rows = {r.name: r for r in model.summary()._coef_rows}
+        assert any(r.is_spline for r in rows.values())
+        assert not any(r.quasi_separated for r in rows.values())
+
+
 class TestColumnAlignment:
     """Sig and LC columns must not break border alignment."""
 
