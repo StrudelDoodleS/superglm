@@ -1103,6 +1103,32 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         with pytest.raises(NotImplementedError, match="not yet exportable"):
             rating_tables._interaction_blocks(model, 3)
 
+    def test_the_exported_block_is_sorted_the_way_the_sweep_reads_it(self):
+        """One order, so a midpoint row cannot pick different nodes on each side.
+
+        ``_nearest_grid_index`` breaks a tie by INDEX, so a row exactly halfway
+        between two nodes takes the earlier one. If the exported block kept a
+        descending axis while the sweep sorted, "earlier" would mean the higher
+        value on one side and the lower on the other, and the sheet would
+        describe a factor the workbook does not carry.
+        """
+        from superglm.export import rating_tables
+
+        model, df, y = self._model_with(self._Stub(descending=True))
+        block = rating_tables._interaction_blocks(model, 3)[0]
+
+        assert block.kind == "grid"
+        assert [float(v) for v in block.table[block.table.columns[0]]] == [1.0, 2.0, 3.0]
+        assert [float(c) for c in block.table.columns[1:]] == [10.0, 20.0, 30.0]
+
+        # And the cell values travelled with their axes: the stub's surface is
+        # ``x1 + 0.01 * x2``.
+        cells = block.table.iloc[:, 1:].to_numpy(dtype=float)
+        expected = np.exp(
+            np.array([1.0, 2.0, 3.0])[:, None] + 0.01 * np.array([10.0, 20.0, 30.0])[None, :]
+        )
+        np.testing.assert_allclose(cells, expected, rtol=1e-12, atol=0.0)
+
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
 
