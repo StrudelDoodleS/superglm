@@ -85,9 +85,9 @@ def _psd_pinv(A: NDArray) -> NDArray:
     surface with no meaning behind it.
     """
     w, Q = np.linalg.eigh(A)
-    rcond = _solve_floor(A.shape[-1])
+    floor = _solve_floor(A.shape[-1])
     scale = np.maximum(w[..., -1:], np.finfo(np.float64).tiny)
-    keep = w > rcond * scale
+    keep = w > floor * scale
     inv = np.where(keep, 1.0 / np.where(keep, w, 1.0), 0.0)
     return (Q * inv[..., None, :]) @ np.swapaxes(Q, -1, -2)
 
@@ -114,13 +114,20 @@ class ArrowFactor:
     def diag_blocks(self) -> NDArray:
         """The ``(L, g, g)`` diagonal blocks of ``K^{-1}``.
 
-        ``[K^-1]_qq = G_q^-1 + G_q^-1 E_q' Sigma^-1 E_q G_q^-1``.  Reading
-        these back is what makes ``tr(K^-1 X)`` affordable for a block-
-        diagonal ``X`` — no other entry of the inverse is ever needed, and
-        forming the whole inverse would cost the quadratic memory this module
-        exists to avoid.  The OFF-diagonal blocks are ``Y_q Sigma^-1 Y_q'``,
-        which a caller that needs them can contract itself out of
-        :attr:`Y` and :attr:`Sinv` without ever forming one.
+        ``[K^-1]_qq = G_q^-1 + G_q^-1 E_q' Sigma^-1 E_q G_q^-1``, formed
+        without forming the inverse — which would cost the quadratic memory
+        this module exists to avoid.  The OFF-diagonal blocks are
+        ``Y_q Sigma^-1 Y_q'``, which a caller that needs them can contract
+        itself out of :attr:`Y` and :attr:`Sinv` without ever forming one.
+
+        **NO PRODUCTION CALLER, DELIBERATELY KEPT.**  This used to be how
+        ``tr(K^-1 X)`` was taken for a block-diagonal ``X``; the ``edf`` it
+        served is a sum of squared norms now and reads nothing back from the
+        inverse.  What is left is the one statement about this factorization
+        that the rest of the class cannot make -- :meth:`solve` exercises the
+        inverse only through a right-hand side -- so the module's own
+        contract test compares these blocks against a dense ``K^-1``.  It is
+        surface with a test behind it rather than surface with nothing.
         """
         return self.Ginv + self.Y @ self.Sinv @ np.swapaxes(self.Y, -1, -2)
 
