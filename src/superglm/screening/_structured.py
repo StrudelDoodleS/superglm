@@ -177,6 +177,21 @@ NONE of them.  The upper end is still a guard: ``A^+`` rests on a deflation
 decision, and a deflation that misfires inverts a direction the pencil does
 not resolve.  Measured once, at 2237 against a ceiling of 77.
 
+**AND "BY CONSTRUCTION" IS ONLY WORTH SOMETHING IF THE CONSTRUCTION IS
+CERTIFIED.**  Two clips are what make it true, and each is now bounded rather
+than trusted, because a clip that silences roundoff silences a breakdown just
+as well and leaves a plausible number inside ``[0, ceiling]`` either way.
+:func:`_psd_factor`'s ``max(w, 0)`` is held to :func:`_psd_clip_allowance` --
+``eigh``'s documented ``n eps ||M||`` plus the measured closure residual over
+the deflation, the second dominating three orders on the starved family --
+and what it removes beyond that is carried into DEGREES OF FREEDOM by
+``||F_q||_F^2`` and refused against the same dust allowance the range guard
+takes.  :func:`_penalty_root`'s projection is held to ``n^2 eps`` of the
+penalty's trace, which is what separates a penalty the two halves can share
+from one where the statistic and the edf would be scoring different pencils.
+Worst observed across every geometry the screening suites exercise: 0.25 of
+the first allowance and 0.375 of the second.
+
 **WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
 leaves ``edf`` unchanged in exact arithmetic and changes only the order of
 every reduction — which is what a different BLAS kernel or thread count does.
@@ -214,28 +229,33 @@ Both forms are wrong there — the old by up to 53.08 df, the new by up to
 and are refused instead of published.  That is a defect in the FACTORIZATION's
 border cut rather than in the edf form, and it is not fixed here.
 
-**HOW FAR BEYOND: ONE ULP OF LAMBDA DECIDES IT.**  On a 7-level ``bs(10)``
-pair with 3 rows per level, ``local`` and ``border`` both measure 9.654e+07 at
-the ladder's high edge and their difference is ``-13.61``.  Move lambda by a
-SINGLE ulp — 594.8079378729931 against ...32, which is just the difference
-between ``1e10 * a / b`` and ``1e10 * (a / b)`` — and the same evaluation
-returns ``edf = 0.8229`` instead.  ``edf`` is not a continuous function of
-lambda at float64 resolution on this family, so no bound on the VALUE is
-available there and none is claimed; the guard is what carries it, and
-``structured_ladder`` refuses the pair on either side of that ulp.
-``tests/test_structured_screening.py`` pins that refusal on this geometry.
+**HOW FAR BEYOND: ONE ULP OF LAMBDA USED TO DECIDE IT.**  On a 7-level
+``bs(10)`` pair with 3 rows per level the OLD difference form measured
+``local`` and ``border`` both at 9.654e+07 at the ladder's high edge, with a
+difference of ``-13.61`` — outside ``[0, 78]``, so refused — while moving
+lambda by a SINGLE ulp, 594.8079378729931 against ...32, which is just the
+difference between ``1e10 * a / b`` and ``1e10 * (a / b)``, returned
+``edf = 0.8229`` instead.  ``edf`` was not a continuous function of lambda at
+float64 resolution on that family.  **THE SUM DOES NOT DO THIS AND THE SAME
+FIXTURE IS THE EVIDENCE**: the two sides of that ulp now read 0.99999632699
+and 0.99999632618, agreeing to 8.1e-10, the sum leaves ``[0, L k_a]`` at NONE
+of 200 log-spaced lambdas where the difference left it at 101, and the ladder
+scores the pair at 1.0000 on every budget instead of handing it back.
+``tests/test_structured_screening.py`` scans the whole bracket rather than
+asserting at either lambda, because what is portable here is the width of the
+region and not a value at one point.
 
-**WHAT A DROPPED DIRECTION COSTS NOW.**  The inverse's relative cut still
-drops directions, and where one carries a filter factor near 1 the answer
+**WHAT A DROPPED DIRECTION COSTS NOW.**  The pair arrow's relative cut still
+drops directions, and where one carries a filter factor near 1 the STATISTIC
 loses it.  ``_mixed_rank_cells`` in the suite is built to sit exactly there —
 its only ``V_eff`` direction is ``1e-16`` RELATIVE to its own level block,
-under ``_solve_floor``'s ``3 eps`` — and a 50-digit oracle puts ``edf`` at
-1.000000 / 0.500000 / 0.000000 across the bracket where this reads
-0.0 / 0.0 / 0.0.  The form it replaces got that fixture's low edge right by
-counting the direction against the PENALTY's scale rather than the block's,
-which is the same mismatch that cost whole degrees of freedom elsewhere.  The
-published row is unchanged: ``screen_interactions`` skips a rung with
-``edf0 <= 0``, so the pair takes the same NaN row the old refusal produced.
+under ``_solve_floor``'s ``3 eps``.  **The edf half no longer pays that**, and
+the reason is the whole point of working on the factor: ``N_q`` is ``T_q' T_q``
+from a QR of ``[R_q ; sqrt(lambda) rootS]`` and ``R_q``'s smallest direction
+sits at ``d``, not at ``d^2``, so the cut is applied to a square root.  Against
+a 50-digit oracle of 1.000000 / 0.500000 / 0.000000 across the bracket this
+reads 0.9999999999 / 0.5000000000 / 5.7e-10, and the ladder attains the 0.5
+rung the form it replaces answered with a single rung at 0.0.
 
 The dense path carries its own version of the same failure and it is not
 touched here: on one of four wide pairs of the shape this kernel exists for
@@ -275,6 +295,7 @@ from superglm.screening._score_stat import ScreenedPair
 
 _EDF_TOL = 1e-6
 _EDF_ROUNDOFF_FACTOR = 64.0
+_PSD_CLIP_FACTOR = 8.0
 _EDF_ABSOLUTE_DUST = np.finfo(np.float64).eps ** 2
 _MAX_BISECT = 200
 _TRACE_CHUNK_DOUBLES = 262_144
@@ -378,6 +399,53 @@ def _centered_level_factors(B: NDArray, W: NDArray) -> NDArray:
 def _combine_row_factors(left: NDArray, right: NDArray) -> NDArray:
     """Compact two weighted-row factors without squaring either one."""
     return np.linalg.qr(np.concatenate((left, right), axis=0), mode="r")
+
+
+def _reduce_row_factors(base: NDArray, blocks: NDArray) -> NDArray:
+    """Compact ``base`` stacked under a batch of per-level row factors.
+
+    The reduction itself is forced: the levels' factors have to meet in one
+    ``w``-column factor and no Gram may be formed on the way, so what is left
+    to choose is the SHAPE OF THE OPERANDS, and stacking the whole batch into
+    one ``(n * h, w)`` matrix chooses badly.  Its row count is the level
+    count, which puts ``L`` inside a matrix dimension: the work stays linear,
+    but the temporary is ``L``-sized and the factorization is one long
+    sequential Householder chain.  ``tests/test_screening_cost_scaling.py``
+    asserts the opposite property -- that ``L`` appears only as a batch count
+    -- and it is right to.
+
+    This is instead the binary reduction tree of Demmel, Grigori, Hoemmen &
+    Langou, *SIAM J. Sci. Comput.* 34(1):A206-A239 (2012) (communication-
+    avoiding TSQR, their §2), on the ``R`` factors alone: pair the blocks,
+    factor every pair in ONE batched call, and repeat.  Every operand is
+    ``(2w, w)`` however many levels there are, the depth is ``log2(n)`` calls
+    instead of one, and the total work is the same ``n`` small factorizations.
+    TSQR is unconditionally backward stable -- each level of the tree is an
+    orthogonal transformation of a matrix whose norm it preserves -- so this
+    is a reorganization of the same reduction and not a relaxation of it.
+
+    Blocks shorter than ``w`` are zero-padded rather than factored, since
+    their ``R`` is themselves; blocks taller are reduced once, batched, before
+    entering the tree.
+    """
+    base = np.asarray(base, dtype=np.float64)
+    blocks = np.asarray(blocks, dtype=np.float64)
+    n, h, w = blocks.shape
+    if n == 0 or w == 0:
+        return base
+    if h > w:
+        blocks = np.linalg.qr(blocks, mode="r")
+        h = w
+    if h < w:
+        padded = np.zeros((n, w, w), dtype=np.float64)
+        padded[:, :h, :] = blocks
+        blocks = padded
+    while blocks.shape[0] > 1:
+        pairs = blocks.shape[0] // 2
+        merged = np.linalg.qr(blocks[: 2 * pairs].reshape(pairs, 2 * w, w), mode="r")
+        odd = blocks[2 * pairs :]
+        blocks = np.concatenate((merged, odd), axis=0) if odd.size else merged
+    return _combine_row_factors(base, blocks[0])
 
 
 def _representative_projection(
@@ -651,10 +719,7 @@ def _unemitted_overlap_rows(
         block = columns[start : start + chunk]
         root = np.sqrt(W_cell[:, block]).T[:, :, None]  # (levels, n_rows, 1)
         rows = np.concatenate((root, root * B[None, :, :]), axis=2)
-        factor = _combine_row_factors(
-            factor,
-            np.linalg.qr(rows, mode="r").reshape(-1, width),
-        )
+        factor = _reduce_row_factors(factor, np.linalg.qr(rows, mode="r"))
     return factor
 
 
@@ -914,7 +979,7 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
         for start in range(0, L, chunk):
             block = p.R[start : start + chunk]
             padded[: block.shape[0], :, 1:] = block
-            combined = _combine_row_factors(combined, padded[: block.shape[0]].reshape(-1, width))
+            combined = _reduce_row_factors(combined, padded[: block.shape[0]])
     if combined.size:
         row_factor = np.linalg.qr(combined, mode="r")
         singular, right = np.linalg.svd(row_factor)[1:]
@@ -929,6 +994,31 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     trace_S = float(np.trace(p.S_a))
     kept_S = float(np.sum(np.square(root_penalty)))
     clip = abs(trace_S - kept_S) / max(abs(trace_S), np.finfo(np.float64).tiny)
+    # THE TWO HALVES MUST BE SCORING THE SAME PENCIL.  ``edf`` is evaluated
+    # against ``rootS' rootS``, the PSD projection of ``S_a``; the statistic is
+    # evaluated against ``S_a`` itself, because ``_pair_arrow`` adds it raw.
+    # That is harmless exactly while the projection removes roundoff, and
+    # nothing above checks that it does -- so a materially indefinite penalty
+    # would have the ladder choosing lambda on one pencil and publishing a
+    # statistic from another.
+    #
+    # The certification is the eigensolver's own documented error bound rather
+    # than a chosen tolerance.  A symmetric eigendecomposition returns
+    # eigenvalues within ``p(n) eps ||S||_2`` of the true ones, with
+    # ``p(n) = n`` in the LAPACK Users' Guide's bound (3rd ed., SIAM 1999,
+    # sec. 4.7), so a genuinely PSD ``S_a`` cannot show a negative eigenvalue
+    # below ``-n eps ||S||_2``; there are at most ``n`` of them, and
+    # ``tr(S) >= ||S||_2`` for a matrix in the cone, so the relative trace mass
+    # a certified-roundoff projection can remove is at most ``n^2 eps``.
+    # Measured across every geometry this suite exercises, the worst observed
+    # is 0.375 of that -- the bound is derived, and it is not tight to what was
+    # seen.
+    if clip > p.S_a.shape[0] ** 2 * np.finfo(np.float64).eps:
+        raise _UnstableStructuredEDFError(
+            f"the penalty's PSD projection removed {clip} of its trace, which is "
+            "more than an eigensolver's backward error: the statistic and the edf "
+            "would be scoring different pencils"
+        )
 
     # ``sum over ALL levels of Q_q' Q_q`` is EXACTLY ``I_r``: that is what
     # makes ``Q`` an orthonormal basis, and every bound the ladder rests on --
@@ -968,8 +1058,65 @@ def _block_inverse_factors(triangular: NDArray) -> NDArray:
     return (np.swapaxes(vt, -1, -2) * inv[..., None, :]) @ np.swapaxes(u, -1, -2)
 
 
-def _psd_factor(M: NDArray) -> NDArray:
+def _psd_clip_allowance(n: int, scale: float, closure: float) -> float:
+    """Largest negative eigenvalue an exactly-PSD block can show at ``scale``.
+
+    ``_psd_factor``'s ``max(w, 0)`` is the Euclidean projection onto the PSD
+    cone (Higham, *LAA* 103:103-118, 1988) and is the right thing to do to
+    roundoff -- but it does the same thing to a block that is materially
+    indefinite because a deflation misfired, and there the contribution is
+    still a squared norm and still lands inside ``[0, ceiling]``.  A clip
+    nobody bounds turns a numerical breakdown into a plausible published
+    ``edf``, so the two cases are separated here.
+
+    Both terms are documented error bounds rather than chosen tolerances:
+
+    * ``eigh`` returns eigenvalues within ``p(n) eps ||M||_2`` of the true
+      ones, with ``p(n) = n`` in the *LAPACK Users' Guide* (3rd ed., SIAM
+      1999, sec. 4.7) bound for the symmetric eigenproblem;
+    * ``W_q`` reaches it through at most three chained products in ``n``
+      dimensions, each contributing ``n eps`` relative (Higham, *ASNA* 2nd
+      ed., Thm 3.5).
+
+    So ``4 n eps ||M||_2``, taken at ``8 n eps`` to round the chain depth up
+    rather than fit it.
+
+    **THE SCALE IS NOT ALWAYS THE BLOCK'S OWN NORM, AND THAT IS THE WHOLE
+    SUBTLETY.**  ``What_q``'s leading block is ``I + Y H^+ Y'``, so its norm
+    is at least 1 and a relative test is well posed.  ``Xi`` alone is not:
+    its eigenvalues are ``(1 - s)(1 + s) / s^2`` for ``H``'s singular values
+    ``s``, which lie in ``[0, 1]`` EXACTLY, so a fully absorbed direction
+    gives ``s = 1 + eps`` and an eigenvalue of ``-2 eps / s^2`` while the
+    block's own norm is that same ``2 eps`` -- every relative bound passes
+    trivially and the test says nothing.  The reference there is what bounds
+    the block, ``||H^+||_2``, so ``scale`` is ``max(||M||_2, ||H^+||_2)``.
+
+    **AND ON THIS GEOMETRY eps IS NOT THE TERM THAT DOMINATES.**  ``W_q``'s
+    PSD-ness is a knife edge, not a margin.  In direction ``j`` its 2x2
+    section is ``[[1 + y^2/h, -y/h], [-y/h, (1 - h)/h]]`` with determinant
+    ``(1 - h - y^2)/h``, so it is PSD exactly to the extent that
+    ``sum_q y_qj^2 = 1 - h_j`` -- which is ``sum_q Q_q' Q_q = I_r`` again, the
+    identity everything here rests on, and whose computed residual
+    ``closure`` this module already measures.  A residual of ``d`` moves that
+    determinant by ``d/h``, hence an eigenvalue by ``d ||H^+||``, and on the
+    starved fixture that term is ``2.1e-11`` where ``n eps ||M||`` is
+    ``3.7e-14``: three orders larger, and it is the one that decides.  A
+    clip below their sum is roundoff on a quantity that is only determined
+    that far; above it, something other than arithmetic moved the block.
+    """
+    return _PSD_CLIP_FACTOR * max(int(n), 1) * float(np.finfo(np.float64).eps) * np.maximum(
+        scale, 0.0
+    ) + np.maximum(closure, 0.0)
+
+
+def _psd_factor(M: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Batched ``F`` with ``F F' = M`` for symmetric ``M``, negatives clipped.
+
+    Returns the factor, the size of what the clip threw away
+    (``max(-w_min, 0)``, which is exactly ``||M - M_+||_2``) and the block's
+    own norm, so the caller can decide whether the clip was roundoff.  See
+    :func:`_psd_clip_allowance` for why it is the caller and not this function
+    that owns the decision.
 
     Equilibrating ``M`` to a unit diagonal before the eigendecomposition was
     tried and is NOT adopted: on the near-absorbed pair it moves the
@@ -979,7 +1126,9 @@ def _psd_factor(M: NDArray) -> NDArray:
     does not repeat it.
     """
     w, Q = np.linalg.eigh(0.5 * (M + np.swapaxes(M, -1, -2)))
-    return Q * np.sqrt(np.where(w > 0.0, w, 0.0))[..., None, :]
+    clipped = np.maximum(-np.min(w, axis=-1, initial=0.0), 0.0)
+    top = np.maximum(np.max(np.abs(w), axis=-1, initial=0.0), 0.0)
+    return Q * np.sqrt(np.where(w > 0.0, w, 0.0))[..., None, :], clipped, top
 
 
 def _absorption_floor(n_terms: int, rank: int, defect: float) -> float:
@@ -1011,8 +1160,10 @@ def _absorption_floor(n_terms: int, rank: int, defect: float) -> float:
     return float(np.sqrt(max(defect, 0.0))) + max(int(n_terms), int(rank), 1) * eps
 
 
-def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> float:
-    """``tr(A(lambda)^+ V_eff)`` as a sum of squared norms.
+def _filter_factor_sum(
+    p: SplineCatPair, geometry: _PairGeometry, lam: float
+) -> tuple[float, float]:
+    """``tr(A(lambda)^+ V_eff)`` as a sum of squared norms, and its clip bound.
 
     **THIS IS THE SUM THE MODULE HEADLINE CLAIMS, AND NOW IT IS ONE.**  With
     ``E_q`` the selector for level ``q``'s block, ``M_q = [E_q, -Psi']`` and
@@ -1076,6 +1227,10 @@ def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) ->
 
     Two chunked passes over the levels, each bounded by
     ``_TRACE_CHUNK_DOUBLES``; ``K`` and ``Y`` are what they carry between them.
+
+    The second return value is ``sum_q ||F_q||_F^2 ||W_q - W_q+||_2``, a bound
+    IN DEGREES OF FREEDOM on everything :func:`_psd_factor`'s clip removed;
+    :func:`_evaluate` refuses the evaluation when it is not dust.
     """
     L, k_a = p.dims
     r = geometry.overlap_rank
@@ -1110,7 +1265,7 @@ def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) ->
             scale[:, None, None]
         )
         cross[start:stop] = factored[:, :k_a, k_a:]
-        border = _combine_row_factors(border, factored[:, k_a:, k_a:].reshape(-1, r))
+        border = _reduce_row_factors(border, factored[:, k_a:, k_a:])
 
     # --- H's spectrum, from its factor's singular values -------------------
     if r:
@@ -1128,12 +1283,15 @@ def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) ->
         xi = np.where(keep, free / safe, free)
         coupled = (right.T * xi) @ right
         coupled = 0.5 * (coupled + coupled.T)
+        deflation = float(np.max(np.where(keep, 1.0 / safe, 1.0)))
     else:
         resolved = extended = coupled = np.zeros((0, 0), dtype=np.float64)
+        deflation = 1.0
 
     # --- pass 2: one PSD factor per level, and the squared norms -----------
     total = 0.0
     correction = 0.0
+    uncertified = 0.0
     block = np.empty((min(chunk, max(L, 1)), width, width), dtype=np.float64)
     for start, stop in blocks:
         carried = p.R[start:stop] @ coupling
@@ -1146,9 +1304,22 @@ def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) ->
         view[:, :k_a, k_a:] = -crossed
         view[:, k_a:, :k_a] = -np.swapaxes(crossed, -1, -2)
         view[:, k_a:, k_a:] = coupled
-        term = float(
-            np.sum(np.square(np.concatenate((contract, carried), axis=2) @ _psd_factor(view)))
-        )
+        rows = np.concatenate((contract, carried), axis=2)
+        factor, negative, top = _psd_factor(view)
+        term = float(np.sum(np.square(rows @ factor)))
+        # What the clip removed BEYOND what roundoff explains, carried into
+        # the units of the answer: for the excess ``e_q``,
+        # ``|tr(F_q (W - W_+) F_q')| <= ||F_q||_F^2 e_q`` by Weyl plus the
+        # trace bound, so this is a bound in DEGREES OF FREEDOM and
+        # :func:`_evaluate` can hold it against the guard's own allowance.
+        # The scale is the largest INTERMEDIATE the block passed through,
+        # ``||H^+|| max(1, ||Y_q||)^2``, and not the block's own norm: the
+        # products that build it can cancel, and a bound taken on the result
+        # of a cancellation is not a bound on the cancellation.
+        scale = np.maximum(top, deflation * np.square(1.0 + np.linalg.norm(Y, axis=(1, 2))))
+        allowance = _psd_clip_allowance(width, scale, geometry.orthonormality * deflation)
+        excess = np.maximum(negative - allowance, 0.0)
+        uncertified += float(np.sum(np.sum(np.square(rows), axis=(1, 2)) * excess))
         # Neumaier-style compensated accumulation: the chunk totals are
         # nonnegative, so this only keeps the scalar independent of chunking.
         updated = total + term
@@ -1161,8 +1332,15 @@ def _filter_factor_sum(p: SplineCatPair, geometry: _PairGeometry, lam: float) ->
     # The levels the menu does not emit all carry the SAME ``W_q = Xi``, so
     # their whole contribution is one term against the compacted Gram factor
     # rather than one term per level.
-    total += float(np.sum(np.square(geometry.base_gram @ _psd_factor(coupled))))
-    return total + correction
+    factor, negative, top = _psd_factor(coupled)
+    total += float(np.sum(np.square(geometry.base_gram @ factor)))
+    excess = np.maximum(
+        negative
+        - _psd_clip_allowance(r, np.maximum(top, deflation), geometry.orthonormality * deflation),
+        0.0,
+    )
+    uncertified += float(np.sum(np.square(geometry.base_gram)) * float(excess))
+    return total + correction, uncertified
 
 
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
@@ -1182,7 +1360,7 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
     T = float(np.sum(geometry.U_eff * x[:, :k_a]))
 
-    edf = _filter_factor_sum(p, geometry, lam)
+    edf, uncertified = _filter_factor_sum(p, geometry, lam)
 
     # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
     # with both parts nonnegative, so the sum lies in ``[0, L * k_a]`` for
@@ -1201,11 +1379,34 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     # times their total, and ``_EDF_ROUNDOFF_FACTOR`` covers ``n`` up to
     # ``2**64``.
     roundoff = _edf_roundoff(edf, geometry.ceiling)
+    # ``uncertified`` is what made every term a squared norm in the first place.
+    # Being nonnegative BY CONSTRUCTION is only worth something if the
+    # construction is certified: ``max(w, 0)`` silences an indefinite block
+    # just as effectively as it silences roundoff, so the two are separated
+    # here, on the one scale where the question is decidable -- degrees of
+    # freedom, against the same allowance the range guard takes.
     if not np.isfinite(edf) or edf < -roundoff or edf > geometry.ceiling + roundoff:
         raise _UnstableStructuredEDFError(
             f"structured EDF is not a filter-factor sum: {edf} (ceiling={geometry.ceiling})"
         )
-    return T, min(max(edf, 0.0), geometry.ceiling)
+    if not uncertified <= roundoff:
+        raise _UnstableStructuredEDFError(
+            f"the PSD clip removed {uncertified} df beyond its backward error, on {edf} "
+            f"(allowance={roundoff}, ceiling={geometry.ceiling})"
+        )
+    # THE DUST BAND IS TWO-SIDED, SO THE COLLAPSE IS TOO.  Everything inside
+    # ``[-roundoff, roundoff]`` was just declared indistinguishable from zero;
+    # returning the positive half of it as a value would be the guard
+    # contradicting itself one line later, and the contradiction is not
+    # cosmetic.  ``screen_interactions`` divides by ``sqrt(2 * edf0)``, so a
+    # published ``edf0`` of 3e-17 -- the same measurement as -3e-17, which
+    # collapses to 0.0 and skips the rung -- inflates that pair's ``z`` by
+    # ~1e8 and sorts a pair that resolved nothing to the top of the screen.
+    # Which side of zero a cancellation residue lands on is not something this
+    # module gets to decide, so it must not be what decides a ranking.
+    if abs(edf) <= roundoff:
+        return T, 0.0
+    return T, min(edf, geometry.ceiling)
 
 
 def structured_ladder(
@@ -1284,14 +1485,19 @@ def structured_ladder(
     not independent targets or already certified edge clamps.  The returned
     list may therefore contain fewer entries than ``budgets``.  If no rung
     survives, ``None`` preserves the pair-refusal signal and lets a speculative
-    structured route hand the dense path back.
+    structured route hand the dense path back.  A failure in the
+    lambda-INDEPENDENT half refuses the pair outright, since no lambda can
+    make it go away.
     """
     if p.profiled_trace is None:
         return None
 
     # One M factorization for the whole ladder: it carries U_eff and both
     # halves of V_eff, none of which depends on lambda.
-    geometry = _profile(p)
+    try:
+        geometry = _profile(p)
+    except _UnstableStructuredEDFError:
+        return None
 
     def evaluate(lam: float) -> tuple[float, float] | None:
         try:

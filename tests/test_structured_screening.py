@@ -544,6 +544,15 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     per-level trace term outright, at ``L = 1``, ``k_a = 1``: a ceiling of
     exactly 1.0.
 
+    **THE COLLAPSE IS TWO-SIDED, WHICH IS THE HALF THAT CAN MOVE A ROW.**  The
+    guard calls ``|edf| <= roundoff`` dust on both sides; the clip used to
+    collapse only the negative half, so ``-1e-300`` returned ``0.0`` and
+    ``screen_interactions`` skipped the rung, while ``+1e-300`` -- the same
+    measurement with the other sign -- was published and divided into
+    ``z = (T - edf0) / sqrt(2 edf0)``, sorting a pair that resolved nothing to
+    the top of the screen.  Both signs now return exactly ``0.0``; RED against
+    the shipped tree, which returns ``1e-300`` for the positive one.
+
     This test reds against the form it replaces for a structural reason: that
     one reached the guard through a ``FakeFactor`` standing in for
     ``_pair_arrow``, and ``_pair_arrow`` no longer computes ``edf``.
@@ -554,12 +563,21 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     geometry = st._profile(pair)
     assert geometry.ceiling == 1.0, geometry.ceiling
 
-    for injected, expected in ((1e-300, 1e-300), (-1e-300, 0.0), (1.0, 1.0)):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: _v)
+    # The dust band both sides of this are inside, derived rather than
+    # asserted: the guard's own allowance on a ceiling of 1.0.
+    band = st._edf_roundoff(0.0, geometry.ceiling)
+    assert 0.0 < band < 1e-13, band
+
+    for injected in (1e-300, -1e-300, 0.5 * band, -0.5 * band):
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (_v, 0.0))
+        assert st._evaluate(pair, geometry, 1.0)[1] == 0.0, injected
+
+    for injected, expected in ((1.0, 1.0), (0.25, 0.25)):
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (_v, 0.0))
         assert st._evaluate(pair, geometry, 1.0)[1] == pytest.approx(expected, abs=1e-12)
 
     for outside in (1.25, -1.25):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=outside, **k: _v)
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=outside, **k: (_v, 0.0))
         with pytest.raises(st._UnstableStructuredEDFError, match="not a filter-factor sum"):
             st._evaluate(pair, geometry, 1.0)
 
@@ -567,7 +585,109 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     # the lower end as reachable as a pair can make it.
     monkeypatch.undo()
     for lam in np.geomspace(1e-30, 1e30, 61):
-        assert st._filter_factor_sum(pair, geometry, float(lam)) >= 0.0
+        assert st._filter_factor_sum(pair, geometry, float(lam))[0] >= 0.0
+
+
+def test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff(monkeypatch):
+    """``max(w, 0)`` makes every term a squared norm WHATEVER the block was.
+
+    That is what the ``edf >= 0`` half of the range guard rests on, so the
+    clip has to be the thing that is certified rather than the thing that
+    launders.  A deflation that misfires, or an ``H^+`` inflating an
+    indefinite residue, leaves a materially indefinite ``W_q``; clipped, it
+    still contributes a nonnegative squared norm and still lands inside
+    ``[0, ceiling]``, so nothing downstream can tell it from a real answer.
+
+    The allowance is derived in :func:`_psd_clip_allowance` and the two arms
+    of this test bracket it: a negative shift a tenth of the allowance is
+    clipped silently, the same shift at ten times the allowance is refused.
+    Injected by SHIFTING THE BLOCK, not by faking the report, so the real
+    eigendecomposition is what measures it.
+
+    RED against the shipped tree, which has no such refusal: the ten-times
+    shift is clipped and published there like any other.
+    """
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_structured_inputs(_thin_level_pair(low_weight=1.0)))
+    geometry = st._profile(pair)
+    lam = 1e-4
+    baseline = st._evaluate(pair, geometry, lam)[1]
+    assert baseline > 1.0, baseline
+
+    real = st._psd_factor
+
+    def shifted(M, *, _by):
+        return real(M - _by * np.eye(M.shape[-1]))
+
+    # The allowance these blocks actually get, MEASURED off the module rather
+    # than reconstructed here -- reconstructing it would make this test a
+    # second copy of the derivation instead of a check on it.
+    seen = []
+    real_allowance = st._psd_clip_allowance
+    monkeypatch.setattr(
+        st,
+        "_psd_clip_allowance",
+        lambda *a: seen.append(np.max(real_allowance(*a))) or real_allowance(*a),
+    )
+    st._evaluate(pair, geometry, lam)
+    monkeypatch.undo()
+    allowance = float(max(seen))
+    assert 0.0 < allowance < 1e-10, allowance
+
+    monkeypatch.setattr(st, "_psd_factor", lambda M: shifted(M, _by=0.1 * allowance))
+    assert st._evaluate(pair, geometry, lam)[1] == pytest.approx(baseline, abs=1e-6)
+
+    monkeypatch.setattr(st, "_psd_factor", lambda M: shifted(M, _by=10.0 * allowance))
+    with pytest.raises(st._UnstableStructuredEDFError, match="PSD clip"):
+        st._evaluate(pair, geometry, lam)
+
+    # ...and the ladder hands the pair back rather than publishing it.
+    assert st.structured_ladder(pair, budgets=BUDGETS) is None
+
+
+def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch):
+    """``edf`` uses the PSD projection of ``S_a``; the statistic uses ``S_a``.
+
+    ``_pair_arrow`` adds ``lam * p.S_a`` raw, while the filter-factor sum is
+    built from ``rootS`` with the negative eigenvalues projected out
+    (:func:`_penalty_root`).  While that projection removes roundoff the two
+    are the same pencil to within their own error; once it removes anything
+    material, the ladder would be choosing lambda on one pencil and
+    publishing a statistic from another, and nothing would say so.
+
+    The certification is the eigensolver's documented bound, ``n^2 eps``
+    relative trace mass -- see :func:`_profile`.  Both arms are checked:
+    a negative eigenvalue at a tenth of that bound is projected silently, one
+    at ten times it refuses the pair.
+
+    RED against the shipped tree, where ``penalty_clip`` is computed, stored
+    on ``_PairGeometry`` and never read by anything.
+    """
+    import superglm.screening._structured as st
+
+    grab = _thin_level_pair(low_weight=1.0)
+    B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
+    n = S_a.shape[0]
+    bound = n * n * np.finfo(np.float64).eps
+
+    # A negative direction of a KNOWN relative trace weight, added to the
+    # penalty's own smallest eigenvector so nothing else about the pair moves.
+    w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
+    direction = np.outer(Q[:, 0], Q[:, 0])
+    trace = float(np.trace(S_a))
+
+    for factor, refused in ((0.1, False), (10.0, True)):
+        injected = S_a - (w[0] + factor * bound * trace) * direction
+        assert np.linalg.eigvalsh(0.5 * (injected + injected.T))[0] < 0.0
+        pair = spline_cat_moments(B_a, injected, S_cell, W_cell, level_rows)
+        if refused:
+            with pytest.raises(st._UnstableStructuredEDFError, match="PSD projection"):
+                st._profile(pair)
+            assert st.structured_ladder(pair, budgets=BUDGETS) is None
+        else:
+            rungs = st.structured_ladder(pair, budgets=BUDGETS)
+            assert rungs is not None and len(rungs) == len(BUDGETS)
 
 
 def test_material_negative_edf_refuses_an_only_search_rung(monkeypatch):
