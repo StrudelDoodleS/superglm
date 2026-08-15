@@ -669,7 +669,7 @@ def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch)
     grab = _thin_level_pair(low_weight=1.0)
     B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
     n = S_a.shape[0]
-    bound = n * n * np.finfo(np.float64).eps
+    bound = 2.0 * n * n * np.finfo(np.float64).eps
 
     # A negative direction of a KNOWN relative trace weight, added to the
     # penalty's own smallest eigenvector so nothing else about the pair moves.
@@ -1747,6 +1747,70 @@ def _free_directions_left_free(grab):
 
 
 _VANISHING_BUDGETS = (2.0, 4.0, 8.0, 400.0)
+
+
+@pytest.mark.parametrize("low_weight", [1e-10, 1e-12])
+def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
+    """A published ``edf0`` may not turn on which side of zero round-off landed.
+
+    **THIS TEST EXISTS BECAUSE CI FOUND IT AND THIS MACHINE COULD NOT.**  The
+    vanishing-mass pair's penalty has a smallest eigenvalue of ``1.3e-16`` of
+    its largest -- below what ``eigh`` resolves, so its SIGN is assembly
+    round-off and differs between machines.  ``lambda_hi = 1e10 * scale``
+    then amplifies it into a real penalty of ``1.86e-08 * tr(V_eff)`` that
+    reaches three levels' free directions, so keeping it or dropping it is a
+    **3 df** difference in what the ladder publishes.  A projection that keeps
+    only ``w > 0`` makes that difference a function of the round-off: this
+    machine reads ``+1.4e-15`` and reports 16.000, CI read the mirror image
+    and reported **19.000**, and both are the same policy applied to the same
+    data.
+
+    :func:`_free_directions_left_free`'s docstring already recorded the
+    finding from the other side -- it takes ``abs`` for exactly this reason,
+    checked against 40-digit mpmath on both signs -- so the module was
+    contradicting the oracle the suite judges it by.
+
+    Asserted here as INVARIANCE rather than as a value, because invariance is
+    the property that is portable: the same pair with the residue negated
+    must publish the same rungs.  Negating one eigenvalue of a symmetric
+    matrix through its own eigenvectors is exactly the perturbation a
+    different BLAS produces, and nothing else about the pair moves.
+
+    RED against the ``max(w, 0)`` projection this replaces: 19.0 against
+    16.000055 at ``1e-10`` and 19.000005 against 15.999928 at ``1e-12``.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    grab = _vanishing_mass_pair(low_weight=low_weight)
+    B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
+    symmetric = 0.5 * (S_a + S_a.T)
+    w, Q = np.linalg.eigh(symmetric)
+
+    # The fixture is what the docstring says: the residue is below what the
+    # eigensolver resolves, so its sign carries no information.
+    assert abs(w[0]) <= len(w) * np.finfo(np.float64).eps * abs(w[-1]), (w[0], w[-1])
+
+    flipped = (Q * np.where(np.arange(w.size) == 0, -w, w)) @ Q.T
+    assert np.linalg.eigvalsh(0.5 * (flipped + flipped.T))[0] < 0.0 < w[0]
+
+    rungs = [
+        structured_ladder(
+            spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows),
+            budgets=_VANISHING_BUDGETS,
+        )
+        for penalty in (symmetric, flipped)
+    ]
+    assert all(r is not None and len(r) == len(_VANISHING_BUDGETS) for r in rungs), rungs
+
+    # The bound is the perturbation's own size, not a comfort margin: moving
+    # one eigenvalue by ``2 |w_0|`` moves ``lambda_hi * w_0`` by the same
+    # factor, and the three free directions' shares respond linearly in it.
+    # 1e-3 is what the high-edge assertions on this fixture already carry;
+    # what this rules out is the 3.0 df the sign used to be worth.
+    for delivered, negated in zip(*rungs, strict=True):
+        assert delivered.edf0 == pytest.approx(negated.edf0, abs=1e-3), (
+            f"the residue's sign moved edf0 from {delivered.edf0!r} to {negated.edf0!r}"
+        )
 
 
 @pytest.mark.parametrize("low_weight", [1e-10, 1e-12])
