@@ -10,6 +10,8 @@ refused for.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1374,11 +1376,34 @@ def _thin_level_pair(low_weight):
 # asserted here.  Both lambdas are hard-coded rather than read back from the
 # ladder: they pin the ORACLE, not the search that produced them.
 _CERTIFIED_LOW_EDGE_LAMBDA = 2.2876641890924248e-11
-_CERTIFIED_LOW_EDGE_EDF = 207.99995542698146
+# ``_vanishing_mass_pair``'s own low-edge rungs, which are DIFFERENT points from
+# the one above and from each other: the bracket is scaled by the pair's own
+# profiled curvature, and how much weight the three starved levels hold moves
+# it.  Pinned so the oracle's error bound is gated where it is actually called
+# rather than at a condition number that is not the one in use.  Measured
+# bit-identical at 1, 4 and 8 threads with all six pools set together, and the
+# two arms -- a dense factorization against an arrow one -- agree to 3.38e-16
+# and 1.69e-16, so the ``rel=1e-12`` they are pinned at carries ~3000x.
+_VANISHING_LOW_EDGE_LAMBDA = {
+    1e-10: 1.9128897316769707e-11,
+    1e-12: 1.912889731636818e-11,
+}
+# The round-trip repr of that float64.  An independent mpmath evaluation at 120
+# and again at 200 decimal digits gives 207.999955426981464537204805751,
+# identical to all 30 digits between the two and agreeing with the arb ball
+# above to 1.3e-20 -- so arb's claimed +/-8.54e-24 was optimistic in its last
+# three digits, and nothing downstream can see the difference.
+_CERTIFIED_LOW_EDGE_EDF = 207.99995542698147
 
 
 def _reference_edf(grab, lam):
     """``edf(lambda)`` from the pair's DESIGN rather than from its Gram.
+
+    **THIS WRAPPER HAS NO CALL SITES AND IS KEPT DELIBERATELY.**  Every
+    consumer now takes the pair form :func:`_reference_edf_and_bound`, so that
+    it gets the bound alongside the value; what lives here is the ROOT-CAUSE
+    argument for issue #272, and five docstrings in this file cite it by name.
+    It is the documented entry point to the oracle, not dead code left behind.
 
     ``edf = tr(R (R'R + lambda S)^-1 R')`` with ``R`` the tensor block
     residualized on the mains and ``S = L'L``.  It is evaluated as
@@ -1411,15 +1436,16 @@ def _reference_edf(grab, lam):
     Against the certified value at the top of this module, at the low edge of
     ``_thin_level_pair(1.0)``::
 
-        this form                 1.99e-13
+        this form                 2.84e-14  -- one ulp of the result
         the moment-space form     1.13e-05
-        structured path           6.97e-09
+        structured path           3.97e-11
         dense path                1.37e-10
 
-    and it is not a property of one arrangement: over 60 symmetric
-    relabelings of the tensor and overlap coordinates, which leave ``edf``
-    exactly unchanged in real arithmetic and change only the order of every
-    reduction, the moment-space form spreads 1.4721e-05 and this one 7.39e-13.
+    and it is not a property of one arrangement: over 40 exact relabelings of
+    the level labels and of the cell table's rows, which leave ``edf``
+    unchanged in real arithmetic and change only the order of every reduction,
+    the moment-space form spreads 1.2038e-05 and this one 5.68e-14 -- two ulps,
+    and the worst distance from the certified value over all 40 is still one.
     Three of 40 level relabelings put the moment-space form outside the 1e-5
     the caller asserts, on one machine, at fixed thread count -- which is
     issue #272's cross-machine failure reproduced locally.
@@ -1439,6 +1465,46 @@ def _reference_edf(grab, lam):
     arbitrate, because there the conditioning is the penalty's own and no
     parametrization escapes it.  The high edge stays parity-only.
     """
+    return _reference_edf_and_bound(_reference_factors(grab), lam)[0]
+
+
+class _LowEdgeFactors(NamedTuple):
+    """Everything :func:`_reference_edf` needs that does NOT depend on lambda.
+
+    Split out so a caller evaluating at two lambdas -- both consuming tests do,
+    once per path -- pays for the 31-column pivoted QR and the residualization
+    of the ``(n_cells, k_a k_b)`` tensor once instead of twice.  The fields
+    after ``penalty_root`` exist only for the error bound.
+    """
+
+    resid: np.ndarray  # the weighted tensor block, residualized on the mains
+    penalty_root: np.ndarray  # kron(S_a^(1/2), I_kb), so its Gram is S_ti
+    tensor_norm: float  # ||weighted tensor||_F, BEFORE residualizing
+    mains_sigma_min: float  # sigma_min of the COLUMN-EQUILIBRATED weighted mains
+    n_mains: int  # its column count
+    penalty_norm: float  # ||S_a||_2
+
+
+def _reference_factors(grab):
+    """Build the pair's weighted design and residualize the tensor on the mains.
+
+    THE MAINS ARE REQUIRED TO BE FULL RANK AND THAT IS AN ASSERTION, not a
+    truncation.  A pivoted QR that silently drops a column would leave this
+    residualizing on a PSEUDO-inverse of ``M`` while the dense path uses a full
+    ``solve(M, C)`` and the structured path uses the arrow factorization's own
+    rank -- three different quantities, reported to the caller as an
+    unexplained numeric miss, which is exactly the issue #272 failure mode this
+    oracle exists to remove.  Measured on every fixture it is used on, the
+    smallest ``|R_ii|`` clears the LAPACK rank tolerance by 1.4e+06 (the
+    starved ``_vanishing_mass_pair(1e-12)``) to 4.4e+10 (``_thin_level_pair``).
+
+    Demonstrated rather than argued: handing the truncating form a spline basis
+    with one duplicated column -- the overlap SPAN is unchanged, its basis is
+    not -- it keeps 31 of 32 columns and returns 207.99998956741607 with no
+    complaint, **3.414e-05 from the clean value and 245x the 1e-5 its caller
+    asserts**, having residualized on a pseudo-inverse.  This raises instead,
+    naming the column count and the margin.
+    """
     B_a, S_a, _, W_cell, level_rows = _structured_inputs(grab)
     k_a, k_b = B_a.shape[1], level_rows.size
     cells = np.argwhere(W_cell > 0.0)
@@ -1446,42 +1512,559 @@ def _reference_edf(grab, lam):
     root_w = np.sqrt(W_cell[rows_a, rows_b])[:, None]
     indicator = (rows_b[:, None] == level_rows[None, :]).astype(np.float64)
     tensor = (B_a[rows_a][:, :, None] * indicator[:, None, :]).reshape(cells.shape[0], k_a * k_b)
-    mains = np.concatenate([np.ones((cells.shape[0], 1)), B_a[rows_a], indicator], axis=1)
-    # Pivoted QR of the overlap span, so a rank-deficient set of mains
-    # residualizes rather than raises -- the one rank decision in here, taken
-    # on a FACTOR and never on a Gram.
-    Q, R_mains, _ = scipy.linalg.qr(mains * root_w, mode="economic", pivoting=True)
-    tol = max(mains.shape) * np.finfo(np.float64).eps * abs(R_mains[0, 0])
-    Q = Q[:, : int(np.sum(np.abs(np.diag(R_mains)) > tol))]
-    resid = tensor * root_w
-    resid -= Q @ (Q.T @ resid)
+    tensor = tensor * root_w
+    mains = np.concatenate([np.ones((cells.shape[0], 1)), B_a[rows_a], indicator], axis=1) * root_w
+    # Pivoted QR of the overlap span -- the one rank decision in here, taken on
+    # a FACTOR and never on a Gram.
+    Q, R_mains, _ = scipy.linalg.qr(mains, mode="economic", pivoting=True)
+    diag = np.abs(np.diag(R_mains))
+    tol = max(mains.shape) * np.finfo(np.float64).eps * diag[0]
+    assert int(np.sum(diag > tol)) == mains.shape[1], (
+        f"the oracle residualizes on a full-rank set of mains or not at all: "
+        f"{int(np.sum(diag > tol))} of {mains.shape[1]} columns clear the rank "
+        f"tolerance, min |R_ii| = {diag.min():.4e} against tol {tol:.4e}"
+    )
+    resid = tensor - Q @ (Q.T @ tensor)
     ev, evec = np.linalg.eigh(0.5 * (S_a + S_a.T))
     root_S = np.kron((evec * np.sqrt(np.clip(ev, 0.0, None))) @ evec.T, np.eye(k_b))
-    T = np.linalg.qr(np.vstack([resid, np.sqrt(lam) * root_S]), mode="r")
-    return float(np.sum(scipy.linalg.solve_triangular(T, resid.T, trans="T", lower=False) ** 2))
+    # Householder's backward error is COLUMNWISE and range(M) is invariant to a
+    # positive column scaling, so the conditioning that governs the projector
+    # is the equilibrated one -- the standard reference for column
+    # equilibration being A. van der Sluis, *Condition numbers and
+    # equilibration of matrices*, Numer. Math. 14:14-23 (1969).  It matters: on
+    # ``_vanishing_mass_pair(1e-12)`` the raw kappa_2 is 4.24e+06, all of it the
+    # 1e-12-weight level's own indicator column, and equilibrated it is 31.9.
+    equilibrated = mains / np.linalg.norm(mains, axis=0)
+    # It DIVIDES the residualization term, so a singular value rounded upward
+    # would make the bound smaller -- the same failure mode the augmented
+    # system's own singular values are enclosed against in
+    # :func:`_reference_edf_and_bound`.  Carried at its LOWER end for the same
+    # reason, and by the same backward-stable-SVD argument plus Horn & Johnson,
+    # *Matrix Analysis* 2nd ed., Cor. 7.3.5.  It costs
+    # 5.7e-13 relative here and moves the bound by 3e-11 of itself; the point is
+    # that it cannot round the wrong way on a machine this one cannot see.
+    mains_sv = np.linalg.svd(equilibrated, compute_uv=False)
+    mains_eps = 0.5 * np.finfo(np.float64).eps * np.sqrt(equilibrated.size) * float(mains_sv[0])
+    return _LowEdgeFactors(
+        resid=resid,
+        penalty_root=root_S,
+        tensor_norm=float(np.linalg.norm(tensor)),
+        mains_sigma_min=float(mains_sv[-1]) - mains_eps,
+        n_mains=mains.shape[1],
+        penalty_norm=float(np.linalg.norm(S_a, 2)),
+    )
+
+
+def _reference_edf_and_bound(factors, lam):
+    """``edf(lambda)``, and a DERIVED bound on this routine's own error in it.
+
+    The bound is built from dimensions, the unit roundoff, and the conditioning
+    of the augmented system -- never from observed headroom.  That distinction
+    is the whole subject of issue #272: a tolerance calibrated on one machine's
+    rounding is not a tolerance, and this oracle calls pivoted QR, an
+    unpivoted QR with its factor accumulated, a symmetric eigensolver and two
+    SVDs, every one of which is free to round differently under another BLAS.
+
+    Write ``A = [R; sqrt(lambda) L]`` for the augmented matrix and
+    ``Q = [Q_R; Q_L]`` for its orthonormal factor.  Then ``edf = ||Q_R||_F^2``
+    -- equivalently ``tr(J P_A)`` for the orthogonal projector ``P_A`` onto
+    ``range(A)`` and ``J = diag(I_m, 0)``, which is the form the perturbation
+    theory below is stated in.  The filter factors ``a_j`` are the squared
+    singular values of ``Q_R``, and for perturbations ``dR``, ``dL`` (with
+    ``Ahat = Q_R'Q_R``)::
+
+        d(edf) = 2 tr(T^-1 (I - Ahat) Q_R' dR) - 2 tr(T^-1 Ahat Q_L' sqrt(lam) dL)
+
+    so, with ``||Q_R (I - Ahat)||_F^2 = sum_j a_j (1 - a_j)^2 =: w1^2`` and
+    ``||Q_L Ahat||_F^2 = sum_j a_j^2 (1 - a_j) =: w2^2``::
+
+        |d edf| <= 2 (w1 ||dR||_F + w2 ||sqrt(lam) dL||_F) / sigma_min(A)
+
+    **THE WEIGHTS ARE THE POINT, NOT THE CONDITION NUMBER.**  Pairing
+    ``||dR||_F/sigma_min`` with ``sqrt(edf)`` instead -- the obvious bound --
+    is 3.9e+05 times looser here (4.085e-04 against 1.036e-09), because it
+    charges the ill-conditioned direction's sensitivity against the
+    well-determined directions' mass.  ``edf`` is insensitive exactly where the
+    filter factors are saturated: at this low edge 208 of 209 have ``a`` within
+    4.457e-05 of 1 IN TOTAL and the last has a certified ``a`` of 1.7e-28, so
+    ``w1 = 3.657e-05`` where ``sqrt(edf) = 14.42``.
+
+    **AND THAT IS EXACTLY WHY THE ORTHONORMAL FACTOR IS FORMED EXPLICITLY.**
+    The identity above requires the numerator and the denominator to move
+    TOGETHER: ``w1``'s ``(1 - a)`` is the cancellation between the two.  An
+    earlier revision of this function computed ``edf = ||R T^-1||_F^2`` with a
+    triangular solve, and that breaks the requirement.  The computed ``T`` is
+    the exact triangular factor of a perturbed ``A + dA``, while the ``R`` in
+    the numerator is the LITERAL, unperturbed array, so what is evaluated is
+    ``tr(R ((A+dA)'(A+dA))^-1 R')`` -- a DENOMINATOR-ONLY perturbation.  Its
+    weight is not ``w1``.  Differentiating ``edf = tr(R G^-1 R')`` in ``G``
+    alone gives ``d edf = -2 tr(diag(a) (R Z)' dR Z)``, so::
+
+        |d edf| <= 2 sqrt(sum_j a_j^3) ||dR||_F / sigma_min(A)
+
+    and ``sqrt(sum a^3) = 14.4222`` is ``sqrt(edf)`` to six digits.  The
+    scalar case is the whole argument in one line: at ``p = 1`` a consistent
+    ``r -> r(1 + d)`` moves ``edf`` by ``2 d a (1 - a)``, and a
+    denominator-only one by ``-2 d a^2``.  At ``a -> 1`` the first VANISHES and
+    the second does not.  Since 208 of the 209 directions here sit at
+    ``a = 1`` to within 4.5e-05 in total, that is the entire quantity.
+    Charged correctly against the triangular-solve form, this function returned
+    **7.2045e-06** on ``_thin_level_pair(1.0)``, not the 4.5938e-09 it
+    reported: 1568x understated, and over seeds 1-21 of the same geometry the
+    number it RETURNED fell short of the exact worst-case first-order response
+    it was meant to bound on seven of them, worst by 460x at seed 5.  Forming
+    ``Q`` costs one ``dorgqr`` and removes the whole mechanism, because
+    Householder's computed factor is the exactly-orthonormal factor of
+    ``A + dA`` (Higham, *ASNA* 2nd ed., Thm 19.4), so numerator and denominator
+    share the perturbation by construction.
+
+    **THE BOUND IS STRICT IN ``dA``, NOT FIRST ORDER.**  An earlier revision
+    returned the differential above evaluated at the COMPUTED factor, plus a
+    quadratic allowance ``(2 eta/sigma_min)^2``.  That is not a bound: the
+    differential's own weights move under the perturbation being bounded, and
+    here they move further than they are large -- ``w1 = 3.657e-05`` against a
+    drift budget of 2.037e-05, i.e. 56% of itself.  The quadratic allowance
+    covered only the ``||dQ_R||_F^2`` term of the expansion and was 600x short
+    of the weight drift.  What is returned now is the mean-value form, which
+    needs no remainder at all::
+
+        |edf(A + dA) - edf(A)| <= 2 max_t [w1(A_t) ||dR||_F + w2(A_t) ||dL||_F]
+                                  / sigma_min(A_t),      A_t = A + t dA
+
+    with every ingredient bounded strictly:
+
+    * ``sigma_min(A_t) >= sigma_min(A) - ||dA||_2`` (Horn & Johnson, *Matrix
+      Analysis*, 2nd ed., Cor. 7.3.5), which also gives
+      ``rank(A_t) = rank(A)`` throughout and is what the ``sigma_min`` guard
+      below enforces.
+    * the filter factors are the eigenvalues of ``J P_A J``, so
+      ``||a(A_t) - a(A)||_2 <= ||J (P_{A_t} - P_A) J||_F <= ||P_{A_t} - P_A||_F``.
+      This is the Hermitian sorted-order form, which is a COROLLARY of Hoffman
+      & Wielandt, *Duke Math. J.* 20:37-39 (1953) -- their statement is for
+      normal matrices and asserts the existence of a permutation -- and is
+      Horn & Johnson, *Matrix Analysis*, 2nd ed., Thm 6.3.5.
+    * at equal rank ``||P_B - P_A||_F^2 = 2 ||P_B^perp E A^+||_F^2`` exactly, so
+      ``||P_B - P_A||_F <= sqrt(2) ||dA||_F / sigma_min(A) =: delta``.  This is
+      Lemma 2.3, eq. (2.7a) of Xu, *On the perturbation of an L^2-orthogonal
+      projection* (arXiv:1809.00200), which gives
+      ``||P_B - P_A||_F^2 = 2(||E A^+||_F^2 - ||P_B E A^+||_F^2)`` at equal
+      rank; the 2-norm form ``||P_B - P_A||_2 <= ||A^+||_2 ||E||_2`` that the
+      residualization term below uses is its eq. (1.2c), attributed there to
+      J.-G. Sun, *The stability of orthogonal projections*, J. Grad. Sch.
+      1:123-133 (1984) -- **not** to Wedin (1973), which an earlier revision of
+      this docstring cited for it without reading it, and which does not appear
+      in Xu's bibliography at all.
+    * ``phi1(a) = a(1-a)^2`` and ``phi2(a) = a^2(1-a)`` are smooth on ``[0,1]``
+      with ``|phi''| <= 4``, so Taylor with a Lagrange remainder gives
+      ``w1(A_t)^2 <= w1^2 + ||phi1'(a)||_2 delta + 2 delta^2`` and likewise for
+      ``w2``, each capped at the ``4p/27`` their crests allow.
+
+    Verified numerically as well as derived.  The assembled bound: over 600
+    random ``(m, p)`` pairs with singular values spread over six decades and
+    ``||dA||_F/sigma_min`` from 1e-06 to 1e-01, **0 violations**, worst
+    realized/bound 0.409.  The ingredients separately, over 400 more: the
+    Hoffman-Wielandt step 0 violations (worst 0.571); the Lipschitz constants
+    are exact (``sup |phi1'| = sup |phi2'| = 1`` and ``max phi1 = max phi2 =
+    4/27`` to six digits); the projector inequality 1 APPARENT violation at
+    1.65 -- which is the float64 projector itself at ``kappa = 3.9e+07`` and
+    ``||E||/sigma_min = 1.2e-09``, where recomputing both projectors at 60
+    digits gives 0.28.  That is issue #272's own defect reappearing inside the
+    instrument built to check the fix, which is why it is checked in extended
+    precision and why it is recorded here rather than quietly dropped.
+
+    **NOTHING GOES RED FROM MAKING IT STRICT, AND THAT IS STATED PLAINLY.**
+    The bound rises 5.2469e-09 -> **1.3921e-07** on the thin pair (26.5x) and
+    1.2361e-04 -> 1.2363e-04 on the starved one (+0.02%); the realized error is
+    2.8422e-14 either way, and no assertion in this file separates them.  The
+    first-order form was not observed to fail: it survives the same 600 random
+    draws and the same injected-perturbation sweep.  What changes is that the
+    remainder is no longer an allowance carried on measurement.
+
+    **THE STRICT BOUND THAT DROPS THE ``(1 - a)`` WEIGHTING WAS MEASURED AND
+    REFUSED, AND THE GATE WAS NOT WIDENED TO FIT IT.**  Writing ``g = p - edf =
+    ||Q_L||_F^2`` and using ``|Delta g| <= ||dP||_F (2 sqrt(g) + ||dP||_F)``
+    directly gives the fully citation-backed
+    ``|Delta edf| <= 2 sqrt(2) sqrt(p - edf) ||dA||_F / sigma_min
+    + 2 ||dA||_F^2 / sigma_min^2``, with no weights to bound over a segment.
+    It is correct, and it is **4.07e-05** here against the 1e-5 its caller
+    asserts on the paths -- 4.1x OUTSIDE it, and 9.69e-04 against 3e-4 on
+    ``_vanishing_mass_pair(1e-12)``.  Adopting it means either widening those
+    two gates, which is the defect this file exists to remove, or losing the
+    oracle.  The reason it is so much looser here is specific and worth
+    recording: ``g`` is 1.0000 on this fixture and all but 4.5e-05 of it is the
+    ONE direction whose ``a`` is 1.7e-28, where ``phi1(a) = a(1-a)^2`` vanishes
+    -- so ``sqrt(g)`` is 27000x ``w1`` while bounding the same quantity.
+
+    **THE ``(1 - a)`` REFINEMENT IS OURS, AND THAT IS A SEARCH RESULT RATHER
+    THAN AN ASSUMPTION.**  Looked for a published bound on
+    ``|Delta tr(J P_A)|`` carrying saturation weighting, or splitting by ``dR``
+    against ``dL``, and found none.  The two ingredients exist in separate
+    literatures and have not been combined.  Knyazev & Argentati, *Majorization
+    for changes in angles between subspaces, Ritz values, and graph Laplacian
+    spectra* (arXiv:math/0508591), Thm 4.2, give the sharpest published bound
+    on a change of this kind, by weak majorization and weighted only by the
+    spectral spread -- with NO ``(1 - a)`` factor.  Their section 4 closes by
+    saying that where one subspace is invariant "it is natural to expect a much
+    better bound that involves the square of the sin Theta(X,Y)" and that
+    "Majorization results of this kind are not apparently known in the
+    literature" -- which is the case here, and is quoted with its condition
+    because it is stated under one.  Holodnak, Ipsen & Wentworth, *Conditioning
+    of leverage scores and computation by QR decomposition* (arXiv:1402.0957),
+    Thm 2.2, publish the saturation weighting
+    ``2 sqrt(l_j(1-l_j)) cos(th_1) sin(th_n) + sin^2(th_n)`` but for INDIVIDUAL
+    leverage scores, never for their sum.  The vocabulary for the quantity
+    itself is Avron, Clarkson & Woodruff, *Sharper Bounds for Regularized Data
+    Fitting* (arXiv:1611.03225): ``edf`` is their Definition 1's *statistical
+    dimension* ``sd_lambda(A)``, and ``sd_lambda(A) = ||Q||_F^2`` for the
+    ridge-augmented ``Q`` is their Fact 33.  There is nothing in the statistics
+    literature on the sensitivity of ``tr(H)`` to the DESIGN -- that work is
+    all sensitivity to lambda, or to the definition of df -- so the
+    numerical-analysis framing is the right one and no statistical shortcut is
+    being missed.
+
+    The five error sources, each at its own standard bound:
+
+    * **the residualization.**  Householder QR is backward stable columnwise
+      (Higham, *ASNA* 2nd ed., Thm 19.4), and the projector onto a perturbed
+      column space moves by at most ``||dM||_2 / sigma_min(M)`` (Sun 1984, as
+      above; charged at twice that here) -- taken on the COLUMN-EQUILIBRATED
+      mains, per :func:`_reference_factors`.
+    * **the augmented QR**, backward stable, so a perturbation of ``A`` itself
+      -- and a CONSISTENT one, which is what forming ``Q`` explicitly buys.
+    * **``Q``'s departure from orthonormality.**  The accumulated factor is
+      the exactly-orthonormal ``Qbar`` plus ``dQ`` with
+      ``||dQ||_F <= gamma_aug sqrt(p)`` (Higham, *ASNA* 2nd ed., section 19.3,
+      applied to ``[I_p; 0]`` -- the result is the standard bound on the
+      computed product of Householder reflectors; the section is cited without
+      a theorem number because no accessible source pins one to it).  It enters EXACTLY, as
+      ``2 ||Qbar_R||_F ||dQ_R||_F + ||dQ_R||_F^2 = 3.09e-11``, and is NOT
+      amplified by ``1/sigma_min`` -- 0.022% of the total.
+    * **the penalty root**, whose ``eigh`` perturbs ``S_a`` by ``u ||S_a||_2``;
+      that enters ``edf`` as ``lambda ||dS||_2 tr(G^-1)`` with ``G = A'A``,
+      since ``d edf = -lambda tr(dS G^-1 V G^-1)`` and ``G^-1 V G^-1 <= G^-1``.
+      2.46e-14 at the low edge, carried for completeness and taken over the
+      segment like everything else.
+    * **the final accumulation.**  ``edf`` is a sum of ``m p`` squares reaching
+      208, so numpy's pairwise summation alone costs
+      ``(log2(m p) + 1) u edf = 4.24e-13`` (Higham, *The accuracy of floating
+      point summation*, SIAM J. Sci. Comput. 14(4):783-799, 1993).  Nothing
+      about this quantity can be asserted below that floor, and one ulp of the
+      result is 2.84e-14.
+
+    **THE DIMENSIONAL FACTORS ARE THE PROBABILISTIC ONES AND THAT IS THE ONE
+    MODELLING ASSUMPTION LEFT IN HERE.  IT IS ALSO THE ONE PLACE THIS FILE IS
+    STILL CHOOSING A CONSTANT, AND THE CHOICE IS STATED WITH ITS PRICE.**  Both
+    QRs are charged at ``u sqrt(k)`` for ``k`` the operation count of Higham's
+    deterministic ``gamma_k`` -- ``m q`` for the mains, ``(m + p) p`` for the
+    augment, plus ``p`` for accumulating ``Q``.  The square-root scaling is
+    Higham and Mary, *A New Approach to Probabilistic Rounding Error Analysis*,
+    SIAM J. Sci. Comput. 41(5):A2815-A2835 (2019).  What that paper proves,
+    stated exactly rather than paraphrased: ``gamma_k`` may be replaced by
+    ``lambda sqrt(k) u`` with probability at least ``1 - 2 exp(-lambda^2/2)``,
+    and the form whose probability is bounded below INDEPENDENTLY of ``k`` --
+    the one a union bound over ``k`` quantities needs -- carries
+    ``sqrt(k log k) u``.  This file charges ``sqrt(k) u``, i.e. ``lambda = 1``,
+    which is a modelling choice and not a confidence statement.  What the
+    fixtures then support, measured:
+
+    * at ``sqrt(k) u`` the thin pair's gate allows ``lambda`` up to 71.8 and the
+      starved pair's up to 2.43 -- overwhelming on the first, about a 10%
+      failure probability on the second.
+    * at ``sqrt(k log k) u`` the bound is 7.6777e-07 on the thin pair, still
+      **13.0x** inside its 1e-5, and **3.8846e-04 on the starved pair against
+      the 3e-4 its caller asserts -- 0.77x, OUTSIDE.**  Under the union-bound
+      form of the theorem there is no float64 oracle for
+      ``_vanishing_mass_pair(1e-12)`` at that rung's allowance.
+
+    The 3e-4 is NOT widened to accommodate that, and the model is not switched
+    inside this change either: it is filed, because switching it removes a
+    check rather than adds one, and that is a decision with a stated cost.
+    Everything downstream of ``||dA||`` is strict; this is where ``||dA||``
+    itself comes from, and it is the only assumption left in the number.
+
+    **THE DETERMINISTIC CONSTANTS WERE TRIED AND MEASURED USELESS.**  Carrying
+    Higham's ``gamma_{mq}`` and ``gamma_{(m+p)p}`` verbatim gives 2.9442e-04 on
+    ``_thin_level_pair(1.0)`` and 2.0911e-02 on ``_vanishing_mass_pair(1e-12)``.
+    At those the oracle certifies nothing -- both are outside their callers'
+    allowance by 29x and 70x, and the pre-#272 moment-space form, whose
+    1.1253e-05 error is the entire reason this test exists, is INSIDE both.  A
+    bound that cannot separate the defect from the noise is not a safer bound,
+    it is a dead test.
+
+    What it comes out at, at each fixture's own low-edge lambda:
+
+    ===========================  ==========  ==========  =========
+    fixture                           bound    realized     caller
+    ===========================  ==========  ==========  =========
+    ``_thin_level_pair(1.0)``     1.3921e-07  2.8422e-14   71.8x of 1e-5
+    ``_thin_level_pair(0.01)``    1.4152e-07           -   70.7x of 1e-5
+    ``_thin_level_pair(0.001)``   1.4251e-07           -   70.2x of 1e-5
+    ``_vanishing_mass_pair()``    1.2363e-04           -    2.4x of 3e-4
+    ``_vanishing_mass_pair(-10)`` 5.6381e-05           -    5.3x of 3e-4
+    ===========================  ==========  ==========  =========
+
+    The realized error on the thin pair is exactly ONE ULP of the result --
+    2.8422e-14 is ``np.spacing(208.0)`` -- which is the floor, not a margin.
+
+    **IT IS NOT TIGHTER THAN THE 1e-9 IT REPLACES.  IT IS 139x LOOSER.**  A
+    number set from errors observed on one machine landed two orders inside the
+    bound this problem actually supports, so the original calibration was
+    lucky, and could not have been known to be.  What it could not do is move:
+    it is a constant, and the quantity it bounds is 1.3921e-07 here and
+    1.2363e-04 on ``_vanishing_mass_pair(1e-12)``, three orders apart.  A
+    fixture-blind 1e-9 is simultaneously right here and wrong by three orders
+    there, which is the defect, not the size of the number.
+
+    Validated by direct perturbation as well, one thread.  Injecting ``dA`` of
+    known norm over five decades of ``||dA||_F/sigma_min`` (1e-05 to 1e-01), 24
+    random directions per decade, the realized response reaches at most 0.0001
+    of this bound on the thin pair and 0.0038 on the starved one -- random
+    directions are nowhere near the worst case, which is the reason the bound
+    is derived rather than sampled.  A full ``u ||M||_F`` perturbation of the
+    mains moves ``edf`` by at most 5.68e-14, far inside what the Sun term
+    charges for it.
+
+    Across 1, 2, 4 and 8 threads -- the cheapest instance of the reordered
+    reduction the bound exists for -- the value is **bit-identical**
+    (207.99995542698144 at all four), where the triangular-solve form moved
+    between ...127 and ...133.  The bound does not move either, because it is
+    a property of the problem rather than of the machine.
+
+    **WHAT IT DOES NOT COVER.**  This bounds the ORACLE's rounding given the
+    ``B_a``, ``S_a`` and ``W_cell`` it is handed.  It says nothing about those
+    inputs differing -- a ``fit_reml`` that lands elsewhere on another
+    platform moves the exact answer itself, and the certified constant is the
+    exact answer for the inputs measured here.  That exposure is unchanged in
+    kind from the 1e-9 this replaces and is larger in magnitude, which is the
+    price of deriving it rather than observing it.  ``W_cell`` is exact on the
+    certified fixture, and the reason is not that its sum lands on 800.0 -- a
+    sum of 800 floats reaching exactly 800.0 says nothing about the entries.
+    It is that the family is gaussian with an identity link, so the working
+    weights ARE the sample weights; ``low_weight = 1.0`` makes every one of
+    them exactly 1.0; and ``x`` is drawn continuously, so each of the 800 rows
+    is its own cell and no aggregation rounds.  That also makes the
+    design-assembly term identically zero THERE (``sqrt(1.0) = 1.0``, both
+    multiplies exact) and 1.3% of ``gamma_mains`` on the other four fixtures,
+    where the sum is not 800.0.
+
+    The bound's own coefficients are computed in the same float64 as the value
+    they bound, so they are used as ENCLOSURES rather than as exact numbers.
+    A singular value rounded the wrong way would otherwise shrink ``w1`` or
+    ``w2`` and grow ``sigma_min`` -- all three in the direction that makes the
+    bound smaller.  Each ``a_j`` is carried as an interval covering both the
+    SVD's own backward error and ``Q``'s departure from orthonormality, and
+    every weight takes the largest value its integrand attains on that interval
+    -- which for ``phi1``, ``phi2`` and their derivatives means checking the
+    interior crest as well as the ends.  ``sigma_min`` is taken at its lower
+    end.  A ``sigma_min`` enclosure that the segment can reach zero returns an
+    INFINITE bound rather than a small wrong number, and the caller's gate on
+    it is what turns that into a failure.
+    """
+    u = 0.5 * np.finfo(np.float64).eps  # unit roundoff, eps/2
+    R, root_S = factors.resid, factors.penalty_root
+    m, p = R.shape
+    aug = np.vstack([R, np.sqrt(lam) * root_S])
+    # THE ORTHONORMAL FACTOR IS FORMED EXPLICITLY AND THAT IS THE WHOLE POINT.
+    # `||R T^-1||_F^2` via a triangular solve is the same quantity in exact
+    # arithmetic and a DIFFERENT one in float64: it divides the literal,
+    # unperturbed `R` by a `T` carrying the QR's backward error, so the
+    # numerator and the denominator do not move together and the `(1 - a)`
+    # cancellation `w1` is built on never happens.  See the docstring.
+    Q, T = np.linalg.qr(aug, mode="reduced")
+    Q_R = Q[:m]
+    edf = float(np.sum(Q_R**2))
+
+    # How much the two QRs and the design assembly perturb what they factor.
+    gamma_mains = u * np.sqrt(m * factors.n_mains) + 2.0 * u  # QR of the (m, q) mains
+    # QR of the (m+p, p) augment; the `+ p` covers accumulating `Q` from the
+    # reflectors, and is charged at the deterministic rate where the sqrt
+    # convention would allow less.
+    gamma_aug = u * (np.sqrt((m + p) * p) + p)
+    # The projector's SUBSPACE moves by ||dM||_2/sigma_min(M) (Sun 1984, via Xu
+    # arXiv:1809.00200 eq. (1.2c)), charged at twice that; applying it is two
+    # GEMMs and a cancelling subtraction, which is charged separately.
+    eta_R = 2.0 * gamma_mains * np.sqrt(factors.n_mains) / factors.mains_sigma_min
+    eta_R = (eta_R + gamma_mains) * factors.tensor_norm
+    # gamma_aug perturbs the WHOLE of [R; sqrt(lam) L].  With `Q` formed
+    # explicitly that perturbation is CONSISTENT -- the computed factor is the
+    # exactly-orthonormal factor of `aug + dA` -- so its R rows ride w1 and its
+    # penalty rows ride w2, exactly as written.
+    eta_A = gamma_aug * float(np.linalg.norm(aug))
+    # `sqrt(lam)` then a multiply: two roundings, so 2u rather than u.
+    eta_L = 2.0 * u * np.sqrt(lam) * float(np.linalg.norm(root_S))
+    eta = eta_R + eta_A + eta_L  # ||dA||_F for the whole augmented matrix
+
+    # THE SENSITIVITY COEFFICIENTS ARE THEMSELVES COMPUTED, so they are used as
+    # ENCLOSURES rather than as exact numbers: a singular value rounded the
+    # wrong way would otherwise shrink the weights and grow the denominator,
+    # all three in the direction that makes the bound smaller.  The SVD is
+    # backward stable, so the singular values' 1-Lipschitz dependence on the
+    # matrix (Horn & Johnson, *Matrix Analysis* 2nd ed., Cor. 7.3.5) puts each
+    # computed singular value within `gamma ||.||_2` of the true one.  `sv` is
+    # additionally the SVD of the COMPUTED Q_R rather than of the exactly
+    # orthonormal Qbar_R, which is what `d_Q` covers here.  `T` needs no
+    # analogue: Higham's Thm 19.4 pairs the computed T with an exactly
+    # orthonormal Qbar, so `sing` are already the exact singular values of the
+    # perturbed augmented matrix.
+    d_Q = gamma_aug * np.sqrt(p)
+    sv = np.linalg.svd(Q_R, compute_uv=False)
+    sing = np.linalg.svd(T, compute_uv=False)
+    eps_a = u * np.sqrt(Q_R.size) + d_Q  # ||Q_R||_2 <= 1 up to the same order
+    eps_T = u * float(p) * float(sing[0])
+    # `maximum(., 0)` before squaring: without it a direction with `sv < eps_a`
+    # gets a POSITIVE lower end and the interval stops containing the true `a`,
+    # which is the case here (sv = 1.3e-14 against eps_a = 1.1e-12 on the near
+    # null direction, whose certified `a` is 1.7e-28).
+    a_lo = np.clip(np.maximum(sv - eps_a, 0.0) ** 2, 0.0, 1.0)
+    a_hi = np.clip((sv + eps_a) ** 2, 0.0, 1.0)
+    sigma_min = float(sing[-1]) - eps_T
+    # The segment A -> A + dA must not change rank, and every quantity below is
+    # taken at its worst over that segment.
+    sigma_seg = sigma_min - eta
+    if sigma_seg <= 0.0 or factors.mains_sigma_min <= 0.0:
+        # Either conditioning is past what float64 can resolve; say so as an
+        # infinite bound rather than as a small wrong number.  The caller's
+        # gate on the bound is what turns this into a failure.
+        return edf, float("inf")
+
+    def _outer(f, *crests):
+        """The largest ``|f(a)|`` over each enclosure, given ``f``'s interior extrema."""
+        best = np.maximum(np.abs(f(a_lo)), np.abs(f(a_hi)))
+        for crest in crests:
+            inside = (a_lo <= crest) & (crest <= a_hi)
+            best = np.where(inside, np.maximum(best, abs(f(crest))), best)
+        return best
+
+    # `||a(A_t) - a(A)||_2` over the whole segment: Hoffman-Wielandt on the
+    # eigenvalues of `J P_A J`, then the equal-rank projector identity.  The
+    # denominator is `sigma_seg` and not `sigma_min`, because the projector
+    # bound wants sigma_min of the UNPERTURBED matrix and all this routine
+    # knows is the perturbed one's, enclosed: 1.4e-05 relative here, and the
+    # point is that it cannot round the wrong way.
+    delta = np.sqrt(2.0) * eta / sigma_seg
+    # phi1, phi2 and their derivatives, each enclosed over [a_lo, a_hi].  The
+    # weights are then carried over the segment by Taylor with a Lagrange
+    # remainder, |phi''| <= 4 on [0, 1], and capped at what their crests allow.
+    cap = 4.0 / 27.0 * p
+    w1 = float(np.sum(_outer(lambda x: x * (1.0 - x) ** 2, 1.0 / 3.0)))
+    w2 = float(np.sum(_outer(lambda x: x * x * (1.0 - x), 2.0 / 3.0)))
+    slope1 = float(np.linalg.norm(_outer(lambda x: 1.0 - 4.0 * x + 3.0 * x * x, 2.0 / 3.0)))
+    slope2 = float(np.linalg.norm(_outer(lambda x: 2.0 * x - 3.0 * x * x, 1.0 / 3.0)))
+    w1 = np.sqrt(min(w1 + slope1 * delta + 2.0 * delta**2, cap))
+    w2 = np.sqrt(min(w2 + slope2 * delta + 2.0 * delta**2, cap))
+
+    bound = 2.0 * (w1 * (eta_R + eta_A) + w2 * (eta_L + eta_A)) / sigma_seg
+    # The computed Q is only orthonormal to `||dQ||_F <= gamma_aug sqrt(p)`
+    # (Higham, ASNA 2nd ed., section 19.3, applied to `[I_p; 0]`).  This enters
+    # EXACTLY rather than to first order, and it is NOT amplified by
+    # 1/sigma_min -- which is why forming Q is worth its cost.
+    bound += 2.0 * np.sqrt(edf) * d_Q + d_Q**2
+    # eigh is backward stable with its own dimensional constant, and clipping a
+    # round-off-negative eigenvalue moves S_a by no more than the same amount.
+    bound += (
+        lam * u * np.sqrt(p) * factors.penalty_norm * float(np.sum(1.0 / (sing - eps_T - eta) ** 2))
+    )
+    bound += (np.log2(m * p) + 1.0) * u * edf  # numpy's pairwise summation
+    return edf, bound
+
+
+def _relabelings(grab, rng, draws):
+    """Exact relabelings of one pair: the level labels, and the cell table's rows.
+
+    Both leave ``edf`` unchanged in real arithmetic and change the order of
+    every reduction, so the spread across them is this oracle's own round-off
+    with the answer held fixed.  Permuting the LEVELS reorders the tensor's
+    block structure and the arrow border; permuting the CELL ROWS reorders
+    every accumulation over the 800 cells, which is the other reduction order
+    and the one a threaded BLAS is free to change.
+    """
+    menu_a, menu_b = grab["menus"]
+    S_cell, W_cell = grab["cells"]
+    for draw in range(draws):
+        if draw % 2 == 0:
+            perm = rng.permutation(menu_b.shape[1])
+            yield {**grab, "menus": (menu_a, menu_b[:, perm])}
+        else:
+            perm = rng.permutation(menu_a.shape[0])
+            yield {
+                **grab,
+                "menus": (menu_a[perm], menu_b),
+                "cells": (S_cell[perm], W_cell[perm]),
+            }
 
 
 def test_the_low_edge_reference_matches_a_certified_high_precision_value():
-    """The oracle is pinned to arbitrary precision, not to the other arm.
+    """The oracle is pinned to high precision, not to the other arm.
 
     Everything else in this file compares two float64 arms, which cannot tell
     a wrong reference from a wrong path.  Issue #272 was exactly that: the
     low-edge assertion failed on a developer machine and passed in CI on the
     same locked dependencies, and the term that moved was neither path.  Both
-    of them sit 6.97e-09 and 1.37e-10 from the certified value; the reference
-    sat 1.13e-05 away and moved by 1.47e-05 across arrangements of the same
+    of them sit 3.97e-11 and 1.37e-10 from the certified value; the reference
+    sat 1.13e-05 away and moved by 1.20e-05 across arrangements of the same
     algebra.
 
     Two properties, and the second is what makes the first portable:
 
-    * the value itself, against 400-bit ball arithmetic.  1e-9 is 500x above
-      the worst error this form was measured at over five fixtures
-      (1.93e-12), 1350x above its spread over exact relabelings (7.39e-13),
-      and 7000x above what a one-ulp perturbation of the basis moves it
-      (1.42e-13, worst of 20 draws; ``S_a`` 5.68e-14; ``lambda`` 0.00e+00).
+    * the value itself, against the high-precision constant at the top of this
+      module.
     * invariance under an exact relabeling.  A reference that is only right
       in the coordinate order it happened to be handed is not a reference,
       and that is the property the moment-space form lacked.
+
+    **EVERY TOLERANCE HERE IS DERIVED, NOT OBSERVED** -- see
+    :func:`_reference_edf_and_bound`, which returns the bound alongside the
+    value.  A number set from the errors one machine happened to produce is
+    the defect issue #272 is about, so this test may not contain one.  What it
+    computes, at ``_CERTIFIED_LOW_EDGE_LAMBDA``:
+
+    ============================  =========  =========  =========
+    fixture                           bound   realized     margin
+    ============================  =========  =========  =========
+    ``_thin_level_pair(1.0)``     1.392e-07  2.842e-14    4.9e+06x
+    relabelings of it             2.784e-07  5.684e-14    4.9e+06x
+    ``_vanishing_mass_pair()``    1.236e-04          -          -
+    relabelings of it             2.473e-04  5.684e-14    4.4e+09x
+    ============================  =========  =========  =========
+
+    The realized errors on the thin pair are ONE ULP of the result, which is
+    the floor: 2.842e-14 is ``np.spacing(208.0)``.  The relabeling row is the
+    SPREAD over 40 exact relabelings, two ulps, and no relabeling is further
+    than one ulp from the certified value.
+
+    Each fixture is measured at the lambda ITS OWN consumer calls the oracle
+    at -- ``_CERTIFIED_LOW_EDGE_LAMBDA`` and ``_VANISHING_LOW_EDGE_LAMBDA``,
+    which are different points because the bracket is scaled by each pair's
+    profiled curvature and starving three levels moves it.
+
+    The relabeling bound is the SUM of two forward bounds, since two float64
+    evaluations of one exact quantity are each inside their own.  Nothing
+    tighter is available: the two evaluations do share their conditioning, but
+    a norm-wise bound cannot know they are permutations of each other.
+
+    **WHAT EACH HALF OF THIS TEST ACTUALLY ESTABLISHES, WHICH IS NOT THE SAME
+    ON THE TWO FIXTURES.**  Against the pre-#272 moment-space form -- the
+    concrete defect, re-measured here at 1.1253e-05 of error on the thin pair:
+
+    * on ``_thin_level_pair(1.0)`` the value check catches it by **80.8x** and
+      the relabeling check, against its 1.2038e-05 of spread over the same 40
+      draws, by **43.2x**.  That is the real guard.
+    * on ``_vanishing_mass_pair(1e-12)`` the relabeling check does **not**
+      catch it -- 6.9564e-05 of spread against a 2.473e-04 allowance, 0.28x --
+      because a fixture with three levels holding 1e-12 of the weight leaves
+      the filter factors spread rather than saturated (``sum_j a_j (1 - a_j) =
+      1.469``, where the thin pair's is 4.457e-05), so ``w1 = 0.9374`` against
+      3.657e-05 and ``sigma_min(A)`` drops to 9.517e-07: the oracle's own
+      guaranteed accuracy there is three orders worse.  It is kept because it
+      exercises the starved path and the cell-row reduction order, and because
+      an arrangement dependence larger than 2.5e-04 would still be caught; it
+      is NOT evidence that the oracle is arrangement-independent there.
+
+    That asymmetry is worth stating plainly rather than averaging away.  It is
+    also why the gate below is read off each fixture's own caller rather than
+    set to a single number: the oracle's guaranteed accuracy must be inside
+    what that caller asserts on the paths, and it clears ``1e-5`` by 71.8x on
+    the thin pair and ``3e-4`` by only 2.4x on the starved one.
     """
     grab = _thin_level_pair(1.0)
     B_a, _, _, W_cell, level_rows = _structured_inputs(grab)
@@ -1490,14 +2073,44 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
     assert (B_a.shape[1], level_rows.size) == (11, 19)
     assert float(W_cell.sum()) == 800.0
 
-    got = _reference_edf(grab, _CERTIFIED_LOW_EDGE_LAMBDA)
-    assert got == pytest.approx(_CERTIFIED_LOW_EDGE_EDF, abs=1e-9), got
+    thin_factors = _reference_factors(grab)
+    got, bound = _reference_edf_and_bound(thin_factors, _CERTIFIED_LOW_EDGE_LAMBDA)
+    assert got == pytest.approx(_CERTIFIED_LOW_EDGE_EDF, abs=bound), (got, bound)
 
-    menu_a, menu_b = grab["menus"]
     rng = np.random.default_rng(11)
-    for _ in range(8):
-        relabeled = {**grab, "menus": (menu_a, menu_b[:, rng.permutation(level_rows.size)])}
-        assert _reference_edf(relabeled, _CERTIFIED_LOW_EDGE_LAMBDA) == pytest.approx(got, abs=1e-9)
+    # ``asserted`` is what each fixture's own consumer holds the PATHS to, and
+    # ``lam`` is where that consumer actually calls the oracle.  The starved
+    # fixture's low edge is NOT the certified point -- its bracket is scaled by
+    # its own profiled curvature, which starving three levels moves -- so
+    # gating it at the certified lambda would validate a different condition
+    # number from the one in use.
+    for fixture, factors, lam, asserted in (
+        (grab, thin_factors, _CERTIFIED_LOW_EDGE_LAMBDA, 1e-5),
+        (_vanishing_mass_pair(1e-12), None, _VANISHING_LOW_EDGE_LAMBDA[1e-12], 3e-4),
+    ):
+        base, base_bound = _reference_edf_and_bound(
+            factors if factors is not None else _reference_factors(fixture), lam
+        )
+        assert base_bound < asserted, (
+            f"the oracle's own error bound {base_bound:.4e} is not inside the "
+            f"{asserted:g} its caller asserts on the paths, so it is not an oracle"
+        )
+        for relabeled in _relabelings(fixture, rng, 8):
+            other, other_bound = _reference_edf_and_bound(_reference_factors(relabeled), lam)
+            # BOTH bounds are gated, not just the base one.  The allowance below
+            # is their SUM, so a relabeling whose own bound ballooned would
+            # otherwise widen the assertion until it passed vacuously.
+            assert other_bound < asserted, (
+                f"a relabeling's own error bound {other_bound:.4e} is not inside "
+                f"the {asserted:g} its caller asserts, so the allowance below "
+                f"would be self-granted"
+            )
+            assert other == pytest.approx(base, abs=base_bound + other_bound), (
+                base,
+                other,
+                base_bound,
+                other_bound,
+            )
 
 
 # One budget above edf at the LOW bracket edge (~208) and four below edf at the
@@ -1574,18 +2187,39 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     * FLOOR, summation.  ``edf`` is a sum of ``p = 209`` filter factors in
       ``[0, 1]``; a length-``p`` float64 sum carries ``gamma_p ~ p eps`` of the
       total, here ``209 * 2.22e-16 * 208 = 9.65e-12`` (Higham, *Accuracy and
-      Stability of Numerical Algorithms*, 2nd ed., Thm 2.5).  Below the
+      Stability of Numerical Algorithms*, 2nd ed., Ch. 3, where ``gamma_n =
+      n u / (1 - n u)`` is defined).  Below the
       relabeling floor, so the relabeling floor binds.
+    * FLOOR, the arbiter's own accuracy.  The arms are judged against
+      ``_reference_edf_and_bound``, and a bound below what that oracle can
+      guarantee asserts the ORACLE's round-off rather than the arms'.  It is
+      1.3921e-07, 1.4152e-07 and 1.4251e-07 at the three weights -- above both
+      floors above, so this is the one that binds, and 1e-5 clears it by 71.8x,
+      70.7x and 70.2x.  It is DERIVED rather than observed, which the constant
+      it replaced (a hard-coded 1e-9) was not, and it is asserted at every
+      lambda the oracle is called at rather than only at the certified one.
     * CEILING.  One degree of freedom.  The form this replaced returned an
       integer rank minus a trace, and a mis-counted direction moved the answer
       by exactly 1.0 df; that is the size of the defect, not a guess.
-    * PLACED.  1e-5 is 3613x above the floor and 100,000x below the defect --
-      5.26x below the geometric mean of the two, ``5.261e-05``, which is the
-      placement that maximizes the multiplicative margin on both sides.  The
-      bound is the tighter of the two choices, not the more comfortable one.
+    * PLACED.  1e-5 is 70.2x above the binding floor and 100,000x below the
+      defect.  The geometric mean of the two is ``3.775e-04``, so 1e-5 sits
+      37.7x TIGHTER than the placement that would maximize the multiplicative
+      margin on both sides -- it is the tighter of the two choices, not the
+      more comfortable one, and it is unchanged from what this file carried
+      when the relabeling floor of 2.8e-09 was the one that bound.
     * OBSERVED, for disclosure only, never to set the bound: structured
       3.965e-11 / 3.336e-08 / 1.288e-07 and dense 1.366e-10 / 2.404e-09 /
       3.226e-09 across the three weights.
+
+    THE LAMBDA PINS CARRY ``abs=0.0`` AND THAT IS WHAT MAKES THEM PINS.  Moving
+    the ladder's low bracket edge by a RELATIVE 1e-11 -- far too small for any
+    edf assertion in this file to see, since ``|d edf / d ln lambda| ~ 4.1``
+    puts it at 4e-11 df -- reds all three parametrizations here and both of
+    ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom``'s.
+    Without ``abs=0.0`` it reds nothing: ``pytest.approx`` keeps a default
+    absolute tolerance of 1e-12 whenever only ``rel`` is given, and against a
+    2.29e-11 lambda that is 4.4%, so the pin accepted anything short of a 4%
+    move of the bracket.
 
     HIGH EDGE, ``abs=3e-3``, the same number the parity assertion already used.
 
@@ -1644,38 +2278,60 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     from superglm.screening._structured import structured_ladder
 
     grab = _thin_level_pair(low_weight)
+    factors = _reference_factors(grab)
     U, V, C, M, S_ti, u_m = grab["args"]
     dense = penalized_score_statistic_ladder(
         U, V, C, M, S_ti, budgets=_EDGE_BUDGETS, U_nuisance=u_m
     )
     struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
     lam_lo, edf_lo, lam_hi, edf_hi = _CERTIFIED_EDGES[low_weight]
+    # ``abs=0.0`` IS LOAD-BEARING ON EVERY LAMBDA PIN BELOW.  ``pytest.approx``
+    # keeps its default absolute tolerance of 1e-12 whenever only ``rel`` is
+    # given, and against a LOW-edge lambda of 2.29e-11 that is 4.4% -- nine
+    # orders looser than the ``rel`` beside it, and enough for a moved bracket
+    # edge to pass unnoticed.  Measured: without it a +5% bracket move is
+    # accepted at the low edge; with it, +0.1% is refused.
+    pin = dict(rel=1e-12, abs=0.0)
     saw_low_edge = saw_high_edge = False
     for budget, d, s in zip(_EDGE_BUDGETS, dense, struct, strict=True):
         # Each path is judged at its reported lambda.  Both brackets now use
         # tr(V_eff), though their endpoint solves remain independent and can
         # differ at the ill-conditioned high edge.
-        assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12), ("one lambda", budget)
+        assert s.lambda0 == pytest.approx(d.lambda0, **pin), ("one lambda", budget)
         if budget > 100.0:
             # LOW edge -- the regime that matters, since the whole-degree-of-
             # freedom error this test exists for lived here, at 1.0 against the
-            # reference.  ``_reference_edf`` is checked against the certified
-            # constant FIRST: it is the arbiter, so an unarbitrated arbiter
-            # would let both arms be judged by a wrong number.  1e-9 is PR
-            # #275's bound, extended from the one weight it certified to all
-            # three; worst observed here 1.99e-13, 5000x inside it.
-            assert s.lambda0 == pytest.approx(lam_lo, rel=1e-12), ("lambda_lo", s.lambda0)
-            reference = _reference_edf(grab, s.lambda0)
-            assert reference == pytest.approx(edf_lo, abs=1e-9), ("oracle", reference)
-            assert s.edf0 == pytest.approx(reference, abs=1e-5), ("structured", budget, s.edf0)
-            assert d.edf0 == pytest.approx(reference, abs=1e-5), ("dense", budget, d.edf0)
+            # reference.  ``_reference_edf_and_bound`` is checked against the
+            # certified constant FIRST: it is the arbiter, so an unarbitrated
+            # arbiter would let both arms be judged by a wrong number.
+            #
+            # THE ALLOWANCE ON THE ARBITER IS THE ORACLE'S OWN DERIVED BOUND,
+            # not a constant.  It replaces a hard-coded 1e-9, which was set
+            # from errors OBSERVED on one machine -- the same defect issue #272
+            # is about -- and which cannot move: the quantity it bounds is
+            # 8.5e-07 here and 1.4e-04 on ``_vanishing_mass_pair(1e-12)``, so a
+            # fixture-blind constant is simultaneously right in one place and
+            # wrong by orders in the other.
+            #
+            # AND THE RULER IS CHECKED AT EVERY POINT IT IS USED, per arm and
+            # at that arm's own lambda.  Each weight moves the bracket --
+            # 2.2877e-11, 2.1629e-11, 2.1617e-11 -- and moves the conditioning
+            # with it, so a parametrization whose oracle stopped being inside
+            # the 1e-5 asserted on the paths would otherwise judge them with an
+            # uncertified ruler and report it as a path error.
+            assert s.lambda0 == pytest.approx(lam_lo, **pin), ("lambda_lo", s.lambda0)
+            for name, arm in (("structured", s), ("dense", d)):
+                reference, ruler = _reference_edf_and_bound(factors, arm.lambda0)
+                assert ruler < 1e-5, (name, budget, low_weight, arm.lambda0, ruler)
+                assert reference == pytest.approx(edf_lo, abs=ruler), ("oracle", name, reference)
+                assert arm.edf0 == pytest.approx(reference, abs=1e-5), (name, budget, arm.edf0)
             saw_low_edge = True
         else:
             # HIGH edge.  No float64 oracle survives here (``_reference_edf``
             # is 8.15e-05 to 2.11e-03 out), so both arms are judged against the
             # certified constant directly.  This edge used to be parity-only,
             # which cannot see the two arms drifting together.
-            assert s.lambda0 == pytest.approx(lam_hi, rel=1e-12), ("lambda_hi", s.lambda0)
+            assert s.lambda0 == pytest.approx(lam_hi, **pin), ("lambda_hi", s.lambda0)
             assert s.edf0 == pytest.approx(edf_hi, abs=3e-3), ("structured hi", budget, s.edf0)
             # The DENSE arm gets its own, looser bound.  See the docstring:
             # its high-edge value moves 4.05e-04 with thread count on this very
@@ -1979,6 +2635,10 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
     # reached by the penalty at the high edge, 16 are not.
     assert left_free == pytest.approx(k_b - 3, abs=0.01)
 
+    # ``abs=0.0``: pytest.approx keeps a default absolute tolerance of 1e-12
+    # when only ``rel`` is given, and this pair's low-edge lambda is 1.91e-11,
+    # so the default alone would accept a 5% move of the bracket.
+    pin = dict(rel=1e-12, abs=0.0)
     for budget, d, s in zip(_VANISHING_BUDGETS, dense, struct, strict=True):
         if budget < 100.0:  # every one of these clamps at the HIGH edge
             # **THIS BOUND WAS 1e-3 AND IS LOOSENED HERE, WHICH IS A COST OF
@@ -2014,14 +2674,43 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
             )
             assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity", budget, s.edf0, d.edf0)
         else:  # the LOW edge, where the reference oracle is sound
-            reference = _reference_edf(grab, s.lambda0)
-            assert s.edf0 == pytest.approx(reference, abs=3e-4), (
-                "low edge oracle",
-                s.edf0,
-                reference,
+            # THE RULER IS CHECKED WHERE IT IS USED.  This fixture's low edge is
+            # NOT the certified point -- the bracket is scaled by each pair's
+            # own profiled curvature, and starving three levels moves it -- so
+            # gating the oracle at ``_CERTIFIED_LOW_EDGE_LAMBDA`` would validate
+            # a condition number that is not the one in use.  The lambda is
+            # pinned for the same reason the certified one is, with the same
+            # ``abs=0.0``: nothing else ties the point the ladder asks the
+            # oracle at to the point the oracle was gated at.
+            assert s.lambda0 == pytest.approx(_VANISHING_LOW_EDGE_LAMBDA[low_weight], **pin), (
+                s.lambda0
             )
+            factors = _reference_factors(grab)
+            for name, arm in (("structured", s), ("dense", d)):
+                reference, ruler = _reference_edf_and_bound(factors, arm.lambda0)
+                # The oracle's own guaranteed error must be inside what this
+                # caller asserts on the paths, or it is not an oracle here.
+                # This clears by only 2.43x at 1e-12 and 5.32x at 1e-10, where
+                # the thin pair clears by 71.8x -- see
+                # :func:`_reference_edf_and_bound`; it is stated rather than
+                # averaged away.
+                #
+                # THE GATE IS NOT DECORATION, AND ONE STEP FURTHER ALONG THIS
+                # PARAMETRIZATION'S OWN AXIS IS WHERE IT FIRES.  At
+                # ``low_weight = 1e-14`` the oracle's bound is 3.1745e-04
+                # against this 3e-4, at 1e-16 it is 2.2917e-03, and at 1e-18
+                # 7.6302e-02 -- so adding 1e-14 to the parametrization above is
+                # RED here and GREEN without this line, where the arms would be
+                # judged, and would agree, against an oracle nobody checked.
+                assert ruler < 3e-4, (name, budget, low_weight, arm.lambda0, ruler)
+                assert arm.edf0 == pytest.approx(reference, abs=3e-4), (
+                    "low edge oracle",
+                    name,
+                    arm.edf0,
+                    reference,
+                )
             assert s.edf0 == pytest.approx(d.edf0, abs=2e-4), ("low edge parity", s.edf0, d.edf0)
-        assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12), ("lambda0", budget)
+        assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12, abs=0.0), ("lambda0", budget)
         assert s.statistic == pytest.approx(d.statistic, rel=1e-4), ("statistic", budget)
 
 
