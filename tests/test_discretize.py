@@ -1048,6 +1048,14 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         # then fails the key test, falls through to the cell-table branch and
         # is refused.  A respelled literal would build the grid regardless.
         model, df, y = self._model_with(self._MappingGrid())
+        # Unpatched first: the exporter really does ship this ``UserDict`` as a
+        # grid.  That premise is what codex's round-6 fix rests on, and without
+        # running it the sentinel assertion below proves only "raises under the
+        # patch" -- which re-adding an ``isinstance(raw, dict)`` here, the same
+        # fork in the other direction, would also satisfy.
+        blocks = rating_tables._interaction_blocks(model, 3)
+        assert [(b.name, b.kind) for b in blocks] == [("a:b", "grid")]
+
         monkeypatch.setattr(
             discretize,
             "_GRID_RECONSTRUCTION_KEYS",

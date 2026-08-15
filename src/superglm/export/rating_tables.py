@@ -1050,11 +1050,13 @@ def _impact_sweep(
     ``exported_n_bins`` is folded into the swept set and marked, because
     without it the sheet can describe every resolution EXCEPT the one the
     reader is holding.  The defaults are ``n_bins=150`` against
-    ``impact_bins=(20, 50, 100, 200, 250)``, and the error falls with
-    resolution, so the 200 and 250 rows report LESS movement than the exported
-    table carries -- a reader taking the smallest number on the sheet as their
-    bound gets one below their own error.  The ``exported`` column says which
-    row is theirs.
+    ``impact_bins=(20, 50, 100, 200, 250)``, so without the fold-in a reader
+    would take one of the ladder's numbers for their own.  Each rung is an
+    INDEPENDENT measurement, not a point on a curve guaranteed to fall: a finer
+    grid shrinks the worst-case bound, but successive nearest-node grids are
+    not nested, so a nearer node can carry a value further from a given row.
+    The ``exported`` column says which row is theirs, and it is the one to
+    read.
 
     An empty ``impact_bins`` still means NO SWEEP, and the fold-in does not
     override it.  That is the documented opt-out for a caller who wants the
