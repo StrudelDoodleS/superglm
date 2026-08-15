@@ -1024,7 +1024,7 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         expected = nodes[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
-    def test_the_exporter_and_the_sweep_use_one_predicate_object(self):
+    def test_the_exporter_and_the_sweep_use_one_predicate_object(self, monkeypatch):
         """The last un-shared copy of the grid rule, now shared.
 
         Four review rounds found the same failure -- the exporter routes a grid
@@ -1035,10 +1035,26 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         value-identical is what every one of those four also was. This asserts
         they are the SAME OBJECT, so a fifth divergence is not expressible.
         """
-        from superglm.diagnostics.discretize import _GRID_RECONSTRUCTION_KEYS
+        from superglm.diagnostics import discretize
         from superglm.export import rating_tables
 
-        assert rating_tables._grid_reconstruction_keys() is _GRID_RECONSTRUCTION_KEYS
+        assert rating_tables._grid_reconstruction_keys() is discretize._GRID_RECONSTRUCTION_KEYS
+
+        # And the CALL SITE reads it, which the identity above does not show:
+        # respelling the literal back into ``_interaction_blocks`` would leave
+        # the accessor dead code and the assertion above still true.  The
+        # accessor imports at call time, so patching the sweep's constant
+        # reaches the exporter -- and a ``TensorInteraction`` reconstruction
+        # then fails the key test, falls through to the cell-table branch and
+        # is refused.  A respelled literal would build the grid regardless.
+        model, df, y = self._model_with(self._MappingGrid())
+        monkeypatch.setattr(
+            discretize,
+            "_GRID_RECONSTRUCTION_KEYS",
+            frozenset({"x1", "x2", "relativity", "sentinel"}),
+        )
+        with pytest.raises(NotImplementedError, match="not yet exportable"):
+            rating_tables._interaction_blocks(model, 3)
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
