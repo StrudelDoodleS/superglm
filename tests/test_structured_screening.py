@@ -1579,9 +1579,10 @@ def _reference_factors(grab):
     # denominator of `eta_R` upward and the bound downward.
     mains_sv = np.linalg.svd(equilibrated, compute_uv=False)
     u = 0.5 * np.finfo(np.float64).eps
-    mains_eps = (u * np.sqrt(equilibrated.size) + u * np.sqrt(mains.shape[0]) + 2.0 * u) * float(
-        mains_sv[0]
-    )
+    lam_sv = _confidence_multiplier(mains.shape[1])
+    mains_eps = (
+        lam_sv * u * np.sqrt(equilibrated.size) + lam_sv * u * np.sqrt(mains.shape[0]) + 2.0 * u
+    ) * float(mains_sv[0])
     return _LowEdgeFactors(
         resid=resid,
         penalty_root=root_S,
@@ -1593,13 +1594,31 @@ def _reference_factors(grab):
     )
 
 
-# The total probability, over BOTH QRs and every column bound each of them
-# needs, that the error bound :func:`_reference_edf_and_bound` returns does not
-# hold.  It is a real number rather than a convention: at the implicit
-# multiplier of 1 an earlier revision used, Higham and Mary's statement is
-# vacuous (`2 exp(-1/2) = 1.21 > 1`), so nothing was being certified at all.
-# 1e-06 puts the multipliers at 5.990 and 6.301 on the fixtures here.
+# The TOTAL probability that the error bound :func:`_reference_edf_and_bound`
+# returns does not hold.  It is a real number rather than a convention: at the
+# implicit multiplier of 1 an earlier revision used, Higham and Mary's statement
+# is vacuous (`2 exp(-1/2) = 1.21 > 1`), so nothing was being certified at all.
+#
+# IT IS A BUDGET AND IT IS SPENT ONCE.  Four quantities in here are charged at
+# the probabilistic rate -- the two QRs and the two SVDs -- so each gets a
+# quarter, and each of those is itself a union over the values it must hold for
+# at once, since Higham's Thm 19.4 is COLUMNWISE and Weyl's bound is per
+# singular value.  An earlier revision gave both QRs the whole budget and
+# advertised the sum as the total, which was 2x optimistic.
 _QR_FAILURE_PROBABILITY = 1e-6
+_PROBABILISTIC_TERMS = 4  # the two QRs and the two SVDs, sharing the budget
+
+
+def _confidence_multiplier(count):
+    """Higham-Mary's ``lambda`` for ``count`` bounds holding at once.
+
+    Their statement is ``|theta_k| <= lambda sqrt(k) u`` with probability at
+    least ``1 - 2 exp(-lambda^2 / 2)`` for ONE quantity.  A union over ``count``
+    of them, at this term's share of the budget, needs
+    ``count * 2 exp(-lambda^2 / 2) <= _QR_FAILURE_PROBABILITY / _PROBABILISTIC_TERMS``.
+    """
+    share = _QR_FAILURE_PROBABILITY / _PROBABILISTIC_TERMS
+    return float(np.sqrt(2.0 * np.log(2.0 * count / share)))
 
 
 def _reference_edf_and_bound(factors, lam):
@@ -1671,11 +1690,13 @@ def _reference_edf_and_bound(factors, lam):
     returned the differential above evaluated at the COMPUTED factor, plus a
     quadratic allowance ``(2 eta/sigma_min)^2``.  That is not a bound: the
     differential's own weights move under the perturbation being bounded, and
-    here they move further than they are large -- ``w1 = 3.657e-05`` against a
-    drift budget ``delta`` of **1.2029e-04**, 3.3x the weight itself.  The
-    quadratic allowance covered only the ``||dQ_R||_F^2`` term of the expansion
-    and was three orders short of the weight drift.  What is returned now is the mean-value form, which
-    needs no remainder at all::
+    here they move further than they are large.  The drift enters as
+    ``w1(seg)^2 = w1^2 + slope1 delta + 2 delta^2``, so it is compared in
+    ``w^2`` space: ``slope1 delta = 1.2485e-04`` against ``w1^2 = 1.3375e-09``,
+    a factor of **93000**, i.e. ``w1`` moves by **305x itself** over the very
+    perturbation being bounded.  The quadratic allowance covered only the
+    ``||dQ_R||_F^2`` term of the expansion and was orders short of that.  What
+    is returned now is the mean-value form, which needs no remainder at all::
 
         |edf(A + dA) - edf(A)| <= 2 max_t [w1(A_t) ||dR||_F + w2(A_t) ||dL||_F]
                                   / sigma_min(A_t),      A_t = A + t dA
@@ -1728,8 +1749,8 @@ def _reference_edf_and_bound(factors, lam):
     precision and why it is recorded here rather than quietly dropped.
 
     **NOTHING GOES RED FROM MAKING IT STRICT, AND THAT IS STATED PLAINLY.**
-    At the same constants the bound rises 5.0771e-08 -> **1.9639e-06** on the
-    thin pair (38.7x) and 7.2819e-04 -> 7.2900e-04 on the starved one (+0.11%);
+    At the same constants the bound rises 5.3743e-08 -> **2.0760e-06** on the
+    thin pair (38.6x) and 7.5578e-04 -> 7.5665e-04 on the starved one (+0.12%);
     the realized error is 2.8422e-14 either way, and no assertion in this file
     separates them.  The first-order form was not observed to fail: it survives
     the same 600 random draws and the same injected-perturbation sweep.  What
@@ -1738,8 +1759,8 @@ def _reference_edf_and_bound(factors, lam):
 
     **THE TWO FIXTURES ARE IN OPPOSITE REGIMES AND THAT IS WHY THEY RESPOND
     DIFFERENTLY TO EVERYTHING.**  On the thin pair the segment drift dominates
-    its own base weight by 90000x (``slope1 delta = 1.2029e-04`` against
-    ``w1^2 = 1.337e-09``), so ``w1 ~ sqrt(delta) ~ sqrt(lambda)`` while
+    its own base weight by 93000x (``slope1 delta = 1.2485e-04`` against
+    ``w1^2 = 1.3375e-09``), so ``w1 ~ sqrt(delta) ~ sqrt(lambda)`` while
     ``eta ~ lambda`` and the bound scales as ``lambda^(3/2)``.  On the starved
     pair ``w1 = 0.9374`` dominates its drift by 1700x and the bound is linear in
     ``lambda``.  Every "Nx inside its gate" figure below is a margin in the
@@ -1752,8 +1773,8 @@ def _reference_edf_and_bound(factors, lam):
     directly gives the fully citation-backed
     ``|Delta edf| <= 2 sqrt(2) sqrt(p - edf) ||dA||_F / sigma_min
     + 2 ||dA||_F^2 / sigma_min^2``, with no weights to bound over a segment.
-    It is correct, and it is **2.4059e-04** here against the 1e-5 its caller
-    asserts on the paths -- **24x OUTSIDE** it, and 2.4325e-04 at
+    It is correct, and it is **2.4972e-04** here against the 1e-5 its caller
+    asserts on the paths -- **25x OUTSIDE** it, and 2.5247e-04 at
     ``low_weight = 0.001``.  Adopting it means either widening that gate, which
     is the defect this file exists to remove, or losing the oracle on the one
     fixture where it still works.  The reason it is so much looser here is
@@ -1809,14 +1830,14 @@ def _reference_edf_and_bound(factors, lam):
       applied to ``[I_p; 0]`` -- the result is the standard bound on the
       computed product of Householder reflectors; the section is cited without
       a theorem number because no accessible source pins one to it).  It enters EXACTLY, as
-      ``2 ||Qbar_R||_F ||dQ_R||_F + ||dQ_R||_F^2 = 1.44e-10``, and is NOT
-      amplified by ``1/sigma_min`` -- 0.0073% of the total.
+      ``2 ||Qbar_R||_F ||dQ_R||_F + ||dQ_R||_F^2 = 1.48e-10``, and is NOT
+      amplified by ``1/sigma_min`` -- 0.0071% of the total.
     * **the penalty root**, whose ``eigh`` perturbs ``S_a`` by ``u ||S_a||_2``;
       that enters ``edf`` as ``lambda ||dS||_2 tr(G^-1)`` with ``G = A'A``,
       since ``d edf = -lambda tr(dS G^-1 V G^-1)`` and ``G^-1 V G^-1 <= G^-1``.
       ``||dS||_2`` is charged for the WHOLE of rebuilding the root and not for
       ``eigh`` alone -- see :func:`_reference_factors` -- which is 2.56x what an
-      earlier revision carried.  6.3e-14 at the low edge, 3.2e-08 of the total,
+      earlier revision carried.  6.3e-14 at the low edge, 3.0e-08 of the total,
       carried for completeness and taken over the segment like everything else.
     * **the final accumulation.**  ``edf`` is a sum of ``m p`` squares reaching
       208, so numpy's pairwise summation alone costs
@@ -1838,11 +1859,16 @@ def _reference_edf_and_bound(factors, lam):
     An earlier revision took ``lambda = 1``, at which the statement is vacuous
     -- ``2 exp(-1/2) = 1.21 > 1`` -- so it certified nothing while being
     consumed as a certificate.  ``lambda`` now comes from
-    ``_QR_FAILURE_PROBABILITY`` by a union bound over every column bound each QR
-    needs, since Thm 19.4's backward error is columnwise: 5.990 for the mains'
-    31 columns and 6.301 for the augment's 209, at a total failure probability
-    of 1e-06.  That costs 14.1x on the thin pair -- a 6.3x constant through a
-    ``lambda^(3/2)`` regime -- and 5.9x on the starved one, and it is what moved
+    :func:`_confidence_multiplier`, which spends ``_QR_FAILURE_PROBABILITY``
+    ONCE: a quarter each to the two QRs and the two SVDs, and within each a
+    union over the values it must hold for simultaneously, since Thm 19.4's
+    backward error is columnwise.  That gives **6.218** for the mains' 31
+    columns and **6.517** for the augment's 209 at a total of 1e-06.  A revision
+    in between gave both QRs the whole budget and advertised the sum as the
+    total, which was 2x optimistic and is corrected here at a cost of 5.7%.
+
+    The naming costs 14.9x on the thin pair -- a 6.5x constant through a
+    ``lambda^(3/2)`` regime -- and 6.1x on the starved one, and it is what moved
     the starved fixture's oracle outside its caller's allowance.  Everything
     downstream of ``||dA||`` is strict; this is where ``||dA||`` itself comes
     from, and it is the only assumption left in the number.  The alternative
@@ -1864,11 +1890,11 @@ def _reference_edf_and_bound(factors, lam):
     ===========================  ==========  ==========  ====================
     fixture                           bound    realized   caller's allowance
     ===========================  ==========  ==========  ====================
-    ``_thin_level_pair(1.0)``     1.9639e-06  2.8422e-14  5.09x inside 1e-5
-    ``_thin_level_pair(0.01)``    1.9952e-06           -  5.01x inside 1e-5
-    ``_thin_level_pair(0.001)``   1.9976e-06           -  5.01x inside 1e-5
-    ``_vanishing_mass_pair()``    7.2900e-04           -  0.41x -- OUTSIDE 3e-4
-    ``_vanishing_mass_pair(-10)`` 3.3188e-04           -  0.90x -- OUTSIDE 3e-4
+    ``_thin_level_pair(1.0)``     2.0760e-06  2.8422e-14  4.82x inside 1e-5
+    ``_thin_level_pair(0.01)``    2.1091e-06           -  4.74x inside 1e-5
+    ``_thin_level_pair(0.001)``   2.1116e-06           -  4.74x inside 1e-5
+    ``_vanishing_mass_pair()``    7.5665e-04           -  0.40x -- OUTSIDE 3e-4
+    ``_vanishing_mass_pair(-10)`` 3.4445e-04           -  0.87x -- OUTSIDE 3e-4
     ===========================  ==========  ==========  ====================
 
     The realized error on the thin pair is exactly ONE ULP of the result --
@@ -1883,12 +1909,12 @@ def _reference_edf_and_bound(factors, lam):
     nobody had ever bounded; what is left is two independent implementations
     agreeing.
 
-    **IT IS NOT TIGHTER THAN THE 1e-9 IT REPLACES.  IT IS 1964x LOOSER.**  A
+    **IT IS NOT TIGHTER THAN THE 1e-9 IT REPLACES.  IT IS 2076x LOOSER.**  A
     number set from errors observed on one machine landed three orders inside
     the bound this problem actually supports, so the original calibration was
     lucky and could not have been known to be.  What it could not do is move:
-    it is a constant, and the quantity it bounds is 1.9639e-06 here and
-    7.2900e-04 on ``_vanishing_mass_pair(1e-12)``, well over two orders apart.
+    it is a constant, and the quantity it bounds is 2.0760e-06 here and
+    7.5665e-04 on ``_vanishing_mass_pair(1e-12)``, well over two orders apart.
     A fixture-blind 1e-9 is simultaneously right here and wrong by orders
     there, which is the defect, not the size of the number.
 
@@ -1963,8 +1989,8 @@ def _reference_edf_and_bound(factors, lam):
     # is COLUMNWISE, so every column bound each QR needs must hold at once: a
     # union bound over `q` and over `p` respectively, at a total
     # `_QR_FAILURE_PROBABILITY` shared between them.
-    lam_mains = np.sqrt(2.0 * np.log(2.0 * factors.n_mains / _QR_FAILURE_PROBABILITY))
-    lam_aug = np.sqrt(2.0 * np.log(2.0 * p / _QR_FAILURE_PROBABILITY))
+    lam_mains = _confidence_multiplier(factors.n_mains)
+    lam_aug = _confidence_multiplier(p)
     gamma_mains = lam_mains * u * np.sqrt(m * factors.n_mains) + 2.0 * u  # (m, q) mains
     # QR of the (m+p, p) augment; the `+ p` covers accumulating `Q` from the
     # reflectors, and is charged at the DETERMINISTIC rate where the
@@ -1974,7 +2000,13 @@ def _reference_edf_and_bound(factors, lam):
     # arXiv:1809.00200 eq. (1.2c)), charged at twice that; applying it is two
     # GEMMs and a cancelling subtraction, which is charged separately.
     eta_R = 2.0 * gamma_mains * np.sqrt(factors.n_mains) / factors.mains_sigma_min
-    eta_R = (eta_R + gamma_mains) * factors.tensor_norm
+    # APPLYING the projector is `tensor - Q (Q' tensor)`: two GEMMs and a
+    # cancelling subtraction.  The first costs `lam_mains u sqrt(m) ||Q||_F` and
+    # `||Q||_F = sqrt(q)` exactly for an orthonormal Q, so it is `gamma_mains`
+    # again to the digit; the second has inner dimension `q`, and the
+    # subtraction one more rounding.
+    eta_R = eta_R + gamma_mains + lam_mains * u * np.sqrt(factors.n_mains) + u
+    eta_R = eta_R * factors.tensor_norm
     # gamma_aug perturbs the WHOLE of [R; sqrt(lam) L].  With `Q` formed
     # explicitly that perturbation is CONSISTENT -- the computed factor is the
     # exactly-orthonormal factor of `aug + dA` -- so its R rows ride w1 and its
@@ -1999,12 +2031,18 @@ def _reference_edf_and_bound(factors, lam):
     d_Q = gamma_aug * np.sqrt(p)
     sv = np.linalg.svd(Q_R, compute_uv=False)
     sing = np.linalg.svd(T, compute_uv=False)
-    eps_a = u * np.sqrt(Q_R.size) + d_Q  # ||Q_R||_2 <= 1 up to the same order
-    eps_T = u * float(p) * float(sing[0])
+    # The SVDs are charged at the same stated confidence as the QRs, from the
+    # same budget -- an earlier revision left them at an implicit multiplier of
+    # one inside a function whose docstring calls that vacuous.  Inert here
+    # (`d_Q` dominates `eps_a`'s SVD half 110x) and carried for consistency.
+    eps_a = _confidence_multiplier(p) * u * np.sqrt(Q_R.size) + d_Q  # ||Q_R||_2 <= 1
+    eps_T = u * float(p) * float(sing[0])  # deterministic, and conservative
     # `maximum(., 0)` before squaring: without it a direction with `sv < eps_a`
     # gets a POSITIVE lower end and the interval stops containing the true `a`,
-    # which is the case here (sv = 3.40e-12 against eps_a = 5.03e-12 on the near
-    # null direction, whose certified `a` is 1.7e-28).
+    # which is the case here: the near-null direction's COMPUTED `sv` is
+    # 3.40e-12 against `eps_a` = 5.44e-12, where the exact value is
+    # sqrt(1.7e-28) = 1.30e-14 -- the computed one is 260x the true one, which
+    # is what an enclosure is for.
     a_lo = np.clip(np.maximum(sv - eps_a, 0.0) ** 2, 0.0, 1.0)
     a_hi = np.clip((sv + eps_a) ** 2, 0.0, 1.0)
     sigma_min = float(sing[-1]) - eps_T
@@ -2029,7 +2067,7 @@ def _reference_edf_and_bound(factors, lam):
     # eigenvalues of `J P_A J`, then the equal-rank projector identity.  The
     # denominator is `sigma_seg` and not `sigma_min`, because the projector
     # bound wants sigma_min of the UNPERTURBED matrix and all this routine
-    # knows is the perturbed one's, enclosed: 8.5e-05 relative here, and the
+    # knows is the perturbed one's, enclosed: 8.8e-05 relative here, and the
     # point is that it cannot round the wrong way.
     delta = np.sqrt(2.0) * eta / sigma_seg
     # phi1, phi2 and their derivatives, each enclosed over [a_lo, a_hi].  The
@@ -2114,10 +2152,10 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
     ============================  =========  =========  =========
     fixture                           bound   realized     margin
     ============================  =========  =========  =========
-    ``_thin_level_pair(1.0)``     1.964e-06  2.842e-14    6.9e+07x
-    relabelings of it             3.928e-06  5.684e-14    6.9e+07x
-    ``_vanishing_mass_pair()``    7.290e-04          -          -
-    relabelings of it             1.458e-03  5.684e-14    2.6e+10x
+    ``_thin_level_pair(1.0)``     2.076e-06  2.842e-14    7.3e+07x
+    relabelings of it             4.152e-06  5.684e-14    7.3e+07x
+    ``_vanishing_mass_pair()``    7.567e-04          -          -
+    relabelings of it             1.513e-03  5.684e-14    2.7e+10x
     ============================  =========  =========  =========
 
     The realized errors on the thin pair are ONE ULP of the result, which is
@@ -2125,10 +2163,12 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
     SPREAD over 40 exact relabelings, two ulps, and no relabeling is further
     than one ulp from the certified value.
 
-    Each fixture is measured at the lambda ITS OWN consumer calls the oracle
-    at -- ``_CERTIFIED_LOW_EDGE_LAMBDA`` and ``_VANISHING_LOW_EDGE_LAMBDA``,
-    which are different points because the bracket is scaled by each pair's
-    profiled curvature and starving three levels moves it.
+    The thin pair is measured at the lambda ITS OWN consumer calls the oracle
+    at.  The starved pair has no such consumer any more -- see
+    ``_VANISHING_LOW_EDGE_LAMBDA`` -- so it is measured at a REPRESENTATIVE
+    point of its own geometry, which is a different point from the thin pair's
+    because the bracket is scaled by each pair's profiled curvature and
+    starving three levels moves it.
 
     The relabeling bound is the SUM of two forward bounds, since two float64
     evaluations of one exact quantity are each inside their own.  Nothing
@@ -2139,13 +2179,22 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
     ON THE TWO FIXTURES.**  Against the pre-#272 moment-space form -- the
     concrete defect, re-measured here at 1.1253e-05 of error on the thin pair:
 
-    * on ``_thin_level_pair(1.0)`` the value check catches it by **5.7x** and
+    * on ``_thin_level_pair(1.0)`` the value check catches it by **5.4x** and
       the relabeling check, against its 1.2038e-05 of spread over the same 40
-      draws, by **3.1x**.  That is the real guard, and it is thinner than it
-      was: naming the failure probability cost 14.1x on this fixture, and it
+      draws, by **2.9x**.  That is the real guard, and it is thinner than it
+      was: naming the failure probability cost 14.9x on this fixture, and it
       came out of exactly this margin.
+
+      **THE VALUE CHECK CANNOT GO SILENTLY VACUOUS AND THE RELABELING CHECK
+      CAN**, which is worth stating because they read alike.  The value check
+      compares at ``abs=bound`` against a 1.1253e-05 defect, and the gate below
+      holds ``bound`` under 1e-5, so it is protected to 1.125x by construction.
+      The relabeling check compares at ``abs = 2 x bound`` and goes vacuous at
+      ``bound = 6.02e-06`` -- which is 1.66x INSIDE the same 1e-5 gate.  Current
+      headroom to that ceiling is 2.90x, and it is a property of the fixture
+      rather than of anything asserted here.
     * on ``_vanishing_mass_pair(1e-12)`` the relabeling check does **not**
-      catch it -- 6.9564e-05 of spread against a 1.458e-03 allowance, 0.05x --
+      catch it -- 6.9564e-05 of spread against a 1.513e-03 allowance, 0.05x --
       because a fixture with three levels holding 1e-12 of the weight leaves
       the filter factors spread rather than saturated (``sum_j a_j (1 - a_j) =
       1.469``, where the thin pair's is 4.457e-05), so ``w1 = 0.9374`` against
@@ -2159,9 +2208,9 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
     That asymmetry is worth stating plainly rather than averaging away.  It is
     also why the gate below is read off each fixture's own caller rather than
     set to a single number: the oracle's guaranteed accuracy must be inside
-    what that caller asserts on the paths.  It clears ``1e-5`` by 5.09x on the
+    what that caller asserts on the paths.  It clears ``1e-5`` by 4.82x on the
     thin pair, and on the starved one it does not clear ``3e-4`` at all
-    (7.290e-04, 0.41x) -- which is why that fixture is carried here with no
+    (7.567e-04, 0.40x) -- which is why that fixture is carried here with no
     gate and no consumer, and why the low-edge rung of
     ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom`` no
     longer arbitrates against it.  See #301.
@@ -2187,17 +2236,17 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
     assert got == pytest.approx(_CERTIFIED_LOW_EDGE_EDF, abs=bound), (got, bound)
 
     rng = np.random.default_rng(11)
-    # ``asserted`` is what each fixture's own consumer holds the PATHS to, and
-    # ``lam`` is where that consumer actually calls the oracle.  The starved
-    # fixture's low edge is NOT the certified point -- its bracket is scaled by
-    # its own profiled curvature, which starving three levels moves -- so
-    # gating it at the certified lambda would validate a different condition
-    # number from the one in use.
+    # ``asserted`` is what each fixture's own consumer holds the PATHS to, or
+    # ``None`` where it has no consumer left, and ``lam`` is the point the
+    # oracle is measured at.  For the thin pair that is where its consumer calls
+    # it; for the starved pair it is a representative point of that geometry,
+    # which is NOT the certified one -- the bracket is scaled by each pair's own
+    # profiled curvature, and starving three levels moves it.
     for fixture, factors, lam, asserted in (
         (grab, thin_factors, _CERTIFIED_LOW_EDGE_LAMBDA, 1e-5),
         # The starved fixture is carried with ``asserted = None``: its consumer
         # no longer arbitrates with this oracle, because at a stated failure
-        # probability the bound here is 7.2900e-04 against the 3e-4 that rung
+        # probability the bound here is 7.5665e-04 against the 3e-4 that rung
         # used to assert.  The relabeling half below is still worth running --
         # it exercises the starved path and the cell-row reduction order, and
         # it is self-consistent, since it compares two evaluations against the
@@ -2210,6 +2259,14 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
         base, base_bound = _reference_edf_and_bound(
             factors if factors is not None else _reference_factors(fixture), lam
         )
+        # A NON-FINITE BOUND IS CHECKED FOR SEPARATELY, and unconditionally.
+        # `_reference_edf_and_bound` returns ``inf`` by design when the
+        # conditioning is past what float64 resolves; with no ``asserted`` to
+        # gate against, that would otherwise turn the relabeling allowance below
+        # into ``abs=inf`` and make the arrangement-invariance check accept
+        # anything -- vanishing at exactly the moment the oracle says it cannot
+        # see the fixture.
+        assert np.isfinite(base_bound), (fixture is grab, base_bound)
         if asserted is not None:
             assert base_bound < asserted, (
                 f"the oracle's own error bound {base_bound:.4e} is not inside the "
@@ -2217,6 +2274,7 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
             )
         for relabeled in _relabelings(fixture, rng, 8):
             other, other_bound = _reference_edf_and_bound(_reference_factors(relabeled), lam)
+            assert np.isfinite(other_bound), (fixture is grab, other_bound)
             # BOTH bounds are gated, not just the base one.  The allowance below
             # is their SUM, so a relabeling whose own bound ballooned would
             # otherwise widen the assertion until it passed vacuously.
@@ -2314,9 +2372,9 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     * FLOOR, the arbiter's own accuracy.  The arms are judged against
       ``_reference_edf_and_bound``, and a bound below what that oracle can
       guarantee asserts the ORACLE's round-off rather than the arms'.  It is
-      1.9639e-06, 1.9952e-06 and 1.9976e-06 at the three weights -- above both
-      floors above, so this is the one that binds, and 1e-5 clears it by 5.09x,
-      5.01x and 5.01x.  It is DERIVED rather than observed, which the constant
+      2.0760e-06, 2.1091e-06 and 2.1116e-06 at the three weights -- above both
+      floors above, so this is the one that binds, and 1e-5 clears it by 4.82x,
+      4.74x and 4.74x.  It is DERIVED rather than observed, which the constant
       it replaced (a hard-coded 1e-9) was not; it holds at a STATED failure
       probability of 1e-06 rather than at an implicit multiplier of one; and it
       is asserted at every lambda the oracle is called at rather than only at
@@ -2326,9 +2384,9 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     * CEILING.  One degree of freedom.  The form this replaced returned an
       integer rank minus a trace, and a mis-counted direction moved the answer
       by exactly 1.0 df; that is the size of the defect, not a guess.
-    * PLACED.  1e-5 is 5.01x above the binding floor and 100,000x below the
-      defect.  The geometric mean of the two is ``1.413e-03``, so 1e-5 sits
-      141x TIGHTER than the placement that would maximize the multiplicative
+    * PLACED.  1e-5 is 4.74x above the binding floor and 100,000x below the
+      defect.  The geometric mean of the two is ``1.453e-03``, so 1e-5 sits
+      145x TIGHTER than the placement that would maximize the multiplicative
       margin on both sides -- it is the tighter of the two choices, not the
       more comfortable one, and it is unchanged from what this file carried
       when the relabeling floor of 2.8e-09 was the one that bound.
@@ -2410,12 +2468,31 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     )
     struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
     lam_lo, edf_lo, lam_hi, edf_hi = _CERTIFIED_EDGES[low_weight]
-    # ``abs=0.0`` IS LOAD-BEARING ON EVERY LAMBDA PIN BELOW.  ``pytest.approx``
-    # keeps its default absolute tolerance of 1e-12 whenever only ``rel`` is
-    # given, and against a LOW-edge lambda of 2.29e-11 that is 4.4% -- nine
-    # orders looser than the ``rel`` beside it, and enough for a moved bracket
-    # edge to pass unnoticed.  Measured: without it a +5% bracket move is
-    # accepted at the low edge; with it, +0.1% is refused.
+    # THIS PIN DOES TWO JOBS AND ONLY ONE OF THEM IS DERIVED.  Both are worth
+    # having; conflating them is not.
+    #
+    # (a) A PRECONDITION, DERIVED.  ``edf_lo`` is certified AT ``lam_lo`` while
+    #     the oracle below is evaluated at ``arm.lambda0``, so the two must be
+    #     the same point to within what that comparison tolerates.
+    #     ``|d edf / d ln lambda| = sum_j a_j (1 - a_j) = 4.457e-05`` at this
+    #     low edge, and the comparison's tolerance is the oracle's own bound,
+    #     2.0760e-06 -- so the precondition is satisfied by any
+    #     ``|d ln lambda| < 4.7e-02``.  That is ALL this half needs, and the
+    #     ``pytest.approx`` default of ``abs=1e-12`` -- 4.371e-02 relative
+    #     against a 2.2877e-11 lambda -- very nearly meets it by accident.
+    # (b) BRACKET REPRODUCIBILITY, OBSERVED AND LABELLED AS SUCH.  The remaining
+    #     ten orders assert that ``fit_reml``'s bracket lands where it lands.
+    #     That is NOT derived -- deriving it would mean bounding ``fit_reml``'s
+    #     own cross-platform reproducibility, which is outside what this oracle
+    #     covers and is stated so.  It is kept because it is the only thing in
+    #     this file that sees a bracket move at all: a relative 1e-11 move is
+    #     4e-11 df, far below any edf assertion here, and it reds all five
+    #     parametrizations of the two tests.  The starved rung's equivalent was
+    #     DELETED rather than kept, because nothing there consumed a lambda; the
+    #     difference is (a), and (a) is why this one stays.
+    #
+    # ``abs=0.0`` is what makes (b) mean anything: without it the default
+    # absolute tolerance swamps the ``rel`` beside it by nine orders.
     pin = dict(rel=1e-12, abs=0.0)
     saw_low_edge = saw_high_edge = False
     for budget, d, s in zip(_EDGE_BUDGETS, dense, struct, strict=True):
@@ -2434,7 +2511,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # not a constant.  It replaces a hard-coded 1e-9, which was set
             # from errors OBSERVED on one machine -- the same defect issue #272
             # is about -- and which cannot move: the quantity it bounds is
-            # 1.9639e-06 here and 7.2900e-04 on ``_vanishing_mass_pair(1e-12)``,
+            # 2.0760e-06 here and 7.5665e-04 on ``_vanishing_mass_pair(1e-12)``,
             # so a fixture-blind constant is simultaneously right in one place
             # and wrong by orders in the other.
             #
@@ -2446,12 +2523,12 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # uncertified ruler and report it as a path error.
             #
             # THE GATE IS NOT DECORATION AND IT HAS ALREADY FIRED TWICE.  At
-            # ``_vanishing_mass_pair``'s low edge the same oracle is 7.29e-04
+            # ``_vanishing_mass_pair``'s low edge the same oracle is 7.57e-04
             # against a 3e-4, and that rung consequently no longer arbitrates at
             # all.  And rebuilding THIS pair's geometry at seeds 1-21 -- the same
             # generator, the same shape, a different draw -- the bound exceeds
-            # this 1e-5 on **6 of the 21**: seeds 13 (6.0906e-05), 8, 17, 4, 20
-            # and 1.  Seed 3 is the one the suite runs, at 1.9639e-06.  On any of
+            # this 1e-5 on **6 of the 21**: seeds 13 (6.3216e-05), 8, 17, 4, 20
+            # and 1.  Seed 3 is the one the suite runs, at 2.0760e-06.  On any of
             # the other six this line refuses; without it both arms would be
             # judged, and would agree, against an oracle nobody had checked.
             assert s.lambda0 == pytest.approx(lam_lo, **pin), ("lambda_lo", s.lambda0)
@@ -2744,7 +2821,7 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
     CHANGE'S ONE DISCLOSED LOSS OF COVERAGE.**  It used to assert each arm
     against ``_reference_edf`` at ``abs=3e-4``.  That reference now returns its
     own error bound at a stated failure probability, and on this fixture the
-    bound is **7.2900e-04** at ``low_weight = 1e-12`` and **3.3188e-04** at
+    bound is **7.5665e-04** at ``low_weight = 1e-12`` and **3.4445e-04** at
     1e-10 -- both outside the 3e-4 the assertion carried, and there is no
     multiplier that rescues them without making the probability meaningless.
     So the assertion is gone rather than widened; the parity check below, which
@@ -2815,8 +2892,8 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
             # RATHER THAN AN OMISSION.**  This edge used to assert each arm
             # against ``_reference_edf`` at 3e-4.  That reference now returns
             # its own error bound, and at a STATED failure probability -- see
-            # ``_QR_FAILURE_PROBABILITY`` -- the bound here is **7.2900e-04** at
-            # ``low_weight = 1e-12`` and **3.3188e-04** at 1e-10, both OUTSIDE
+            # ``_QR_FAILURE_PROBABILITY`` -- the bound here is **7.5665e-04** at
+            # ``low_weight = 1e-12`` and **3.4445e-04** at 1e-10, both OUTSIDE
             # the 3e-4 the assertion carried.  There is no multiplier that
             # rescues it: the gate needs one below 2.43, at which a single
             # column bound already fails 10% of the time and the union over 240
