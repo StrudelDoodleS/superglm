@@ -159,11 +159,12 @@ _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 _LOW_CREDIBILITY_TAG = "LC"
 _LOW_CREDIBILITY_NOTE = (
     "LC: low credibility — flagged when a categorical level carries fewer than\n"
-    "20 observations or under 0.05% of exposure, or when a coefficient's standard\n"
-    "error is far above this model's typical one. The estimate, interval and\n"
-    "p-value beside it are unchanged and are the ones the fit produced; the flag\n"
-    "says only that little data stands behind them. Treat the row as partially\n"
-    "credible: pool the level, or re-specify the term, before pricing on it."
+    "20 observations or under 0.05% of exposure, or, for a row that has no\n"
+    "per-level counts, when its standard error is far above this model's typical\n"
+    "one. The estimate, interval and p-value beside it are unchanged and are the\n"
+    "ones the fit produced; the flag says only that little data stands behind\n"
+    "them. Treat the row as partially credible: pool the level, or re-specify the\n"
+    "term, before pricing on it."
 )
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
@@ -212,7 +213,7 @@ def _is_smooth_group_row(row: _CoefRow) -> bool:
     return bool(row.is_spline) and row.subgroup_type not in _PARAMETRIC_GROUP_TEST_TYPES
 
 
-def _qs_diagnostic_label(row: _CoefRow) -> str:
+def _low_credibility_label(row: _CoefRow) -> str:
     """Label fitted-group diagnostics without attributing them to one member."""
     if row.level_group:
         return f"{row.group or row.name} {row.level_group}"
@@ -705,7 +706,7 @@ class ModelSummary:
                 )
             ):
                 stars = _sig_stars(row.p)
-                qs = "?" if row.quasi_separated else ""
+                advisory = "?" if row.quasi_separated else ""
                 z_decimals = (
                     1 if row.z is not None and np.isfinite(row.z) and abs(row.z) >= 100 else 3
                 )
@@ -744,7 +745,7 @@ class ModelSummary:
                                 width=coef_field_widths[5],
                             ),
                             stars,
-                            qs,
+                            advisory,
                         )
                     )
                 )
@@ -779,8 +780,8 @@ class ModelSummary:
                     )
                 )
         lines.append(_SIG_LEGEND)
-        has_qs = any(r.quasi_separated for r in display_rows)
-        if has_qs:
+        has_low_credibility = any(r.quasi_separated for r in display_rows)
+        if has_low_credibility:
             lines.append(_LOW_CREDIBILITY_NOTE)
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
@@ -798,14 +799,16 @@ class ModelSummary:
                 )
 
         # Low-credibility footnote
-        qs_rows = [r for r in display_rows if r.quasi_separated and r.level_n_obs is not None]
-        if qs_rows:
+        low_credibility_rows = [
+            r for r in display_rows if r.quasi_separated and r.level_n_obs is not None
+        ]
+        if low_credibility_rows:
             lines.append("")
             lines.append("? Low-credibility levels, and the experience behind each:")
-            for r in qs_rows:
+            for r in low_credibility_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
                 lines.append(
-                    f"    {_qs_diagnostic_label(r)}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
+                    f"    {_low_credibility_label(r)}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
                 )
 
         return "\n".join(lines)
@@ -1132,7 +1135,7 @@ class ModelSummary:
                 )
             ):
                 stars = _sig_stars(row.p)
-                qs = "?" if row.quasi_separated else ""
+                advisory = "?" if row.quasi_separated else ""
                 z_text = f"{row.z:.3f}" if row.z is not None and np.isfinite(row.z) else "---"
                 p_text = f"{row.p:.3f}" if row.p is not None and np.isfinite(row.p) else "---"
                 ci_low_text = (
@@ -1157,7 +1160,7 @@ class ModelSummary:
                     f'<td style="{cell}">{ci_low_text}</td>'
                     f'<td style="{cell}">{ci_high_text}</td>'
                     f'<td style="{sig_cell}">{stars}</td>'
-                    f'<td style="{sig_cell}">{qs}</td>'
+                    f'<td style="{sig_cell}">{advisory}</td>'
                     f"</tr>"
                 )
             else:
@@ -1202,8 +1205,8 @@ class ModelSummary:
             f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
             f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
         )
-        has_qs = any(r.quasi_separated for r in display_rows)
-        if has_qs:
+        has_low_credibility = any(r.quasi_separated for r in display_rows)
+        if has_low_credibility:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#c60;border:none;">{_LOW_CREDIBILITY_NOTE}</td></tr>'
@@ -1228,19 +1231,21 @@ class ModelSummary:
                 f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
             )
         # Low-credibility footnote
-        qs_rows = [r for r in display_rows if r.quasi_separated and r.level_n_obs is not None]
-        if qs_rows:
-            qs_lines = ["? Low-credibility levels, and the experience behind each:"]
-            for r in qs_rows:
+        low_credibility_rows = [
+            r for r in display_rows if r.quasi_separated and r.level_n_obs is not None
+        ]
+        if low_credibility_rows:
+            advisory_lines = ["? Low-credibility levels, and the experience behind each:"]
+            for r in low_credibility_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
-                qs_lines.append(
-                    f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(_qs_diagnostic_label(r))}: "
+                advisory_lines.append(
+                    f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(_low_credibility_label(r))}: "
                     f"{r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
                 )
-            qs_html = "<br>".join(qs_lines)
+            advisory_html = "<br>".join(advisory_lines)
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">{qs_html}</td></tr>'
+                f'color:#c60;border:none;">{advisory_html}</td></tr>'
             )
 
         parts.append("</table>")
