@@ -1520,14 +1520,22 @@ def test_an_empty_offset_bin_ships_a_factor_a_risk_can_be_rated_on():
     probe = 0.5 * (edges[:-1] + edges[1:])
     factor = relativity[np.clip(np.digitize(probe, edges, right=False), 1, len(relativity)) - 1]
     assert np.all(factor > 0.0), "no bin prices a risk at zero"
-    assert np.all((factor >= edges[:-1]) & (factor <= edges[1:])), (
+    # A weighted average of values inside an interval is inside it, so the only
+    # slack this needs is the average's own round-off: ``np.average`` over at
+    # most n values, i.e. n eps relative.  Not fitted -- it is eleven orders
+    # below the gap a fill of 1.0 would leave against a bin spanning [0.05, 2.0].
+    slack = len(X) * _EPS * np.abs(edges)
+    assert np.all((factor >= edges[:-1] - slack[:-1]) & (factor <= edges[1:] + slack[1:])), (
         "each bin's factor is a multiplier that bin could hold"
     )
 
     # And the offset block's boundaries round-trip too -- it shares the printer.
+    # Binned on ``exp(offset)``, which is what the block bins and what a consumer
+    # holds, rather than on ``exposure``: ``exp(log(x))`` is not ``x`` in general,
+    # and pinning the wrong array would make this pass or fail on an ulp.
     from superglm.diagnostics.discretize import _compute_edges
 
-    np.testing.assert_array_equal(edges, _compute_edges(exposure, np.ones(n), 150, "uniform"))
+    np.testing.assert_array_equal(edges, _compute_edges(np.exp(offset), np.ones(n), 150, "uniform"))
 
 
 def test_a_relativity_a_consumer_cannot_multiply_by_stops_the_export():
@@ -1674,6 +1682,13 @@ def test_an_interaction_cell_that_is_not_a_usable_factor_stops_the_export():
     So the saturation gate, the base guard and the per-block guard were all
     silent -- correctly, each on its own terms -- and a risk keyed into a corner
     cell priced at exactly zero.
+
+    It is the FLOOR arm that catches this fixture and not the ceiling: the
+    largest cell, 1.8e+155, is well inside ``exp(+500)`` = 1.4e+217.  A guard
+    written only against the overflow side would still ship this workbook.  That
+    is pinned below on constructed cells rather than on these, because where a
+    degree-4 tensor lands 90 units outside its data is a property of the LAPACK
+    that fitted it.
     """
     model, X, y = _diagonal_band_interaction_fit()
 
@@ -1688,27 +1703,31 @@ def test_an_interaction_cell_that_is_not_a_usable_factor_stops_the_export():
 
     # What was shipping: the cells themselves, read the way _interaction_blocks
     # builds them, with the main-effect half of the payload entirely healthy.
+    # Asserted as "some cell leaves the usable band" rather than as the exact
+    # value: the fixture reaches 1e-262 and 0.0 here, but it is a degree-4
+    # tensor extrapolated far outside its data, so the digits it lands on are a
+    # property of this LAPACK.  The band is the invariant, and it is cleared by
+    # more than 40 orders of magnitude either way.
     cells = rating_tables._interaction_blocks(model, 20)[0].table.iloc[:, 1:].to_numpy(np.float64)
-    assert int(np.count_nonzero(cells == 0.0)) > 0, "a factor of exactly zero"
-    # It is the FLOOR arm that catches this fixture, not the ceiling: the grid
-    # runs down through the clip floor to exactly 0.0 while its largest cell,
-    # 1.8e+155, is still well inside exp(+500) = 1.4e+217.  Worth pinning,
-    # because a guard written only against the overflow side would pass every
-    # assertion above and still ship this workbook.
-    assert np.all(np.isfinite(cells)), "nothing here overflows to inf"
-    assert float(np.max(cells)) < float(np.exp(500.0)), "and nothing reaches the ceiling"
-    small = cells[cells > 0.0].min()
-    assert float(small) <= float(np.exp(-500.0)), "but the floor is passed on the way to zero"
+    unusable = ~np.isfinite(cells) | (cells >= np.exp(500.0)) | (cells <= np.exp(-500.0))
+    assert np.any(unusable), "at least one exported cell is not a factor at all"
 
-    # Isolated from the 0.0 predicate: an interaction block carrying inf is
-    # refused too, and it is refused only because the guard now SEES
-    # interactions -- the predicate itself has rejected inf all along.
-    interaction = rating_tables.InteractionTableBlock(
-        name="a:b",
-        table=pd.DataFrame({"a": ["0.0", "1.0"], "1.0": [1.0, float("inf")], "2.0": [1.0, 1.0]}),
-    )
-    with pytest.raises(ValueError, match="cannot multiply by"):
-        rating_tables._require_usable_relativities_export([], [interaction])
+    # The two arms, on CONSTRUCTED cells so that the mechanism is pinned without
+    # depending on where a fitted extrapolation happens to land.  Each is refused
+    # only because the guard now SEES interactions: the ``inf`` arm has been in
+    # the predicate all along, and the ``0.0`` arm is issue #291's half.
+    def interaction(cell: float) -> rating_tables.InteractionTableBlock:
+        return rating_tables.InteractionTableBlock(
+            name="a:b",
+            table=pd.DataFrame(
+                {"a": ["0.0", "1.0"], "1.0": [1.0, cell], "2.0": [1.0, 1.0]},
+            ),
+        )
+
+    for cell in (float("inf"), 0.0, float(np.exp(500.0)), float(np.exp(-500.0))):
+        with pytest.raises(ValueError, match="cannot multiply by"):
+            rating_tables._require_usable_relativities_export([], [interaction(cell)])
+    rating_tables._require_usable_relativities_export([], [interaction(1.0)])
 
     # An ordinary interaction is untouched, and its first column -- level labels,
     # which may look numeric -- is a key rather than a factor.
