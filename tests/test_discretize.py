@@ -1151,33 +1151,40 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         )
         np.testing.assert_allclose(cells, expected, rtol=1e-12, atol=0.0)
 
-    def test_the_class_fast_path_agrees_with_the_contract(self):
+    def test_the_class_fast_path_covers_every_shipped_interaction(self):
         """A negative class check may only skip work, never change an answer.
 
         ``_grid_reconstruction`` short-circuits the shipped interaction types
         whose reconstruction is never a surface, because reconstructing one to
         learn that is quadratic in a categorical parent's cardinality --
         ``SplineCategorical.reconstruct`` walks every level and each call walks
-        them again. Deciding by class is what four rounds had to undo, so the
-        list is checked against the contract it stands in for.
+        them again. Deciding by class is what four rounds had to undo, so what
+        is pinned here is that the list PARTITIONS the shipped types with the
+        two grid ones: a new interaction class cannot be added without landing
+        on one side or the other, and neither side can claim a type twice.
         """
+        import inspect
+
         from superglm.diagnostics import discretize
         from superglm.features import interaction as interaction_module
+        from superglm.features.factor_smooth import FactorSmooth
 
-        listed = discretize._non_grid_builtin_interactions()
-        for spec_type in listed:
-            keys = {c for c in spec_type.reconstruct.__code__.co_consts if isinstance(c, str)}
-            assert not {"x1", "x2"} <= keys, f"{spec_type.__name__} can return a grid"
+        listed = set(discretize._non_grid_builtin_interactions())
+        grids = {interaction_module.TensorInteraction, interaction_module.PolynomialInteraction}
 
-        # And the two that ARE grids are not on it.
-        assert interaction_module.TensorInteraction not in listed
-        assert interaction_module.PolynomialInteraction not in listed
-        for spec_type in (
-            interaction_module.TensorInteraction,
-            interaction_module.PolynomialInteraction,
-        ):
-            keys = {c for c in spec_type.reconstruct.__code__.co_consts if isinstance(c, str)}
-            assert {"x1", "x2"} <= keys
+        assert not (listed & grids), "a type cannot be both a grid and not a grid"
+
+        shipped = {
+            obj
+            for _, obj in inspect.getmembers(interaction_module, inspect.isclass)
+            if obj.__module__ == interaction_module.__name__ and hasattr(obj, "parent_names")
+        } | {FactorSmooth}
+        assert shipped, "the interaction module must define interaction types"
+        unclassified = shipped - listed - grids
+        assert not unclassified, (
+            f"unclassified interaction types: {sorted(t.__name__ for t in unclassified)} -- "
+            "each must be listed as a non-grid built-in or be one of the two grid types"
+        )
 
     def test_an_unusable_reconstructed_factor_is_refused(self):
         """A caller's grid can hand back something that is not a factor.
