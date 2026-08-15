@@ -189,8 +189,9 @@ and what it removes beyond that is carried into DEGREES OF FREEDOM by
 takes.  :func:`_penalty_root`'s projection is held to ``n^2 eps`` of the
 penalty's trace, which is what separates a penalty the two halves can share
 from one where the statistic and the edf would be scoring different pencils.
-Worst observed across every geometry the screening suites exercise: 0.25 of
-the first allowance and 0.375 of the second.
+Neither fires on data: over the five screening suites, 86 pair geometries
+and 767 evaluations, there are ZERO refusals from either, and the worst
+approach is 0.25 of the first allowance and 0.1875 of the second.
 
 **WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
 leaves ``edf`` unchanged in exact arithmetic and changes only the order of
@@ -831,24 +832,48 @@ def _penalty_root(S_a: NDArray) -> NDArray:
     carry is genuinely not, and ``fl(lambda * S_a)`` leaves the cone even for
     the exactly-PSD one.
 
-    **ONLY STRICTLY NEGATIVE EIGENVALUES ARE CLIPPED, AND THE REASON IS
-    MEASURED.**  ``max(w, 0)`` is the Euclidean projection onto the PSD cone
-    (Higham, *Linear Algebra Appl.* 103:103-118, 1988), so it is the smallest
-    change that makes the identity true.  A cut at the module's usual
-    ``k eps`` relative floor is NOT: on the suite's vanishing-mass pair the
-    penalty's smallest eigenvalue is ``+1.374e-16`` of its largest, which
+    **A CUT AT THE MODULE'S USUAL ``k eps`` RELATIVE FLOOR IS WRONG HERE, AND
+    THE REASON IS MEASURED.**  On the suite's vanishing-mass pair the
+    penalty's smallest eigenvalue is ``1.374e-16`` of its largest, which
     ``lambda_hi = 1e10 * scale`` amplifies into a real penalty of
     ``1.86e-08 * tr(V_eff)`` that reaches three levels' free directions.
-    Dropping it reports 19 free directions where the closed form counts 16.
-    The residue is data, not dust, and its SIGN is the accident -- the same
-    fixture measures ``+2.11e-15`` at one seed and ``-5.03e-16`` at another.
+    Dropping it reports 19 free directions where an independent closed form
+    counts 16.  The residue is data.
+
+    **AND ITS SIGN IS NOT, SO NEITHER ``max(w, 0)`` NOR A DROP MAY DECIDE
+    THREE DEGREES OF FREEDOM.**  Assembly round-off puts that eigenvalue on
+    either side of zero depending on the data -- the same fixture measures
+    ``+2.11e-15`` at one seed and ``-5.03e-16`` at another, and the same
+    fixture at the same seed measures either sign on different machines.
+    ``max(w, 0)`` is the Euclidean projection onto the PSD cone (Higham,
+    *Linear Algebra Appl.* 103:103-118, 1988) and is the right thing to do to
+    an eigenvalue that is RESOLVED; applied to one that is not, it turns a
+    coin flip into a 3 df move in a published ``edf0``, and CI caught exactly
+    that -- 19.000000 where this machine reads 16.000374.
+
+    So an eigenvalue inside ``eigh``'s own error bar, ``n eps ||S||_2``
+    (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, sec. 4.7), is taken at its
+    MAGNITUDE, which is the only sign-independent choice that keeps it.
+    Checked against 40-digit mpmath on both signs of the residue: the
+    magnitude gives 15.999993 and 16.000012, and clamping the negative case
+    up to zero gives back the full ``k_b`` -- wrong by three degrees of
+    freedom.  Inside the bar every PSD matrix within ``n eps ||S||_2`` of
+    ``S_a`` is equally admissible, so what is chosen there cannot be settled
+    by nearness to ``S_a``; it is settled by requiring the answer to be a
+    function of the data rather than of the rounding.
+
+    Outside the bar a negative eigenvalue is real, no magnitude is taken and
+    the direction is dropped -- and :func:`_profile` then refuses the pair,
+    because the statistic is still scoring ``S_a`` raw.
     """
     n = S_a.shape[0]
     if n == 0:
         return np.zeros((0, 0), dtype=np.float64)
     w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
-    keep = w > 0.0
-    return (Q[:, keep] * np.sqrt(w[keep])).T
+    unresolved = float(n) * np.finfo(np.float64).eps * float(np.max(np.abs(w), initial=0.0))
+    lifted = np.where(w >= -unresolved, np.abs(w), 0.0)
+    keep = lifted > 0.0
+    return (Q[:, keep] * np.sqrt(lifted[keep])).T
 
 
 @dataclass(frozen=True)
@@ -1007,13 +1032,15 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # eigenvalues within ``p(n) eps ||S||_2`` of the true ones, with
     # ``p(n) = n`` in the LAPACK Users' Guide's bound (3rd ed., SIAM 1999,
     # sec. 4.7), so a genuinely PSD ``S_a`` cannot show a negative eigenvalue
-    # below ``-n eps ||S||_2``; there are at most ``n`` of them, and
-    # ``tr(S) >= ||S||_2`` for a matrix in the cone, so the relative trace mass
-    # a certified-roundoff projection can remove is at most ``n^2 eps``.
+    # below ``-n eps ||S||_2``.  There are at most ``n`` of them; each moves
+    # the trace by ``|w|`` if dropped and by ``2 |w|`` if taken at its
+    # magnitude, which is what :func:`_penalty_root` does inside that bar; and
+    # ``tr(S) >= ||S||_2`` for a matrix in the cone.  So the relative trace
+    # mass a certified-roundoff projection can move is at most ``2 n^2 eps``.
     # Measured across every geometry this suite exercises, the worst observed
-    # is 0.375 of that -- the bound is derived, and it is not tight to what was
+    # is 0.1875 of that -- the bound is derived, and it is not tight to what was
     # seen.
-    if clip > p.S_a.shape[0] ** 2 * np.finfo(np.float64).eps:
+    if clip > 2.0 * p.S_a.shape[0] ** 2 * np.finfo(np.float64).eps:
         raise _UnstableStructuredEDFError(
             f"the penalty's PSD projection removed {clip} of its trace, which is "
             "more than an eigensolver's backward error: the statistic and the edf "
