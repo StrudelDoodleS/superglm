@@ -353,8 +353,12 @@ def _summary_advisory_kind(row, quasi_separated: bool) -> str:
     """
     if not quasi_separated:
         return ""
-    kind = str(getattr(row, "advisory_trigger", "") or "")
-    return kind if kind in {"thin_level", "outsized_se"} else "thin_level"
+    # Read directly, like every other field here: a defaulting ``getattr``
+    # fails OPEN under the rename issue #304 is scheduled to do, silently
+    # relabelling every flagged row as thin.  An unrecognised value gets the
+    # neutral third kind rather than either claim.
+    kind = str(row.advisory_trigger or "")
+    return kind if kind in {"thin_level", "outsized_se"} else "unknown"
 
 
 def _summary_sig_class(p_value: float | None) -> str:
