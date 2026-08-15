@@ -275,15 +275,56 @@ test("grouped compact summary renders one row and escaped membership legend", ()
   assert.match(nodes.summaryFrame.innerHTML, /aria-label="Level group membership"/);
 });
 
-test("ordinary compact summary remains a six-column table", () => {
+test("ordinary compact summary remains a seven-column table", () => {
   const nodes = compactSummaryNodes();
   const payload = compactLevelSummary("expanded", { hasLevelGroups: false });
 
   renderSummary(payload, nodes);
 
-  assert.equal((nodes.summaryFrame.innerHTML.match(/<th(?:\s|>)/g) || []).length, 6);
+  assert.equal((nodes.summaryFrame.innerHTML.match(/<th(?:\s|>)/g) || []).length, 7);
   assert.doesNotMatch(nodes.summaryFrame.innerHTML, /Level group/);
   assert.doesNotMatch(nodes.summaryFrame.innerHTML, /summary-level-group/);
+});
+
+test("a low-credibility row keeps its significance and gets its own marker", () => {
+  // The advisory is not a verdict on the estimate: the rule behind it reads a
+  // level's volume, or a standard error's size, and never the p-value.  The
+  // editor used to render "QS" in the Sig column and recolour the SE cell,
+  // which told a reader there was no significance to report (issue #239).
+  const nodes = compactSummaryNodes();
+  renderSummary({
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {},
+      level_display: "expanded",
+      has_level_groups: false,
+      level_groups: [],
+      rows: [{
+        name: "cat[RARE]",
+        group: "cat",
+        kind: "coef",
+        coef: 8.2365,
+        se: 0.1293,
+        p_value: 0.0,
+        sig_code: "***",
+        sig_class: "sig-strong",
+        advisory_code: "?",
+        quasi_separated: true
+      }]
+    }
+  }, nodes);
+
+  const markup = nodes.summaryFrame.innerHTML;
+  assert.match(markup, /<th class="advisory-code"[^>]*>LC<\/th>/);
+  assert.match(markup, /<td class="sig-code">\*\*\*<\/td>/);
+  assert.match(markup, /<td class="advisory-code"[^>]*>\?<\/td>/);
+  // The SE cell still reports the p-value, and the advisory never claims the
+  // estimate is unidentified.
+  assert.match(markup, /class="summary-se se-cell sig-strong"/);
+  assert.doesNotMatch(markup, /sig-qs/);
+  assert.doesNotMatch(markup, /[Ss]eparat/);
 });
 
 test("direct summary helpers include the grouped level display", async () => {

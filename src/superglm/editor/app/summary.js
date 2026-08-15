@@ -633,7 +633,7 @@ function renderCompactSummary(payload) {
   const model = compact.model || {};
   const rows = Array.isArray(compact.rows) ? compact.rows : [];
   const hasLevelGroups = compact.has_level_groups === true;
-  const columnCount = hasLevelGroups ? 7 : 6;
+  const columnCount = hasLevelGroups ? 8 : 7;
   const facts = [
     ["Family", model.family],
     ["Link", model.link],
@@ -673,6 +673,7 @@ function renderCompactSummary(payload) {
             <th class="summary-se">SE</th>
             <th class="summary-p">p</th>
             <th class="sig-code">Sig</th>
+            <th class="advisory-code" title="Low credibility">LC</th>
           </tr>
         </thead>
         <tbody>
@@ -759,6 +760,7 @@ function renderSummaryRow(row, hasLevelGroups) {
       </td>
       <td class="summary-p">${escapeHTML(formatP(row.p_value))}</td>
       <td class="sig-code">${escapeHTML(row.sig_code || "")}</td>
+      <td class="advisory-code" title="${escapeHTML(advisoryTitle(row))}">${escapeHTML(row.advisory_code || "")}</td>
     </tr>
   `;
 }
@@ -851,14 +853,21 @@ function safeSigClass(value) {
     "sig-weak",
     "sig-none",
     "sig-unknown",
-    "sig-reference",
-    "sig-qs"
+    "sig-reference"
   ]);
   return allowed.has(value) ? value : "sig-unknown";
 }
 
 function sigTitle(row) {
-  if (row.quasi_separated) return "Quasi-separated level";
   if (payloadNumber(row.p_value) === null) return "Inference unavailable for this row";
   return `Colored by ${row.stat_label || "p"} p=${formatP(row.p_value)}`;
+}
+
+// The advisory is a separate column from Sig because it is a separate finding:
+// the rule behind it reads a level's volume, or a standard error's size, and
+// never the p-value, so it cannot stand in for one (issue #239).
+function advisoryTitle(row) {
+  return row.quasi_separated
+    ? "Low credibility: thin level or an outsized standard error"
+    : "";
 }
