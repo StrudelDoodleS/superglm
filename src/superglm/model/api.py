@@ -784,11 +784,35 @@ class SuperGLM:
         pseudo-inverse — routinely the pseudo-inverse, since one empty
         ``cat_cat`` cell or one singleton level makes a probe column
         collinear with the overlap span — so per-pair time grows as ``k^3``
-        where the allocations grow as ``k^2``.  A pair too wide to solve
-        inside the budget is refused with a NaN row by the same
-        cubic-work gate (``k^3 <= 1000 * max_cells`` unpenalized, 16x the
-        work charged to a penalized block: ``k <= 1709`` and ``k <= 678`` at
-        the default, measured there at 1.3 s and 1.9 s per pair).
+        where the allocations grow as ``k^2``.  A cubic-work gate caps ``k``
+        at ``(1000 * max_cells)^(1/3)`` for an unpenalized block and
+        ``(500 * max_cells)^(1/3)`` for a penalized one, whose ladder can
+        bisect: 1709 and 1357 at the default.  That cap is NOT a constant —
+        ``max_cells`` sets it and nothing else does.  Penalized ceilings:
+        1357 at 5e6, 793 at 1e6, 368 at 1e5, 292 at 5e4, 170 at 1e4, with an
+        allocation gate ``k <= 2 * sqrt(max_cells)`` binding instead below
+        ``max_cells`` ~3906.  Family, link, ``phi``, penalty order, basis
+        kind, prior weights and the ``edf0`` ladder move none of it; only the
+        block's own width does, and for ``spline_cat`` that width is
+        ``k_spline * (L - 1)``.  (Per-pair times are deliberately not quoted
+        here; the module's own comments carry the measured ones.)
+
+        Which kernel scores a pair follows from that.  The dense path gets
+        first refusal and keeps every pair it can score exactly.  A
+        ``spline_cat`` pair it cannot is RETRIED through the arrow kernel —
+        linear in the level count, with no block-dimension ceiling — rather
+        than refused, at any of three exits: the block over the cap above,
+        which at the default sends a library-default ``Spline()`` margin to
+        the arrow kernel from ``L = 106`` levels (``ps(15)`` from 77,
+        ``ps(20)`` from 61); the pair's dense support intermediate over
+        budget where the arrow kernel's transposed one still fits, which
+        fires with the dense block far BELOW the cap (measured at
+        ``k = 231``: a 22-level factor against a ``ps(8)`` margin with 46,119
+        distinct values); and the exhaustion of the binning fallback.  So a
+        NaN ``spline_cat`` row means the arrow gates or its ladder refused
+        too.  Every other kind is dense-only, and for them the cap is the
+        refusal.
+
         A categorical margin never bins — its support is the fitted level
         set — and a numeric margin never grids at all: it enters its probe
         linearly, so a ``numeric_cat``/``numeric_numeric`` row that carries a
