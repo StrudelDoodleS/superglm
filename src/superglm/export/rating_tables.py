@@ -1237,6 +1237,15 @@ def build_rating_table_payload(
     exists precisely because one number on this sheet was read as more than it
     was.  ``impact_bins`` sweeps that ladder; an empty one means no sheet.
 
+    Two limits on that bound, both tracked rather than fixed here.  The sheet's
+    discretised prediction goes through ``stabilize_eta`` and the workbook's
+    product does not, so an approximation that pushes a row out of the link's
+    range is clipped on the sheet and not in the table (issue #313).  And for a
+    grid whose parent is a spline-mode ``OrderedCategorical``, the block is a
+    DISCLOSURE rather than a lookup: ``_continuous_interaction_block`` prints
+    the axis in mapped-score space while a consumer holds the level label, and
+    no block carries the map between them -- the same keying gap as issue #286.
+
     * The binning itself, which the ``discretization_impact`` sheet quantifies
       for the main-effect ``Spline`` and ``Polynomial`` blocks.
       It is bias-free in the GEOMETRY measure: each bin's relativity is the

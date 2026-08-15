@@ -644,6 +644,23 @@ class TestContinuousInteractionIsDiscretized:
         assert result.tables == {}
         assert set(result.interaction_tables) == {"age:density"}
 
+    def test_a_repeated_name_is_not_counted_twice(self, gridded_interaction_model):
+        """One block ships once, so its error is counted once.
+
+        A repeated name used to add its replacement delta once per occurrence
+        while writing a single table, so the sheet reported twice the
+        discretisation error of a block the workbook carries once.
+        """
+        model, df, y = gridded_interaction_model
+        once = model.discretization_impact(df, y, n_bins=20, features=["age:density"])
+        twice = model.discretization_impact(
+            df, y, n_bins=20, features=["age:density", "age:density"]
+        )
+
+        np.testing.assert_allclose(twice.predictions, once.predictions, rtol=0.0, atol=0.0)
+        assert twice.metrics == once.metrics
+        assert set(twice.interaction_tables) == {"age:density"}
+
     def test_an_unknown_name_is_still_an_unknown_feature(self, gridded_interaction_model):
         model, df, y = gridded_interaction_model
         with pytest.raises(ValueError, match="Unknown feature"):
@@ -700,7 +717,14 @@ class TestGridParentsAreReadTheWayTheFitReadsThem:
         same space the grid was built over.
         """
         model, df, y = self._ordered_parent_model()
-        result = model.discretization_impact(df, y, n_bins=8)
+        # ``n_bins=5`` is load-bearing: ``OrderedCategorical`` maps its five
+        # levels to ``linspace(0, 1, 5)`` and the grid axis is the training
+        # range of those scores at five nodes, so the two arrays are identical
+        # and EVERY band sits on a node. At any other resolution only the two
+        # extreme bands do, and a wrong-but-numeric resolution -- level codes
+        # 0..4 -- would clamp those same two onto the same end nodes and clear
+        # the exactness assertion below while silently mis-rating the interior.
+        result = model.discretization_impact(df, y, n_bins=5)
 
         assert set(result.interaction_tables) == {"band:density"}
         grid = result.interaction_tables["band:density"]
@@ -723,15 +747,15 @@ class TestGridParentsAreReadTheWayTheFitReadsThem:
             for label, score in spec._level_to_value.items()
             if np.min(np.abs(band_axis - float(score))) < 1e-12
         ]
-        assert on_node_bands, "the fixture must place at least one band on a node"
         on_nodes = pd.DataFrame(
             {
                 "band": np.repeat(on_node_bands, len(density_axis)),
                 "density": np.tile(density_axis, len(on_node_bands)),
             }
         )
+        assert len(on_node_bands) == 5, "every band must sit on a node for this to bite"
         at_nodes = model.discretization_impact(
-            on_nodes, np.ones(len(on_nodes)), n_bins=8, features=["band:density"]
+            on_nodes, np.ones(len(on_nodes)), n_bins=5, features=["band:density"]
         )
         np.testing.assert_allclose(
             at_nodes.predictions,
@@ -744,7 +768,7 @@ class TestGridParentsAreReadTheWayTheFitReadsThem:
         from superglm.export.rating_tables import build_rating_table_payload
 
         model, df, y = self._ordered_parent_model()
-        payload = build_rating_table_payload(model, df, y, n_bins=8, impact_bins=(8,))
+        payload = build_rating_table_payload(model, df, y, n_bins=5, impact_bins=(5,))
 
         assert "band:density" in set(payload.discretization_impact["feature"])
 
@@ -834,6 +858,85 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
                 "relativity": np.exp(surface),
                 "interaction": True,
             }
+
+    class _DescendingAxes:
+        """A grid whose axes are supplied in descending order."""
+
+        parent_names = ("a", "b")
+
+        def reconstruct(self, beta, n_points=50):
+            x1 = np.array([3.0, 2.0, 1.0])
+            x2 = np.array([30.0, 20.0, 10.0])
+            surface = np.outer(x1, x2)
+            return {
+                "x1": x1,
+                "x2": x2,
+                "relativity": np.exp(surface),
+                "log_relativity": surface,
+                "interaction": True,
+            }
+
+    def test_a_descending_axis_is_sorted_before_the_binary_search(self):
+        """``_nearest_grid_index`` is a binary search, so order is load-bearing.
+
+        The exporter preserves whatever order a reconstruction supplies and
+        applies no monotonicity gate, so a descending axis would map a risk
+        onto a non-nearest node while every cell count and metric kept claiming
+        the documented nearest-node lookup.
+        """
+        from superglm.diagnostics.discretize import _ascending_grid, _nearest_grid_index
+
+        spec = self._DescendingAxes()
+        raw = spec.reconstruct(np.zeros(1))
+        axis1, axis2, surface = _ascending_grid(
+            np.asarray(raw["x1"]), np.asarray(raw["x2"]), np.asarray(raw["log_relativity"])
+        )
+
+        np.testing.assert_allclose(axis1, [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(axis2, [10.0, 20.0, 30.0])
+        # The surface travels with its axes: every cell keeps its own pair.
+        np.testing.assert_allclose(surface, np.outer(axis1, axis2))
+        # And the nearest node is now genuinely the nearest one.
+        np.testing.assert_array_equal(
+            _nearest_grid_index(axis1, np.array([0.9, 2.1, 99.0])), [0, 1, 2]
+        )
+
+    class _InconsistentSurfaces:
+        """``relativity`` and ``log_relativity`` that disagree."""
+
+        parent_names = ("a", "b")
+
+        def reconstruct(self, beta, n_points=50):
+            x1 = np.linspace(0.0, 1.0, 3)
+            x2 = np.linspace(0.0, 1.0, 3)
+            exported = np.full((3, 3), 2.0)
+            return {
+                "x1": x1,
+                "x2": x2,
+                "relativity": exported,
+                "log_relativity": np.zeros((3, 3)),
+                "interaction": True,
+            }
+
+    def test_the_swept_surface_is_the_one_the_workbook_prints(self):
+        """``_continuous_interaction_block`` emits ``relativity``, so measure that.
+
+        For the two built-ins the pair agrees to an ulp, but a custom
+        reconstructor can return two surfaces that disagree -- and then
+        measuring the one the workbook does not ship reports error for a table
+        nobody holds.
+        """
+        from superglm.diagnostics.discretize import _grid_reconstruction, orient_grid_surface
+
+        spec = self._InconsistentSurfaces()
+        raw = _grid_reconstruction(spec, np.zeros(1), 3)
+        assert raw is not None
+        exported = orient_grid_surface(
+            "a:b", np.asarray(raw["x1"]), np.asarray(raw["x2"]), raw["relativity"]
+        )
+        np.testing.assert_allclose(np.log(exported), np.log(2.0))
+        # The field the sweep must NOT prefer.
+        np.testing.assert_allclose(np.asarray(raw["log_relativity"]), 0.0)
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
