@@ -319,6 +319,23 @@ def _axis_column_labels(parent1: str, parent2: str) -> tuple[str, str]:
     return parent1, parent2
 
 
+def _ascending_grid(
+    axis1: NDArray, axis2: NDArray, surface: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Put both axes in ascending order, carrying the surface with them.
+
+    ``_nearest_grid_index`` is a binary search, so a descending or unsorted
+    axis would silently map a risk onto a non-nearest node -- and the exporter
+    preserves whatever order a reconstruction supplies without a monotonicity
+    gate. Sorting rather than refusing, because the set of cells is unchanged:
+    every factor a reader can look up off the exported block is still here,
+    and the lookup that finds it is now the documented one.
+    """
+    order1 = np.argsort(axis1, kind="stable")
+    order2 = np.argsort(axis2, kind="stable")
+    return axis1[order1], axis2[order2], surface[np.ix_(order1, order2)]
+
+
 def _nearest_grid_index(grid: NDArray, x: NDArray) -> NDArray:
     """Index of the closest grid node, ties to the lower index.
 
@@ -480,6 +497,11 @@ def discretization_impact(
     target_features: list[str] = []
     target_interactions: list[str] = []
     if features is not None:
+        # De-duplicated, order preserved. A repeated name used to add its
+        # replacement delta once per occurrence while writing one table, so
+        # ``features=["age:density", "age:density"]`` reported twice the
+        # discretisation error of a block the workbook ships once.
+        features = list(dict.fromkeys(features))
         for name in features:
             if name in model._specs:
                 if not _is_continuous_feature(model, name):
@@ -608,16 +630,19 @@ def discretization_impact(
                 f"Interaction {name!r} was classified as a sampled grid but its "
                 "reconstruction no longer carries one."
             )
+        # From ``relativity``, which is the field ``_continuous_interaction_block``
+        # prints, rather than from ``log_relativity`` beside it.  For the two
+        # built-ins the pair is consistent to an ulp, but a custom reconstructor
+        # can return two surfaces that disagree, and then measuring the one the
+        # workbook does NOT ship would report error for a table nobody holds.
         axis1 = np.asarray(grid["x1"], dtype=np.float64)
         axis2 = np.asarray(grid["x2"], dtype=np.float64)
-        surface = orient_grid_surface(
-            name,
-            axis1,
-            axis2,
-            grid["log_relativity"]
-            if "log_relativity" in grid
-            else np.log(np.asarray(grid["relativity"], dtype=np.float64)),
-        )
+        surface = np.log(orient_grid_surface(name, axis1, axis2, grid["relativity"]))
+        # Ascending, because the nearest-node search is a binary search and the
+        # exporter applies no monotonicity gate to a supplied axis. Sorting the
+        # surface with its axes leaves the set of cells -- and so every factor a
+        # reader can look up -- unchanged.
+        axis1, axis2, surface = _ascending_grid(axis1, axis2, surface)
 
         # Through the same parent resolution prediction and design assembly
         # use.  A spline-mode ``OrderedCategorical`` parent contributes its
