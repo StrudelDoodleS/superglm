@@ -15,6 +15,10 @@ from superglm.features.ordered_categorical import (
 )
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import spline_groups
+
+# The legend's wording is imported rather than restated: it was a second string
+# literal here, and that is how it came to describe a rule neither module
+# implements (issue #239).
 from superglm.inference.summary import _LOW_CREDIBILITY_NOTE
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
@@ -87,9 +91,9 @@ _EDITOR_OFFSET_NOTE = (
     "Editor offset refit: listed editor terms are fixed offset factors. "
     "Inference is conditional on those fixed offsets."
 )
-# The advisory's wording lives with the console renderer, which is the one that
-# always presented it as an advisory.  Two literals is how the note came to
-# describe a rule that neither renderer implements.
+# The workbook's short cell value, deliberately distinct from the legend above:
+# this one has to fit a Warning column, and the note explains it in the sheet's
+# notes.
 _LOW_CREDIBILITY_WARNING = "Low credibility"
 
 
