@@ -432,3 +432,30 @@ def test_curve_se_range_describes_the_spline_block_only():
     row = next(r for r in model.summary()._coef_rows if r.name == "band" and r.is_spline)
     assert row.curve_se_max == pytest.approx(float(smooth_se.max()))
     assert row.curve_se_min == pytest.approx(float(smooth_se.min()))
+
+
+def test_a_group_rows_stars_sit_under_sig_with_the_optional_columns_present():
+    """The star offset is built twice, and only the extras make that interesting.
+
+    A whole-term row's stars are placed at an offset derived from
+    ``_coef_prefix(row)``, while the header pads with its own ``hdr_prefix``.
+    The two agree trivially when there are no optional columns; ``level_group_w``
+    and ``level_fit_w`` are the parts written twice, and this fixture is the one
+    that renders a ``Fit`` column, so the equality is covered where it is not
+    trivial (issue #239).
+    """
+    model, X, y, weights = _specials_model()
+    lines = str(model.summary()).split("\n")
+    header = next(line for line in lines if "P>|z|" in line)
+    group_lines = [line for line in lines if "chi2(" in line and "***" in line]
+    assert group_lines, "the fixture must render a significant whole-term row"
+    assert "Fit" in header, "this fixture exists to exercise the optional Fit column"
+
+    sig_start = header.index("Sig")
+    advisory_start = header.index("LC", sig_start)
+    for line in group_lines:
+        stars = line.index("***")
+        assert sig_start <= stars < advisory_start, (
+            f"stars at {stars} fall outside Sig [{sig_start}, {advisory_start})"
+        )
+        assert line[advisory_start : advisory_start + 3].strip() == ""

@@ -678,7 +678,6 @@ class TestWholeTermStarsSitUnderSig:
         """
         from superglm.inference.summary import ModelSummary, _CoefRow
 
-        long_kind = "ordered polynomial"
         rows = [
             _CoefRow(
                 name="band",
@@ -713,7 +712,7 @@ class TestWholeTermStarsSitUnderSig:
         text = str(ModelSummary({}, info, rows))
         lines = text.split("\n")
         header = next(line for line in lines if "P>|z|" in line)
-        group_line = next(line for line in lines if long_kind in line)
+        group_line = next(line for line in lines if "chi2(" in line)
 
         sig_start = header.index("Sig")
         advisory_start = header.index("LC", sig_start)
@@ -724,6 +723,15 @@ class TestWholeTermStarsSitUnderSig:
         # And the box stays one width, which the overrun used to break.
         box = [line for line in lines if line.startswith("║")]
         assert len({len(line) for line in box}) == 1
+
+        # The KIND is what gives way, not the p-value: on the console this is
+        # the only place a reader can get the whole-term p, while the HTML row
+        # has no width bound and prints it in full -- so eliding the tail would
+        # make the two renderers disagree about one term.
+        assert "p=<0.001]" in group_line
+        assert "chi2(12.0)=12345.6" in group_line
+        assert "…" in group_line
+        assert "ordered polynomial" not in group_line
 
 
 class TestColumnAlignment:
