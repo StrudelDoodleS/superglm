@@ -227,11 +227,54 @@ def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
 _GRID_RECONSTRUCTION_KEYS = frozenset({"x1", "x2", "relativity"})
 
 
-def _accepts_n_points(reconstruct) -> bool:
+def reconstruct_interaction(ispec, beta: NDArray, n_points: int) -> dict:
+    """Reconstruct an interaction, passing ``n_points`` only if it takes one.
+
+    Shared with the rating-table export so that "is this a grid" is answered
+    the same way in both places. Deciding it twice is the shape issue #287
+    took, and a signature pre-filter here would have been a third answer: a
+    custom spec whose ``reconstruct(beta)`` takes no ``n_points`` and still
+    returns a surface is exported as a grid, so it has to be swept as one.
+    """
+    reconstruct = getattr(ispec, "reconstruct", None)
+    if reconstruct is None:
+        raise TypeError(f"{type(ispec).__name__} has no reconstruct()")
     try:
-        return "n_points" in signature(reconstruct).parameters
+        takes_n_points = "n_points" in signature(reconstruct).parameters
     except (TypeError, ValueError):
-        return False
+        takes_n_points = False
+    if takes_n_points:
+        return reconstruct(beta, n_points=n_points)
+    return reconstruct(beta)
+
+
+def orient_grid_surface(name: str, axis1: NDArray, axis2: NDArray, surface: NDArray) -> NDArray:
+    """Normalise a reconstructed surface to ``surface[i, j] = f(x1[i], x2[j])``.
+
+    Shared with ``_continuous_interaction_block`` so the sweep and the exported
+    block cannot orient the same grid differently. Two shapes are accepted
+    because both built-ins return the meshgrid convention
+    ``surface[j, i] = f(x1[i], x2[j])`` while a custom spec may already be in
+    the natural order, and a non-square grid distinguishes them.
+
+    A SQUARE grid does not: both built-ins sample ``n_points`` nodes per axis,
+    so the first branch always fires there and the shape cannot witness the
+    orientation. What decides it is the convention, which
+    ``TensorInteraction.reconstruct`` states and ``PolynomialInteraction``
+    inherits from ``np.meshgrid``'s default ``indexing="xy"`` -- and what pins
+    it is ``test_the_exported_grids_orientation_is_load_bearing``, which checks
+    an exported cell against the fitted interaction's own factor on a
+    deliberately asymmetric domain.
+    """
+    surface = np.asarray(surface, dtype=np.float64)
+    if surface.shape == (len(axis2), len(axis1)):
+        return surface.T
+    if surface.shape != (len(axis1), len(axis2)):
+        raise ValueError(
+            f"Interaction {name!r} returned a {surface.shape} grid, "
+            f"expected {(len(axis1), len(axis2))} or {(len(axis2), len(axis1))}."
+        )
+    return surface
 
 
 def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
@@ -244,32 +287,13 @@ def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     caller supplied. An isinstance check against the two built-ins would let
     such a spec be exported approximately and left off the impact sheet, which
     is the same gap this module closes for the built-ins.
-
-    The signature test comes first so that classifying an interaction is cheap
-    for the ones that are not grids: a cell table, a per-unit coefficient and a
-    ``FactorSmooth`` all take no ``n_points`` and are rejected without
-    reconstructing anything.
     """
-    reconstruct = getattr(ispec, "reconstruct", None)
-    if reconstruct is None or not _accepts_n_points(reconstruct):
+    if getattr(ispec, "reconstruct", None) is None:
         return None
-    raw = reconstruct(beta, n_points=n_points)
+    raw = reconstruct_interaction(ispec, beta, n_points)
     if not isinstance(raw, dict) or not _GRID_RECONSTRUCTION_KEYS <= set(raw):
         return None
     return raw
-
-
-def _is_continuous_interaction(model: SuperGLM, name: str, beta: NDArray, n_points: int) -> bool:
-    """Whether this interaction is exported as a sampled surface.
-
-    A categorical-by-categorical interaction is a full cell table and a
-    numeric-by-numeric one is a single per-unit-per-unit coefficient; neither
-    approximates anything, so neither belongs on the impact sheet.
-    """
-    ispec = model._interaction_specs.get(name)
-    if ispec is None:
-        return False
-    return _grid_reconstruction(ispec, beta, n_points) is not None
 
 
 _INTERACTION_TABLE_RESERVED_COLUMNS = ("relativity", "log_relativity", "n_obs", "sample_weight")
@@ -436,6 +460,20 @@ def discretization_impact(
             raise RuntimeError(f"prediction plan does not define fitted interaction {name!r}")
         return beta[np.asarray(term["beta_idx"], dtype=np.intp)]
 
+    # Classifying an interaction means reconstructing it, and the loop below
+    # needs the same surface at the same ``n_bins`` -- so it is kept rather
+    # than built twice. On the ``PolynomialInteraction`` path a reconstruction
+    # allocates a dense ``(n_points**2, n1*n2)`` array, so the second one was
+    # not free.
+    grids: dict[str, dict | None] = {}
+
+    def _grid_for(name: str) -> dict | None:
+        if name not in grids:
+            grids[name] = _grid_reconstruction(
+                model._interaction_specs[name], _interaction_beta(name), n_bins
+            )
+        return grids[name]
+
     # Determine which terms to discretize. Two namespaces, because a
     # continuous-by-continuous interaction is approximated by the same export
     # and by the same ``n_bins``, and leaving it out understates the answer.
@@ -451,7 +489,7 @@ def discretization_impact(
                     )
                 target_features.append(name)
             elif name in model._interaction_specs:
-                if not _is_continuous_interaction(model, name, _interaction_beta(name), n_bins):
+                if _grid_for(name) is None:
                     raise ValueError(
                         f"Interaction '{name}' is not continuous-by-continuous — "
                         "only interactions exported as a sampled grid can be discretized."
@@ -464,9 +502,7 @@ def discretization_impact(
             name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
         target_interactions = [
-            name
-            for name in model._interaction_order
-            if _is_continuous_interaction(model, name, _interaction_beta(name), n_bins)
+            name for name in model._interaction_order if _grid_for(name) is not None
         ]
 
     from superglm.model.input_validation import validate_x_columns
@@ -566,7 +602,7 @@ def discretization_impact(
         # nodes per axis. Reading it back from the spec rather than
         # re-deriving it is what makes the measured error the EXPORTED error.
         ispec = term["spec"]
-        grid = _grid_reconstruction(ispec, beta_term, n_bins)
+        grid = _grid_for(name)
         if grid is None:
             raise RuntimeError(
                 f"Interaction {name!r} was classified as a sampled grid but its "
@@ -574,30 +610,14 @@ def discretization_impact(
             )
         axis1 = np.asarray(grid["x1"], dtype=np.float64)
         axis2 = np.asarray(grid["x2"], dtype=np.float64)
-        surface = np.asarray(
+        surface = orient_grid_surface(
+            name,
+            axis1,
+            axis2,
             grid["log_relativity"]
             if "log_relativity" in grid
             else np.log(np.asarray(grid["relativity"], dtype=np.float64)),
-            dtype=np.float64,
         )
-        # Transposed unconditionally, and NOT behind a shape test.  Both axes
-        # carry ``n_points`` nodes, so the grid is square and its shape cannot
-        # witness its orientation -- a shape test here would look like a check
-        # while being one branch that always fires.  What the orientation
-        # actually rests on is the reconstruction convention, ``surface[j, i] =
-        # f(x1[i], x2[j])``, which ``TensorInteraction.reconstruct`` states and
-        # ``PolynomialInteraction`` inherits from ``np.meshgrid``'s default
-        # ``indexing="xy"``.  It is the same transpose
-        # ``_continuous_interaction_block`` applies, so the two agree by
-        # construction rather than by luck, and
-        # ``test_the_exported_grids_orientation_is_load_bearing`` fails if
-        # either flips.
-        if surface.shape != (len(axis2), len(axis1)):
-            raise ValueError(
-                f"Interaction {name!r} returned a {surface.shape} log-relativity grid, "
-                f"expected {(len(axis2), len(axis1))}."
-            )
-        surface = surface.T
 
         # Through the same parent resolution prediction and design assembly
         # use.  A spline-mode ``OrderedCategorical`` parent contributes its

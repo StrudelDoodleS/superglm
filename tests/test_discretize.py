@@ -17,6 +17,15 @@ from superglm import (
 from superglm.distributions import Poisson, Tweedie
 from superglm.penalties.group_lasso import GroupLasso
 
+_EPS = float(np.finfo(np.float64).eps)
+# A grid cell and the exact contribution are the same bilinear form reached by
+# two associations -- a matrix chain in ``reconstruct``, an einsum in ``score``.
+# Charging each the standard p-term inner-product bound at p = 49 coefficients,
+# twice, and one ulp for the ``exp``, gives ~100 u; 128 u is that rounded up.
+# The same constant and the same derivation as ``_GRID_CELL_RTOL`` in
+# ``test_rating_table_prediction_equivalence``.
+_NODE_EXACT_RTOL = 128 * _EPS
+
 
 @pytest.fixture
 def fitted_model():
@@ -608,10 +617,12 @@ class TestContinuousInteractionIsDiscretized:
         np.testing.assert_allclose(
             at_nodes.predictions,
             at_nodes.original_predictions,
-            rtol=1e-12,
+            rtol=_NODE_EXACT_RTOL,
             atol=0.0,
         )
-        assert at_nodes.metrics["max_abs_prediction_change_pct"] == pytest.approx(0.0, abs=1e-9)
+        assert at_nodes.metrics["max_abs_prediction_change_pct"] == pytest.approx(
+            0.0, abs=100.0 * _NODE_EXACT_RTOL
+        )
 
         # Halfway between nodes is the worst case for the same rule, and it is
         # not zero -- so the equality above is a property of sitting on a node.
@@ -679,6 +690,14 @@ class TestGridParentsAreReadTheWayTheFitReadsThem:
         number is what the axis carries.  Reading the column as float64 raised
         ``could not convert string to float`` and took the whole export down --
         a model that exported cleanly on master.
+
+        Pinned by the space rather than by the absence of an exception.  Any
+        numeric resolution -- level codes, positions, anything -- would clear a
+        "does not raise" check, because ``_nearest_grid_index`` clamps an
+        out-of-range value onto an end node and every row still lands in some
+        cell while being silently mis-rated.  A row whose band's mapped score
+        IS a grid node can only be approximated exactly if the sweep read the
+        same space the grid was built over.
         """
         model, df, y = self._ordered_parent_model()
         result = model.discretization_impact(df, y, n_bins=8)
@@ -687,6 +706,39 @@ class TestGridParentsAreReadTheWayTheFitReadsThem:
         grid = result.interaction_tables["band:density"]
         assert int(grid["n_obs"].sum()) == len(df)
         assert np.isfinite(result.metrics["max_abs_prediction_change_pct"])
+
+        # The band axis really is score space, not label or code space: every
+        # node is one of the parent's own mapped scores.
+        spec = model._specs["band"]
+        scores = np.array(sorted(spec._level_to_value.values()), dtype=float)
+        band_axis = np.array(sorted(set(grid[grid.columns[0]])), dtype=float)
+        assert band_axis.min() == pytest.approx(scores.min())
+        assert band_axis.max() == pytest.approx(scores.max())
+
+        # And a frame sitting on nodes of both axes is approximated exactly,
+        # which resolution to any other numeric space would break.
+        density_axis = np.array(sorted(set(grid[grid.columns[1]])), dtype=float)
+        on_node_bands = [
+            label
+            for label, score in spec._level_to_value.items()
+            if np.min(np.abs(band_axis - float(score))) < 1e-12
+        ]
+        assert on_node_bands, "the fixture must place at least one band on a node"
+        on_nodes = pd.DataFrame(
+            {
+                "band": np.repeat(on_node_bands, len(density_axis)),
+                "density": np.tile(density_axis, len(on_node_bands)),
+            }
+        )
+        at_nodes = model.discretization_impact(
+            on_nodes, np.ones(len(on_nodes)), n_bins=8, features=["band:density"]
+        )
+        np.testing.assert_allclose(
+            at_nodes.predictions,
+            at_nodes.original_predictions,
+            rtol=_NODE_EXACT_RTOL,
+            atol=0.0,
+        )
 
     def test_the_rating_table_export_of_such_a_model_still_builds(self):
         from superglm.export.rating_tables import build_rating_table_payload
@@ -737,6 +789,78 @@ class TestBothGridAxesSurviveIntoTheTable:
         )
         assert _axis_column_labels("age", "n_obs") == ("age (axis 1)", "n_obs (axis 2)")
         assert _axis_column_labels("age", "density") == ("age", "density")
+
+
+class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
+    """One rule, applied in one place, for both the block and the sheet.
+
+    ``_interaction_blocks`` ships a grid on the reconstruction's KEYS, calling
+    ``reconstruct`` with ``n_points`` only when the signature takes one and
+    accepting either axis orientation.  Any second rule -- a class check, a
+    signature pre-filter, a stricter shape test -- makes the exporter and the
+    sweep disagree about the same interaction, which is the shape issue #287
+    took.  These pin the two shapes where a second rule diverged.
+    """
+
+    class _GridWithoutNPoints:
+        """A grid reconstructor whose signature takes no ``n_points``."""
+
+        parent_names = ("a", "b")
+
+        def reconstruct(self, beta):
+            x1 = np.linspace(0.0, 1.0, 4)
+            x2 = np.linspace(0.0, 1.0, 4)
+            surface = np.outer(x1, x2)
+            return {
+                "x1": x1,
+                "x2": x2,
+                "log_relativity": surface,
+                "relativity": np.exp(surface),
+                "interaction": True,
+            }
+
+    class _GridInNaturalOrder:
+        """A non-square grid already shaped ``(len(x1), len(x2))``."""
+
+        parent_names = ("a", "b")
+
+        def reconstruct(self, beta, n_points=50):
+            x1 = np.linspace(0.0, 1.0, 3)
+            x2 = np.linspace(0.0, 1.0, 5)
+            surface = np.outer(x1, x2 + 1.0)
+            return {
+                "x1": x1,
+                "x2": x2,
+                "relativity": np.exp(surface),
+                "interaction": True,
+            }
+
+    def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
+        from superglm.diagnostics.discretize import _grid_reconstruction
+
+        raw = _grid_reconstruction(self._GridWithoutNPoints(), np.zeros(1), 7)
+        assert raw is not None
+        assert {"x1", "x2", "relativity"} <= set(raw)
+
+    def test_both_orientations_the_exporter_accepts_are_normalised(self):
+        from superglm.diagnostics.discretize import orient_grid_surface
+
+        spec = self._GridInNaturalOrder()
+        raw = spec.reconstruct(np.zeros(1))
+        axis1 = np.asarray(raw["x1"])
+        axis2 = np.asarray(raw["x2"])
+        natural = np.log(np.asarray(raw["relativity"]))
+
+        # Already `(len(x1), len(x2))`: returned untouched.
+        oriented = orient_grid_surface("a:b", axis1, axis2, natural)
+        np.testing.assert_allclose(oriented, natural, rtol=0.0, atol=0.0)
+        # The meshgrid convention `(len(x2), len(x1))`: transposed to match.
+        np.testing.assert_allclose(
+            orient_grid_surface("a:b", axis1, axis2, natural.T), natural, rtol=0.0, atol=0.0
+        )
+        # Anything else is refused rather than silently reshaped.
+        with pytest.raises(ValueError, match="expected"):
+            orient_grid_surface("a:b", axis1, axis2, np.zeros((2, 2)))
 
 
 class TestExactlyTabulatedInteractionIsNotDiscretized:

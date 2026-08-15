@@ -821,6 +821,27 @@ def test_default_impact_sweep_bins():
     assert set(sheet["feature"]) == {"age"}
 
 
+def test_an_empty_impact_bins_still_means_no_sweep():
+    """The opt-out survives folding the exported resolution in.
+
+    ``impact_bins=()`` is how a caller asks for the tables without paying for
+    the analysis, and five call sites in this suite use it that way.  Folding
+    ``n_bins`` into the swept set exists so the ladder describes the shipped
+    table -- not so a caller who declined the ladder is handed one anyway, at
+    the full default 150 bins.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, impact_bins=())
+
+    assert payload.discretization_impact.empty
+    assert list(payload.discretization_impact.columns)[:4] == [
+        "n_bins",
+        "exported",
+        "feature",
+        "actual_bins",
+    ]
+
+
 def test_categorical_and_numeric_blocks_are_exported():
     model, X, y, w = _fit_export_model()
     payload = build_rating_table_payload(model, X, y, sample_weight=w)
