@@ -1232,10 +1232,15 @@ def build_coef_rows(
         if row.se is not None and np.isnan(row.se):
             row.estimable = False
 
-    # ── Quasi-separation detection ──────────────────────────────
+    # ── Low-credibility advisory ────────────────────────────────
+    # Two disjoint triggers, neither of which is a separation test: neither
+    # reads the response, and separation is a joint property of the design and
+    # the response (issue #239).
     # Primary: data-driven — flag categorical levels with too few obs.
     # Fallback: SE-based — for non-categorical features or when
-    # per-level diagnostics are unavailable.
+    # per-level diagnostics are unavailable. Not scale-invariant: the threshold
+    # is this model's median parametric SE, so rescaling ONE predictor trips it
+    # on units alone. Splitting the two is issue #304.
     for r in rows:
         if r.is_spline or r.name == "Intercept":
             continue
