@@ -819,7 +819,12 @@ class SuperGLM:
         fires with the dense block far BELOW the cap (measured at
         ``k = 231``: a 22-level factor against a ``ps(8)`` margin with 46,119
         distinct values).  Third, the exhaustion of the binning fallback.
-        Every other kind is dense-only, and for them the cap is the refusal.
+        Only ``spline_cat`` has that retry: ``ti`` and ``cat_cat`` are
+        gridded and dense-only, so for them the cap IS the refusal.  The two
+        numeric kinds are neither — they enter through the z-moment kernels
+        rather than the dense curvature one, and ``numeric_numeric``
+        contracts to 3x3 blocks whatever the supports, so it never meets the
+        cap at all.
 
         A NaN row is not by itself a routing signal.  A ``spline_cat`` pair
         reaches one either because the arrow gates or its ladder refused

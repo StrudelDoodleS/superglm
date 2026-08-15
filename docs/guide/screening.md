@@ -440,9 +440,12 @@ discretize at all, so OC pairs stay exact on both sides.
   which kernel scored a pair — and read the *unpinned* level count when you
   do, since a `levels=` universe with no training rows behind it is pinned to
   base and widens no block: against a library-default `Spline()` margin (13
-  probe columns), 140 declared levels of which 105 are populated stays on the
-  dense path at a block of 13 x 104 = 1,352, where 106 populated levels would
-  not. Nor is a NaN row a routing signal in reverse: a `spline_cat` pair whose
+  probe columns) over a 400-point support, 140 declared levels of which 105
+  are populated stays on the dense path at a block of 13 x 104 = 1,352, where
+  106 populated levels would not. The support matters because the block width
+  is only the first gate — hold that same 140/105 factor and widen the spline
+  and the pair takes the support exit instead at an unchanged block width
+  (measured: 1,800 distinct values dense, 1,848 arrow). Nor is a NaN row a routing signal in reverse: a `spline_cat` pair whose
   ladder resolved no direction at any rung gets one on EITHER path.
   Measured end to end, best of three, one BLAS thread: 200 levels 0.013 s,
   1,000 levels 0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124*
