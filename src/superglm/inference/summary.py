@@ -661,9 +661,18 @@ class ModelSummary:
                     spline_text = (
                         f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
                     )
-                    prefix = f"{_coef_prefix(row)}  {spline_text} "
-                    pad = max(W - len(prefix) - 4, 0)
-                    lines.append(_row(f"{prefix}{'':<{pad}s} {stars:<3s}"))
+                    # Placed at the header's OWN Sig offset, not right-aligned
+                    # to the box.  A group row hand-builds its line instead of
+                    # going through ``_coef_fields``, and padding to the box
+                    # edge put its stars in the last field -- the advisory, not
+                    # Sig -- on a row kind the detection never inspects, so
+                    # every significant smooth read as flagged.  ``_coef_fields``
+                    # emits six numeric fields each preceded by a space, then a
+                    # space and the 3-wide Sig, which is the offset below.
+                    prefix = f"{_coef_prefix(row)}  {spline_text}"
+                    sig_col = len(_coef_prefix(row)) + sum(coef_field_widths[:6]) + 7
+                    pad = max(sig_col - len(prefix), 1)
+                    lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s} {'':<3s}"))
                     if detail_str:
                         lines.append(
                             _row(f"{'':<{name_w + level_group_w + level_fit_w}s}    {detail_str}")
