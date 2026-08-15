@@ -1063,6 +1063,28 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         np.testing.assert_allclose(np.asarray(raw["log_relativity"]), oracle, rtol=0.0, atol=1e-12)
         assert np.asarray(raw["log_relativity"]).shape == (13, 13)
 
+        # And the dense path is not merely unnecessary, it is not taken.  The
+        # value and shape assertions above hold for the old implementation too,
+        # so what separates them is WHICH allocation happens -- asserted
+        # structurally, since this box cannot measure memory or time reliably.
+        from superglm.features import interaction as interaction_module
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("reconstruct must not build the dense cross design")
+
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr(interaction_module.PolynomialInteraction, "_cross_design", _forbidden)
+            again = spec.reconstruct(beta, n_points=13)
+        finally:
+            patch.undo()
+        np.testing.assert_allclose(
+            np.asarray(again["log_relativity"]),
+            np.asarray(raw["log_relativity"]),
+            rtol=0.0,
+            atol=0.0,
+        )
+
     def test_the_exporter_and_the_sweep_use_one_predicate_object(self, monkeypatch):
         """The last un-shared copy of the grid rule, now shared.
 
@@ -1128,6 +1150,58 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
             np.array([1.0, 2.0, 3.0])[:, None] + 0.01 * np.array([10.0, 20.0, 30.0])[None, :]
         )
         np.testing.assert_allclose(cells, expected, rtol=1e-12, atol=0.0)
+
+    def test_the_class_fast_path_agrees_with_the_contract(self):
+        """A negative class check may only skip work, never change an answer.
+
+        ``_grid_reconstruction`` short-circuits the shipped interaction types
+        whose reconstruction is never a surface, because reconstructing one to
+        learn that is quadratic in a categorical parent's cardinality --
+        ``SplineCategorical.reconstruct`` walks every level and each call walks
+        them again. Deciding by class is what four rounds had to undo, so the
+        list is checked against the contract it stands in for.
+        """
+        from superglm.diagnostics import discretize
+        from superglm.features import interaction as interaction_module
+
+        listed = discretize._non_grid_builtin_interactions()
+        for spec_type in listed:
+            keys = {c for c in spec_type.reconstruct.__code__.co_consts if isinstance(c, str)}
+            assert not {"x1", "x2"} <= keys, f"{spec_type.__name__} can return a grid"
+
+        # And the two that ARE grids are not on it.
+        assert interaction_module.TensorInteraction not in listed
+        assert interaction_module.PolynomialInteraction not in listed
+        for spec_type in (
+            interaction_module.TensorInteraction,
+            interaction_module.PolynomialInteraction,
+        ):
+            keys = {c for c in spec_type.reconstruct.__code__.co_consts if isinstance(c, str)}
+            assert {"x1", "x2"} <= keys
+
+    def test_an_unusable_reconstructed_factor_is_refused(self):
+        """A caller's grid can hand back something that is not a factor.
+
+        ``np.log`` would turn a zero or a negative into ``-inf``/``nan`` that
+        flows through stabilization into every metric, so the result would
+        report clipped or non-finite predictions beside a table that no longer
+        contains the factor it was given. The rating-table builder rejects
+        unusable relativities before the sweep; a direct call has no such guard.
+        """
+        stub = self._Stub()
+        base = stub.reconstruct
+
+        def _zeroed(beta, n_points=50):
+            raw = dict(base(beta, n_points=n_points))
+            relativity = np.array(raw["relativity"], dtype=float)
+            relativity[0, 0] = 0.0
+            raw["relativity"] = relativity
+            return raw
+
+        stub.reconstruct = _zeroed
+        model, df, y = self._model_with(stub)
+        with pytest.raises(ValueError, match="not a usable factor"):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
