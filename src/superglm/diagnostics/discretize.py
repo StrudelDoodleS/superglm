@@ -277,6 +277,40 @@ def orient_grid_surface(name: str, axis1: NDArray, axis2: NDArray, surface: NDAr
     return surface
 
 
+def _non_grid_builtin_interactions() -> tuple[type, ...]:
+    """The shipped interaction types whose reconstruction is never a surface.
+
+    A NEGATIVE fast path, and only that: classifying by class is what four
+    review rounds had to undo, so this decides nothing on its own -- anything
+    not listed still goes through the reconstruction contract, which is what
+    the exporter routes on.  What it buys is not reconstructing a term the
+    answer is already known for: ``SplineCategorical.reconstruct`` walks every
+    level and each call walks them again, so on a high-cardinality parent the
+    default diagnostic paid quadratic work to learn the term is a cell table.
+
+    ``test_the_class_fast_path_agrees_with_the_contract`` checks every shipped
+    interaction type both ways, so a class that later starts returning a grid
+    cannot stay on this list silently.
+    """
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.interaction import (
+        CategoricalInteraction,
+        NumericCategorical,
+        NumericInteraction,
+        PolynomialCategorical,
+        SplineCategorical,
+    )
+
+    return (
+        SplineCategorical,
+        PolynomialCategorical,
+        NumericCategorical,
+        CategoricalInteraction,
+        NumericInteraction,
+        FactorSmooth,
+    )
+
+
 def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     """The spec's reconstruction if it is a sampled surface, else ``None``.
 
@@ -289,6 +323,8 @@ def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     is the same gap this module closes for the built-ins.
     """
     if getattr(ispec, "reconstruct", None) is None:
+        return None
+    if isinstance(ispec, _non_grid_builtin_interactions()):
         return None
     raw = reconstruct_interaction(ispec, beta, n_points)
     # The exporter's test verbatim -- a key-subset check and nothing else.  An
@@ -642,7 +678,21 @@ def discretization_impact(
         # workbook does NOT ship would report error for a table nobody holds.
         axis1 = np.asarray(grid["x1"], dtype=np.float64)
         axis2 = np.asarray(grid["x2"], dtype=np.float64)
-        surface = np.log(orient_grid_surface(name, axis1, axis2, grid["relativity"]))
+        relativity = orient_grid_surface(name, axis1, axis2, grid["relativity"])
+        # Checked before the logarithm rather than after.  A caller-supplied
+        # reconstruction can hand back a zero, negative or non-finite factor,
+        # and ``np.log`` would turn it into ``-inf``/``nan`` that flows through
+        # ``stabilize_eta`` into every metric -- so the result would report
+        # clipped or non-finite predictions beside a table that no longer
+        # contains the factor it was given.  The rating-table builder rejects
+        # unusable relativities before it reaches here; a direct call has no
+        # such guard.
+        if not np.all(np.isfinite(relativity)) or np.any(relativity <= 0.0):
+            raise ValueError(
+                f"Interaction {name!r} reconstructed a relativity that is not a usable "
+                "factor: every cell must be finite and strictly positive."
+            )
+        surface = np.log(relativity)
         # Ascending, because the nearest-node search is a binary search and the
         # exporter applies no monotonicity gate to a supplied axis. Sorting the
         # surface with its axes leaves the set of cells -- and so every factor a
