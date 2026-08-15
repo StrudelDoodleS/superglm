@@ -1024,6 +1024,45 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         expected = nodes[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
+    def test_a_polynomial_grid_costs_its_margins_not_their_cross_product(self):
+        """The grid must not allocate a cross design that grows as n_points**2.
+
+        ``PolynomialInteraction`` built a dense ``(n_points**2, n1*n2)`` matrix
+        over a meshgrid, carrying nothing the two marginal bases do not -- the
+        product structure factors. The sweep reconstructs at every rung of its
+        ladder, so a model that exported fine could exhaust memory once
+        interactions joined it.
+
+        Pinned by VALUE against the fit's own per-point contract, ``score``, so
+        the factored association has to agree with the one the model predicts
+        through, and by the surface's shape, which the dense form reached only
+        after materialising the square.
+        """
+        from superglm.export import rating_tables
+
+        rng = np.random.default_rng(9)
+        n = 500
+        df = pd.DataFrame({"a": rng.uniform(0.0, 10.0, n), "b": rng.uniform(0.0, 5.0, n)})
+        y = rng.poisson(np.exp(-1.0 + 0.05 * df["a"] + 0.03 * df["b"])).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={"a": Polynomial(degree=3), "b": Polynomial(degree=3)},
+            interactions=[("a", "b")],
+        )
+        model.fit(df, y)
+
+        spec = model._interaction_specs["a:b"]
+        beta = rating_tables._interaction_beta(model, "a:b")
+        raw = spec.reconstruct(beta, n_points=13)
+
+        axis1 = np.asarray(raw["x1"])
+        axis2 = np.asarray(raw["x2"])
+        mesh1, mesh2 = np.meshgrid(axis1, axis2)
+        oracle = spec.score(mesh1.ravel(), mesh2.ravel(), beta).reshape(13, 13)
+        np.testing.assert_allclose(np.asarray(raw["log_relativity"]), oracle, rtol=0.0, atol=1e-12)
+        assert np.asarray(raw["log_relativity"]).shape == (13, 13)
+
     def test_the_exporter_and_the_sweep_use_one_predicate_object(self, monkeypatch):
         """The last un-shared copy of the grid rule, now shared.
 

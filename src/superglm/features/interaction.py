@@ -1146,16 +1146,32 @@ class PolynomialInteraction:
         return np.einsum("ij,jk,ik->i", P1, C, P2, optimize=True)
 
     def reconstruct(self, beta: NDArray, n_points: int = 50) -> dict[str, Any]:
+        """Evaluate the surface on a grid without materialising a cross design.
+
+        The cross design over a meshgrid is ``(n_points**2, n1*n2)``, so it
+        grows with the SQUARE of the requested resolution while carrying no
+        information the two marginal bases do not: the product structure means
+        ``f(x1_i, x2_j) = P1[i] C P2[j]``, which factors. At ``n_points=250``
+        with two degree-50 parents the dense form is about 1.25 GB against
+        4.8 MB for the fit's own design -- and the rating-table impact sweep
+        reconstructs at every rung of its ladder, so a model that exported
+        before could run out of memory once interactions joined the sweep.
+
+        Same value and same convention as before -- ``surface[j, i] =
+        f(x1[i], x2[j])``, which is what ``np.meshgrid``'s default ``"xy"``
+        indexing produced -- reached by the association ``TensorInteraction``
+        already uses.
+        """
         x1_grid = np.linspace(self._lo1, self._hi1, n_points)
         x2_grid = np.linspace(self._lo2, self._hi2, n_points)
-        X1, X2 = np.meshgrid(x1_grid, x2_grid)
-        cols = self._cross_design(X1.ravel(), X2.ravel())
-        log_rels = cols @ beta
+        P1, P2 = self._marginal_bases(x1_grid, x2_grid)
+        C = np.asarray(beta, dtype=np.float64).reshape(self._n1, self._n2)
+        surface = P2 @ C.T @ P1.T
         return {
             "x1": x1_grid,
             "x2": x2_grid,
-            "log_relativity": log_rels.reshape(n_points, n_points),
-            "relativity": np.exp(log_rels).reshape(n_points, n_points),
+            "log_relativity": surface,
+            "relativity": np.exp(surface),
             "interaction": True,
         }
 
