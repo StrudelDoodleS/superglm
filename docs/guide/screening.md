@@ -430,14 +430,18 @@ discretize at all, so OC pairs stay exact on both sides.
   unchanged; the structured path only extends where it stops. The
   block-dimension ceiling is not the only place it stops, so it is not the
   only door into the kernel: a pair whose *support* intermediate
-  `support * (L-1)^2 + L * k_spline^2` blows the same budget is handed over
-  too, whenever the structured path's transposed intermediate
+  `support * contrasts^2 + L * k_spline^2` blows the same budget is handed
+  over too, whenever the structured path's transposed intermediate
   `support * k_spline^2` still fits — which happens with the dense block far
   below the ceiling. Measured: a 22-level factor against a `ps(8)` margin with
   46,119 distinct values is scored by the kernel, exactly, at a block
   dimension of 231 against the ceiling of 1,357. Exhausting the binning
   fallback is a third door. So do not read the level count alone to decide
-  which kernel scored a pair.
+  which kernel scored a pair — and read the *unpinned* level count when you
+  do, since a `levels=` universe with no training rows behind it is pinned to
+  base and widens no block: 140 declared levels of which 105 are populated
+  stays on the dense path at a block of 1,352, where 106 populated levels
+  would not.
   Measured end to end, best of three, one BLAS thread: 200 levels 0.013 s,
   1,000 levels 0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124*
   levels the dense path tops out at when the block ceiling is what binds.
