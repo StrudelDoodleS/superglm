@@ -867,6 +867,7 @@
   "tests/test_discretize.py::TestTheSweepAndTheExporterAgreeOnWhatAGridIs::test_a_grid_reconstructor_without_n_points_is_still_a_grid": 0.0004831729456782341,
   "tests/test_discretize.py::TestTheSweepAndTheExporterAgreeOnWhatAGridIs::test_a_mapping_that_is_not_a_dict_is_still_a_grid": 0.0066689252853393555,
   "tests/test_discretize.py::TestTheSweepAndTheExporterAgreeOnWhatAGridIs::test_both_orientations_the_exporter_accepts_are_normalised": 0.0006519758608192205,
+  "tests/test_discretize.py::TestTheSweepAndTheExporterAgreeOnWhatAGridIs::test_the_exporter_and_the_sweep_use_one_predicate_object": 0.00020272890105843544,
   "tests/test_discretize.py::TestTheSweepAndTheExporterAgreeOnWhatAGridIs::test_the_swept_surface_is_the_one_the_workbook_prints": 0.0003976097796112299,
   "tests/test_discretize.py::TestWeightContract::test_frequency_weights_match_literal_row_replication[exposure_quantile]": 0.04051861198968254,
   "tests/test_discretize.py::TestWeightContract::test_frequency_weights_match_literal_row_replication[uniform]": 0.038350237970007583,

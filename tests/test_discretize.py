@@ -882,9 +882,10 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
                 np.array([30.0, 20.0, 10.0]) if self.descending else np.array([10.0, 20.0, 30.0])
             )
             # ``surface[j, i] = f(x1[i], x2[j])``, the convention both built-ins
-            # return and ``orient_grid_surface`` normalises: the value varies
-            # along the SECOND index here and along the first after orienting.
-            surface = np.repeat(axis[None, :], 3, axis=0)
+            # return and ``orient_grid_surface`` normalises.  It depends on
+            # BOTH axes -- a surface constant along axis 2 cannot witness that
+            # axis's order, and ``_ascending_grid`` sorts both.
+            surface = axis[None, :] + 0.01 * other[:, None]
             return {
                 "x1": axis,
                 "x2": other,
@@ -935,14 +936,22 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         model, df, y = self._model_with(self._Stub(descending=True))
         result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
+        # BOTH axis columns are stated in order, not as a set: sorting one and
+        # leaving the other reversed ships a table whose ``n_obs`` hangs on the
+        # wrong cells, and the surface below is what detects it.
         table = result.interaction_tables["a:b"]
+        assert list(table[table.columns[0]])[:3] == [1.0, 1.0, 1.0]
+        assert list(table[table.columns[1]])[:3] == [10.0, 20.0, 30.0]
         assert sorted(set(table[table.columns[0]])) == [1.0, 2.0, 3.0]
         assert int(table["n_obs"].sum()) == len(df)
 
+        nodes_a = np.array([1.0, 2.0, 3.0])
+        nodes_b = np.array([10.0, 20.0, 30.0])
         delta = np.log(result.predictions / result.original_predictions)
-        expected = np.array([1.0, 2.0, 3.0])[
-            np.abs(df["a"].to_numpy()[:, None] - np.array([1.0, 2.0, 3.0])).argmin(axis=1)
-        ]
+        expected = (
+            nodes_a[np.abs(df["a"].to_numpy()[:, None] - nodes_a).argmin(axis=1)]
+            + 0.01 * nodes_b[np.abs(df["b"].to_numpy()[:, None] - nodes_b).argmin(axis=1)]
+        )
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
     def test_the_swept_surface_is_the_one_the_workbook_prints(self):
@@ -958,8 +967,12 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
         delta = np.log(result.predictions / result.original_predictions)
-        nodes = np.array([1.0, 2.0, 3.0])
-        expected = nodes[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
+        nodes_a = np.array([1.0, 2.0, 3.0])
+        nodes_b = np.array([10.0, 20.0, 30.0])
+        expected = (
+            nodes_a[np.abs(df["a"].to_numpy()[:, None] - nodes_a).argmin(axis=1)]
+            + 0.01 * nodes_b[np.abs(df["b"].to_numpy()[:, None] - nodes_b).argmin(axis=1)]
+        )
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
         # Preferring ``log_relativity`` would have made every delta zero.
         assert np.abs(delta).min() > 0.0
@@ -1010,6 +1023,22 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         nodes = np.array([1.0, 2.0, 3.0])
         expected = nodes[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
+
+    def test_the_exporter_and_the_sweep_use_one_predicate_object(self):
+        """The last un-shared copy of the grid rule, now shared.
+
+        Four review rounds found the same failure -- the exporter routes a grid
+        on one rule and the sweep re-decides with a second (a class check, a
+        signature pre-filter, a shape acceptance set, an ``isinstance``), and
+        where they disagree the payload dies refusing a block that shipped.
+        Asserting the two literals against each other would repeat the mistake:
+        value-identical is what every one of those four also was. This asserts
+        they are the SAME OBJECT, so a fifth divergence is not expressible.
+        """
+        from superglm.diagnostics.discretize import _GRID_RECONSTRUCTION_KEYS
+        from superglm.export import rating_tables
+
+        assert rating_tables._grid_reconstruction_keys() is _GRID_RECONSTRUCTION_KEYS
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction

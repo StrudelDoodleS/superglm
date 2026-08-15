@@ -142,6 +142,12 @@ def _continuous_features(model: SuperGLM) -> list[str]:
     ]
 
 
+def _grid_reconstruction_keys() -> frozenset[str]:
+    from superglm.diagnostics.discretize import _GRID_RECONSTRUCTION_KEYS
+
+    return _GRID_RECONSTRUCTION_KEYS
+
+
 def _gridded_interaction_names(blocks: list[InteractionTableBlock]) -> list[str]:
     """The exported blocks that are sampled surfaces, read off the blocks.
 
@@ -892,7 +898,13 @@ def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBl
         ispec = model._interaction_specs[name]
         parent1, _ = ispec.parent_names
         raw = _reconstruct_interaction(ispec, _interaction_beta(model, name), n_bins)
-        if {"x1", "x2", "relativity"} <= set(raw):
+        # The sweep's predicate, imported rather than respelled.  Four review
+        # rounds found the same failure -- the exporter routes a grid on one
+        # rule and the sweep re-decides with a second, and where they disagree
+        # the whole payload dies refusing a block that shipped.  This was the
+        # last copy of that rule; sharing it makes a fifth divergence
+        # inexpressible.
+        if _grid_reconstruction_keys() <= set(raw):
             parent2 = ispec.parent_names[1]
             blocks.append(_continuous_interaction_block(name, raw, parent1, parent2))
             continue
@@ -1201,13 +1213,18 @@ def build_rating_table_payload(
     whose edges are all data values; under ``"uniform"`` on a skewed exposure it
     is the normal case, measured at 123 of 150 bins on an 800-row fit.
 
-    Lossy, by construction, for the approximated blocks -- ``Spline``,
+    Lossy, by construction, for the approximated FITTED TERMS -- ``Spline``,
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
     distinct errors ride on those, and the sheet reports the first for all
     three: the sweep is handed ``_continuous_features`` and
     ``_gridded_interaction_names`` -- the second read off the interaction
-    blocks that were actually built, so the sheet names every block the
-    workbook approximates and its metrics are joint over all of them.
+    blocks that were actually built, so the sheet names every one of those
+    three and its metrics are joint over them.
+
+    "Fitted terms" is the scope, not "every factor the workbook carries": the
+    binned OFFSET MULTIPLIER block is approximated too, is measured below at
+    8.86e-02, and is not swept, because it is not a fitted term and has no
+    prediction-plan entry.  See the paragraph on issue #314 further down.
 
     The interaction's share is a SAMPLING rather than a binning, and it is the
     larger of the two differences between the sheet's two row kinds.  A binned
