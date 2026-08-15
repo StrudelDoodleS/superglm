@@ -1376,18 +1376,22 @@ def _thin_level_pair(low_weight):
 # asserted here.  Both lambdas are hard-coded rather than read back from the
 # ladder: they pin the ORACLE, not the search that produced them.
 _CERTIFIED_LOW_EDGE_LAMBDA = 2.2876641890924248e-11
-# ``_vanishing_mass_pair``'s own low-edge rungs, which are DIFFERENT points from
-# the one above and from each other: the bracket is scaled by the pair's own
-# profiled curvature, and how much weight the three starved levels hold moves
-# it.  Pinned so the oracle's error bound is gated where it is actually called
-# rather than at a condition number that is not the one in use.  Measured
-# bit-identical at 1, 4 and 8 threads with all six pools set together, and the
-# two arms -- a dense factorization against an arrow one -- agree to 3.38e-16
-# and 1.69e-16, so the ``rel=1e-12`` they are pinned at carries ~3000x.
-_VANISHING_LOW_EDGE_LAMBDA = {
-    1e-10: 1.9128897316769707e-11,
-    1e-12: 1.912889731636818e-11,
-}
+# ``_vanishing_mass_pair(1e-12)``'s own low-edge rung, which is a DIFFERENT
+# point from the one above: the bracket is scaled by the pair's own profiled
+# curvature and starving three levels moves it.
+#
+# IT IS NOT A PIN AND NOTHING ASSERTS THE LADDER LANDS ON IT.  An earlier
+# revision did assert that, to tie the point the oracle was gated at to the
+# point the ladder asked for it -- but that rung no longer arbitrates against
+# the oracle at all (see
+# ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom``), so the
+# tie has nothing left to hold and the assertion would only be an undated
+# observation about this machine's ``fit_reml``.  What the constant does now is
+# name a REPRESENTATIVE point of the starved geometry for
+# ``test_the_low_edge_reference_matches_a_certified_high_precision_value`` to
+# measure the oracle's arrangement-independence at; nothing downstream depends
+# on it being the ladder's exact edge.
+_VANISHING_LOW_EDGE_LAMBDA = 1.912889731636818e-11
 # The round-trip repr of that float64.  An independent mpmath evaluation at 120
 # and again at 200 decimal digits gives 207.999955426981464537204805751,
 # identical to all 30 digits between the two and agreeing with the arb ball
@@ -1625,7 +1629,8 @@ def _reference_edf_and_bound(factors, lam):
 
     **THE WEIGHTS ARE THE POINT, NOT THE CONDITION NUMBER.**  Pairing
     ``||dR||_F/sigma_min`` with ``sqrt(edf)`` instead -- the obvious bound --
-    is 3.9e+05 times looser here (4.085e-04 against 1.036e-09), because it
+    is 3.9e+05 times looser here (a ratio, so it does not depend on the
+    dimensional constants), because it
     charges the ill-conditioned direction's sensitivity against the
     well-determined directions' mass.  ``edf`` is insensitive exactly where the
     filter factors are saturated: at this low edge 208 of 209 have ``a`` within
@@ -1653,7 +1658,8 @@ def _reference_edf_and_bound(factors, lam):
     ``a = 1`` to within 4.5e-05 in total, that is the entire quantity.
     Charged correctly against the triangular-solve form, this function returned
     **7.2045e-06** on ``_thin_level_pair(1.0)``, not the 4.5938e-09 it
-    reported: 1568x understated, and over seeds 1-21 of the same geometry the
+    reported -- both at that revision's constants, so the ratio is the claim:
+    1568x understated, and over seeds 1-21 of the same geometry the
     number it RETURNED fell short of the exact worst-case first-order response
     it was meant to bound on seven of them, worst by 460x at seed 5.  Forming
     ``Q`` costs one ``dorgqr`` and removes the whole mechanism, because
@@ -1666,9 +1672,9 @@ def _reference_edf_and_bound(factors, lam):
     quadratic allowance ``(2 eta/sigma_min)^2``.  That is not a bound: the
     differential's own weights move under the perturbation being bounded, and
     here they move further than they are large -- ``w1 = 3.657e-05`` against a
-    drift budget of 2.037e-05, i.e. 56% of itself.  The quadratic allowance
-    covered only the ``||dQ_R||_F^2`` term of the expansion and was 600x short
-    of the weight drift.  What is returned now is the mean-value form, which
+    drift budget ``delta`` of **1.2029e-04**, 3.3x the weight itself.  The
+    quadratic allowance covered only the ``||dQ_R||_F^2`` term of the expansion
+    and was three orders short of the weight drift.  What is returned now is the mean-value form, which
     needs no remainder at all::
 
         |edf(A + dA) - edf(A)| <= 2 max_t [w1(A_t) ||dR||_F + w2(A_t) ||dL||_F]
@@ -2199,7 +2205,7 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
         # gate against, and inventing one would be the defect this file exists
         # to remove.  See the low-edge comment in
         # ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom``.
-        (_vanishing_mass_pair(1e-12), None, _VANISHING_LOW_EDGE_LAMBDA[1e-12], None),
+        (_vanishing_mass_pair(1e-12), None, _VANISHING_LOW_EDGE_LAMBDA, None),
     ):
         base, base_bound = _reference_edf_and_bound(
             factors if factors is not None else _reference_factors(fixture), lam
@@ -2770,10 +2776,6 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
     # reached by the penalty at the high edge, 16 are not.
     assert left_free == pytest.approx(k_b - 3, abs=0.01)
 
-    # ``abs=0.0``: pytest.approx keeps a default absolute tolerance of 1e-12
-    # when only ``rel`` is given, and this pair's low-edge lambda is 1.91e-11,
-    # so the default alone would accept a 5% move of the bracket.
-    pin = dict(rel=1e-12, abs=0.0)
     for budget, d, s in zip(_VANISHING_BUDGETS, dense, struct, strict=True):
         if budget < 100.0:  # every one of these clamps at the HIGH edge
             # **THIS BOUND WAS 1e-3 AND IS LOOSENED HERE, WHICH IS A COST OF
@@ -2808,18 +2810,7 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
                 left_free,
             )
             assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity", budget, s.edf0, d.edf0)
-        else:  # the LOW edge, where the reference oracle is sound
-            # THE RULER IS CHECKED WHERE IT IS USED.  This fixture's low edge is
-            # NOT the certified point -- the bracket is scaled by each pair's
-            # own profiled curvature, and starving three levels moves it -- so
-            # gating the oracle at ``_CERTIFIED_LOW_EDGE_LAMBDA`` would validate
-            # a condition number that is not the one in use.  The lambda is
-            # pinned for the same reason the certified one is, with the same
-            # ``abs=0.0``: nothing else ties the point the ladder asks the
-            # oracle at to the point the oracle was gated at.
-            assert s.lambda0 == pytest.approx(_VANISHING_LOW_EDGE_LAMBDA[low_weight], **pin), (
-                s.lambda0
-            )
+        else:  # the LOW edge
             # **NO ORACLE ARBITRATES THIS RUNG, AND THAT IS A MEASUREMENT
             # RATHER THAN AN OMISSION.**  This edge used to assert each arm
             # against ``_reference_edf`` at 3e-4.  That reference now returns
@@ -2841,6 +2832,16 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
             # a disclosed loss of coverage against the form it replaces, and the
             # thing lost was an arbitration nobody had ever bounded.  Filed with
             # the modelling question on #301.
+            #
+            # NO LAMBDA IS PINNED HERE EITHER, for the same reason.  A pin ties
+            # the point an oracle was certified at to the point a consumer asks
+            # for it; with no oracle consumed here there is nothing to tie, and
+            # a bare ``rel=1e-12`` against a lambda this machine happens to
+            # produce would be an observation about ``fit_reml`` on one
+            # platform -- issue #272's own shape, aimed at a different quantity.
+            # The inter-arm check below still holds both paths to the SAME
+            # lambda, which is a property of the two implementations rather
+            # than of a machine.
             assert s.edf0 == pytest.approx(d.edf0, abs=2e-4), ("low edge parity", s.edf0, d.edf0)
         assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12, abs=0.0), ("lambda0", budget)
         assert s.statistic == pytest.approx(d.statistic, rel=1e-4), ("statistic", budget)
