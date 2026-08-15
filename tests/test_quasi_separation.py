@@ -530,8 +530,11 @@ class TestTheNoteIsTrueOfTheSecondTriggerToo:
         after = next(r for r in rescaled.summary()._coef_rows if r.name == "c")
 
         # Same fit: the rescaling is a change of units, not of information.
-        assert after.p == pytest.approx(before.p, abs=1e-12)
-        assert abs(after.z) == pytest.approx(abs(before.z), rel=1e-6)
+        # Compared RELATIVELY -- both p-values here are ~1e-176, so an absolute
+        # tolerance would pass for any two numbers below it -- and the z keeps
+        # its sign, which a positive rescale preserves.
+        assert after.p == pytest.approx(before.p, rel=1e-9)
+        assert after.z == pytest.approx(before.z, rel=1e-6)
         # But the standard error moves by the scale factor, and the flag follows.
         assert after.se > before.se * 1e5
         assert before.quasi_separated is False
@@ -546,6 +549,56 @@ class TestTheNoteIsTrueOfTheSecondTriggerToo:
         assert "units" in text
         # And it does not attribute this row to a shortage of data.
         assert "little data stands behind" not in text
+
+    def test_the_threshold_has_an_absolute_floor_the_note_declares(self):
+        """The SE branch is a screen, not a ranking, and the note says so.
+
+        ``max(50 * median_se, 10.0)``: the floor binds whenever the median
+        parametric standard error is under 0.2, which is the ordinary case, so
+        a coefficient can be hundreds of times the typical width and go
+        unflagged.  A reader who took "far above this model's typical one" as
+        the whole rule would scan the LC column for the widest-relative
+        coefficients and not find this one.
+        """
+        rescaled, _ = self._rescaled_predictor(1e-3)
+        rows = {r.name: r for r in rescaled.summary()._coef_rows}
+        c = rows["c"]
+        typical = float(
+            np.median([r.se for name, r in rows.items() if name != "Intercept" and r.se])
+        )
+
+        # Nearly a thousand times the model's typical width...
+        assert c.se / typical > 500.0
+        # ...and below the absolute floor, so not flagged.
+        assert c.se < 10.0
+        assert c.quasi_separated is False
+
+        # The note is only printed when something is flagged, so the wording is
+        # read off a fit where the flag fires -- and it has to warn that this
+        # unflagged 985x coefficient exists.
+        flagged, _ = self._rescaled_predictor(1e-6)
+        # Whitespace-normalised: the note is hard-wrapped, so a phrase test on
+        # the raw text would be a test of where the line breaks fall.
+        note = re.sub(r"\s+", " ", str(flagged.summary())).lower()
+        assert "above a fixed floor" in note
+        assert "screen rather than a ranking" in note
+
+    def test_the_exported_warning_cell_names_the_trigger_that_fired(self):
+        """That cell lands in a spreadsheet column without its legend.
+
+        A downstream consumer reads the Warning value on its own, so it has to
+        be a true statement about THAT row rather than the union of the two
+        triggers. The branches are disjoint -- the SE fallback skips any row
+        with per-level counts -- so the row itself says which one fired.
+        """
+        rescaled, _ = self._rescaled_predictor(1e-6)
+        se_flagged, _ = _export_term(rescaled, "c")
+        assert se_flagged.warning == "Outsized standard error"
+        assert se_flagged.significance != ""
+
+        thin = _thin_but_cleanly_estimated()
+        level_flagged, _ = _export_term(thin, "cat[RARE]")
+        assert level_flagged.warning == "Low credibility"
 
 
 class TestColumnAlignment:

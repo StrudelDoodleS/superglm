@@ -147,14 +147,21 @@ _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 # the maximum likelihood estimates for certain generalized linear models",
 # Biometrika 63(1), 1976, 27-32).
 #
-# The second branch is not a volume test and is not even scale-invariant: the
-# threshold is this model's median parametric SE times fifty, so rescaling ONE
-# predictor moves its SE without moving the median and trips the flag on units
-# alone.  Measured on a 5000-row gaussian fit, predictor "c" rescaled by 1e-6:
-# se 7.0e-03 -> 7.0e+04 with the coefficient, z and p-value identical, and the
-# row flagged.  The note therefore says what each branch means separately
-# rather than attributing both to a shortage of data; splitting them into two
-# flags is issue #304.
+# The second branch is not a volume test, is not scale-invariant, and is a
+# screen rather than a ranking.  Its threshold is ``max(50 * median_se, 10.0)``,
+# so rescaling ONE predictor moves its SE without moving the median and trips
+# the flag on units alone -- and the absolute 10.0 is what actually binds
+# whenever the median parametric SE is under 0.2, which is the ordinary case.
+# Measured on a 5000-row gaussian fit (sigma 0.5, unit-variance predictors,
+# median SE 7.1e-03, so the relative half would fire at 0.36 while the floor
+# sets 10.0), rescaling predictor "c":
+#
+#   1e-3: se 7.02, 985x the median -- NOT flagged, because 7.02 < 10
+#   1e-6: se 7.02e+03              -- flagged
+#
+# with the coefficient, z and p-value identical in both.  The note therefore
+# says what each branch means separately, and says the floor makes the column a
+# screen; splitting the two into separate flags is issue #304.
 #
 # The FIRST branch is a volume test, which in an insurance context
 # is a limited-fluctuation credibility question -- has this cell enough
@@ -169,14 +176,16 @@ _LOW_CREDIBILITY_TAG = "LC"
 _LOW_CREDIBILITY_NOTE = (
     "LC: low credibility — flagged when a categorical level carries fewer than\n"
     "20 observations or under 0.05% of exposure, or, for a row that has no\n"
-    "per-level counts, when its standard error is far above this model's typical\n"
-    "one. The estimate, interval and p-value beside it are unchanged and are the\n"
-    "ones the fit produced. A flagged LEVEL is thin: treat it as partially\n"
-    "credible and pool it, or blend it toward the portfolio, before pricing on\n"
-    "it. A flagged COEFFICIENT is only wide next to its neighbours — a direction\n"
-    "the data does not identify does that, and so does a predictor on a much\n"
-    "smaller scale than the rest, so check its units before reading it as a\n"
-    "shortage of data."
+    "per-level counts, when its standard error is both far above this model's\n"
+    "typical one and above a fixed floor. The estimate, interval and p-value\n"
+    "beside it are unchanged and are the ones the fit produced. A flagged LEVEL\n"
+    "is thin: treat it as partially credible and pool it, or blend it toward the\n"
+    "portfolio, before pricing on it. A flagged COEFFICIENT is wide in absolute\n"
+    "terms — a direction the data does not identify does that, and so does a\n"
+    "predictor on a much smaller scale than the rest, so check its units before\n"
+    "reading it as a shortage of data. The floor makes this column a screen\n"
+    "rather than a ranking: a coefficient can be many times the typical width\n"
+    "and go unflagged."
 )
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
@@ -1219,12 +1228,13 @@ class ModelSummary:
         )
         has_low_credibility = any(r.quasi_separated for r in display_rows)
         if has_low_credibility:
+            # The only multi-line note in this renderer that used to keep its
+            # source newlines, which HTML collapses into one paragraph.  Hoisted
+            # so the conversion reads the same way as the Wald note's below.
+            advisory_note_html = _LOW_CREDIBILITY_NOTE.replace("\n", "<br>")
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">'
-                # The only multi-line note in this renderer that used to keep
-                # its source newlines, which HTML collapses into one paragraph.
-                f"{_LOW_CREDIBILITY_NOTE.replace(chr(10), '<br>')}</td></tr>"
+                f'color:#c60;border:none;">{advisory_note_html}</td></tr>'
             )
         for note in _editor_notes(info):
             parts.append(

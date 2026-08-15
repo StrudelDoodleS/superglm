@@ -91,10 +91,20 @@ _EDITOR_OFFSET_NOTE = (
     "Editor offset refit: listed editor terms are fixed offset factors. "
     "Inference is conditional on those fixed offsets."
 )
-# The workbook's short cell value, deliberately distinct from the legend above:
-# this one has to fit a Warning column, and the note explains it in the sheet's
-# notes.
-_LOW_CREDIBILITY_WARNING = "Low credibility"
+# The workbook's short cell values, one per trigger.  The two are deliberately
+# distinct because this cell travels WITHOUT the legend: it lands in a
+# spreadsheet column that a downstream consumer reads on its own, so it has to
+# be a true row-level statement rather than the union of two.
+#
+# The branches are disjoint and the row says which one fired: the SE fallback
+# skips any row that has per-level counts, so ``level_n_obs is not None`` is
+# exactly the volume branch.  Calling the other one "Low credibility" would
+# assert a shortage of data about a row that may have none -- the trigger is
+# this model's median parametric SE times fifty, which is not scale-invariant,
+# so a predictor in very small units trips it with the whole sample behind it
+# and an unchanged z and p-value.
+_THIN_LEVEL_WARNING = "Low credibility"
+_OUTSIZED_SE_WARNING = "Outsized standard error"
 
 
 def _finite_float(value: Any) -> float | None:
@@ -338,6 +348,13 @@ def _significance(p_value: float | None) -> str:
     return ""
 
 
+def _advisory_warning(row: _CoefRow, quasi_separated: bool) -> str:
+    """Name the trigger that fired, not the union of the two."""
+    if not quasi_separated:
+        return ""
+    return _THIN_LEVEL_WARNING if row.level_n_obs is not None else _OUTSIZED_SE_WARNING
+
+
 def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryTermRow, ...]:
     level_names = _canonical_level_row_names(model)
     selected_names = selected_group_name_set(
@@ -407,7 +424,7 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
                     or any(group.name in selected_names for group in active_groups)
                 ),
                 significance=_significance(p_value),
-                warning=_LOW_CREDIBILITY_WARNING if quasi_separated else "",
+                warning=_advisory_warning(row, quasi_separated),
             )
         )
     return tuple(terms)

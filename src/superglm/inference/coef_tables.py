@@ -1238,9 +1238,12 @@ def build_coef_rows(
     # the response (issue #239).
     # Primary: data-driven — flag categorical levels with too few obs.
     # Fallback: SE-based — for non-categorical features or when
-    # per-level diagnostics are unavailable. Not scale-invariant: the threshold
-    # is this model's median parametric SE, so rescaling ONE predictor trips it
-    # on units alone. Splitting the two is issue #304.
+    # per-level diagnostics are unavailable. Neither scale-invariant nor purely
+    # relative: the threshold is ``max(50 * median_se, 10.0)``, so rescaling ONE
+    # predictor trips it on units alone, while the absolute 10.0 is what binds
+    # whenever the median parametric SE is under 0.2 -- a coefficient can be
+    # hundreds of times the typical width and go unflagged. Splitting the two
+    # branches is issue #304.
     for r in rows:
         if r.is_spline or r.name == "Intercept":
             continue
