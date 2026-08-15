@@ -404,3 +404,79 @@ def test_pinned_level_also_stops_being_certain_under_mean_centering():
     np.testing.assert_allclose(
         mean.se_log_relativity, _contrast_se(model, "band"), rtol=RTOL, atol=ATOL
     )
+
+
+def test_mean_centering_shifts_a_smooth_curve_and_passes_everything_else_through() -> None:
+    """``_recenter_term`` shifts a ``SmoothCurve``'s values and copies the rest.
+
+    Called directly, because no in-tree caller reaches this branch.  The only
+    term kind that carries a ``smooth_curve`` is ``OrderedCategorical`` with a
+    smooth inner basis, and that branch is anchored on its base level and
+    returns without recentering -- so the curve arm of ``_recenter_term`` is
+    live code on an unexercised path.  Measured rather than assumed: probing
+    every call across the 2191 tests that touch centering, term inference,
+    relativities, plotting, the editor and each inner basis recorded 991 calls,
+    104 of them under ``centering="mean"``, and **0** carrying a curve.  An
+    end-to-end fixture would therefore pin nothing at all; this one does.
+
+    What it pins is the ``replace`` spelling, not today's field list.  The
+    function names four of ``SmoothCurve``'s seven fields; the other three were
+    being copied across by hand, so an eighth field added later would have
+    silently taken its DEFAULT instead of the value the curve carries.  The
+    check below is therefore written over ``dataclasses.fields`` -- every field
+    the function does not name must come back identical -- so a new field is
+    covered the day it is added rather than the day someone remembers this test.
+
+    Exact equality throughout, and it is not a tolerance anyone chose: the
+    shift is subtracted from, and the factor multiplied into, the very arrays
+    the assertions rebuild, so both sides are the same IEEE operation on the
+    same operands.  A tolerance here would only hide a genuine difference.
+    """
+    import dataclasses
+
+    from superglm.inference import SmoothCurve, TermInference, _recenter_term, _safe_exp
+
+    log_rel = np.array([-0.4, -0.1, 0.2, 0.7])
+    curve = SmoothCurve(
+        x=np.linspace(0.0, 3.0, 7),
+        log_relativity=np.linspace(-0.4, 0.7, 7),
+        relativity=np.exp(np.linspace(-0.4, 0.7, 7)),
+        level_x=np.arange(4.0),
+        se_log_relativity=np.full(7, 0.05),
+        ci_lower=np.exp(np.linspace(-0.4, 0.7, 7) - 0.098),
+        ci_upper=np.exp(np.linspace(-0.4, 0.7, 7) + 0.098),
+    )
+    ti = TermInference(
+        name="band",
+        kind="categorical",
+        active=True,
+        levels=["a", "b", "c", "d"],
+        log_relativity=log_rel,
+        relativity=np.exp(log_rel),
+        smooth_curve=curve,
+    )
+
+    centered = _recenter_term(ti, "mean")
+    shift = float(np.mean(log_rel))
+    factor = _safe_exp(-shift)
+    assert centered.centering_shift == shift
+    assert centered.centering_mode == "mean"
+
+    new = centered.smooth_curve
+    assert new is not None
+    # the four the function names: a shift on the log scale, a scaling on the
+    # relativity scale, and the interval endpoints carried with it
+    np.testing.assert_array_equal(new.log_relativity, np.asarray(curve.log_relativity) - shift)
+    np.testing.assert_array_equal(new.relativity, np.asarray(curve.relativity) * factor)
+    np.testing.assert_array_equal(new.ci_lower, np.asarray(curve.ci_lower) * factor)
+    np.testing.assert_array_equal(new.ci_upper, np.asarray(curve.ci_upper) * factor)
+    # everything else, whatever it grows to be
+    shifted = {"log_relativity", "relativity", "ci_lower", "ci_upper"}
+    passed_through = [f.name for f in dataclasses.fields(SmoothCurve) if f.name not in shifted]
+    assert passed_through == ["x", "level_x", "se_log_relativity"], (
+        f"SmoothCurve gained or lost a field; check it is shifted or copied: {passed_through}"
+    )
+    for field in passed_through:
+        np.testing.assert_array_equal(
+            getattr(new, field), getattr(curve, field), err_msg=f"{field} was not passed through"
+        )
