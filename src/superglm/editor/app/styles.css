@@ -490,11 +490,15 @@ button:active { background: #e6edf3; }
 .summary-table .summary-term {
   text-align: left;
 }
+/* The declared widths must sum to 100% in both variants: the table is
+   table-layout:fixed, so a total over 100% is normalised by scaling every
+   column down and the term column -- the only one that wraps arbitrary text --
+   absorbs the largest absolute loss. */
 .summary-table:not(.has-level-groups) .summary-term {
-  width: 36%;
+  width: 30%;
 }
 .summary-table.has-level-groups .summary-term {
-  width: 26%;
+  width: 20%;
 }
 .summary-table.has-level-groups .summary-level-group {
   width: 12%;
@@ -516,10 +520,15 @@ button:active { background: #e6edf3; }
   width: 12%;
 }
 .summary-table .sig-code {
-  width: 10%;
+  width: 8%;
 }
+/* Colour lives on this selector, not on a bare `.advisory-code`: the base
+   `.summary-table th, .summary-table td` rule is (0,1,1) and outranks a
+   single class, so the marker would render in the ordinary cell colour while
+   the rule above it claimed otherwise. */
 .summary-table .advisory-code {
   width: 8%;
+  color: #9f1239;
 }
 .summary-group-row td {
   padding: 8px 4px 4px;
@@ -567,10 +576,10 @@ button:active { background: #e6edf3; }
   font-weight: 700;
   letter-spacing: 0;
 }
-/* The advisory keeps its own colour rather than taking over the SE cell's:
-   significance and low credibility are independent findings (issue #239). */
+/* The advisory keeps its own column rather than taking over the SE cell's
+   colour: significance and low credibility are independent findings
+   (issue #239). */
 .advisory-code {
-  color: #9f1239;
   font-weight: 700;
   letter-spacing: 0;
 }

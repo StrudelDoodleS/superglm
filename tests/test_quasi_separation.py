@@ -496,7 +496,7 @@ class TestTheLegendDescribesTheRuleThatExists:
 
 
 class TestColumnAlignment:
-    """Sig and QS columns must not break border alignment."""
+    """Sig and LC columns must not break border alignment."""
 
     def test_all_data_rows_same_width(self):
         df, y, exposure = _make_sparse_tweedie_data()

@@ -866,8 +866,12 @@ function sigTitle(row) {
 // The advisory is a separate column from Sig because it is a separate finding:
 // the rule behind it reads a level's volume, or a standard error's size, and
 // never the p-value, so it cannot stand in for one (issue #239).
+//
+// Derived from the marker the cell renders, not from a second payload key
+// saying the same thing: two keys that must agree can disagree, and the row
+// would then carry a marker with no title or a title with no marker.
 function advisoryTitle(row) {
-  return row.quasi_separated
+  return row.advisory_code
     ? "Low credibility: thin level or an outsized standard error"
     : "";
 }
