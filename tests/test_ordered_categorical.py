@@ -703,14 +703,42 @@ class TestOrderedCategoricalShapeDispatch:
         plain_curve = np.asarray(plain.predict(pd.DataFrame({"pos": positions})), dtype=float)
         plain_curve = plain_curve - plain_curve[0]
 
-        # Same design, same solve, differing only in the order of a handful of
-        # float operations on the way in, so the agreement is a roundoff bound
-        # off the curve's own scale rather than a fitted tolerance.
+        # Tolerance derived, not chosen. Given one design, a level value is
+        # reached by assembling a k-term basis row, a factorization-based solve
+        # of the k-by-k system, the cone projection, and the reconstruction --
+        # a chain whose accumulated float64 error is bounded by a low-degree
+        # polynomial in k times the unit roundoff (Higham, *Accuracy and
+        # Stability of Numerical Algorithms*, 2nd ed., Lemma 3.1 for the inner
+        # products, §9.3 for the solve's backward error), scaled by the
+        # magnitude of the quantity itself. Taking that polynomial as k**2 for
+        # a well-conditioned design gives the bound below; k is read off the
+        # fitted group rather than hard-coded, so a knot-count change moves the
+        # bound with it. Observed at 2.5 ulps of scale (`cr`) and 9.8 (`ps`),
+        # against a bound of k**2 = 81 -- roundoff, with room for a different
+        # BLAS to order the sums differently, and roughly nine orders of
+        # magnitude tighter than the 0.41-0.68 divergence the unfixed code
+        # shows, which is what makes the assertion discriminating.
+        n_cols = sum(g.size for g in wrapped._groups if g.feature_name == "band")
         scale = max(1.0, float(np.max(np.abs(wrapped_curve))))
-        np.testing.assert_allclose(wrapped_curve, plain_curve, rtol=0.0, atol=1e-6 * scale)
+        atol = n_cols**2 * np.finfo(np.float64).eps * scale
+        np.testing.assert_allclose(wrapped_curve, plain_curve, rtol=0.0, atol=atol)
+        # The pre-repair violation is a single reduction over the same curve on
+        # the same grid, so it carries only the grid's own roundoff.
         assert wrapped._shape_repairs["band"].max_violation_before == pytest.approx(
-            plain._shape_repairs["pos"].max_violation_before, rel=1e-9
+            plain._shape_repairs["pos"].max_violation_before,
+            rel=n_cols * np.finfo(np.float64).eps,
         )
+
+        # And the reason the two agree at all, asserted EXACTLY rather than to
+        # any tolerance: the axis the wrapper resolves from labels is bitwise
+        # the float64 column the plain term reads straight off the frame. That
+        # is what makes the comparison above a statement about arithmetic
+        # ordering rather than about two different geometries that happen to
+        # land close. Asserted last so the curve comparison owns the failure
+        # message when the dispatch is broken.
+        axis, axis_rows = wrapped._specs["band"].shape_axis(X["band"].to_numpy())
+        assert axis_rows.all()
+        assert np.array_equal(axis, X["pos"].to_numpy())
 
     def test_postfit_repair_on_a_selected_wrapper_refuses_rather_than_no_ops(
         self, dipping_ordinal_data
