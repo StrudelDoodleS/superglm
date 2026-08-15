@@ -148,6 +148,9 @@ def test_a_too_wide_spline_cat_pair_is_retried_not_refused():
     # leaves this module green while the reader loses the diagnostic.
     assert "A NaN row is not by itself a routing signal" in DOC
     assert "on EITHER path" in DOC
+    # the retry is spline_cat's alone; numeric_numeric never meets the cap
+    assert "Only ``spline_cat`` has that retry" in DOC
+    assert "never meets the cap at all" in DOC
     # the same counting correction, one paragraph down, for numeric_cat
     assert "1710 UNPINNED levels" in DOC
 
@@ -177,13 +180,13 @@ def test_a_pinned_level_widens_no_block_so_the_threshold_is_the_unpinned_count()
     assert "declared ``levels=`` universe can be far larger" in DOC
     assert "pinned to base and contributes none" in DOC
 
-    declared, populated = 140, 105
+    declared, populated, support = 140, 105, 400
     levels = [f"L{i}" for i in range(declared)]
     rng = np.random.default_rng(0)
-    grid = np.linspace(0.0, 1.0, 400)
+    grid = np.linspace(0.0, 1.0, support)
     df = pd.DataFrame(
         {
-            "x": grid[np.arange(8_000) % 400],
+            "x": grid[np.arange(8_000) % support],
             "g": pd.Categorical(
                 np.array(levels[:populated])[rng.integers(0, populated, 8_000)],
                 categories=levels,
@@ -204,6 +207,19 @@ def test_a_pinned_level_widens_no_block_so_the_threshold_is_the_unpinned_count()
     assert seen["k_s"] * seen["levels"] == 1352 <= _cubic_ceiling(5_000_000, penalized=True)
     assert route == "dense", "34 more declared levels than the threshold, still dense"
     assert np.isfinite(row["z"])
+
+    # ...but the block width is only the FIRST gate, so "stays dense" is a
+    # claim about this support too.  Widening the spline takes the same
+    # factor through the support exit at an unchanged block of 1352.
+    contrasts, k_s = populated - 1, 13
+    wide = 1_848
+    assert support * contrasts**2 + populated * k_s**2 <= _INTERMEDIATE_BUDGET_FACTOR * 5_000_000
+    assert wide * contrasts**2 + populated * k_s**2 > _INTERMEDIATE_BUDGET_FACTOR * 5_000_000
+    df["x"] = np.linspace(0.0, 1.0, wide)[np.arange(len(df)) % wide]
+    model.fit_reml(df, y)
+    route, seen, _ = _route(("x", "g"), model, df, y)
+    assert seen["k_s"] * seen["levels"] == 1352, "the block did not move"
+    assert route == "arrow", "the support exit, at an unchanged block width"
 
 
 @pytest.mark.slow
