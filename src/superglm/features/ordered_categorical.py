@@ -744,6 +744,49 @@ class OrderedCategorical:
         """Penalty type of the inner spline."""
         return self._basis_spline.penalty
 
+    # ── Declared shape constraint ──────────────────────────────────
+    # NOT derived views like the block above: these two are read by the
+    # engines that ACT on a shape declaration. Every such reader spells the
+    # lookup ``getattr(spec, "constraint_kind", ...)`` against the FEATURE
+    # spec, which for an ordered term is this wrapper rather than the spline
+    # the caller wrote the constraint on -- so without the forward a declared
+    # constraint reads back as absent and its engine silently skips the term.
+    # ``getattr`` with a default rather than the inner property, because a
+    # Piecewise or Polynomial inner basis takes no constraint at all and must
+    # answer "none declared" rather than raise.
+
+    @property
+    def constraint_kind(self) -> str | None:
+        """Shape token declared on the inner basis (``"increasing"``, ...)."""
+        inner = self._basis_spline
+        return getattr(inner, "constraint_kind", getattr(inner, "monotone", None))
+
+    @property
+    def constraint_mode(self) -> str:
+        """Whether the declared constraint binds at fit time or post-fit."""
+        inner = self._basis_spline
+        return getattr(inner, "constraint_mode", getattr(inner, "monotone_mode", "postfit"))
+
+    def shape_axis(self, x: NDArray) -> tuple[NDArray, NDArray[np.bool_]]:
+        """The inner basis' numeric axis, and the rows that sit on it.
+
+        A shape constraint on an ordered term is stated over the inner spline's
+        level-score axis, not over the label column the frame carries. Engines
+        that read a raw numeric column off the frame therefore cannot read this
+        term's; they have to resolve the axis through the wrapper, exactly as
+        ``transform`` does.
+
+        The returned mask is not decoration: a ``specials=`` level is fitted as
+        a free effect with no coordinate on the smooth's axis, so its rows are
+        absent from the first return value and a caller carrying per-row weights
+        must drop the same rows to keep them aligned.
+        """
+        labels = self._resolved_labels(x)
+        if not self.has_specials:
+            return self._map_to_numeric(labels), np.ones(len(labels), dtype=bool)
+        ordered_mask = np.asarray(~self._special_mask(labels).any(axis=1), dtype=bool)
+        return self._map_to_numeric(labels[ordered_mask]), ordered_mask
+
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
         """Forward the inner spline's raw monotone geometry to the builder.
 
@@ -759,8 +802,29 @@ class OrderedCategorical:
         which is the space the returned design lives in, so it needs no
         remapping. Level scores ascend with level order by construction, so
         "increasing" means increasing across the declared levels.
+
+        Defined unconditionally, which is what makes the guard below load-
+        bearing: the builder decides whether raw geometry exists by asking
+        ``getattr(spec, "_build_monotone_constraints_raw", None)``, and that
+        question is answered by the WRAPPER, which always has the method, not
+        by the basis, which may not. Its ``RuntimeError`` backstop can
+        therefore never fire on an ordered term, so the same refusal has to be
+        raised here -- naming the basis that cannot supply the geometry rather
+        than surfacing as an ``AttributeError`` from one frame deeper. No
+        engine routes such a basis to the QP branch today: the stamp is set
+        only where the raw builder is already known to exist, on the inner
+        spline. This keeps the failure legible if one ever does.
         """
-        return self._basis_spline._build_monotone_constraints_raw()
+        inner = self._basis_spline
+        raw_builder = getattr(inner, "_build_monotone_constraints_raw", None)
+        if raw_builder is None:
+            raise RuntimeError(
+                f"cannot build QP constraints for OrderedCategorical(basis="
+                f"{type(inner).__name__}(...)): its raw constraint geometry is "
+                f"unavailable. Fit-time shape constraints need a basis that "
+                f"states them in coefficient space; use kind='cr' or kind='bs'."
+            )
+        return raw_builder()
 
     def __repr__(self) -> str:
         n = self._n_levels
@@ -1328,20 +1392,28 @@ class OrderedCategorical:
 
     # ── Transform ──────────────────────────────────────────────────
 
+    def _resolved_labels(self, x: NDArray) -> NDArray:
+        """Canonicalize, validate and group a raw column into fitted labels.
+
+        The one preamble every scoring-side entry point needs before it can ask
+        anything of a level: put the data's spelling into the declaration's
+        namespace, refuse levels the fit never saw, then collapse grouped levels
+        onto the label their group was fitted under.
+        """
+        x = self._canonical(np.asarray(x).ravel())
+        if self._grouping is None:
+            _validate_categorical_levels(x, self._known_levels)
+            return x
+        x = _grouping_labels(x)
+        _validate_categorical_levels(x, self._known_levels | set(self._grouping.grouped_levels))
+        return np.array(
+            [self._grouping.original_to_group.get(v, v) for v in x],
+            dtype=object,
+        )
+
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix for new data using learned parameters."""
-        x = self._canonical(np.asarray(x).ravel())
-        if self._grouping is not None:
-            x = _grouping_labels(x)
-            valid_levels = self._known_levels | set(self._grouping.grouped_levels)
-            _validate_categorical_levels(x, valid_levels)
-            x = np.array(
-                [self._grouping.original_to_group.get(v, v) for v in x],
-                dtype=object,
-            )
-        else:
-            _validate_categorical_levels(x, self._known_levels)
-
+        x = self._resolved_labels(x)
         if not self.has_specials:
             return self._basis_spline.transform(self._map_to_numeric(x))
         special_mask = self._special_mask(x)
@@ -1358,18 +1430,7 @@ class OrderedCategorical:
 
     def score(self, x: NDArray, beta: NDArray[np.floating]) -> NDArray[np.floating]:
         """Score the fitted ordered-categorical contribution directly on new data."""
-        x = self._canonical(np.asarray(x).ravel())
-        if self._grouping is not None:
-            x = _grouping_labels(x)
-            valid_levels = self._known_levels | set(self._grouping.grouped_levels)
-            _validate_categorical_levels(x, valid_levels)
-            x = np.array(
-                [self._grouping.original_to_group.get(v, v) for v in x],
-                dtype=object,
-            )
-        else:
-            _validate_categorical_levels(x, self._known_levels)
-
+        x = self._resolved_labels(x)
         spline_beta, special_beta = self._split_beta(beta)
         if not self.has_specials:
             return self._basis_spline.score(self._map_to_numeric(x), spline_beta)

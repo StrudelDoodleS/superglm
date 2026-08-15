@@ -208,16 +208,23 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
 
 
 def _reject_structured_fit_constraints(model) -> None:
-    """Reject constrained REML geometry that compact penalties do not define."""
+    """Reject constrained REML geometry that compact penalties do not define.
+
+    Selects on the DECLARATION, not on the spec's type. The type test this
+    replaced (``isinstance(spec, _SplineBase)``) ran before the declaration was
+    read, so a constraint declared on a spline inside a wrapper such as
+    ``OrderedCategorical`` slipped past the very guard whose whole purpose is to
+    refuse it, and the model fitted down a path this refusal exists to say is
+    undefined. A spec that declares no constraint still answers ``None`` and is
+    skipped exactly as before.
+    """
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.random_effect import RandomEffect
-    from superglm.features.spline import _SplineBase
 
     constrained_splines = [
         name
         for name, spec in model._specs.items()
-        if isinstance(spec, _SplineBase)
-        and getattr(spec, "constraint_kind", getattr(spec, "monotone", None)) is not None
+        if getattr(spec, "constraint_kind", getattr(spec, "monotone", None)) is not None
         and getattr(
             spec,
             "constraint_mode",

@@ -565,3 +565,149 @@ class TestSplineObjectBasis:
                 basis=Spline(n_knots=10),
             )
         assert spec._spline.n_knots == 2
+
+
+# ── Post-fit shape repair and structured rejection on the wrapper ──
+
+
+@pytest.fixture
+def dipping_ordinal_data():
+    """Ordered levels whose true effect DIPS, so a monotone repair must bind.
+
+    ``ordinal_data``'s truth is monotone by construction, so a post-fit
+    ``increasing`` repair on it is a no-op whether or not the repair engine
+    ever sees the term -- it measures nothing. The designed dip here is the
+    signal: an unrepaired fit must reproduce it, a repaired one must not.
+    """
+    rng = np.random.default_rng(20260815)
+    levels = [f"B{i:02d}" for i in range(12)]
+    effect = np.array([0.0, 0.30, 0.60, 0.90, 1.20, 0.10, -0.20, 0.05, 0.60, 1.00, 1.30, 1.60])
+    idx = np.repeat(np.arange(len(levels)), 200)
+    X = pd.DataFrame({"band": np.array(levels, dtype=object)[idx]})
+    y = effect[idx] + 0.10 * rng.normal(size=idx.size)
+    return X, y, levels, effect
+
+
+def _level_curve(model, name, levels):
+    rels = model.reconstruct_feature(name)["level_log_relativities"]
+    return np.array([rels[lev] for lev in levels], dtype=float)
+
+
+def _monotone_slack(curve):
+    """Feasibility slack from dtype epsilon and the curve's own scale."""
+    return np.finfo(float).eps ** 0.5 * max(1.0, float(np.max(np.abs(curve))))
+
+
+class TestOrderedCategoricalShapeDispatch:
+    """A declared shape constraint must bind on the WRAPPER, not only on a
+    bare ``Spline``. Both engines below filtered on ``isinstance(spec,
+    _SplineBase)`` before reading the constraint, and an ``OrderedCategorical``
+    is not one -- so the declaration reached neither.
+    """
+
+    @pytest.mark.parametrize("kind", ["cr", "ps"])
+    @pytest.mark.parametrize("direction", ["increasing", "decreasing"])
+    def test_postfit_repair_reaches_the_wrapped_spline(self, dipping_ordinal_data, kind, direction):
+        from superglm.features.spline import Spline
+
+        X, y, levels, effect = dipping_ordinal_data
+        designed_dip = float(np.max(effect) - np.min(effect[np.argmax(effect) :]))
+        spec = OrderedCategorical(
+            order=levels,
+            basis=Spline(kind=kind, n_knots=8, constraint=getattr(Constraint.postfit, direction)),
+        )
+        model = SuperGLM(family="gaussian", features={"band": spec}, selection_penalty=0.0).fit(
+            X, y
+        )
+
+        # The unrepaired fit must carry the designed dip, or the repair has
+        # nothing to bind on and a green test would measure nothing. A quarter
+        # of the designed excursion is the floor a fit that tracked it clears.
+        before = _level_curve(model, "band", levels)
+        assert float(-np.min(np.diff(before))) > 0.25 * designed_dip, before
+
+        model.apply_shape_postfit(X)
+
+        after = _level_curve(model, "band", levels)
+        steps = np.diff(after)
+        slack = _monotone_slack(after)
+        if direction == "increasing":
+            assert np.all(steps >= -slack), f"not increasing: {steps}"
+        else:
+            assert np.all(steps <= slack), f"not decreasing: {steps}"
+
+        # Pin the DISPATCH as well, not just the shape: a monotone curve alone
+        # could come from anywhere, but a recorded repair means the engine saw
+        # the term.
+        assert "band" in model._shape_repairs
+        repair = model._shape_repairs["band"]
+        assert repair.kind == direction
+        assert repair.max_violation_after <= repair.max_violation_before
+
+    def test_postfit_repair_composes_with_specials(self, dipping_ordinal_data):
+        """``specials=`` is the one delegation shape the wrapper reshapes: the
+        term owns a second, unpenalized free block beside the smooth. The
+        repair works in the inner spline's own coefficient space, so it must
+        see the smooth block alone -- concatenating the special block into it
+        would reinterpret free level effects as spline coefficients."""
+        from superglm.features.spline import Spline
+
+        X, y, levels, effect = dipping_ordinal_data
+        X = X.copy()
+        X.loc[np.arange(len(X)) % 25 == 0, "band"] = "MISSING"
+        designed_dip = float(np.max(effect) - np.min(effect[np.argmax(effect) :]))
+        spec = OrderedCategorical(
+            order=levels,
+            specials=["MISSING"],
+            basis=Spline(kind="cr", n_knots=8, constraint=Constraint.postfit.increasing),
+        )
+        model = SuperGLM(family="gaussian", features={"band": spec}, selection_penalty=0.0).fit(
+            X, y
+        )
+        before = _level_curve(model, "band", levels)
+        assert float(-np.min(np.diff(before))) > 0.25 * designed_dip, before
+
+        model.apply_shape_postfit(X)
+
+        after = _level_curve(model, "band", levels)
+        steps = np.diff(after)
+        assert np.all(steps >= -_monotone_slack(after)), f"not increasing: {steps}"
+        assert "band" in model._shape_repairs
+
+    def test_structured_rejection_sees_the_wrapped_fit_constraint(self, dipping_ordinal_data):
+        """``_reject_structured_fit_constraints`` exists because a fit-time
+        shape constraint and a RandomEffect do not jointly define the compact
+        REML geometry. A bare ``Spline`` is refused; the same request wrapped
+        must be refused identically, not fitted by an undefined path."""
+        from superglm import RandomEffect
+        from superglm.features.spline import Spline
+
+        X, y, levels, _ = dipping_ordinal_data
+        X = X.copy()
+        X["grp"] = np.array([f"g{i % 6}" for i in range(len(X))], dtype=object)
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "band": OrderedCategorical(
+                    order=levels,
+                    basis=Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing),
+                ),
+                "grp": RandomEffect(),
+            },
+        )
+        with pytest.raises(NotImplementedError, match="fit-time shape constraints"):
+            model.fit_reml(X, y)
+
+    def test_qp_geometry_forward_names_a_basis_that_cannot_supply_it(self):
+        """The wrapper forwards ``_build_monotone_constraints_raw``
+        unconditionally, so ``getattr(spec, ..., None)`` at the builder's QP
+        branch always finds a method and its ``RuntimeError`` backstop can
+        never fire. A basis with no raw geometry must still fail by name."""
+        from superglm.features.spline import Spline
+
+        spec = OrderedCategorical(
+            order=[f"B{i:02d}" for i in range(8)],
+            basis=Spline(kind="ns", n_knots=5),
+        )
+        with pytest.raises(RuntimeError, match="raw constraint geometry"):
+            spec._build_monotone_constraints_raw()

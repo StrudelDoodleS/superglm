@@ -6,6 +6,7 @@ import copy
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.group_matrix import GroupMatrix
@@ -527,29 +528,89 @@ def _validate_repair_for_publication(
     return candidate_beta, candidate_eta, candidate_intercept_shift
 
 
-def _pending_repairs(model, spline_type) -> list[tuple[str, object, str, list[object]]]:
-    """Return repairs that can change coefficients without cloning fitted state."""
+@dataclass
+class _PendingRepair:
+    """One term whose declared post-fit shape has to be projected.
+
+    ``spec`` is the FEATURE as the model holds it; ``curve_spec`` is the object
+    whose coefficient space the repair actually works in. They are the same
+    object for a plain spline and differ for a wrapper such as
+    ``OrderedCategorical``, whose smooth is an inner spline over mapped level
+    scores. Keeping both means the repair reads geometry from the basis that
+    owns it while the column, the groups and the recorded result stay keyed to
+    the feature the caller declared.
+    """
+
+    name: str
+    spec: object
+    curve_spec: object
+    kind: str
+    groups: list[object]
+
+
+def _curve_spec(spec):
+    """The basis whose coefficient space a shape repair operates in."""
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+
+
+def _pending_repairs(model) -> list[_PendingRepair]:
+    """Return repairs that can change coefficients without cloning fitted state.
+
+    Selects on the DECLARATION -- a spec that names a post-fit shape -- rather
+    than on the spec's type. The type test this replaced (``isinstance(spec,
+    _SplineBase)``) ran before the declaration was ever read, so a constraint
+    declared on a wrapped spline was skipped in silence: no repair, no warning,
+    and a summary that still reported the constraint. Any spec that does not
+    declare one still answers ``None`` here and is skipped as before.
+
+    The repair is a statement about THE SMOOTH, so it takes the feature's
+    spline blocks through the shared filter rather than every block under the
+    feature name: an ordered term carrying ``specials=`` owns an unpenalized
+    free-level block beside its curve, and concatenating that into the term
+    vector would reinterpret free level effects as the spline's trailing
+    coefficients and repair a curve nobody fitted.
+    """
+    from superglm.inference._term_helpers import spline_groups
+
     beta = model.result.beta
-    pending: list[tuple[str, object, str, list[object]]] = []
+    pending: list[_PendingRepair] = []
     for name, spec in model._specs.items():
-        if not isinstance(spec, spline_type):
-            continue
         kind = _constraint_kind(spec)
         if kind is None or _constraint_mode(spec) != "postfit":
             continue
-        groups = [group for group in model._groups if group.feature_name == name]
+        groups = spline_groups([group for group in model._groups if group.feature_name == name])
         if groups and any(np.any(beta[group.sl] != 0.0) for group in groups):
-            pending.append((name, spec, kind, groups))
+            pending.append(_PendingRepair(name, spec, _curve_spec(spec), kind, groups))
     return pending
 
 
-def _repair_changes_coefficients(model, pending_repair) -> bool:
+def _repair_axis_column(pending_repair, frame) -> tuple[NDArray, NDArray]:
+    """The numeric axis the term's shape lives on, and its per-row weights mask.
+
+    A plain spline's axis IS its column. A wrapped ordinal term's column carries
+    labels, and its shape lives on the inner spline's level-score axis, so the
+    axis has to be resolved through the wrapper -- and rows held out of the
+    smooth by ``specials=`` occupy no point on it.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    spec = pending_repair.spec
+    if isinstance(spec, OrderedCategorical):
+        return spec.shape_axis(frame.column_array(pending_repair.name))
+    column = frame.column_array(pending_repair.name, dtype=np.float64)
+    return column, np.ones(len(column), dtype=bool)
+
+
+def _repair_changes_coefficients(model, pending_repair: _PendingRepair) -> bool:
     """Return whether span-wise certification requires a coefficient projection."""
     from superglm.constraints import shape_constraint_is_roundoff_feasible
 
-    _, spec, kind, groups = pending_repair
-    term_beta = np.concatenate([model.result.beta[group.sl] for group in groups])
-    return not shape_constraint_is_roundoff_feasible(spec, term_beta, kind)
+    term_beta = np.concatenate([model.result.beta[group.sl] for group in pending_repair.groups])
+    return not shape_constraint_is_roundoff_feasible(
+        pending_repair.curve_spec, term_beta, pending_repair.kind
+    )
 
 
 def _refresh_repaired_geometry(model, prior_working_weights, prior_selected_names) -> None:
@@ -651,8 +712,6 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
 
 
 def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: int = 500):
-    from superglm.features.spline import _SplineBase
-
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling apply_shape_postfit().")
     if not getattr(model, "_retain_fit_state", True):
@@ -661,7 +720,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             "retain_fit_state=True before calling apply_shape_postfit()."
         )
 
-    pending_repairs = _pending_repairs(model, _SplineBase)
+    pending_repairs = _pending_repairs(model)
     if not pending_repairs:
         return model
 
@@ -729,13 +788,21 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
     if scoring_offset is not None:
         current_eta = current_eta + np.asarray(scoring_offset, dtype=np.float64)
 
-    for name, spec, kind, groups in pending_repairs:
+    for pending in pending_repairs:
+        name, kind, groups = pending.name, pending.kind, pending.groups
+        curve_spec = pending.curve_spec
         beta = work_model.result.beta
-        x_col = frame.column_array(name, dtype=np.float64)
-        grid_weights = _grid_weights(spec, x_col, scoring_weights_arr, n_grid)
+        x_col, axis_rows = _repair_axis_column(pending, frame)
+        # Rows a `specials=` level holds out of the smooth carry no coordinate
+        # on the axis, so the histogram behind the grid weights has to lose the
+        # same rows or the two arrays stop describing one set of observations.
+        # Left exactly as it was when nothing is held out, which is every term
+        # but that one.
+        axis_weights = scoring_weights_arr if axis_rows.all() else scoring_weights_arr[axis_rows]
+        grid_weights = _grid_weights(curve_spec, x_col, axis_weights, n_grid)
 
         repair_result = _repairer(kind).repair(
-            spec,
+            curve_spec,
             beta,
             groups,
             weights=grid_weights,
@@ -745,7 +812,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
 
         candidate_beta, current_eta, intercept_shift = _validate_repair_for_publication(
             work_model,
-            spec=spec,
+            spec=curve_spec,
             kind=kind,
             groups=groups,
             repair_result=repair_result,
