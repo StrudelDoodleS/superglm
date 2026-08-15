@@ -1,6 +1,7 @@
-"""Tests for quasi-separation detection and numerical stability."""
+"""Tests for the low-credibility advisory, its renderers, and IRLS stability."""
 
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -325,7 +326,11 @@ class TestEDFNotRegressed:
 
 
 class TestFootnoteInSummary:
-    """Quasi-separated footnote must appear in ASCII output."""
+    """The per-level footnote must appear in ASCII output.
+
+    It names the levels the flag fired on and the experience behind each, which
+    is the whole of what the rule measured.
+    """
 
     def test_footnote_present(self):
         df, y, exposure = _make_sparse_tweedie_data()
@@ -338,9 +343,156 @@ class TestFootnoteInSummary:
         s = m.summary()
         text = str(s)
 
-        assert "Quasi-separated" in text
+        assert "Low-credibility levels" in text
         assert "rare" in text.lower()
         assert "obs" in text
+
+
+def _thin_but_cleanly_estimated():
+    """A level with 15 rows, a large effect, and a tight interval.
+
+    Gaussian with an identity link, so a coefficient CANNOT diverge here: the
+    normal has no mass point for the predictor to be driven towards, and the
+    MLE is the least-squares solution, which exists and is unique whenever the
+    design has full column rank (Wedderburn 1976).  Any surface that reports
+    separation for this fit is reporting something the data cannot show.
+    """
+    rng = np.random.default_rng(0)
+    levels = np.array(["A"] * 2000 + ["B"] * 2000 + ["RARE"] * 15)
+    mu = np.where(levels == "RARE", 8.0, np.where(levels == "B", 1.0, 0.0))
+    y = mu + rng.normal(0, 0.5, size=levels.size)
+    X = pd.DataFrame({"cat": pd.Categorical(levels, categories=["A", "B", "RARE"])})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"cat": Categorical(base="first")},
+    )
+    model.fit(X, y)
+    return model
+
+
+def _export_term(model, name):
+    from superglm.export.summary import build_summary_export_payload
+
+    payload = build_summary_export_payload(model)
+    return next(term for term in payload.terms if term.term == name), payload
+
+
+def _editor_row(model, name):
+    from superglm.editor.summaries import _compact_summary_row
+
+    rows = model.summary(detail="compact")._coef_rows
+    return next(_compact_summary_row(row) for row in rows if str(row.name) == name)
+
+
+class TestTheFlagIsAdvisoryOnEveryRenderer:
+    """The flag says "thin cell"; no renderer may report it as a verdict.
+
+    The rule that sets it reads ``level_n_obs`` and ``level_exposure_share``
+    and nothing else -- not the coefficient, not its standard error, not its
+    p-value, not the link.  A level can therefore be both strongly significant
+    and flagged, and the console has always said so while the export and the
+    editor replaced the significance code with the flag (issue #239).
+    """
+
+    def test_every_renderer_reports_the_same_significance_for_a_flagged_level(self):
+        model = _thin_but_cleanly_estimated()
+        rare = next(r for r in model.summary()._coef_rows if r.name == "cat[RARE]")
+        assert rare.quasi_separated is True
+        assert rare.p < 0.001
+        assert np.isfinite(rare.se) and rare.se > 0
+
+        console_line = next(
+            line for line in str(model.summary()).split("\n") if "cat[RARE]" in line
+        )
+        assert "***" in console_line
+
+        html_row = next(
+            fragment
+            for fragment in re.findall(r"<tr.*?</tr>", model.summary()._repr_html_(), re.S)
+            if "cat[RARE]" in fragment
+        )
+        assert "***" in html_row
+
+        term, _ = _export_term(model, "cat[RARE]")
+        assert term.significance == "***"
+
+        editor = _editor_row(model, "cat[RARE]")
+        assert editor["sig_code"] == "***"
+        assert editor["sig_class"] == "sig-strong"
+
+    def test_every_renderer_still_carries_the_advisory(self):
+        """Keeping the stars may not cost the reader the flag itself."""
+        model = _thin_but_cleanly_estimated()
+
+        console_line = next(
+            line for line in str(model.summary()).split("\n") if "cat[RARE]" in line
+        )
+        other_line = next(line for line in str(model.summary()).split("\n") if "cat[B]" in line)
+        assert "?" in console_line
+        assert "?" not in other_line
+
+        html = model.summary()._repr_html_()
+        rare_row = next(
+            fragment
+            for fragment in re.findall(r"<tr.*?</tr>", html, re.S)
+            if "cat[RARE]" in fragment
+        )
+        assert "?" in rare_row
+
+        term, _ = _export_term(model, "cat[RARE]")
+        other, _ = _export_term(model, "cat[B]")
+        assert term.warning != ""
+        assert other.warning == ""
+
+        editor = _editor_row(model, "cat[RARE]")
+        assert editor["quasi_separated"] is True
+        assert editor["advisory_code"] == "?"
+        assert _editor_row(model, "cat[B]")["advisory_code"] == ""
+
+
+class TestTheLegendDescribesTheRuleThatExists:
+    """A reader trusts a legend absolutely, so it may not out-run the rule.
+
+    Separation and an infinite MLE component are logically equivalent (Albert
+    and Anderson, *Biometrika* 71(1), 1984), and separation is a joint property
+    of the design and the response that a marginal cell count can neither
+    establish nor rule out.  The legend used to assert both, plus a log-link
+    divergence, of every flagged level -- on a fit that has no log link.
+    """
+
+    _FABRICATED = (
+        "no finite MLE",
+        "diverges",
+        "perfectly or nearly predicts",
+        "log-link",
+        "log link",
+        "separation",
+        "separated",
+    )
+
+    def _surfaces(self, model):
+        term, payload = _export_term(model, "cat[RARE]")
+        return {
+            "ascii": str(model.summary()),
+            "html": model.summary()._repr_html_(),
+            "export": "\n".join(payload.notes) + "\n" + term.warning,
+        }
+
+    def test_no_surface_asserts_a_diagnosis_the_rule_never_made(self):
+        model = _thin_but_cleanly_estimated()
+        for surface, text in self._surfaces(model).items():
+            lowered = text.lower()
+            for claim in self._FABRICATED:
+                assert claim not in lowered, f"{surface} still asserts {claim!r}"
+
+    def test_every_surface_states_the_rule_and_what_it_licenses(self):
+        model = _thin_but_cleanly_estimated()
+        for surface, text in self._surfaces(model).items():
+            lowered = text.lower()
+            assert "20 observations" in lowered, f"{surface} does not state the count trigger"
+            assert "0.05%" in lowered, f"{surface} does not state the exposure trigger"
+            assert "credibility" in lowered, f"{surface} does not say what the flag means"
 
 
 class TestColumnAlignment:
