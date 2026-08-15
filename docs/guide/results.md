@@ -208,16 +208,25 @@ table is applied to risks the export never saw.
 For the same reason the export refuses a fit that **saturates**. `model.predict` clips a log-link
 predictor to `[-80, 80]`, and a clip is not a factor either; a frame that already reaches it would
 produce a workbook that silently disagrees with the model it came from. Such a fit is
-quasi-separated or mis-scaled — refit or rescale rather than export it. The same applies to an
-individual relativity: a factor large enough that `superglm` had to clip it is refused rather than
-exported, because two blocks whose contributions cancel can leave the prediction healthy while
-neither factor is the model's.
+quasi-separated or mis-scaled — refit or rescale rather than export it. The same applies to every
+**individual relativity**, on a main-effect block and on an interaction cell alike: a factor a
+consumer cannot multiply by — `inf`, `nan`, `0.0`, negative, subnormal, or at or beyond the
+`exp(±500)` range `superglm` clips confidence bounds to — is refused rather than exported. Two
+blocks whose contributions cancel can leave the prediction healthy while neither factor is the
+model's, so this is checked per block rather than on the product. A factor of exactly `0.0` is
+refused for the same reason an infinite base is: it zeroes every premium it touches while every
+relativity *ratio* on the sheet still reads correctly.
+
+Bin boundaries and interaction axis values are printed at **round-trip precision** — the string in
+the workbook converts back to exactly the number the model binned on, so applying the printed table
+puts every risk in the same bin the model did.
 
 The **offset multiplier** block is exact only while the fit carries fewer than 20 distinct offset
 multipliers. Above that — the normal case for a continuous exposure — it is binned like a spline
 block, with rows keyed on interval strings and each carrying its bin's exposure-weighted average, so
-it is a summary rather than a per-row lookup. Pass `offset_source=` to export the exact form, keyed
-on a raw column of the frame.
+it is a summary rather than a per-row lookup. A bin with no exposure — reachable with
+`bin_strategy="uniform"` on a skewed exposure — reports the midpoint of its own interval at weight
+zero. Pass `offset_source=` to export the exact form, keyed on a raw column of the frame.
 
 The workbook includes selected-bin rating tables, a discretization impact sweep for
 `20, 50, 100, 200, 250` bins, and a structured Model Summary sheet. The impact sweep covers
