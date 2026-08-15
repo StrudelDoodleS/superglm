@@ -536,7 +536,7 @@ def build_coef_rows(
 
                 _, s_lam, s_kind, s_knot_strat, s_bnd = _spline_enrichment(
                     smooth_groups[0].name,
-                    spec._spline,
+                    spec._basis_spline,
                 )
                 rows.append(
                     _CoefRow(
@@ -558,11 +558,17 @@ def build_coef_rows(
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
                         # The wrapper's own forward, not a reach past it into
-                        # `_spline`: that private attribute is `None` on a
-                        # step-mode pickle, so the `getattr` default answered
-                        # "no constraint" for a spec that cannot score at all,
-                        # where `constraint_kind` funnels through the property
-                        # that refuses one.
+                        # `_spline`. Unlike a `getattr` default, this RAISES on
+                        # a step-mode pickle -- and that is safe by local
+                        # dominance, not by any global claim that such a spec
+                        # cannot reach here: `spec.reconstruct(...)` and
+                        # `spec.basis_kind` above both funnel through
+                        # `_basis_spline` unconditionally, so either raises the
+                        # migration error first and this line can never be the
+                        # first failure on any input. Dominance is checkable in
+                        # this one function; "a step pickle dies at build" is a
+                        # claim about every route into this file, and a restored
+                        # whole-model pickle never calls build at all.
                         monotone=spec.constraint_kind,
                         monotone_engine=g.monotone_engine,
                         monotone_repaired=g.feature_name in _mono_repairs,
