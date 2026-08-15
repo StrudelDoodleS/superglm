@@ -1916,7 +1916,7 @@ def _reference_edf_and_bound(factors, lam):
     them exactly 1.0; and ``x`` is drawn continuously, so each of the 800 rows
     is its own cell and no aggregation rounds.  That also makes the
     design-assembly term identically zero THERE (``sqrt(1.0) = 1.0``, both
-    multiplies exact) and 1.3% of ``gamma_mains`` on the other four fixtures,
+    multiplies exact) and 0.21% of ``gamma_mains`` on the other four fixtures,
     where the sum is not 800.0.
 
     The bound's own coefficients are computed in the same float64 as the value
@@ -1997,7 +1997,7 @@ def _reference_edf_and_bound(factors, lam):
     eps_T = u * float(p) * float(sing[0])
     # `maximum(., 0)` before squaring: without it a direction with `sv < eps_a`
     # gets a POSITIVE lower end and the interval stops containing the true `a`,
-    # which is the case here (sv = 1.3e-14 against eps_a = 1.1e-12 on the near
+    # which is the case here (sv = 3.40e-12 against eps_a = 5.03e-12 on the near
     # null direction, whose certified `a` is 1.7e-28).
     a_lo = np.clip(np.maximum(sv - eps_a, 0.0) ** 2, 0.0, 1.0)
     a_hi = np.clip((sv + eps_a) ** 2, 0.0, 1.0)
@@ -2023,7 +2023,7 @@ def _reference_edf_and_bound(factors, lam):
     # eigenvalues of `J P_A J`, then the equal-rank projector identity.  The
     # denominator is `sigma_seg` and not `sigma_min`, because the projector
     # bound wants sigma_min of the UNPERTURBED matrix and all this routine
-    # knows is the perturbed one's, enclosed: 1.4e-05 relative here, and the
+    # knows is the perturbed one's, enclosed: 8.5e-05 relative here, and the
     # point is that it cannot round the wrong way.
     delta = np.sqrt(2.0) * eta / sigma_seg
     # phi1, phi2 and their derivatives, each enclosed over [a_lo, a_hi].  The
