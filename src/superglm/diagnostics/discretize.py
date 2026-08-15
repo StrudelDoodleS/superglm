@@ -12,6 +12,7 @@ rating-table block is sampled on — and reports the impact.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from inspect import signature
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -38,8 +39,10 @@ class DiscretizationResult:
         Tweedie) and is reported for display rather than reinterpreted as a
         Tweedie replication count.
     interaction_tables : dict[str, DataFrame]
-        Per-INTERACTION grids, one row per grid cell, with the two parent
-        columns carrying the cell's axis values and then relativity,
+        Per-INTERACTION grids, one row per grid cell, with two axis-value
+        columns named for the parents -- suffixed ``(axis 1)``/``(axis 2)``
+        when the parent names would collide with each other or with a value
+        column -- and then relativity,
         log_relativity, n_obs and sample_weight on the same terms as
         ``tables``. Kept in its own mapping because the two shapes are not
         interchangeable: a main effect is binned into intervals and a
@@ -221,18 +224,75 @@ def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
     return isinstance(model._specs[name], _SplineBase | Polynomial)
 
 
-def _is_continuous_interaction(model: SuperGLM, name: str) -> bool:
-    """Check if an interaction is one whose reconstruction is a sampled grid.
+_GRID_RECONSTRUCTION_KEYS = frozenset({"x1", "x2", "relativity"})
 
-    These are the two the rating-table export ships as a surface rather than as
-    a lookup, so they are the two that carry a discretisation error at all. A
-    categorical-by-categorical interaction is a full cell table and a
-    numeric-by-numeric one is a single per-unit-per-unit coefficient; neither
-    approximates anything.
+
+def _accepts_n_points(reconstruct) -> bool:
+    try:
+        return "n_points" in signature(reconstruct).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
+    """The spec's reconstruction if it is a sampled surface, else ``None``.
+
+    Classified by the reconstruction CONTRACT rather than by class, because
+    that is the rule the rating-table export ships on: ``_interaction_blocks``
+    routes any interaction whose reconstruction carries ``x1``, ``x2`` and
+    ``relativity`` to the grid block, including an explicit interaction spec a
+    caller supplied. An isinstance check against the two built-ins would let
+    such a spec be exported approximately and left off the impact sheet, which
+    is the same gap this module closes for the built-ins.
+
+    The signature test comes first so that classifying an interaction is cheap
+    for the ones that are not grids: a cell table, a per-unit coefficient and a
+    ``FactorSmooth`` all take no ``n_points`` and are rejected without
+    reconstructing anything.
     """
-    from superglm.features.interaction import PolynomialInteraction, TensorInteraction
+    reconstruct = getattr(ispec, "reconstruct", None)
+    if reconstruct is None or not _accepts_n_points(reconstruct):
+        return None
+    raw = reconstruct(beta, n_points=n_points)
+    if not isinstance(raw, dict) or not _GRID_RECONSTRUCTION_KEYS <= set(raw):
+        return None
+    return raw
 
-    return isinstance(model._interaction_specs.get(name), TensorInteraction | PolynomialInteraction)
+
+def _is_continuous_interaction(model: SuperGLM, name: str, beta: NDArray, n_points: int) -> bool:
+    """Whether this interaction is exported as a sampled surface.
+
+    A categorical-by-categorical interaction is a full cell table and a
+    numeric-by-numeric one is a single per-unit-per-unit coefficient; neither
+    approximates anything, so neither belongs on the impact sheet.
+    """
+    ispec = model._interaction_specs.get(name)
+    if ispec is None:
+        return False
+    return _grid_reconstruction(ispec, beta, n_points) is not None
+
+
+_INTERACTION_TABLE_RESERVED_COLUMNS = ("relativity", "log_relativity", "n_obs", "sample_weight")
+
+
+def _axis_column_labels(parent1: str, parent2: str) -> tuple[str, str]:
+    """Two distinct, non-reserved names for a grid's axis-value columns.
+
+    Both collisions are reachable and both lose an axis silently, because a
+    later key in a ``DataFrame`` dict literal simply overwrites an earlier one.
+    ``interactions=[("age", "age")]`` fits and exports, so ``parent1`` and
+    ``parent2`` can be the same string; and a feature may be named
+    ``relativity`` or ``n_obs``, in which case its axis values would be
+    replaced by the value column of that name. Same hazard the offset block
+    already guards with ``_OFFSET_SOURCE_RESERVED_COLUMNS``.
+
+    Disambiguated by axis index on BOTH columns rather than on the second
+    alone, so a reader never has to know which one moved.
+    """
+    reserved = set(_INTERACTION_TABLE_RESERVED_COLUMNS)
+    if parent1 == parent2 or reserved & {parent1, parent2}:
+        return f"{parent1} (axis 1)", f"{parent2} (axis 2)"
+    return parent1, parent2
 
 
 def _nearest_grid_index(grid: NDArray, x: NDArray) -> NDArray:
@@ -366,6 +426,16 @@ def discretization_impact(
     from superglm.links import stabilize_eta
     from superglm.model import base
 
+    plan = base._prediction_plan(model)
+    terms_by_name = {term["name"]: term for term in plan["features"]}
+    interaction_terms = {term["name"]: term for term in plan["interactions"]}
+
+    def _interaction_beta(name: str) -> NDArray:
+        term = interaction_terms.get(name)
+        if term is None:
+            raise RuntimeError(f"prediction plan does not define fitted interaction {name!r}")
+        return beta[np.asarray(term["beta_idx"], dtype=np.intp)]
+
     # Determine which terms to discretize. Two namespaces, because a
     # continuous-by-continuous interaction is approximated by the same export
     # and by the same ``n_bins``, and leaving it out understates the answer.
@@ -381,7 +451,7 @@ def discretization_impact(
                     )
                 target_features.append(name)
             elif name in model._interaction_specs:
-                if not _is_continuous_interaction(model, name):
+                if not _is_continuous_interaction(model, name, _interaction_beta(name), n_bins):
                     raise ValueError(
                         f"Interaction '{name}' is not continuous-by-continuous — "
                         "only interactions exported as a sampled grid can be discretized."
@@ -394,7 +464,9 @@ def discretization_impact(
             name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
         target_interactions = [
-            name for name in model._interaction_order if _is_continuous_interaction(model, name)
+            name
+            for name in model._interaction_order
+            if _is_continuous_interaction(model, name, _interaction_beta(name), n_bins)
         ]
 
     from superglm.model.input_validation import validate_x_columns
@@ -413,8 +485,6 @@ def discretization_impact(
     validate_x_columns(frame, required)
     eta_orig = base.predict_eta_exact(model, frame, offset=offset)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
-    plan = base._prediction_plan(model)
-    terms_by_name = {term["name"]: term for term in plan["features"]}
 
     # For each target feature, compute the delta (binned - smooth)
     tables: dict[str, pd.DataFrame] = {}
@@ -480,14 +550,13 @@ def discretization_impact(
 
     # Interactions: sampled at grid nodes rather than averaged over bins, so
     # the per-observation replacement is the node a consumer's lookup lands on.
+    from superglm.features.ordered_categorical import resolve_interaction_parent_of
+
     interaction_tables: dict[str, pd.DataFrame] = {}
-    interaction_terms = {term["name"]: term for term in plan["interactions"]}
 
     for name in target_interactions:
-        term = interaction_terms.get(name)
-        if term is None:
-            raise RuntimeError(f"prediction plan does not define fitted interaction {name!r}")
-        beta_term = beta[np.asarray(term["beta_idx"], dtype=np.intp)]
+        term = interaction_terms[name]
+        beta_term = _interaction_beta(name)
         log_rel_exact = np.asarray(
             base._score_prediction_term_local_exact(term, frame, beta_term),
             dtype=np.float64,
@@ -496,29 +565,61 @@ def discretization_impact(
         # The same grid the export ships, at the same resolution: ``n_bins``
         # nodes per axis. Reading it back from the spec rather than
         # re-deriving it is what makes the measured error the EXPORTED error.
-        grid = term["spec"].reconstruct(beta_term, n_points=n_bins)
+        ispec = term["spec"]
+        grid = _grid_reconstruction(ispec, beta_term, n_bins)
+        if grid is None:
+            raise RuntimeError(
+                f"Interaction {name!r} was classified as a sampled grid but its "
+                "reconstruction no longer carries one."
+            )
         axis1 = np.asarray(grid["x1"], dtype=np.float64)
         axis2 = np.asarray(grid["x2"], dtype=np.float64)
-        surface = np.asarray(grid["log_relativity"], dtype=np.float64)
-        if surface.shape == (len(axis2), len(axis1)):
-            surface = surface.T
-        elif surface.shape != (len(axis1), len(axis2)):
+        surface = np.asarray(
+            grid["log_relativity"]
+            if "log_relativity" in grid
+            else np.log(np.asarray(grid["relativity"], dtype=np.float64)),
+            dtype=np.float64,
+        )
+        # Transposed unconditionally, and NOT behind a shape test.  Both axes
+        # carry ``n_points`` nodes, so the grid is square and its shape cannot
+        # witness its orientation -- a shape test here would look like a check
+        # while being one branch that always fires.  What the orientation
+        # actually rests on is the reconstruction convention, ``surface[j, i] =
+        # f(x1[i], x2[j])``, which ``TensorInteraction.reconstruct`` states and
+        # ``PolynomialInteraction`` inherits from ``np.meshgrid``'s default
+        # ``indexing="xy"``.  It is the same transpose
+        # ``_continuous_interaction_block`` applies, so the two agree by
+        # construction rather than by luck, and
+        # ``test_the_exported_grids_orientation_is_load_bearing`` fails if
+        # either flips.
+        if surface.shape != (len(axis2), len(axis1)):
             raise ValueError(
                 f"Interaction {name!r} returned a {surface.shape} log-relativity grid, "
-                f"expected {(len(axis1), len(axis2))} or {(len(axis2), len(axis1))}."
+                f"expected {(len(axis2), len(axis1))}."
             )
+        surface = surface.T
 
+        # Through the same parent resolution prediction and design assembly
+        # use.  A spline-mode ``OrderedCategorical`` parent contributes its
+        # inner spline on MAPPED SCORES, so the frame holds level labels while
+        # the grid axis is in score space; reading the column as float64
+        # directly raised ``could not convert string to float`` and took every
+        # rating-table export of such a model down with it.
         parent1, parent2 = term["parent_names"]
-        index1 = _nearest_grid_index(axis1, frame.column_array(parent1, dtype=np.float64))
-        index2 = _nearest_grid_index(axis2, frame.column_array(parent2, dtype=np.float64))
+        left_spec, right_spec = term.get("parent_specs", (None, None))
+        _, values1 = resolve_interaction_parent_of(ispec, left_spec, frame.column_array(parent1))
+        _, values2 = resolve_interaction_parent_of(ispec, right_spec, frame.column_array(parent2))
+        index1 = _nearest_grid_index(axis1, np.asarray(values1, dtype=np.float64))
+        index2 = _nearest_grid_index(axis2, np.asarray(values2, dtype=np.float64))
         total_delta += surface[index1, index2] - log_rel_exact
 
         n_cells = len(axis1) * len(axis2)
         cell = index1 * len(axis2) + index2
+        label1, label2 = _axis_column_labels(parent1, parent2)
         interaction_tables[name] = pd.DataFrame(
             {
-                parent1: np.repeat(axis1, len(axis2)),
-                parent2: np.tile(axis2, len(axis1)),
+                label1: np.repeat(axis1, len(axis2)),
+                label2: np.tile(axis2, len(axis1)),
                 "relativity": np.exp(surface).ravel(),
                 "log_relativity": surface.ravel(),
                 "n_obs": np.bincount(cell, minlength=n_cells),

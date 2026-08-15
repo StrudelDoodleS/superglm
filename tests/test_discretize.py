@@ -8,6 +8,7 @@ from superglm import (
     Categorical,
     DiscretizationResult,
     Numeric,
+    OrderedCategorical,
     Polynomial,
     Spline,
     SuperGLM,
@@ -569,27 +570,61 @@ class TestContinuousInteractionIsDiscretized:
             atol=0.0,
         )
 
-    def test_a_finer_grid_moves_the_predictions_less(self, gridded_interaction_model):
-        """Sampling a continuous surface more finely can only approximate it better.
+    def test_a_risk_sitting_on_a_grid_node_is_approximated_exactly(self, gridded_interaction_model):
+        """The lookup rule is pinned by the case where it must cost nothing.
 
-        Derived rather than calibrated: the surface is continuous on a compact
-        rectangle, so the nearest-node error is bounded by its modulus of
-        continuity at the node spacing, and the spacing falls monotonically with
-        ``n_bins``.  Asserted as a strict inequality with no tolerance, because a
-        constant here would be a number fitted to this fit.
+        A row whose two parent values ARE grid nodes gets the surface at its own
+        location, so the replacement is the exact contribution and the
+        discretized prediction must equal the smooth one.  Exact rather than
+        ordered: a modulus-of-continuity argument shrinks the error BOUND with
+        the node spacing but does not force the realised error over a fixed set
+        of rows to fall, so comparing two fitted error measurements would be a
+        constant fitted to this fit rather than a derived one.
+
+        It also discriminates.  Any of the failures that a symmetric fixture
+        hides -- reading the surface transposed, keying the axes on the wrong
+        parent, an off-by-one in the nearest-node search -- moves a node row off
+        its own value and breaks the equality, and the midpoint case below
+        confirms the identity is not vacuous.
         """
         model, df, y = gridded_interaction_model
-        coarse = model.discretization_impact(df, y, n_bins=10, features=["age:density"])
-        fine = model.discretization_impact(df, y, n_bins=100, features=["age:density"])
+        n_bins = 12
+        grid = model.discretization_impact(
+            df, y, n_bins=n_bins, features=["age:density"]
+        ).interaction_tables["age:density"]
+        axis_age = np.array(sorted(set(grid["age"])), dtype=float)
+        axis_density = np.array(sorted(set(grid["density"])), dtype=float)
 
-        assert (
-            fine.metrics["max_abs_prediction_change_pct"]
-            < coarse.metrics["max_abs_prediction_change_pct"]
+        on_nodes = pd.DataFrame(
+            {
+                "age": np.repeat(axis_age, len(axis_density)),
+                "density": np.tile(axis_density, len(axis_age)),
+            }
         )
-        assert (
-            fine.metrics["mean_abs_prediction_change_pct"]
-            < coarse.metrics["mean_abs_prediction_change_pct"]
+        y_nodes = np.ones(len(on_nodes))
+        at_nodes = model.discretization_impact(
+            on_nodes, y_nodes, n_bins=n_bins, features=["age:density"]
         )
+        np.testing.assert_allclose(
+            at_nodes.predictions,
+            at_nodes.original_predictions,
+            rtol=1e-12,
+            atol=0.0,
+        )
+        assert at_nodes.metrics["max_abs_prediction_change_pct"] == pytest.approx(0.0, abs=1e-9)
+
+        # Halfway between nodes is the worst case for the same rule, and it is
+        # not zero -- so the equality above is a property of sitting on a node.
+        between = pd.DataFrame(
+            {
+                "age": np.repeat((axis_age[:-1] + axis_age[1:]) / 2.0, len(axis_density) - 1),
+                "density": np.tile((axis_density[:-1] + axis_density[1:]) / 2.0, len(axis_age) - 1),
+            }
+        )
+        off_nodes = model.discretization_impact(
+            between, np.ones(len(between)), n_bins=n_bins, features=["age:density"]
+        )
+        assert off_nodes.metrics["max_abs_prediction_change_pct"] > 0.0
 
     def test_an_interaction_can_be_asked_for_by_name(self, gridded_interaction_model):
         model, df, y = gridded_interaction_model
@@ -602,6 +637,106 @@ class TestContinuousInteractionIsDiscretized:
         model, df, y = gridded_interaction_model
         with pytest.raises(ValueError, match="Unknown feature"):
             model.discretization_impact(df, y, features=["age:nonexistent"])
+
+
+class TestGridParentsAreReadTheWayTheFitReadsThem:
+    """The columns the sweep keys on must be the ones the grid is built over."""
+
+    @staticmethod
+    def _ordered_parent_model():
+        bands = ["18-25", "26-35", "36-50", "51-65", "66+"]
+        rng = np.random.default_rng(3)
+        n = 900
+        df = pd.DataFrame(
+            {
+                "band": rng.choice(bands, n),
+                "density": rng.uniform(0.0, 10.0, n),
+            }
+        )
+        eta = (
+            -1.0
+            + 0.15 * np.array([bands.index(b) for b in df["band"]])
+            + 0.05 * df["density"].to_numpy()
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={
+                "band": OrderedCategorical(order=bands, basis=Spline(n_knots=4)),
+                "density": Spline(n_knots=5),
+            },
+            interactions=[("band", "density")],
+        )
+        model.fit(df, y)
+        return model, df, y
+
+    def test_an_ordered_categorical_parent_is_resolved_to_its_scores(self):
+        """The frame holds labels; the grid axis is in mapped-score space.
+
+        A spline-mode ``OrderedCategorical`` parent contributes its inner spline
+        on mapped numeric scores, so ``"66+"`` is what the frame carries and a
+        number is what the axis carries.  Reading the column as float64 raised
+        ``could not convert string to float`` and took the whole export down --
+        a model that exported cleanly on master.
+        """
+        model, df, y = self._ordered_parent_model()
+        result = model.discretization_impact(df, y, n_bins=8)
+
+        assert set(result.interaction_tables) == {"band:density"}
+        grid = result.interaction_tables["band:density"]
+        assert int(grid["n_obs"].sum()) == len(df)
+        assert np.isfinite(result.metrics["max_abs_prediction_change_pct"])
+
+    def test_the_rating_table_export_of_such_a_model_still_builds(self):
+        from superglm.export.rating_tables import build_rating_table_payload
+
+        model, df, y = self._ordered_parent_model()
+        payload = build_rating_table_payload(model, df, y, n_bins=8, impact_bins=(8,))
+
+        assert "band:density" in set(payload.discretization_impact["feature"])
+
+
+class TestBothGridAxesSurviveIntoTheTable:
+    """A cell is two axis values, so the table needs two axis columns."""
+
+    def test_a_same_feature_interaction_keeps_both_axes(self):
+        """``interactions=[("age", "age")]`` fits and exports, so it must tabulate.
+
+        Both parent names are the same string, and a later key in a DataFrame
+        dict literal overwrites an earlier one, so the table silently carried
+        one axis for a two-dimensional grid.
+        """
+        rng = np.random.default_rng(11)
+        df = pd.DataFrame({"age": rng.uniform(18.0, 80.0, 400)})
+        y = rng.poisson(np.exp(-1.0 + 0.02 * df["age"])).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={"age": Spline(n_knots=6)},
+            interactions=[("age", "age")],
+        )
+        model.fit(df, y)
+
+        grid = model.discretization_impact(df, y, n_bins=5).interaction_tables["age:age"]
+
+        assert len(grid) == 25
+        axis_columns = [c for c in grid.columns if c.startswith("age")]
+        assert axis_columns == ["age (axis 1)", "age (axis 2)"]
+        # Two axes really are present: each takes every node value.
+        for column in axis_columns:
+            assert len(set(grid[column])) == 5
+
+    def test_a_parent_named_for_a_value_column_keeps_its_axis(self):
+        """A feature may legitimately be called ``relativity``."""
+        from superglm.diagnostics.discretize import _axis_column_labels
+
+        assert _axis_column_labels("relativity", "density") == (
+            "relativity (axis 1)",
+            "density (axis 2)",
+        )
+        assert _axis_column_labels("age", "n_obs") == ("age (axis 1)", "n_obs (axis 2)")
+        assert _axis_column_labels("age", "density") == ("age", "density")
 
 
 class TestExactlyTabulatedInteractionIsNotDiscretized:
