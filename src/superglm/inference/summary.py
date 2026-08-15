@@ -58,6 +58,13 @@ class _CoefRow:
     # to be rendered as; the renderers no longer report it as a diagnosis
     # (issue #239), and the field name itself is tracked as issue #304.
     quasi_separated: bool = False
+    # Which of the two disjoint triggers fired, recorded ALONGSIDE the flag
+    # rather than re-derived by each renderer from ``level_n_obs``.  The level
+    # display strips those diagnostics from all but the first member of a
+    # grouped level so the footnote does not double-count, so a renderer
+    # reading them off a DISPLAY row would call a pooled thin level an
+    # outsized standard error.  ``dataclasses.replace`` carries this through.
+    advisory_trigger: str = ""
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
     # Per-level fit provenance: "smooth" for a level carried by the spline,
