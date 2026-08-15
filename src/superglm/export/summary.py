@@ -15,6 +15,7 @@ from superglm.features.ordered_categorical import (
 )
 from superglm.features.spline import _SplineBase
 from superglm.inference._term_helpers import spline_groups
+from superglm.inference.summary import _LOW_CREDIBILITY_NOTE
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
@@ -86,11 +87,10 @@ _EDITOR_OFFSET_NOTE = (
     "Editor offset refit: listed editor terms are fixed offset factors. "
     "Inference is conditional on those fixed offsets."
 )
-_QS_NOTE = (
-    "QS: quasi-complete separation — a predictor perfectly or nearly predicts\n"
-    "zero response, so the log-link coefficient diverges to -∞ and no finite\n"
-    "MLE exists. Flagged levels have <20 obs or <0.05% exposure."
-)
+# The advisory's wording lives with the console renderer, which is the one that
+# always presented it as an advisory.  Two literals is how the note came to
+# describe a rule that neither renderer implements.
+_LOW_CREDIBILITY_WARNING = "Low credibility"
 
 
 def _finite_float(value: Any) -> float | None:
@@ -308,9 +308,19 @@ def _level_row_kind(row: _CoefRow) -> str:
     return "free level" if row.level_fit == "free" else "level"
 
 
-def _significance(p_value: float | None, quasi_separated: bool) -> str:
-    if quasi_separated:
-        return "QS"
+def _significance(p_value: float | None) -> str:
+    """The p-value's own code, and nothing else.
+
+    The low-credibility advisory used to be returned from here instead of the
+    stars, which made the exported workbook say that a flagged row had no
+    significance to report.  It is not a verdict on the estimate -- the rule
+    behind it reads a level's observation count and exposure share, or a
+    standard error's size against the model's typical one, and never the
+    p-value -- so a level can legitimately be both ``***`` and flagged.  The
+    console has always shown them as independent columns; the payload now
+    does the same, carrying the advisory in ``warning`` where it already had a
+    column of its own (issue #239).
+    """
     if p_value is None:
         return ""
     if p_value < 0.001:
@@ -392,8 +402,8 @@ def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryT
                     str(row.name) == "Intercept"
                     or any(group.name in selected_names for group in active_groups)
                 ),
-                significance=_significance(p_value, quasi_separated),
-                warning="Quasi-separated" if quasi_separated else "",
+                significance=_significance(p_value),
+                warning=_LOW_CREDIBILITY_WARNING if quasi_separated else "",
             )
         )
     return tuple(terms)
@@ -420,7 +430,7 @@ def _summary_notes(
             notes.append(_GROUP_WALD_NOTE)
         notes.append(_PARAMETRIC_WALD_NOTE)
     if any(row.warning for row in terms):
-        notes.append(_QS_NOTE)
+        notes.append(_LOW_CREDIBILITY_NOTE)
     return tuple(notes)
 
 

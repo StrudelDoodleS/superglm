@@ -53,7 +53,10 @@ class _CoefRow:
     monotone: str | None = None  # "increasing", "decreasing", or None
     monotone_engine: str | None = None  # "qp" or "scop"
     monotone_repaired: bool = False
-    # Quasi-separation warning
+    # Low-credibility advisory: a thin categorical level, or a standard
+    # error far above the model's typical one.  Named for the flag it used
+    # to be rendered as; the renderers no longer report it as a diagnosis
+    # (issue #239), and the field name itself is tracked as issue #304.
     quasi_separated: bool = False
     level_n_obs: int | None = None
     level_exposure_share: float | None = None
@@ -124,10 +127,43 @@ def _format_profile_estimate(
 
 
 _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
-_QS_NOTE = (
-    "QS: quasi-complete separation — a predictor perfectly or nearly predicts\n"
-    "zero response, so the log-link coefficient diverges to -∞ and no finite\n"
-    "MLE exists. Flagged levels have <20 obs or <0.05% exposure."
+# The column tag and the note that defines it, in one place because the export
+# renders the same note (``superglm.export.summary`` imports both) and the two
+# used to be maintained as separate string literals.
+#
+# The note says what the RULE establishes.  It used to report quasi-complete
+# separation, an infinite maximum-likelihood estimate and a log-link
+# divergence, of every flagged row.  Separation and an infinite MLE component
+# are equivalent (A. Albert and J. A. Anderson, "On the existence of maximum
+# likelihood estimates in logistic regression models", Biometrika 71(1), 1984,
+# 1-10), and it is a joint property of the design and the response, tested by
+# linear-programming feasibility on both (K. Konis, "Linear programming
+# algorithms for detection of separated data in binary logistic regression
+# models", DPhil thesis, Oxford, 2007).  Neither branch of the detection here
+# looks at the response at all, so neither can establish it -- and the phenomenon
+# is defined only where the response distribution has a boundary the predictor
+# can be driven toward, which excludes the gaussian identity-link fits this note
+# was appearing under (R. W. M. Wedderburn, "On the existence and uniqueness of
+# the maximum likelihood estimates for certain generalized linear models",
+# Biometrika 63(1), 1976, 27-32).
+#
+# What the rule does implement is a volume test, which in an insurance context
+# is a limited-fluctuation credibility question -- has this cell enough
+# experience to stand on its own (A. H. Mowbray, "How extensive a payroll
+# exposure is necessary to give a dependable pure premium?", PCAS 1, 1914,
+# 24-30; Actuarial Standards Board, ASOP No. 25, "Credibility Procedures",
+# 2013).  The sparse-cell estimate is finite and valid; it is unstable and
+# small-sample biased away from the null (D. Firth, "Bias reduction of maximum
+# likelihood estimates", Biometrika 80(1), 1993, 27-38).  That is what a reader
+# may act on, so that is what the note says.
+_LOW_CREDIBILITY_TAG = "LC"
+_LOW_CREDIBILITY_NOTE = (
+    "LC: low credibility — flagged when a categorical level carries fewer than\n"
+    "20 observations or under 0.05% of exposure, or when a coefficient's standard\n"
+    "error is far above this model's typical one. The estimate, interval and\n"
+    "p-value beside it are unchanged and are the ones the fit produced; the flag\n"
+    "says only that little data stands behind them. Treat the row as partially\n"
+    "credible: pool the level, or re-specify the term, before pricing on it."
 )
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
@@ -515,7 +551,7 @@ class ModelSummary:
             "[" + f"{half:.3f}",
             f"{1 - half:.3f}" + "]",
             "Sig",
-            "QS",
+            _LOW_CREDIBILITY_TAG,
         )
         lines.append(_row(hdr))
         lines.append(_thin())
@@ -745,7 +781,7 @@ class ModelSummary:
         lines.append(_SIG_LEGEND)
         has_qs = any(r.quasi_separated for r in display_rows)
         if has_qs:
-            lines.append(_QS_NOTE)
+            lines.append(_LOW_CREDIBILITY_NOTE)
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
@@ -761,11 +797,11 @@ class ModelSummary:
                     "For borderline significance, use a likelihood ratio test."
                 )
 
-        # Quasi-separated footnote
+        # Low-credibility footnote
         qs_rows = [r for r in display_rows if r.quasi_separated and r.level_n_obs is not None]
         if qs_rows:
             lines.append("")
-            lines.append("? Quasi-separated levels (insufficient data):")
+            lines.append("? Low-credibility levels, and the experience behind each:")
             for r in qs_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
                 lines.append(
@@ -892,7 +928,7 @@ class ModelSummary:
                 f"[{half:.3f}",
                 f"{1 - half:.3f}]",
                 "Sig",
-                "QS",
+                _LOW_CREDIBILITY_TAG,
             ]
         )
         parts.append("<tr>")
@@ -1059,7 +1095,7 @@ class ModelSummary:
                         "<th style='padding:1px 6px;'>[ci_lo</th>"
                         "<th style='padding:1px 6px;'>ci_hi]</th>"
                         "<th style='padding:1px 6px;'>Sig</th>"
-                        "<th style='padding:1px 6px;'>QS</th>"
+                        f"<th style='padding:1px 6px;'>{_LOW_CREDIBILITY_TAG}</th>"
                         "</tr>" + "".join(inner_rows) + "</table>"
                     )
                     parts.append(
@@ -1170,7 +1206,7 @@ class ModelSummary:
         if has_qs:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">{_QS_NOTE}</td></tr>'
+                f'color:#c60;border:none;">{_LOW_CREDIBILITY_NOTE}</td></tr>'
             )
         for note in _editor_notes(info):
             parts.append(
@@ -1191,10 +1227,10 @@ class ModelSummary:
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
                 f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
             )
-        # Quasi-separated footnote
+        # Low-credibility footnote
         qs_rows = [r for r in display_rows if r.quasi_separated and r.level_n_obs is not None]
         if qs_rows:
-            qs_lines = ["? Quasi-separated levels (insufficient data):"]
+            qs_lines = ["? Low-credibility levels, and the experience behind each:"]
             for r in qs_rows:
                 exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
                 qs_lines.append(

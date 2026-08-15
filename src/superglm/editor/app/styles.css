@@ -518,6 +518,9 @@ button:active { background: #e6edf3; }
 .summary-table .sig-code {
   width: 10%;
 }
+.summary-table .advisory-code {
+  width: 8%;
+}
 .summary-group-row td {
   padding: 8px 4px 4px;
   border-bottom: 1px solid #d8dee4;
@@ -560,8 +563,14 @@ button:active { background: #e6edf3; }
 .se-cell.sig-none { background: #fee2e2; color: #991b1b; }
 .se-cell.sig-unknown { background: #f3f4f6; color: #57606a; }
 .se-cell.sig-reference { background: #f6f8fa; color: #57606a; }
-.se-cell.sig-qs { background: #ffe4e6; color: #9f1239; }
 .sig-code {
+  font-weight: 700;
+  letter-spacing: 0;
+}
+/* The advisory keeps its own colour rather than taking over the SE cell's:
+   significance and low credibility are independent findings (issue #239). */
+.advisory-code {
+  color: #9f1239;
   font-weight: 700;
   letter-spacing: 0;
 }

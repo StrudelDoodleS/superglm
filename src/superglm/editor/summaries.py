@@ -253,12 +253,9 @@ def _compact_summary_row(row) -> dict[str, Any]:
             "" if is_reference else ("chi2" if row.is_spline else ("z" if stat is not None else ""))
         ),
         "p_value": p_value,
-        "sig_code": _summary_sig_code(p_value, bool(row.quasi_separated)),
-        "sig_class": (
-            "sig-reference"
-            if is_reference
-            else _summary_sig_class(p_value, bool(row.quasi_separated))
-        ),
+        "sig_code": _summary_sig_code(p_value),
+        "sig_class": "sig-reference" if is_reference else _summary_sig_class(p_value),
+        "advisory_code": _summary_advisory_code(bool(row.quasi_separated)),
         "quasi_separated": bool(row.quasi_separated),
         "active": bool(row.active),
         "n_params": int(row.n_params or 0),
@@ -309,9 +306,15 @@ def _finite_float(value: Any) -> float | None:
     return number if np.isfinite(number) else None
 
 
-def _summary_sig_code(p_value: float | None, quasi_separated: bool) -> str:
-    if quasi_separated:
-        return "QS"
+def _summary_sig_code(p_value: float | None) -> str:
+    """The p-value's own code.
+
+    The low-credibility advisory used to be returned from here, and its class
+    from ``_summary_sig_class``, so the editor's Sig column and its SE-cell
+    colour both stopped reporting significance for a flagged row.  The rule
+    behind the advisory never reads the p-value, so it cannot speak for it; it
+    now travels in its own column (issue #239).
+    """
     if p_value is None:
         return ""
     if p_value < 0.001:
@@ -325,9 +328,12 @@ def _summary_sig_code(p_value: float | None, quasi_separated: bool) -> str:
     return ""
 
 
-def _summary_sig_class(p_value: float | None, quasi_separated: bool) -> str:
-    if quasi_separated:
-        return "sig-qs"
+def _summary_advisory_code(quasi_separated: bool) -> str:
+    """The advisory marker, matching the console's ``LC`` column."""
+    return "?" if quasi_separated else ""
+
+
+def _summary_sig_class(p_value: float | None) -> str:
     if p_value is None:
         return "sig-unknown"
     if p_value < 0.001:
