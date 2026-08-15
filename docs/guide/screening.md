@@ -439,14 +439,16 @@ discretize at all, so OC pairs stay exact on both sides.
   fallback is a third door. So do not read the level count alone to decide
   which kernel scored a pair — and read the *unpinned* level count when you
   do, since a `levels=` universe with no training rows behind it is pinned to
-  base and widens no block: 140 declared levels of which 105 are populated
-  stays on the dense path at a block of 1,352, where 106 populated levels
-  would not.
+  base and widens no block: against a library-default `Spline()` margin (13
+  probe columns), 140 declared levels of which 105 are populated stays on the
+  dense path at a block of 13 x 104 = 1,352, where 106 populated levels would
+  not. Nor is a NaN row a routing signal in reverse: a `spline_cat` pair whose
+  ladder resolved no direction at any rung gets one on EITHER path.
   Measured end to end, best of three, one BLAS thread: 200 levels 0.013 s,
   1,000 levels 0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124*
   levels the dense path tops out at when the block ceiling is what binds.
-  Above roughly five thousand levels the binding cost
-  is no longer screening but fitting the mains model the screen runs against,
+  Above roughly five thousand levels the binding cost is no longer screening
+  but fitting the mains model the screen runs against,
   whose factor contributes one column per level and which no `discrete=`
   setting compresses — discretization is support compression for *continuous*
   covariates, and a factor is already on its own grid.

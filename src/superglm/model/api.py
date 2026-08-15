@@ -794,7 +794,8 @@ class SuperGLM:
         at 1e5, 292 at 5e4, 170 at 1e4, with an allocation gate
         ``k <= 2 * sqrt(max_cells)`` binding instead below ``max_cells``
         ~3906 (the crossover is ~15625 for an unpenalized block, so a wide
-        ``cat_cat`` reaches the allocation gate four times sooner).  Family,
+        ``cat_cat`` reaches the allocation gate at a ``max_cells`` four times
+        larger).  Family,
         link, ``phi``, penalty order, basis kind, prior weights and the
         ``edf0`` ladder move none of it; only the block's own width does,
         and for ``spline_cat`` that width is
@@ -832,9 +833,10 @@ class SuperGLM:
         statistic is exact.  Those kinds have no binning fallback, so their
         only degradation is refusal: a ``numeric_cat`` pair whose factor is
         too wide for the pair's blocks to fit ``max_cells`` — or to be solved
-        inside it, which binds first and admits 1710 levels at the default —
-        gets a NaN row, and raising ``max_cells``
-        computes it exactly.  Screening always probes exact bases, so a pair whose
+        inside it, which binds first and admits 1710 UNPINNED levels (1709
+        contrasts) at the default, counted the same way as the
+        ``spline_cat`` threshold above — gets a NaN row, and raising
+        ``max_cells`` computes it exactly.  Screening always probes exact bases, so a pair whose
         confirmatory refit would discretize LOSSILY is flagged
         ``approx=True`` to make that support-discretization gap — measured
         at ~3.5% on signal pairs, the same class as the quantile fallback —
