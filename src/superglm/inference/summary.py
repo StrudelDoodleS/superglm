@@ -681,9 +681,25 @@ class ModelSummary:
                     # right border leaves the box.  Truncating keeps both
                     # invariants for any label; the elided tail is the p-value,
                     # which the row's own data still carries.
-                    room = sig_col - len(row_prefix) - 2
-                    if len(spline_text) > room:
-                        spline_text = spline_text[: max(room - 1, 0)] + "…"
+                    # Two for the gap after the term name, one so the stars are
+                    # never flush against the label the way the header's own
+                    # " Sig" is not.
+                    room = sig_col - len(row_prefix) - 3
+                    overflow = len(spline_text) - room
+                    if overflow > 0:
+                        # The KIND is elided, not the tail.  The tail is
+                        # ``p=``, and on the console that is the only place a
+                        # reader can get the whole-term p-value -- the HTML row
+                        # has no width bound and still prints it, so cutting it
+                        # here would make the two renderers disagree about one
+                        # term, which is the thing this change exists to stop.
+                        # A label is recoverable from the term's own report;
+                        # a number that is nowhere else is not.
+                        keep = len(kind) - overflow - 1
+                        if keep >= 1:
+                            spline_text = spline_text.replace(f"[{kind},", f"[{kind[:keep]}…,", 1)
+                        else:
+                            spline_text = spline_text[: max(room - 1, 0)] + "…"
                     prefix = f"{row_prefix}  {spline_text}"
                     pad = max(sig_col - len(prefix), 0)
                     lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s} {'':<3s}"))
