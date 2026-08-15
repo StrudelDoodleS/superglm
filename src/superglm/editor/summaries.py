@@ -256,6 +256,7 @@ def _compact_summary_row(row) -> dict[str, Any]:
         "sig_code": _summary_sig_code(p_value),
         "sig_class": "sig-reference" if is_reference else _summary_sig_class(p_value),
         "advisory_code": _summary_advisory_code(bool(row.quasi_separated)),
+        "advisory_kind": _summary_advisory_kind(row, bool(row.quasi_separated)),
         "quasi_separated": bool(row.quasi_separated),
         "active": bool(row.active),
         "n_params": int(row.n_params or 0),
@@ -331,6 +332,21 @@ def _summary_sig_code(p_value: float | None) -> str:
 def _summary_advisory_code(quasi_separated: bool) -> str:
     """The advisory marker, matching the console's ``LC`` column."""
     return "?" if quasi_separated else ""
+
+
+def _summary_advisory_kind(row, quasi_separated: bool) -> str:
+    """Which of the two disjoint triggers fired on this row.
+
+    The browser renders a per-row tooltip, which is a row-level statement, and
+    the two triggers license different ones: a thin level really is short of
+    experience, while an outsized standard error can be a predictor on a much
+    smaller scale with the whole sample behind it. The SE fallback skips any
+    row that has per-level counts, so ``level_n_obs is not None`` is exactly
+    the volume branch -- the same discriminator the exported Warning cell uses.
+    """
+    if not quasi_separated:
+        return ""
+    return "thin_level" if row.level_n_obs is not None else "outsized_se"
 
 
 def _summary_sig_class(p_value: float | None) -> str:
