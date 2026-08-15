@@ -147,7 +147,16 @@ _SIG_LEGEND = "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
 # the maximum likelihood estimates for certain generalized linear models",
 # Biometrika 63(1), 1976, 27-32).
 #
-# What the rule does implement is a volume test, which in an insurance context
+# The second branch is not a volume test and is not even scale-invariant: the
+# threshold is this model's median parametric SE times fifty, so rescaling ONE
+# predictor moves its SE without moving the median and trips the flag on units
+# alone.  Measured on a 5000-row gaussian fit, predictor "c" rescaled by 1e-6:
+# se 7.0e-03 -> 7.0e+04 with the coefficient, z and p-value identical, and the
+# row flagged.  The note therefore says what each branch means separately
+# rather than attributing both to a shortage of data; splitting them into two
+# flags is issue #304.
+#
+# The FIRST branch is a volume test, which in an insurance context
 # is a limited-fluctuation credibility question -- has this cell enough
 # experience to stand on its own (A. H. Mowbray, "How extensive a payroll
 # exposure is necessary to give a dependable pure premium?", PCAS 1, 1914,
@@ -162,9 +171,12 @@ _LOW_CREDIBILITY_NOTE = (
     "20 observations or under 0.05% of exposure, or, for a row that has no\n"
     "per-level counts, when its standard error is far above this model's typical\n"
     "one. The estimate, interval and p-value beside it are unchanged and are the\n"
-    "ones the fit produced; the flag says only that little data stands behind\n"
-    "them. Treat the row as partially credible: pool the level, or re-specify the\n"
-    "term, before pricing on it."
+    "ones the fit produced. A flagged LEVEL is thin: treat it as partially\n"
+    "credible and pool it, or blend it toward the portfolio, before pricing on\n"
+    "it. A flagged COEFFICIENT is only wide next to its neighbours — a direction\n"
+    "the data does not identify does that, and so does a predictor on a much\n"
+    "smaller scale than the rest, so check its units before reading it as a\n"
+    "shortage of data."
 )
 _WALD_NOTE = (
     "Note: smooth p-values use Wood (2013) Bayesian test.\n"
@@ -509,14 +521,14 @@ class ModelSummary:
             ci_low: str,
             ci_high: str,
             sig: str = "",
-            qs: str = "",
+            advisory: str = "",
         ) -> str:
             numeric = (coef, se, z, p, ci_low, ci_high)
             rendered = "".join(
                 f" {value:>{width}s}"
                 for value, width in zip(numeric, coef_field_widths[:6], strict=True)
             )
-            return f"{rendered} {sig or '---':<3s} {qs or '---':<3s}"
+            return f"{rendered} {sig or '---':<3s} {advisory or '---':<3s}"
 
         lines: list[str] = []
 
@@ -1209,7 +1221,10 @@ class ModelSummary:
         if has_low_credibility:
             parts.append(
                 f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">{_LOW_CREDIBILITY_NOTE}</td></tr>'
+                f'color:#c60;border:none;">'
+                # The only multi-line note in this renderer that used to keep
+                # its source newlines, which HTML collapses into one paragraph.
+                f"{_LOW_CREDIBILITY_NOTE.replace(chr(10), '<br>')}</td></tr>"
             )
         for note in _editor_notes(info):
             parts.append(

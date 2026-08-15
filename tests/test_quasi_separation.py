@@ -495,6 +495,59 @@ class TestTheLegendDescribesTheRuleThatExists:
             assert "credibility" in lowered, f"{surface} does not say what the flag means"
 
 
+class TestTheNoteIsTrueOfTheSecondTriggerToo:
+    """The SE branch is not a volume test, so the note may not call it one.
+
+    Its threshold is this model's median parametric standard error times fifty,
+    which is not scale-invariant: rescaling ONE predictor moves its standard
+    error without moving the median, so the flag fires on units alone. A note
+    that told the reader little data stood behind such a row would be as wrong
+    as the separation claim it replaced, in the other direction.
+    """
+
+    @staticmethod
+    def _rescaled_predictor(scale):
+        rng = np.random.default_rng(4)
+        n = 5000
+        a = rng.normal(0, 1, n)
+        b = rng.normal(0, 1, n)
+        c = rng.normal(0, 1, n)
+        y = 1.0 + 0.5 * a + 0.3 * b + 0.2 * c + rng.normal(0, 0.5, n)
+        X = pd.DataFrame({"a": a, "b": b, "c": c * scale})
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={"a": Numeric(), "b": Numeric(), "c": Numeric()},
+        )
+        model.fit(X, y)
+        return model, len(X)
+
+    def test_the_flag_fires_on_units_alone(self):
+        plain, _ = self._rescaled_predictor(1.0)
+        rescaled, n_rows = self._rescaled_predictor(1e-6)
+
+        before = next(r for r in plain.summary()._coef_rows if r.name == "c")
+        after = next(r for r in rescaled.summary()._coef_rows if r.name == "c")
+
+        # Same fit: the rescaling is a change of units, not of information.
+        assert after.p == pytest.approx(before.p, abs=1e-12)
+        assert abs(after.z) == pytest.approx(abs(before.z), rel=1e-6)
+        # But the standard error moves by the scale factor, and the flag follows.
+        assert after.se > before.se * 1e5
+        assert before.quasi_separated is False
+        assert after.quasi_separated is True
+        # With every one of the fit's rows behind it.
+        assert n_rows == 5000
+
+    def test_the_note_sends_the_reader_to_the_units_first(self):
+        rescaled, _ = self._rescaled_predictor(1e-6)
+        text = str(rescaled.summary()).lower()
+
+        assert "units" in text
+        # And it does not attribute this row to a shortage of data.
+        assert "little data stands behind" not in text
+
+
 class TestColumnAlignment:
     """Sig and LC columns must not break border alignment."""
 
