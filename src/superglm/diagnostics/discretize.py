@@ -324,7 +324,14 @@ def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     """
     if getattr(ispec, "reconstruct", None) is None:
         return None
-    if isinstance(ispec, _non_grid_builtin_interactions()):
+    # ``type(...) in``, not ``isinstance``: a SUBCLASS of a listed type is not
+    # listed, and it can override ``reconstruct`` to return a surface.  The
+    # exporter would ship it as a grid on the contract while an isinstance
+    # short-circuit refused it here -- the sixth expression of the same
+    # exporter-accepts/sweep-refuses fork, introduced by this very speedup.
+    # An exact-type check makes that case unreachable rather than untested,
+    # and makes the sentence above literally true.
+    if type(ispec) in _non_grid_builtin_interactions():
         return None
     raw = reconstruct_interaction(ispec, beta, n_points)
     # The exporter's test verbatim -- a key-subset check and nothing else.  An
