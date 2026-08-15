@@ -1186,6 +1186,49 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
             "each must be listed as a non-grid built-in or be one of the two grid types"
         )
 
+    def test_a_subclass_of_a_listed_type_is_still_classified_by_contract(self):
+        """The fast path lists exact types, so a subclass is not short-circuited.
+
+        A caller can subclass a shipped non-grid type and override
+        ``reconstruct`` to return a surface. The exporter ships that as a grid
+        on the contract, so an ``isinstance`` short-circuit here would refuse
+        the same interaction and take the payload down -- the same
+        exporter-accepts/sweep-refuses fork five earlier rounds each closed,
+        reintroduced by the speedup itself.
+        """
+        from superglm.diagnostics.discretize import _grid_reconstruction
+        from superglm.features.interaction import SplineCategorical
+
+        class _GridSubclass(SplineCategorical):
+            def __init__(self):  # noqa: D107 - stub, never built
+                pass
+
+            def reconstruct(self, beta, n_points=50):
+                axis = np.linspace(0.0, 1.0, 3)
+                surface = np.zeros((3, 3))
+                return {
+                    "x1": axis,
+                    "x2": axis,
+                    "relativity": np.exp(surface),
+                    "log_relativity": surface,
+                    "interaction": True,
+                }
+
+        # The exporter's own predicate accepts it...
+        raw = _GridSubclass().reconstruct(np.zeros(1), n_points=3)
+        assert {"x1", "x2", "relativity"} <= set(raw)
+        # ...so the sweep must too, rather than short-circuiting on the base.
+        assert _grid_reconstruction(_GridSubclass(), np.zeros(1), 3) is not None
+
+        # And the exact listed type is still short-circuited, which is the
+        # speedup the fast path exists for.
+        assert (
+            type(_GridSubclass())
+            not in __import__(
+                "superglm.diagnostics.discretize", fromlist=["x"]
+            )._non_grid_builtin_interactions()
+        )
+
     def test_an_unusable_reconstructed_factor_is_refused(self):
         """A caller's grid can hand back something that is not a factor.
 
