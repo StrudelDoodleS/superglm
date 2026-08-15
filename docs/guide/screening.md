@@ -427,10 +427,21 @@ discretize at all, so OC pairs stay exact on both sides.
   pair the ceiling above refuses is retried through a kernel that factorizes
   that arrow in time and memory *linear* in the level count, rather than
   cubic and quadratic. The dense path still scores every pair it can,
-  unchanged; the structured path only extends where it stops. Measured end to
-  end, best of three, one BLAS thread: 200 levels 0.013 s, 1,000 levels
-  0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124* levels the
-  dense path tops out at. Above roughly five thousand levels the binding cost
+  unchanged; the structured path only extends where it stops. The
+  block-dimension ceiling is not the only place it stops, so it is not the
+  only door into the kernel: a pair whose *support* intermediate
+  `support * (L-1)^2 + L * k_spline^2` blows the same budget is handed over
+  too, whenever the structured path's transposed intermediate
+  `support * k_spline^2` still fits — which happens with the dense block far
+  below the ceiling. Measured: a 22-level factor against a `ps(8)` margin with
+  46,119 distinct values is scored by the kernel, exactly, at a block
+  dimension of 231 against the ceiling of 1,357. Exhausting the binning
+  fallback is a third door. So do not read the level count alone to decide
+  which kernel scored a pair.
+  Measured end to end, best of three, one BLAS thread: 200 levels 0.013 s,
+  1,000 levels 0.048 s, 5,000 levels 0.32 s — against 0.40 s for the *124*
+  levels the dense path tops out at when the block ceiling is what binds.
+  Above roughly five thousand levels the binding cost
   is no longer screening but fitting the mains model the screen runs against,
   whose factor contributes one column per level and which no `discrete=`
   setting compresses — discretization is support compression for *continuous*
