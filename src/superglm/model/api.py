@@ -794,10 +794,10 @@ class SuperGLM:
         at 1e5, 292 at 5e4, 170 at 1e4, with an allocation gate
         ``k <= 2 * sqrt(max_cells)`` binding instead below ``max_cells``
         ~3906 (the crossover is ~15625 for an unpenalized block, so a wide
-        ``cat_cat`` reaches the allocation gate four times sooner).
-        Family, link, ``phi``, penalty order, basis
-        kind, prior weights and the ``edf0`` ladder move none of it; only the
-        block's own width does, and for ``spline_cat`` that width is
+        ``cat_cat`` reaches the allocation gate four times sooner).  Family,
+        link, ``phi``, penalty order, basis kind, prior weights and the
+        ``edf0`` ladder move none of it; only the block's own width does,
+        and for ``spline_cat`` that width is
         ``k_spline`` times the factor's CONTRAST count — the levels that
         carry a column, not the declared universe, since a level with no
         effective training rows is pinned to base and contributes none.
