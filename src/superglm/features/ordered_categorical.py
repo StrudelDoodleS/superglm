@@ -754,6 +754,18 @@ class OrderedCategorical:
     # ``getattr`` with a default rather than the inner property, because a
     # Piecewise or Polynomial inner basis takes no constraint at all and must
     # answer "none declared" rather than raise.
+    #
+    # The legacy spelling (``monotone``/``monotone_mode``) is DELIBERATELY not
+    # forwarded. Every canonical reader spells
+    # ``getattr(spec, "constraint_kind", getattr(spec, "monotone", None))``,
+    # reading the canonical name first, so forwarding the pair below already
+    # answers all of them; adding the legacy pair would put a deprecated
+    # spelling onto a public surface that never had one, and give the wrapper
+    # two names to keep in step. The consequence to know: a reader spelling
+    # ONLY ``getattr(spec, "monotone", None)`` gets ``None`` from an ordered
+    # term. Two do -- both inside ``isinstance(spec, _SplineBase)`` branches
+    # that an ordered term cannot enter, so neither can observe the gap. A new
+    # reader must use the canonical name.
 
     @property
     def constraint_kind(self) -> str | None:
