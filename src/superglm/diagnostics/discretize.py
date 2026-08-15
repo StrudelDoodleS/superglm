@@ -291,7 +291,12 @@ def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     if getattr(ispec, "reconstruct", None) is None:
         return None
     raw = reconstruct_interaction(ispec, beta, n_points)
-    if not isinstance(raw, dict) or not _GRID_RECONSTRUCTION_KEYS <= set(raw):
+    # The exporter's test verbatim -- a key-subset check and nothing else.  An
+    # ``isinstance(raw, dict)`` beside it is stricter than what ships: a mapping
+    # that is not a ``dict`` (a ``UserDict``, say) is exported as a grid, since
+    # ``_interaction_blocks`` only iterates keys and subscripts values, and
+    # would then be refused here -- taking the whole payload down.
+    if not _GRID_RECONSTRUCTION_KEYS <= set(raw):
         return None
     return raw
 
