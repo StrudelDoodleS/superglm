@@ -633,8 +633,23 @@ class TestOrderedCategoricalShapeDispatch:
         slack = _monotone_slack(after)
         if direction == "increasing":
             assert np.all(steps >= -slack), f"not increasing: {steps}"
+            # One-sided monotonicity alone is satisfied by an all-zero
+            # collapsed block, so pin that the repaired curve still carries
+            # the truth's overall rise rather than having gone flat.
+            assert after[-1] - after[0] > 0.5 * (effect[-1] - effect[0]), after
         else:
             assert np.all(steps <= slack), f"not decreasing: {steps}"
+            # NOT a mirror of the branch above, and the asymmetry is the point.
+            # The fixture's truth rises overall, so the weighted projection of
+            # it onto the DECREASING cone is essentially the constant -- which
+            # means `steps <= slack` here is satisfied by exactly the collapsed
+            # block the increasing branch guards against, and cannot be the
+            # discriminating assertion. What this arm actually pins is that the
+            # engine ran with the direction it was handed: the recorded repair
+            # below carries `kind == "decreasing"`, and the curve had to move a
+            # long way to get flat. Asserting a rise here would be asserting
+            # the constraint failed.
+            assert float(np.max(np.abs(after - before))) > 0.25 * designed_dip, after
 
         # Pin the DISPATCH as well, not just the shape: a monotone curve alone
         # could come from anywhere, but a recorded repair means the engine saw
@@ -643,6 +658,96 @@ class TestOrderedCategoricalShapeDispatch:
         repair = model._shape_repairs["band"]
         assert repair.kind == direction
         assert repair.max_violation_after <= repair.max_violation_before
+
+    @pytest.mark.parametrize("kind", ["cr", "ps"])
+    def test_postfit_repair_matches_the_unwrapped_spline(self, dipping_ordinal_data, kind):
+        """The definition of the fix: the wrapper reaches the engine the plain
+        term already used, so the two must agree.
+
+        A shape assertion alone cannot say that. It passes for any repair that
+        happens to produce a monotone curve, including one that repaired the
+        wrong coefficient space or weighted the grid by the wrong rows. Pinning
+        the wrapped result against an unwrapped ``Spline`` on the same mapped
+        level positions, same knots, same constraint, same data, says the
+        stronger thing -- and would fail loudly on a future change that made the
+        two diverge, instead of requiring the numbers to be re-measured by hand.
+        """
+        from superglm.features.spline import Spline
+
+        X, y, levels, _ = dipping_ordinal_data
+        # The positions `OrderedCategorical` maps `order=` onto, made explicit.
+        positions = np.linspace(0.0, 1.0, len(levels))
+        X = X.copy()
+        X["pos"] = positions[[levels.index(lev) for lev in X["band"]]]
+        constraint = Constraint.postfit.increasing
+
+        wrapped = SuperGLM(
+            family="gaussian",
+            features={
+                "band": OrderedCategorical(
+                    order=levels, basis=Spline(kind=kind, n_knots=8, constraint=constraint)
+                )
+            },
+            selection_penalty=0.0,
+        ).fit(X, y)
+        plain = SuperGLM(
+            family="gaussian",
+            features={"pos": Spline(kind=kind, n_knots=8, constraint=constraint)},
+            selection_penalty=0.0,
+        ).fit(X, y)
+
+        wrapped.apply_shape_postfit(X)
+        plain.apply_shape_postfit(X)
+
+        wrapped_curve = _level_curve(wrapped, "band", levels)
+        plain_curve = np.asarray(plain.predict(pd.DataFrame({"pos": positions})), dtype=float)
+        plain_curve = plain_curve - plain_curve[0]
+
+        # Same design, same solve, differing only in the order of a handful of
+        # float operations on the way in, so the agreement is a roundoff bound
+        # off the curve's own scale rather than a fitted tolerance.
+        scale = max(1.0, float(np.max(np.abs(wrapped_curve))))
+        np.testing.assert_allclose(wrapped_curve, plain_curve, rtol=0.0, atol=1e-6 * scale)
+        assert wrapped._shape_repairs["band"].max_violation_before == pytest.approx(
+            plain._shape_repairs["pos"].max_violation_before, rel=1e-9
+        )
+
+    def test_postfit_repair_on_a_selected_wrapper_refuses_rather_than_no_ops(
+        self, dipping_ordinal_data
+    ):
+        """``select=True`` skips the inner spline's identifiability projection,
+        so the term's columns no longer sum to zero and a repair would move the
+        fitted mean. The repair engine's own publication check catches that and
+        refuses.
+
+        A plain ``Spline`` in the same configuration repairs instead, because
+        runtime canonicalization registers it and its recorded column means
+        cancel the shift; an ``OrderedCategorical`` is never registered, so
+        nothing cancels it. That asymmetry is filed separately -- what this
+        test pins is the part that must not regress: the ordered term REFUSES,
+        loudly, rather than returning silently unrepaired the way it did before
+        the constraint reached the engine at all.
+        """
+        from superglm.features.spline import Spline
+
+        X, y, levels, _ = dipping_ordinal_data
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "band": OrderedCategorical(
+                    order=levels,
+                    basis=Spline(
+                        kind="cr",
+                        n_knots=8,
+                        select=True,
+                        constraint=Constraint.postfit.increasing,
+                    ),
+                )
+            },
+            selection_penalty=0.0,
+        ).fit(X, y)
+        with pytest.raises(RuntimeError, match="fitted centering changed"):
+            model.apply_shape_postfit(X)
 
     def test_postfit_repair_composes_with_specials(self, dipping_ordinal_data):
         """``specials=`` is the one delegation shape the wrapper reshapes: the
@@ -697,6 +802,22 @@ class TestOrderedCategoricalShapeDispatch:
         )
         with pytest.raises(NotImplementedError, match="fit-time shape constraints"):
             model.fit_reml(X, y)
+
+    @pytest.mark.parametrize("basis", ["piecewise", "polynomial"])
+    def test_postfit_repair_refuses_a_basis_with_no_curve_geometry(self, basis):
+        """Selection is by declaration; resolving the curve is by type, and the
+        two can drift. Nothing declares a constraint on a non-spline basis
+        today, so this pins the refusal rather than a live path: the repair
+        must name the basis instead of dying on ``spec._lo`` several frames
+        later, the same way the QP forward now does."""
+        from superglm import Piecewise, Polynomial
+        from superglm.model.shape_ops import _curve_spec
+
+        levels = [f"B{i:02d}" for i in range(8)]
+        inner = Piecewise(breaks=["B03"]) if basis == "piecewise" else Polynomial(degree=2)
+        spec = OrderedCategorical(order=levels, basis=inner)
+        with pytest.raises(NotImplementedError, match="only implemented for spline bases"):
+            _curve_spec("band", spec)
 
     def test_qp_geometry_forward_names_a_basis_that_cannot_supply_it(self):
         """The wrapper forwards ``_build_monotone_constraints_raw``
