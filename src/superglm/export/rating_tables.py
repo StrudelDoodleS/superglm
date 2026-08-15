@@ -1237,7 +1237,13 @@ def build_rating_table_payload(
     exists precisely because one number on this sheet was read as more than it
     was.  ``impact_bins`` sweeps that ladder; an empty one means no sheet.
 
-    Two limits on that bound, both tracked rather than fixed here.  The sheet's
+    The bound is over the TERMS the sheet lists, not over every factor the
+    workbook carries, and three limits on it are tracked rather than fixed
+    here.  The binned OFFSET MULTIPLIER block -- the normal case for a
+    continuous exposure without ``offset_source=``, and measured above at
+    8.86e-02 -- is not swept at all, and the sweep passes the exact offset into
+    every call, so a categorical-only model with a continuous offset gets an
+    empty sheet beside a binned offset block (issue #314).  The sheet's
     discretised prediction goes through ``stabilize_eta`` and the workbook's
     product does not, so an approximation that pushes a row out of the link's
     range is clipped on the sheet and not in the table (issue #313).  And for a
@@ -1245,6 +1251,12 @@ def build_rating_table_payload(
     DISCLOSURE rather than a lookup: ``_continuous_interaction_block`` prints
     the axis in mapped-score space while a consumer holds the level label, and
     no block carries the map between them -- the same keying gap as issue #286.
+
+    Each swept resolution is also an INDEPENDENT measurement rather than a
+    point on a falling curve.  A finer grid shrinks the worst-case bound, but
+    successive nearest-node grids are not nested, so a nearer node can carry a
+    value further from a given row; the ``exported`` row is the one to read,
+    not the smallest number on the sheet.
 
     * The binning itself, which the ``discretization_impact`` sheet quantifies
       for the main-effect ``Spline`` and ``Polynomial`` blocks.
