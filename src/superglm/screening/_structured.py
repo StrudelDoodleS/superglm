@@ -1412,6 +1412,17 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
     T = float(np.sum(geometry.U_eff * x[:, :k_a]))
 
+    # THE TWO HALVES ARE INDEPENDENT, SO THEIR TEMPORARIES MUST NOT OVERLAP.
+    # ``f`` holds the arrow's ``Ginv`` and ``Y``, both level-sized, and ``b``
+    # and ``x`` are two more; the filter pass then allocates ``contracted``
+    # and ``cross``.  Nothing below reads any of the four, and the structured
+    # allocation gate is written for the stacks that have to COEXIST, so they
+    # are released here rather than at the end of the frame.  Measured peak of
+    # one evaluation at L = 2000, k_a = 13: 26.18 -> 19.46 MB, which is the
+    # 6.72 MB those four arrays hold (Ginv 2000x14x14, Y 2000x14x14, b and x
+    # 2000x14) to three digits.
+    del f, b, x
+
     edf, uncertified = _filter_factor_sum(p, geometry, lam)
 
     # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
