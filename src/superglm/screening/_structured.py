@@ -943,7 +943,7 @@ class _PairGeometry:
     ceiling: float  # L * k_a
 
 
-def _pair_arrow(p: SplineCatPair, lam: float):
+def _pair_arrow(p: SplineCatPair, lam: float, penalty: NDArray | None = None):
     """``K(lambda)`` in arrow form: one ``(k_a + 1)`` block per level.
 
     Level q's block holds its tensor coefficients beside its own contrast;
@@ -951,11 +951,23 @@ def _pair_arrow(p: SplineCatPair, lam: float):
     every level shares.  ``C``'s spline-main rows are literally ``V``'s
     diagonal blocks — both are ``sum_i w_i A_i A_i'`` restricted to the level
     — so they are taken from the same array rather than reassembled.
+
+    **``penalty`` IS HOW THE TWO HALVES ARE MADE TO SCORE ONE PENCIL.**  The
+    ladder chooses lambda from ``edf``, which is evaluated against
+    ``rootS' rootS``, and then publishes a statistic from this factorization.
+    Adding ``p.S_a`` raw here would make those two different matrices whenever
+    the projection did anything -- and it is at ``lambda_hi = 1e10 * scale``
+    that the difference is largest, which is exactly a rung the ladder
+    publishes.  Measured before this argument was threaded through: on a
+    nullity-two pair the high-edge statistic reads 2.999250 against 2.821425,
+    a 5.9e-02 relative gap, on a penalty perturbation of ``2.2e-14``.  The
+    caller passes the same projection ``edf`` uses; ``None`` keeps ``S_a`` for
+    the callers that have no geometry to hand.
     """
     L, k_a = p.dims
     g, r = k_a + 1, 1 + k_a
     G = _unpenalized_blocks(p)
-    G[:, :k_a, :k_a] += lam * p.S_a
+    G[:, :k_a, :k_a] += lam * (p.S_a if penalty is None else penalty)
     E = np.empty((L, r, g), dtype=np.float64)
     E[:, 0, :k_a] = p.c
     E[:, 0, k_a] = p.m
@@ -1019,13 +1031,14 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     trace_S = float(np.trace(p.S_a))
     kept_S = float(np.sum(np.square(root_penalty)))
     clip = abs(trace_S - kept_S) / max(abs(trace_S), np.finfo(np.float64).tiny)
-    # THE TWO HALVES MUST BE SCORING THE SAME PENCIL.  ``edf`` is evaluated
-    # against ``rootS' rootS``, the PSD projection of ``S_a``; the statistic is
-    # evaluated against ``S_a`` itself, because ``_pair_arrow`` adds it raw.
-    # That is harmless exactly while the projection removes roundoff, and
-    # nothing above checks that it does -- so a materially indefinite penalty
-    # would have the ladder choosing lambda on one pencil and publishing a
-    # statistic from another.
+    # THE TWO HALVES SCORE ONE PENCIL AND THIS IS THE SECOND LINE, NOT THE
+    # FIRST.  ``_evaluate`` hands this same projection to ``_pair_arrow``, so
+    # the statistic and the edf are built from ``rootS' rootS`` together; what
+    # is left to check is that the PROJECTION ITSELF is roundoff, because the
+    # DENSE path still assembles ``S_ti`` raw and the two routes have to stay
+    # comparable.  A projection that removed something material would mean the
+    # structured route was scoring a different model from the one the caller
+    # specified, and silently.
     #
     # The certification is the eigensolver's own documented error bound rather
     # than a chosen tolerance.  A symmetric eigendecomposition returns
@@ -1378,10 +1391,12 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     factors ``p.R`` and the compacted overlap rows, which is why the two are
     two factorizations rather than one.  What that buys is stated in the
     module docstring under "WHAT THE MOMENTS COST"; what it costs is one extra
-    factorization per evaluation, measured there too.
+    factorization per evaluation, measured there too.  The one thing they DO
+    share is the penalty: both are built from ``rootS' rootS``, so the lambda
+    the ladder chooses and the statistic it publishes come from one pencil.
     """
     L, k_a = p.dims
-    f = _pair_arrow(p, lam)
+    f = _pair_arrow(p, lam, geometry.root_penalty.T @ geometry.root_penalty)
     b = np.zeros((L, k_a + 1), dtype=np.float64)
     b[:, :k_a] = geometry.U_eff
     x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
