@@ -171,6 +171,7 @@ def test_expanded_display_reports_group_level_qs_diagnostics_once():
 
     spec, rows, groups = _categorical_case()
     rows[1].quasi_separated = True
+    rows[1].advisory_trigger = "thin_level"
     rows[1].level_n_obs = 12
     rows[1].level_exposure_share = 0.004
     presentation = build_summary_level_display(
@@ -185,6 +186,19 @@ def test_expanded_display_reports_group_level_qs_diagnostics_once():
     assert [row.quasi_separated for row in grouped_members] == [True, True]
     assert [row.level_n_obs for row in grouped_members] == [12, None]
     assert [row.level_exposure_share for row in grouped_members] == [0.004, None]
+    # The diagnostics are dropped from the later member so the footnote does
+    # not double-count, but the TRIGGER survives on both -- a renderer that
+    # re-derived it from ``level_n_obs`` here would call the second member an
+    # outsized standard error, on a categorical level with no units whose
+    # standard error was never tested (issue #239).
+    assert [row.advisory_trigger for row in grouped_members] == ["thin_level", "thin_level"]
+
+    from superglm.editor.summaries import _compact_summary_row
+
+    assert [_compact_summary_row(row)["advisory_kind"] for row in grouped_members] == [
+        "thin_level",
+        "thin_level",
+    ]
     text = str(summary)
     html = summary._repr_html_()
     assert text.count("12 obs (0.40% exposure)") == 1

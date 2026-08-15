@@ -338,15 +338,23 @@ def _summary_advisory_kind(row, quasi_separated: bool) -> str:
     """Which of the two disjoint triggers fired on this row.
 
     The browser renders a per-row tooltip, which is a row-level statement, and
-    the two triggers license different ones: a thin level really is short of
-    experience, while an outsized standard error can be a predictor on a much
-    smaller scale with the whole sample behind it. The SE fallback skips any
-    row that has per-level counts, so ``level_n_obs is not None`` is exactly
-    the volume branch -- the same discriminator the exported Warning cell uses.
+    the two license different ones: a thin level really is short of experience,
+    while an outsized standard error can be a predictor on a much smaller scale
+    with the whole sample behind it.
+
+    Read off ``advisory_trigger``, recorded where the flag is set.  Re-deriving
+    it from ``level_n_obs`` is wrong HERE specifically: this payload is built
+    from ``_display_rows``, and the expanded level display strips the per-level
+    diagnostics from all but the first member of a grouped level so the
+    footnote does not double-count -- so every later member of a pooled thin
+    level would be labelled an outsized standard error, on a row with no units
+    whose standard error was never tested, while the workbook (which reads
+    ``_coef_rows``) called the same coefficient thin.
     """
     if not quasi_separated:
         return ""
-    return "thin_level" if row.level_n_obs is not None else "outsized_se"
+    kind = str(getattr(row, "advisory_trigger", "") or "")
+    return kind if kind in {"thin_level", "outsized_se"} else "thin_level"
 
 
 def _summary_sig_class(p_value: float | None) -> str:

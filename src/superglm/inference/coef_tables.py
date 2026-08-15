@@ -1250,8 +1250,10 @@ def build_coef_rows(
         # Data-driven: insufficient observations or exposure
         if r.level_n_obs is not None and r.level_n_obs < 20:
             r.quasi_separated = True
+            r.advisory_trigger = "thin_level"
         elif r.level_exposure_share is not None and r.level_exposure_share < 0.0005:
             r.quasi_separated = True
+            r.advisory_trigger = "thin_level"
 
     # SE-based fallback for rows without per-level diagnostics
     parametric_ses = [
@@ -1275,6 +1277,7 @@ def build_coef_rows(
                 continue  # already handled by data-driven check
             if r.se is not None and r.se > sep_threshold:
                 r.quasi_separated = True
+                r.advisory_trigger = "outsized_se"
 
     return rows
 

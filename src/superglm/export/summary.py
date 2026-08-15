@@ -348,11 +348,20 @@ def _significance(p_value: float | None) -> str:
     return ""
 
 
+_ADVISORY_WARNINGS = {"thin_level": _THIN_LEVEL_WARNING, "outsized_se": _OUTSIZED_SE_WARNING}
+
+
 def _advisory_warning(row: _CoefRow, quasi_separated: bool) -> str:
-    """Name the trigger that fired, not the union of the two."""
+    """Name the trigger that fired, not the union of the two.
+
+    Read off ``advisory_trigger``, which is recorded where the flag is set,
+    rather than re-derived from ``level_n_obs`` here: the level display strips
+    those diagnostics from all but the first member of a grouped level, so a
+    renderer that re-derives disagrees with this one about the same row.
+    """
     if not quasi_separated:
         return ""
-    return _THIN_LEVEL_WARNING if row.level_n_obs is not None else _OUTSIZED_SE_WARNING
+    return _ADVISORY_WARNINGS.get(row.advisory_trigger, _THIN_LEVEL_WARNING)
 
 
 def _term_rows(model: SuperGLM, source: _CompactSummarySource) -> tuple[SummaryTermRow, ...]:
