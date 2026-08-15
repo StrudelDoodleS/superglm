@@ -1875,17 +1875,99 @@ def test_the_impact_sheet_covers_the_binned_continuous_interaction():
     assert set(sheet["feature"]) == {"age", "density", "age:density"}
 
     # And it carries the same information as the main-effect rows, rather than a
-    # name beside a row of blanks.
-    row = sheet[sheet["feature"] == "age:density"]
-    assert len(row) == 1
-    assert not row.isna().to_numpy().any()
-    # ``actual_bins`` counts the distinct factors the block carries, which for a
-    # grid is its cells: the sweep asked for 10 points per axis.
-    assert int(row["actual_bins"].iloc[0]) == 100
+    # name beside a row of blanks.  Swept at 10 and again at the exported 20,
+    # which the sweep folds in so a row describes the table in hand.
+    rows = sheet[(sheet["feature"] == "age:density") & (sheet["n_bins"] == 10)]
+    assert len(rows) == 1
+    assert not rows.isna().to_numpy().any()
+    # ``actual_bins`` counts the block's own table rows, which for a grid is its
+    # cells: 10 nodes per axis.
+    assert int(rows["actual_bins"].iloc[0]) == 100
     for column in ("deviance_change_pct", "mean_abs_prediction_change_pct"):
-        assert float(row[column].iloc[0]) == pytest.approx(
-            float(sheet[sheet["feature"] == "age"][column].iloc[0])
+        assert float(rows[column].iloc[0]) == pytest.approx(
+            float(sheet[(sheet["feature"] == "age") & (sheet["n_bins"] == 10)][column].iloc[0])
         )
+
+
+# A grid cell is a dot product of two marginal bases against the coefficient
+# block, and the exported value and the oracle below reach it by different
+# associations -- ``reconstruct`` through a matrix chain, ``score`` through an
+# einsum.  Charging each the standard p-term inner-product bound at p = 49
+# coefficients, twice, and one ulp for the ``exp``, gives ~100 u; 128 u is that
+# rounded up.  Derived from the operation count, not from the observed gap.
+_GRID_CELL_RTOL = 128 * _EPS
+
+
+def test_the_exported_grids_orientation_is_load_bearing():
+    """Which axis is which cannot be checked from the grid's shape.
+
+    Both axes carry ``n_points`` nodes, so the surface is square and a
+    transposition changes no shape.  Worse, the sweep and the workbook
+    reconstruction read it through the SAME transpose, so a joint flip cancels
+    in ``test_the_sheets_prediction_change_is_the_whole_workbooks_error`` and
+    that test passes with both sides wrong.
+
+    Pinned here against the model instead: the cell under row key ``x1`` and
+    column header ``x2`` must be the fitted interaction's own factor at
+    ``(x1, x2)``.  The fixture's axes are asymmetric on purpose -- ``age``
+    18-80 against ``density`` 0-10 -- so a swapped pair is not merely a
+    different number, it is off the other axis's domain entirely, and the
+    corner cells below are the strongest form of that.
+
+    The spec is consulted here, unlike everywhere else in this module, because
+    it is the ORACLE: the claim is that the sheet agrees with the model, and
+    only the model can say what it should have been.
+    """
+    model, X, y = _grid_interaction_frame()
+    payload = build_rating_table_payload(model, X, y, n_bins=12, impact_bins=(12,))
+    block = next(b for b in payload.interactions if b.name == "age:density")
+    assert block.kind == "grid"
+
+    table = block.table
+    axis_age = table["age"].to_numpy(dtype=np.float64)
+    axis_density = np.array([float(c) for c in table.columns[1:]], dtype=np.float64)
+    assert axis_age[0] != pytest.approx(axis_density[0])
+
+    ispec = model._interaction_specs["age:density"]
+    beta = rating_tables._interaction_beta(model, "age:density")
+    last = len(axis_age) - 1
+    for i, j in ((0, last), (last, 0), (0, 0), (last, last), (3, 8)):
+        expected = float(
+            np.exp(ispec.score(np.array([axis_age[i]]), np.array([axis_density[j]]), beta))[0]
+        )
+        assert float(table.iloc[i, j + 1]) == pytest.approx(expected, rel=_GRID_CELL_RTOL), (
+            f"cell ({i}, {j}) is not the model's factor at "
+            f"(age={axis_age[i]}, density={axis_density[j]})"
+        )
+
+
+def test_the_sheet_describes_the_workbook_that_was_actually_exported():
+    """A reader holds ONE table, and the sheet has to have a row about it.
+
+    The defaults are ``n_bins=150`` against ``impact_bins=(20, 50, 100, 200,
+    250)``, so before this the sheet described five resolutions and not the one
+    shipped -- and since the error falls with resolution, the 200 and 250 rows
+    reported LESS movement than the exported table carries.  A reader taking
+    the smallest number on the sheet as their bound got one below their own
+    error, which is the understatement this whole change is about.
+    """
+    model, X, y = _grid_interaction_frame()
+    payload = build_rating_table_payload(model, X, y, n_bins=37, impact_bins=(20, 50))
+    sheet = payload.discretization_impact
+
+    exported = sheet[sheet["exported"]]
+    assert set(exported["n_bins"]) == {37}
+    assert set(sheet[~sheet["exported"]]["n_bins"]) == {20, 50}
+    assert set(exported["feature"]) == {"age", "density", "age:density"}
+
+    # And the marked row is the one that describes the blocks in hand.
+    row = exported.iloc[0]
+    predicted = model.predict(X)
+    workbook = _predict_from_payload(payload, X)
+    moved_pct = np.abs(workbook - predicted) / predicted * 100.0
+    assert float(row["max_abs_prediction_change_pct"]) == pytest.approx(
+        float(moved_pct.max()), rel=_RECONSTRUCTION_RTOL
+    )
 
 
 def test_the_sheets_prediction_change_is_the_whole_workbooks_error():
