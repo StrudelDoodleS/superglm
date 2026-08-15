@@ -859,64 +859,91 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
                 "interaction": True,
             }
 
-    class _DescendingAxes:
-        """A grid whose axes are supplied in descending order."""
+    class _Stub:
+        """A grid reconstructor with a surface that depends on axis 1 alone.
+
+        ``score`` returns zero, so the per-row replacement delta IS the surface
+        value at the node a risk lands on -- which makes the discretized
+        predictions read the lookup out loud.
+        """
 
         parent_names = ("a", "b")
 
+        def __init__(self, *, descending=False, inconsistent=False):
+            self.descending = descending
+            self.inconsistent = inconsistent
+
+        def score(self, x1, x2, beta):
+            return np.zeros(len(np.asarray(x1).ravel()))
+
         def reconstruct(self, beta, n_points=50):
-            x1 = np.array([3.0, 2.0, 1.0])
-            x2 = np.array([30.0, 20.0, 10.0])
-            surface = np.outer(x1, x2)
+            axis = np.array([3.0, 2.0, 1.0]) if self.descending else np.array([1.0, 2.0, 3.0])
+            other = (
+                np.array([30.0, 20.0, 10.0]) if self.descending else np.array([10.0, 20.0, 30.0])
+            )
+            # ``surface[j, i] = f(x1[i], x2[j])``, the convention both built-ins
+            # return and ``orient_grid_surface`` normalises: the value varies
+            # along the SECOND index here and along the first after orienting.
+            surface = np.repeat(axis[None, :], 3, axis=0)
             return {
-                "x1": x1,
-                "x2": x2,
+                "x1": axis,
+                "x2": other,
                 "relativity": np.exp(surface),
-                "log_relativity": surface,
+                # Zero where the exported ``relativity`` says otherwise, when
+                # asked for -- the two disagree only for a custom spec.
+                "log_relativity": np.zeros((3, 3)) if self.inconsistent else surface,
                 "interaction": True,
             }
+
+    @staticmethod
+    def _model_with(stub):
+        """A fitted model whose interaction spec is the stub.
+
+        Substituted after the fit and the prediction plan reset, so the sweep
+        reaches the stub through ``discretization_impact`` itself. Calling the
+        helpers directly would leave both fixes revertible with the tests still
+        green, which is the failure mode AGENTS.md's mutation requirement is
+        about.
+        """
+        rng = np.random.default_rng(2)
+        n = 300
+        df = pd.DataFrame({"a": rng.uniform(1.0, 3.0, n), "b": rng.uniform(10.0, 30.0, n)})
+        y = rng.poisson(np.exp(-1.0 + 0.1 * df["a"])).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={"a": Numeric(), "b": Numeric()},
+            interactions=[("a", "b")],
+        )
+        model.fit(df, y)
+        model._interaction_specs["a:b"] = stub
+        model._prediction_plan = None
+        return model, df, y
 
     def test_a_descending_axis_is_sorted_before_the_binary_search(self):
-        """``_nearest_grid_index`` is a binary search, so order is load-bearing.
+        """``_nearest_grid_index`` bisects, so axis order is load-bearing.
 
         The exporter preserves whatever order a reconstruction supplies and
-        applies no monotonicity gate, so a descending axis would map a risk
-        onto a non-nearest node while every cell count and metric kept claiming
-        the documented nearest-node lookup.
+        applies no monotonicity gate. With the axes descending, a binary search
+        maps a risk onto a non-nearest node while every cell count and metric
+        keeps claiming the documented nearest-node lookup.
+
+        Read through the predictions: the stub's surface is its own axis-1 node
+        value and its ``score`` is zero, so each row's delta must be the node
+        nearest its ``a``. Sorted, that is 1, 2 or 3.
         """
-        from superglm.diagnostics.discretize import _ascending_grid, _nearest_grid_index
+        model, df, y = self._model_with(self._Stub(descending=True))
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
-        spec = self._DescendingAxes()
-        raw = spec.reconstruct(np.zeros(1))
-        axis1, axis2, surface = _ascending_grid(
-            np.asarray(raw["x1"]), np.asarray(raw["x2"]), np.asarray(raw["log_relativity"])
-        )
+        table = result.interaction_tables["a:b"]
+        assert sorted(set(table[table.columns[0]])) == [1.0, 2.0, 3.0]
+        assert int(table["n_obs"].sum()) == len(df)
 
-        np.testing.assert_allclose(axis1, [1.0, 2.0, 3.0])
-        np.testing.assert_allclose(axis2, [10.0, 20.0, 30.0])
-        # The surface travels with its axes: every cell keeps its own pair.
-        np.testing.assert_allclose(surface, np.outer(axis1, axis2))
-        # And the nearest node is now genuinely the nearest one.
-        np.testing.assert_array_equal(
-            _nearest_grid_index(axis1, np.array([0.9, 2.1, 99.0])), [0, 1, 2]
-        )
-
-    class _InconsistentSurfaces:
-        """``relativity`` and ``log_relativity`` that disagree."""
-
-        parent_names = ("a", "b")
-
-        def reconstruct(self, beta, n_points=50):
-            x1 = np.linspace(0.0, 1.0, 3)
-            x2 = np.linspace(0.0, 1.0, 3)
-            exported = np.full((3, 3), 2.0)
-            return {
-                "x1": x1,
-                "x2": x2,
-                "relativity": exported,
-                "log_relativity": np.zeros((3, 3)),
-                "interaction": True,
-            }
+        delta = np.log(result.predictions / result.original_predictions)
+        expected = np.array([1.0, 2.0, 3.0])[
+            np.abs(df["a"].to_numpy()[:, None] - np.array([1.0, 2.0, 3.0])).argmin(axis=1)
+        ]
+        np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
     def test_the_swept_surface_is_the_one_the_workbook_prints(self):
         """``_continuous_interaction_block`` emits ``relativity``, so measure that.
@@ -924,19 +951,26 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         For the two built-ins the pair agrees to an ulp, but a custom
         reconstructor can return two surfaces that disagree -- and then
         measuring the one the workbook does not ship reports error for a table
-        nobody holds.
+        nobody holds. The stub's ``log_relativity`` is all zeros, so preferring
+        it would make every delta zero and the impact vanish.
         """
-        from superglm.diagnostics.discretize import _grid_reconstruction, orient_grid_surface
+        model, df, y = self._model_with(self._Stub(inconsistent=True))
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
-        spec = self._InconsistentSurfaces()
-        raw = _grid_reconstruction(spec, np.zeros(1), 3)
-        assert raw is not None
-        exported = orient_grid_surface(
-            "a:b", np.asarray(raw["x1"]), np.asarray(raw["x2"]), raw["relativity"]
+        delta = np.log(result.predictions / result.original_predictions)
+        nodes = np.array([1.0, 2.0, 3.0])
+        expected = nodes[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
+        np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
+        # Preferring ``log_relativity`` would have made every delta zero.
+        assert np.abs(delta).min() > 0.0
+
+        table = result.interaction_tables["a:b"]
+        np.testing.assert_allclose(
+            table["log_relativity"].to_numpy(),
+            np.log(table["relativity"].to_numpy()),
+            rtol=_NODE_EXACT_RTOL,
+            atol=0.0,
         )
-        np.testing.assert_allclose(np.log(exported), np.log(2.0))
-        # The field the sweep must NOT prefer.
-        np.testing.assert_allclose(np.asarray(raw["log_relativity"]), 0.0)
 
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
