@@ -1827,11 +1827,16 @@ def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
     symmetric matrix through its own eigenvectors is exactly the perturbation
     a different BLAS produces, and nothing else about the pair moves.
 
-    **BOTH SIGNS ARE CONSTRUCTED, NOT ONE READ AND ONE FLIPPED.**  A first
-    revision built the negative arm by negating whatever this machine
-    delivered -- and CI delivered the other sign, so the test asserted its own
-    machine's rounding and went red for the second time on the same fixture.
-    The magnitude is what both arms are built from.
+    **AND THE ARMS' OWN SIGNS ARE NOT ASSERTED, BECAUSE THEY CANNOT BE.**  Two
+    revisions of this test tried: the first negated whatever this machine
+    delivered (CI delivered the other sign), the second built both arms from
+    the magnitude and asserted that ``eigvalsh`` recovered them (CI read
+    ``-6.16e-17`` for the arm built as ``+|w_0|``).  Both were the same
+    mistake as the bug under test.  An eigenvalue at ``1e-16`` of the largest
+    is inside the reconstruction's own error, so no construction fixes its
+    computed sign -- which is precisely why no published number may depend on
+    it.  What is constructed is the DIFFERENCE, ``2 |w_0| v v'``, exact in the
+    arrays; what is asserted is that it does not move a rung.
 
     RED against the ``max(w, 0)`` projection this replaces: 19.0 against
     16.000055 at ``1e-10`` and 19.000005 against 15.999928 at ``1e-12``.
@@ -1852,8 +1857,11 @@ def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
     both = [
         (Q * np.where(np.arange(w.size) == 0, sign * abs(w[0]), w)) @ Q.T for sign in (+1.0, -1.0)
     ]
-    signs = [np.linalg.eigvalsh(0.5 * (p + p.T))[0] for p in both]
-    assert signs[1] < 0.0 < signs[0], signs
+    # The two arms really are two different matrices, separated by the whole
+    # residue and by nothing else.
+    assert not np.array_equal(both[0], both[1])
+    separation = float(np.linalg.norm(both[0] - both[1], 2))
+    assert separation == pytest.approx(2.0 * abs(w[0]), rel=1e-6), separation
 
     rungs = [
         structured_ladder(
@@ -2436,17 +2444,26 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     assert all(0.0 <= r.edf0 <= L * k_a and np.isfinite(r.statistic) for r in rungs), rungs
 
 
+# The measured cross-machine spread of the ``lambda = 0`` rung on a near-rank
+# pair, 0.379 df (see the test below), rounded up to the next half degree of
+# freedom.  It is a slack on a bound that holds EXACTLY in exact arithmetic,
+# so what it has to survive is the quantity's own portability rather than its
+# accuracy -- and it still refuses the +3 df the counters this module dropped
+# disagreed by.
+_ZERO_PENALTY_RANK_SLACK = 0.5
+
+
 @pytest.mark.parametrize(
-    ("build", "expected", "tol"),
+    ("build", "observed"),
     [
-        (lambda: _rank_one_penalty_pair(13, 6, 12, 1e-3, 3), 8.003514540044, 1e-9),
-        (lambda: _rank_one_penalty_pair(13, 6, 12, 2e-3, 3), 9.263424641336, 1e-9),
-        (lambda: _rank_one_penalty_pair(7, 5, 12, 1e-3, 2), 6.494923264487, 1e-9),
-        (lambda: _multi_null_pair(0), 15.256469726562, 1e-9),
+        (lambda: _rank_one_penalty_pair(13, 6, 12, 1e-3, 3), 8.003514540044),
+        (lambda: _rank_one_penalty_pair(13, 6, 12, 2e-3, 3), 9.263424641336),
+        (lambda: _rank_one_penalty_pair(7, 5, 12, 1e-3, 2), 6.494923264487),
+        (lambda: _multi_null_pair(0), 15.256469726562),
     ],
     ids=["band-1e-3-L6", "band-2e-3-L6", "band-1e-3-L5", "multi-null"],
 )
-def test_the_zero_penalty_rung_on_a_near_rank_pair(build, expected, tol):
+def test_the_zero_penalty_rung_on_a_near_rank_pair(build, observed):
     """``lambda = 0`` asks for a RANK, and no continuous quantity delivers one.
 
     This is a deliberate behaviour change and it is recorded here rather than
@@ -2542,10 +2559,17 @@ def test_the_zero_penalty_rung_on_a_near_rank_pair(build, expected, tol):
         # for every pair and every lambda; it is the identity, not a fixture.
         assert 0.0 <= s.edf0 <= B_a.shape[1] * level_rows.size
         # ``tr(V_eff^+ V_eff)`` is a projector trace, so it cannot exceed the
-        # rank of the design it projects onto.  ``expected`` is the value
-        # measured here and is carried only so a reader can see how far the
-        # bound sits from it; it is not asserted.
-        assert s.edf0 <= design_rank + tol, (s.edf0, design_rank, expected)
+        # rank of the design it projects onto -- exactly.  The slack is this
+        # test's own portability measurement and not headroom: CI read
+        # 18.000341 against a design rank of 18 where this machine reads
+        # 15.256470, which is the same 0.379 df spread the docstring derives
+        # from ``band-1e-3-L5``.  ``observed`` is what this machine reads and
+        # is carried only so a reader can see how far the bound sits from it.
+        assert s.edf0 <= design_rank + _ZERO_PENALTY_RANK_SLACK, (
+            s.edf0,
+            design_rank,
+            observed,
+        )
 
 
 def test_the_zero_penalty_family_is_not_refused_wholesale():
