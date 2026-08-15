@@ -83,12 +83,25 @@ _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 # "based on the available cell width", so there is no precision to claim.
 #
 # ``0.0000000000E+00`` is ten mantissa decimals plus the leading digit: eleven
-# significant digits at EVERY magnitude, one more than the ten this module
-# prints bin edges and axis values at, and well inside the fifteen Excel
+# significant digits at EVERY magnitude, and well inside the fifteen Excel
 # retains.  The base should not be the least precisely stated number on a sheet
-# whose other public strings are ``.10g``.
+# whose other public keys -- bin boundaries, interaction axis values -- are
+# printed at full round-trip precision.
 _BASE_RELATIVITY_CELL = "C2"
 _BASE_RELATIVITY_NUMBER_FORMAT = "0.0000000000E+00"
+
+# ...and a format Excel cannot fit renders as ``########``, which is the one
+# cell on the sheet a reader most needs to be able to read.  ``_autosize``
+# cannot see it: it measures ``str(cell.value)``, the raw float, and the base
+# sits in a column whose other entries are a block's ``Weight`` values -- short
+# whole numbers on an ordinary tariff, and absent entirely on an intercept-only
+# export -- so the column lands on the floor of 12 while the rendering needs
+# more.  Derived from the format rather than observed: one leading digit, the
+# decimal separator, ten mantissa decimals, ``E``, the exponent sign, and up to
+# three exponent digits (float64 reaches E+308) is 17 characters; the base is
+# ``exp`` of a real number so it is never negative and never needs an
+# eighteenth.  Plus the two columns of padding ``_autosize`` already applies.
+_BASE_RELATIVITY_MIN_WIDTH = 17 + 2
 
 
 def _resolve_workbook_target(
@@ -381,6 +394,15 @@ def write_rating_table_workbook(
 
     for sheet in wb.worksheets:
         _autosize(sheet)
+
+    # After ``_autosize``, and a floor rather than an assignment, so a block
+    # whose own column is wider keeps its width.
+    base_column = ws[_BASE_RELATIVITY_CELL].column_letter
+    ws.column_dimensions[base_column].width = max(
+        ws.column_dimensions[base_column].width,
+        _BASE_RELATIVITY_MIN_WIDTH,
+    )
+
     summary_ws.column_dimensions["A"].width = 32
     summary_ws.column_dimensions["B"].width = 24
     for column in "CDEFGHIJKLMNO":
