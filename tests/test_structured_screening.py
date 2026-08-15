@@ -646,15 +646,66 @@ def test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff(monkeypatch):
     assert st.structured_ladder(pair, budgets=BUDGETS) is None
 
 
+def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
+    """One projection, both halves -- and the gap it closes is 5.9e-02.
+
+    The ladder chooses lambda from ``edf``, evaluated against
+    ``rootS' rootS``, and then publishes a statistic from ``_pair_arrow``.
+    If that added ``p.S_a`` raw, the two would be different matrices wherever
+    the projection did anything, and the largest ``lambda`` in the bracket is
+    ``lambda_hi = 1e10 * scale`` -- a rung the ladder publishes, not a corner.
+
+    Measured on the nullity-two pair, where the penalty's smallest eigenvalue
+    is a ``2.2e-14`` residue: the high-edge statistic reads **2.999250** on the
+    raw pencil and **2.821425** on the projected one, a 5.9e-02 relative gap
+    from a perturbation twelve orders below the penalty's scale.  Which of the
+    two is published is therefore not a detail.
+
+    What is asserted is the identity, not the gap: ``_evaluate``'s statistic
+    must equal the one the projected pencil gives and must NOT equal the raw
+    one.  RED against passing ``p.S_a`` -- the equality and the inequality swap
+    places.
+    """
+    import superglm.screening._structured as st
+
+    grab = _multi_null_pair(0)
+    B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
+    pair = spline_cat_moments(B_a, S_a, S_cell, W_cell, level_rows)
+    geometry = st._profile(pair)
+    lam = _ladder_high_edge(pair)
+
+    projected = geometry.root_penalty.T @ geometry.root_penalty
+    assert not np.allclose(projected, pair.S_a, rtol=0.0, atol=0.0)
+
+    def statistic(penalty):
+        f = st._pair_arrow(pair, lam, penalty)
+        L, k_a = pair.dims
+        b = np.zeros((L, k_a + 1))
+        b[:, :k_a] = geometry.U_eff
+        x, _ = f.solve(b, np.zeros(1 + k_a))
+        return float(np.sum(geometry.U_eff * x[:, :k_a]))
+
+    published = st._evaluate(pair, geometry, lam)[0]
+    on_projected, on_raw = statistic(projected), statistic(pair.S_a)
+
+    # The two pencils are far enough apart here that the identity below is a
+    # real choice: a relative gap of 1e-2 is four orders above the 1e-6 the
+    # ladder's own tolerance works to.
+    assert abs(on_raw - on_projected) / abs(on_raw) > 1e-2, (on_raw, on_projected)
+    assert published == on_projected, (published, on_projected)
+    assert published != on_raw, (published, on_raw)
+
+
 def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch):
     """``edf`` uses the PSD projection of ``S_a``; the statistic uses ``S_a``.
 
-    ``_pair_arrow`` adds ``lam * p.S_a`` raw, while the filter-factor sum is
-    built from ``rootS`` with the negative eigenvalues projected out
-    (:func:`_penalty_root`).  While that projection removes roundoff the two
-    are the same pencil to within their own error; once it removes anything
-    material, the ladder would be choosing lambda on one pencil and
-    publishing a statistic from another, and nothing would say so.
+    ``_evaluate`` hands the same ``rootS' rootS`` to ``_pair_arrow`` that the
+    filter-factor sum uses, so the two halves score one pencil by
+    construction.  What that does NOT settle is whether the projection is
+    entitled to change the pencil at all: the DENSE route still assembles
+    ``S_ti`` raw, so a projection that removed something material would leave
+    the structured route scoring a different model from the one the caller
+    specified, and only on the pairs wide enough to route here.
 
     The certification is the eigensolver's documented bound, ``n^2 eps``
     relative trace mass -- see :func:`_profile`.  Both arms are checked:
@@ -2239,9 +2290,9 @@ def test_the_pair_geometry_is_built_once_and_carries_no_lambda(build, budget, mu
         profiles.append(1)
         return real_profile(pair)
 
-    def spy_arrow(pair, lam):
+    def spy_arrow(pair, lam, *args, **kwargs):
         factors.append(float(lam))
-        return real_arrow(pair, lam)
+        return real_arrow(pair, lam, *args, **kwargs)
 
     st._profile, st._pair_arrow = spy_profile, spy_arrow
     try:
