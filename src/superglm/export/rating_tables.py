@@ -588,9 +588,13 @@ def _require_usable_relativities_export(
             "0.0 zeroes every premium it touches while every relativity ratio on the "
             "sheet still reads correctly. Two blocks whose contributions cancel can "
             "leave the prediction well behaved while their individual factors do not, "
-            "so this is checked per block. The fit is quasi-separated or mis-scaled, "
-            "or the exported grid reaches far outside the data; refit, rescale or "
-            "narrow the term rather than export it."
+            "so this is checked per block. On a main-effect block the fit is "
+            "quasi-separated or mis-scaled: refit or rescale. On an interaction block "
+            "the cause is more often the sampled grid, which spans the parents' "
+            "bounding box and cannot be narrowed: if the data occupies only part of "
+            "that box, the corner cells are extrapolation with no exposure behind "
+            "them, and the remedy is to refit the parents at a lower degree or with "
+            "fewer knots."
         )
 
 
@@ -706,7 +710,16 @@ def _offset_multiplier_block(
     rows: list[dict[str, str | float]] = []
     for b in range(actual_n_bins):
         mask = bin_idx == b
-        if not np.any(mask):
+        exposure = float(weights[mask].sum()) if np.any(mask) else 0.0
+        # Branching on the WEIGHT rather than on emptiness, because those are
+        # not the same condition and the difference is reachable.
+        # ``sample_weight`` is only validated non-negative, and ``_compute_edges``
+        # builds ``"uniform"`` edges from ``x[sample_weight > 0.0]`` -- so a bin
+        # can hold rows that between them carry no weight at all, at which point
+        # ``np.average`` raises ``ZeroDivisionError`` from inside NumPy.  A bin
+        # with no weight has no weighted mean to report, whether or not it has
+        # rows, so both take the same answer.
+        if exposure <= 0.0:
             # An empty bin still ships a row, so it still ships a FACTOR, and
             # ``0.0`` is the one value a multiplicative tariff can never carry:
             # it prices every risk that lands in the bin at zero while every
@@ -724,13 +737,11 @@ def _offset_multiplier_block(
             # same statistic the non-empty branch reports -- the weighted mean
             # multiplier -- under the only distribution an empty bin licenses.
             # Under ``bin_strategy="exposure_quantile"`` this branch is
-            # unreachable, because every edge is a data value; under
-            # ``"uniform"`` on a skewed exposure it is the normal case (issue
-            # #291: measured 123 of 150 bins on an 800-row fit).
+            # unreachable, because every edge is a positive-weight data value;
+            # under ``"uniform"`` on a skewed exposure it is the normal case
+            # (issue #291: measured 123 of 150 bins on an 800-row fit).
             avg_multiplier = 0.5 * (float(edges[b]) + float(edges[b + 1]))
-            exposure = 0.0
         else:
-            exposure = float(weights[mask].sum())
             avg_multiplier = float(np.average(multiplier[mask], weights=weights[mask]))
         rows.append(
             {
@@ -1254,6 +1265,14 @@ def build_rating_table_payload(
     caller might reasonably catch and report per-model in a batch, rather than
     fix.  (``RuntimeError`` for an unfitted model is the ordinary object-state
     complaint every method on the class makes, not a discipline of this one.)
+
+    Where they collide, the ``ValueError`` wins.  A model that both carries an
+    unusable relativity and has a non-representable base now reports the block,
+    because that is the more specific complaint and the one that names where to
+    look; the base is checked last.  This is stated because it changed: the
+    interaction blocks used to be built as a keyword argument beside
+    ``base_relativity=``, and Python evaluates those left to right, so the base
+    was formed -- and raised -- first.
     """
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")

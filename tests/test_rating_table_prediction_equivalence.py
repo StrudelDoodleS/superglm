@@ -1538,6 +1538,73 @@ def test_an_empty_offset_bin_ships_a_factor_a_risk_can_be_rated_on():
     np.testing.assert_array_equal(edges, _compute_edges(np.exp(offset), np.ones(n), 150, "uniform"))
 
 
+def test_a_bin_holding_only_zero_weight_rows_ships_a_factor_too():
+    """ "Empty" and "carries no weight" are different conditions, and both reach here.
+
+    ``sample_weight`` is only validated non-negative, and ``_compute_edges``
+    builds ``"uniform"`` edges from ``x[sample_weight > 0.0]`` -- so the edge
+    range is set by the positive-weight rows while ``np.digitize`` bins all of
+    them. A zero-weight row sitting in a gap between two positive-weight
+    clusters therefore lands alone in a bin that is NOT empty and carries no
+    weight at all, and the weighted-average branch raised
+    ``ZeroDivisionError: Weights sum to zero, can't be normalized`` from inside
+    NumPy.
+
+    Loud rather than silent, and pre-existing, so it is not the defect this
+    module is about -- but it is the same bin under a different predicate, and
+    a bin with no weight has no weighted mean to report whether or not it has
+    rows. Both take the midpoint.
+    """
+    rng = np.random.default_rng(4)
+    n = 400
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n)})
+    exposure = np.concatenate(
+        [rng.uniform(0.05, 0.25, n - 13), rng.uniform(1.8, 2.0, 10), [0.9, 1.0, 1.1]]
+    )
+    sample_weight = np.ones(n)
+    # The three rows in the gap are the ones that carry nothing.
+    sample_weight[-3:] = 0.0
+    offset = np.log(exposure)
+    y = rng.poisson(np.exp(-1.0 + 0.4 * (X["region"].to_numpy() == "B")) * exposure).astype(
+        np.float64
+    )
+
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, sample_weight=sample_weight, offset=offset)
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=sample_weight,
+        offset=offset,
+        n_bins=150,
+        impact_bins=(20,),
+        bin_strategy="uniform",
+    )
+
+    block = next(b for b in payload.main_effects if b.kind == "offset")
+    edges = _printed_edges(block)
+    relativity = block.table["Relativity"].to_numpy(dtype=np.float64)
+
+    # The configuration really is the one described: a bin with rows in it and
+    # no weight behind them.
+    bin_index = np.clip(np.digitize(exposure, edges, right=False), 1, len(relativity)) - 1
+    weightless = [
+        b
+        for b in range(len(relativity))
+        if np.any(bin_index == b) and float(sample_weight[bin_index == b].sum()) == 0.0
+    ]
+    assert weightless, "a non-empty bin whose rows carry no weight"
+
+    probe = 0.5 * (edges[:-1] + edges[1:])
+    factor = relativity[np.clip(np.digitize(probe, edges, right=False), 1, len(relativity)) - 1]
+    assert np.all(factor > 0.0), "no bin prices a risk at zero"
+    slack = len(X) * _EPS * np.abs(edges)
+    assert np.all((factor >= edges[:-1] - slack[:-1]) & (factor <= edges[1:] + slack[1:]))
+
+
 def test_a_relativity_a_consumer_cannot_multiply_by_stops_the_export():
     """Two different mechanisms produce an unusable factor, and both are refused.
 
