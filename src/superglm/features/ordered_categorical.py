@@ -766,6 +766,14 @@ class OrderedCategorical:
     # term. Two do -- both inside ``isinstance(spec, _SplineBase)`` branches
     # that an ordered term cannot enter, so neither can observe the gap. A new
     # reader must use the canonical name.
+    #
+    # One more belongs in this register because it fails differently:
+    # ``_spline_subclass_ops`` spells ``getattr(spec, "constraint_kind", None)
+    # or spec.monotone`` -- a BARE attribute fallback, not a ``getattr``
+    # default. Reached with an ordered term whose inner basis declares nothing,
+    # it would raise ``AttributeError`` rather than answer ``None``. Safe today
+    # only because ``spec`` there is ``self`` on a spline, never a wrapper; it
+    # is listed because a loud gap is the one worth knowing about.
 
     @property
     def constraint_kind(self) -> str | None:

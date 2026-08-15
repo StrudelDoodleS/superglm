@@ -558,8 +558,12 @@ def _curve_spec(name: str, spec):
     spline internals (``_lo``, ``_hi``, ``_knots``, ``reconstruct``). Without
     this guard the mismatch surfaces as an ``AttributeError`` on ``spec._lo``
     inside the grid weights, several frames from the declaration that caused
-    it. Refuse by name instead, the same way the ordered wrapper refuses a
-    basis that cannot supply raw QP geometry.
+    it. Refuse by name instead, with the same intent as the ordered wrapper's
+    refusal of a basis that cannot supply raw QP geometry -- though not the
+    same exception: that one reports a builder invariant and raises
+    ``RuntimeError``, while this reports an engine that was never written for
+    the basis in hand, which is what ``NotImplementedError`` means here and in
+    ``_reject_structured_fit_constraints``.
     """
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.spline import _SplineBase

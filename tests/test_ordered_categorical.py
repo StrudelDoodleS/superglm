@@ -588,6 +588,31 @@ def dipping_ordinal_data():
     return X, y, levels, effect
 
 
+def _designed_excursion(effect):
+    """The INTERIOR fall the fixture designs in: peak before the trough, to it.
+
+    Not ``max(effect) - min(effect[argmax(effect):])``, which is the obvious
+    spelling and is silently zero here: this truth ENDS at its global maximum
+    (1.60 at the last level), so that slice is a singleton and every guard
+    built on it degrades to ``> 0``. The quantity the tests want is the drop a
+    monotone repair has to remove, which is the descent into the trough.
+    """
+    effect = np.asarray(effect, dtype=float)
+    trough = int(np.argmin(effect))
+    return float(np.max(effect[: trough + 1]) - effect[trough])
+
+
+# Floor for "the unrepaired fit still carries the fixture's dip". A DEGENERATION
+# DETECTOR, not a calibration: how much of a designed excursion a penalized
+# smooth reproduces depends on lambda, the knots and the data, with no closed
+# form to derive a fraction from. So the value has to sit well below what a
+# working fixture realises and well above zero. Measured across both bases and
+# the specials variant, the fits realise 0.278-0.677 of the designed excursion;
+# one tenth leaves the tightest case a factor of 2.8, which is margin against a
+# different BLAS rather than margin fitted to the observation.
+_DIP_REALISATION_FLOOR = 0.10
+
+
 def _level_curve(model, name, levels):
     rels = model.reconstruct_feature(name)["level_log_relativities"]
     return np.array([rels[lev] for lev in levels], dtype=float)
@@ -611,7 +636,10 @@ class TestOrderedCategoricalShapeDispatch:
         from superglm.features.spline import Spline
 
         X, y, levels, effect = dipping_ordinal_data
-        designed_dip = float(np.max(effect) - np.min(effect[np.argmax(effect) :]))
+        designed_dip = _designed_excursion(effect)
+        # Fixture self-check: the truth must actually design a fall in, or
+        # every guard below is measuring nothing.
+        assert designed_dip == pytest.approx(1.40)
         spec = OrderedCategorical(
             order=levels,
             basis=Spline(kind=kind, n_knots=8, constraint=getattr(Constraint.postfit, direction)),
@@ -624,7 +652,7 @@ class TestOrderedCategoricalShapeDispatch:
         # nothing to bind on and a green test would measure nothing. A quarter
         # of the designed excursion is the floor a fit that tracked it clears.
         before = _level_curve(model, "band", levels)
-        assert float(-np.min(np.diff(before))) > 0.25 * designed_dip, before
+        assert float(-np.min(np.diff(before))) > _DIP_REALISATION_FLOOR * designed_dip, before
 
         model.apply_shape_postfit(X)
 
@@ -649,7 +677,9 @@ class TestOrderedCategoricalShapeDispatch:
             # below carries `kind == "decreasing"`, and the curve had to move a
             # long way to get flat. Asserting a rise here would be asserting
             # the constraint failed.
-            assert float(np.max(np.abs(after - before))) > 0.25 * designed_dip, after
+            assert float(np.max(np.abs(after - before))) > _DIP_REALISATION_FLOOR * designed_dip, (
+                after
+            )
 
         # Pin the DISPATCH as well, not just the shape: a monotone curve alone
         # could come from anywhere, but a recorded repair means the engine saw
@@ -751,10 +781,17 @@ class TestOrderedCategoricalShapeDispatch:
         A plain ``Spline`` in the same configuration repairs instead, because
         runtime canonicalization registers it and its recorded column means
         cancel the shift; an ``OrderedCategorical`` is never registered, so
-        nothing cancels it. That asymmetry is filed separately -- what this
-        test pins is the part that must not regress: the ordered term REFUSES,
-        loudly, rather than returning silently unrepaired the way it did before
-        the constraint reached the engine at all.
+        nothing cancels it. That asymmetry is issue #311 -- what this test pins
+        is the part that must not regress: the ordered term REFUSES, loudly,
+        rather than returning silently unrepaired the way it did before the
+        constraint reached the engine at all.
+
+        A TOMBSTONE, NOT AN INVARIANT. Closing #311 makes this configuration
+        repair, at which point the ``pytest.raises`` below must be replaced,
+        not restored -- its failure then is the fix landing, not a regression.
+        The state assertions after it are the part that survives: whatever the
+        engine decides, refusing must leave the fitted model untouched rather
+        than half-repaired, and nothing else covers that on this path.
         """
         from superglm.features.spline import Spline
 
@@ -774,8 +811,22 @@ class TestOrderedCategoricalShapeDispatch:
             },
             selection_penalty=0.0,
         ).fit(X, y)
+        beta_before = np.array(model.result.beta, copy=True)
+        intercept_before = float(model.result.intercept)
+        revision_before = model._fit_revision
+
         with pytest.raises(RuntimeError, match="fitted centering changed"):
             model.apply_shape_postfit(X)
+
+        # A refusal that left partial state would be worse than either outcome.
+        # `_validate_repair_for_publication` runs before any mutation and the
+        # work happens on a `FittedStateRevision`, so the published model must
+        # be bit-identical to what it was -- assert that rather than trust it.
+        assert not getattr(model, "_shape_repairs", {})
+        assert not getattr(model, "_monotone_repairs", {})
+        np.testing.assert_array_equal(model.result.beta, beta_before)
+        assert float(model.result.intercept) == intercept_before
+        assert model._fit_revision == revision_before
 
     def test_postfit_repair_composes_with_specials(self, dipping_ordinal_data):
         """``specials=`` is the one delegation shape the wrapper reshapes: the
@@ -788,7 +839,10 @@ class TestOrderedCategoricalShapeDispatch:
         X, y, levels, effect = dipping_ordinal_data
         X = X.copy()
         X.loc[np.arange(len(X)) % 25 == 0, "band"] = "MISSING"
-        designed_dip = float(np.max(effect) - np.min(effect[np.argmax(effect) :]))
+        designed_dip = _designed_excursion(effect)
+        # Fixture self-check: the truth must actually design a fall in, or
+        # every guard below is measuring nothing.
+        assert designed_dip == pytest.approx(1.40)
         spec = OrderedCategorical(
             order=levels,
             specials=["MISSING"],
@@ -798,7 +852,7 @@ class TestOrderedCategoricalShapeDispatch:
             X, y
         )
         before = _level_curve(model, "band", levels)
-        assert float(-np.min(np.diff(before))) > 0.25 * designed_dip, before
+        assert float(-np.min(np.diff(before))) > _DIP_REALISATION_FLOOR * designed_dip, before
 
         model.apply_shape_postfit(X)
 
