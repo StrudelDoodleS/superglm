@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -862,9 +861,12 @@ def _interaction_beta(model: SuperGLM, name: str) -> np.ndarray:
 
 
 def _reconstruct_interaction(ispec, beta: NDArray, n_bins: int) -> dict:
-    if "n_points" in signature(ispec.reconstruct).parameters:
-        return ispec.reconstruct(beta, n_points=n_bins)
-    return ispec.reconstruct(beta)
+    # Shared with the impact sweep, so "does this spec take n_points" and
+    # "which orientation is this surface" are answered once rather than in two
+    # places that can disagree -- which is the shape issue #287 took.
+    from superglm.diagnostics.discretize import reconstruct_interaction
+
+    return reconstruct_interaction(ispec, beta, n_bins)
 
 
 def _continuous_interaction_block(
@@ -873,16 +875,11 @@ def _continuous_interaction_block(
     parent1: str,
     parent2: str,
 ) -> InteractionTableBlock:
+    from superglm.diagnostics.discretize import orient_grid_surface
+
     x1 = np.asarray(raw["x1"], dtype=np.float64)
     x2 = np.asarray(raw["x2"], dtype=np.float64)
-    relativity = np.asarray(raw["relativity"], dtype=np.float64)
-    if relativity.shape == (len(x2), len(x1)):
-        relativity = relativity.T
-    elif relativity.shape != (len(x1), len(x2)):
-        raise ValueError(
-            f"Interaction {name!r} returned a {relativity.shape} relativity grid, "
-            f"expected {(len(x1), len(x2))} or {(len(x2), len(x1))}."
-        )
+    relativity = orient_grid_surface(name, x1, x2, raw["relativity"])
 
     table = pd.DataFrame(relativity, columns=[_format_axis_value(v) for v in x2])
     table.insert(0, parent1, [_format_axis_value(v) for v in x1])
@@ -1046,9 +1043,16 @@ def _impact_sweep(
     table carries -- a reader taking the smallest number on the sheet as their
     bound gets one below their own error.  The ``exported`` column says which
     row is theirs.
+
+    An empty ``impact_bins`` still means NO SWEEP, and the fold-in does not
+    override it.  That is the documented opt-out for a caller who wants the
+    tables without paying for the analysis, and turning it into "one sweep at
+    ``n_bins``" would have been a silent cost -- the fold-in exists so the
+    ladder describes the shipped table, not so a caller who declined the ladder
+    gets one anyway.
     """
     rows: list[dict[str, float | int | str]] = []
-    if not features:
+    if not features or not impact_bins:
         return _empty_impact_frame()
 
     for n_bins in sorted(dict.fromkeys((*impact_bins, exported_n_bins))):
@@ -1223,6 +1227,15 @@ def build_rating_table_payload(
     mean read 4.92% against 5.51%.  The two now agree to round-off, which is
     what ``test_the_sheets_prediction_change_is_the_whole_workbooks_error``
     pins (issue #287).
+
+    The sheet's metric columns are JOINT over everything discretised at that
+    resolution, so within one ``n_bins`` group only ``feature`` and
+    ``actual_bins`` vary: the ``age:density`` row's
+    ``max_abs_prediction_change_pct`` is the whole model's number under that
+    binning, not the interaction's own.  That is what makes it the bound a
+    consumer of the whole table needs, and it is stated because this issue
+    exists precisely because one number on this sheet was read as more than it
+    was.  ``impact_bins`` sweeps that ladder; an empty one means no sheet.
 
     * The binning itself, which the ``discretization_impact`` sheet quantifies
       for the main-effect ``Spline`` and ``Polynomial`` blocks.
