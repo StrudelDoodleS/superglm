@@ -311,6 +311,7 @@ test("a low-credibility row keeps its significance and gets its own marker", () 
         sig_code: "***",
         sig_class: "sig-strong",
         advisory_code: "?",
+        advisory_kind: "thin_level",
         quasi_separated: true
       }]
     }
@@ -318,6 +319,7 @@ test("a low-credibility row keeps its significance and gets its own marker", () 
 
   const markup = nodes.summaryFrame.innerHTML;
   assert.match(markup, /<th class="advisory-code"[^>]*>LC<\/th>/);
+  assert.match(markup, /title="Low credibility: this level carries little experience"/);
   assert.match(markup, /<td class="sig-code">\*\*\*<\/td>/);
   assert.match(markup, /<td class="advisory-code"[^>]*>\?<\/td>/);
   // The SE cell still reports the p-value, and the advisory never claims the
@@ -325,6 +327,45 @@ test("a low-credibility row keeps its significance and gets its own marker", () 
   assert.match(markup, /class="summary-se se-cell sig-strong"/);
   assert.doesNotMatch(markup, /sig-qs/);
   assert.doesNotMatch(markup, /[Ss]eparat/);
+});
+
+test("an outsized-standard-error row is not labelled as thin", () => {
+  // The two triggers are disjoint and license different row-level statements:
+  // a thin level really is short of experience, while an outsized standard
+  // error can be a predictor on a much smaller scale with the whole sample
+  // behind it. The tooltip is a row-level statement, so it follows the trigger.
+  const nodes = compactSummaryNodes();
+  renderSummary({
+    available: true,
+    label: "Summary",
+    html: "",
+    compact: {
+      model: {},
+      level_display: "expanded",
+      has_level_groups: false,
+      level_groups: [],
+      rows: [{
+        name: "c",
+        group: "c",
+        kind: "coef",
+        coef: 2.05e6,
+        se: 7.0e4,
+        p_value: 0.0,
+        sig_code: "***",
+        sig_class: "sig-strong",
+        advisory_code: "?",
+        advisory_kind: "outsized_se",
+        quasi_separated: true
+      }]
+    }
+  }, nodes);
+
+  const markup = nodes.summaryFrame.innerHTML;
+  assert.match(markup, /<td class="advisory-code"[^>]*>\?<\/td>/);
+  assert.match(markup, /title="Outsized standard error[^"]*units"/);
+  assert.doesNotMatch(markup, /little experience/);
+  // And it still keeps its significance.
+  assert.match(markup, /<td class="sig-code">\*\*\*<\/td>/);
 });
 
 test("direct summary helpers include the grouped level display", async () => {

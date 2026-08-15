@@ -4277,6 +4277,7 @@
   "tests/test_quasi_separation.py::TestTheFlagIsAdvisoryOnEveryRenderer::test_every_renderer_still_carries_the_advisory": 0.049912394024431705,
   "tests/test_quasi_separation.py::TestTheLegendDescribesTheRuleThatExists::test_every_surface_states_the_rule_and_what_it_licenses": 0.04878109390847385,
   "tests/test_quasi_separation.py::TestTheLegendDescribesTheRuleThatExists::test_no_surface_asserts_a_diagnosis_the_rule_never_made": 0.06020300695672631,
+  "tests/test_quasi_separation.py::TestTheNoteIsTrueOfTheSecondTriggerToo::test_the_editor_row_carries_the_same_trigger_the_workbook_names": 0.03833018499426544,
   "tests/test_quasi_separation.py::TestTheNoteIsTrueOfTheSecondTriggerToo::test_the_exported_warning_cell_names_the_trigger_that_fired": 0.017872922122478485,
   "tests/test_quasi_separation.py::TestTheNoteIsTrueOfTheSecondTriggerToo::test_the_flag_fires_on_units_alone": 0.054387050215154886,
   "tests/test_quasi_separation.py::TestTheNoteIsTrueOfTheSecondTriggerToo::test_the_note_sends_the_reader_to_the_units_first": 0.016366113210096955,

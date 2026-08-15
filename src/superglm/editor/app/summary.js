@@ -867,11 +867,19 @@ function sigTitle(row) {
 // the rule behind it reads a level's volume, or a standard error's size, and
 // never the p-value, so it cannot stand in for one (issue #239).
 //
-// Derived from the marker the cell renders, not from a second payload key
-// saying the same thing: two keys that must agree can disagree, and the row
-// would then carry a marker with no title or a title with no marker.
+// Keyed off the marker the cell renders, so a row cannot carry a marker with no
+// title or a title with no marker. The TEXT comes from the trigger that fired,
+// because the tooltip is a row-level statement and the two triggers license
+// different ones: a thin level is short of experience, while an outsized
+// standard error can be a predictor on a much smaller scale with the whole
+// sample behind it. Same split the exported Warning cell makes.
+const ADVISORY_TITLES = {
+  thin_level: "Low credibility: this level carries little experience",
+  outsized_se:
+    "Outsized standard error: wide next to this model's typical one — check the predictor's units"
+};
+
 function advisoryTitle(row) {
-  return row.advisory_code
-    ? "Low credibility: thin level or an outsized standard error"
-    : "";
+  if (!row.advisory_code) return "";
+  return ADVISORY_TITLES[row.advisory_kind] || "Low credibility";
 }
