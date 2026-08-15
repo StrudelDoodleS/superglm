@@ -228,10 +228,21 @@ it is a summary rather than a per-row lookup. A bin with no exposure — reachab
 `bin_strategy="uniform"` on a skewed exposure — reports the midpoint of its own interval at weight
 zero. Pass `offset_source=` to export the exact form, keyed on a raw column of the frame.
 
-The workbook includes selected-bin rating tables, a discretization impact sweep for
-`20, 50, 100, 200, 250` bins, and a structured Model Summary sheet. The impact sweep covers
-main-effect spline and polynomial terms; a continuous-by-continuous interaction is binned onto the
-same grid but is not itself reported there ([#287](https://github.com/StrudelDoodleS/superglm/issues/287)).
+The workbook includes selected-bin rating tables, a discretization impact sweep, and a structured
+Model Summary sheet. The sweep runs the `impact_bins` ladder — `20, 50, 100, 200, 250` by default —
+**plus the `n_bins` the workbook was actually exported at**, marked by the sheet's `exported` column.
+That row is the one that describes the table in hand: the error falls as bins rise, so without it a
+reader taking the smallest number on the sheet as their bound got one below their own. Passing
+`impact_bins=()` still skips the sheet entirely.
+
+The sweep covers every block the workbook approximates: main-effect spline and polynomial terms, and
+a continuous-by-continuous interaction, which is sampled onto an `n_bins`-per-axis grid rather than
+binned into intervals. Its row is keyed on the interaction's name and its `actual_bins` counts the
+grid's *cells*, so an interaction swept at 20 reports 400 where a main effect reports 20. The metric
+columns are **joint** over everything discretized at that resolution — within one `n_bins` group only
+`feature` and `actual_bins` vary — which is what makes them the bound for a consumer applying the
+whole table.
+
 The `ModelOverview` and
 `TermInference` Excel tables use typed cells for metrics, estimates, intervals, and p-values instead
 of storing the formatted console summary as one text column. The editor exposes the same workbook

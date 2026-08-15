@@ -1836,7 +1836,11 @@ class SuperGLM:
         sample_weight: NDArray | None = None,
         **kwargs,
     ) -> DiscretizationResult:
-        """Analyse the impact of discretizing spline/polynomial curves."""
+        """Analyse the impact of discretizing this fit's smooth terms.
+
+        Spline and polynomial main effects into bins, and a
+        continuous-by-continuous interaction onto the grid its rating-table
+        block is sampled on."""
         return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
     def export_rating_tables(
