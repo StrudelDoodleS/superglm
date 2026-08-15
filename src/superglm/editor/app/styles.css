@@ -491,9 +491,12 @@ button:active { background: #e6edf3; }
   text-align: left;
 }
 /* The declared widths must sum to 100% in both variants: the table is
-   table-layout:fixed, so a total over 100% is normalised by scaling every
-   column down and the term column -- the only one that wraps arbitrary text --
-   absorbs the largest absolute loss. */
+   table-layout:fixed, so a total over 100% is silently normalised by scaling
+   every column down. The LC column's 8% is taken mostly from the term column,
+   on purpose: every other column is `.summary-number`, which is
+   `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`, so narrowing
+   one truncates digits, while the term column merely wraps. A wrapped name
+   beats an ellipsised number. */
 .summary-table:not(.has-level-groups) .summary-term {
   width: 30%;
 }
@@ -522,12 +525,16 @@ button:active { background: #e6edf3; }
 .summary-table .sig-code {
   width: 8%;
 }
-/* Colour lives on this selector, not on a bare `.advisory-code`: the base
-   `.summary-table th, .summary-table td` rule is (0,1,1) and outranks a
-   single class, so the marker would render in the ordinary cell colour while
-   the rule above it claimed otherwise. */
 .summary-table .advisory-code {
   width: 8%;
+}
+/* Colour lives on a `td`-qualified selector, not on a bare `.advisory-code`:
+   the base `.summary-table th, .summary-table td` rule is (0,1,1) and outranks
+   a single class, so the marker would render in the ordinary cell colour. And
+   it is scoped to the data cells because `.summary-table .advisory-code` would
+   also outrank `.summary-table th`, leaving a permanently crimson `LC` header
+   over an empty column on every model with nothing flagged. */
+.summary-table td.advisory-code {
   color: #9f1239;
 }
 .summary-group-row td {
