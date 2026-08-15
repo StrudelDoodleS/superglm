@@ -69,10 +69,18 @@ class RatingTableBlock:
 
 @dataclass(frozen=True)
 class InteractionTableBlock:
-    """One two-way interaction rating-table block."""
+    """One two-way interaction rating-table block.
+
+    ``kind`` says how the block approximates: ``"cells"`` is a full
+    categorical-by-categorical cell table and is exact, ``"grid"`` is a
+    continuous surface SAMPLED at ``n_bins`` nodes per axis and is not.  It is
+    recorded because ``_interaction_blocks`` is the one place that decides,
+    and a second place deciding differently is the shape issue #287 took.
+    """
 
     name: str
     table: pd.DataFrame
+    kind: str = "cells"
 
 
 @dataclass(frozen=True)
@@ -135,21 +143,17 @@ def _continuous_features(model: SuperGLM) -> list[str]:
     ]
 
 
-def _continuous_interactions(model: SuperGLM) -> list[str]:
-    """The interactions ``_continuous_interaction_block`` ships as a grid.
+def _gridded_interaction_names(blocks: list[InteractionTableBlock]) -> list[str]:
+    """The exported blocks that are sampled surfaces, read off the blocks.
 
-    Beside ``_continuous_features`` and scanned the same way, because these are
-    the other terms the workbook approximates: they are sampled onto an
-    ``n_bins``-per-axis surface rather than tabulated exactly, so they belong
-    on the impact sheet for the same reason a binned ``Spline`` does.
+    Derived from what ``_interaction_blocks`` actually BUILT rather than
+    re-decided from the specs, so "what the workbook approximates" and "what
+    the impact sheet covers" cannot drift apart -- which is the shape issue
+    #287 took. Selecting by spec class here would have left any grid-shaped
+    spec outside the two built-ins exported approximately and off the sheet,
+    because the exporter routes on the reconstruction contract, not the class.
     """
-    from superglm.features.interaction import PolynomialInteraction, TensorInteraction
-
-    return [
-        name
-        for name in model._interaction_order
-        if isinstance(model._interaction_specs.get(name), TensorInteraction | PolynomialInteraction)
-    ]
+    return [block.name for block in blocks if block.kind == "grid"]
 
 
 def _format_number(value: float) -> str:
@@ -882,7 +886,7 @@ def _continuous_interaction_block(
 
     table = pd.DataFrame(relativity, columns=[_format_axis_value(v) for v in x2])
     table.insert(0, parent1, [_format_axis_value(v) for v in x1])
-    return InteractionTableBlock(name=name, table=table)
+    return InteractionTableBlock(name=name, table=table, kind="grid")
 
 
 def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBlock]:
@@ -910,7 +914,7 @@ def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBl
                 key = f"{level1}:{level2}"
                 row[level2] = float(raw["relativities"].get(key, 1.0))
             rows.append(row)
-        blocks.append(InteractionTableBlock(name=name, table=pd.DataFrame(rows)))
+        blocks.append(InteractionTableBlock(name=name, table=pd.DataFrame(rows), kind="cells"))
     return blocks
 
 
@@ -1006,6 +1010,7 @@ def _empty_impact_frame() -> pd.DataFrame:
     return pd.DataFrame(
         columns=[
             "n_bins",
+            "exported",
             "feature",
             "actual_bins",
             "deviance_original",
@@ -1029,12 +1034,24 @@ def _impact_sweep(
     impact_bins: tuple[int, ...],
     bin_strategy: str,
     features: list[str],
+    exported_n_bins: int,
 ) -> pd.DataFrame:
+    """One row per approximated block per swept resolution.
+
+    ``exported_n_bins`` is folded into the swept set and marked, because
+    without it the sheet can describe every resolution EXCEPT the one the
+    reader is holding.  The defaults are ``n_bins=150`` against
+    ``impact_bins=(20, 50, 100, 200, 250)``, and the error falls with
+    resolution, so the 200 and 250 rows report LESS movement than the exported
+    table carries -- a reader taking the smallest number on the sheet as their
+    bound gets one below their own error.  The ``exported`` column says which
+    row is theirs.
+    """
     rows: list[dict[str, float | int | str]] = []
     if not features:
         return _empty_impact_frame()
 
-    for n_bins in impact_bins:
+    for n_bins in sorted(dict.fromkeys((*impact_bins, exported_n_bins))):
         result = model.discretization_impact(
             X,
             y,
@@ -1047,6 +1064,7 @@ def _impact_sweep(
         for feature, table in result.tables.items():
             row: dict[str, float | int | str] = {
                 "n_bins": int(n_bins),
+                "exported": int(n_bins) == exported_n_bins,
                 "feature": feature,
                 "actual_bins": int(len(table)),
             }
@@ -1054,13 +1072,13 @@ def _impact_sweep(
             rows.append(row)
         # Beside the main-effect rows and in the same columns, because a
         # reader has to be able to see every block the workbook approximates
-        # from one place.  ``actual_bins`` counts the distinct factors the
-        # block carries, which for a grid is its CELLS -- one table row per
-        # cell -- so an interaction swept at 20 reports 400 where a main
-        # effect reports 20.
+        # from one place.  ``actual_bins`` counts the block's own table rows,
+        # which for a grid is its CELLS, so an interaction swept at 20 reports
+        # 400 where a main effect reports 20.
         for interaction, table in result.interaction_tables.items():
             row = {
                 "n_bins": int(n_bins),
+                "exported": int(n_bins) == exported_n_bins,
                 "feature": interaction,
                 "actual_bins": int(len(table)),
             }
@@ -1183,8 +1201,9 @@ def build_rating_table_payload(
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
     distinct errors ride on those, and the sheet reports the first for all
     three: the sweep is handed ``_continuous_features`` and
-    ``_continuous_interactions``, so the sheet names every block the workbook
-    approximates and its metrics are joint over all of them.
+    ``_gridded_interaction_names`` -- the second read off the interaction
+    blocks that were actually built, so the sheet names every block the
+    workbook approximates and its metrics are joint over all of them.
 
     The interaction's share is a SAMPLING rather than a binning, and it is the
     larger of the two differences between the sheet's two row kinds.  A binned
@@ -1439,10 +1458,13 @@ def build_rating_table_payload(
         offset=export_offset,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
-        # Both lists, because both are approximated.  The ``selected`` call
-        # above stays main-effect-only: its tables are consumed as blocks,
-        # keyed by feature name, and an interaction has no such block.
-        features=continuous + _continuous_interactions(model),
+        exported_n_bins=int(n_bins),
+        # Both lists, because both are approximated, and the second read off
+        # the blocks that were BUILT rather than re-derived from the specs.
+        # The ``selected`` call above stays main-effect-only: its tables are
+        # consumed as blocks keyed by feature name, and an interaction has no
+        # such block.
+        features=continuous + _gridded_interaction_names(interactions),
     )
     return RatingTablePayload(
         base_relativity=_base_relativity(

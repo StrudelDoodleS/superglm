@@ -805,17 +805,20 @@ def test_default_selected_bins_are_150():
 
 
 def test_default_impact_sweep_bins():
+    """The default sweep includes the resolution the workbook was exported at.
+
+    ``impact_bins`` is a comparison ladder and ``n_bins`` is what shipped; with
+    the default 150 outside the ladder, every row of the sheet described a
+    table the reader does not have, and the 200/250 rows understated their
+    error because it falls with resolution.
+    """
     model, X, y, w = _fit_export_model()
     payload = build_rating_table_payload(model, X, y, sample_weight=w)
+    sheet = payload.discretization_impact
 
-    assert sorted(payload.discretization_impact["n_bins"].unique().tolist()) == [
-        20,
-        50,
-        100,
-        200,
-        250,
-    ]
-    assert set(payload.discretization_impact["feature"]) == {"age"}
+    assert sorted(sheet["n_bins"].unique().tolist()) == [20, 50, 100, 150, 200, 250]
+    assert sorted(sheet[sheet["exported"]]["n_bins"].unique().tolist()) == [150]
+    assert set(sheet["feature"]) == {"age"}
 
 
 def test_categorical_and_numeric_blocks_are_exported():
@@ -1195,7 +1198,9 @@ def test_rating_table_payload_passes_offset_to_discretization_impact(monkeypatch
 
     build_rating_table_payload(model, X, y, sample_weight=w, offset=offset, n_bins=1)
 
-    assert len(seen_offsets) == 6
+    # Six ladder rungs plus the exported ``n_bins=1``, which the sweep folds in
+    # so the sheet has a row about the table that shipped.
+    assert len(seen_offsets) == 7
     for seen in seen_offsets:
         np.testing.assert_allclose(seen, offset)
 
@@ -1284,8 +1289,8 @@ def test_excel_workbook_layout(tmp_path):
     assert ws["G7"].value == "score"
 
     impact_ws = wb["Discretization Impact"]
-    headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 11)]
-    assert headers[:3] == ["n_bins", "feature", "actual_bins"]
+    headers = [impact_ws.cell(row=1, column=i).value for i in range(1, 12)]
+    assert headers[:4] == ["n_bins", "exported", "feature", "actual_bins"]
 
     summary_ws = wb["Model Summary"]
     assert summary_ws["A1"].value == "Model Summary"
