@@ -1,15 +1,17 @@
-"""Spline discretization impact analysis.
+"""Discretization impact analysis.
 
-Answers the question: "If I bin this spline into N buckets, how do my
-predictions and model metrics change?"
+Answers the question: "If I bin this fit's smooth terms into N buckets, how do
+my predictions and model metrics change?"
 
 This is a read-only analysis tool — no refitting. It takes a fitted model,
-discretizes spline contributions analytically, and reports the impact.
+discretizes the smooth contributions analytically — spline and polynomial main
+effects into bins, a continuous-by-continuous interaction onto the grid its
+rating-table block is sampled on — and reports the impact.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -29,24 +31,36 @@ class DiscretizationResult:
     Attributes
     ----------
     tables : dict[str, DataFrame]
-        Per-feature rating tables with columns: bin_from, bin_to,
+        Per-MAIN-EFFECT rating tables with columns: bin_from, bin_to,
         relativity, log_relativity, n_obs, sample_weight. ``n_obs`` is always
         the physical row count. ``sample_weight`` is the supplied weight total
         in the bin (frequency mass for non-Tweedie; EDM prior-weight mass for
         Tweedie) and is reported for display rather than reinterpreted as a
         Tweedie replication count.
+    interaction_tables : dict[str, DataFrame]
+        Per-INTERACTION grids, one row per grid cell, with the two parent
+        columns carrying the cell's axis values and then relativity,
+        log_relativity, n_obs and sample_weight on the same terms as
+        ``tables``. Kept in its own mapping because the two shapes are not
+        interchangeable: a main effect is binned into intervals and a
+        continuous-by-continuous interaction is SAMPLED at grid nodes, so it
+        has axis values where a bin has a half-open interval, and one row per
+        cell rather than per bin.
     predictions : NDArray
         Predictions using discretized (binned) curves.
     original_predictions : NDArray
         Original smooth predictions.
     metrics : dict[str, float]
-        Comparison metrics between original and discretized predictions.
+        Comparison metrics between original and discretized predictions. Joint
+        over everything discretized in the call, main effects and interactions
+        alike, since that is the prediction a consumer of the whole table gets.
     """
 
     tables: dict[str, pd.DataFrame]
     predictions: NDArray
     original_predictions: NDArray
     metrics: dict[str, float]
+    interaction_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 def _validated_discretization_weights(
@@ -207,6 +221,38 @@ def _is_continuous_feature(model: SuperGLM, name: str) -> bool:
     return isinstance(model._specs[name], _SplineBase | Polynomial)
 
 
+def _is_continuous_interaction(model: SuperGLM, name: str) -> bool:
+    """Check if an interaction is one whose reconstruction is a sampled grid.
+
+    These are the two the rating-table export ships as a surface rather than as
+    a lookup, so they are the two that carry a discretisation error at all. A
+    categorical-by-categorical interaction is a full cell table and a
+    numeric-by-numeric one is a single per-unit-per-unit coefficient; neither
+    approximates anything.
+    """
+    from superglm.features.interaction import PolynomialInteraction, TensorInteraction
+
+    return isinstance(model._interaction_specs.get(name), TensorInteraction | PolynomialInteraction)
+
+
+def _nearest_grid_index(grid: NDArray, x: NDArray) -> NDArray:
+    """Index of the closest grid node, ties to the lower index.
+
+    The exported interaction block is keyed on the grid's axis VALUES, not on
+    intervals, so a consumer holding a raw risk has no bin to fall into and the
+    only lookup the sheet supports is the nearest printed axis value on each
+    axis. This is that rule, so what the impact sweep measures is the factor a
+    reader will actually apply.
+    """
+    grid = np.asarray(grid, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    if len(grid) < 2:
+        return np.zeros(len(x), dtype=np.intp)
+    right = np.clip(np.searchsorted(grid, x), 1, len(grid) - 1)
+    take_left = (x - grid[right - 1]) <= (grid[right] - x)
+    return np.where(take_left, right - 1, right).astype(np.intp)
+
+
 def _weighted_correlation(x: NDArray, y: NDArray, weights: NDArray) -> float:
     """Correlation under frequency mass or unit physical-row mass."""
     positive = weights > 0.0
@@ -235,11 +281,21 @@ def discretization_impact(
     bin_strategy: str = "exposure_quantile",
     features: list[str] | None = None,
 ) -> DiscretizationResult:
-    """Analyse the impact of discretizing smooth spline/polynomial curves.
+    """Analyse the impact of discretizing the smooth terms of a fit.
 
     For each spline/polynomial feature, the smooth per-observation
-    log-relativity is replaced with a family-appropriate bin average.
+    log-relativity is replaced with a family-appropriate bin average. For each
+    continuous-by-continuous interaction it is replaced with the value at the
+    nearest node of the ``n_bins``-per-axis grid the rating-table export ships
+    -- a SAMPLING rather than an averaging, because that block is keyed on axis
+    values and a consumer's only available lookup is the nearest one.
     Predictions are recomputed and compared to the originals.
+
+    Both are covered because both are approximations the exported workbook
+    carries, and reporting one without the other understates how far the table
+    sits from the model (issue #287). The returned ``metrics`` are joint over
+    everything discretized in the call, which is the error a consumer applying
+    the whole table actually gets.
 
     For non-Tweedie families, ``sample_weight`` is case/frequency mass:
     bin geometry, bin averages, mean prediction change, and prediction
@@ -275,8 +331,9 @@ def discretization_impact(
         frequency mass for non-Tweedie models and unit physical-row mass for
         Tweedie.
     features : list[str], optional
-        Subset of spline/polynomial feature names to discretize.
-        None means all spline/polynomial features.
+        Subset of names to discretize: spline/polynomial features, and
+        continuous-by-continuous interaction names as they appear in
+        ``model._interaction_order``. None means every one of both.
 
     Returns
     -------
@@ -309,26 +366,51 @@ def discretization_impact(
     from superglm.links import stabilize_eta
     from superglm.model import base
 
-    # Determine which features to discretize
+    # Determine which terms to discretize. Two namespaces, because a
+    # continuous-by-continuous interaction is approximated by the same export
+    # and by the same ``n_bins``, and leaving it out understates the answer.
+    target_features: list[str] = []
+    target_interactions: list[str] = []
     if features is not None:
         for name in features:
-            if name not in model._specs:
+            if name in model._specs:
+                if not _is_continuous_feature(model, name):
+                    raise ValueError(
+                        f"Feature '{name}' is not a spline or polynomial — "
+                        "only continuous features can be discretized."
+                    )
+                target_features.append(name)
+            elif name in model._interaction_specs:
+                if not _is_continuous_interaction(model, name):
+                    raise ValueError(
+                        f"Interaction '{name}' is not continuous-by-continuous — "
+                        "only interactions exported as a sampled grid can be discretized."
+                    )
+                target_interactions.append(name)
+            else:
                 raise ValueError(f"Unknown feature: {name}")
-            if not _is_continuous_feature(model, name):
-                raise ValueError(
-                    f"Feature '{name}' is not a spline or polynomial — "
-                    "only continuous features can be discretized."
-                )
-        target_features = features
     else:
         target_features = [
             name for name in model._feature_order if _is_continuous_feature(model, name)
         ]
+        target_interactions = [
+            name for name in model._interaction_order if _is_continuous_interaction(model, name)
+        ]
 
     from superglm.model.input_validation import validate_x_columns
 
-    frame.require_columns(tuple(target_features))
-    validate_x_columns(frame, target_features)
+    required = list(
+        dict.fromkeys(
+            target_features
+            + [
+                parent
+                for name in target_interactions
+                for parent in model._interaction_specs[name].parent_names
+            ]
+        )
+    )
+    frame.require_columns(tuple(required))
+    validate_x_columns(frame, required)
     eta_orig = base.predict_eta_exact(model, frame, offset=offset)
     original_predictions = clip_mu(model._link.inverse(eta_orig), model._distribution)
     plan = base._prediction_plan(model)
@@ -396,6 +478,54 @@ def discretization_impact(
         binned_log_rel = bin_log_rel[bin_idx]
         total_delta += binned_log_rel - log_rel_smooth
 
+    # Interactions: sampled at grid nodes rather than averaged over bins, so
+    # the per-observation replacement is the node a consumer's lookup lands on.
+    interaction_tables: dict[str, pd.DataFrame] = {}
+    interaction_terms = {term["name"]: term for term in plan["interactions"]}
+
+    for name in target_interactions:
+        term = interaction_terms.get(name)
+        if term is None:
+            raise RuntimeError(f"prediction plan does not define fitted interaction {name!r}")
+        beta_term = beta[np.asarray(term["beta_idx"], dtype=np.intp)]
+        log_rel_exact = np.asarray(
+            base._score_prediction_term_local_exact(term, frame, beta_term),
+            dtype=np.float64,
+        ).ravel()
+
+        # The same grid the export ships, at the same resolution: ``n_bins``
+        # nodes per axis. Reading it back from the spec rather than
+        # re-deriving it is what makes the measured error the EXPORTED error.
+        grid = term["spec"].reconstruct(beta_term, n_points=n_bins)
+        axis1 = np.asarray(grid["x1"], dtype=np.float64)
+        axis2 = np.asarray(grid["x2"], dtype=np.float64)
+        surface = np.asarray(grid["log_relativity"], dtype=np.float64)
+        if surface.shape == (len(axis2), len(axis1)):
+            surface = surface.T
+        elif surface.shape != (len(axis1), len(axis2)):
+            raise ValueError(
+                f"Interaction {name!r} returned a {surface.shape} log-relativity grid, "
+                f"expected {(len(axis1), len(axis2))} or {(len(axis2), len(axis1))}."
+            )
+
+        parent1, parent2 = term["parent_names"]
+        index1 = _nearest_grid_index(axis1, frame.column_array(parent1, dtype=np.float64))
+        index2 = _nearest_grid_index(axis2, frame.column_array(parent2, dtype=np.float64))
+        total_delta += surface[index1, index2] - log_rel_exact
+
+        n_cells = len(axis1) * len(axis2)
+        cell = index1 * len(axis2) + index2
+        interaction_tables[name] = pd.DataFrame(
+            {
+                parent1: np.repeat(axis1, len(axis2)),
+                parent2: np.tile(axis2, len(axis1)),
+                "relativity": np.exp(surface).ravel(),
+                "log_relativity": surface.ravel(),
+                "n_obs": np.bincount(cell, minlength=n_cells),
+                "sample_weight": np.bincount(cell, weights=evaluation_weight, minlength=n_cells),
+            }
+        )
+
     # Discretized predictions
     eta_disc = stabilize_eta(eta_orig + total_delta, model._link)
     predictions = clip_mu(model._link.inverse(eta_disc), model._distribution)
@@ -440,4 +570,5 @@ def discretization_impact(
         predictions=predictions,
         original_predictions=original_predictions,
         metrics=metrics,
+        interaction_tables=interaction_tables,
     )
