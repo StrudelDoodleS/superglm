@@ -135,12 +135,50 @@ def _continuous_features(model: SuperGLM) -> list[str]:
     ]
 
 
+def _format_number(value: float) -> str:
+    """Print a float so that reading the string back gives the same float.
+
+    Every number this module prints as a KEY -- a bin boundary, an interaction
+    axis value -- is a number the consumer converts back to a float in order to
+    decide which row of the table a risk belongs to.  So the only requirement
+    that matters is Steele and White's first free-format property: converting
+    the printed decimal back must recover the original binary64 value exactly
+    (G. L. Steele Jr. and J. L. White, "How to print floating-point numbers
+    accurately", PLDI 1990, s2 -- no loss of information, no extra information,
+    correct rounding; see also D. M. Gay, "Correctly rounded binary-decimal and
+    decimal-binary conversions", AT&T Bell Laboratories NAM 90-10, 1990).
+
+    A fixed-format ``.10g`` does not have it.  Ten significant digits do not
+    identify a binary64, which needs seventeen (J. Champagne Gareau and
+    D. Lemire, "Converting Binary Floating-Point Numbers to Shortest Decimal
+    Strings: An Experimental Review", arXiv:2603.06581, s2), so the printed
+    value is a DIFFERENT number from the one the model used.  For an ordinary
+    reported quantity that is a rounding; for a bin boundary it is not, because
+    the map from value to bin is discontinuous there.  An edge perturbed by
+    5e-10 relative moves every row inside that band into the neighbouring bin,
+    which changes the factor by a whole bin step -- and under the default
+    ``bin_strategy="exposure_quantile"`` the edges ARE data values, so a row
+    sits exactly on one by construction.  Measured on the equivalence fixture
+    (900 rows, 150 bins, two continuous terms): 302 of 302 printed edges
+    differed from the exact ones by up to 4.99e-09, 133 of 900 rows (14.8%)
+    took a different factor, and the reconstruction missed the discretised
+    predictions by 2.29e-01 relative rather than by round-off.
+
+    ``repr`` is the shortest string with that property (``float(repr(x)) ==
+    x``; ``sys.float_repr_style == 'short'`` since Python 3.1), so it costs
+    only the digits that are load-bearing.  ``float`` first, because
+    ``repr(np.float64(x))`` is ``np.float64(...)`` under NumPy 2 and would not
+    parse back at all.
+    """
+    return repr(float(value))
+
+
 def _format_interval(left: float, right: float) -> str:
-    return f"[{left:.10g}, {right:.10g})"
+    return f"[{_format_number(left)}, {_format_number(right)})"
 
 
 def _format_axis_value(value: float) -> str:
-    return f"{value:.10g}"
+    return _format_number(value)
 
 
 def _continuous_block(name: str, table: pd.DataFrame) -> RatingTableBlock:
@@ -442,47 +480,117 @@ def _require_unsaturated_predictor_export(
     )
 
 
-def _require_unclipped_relativities_export(blocks: list[RatingTableBlock]) -> None:
-    """No exported factor may be one ``_safe_exp`` had to clip.
+def _emitted_relativities(block: RatingTableBlock | InteractionTableBlock) -> NDArray:
+    """Every number one exported block asks a consumer to multiply by.
 
-    Relativities are exponentiated through ``_safe_exp``, which clips its
-    argument to +/-500 so a quasi-separated CONFIDENCE BOUND comes back finite
-    instead of ``inf``.  That is right for a bound and wrong for a factor, for
-    the same reason it was wrong for the base (see ``_base_relativity``): the
-    clipped value is representable but is no longer the model's.
+    Two shapes, because the export has two.  A main-effect block is keyed on
+    its first column and states one factor per row in ``Relativity``; an
+    interaction block is a CELL TABLE whose first column is the row key and
+    whose every remaining column is a factor.  Reading the interaction table
+    positionally rather than by name is deliberate: its column headers are the
+    second parent's level labels, which are data, so there is no name to match
+    on -- and slicing from column 1 is exactly how ``_continuous_interaction_
+    block`` and ``_interaction_blocks`` build it.
 
-    It matters because a clip on one block is not cancelled by the opposite
-    contribution on another.  Term contributions of ``+800`` and ``-700`` have a
-    perfectly ordinary product, ``exp(100)``; clipped they become
-    ``exp(500) * exp(-500) = 1``, so the workbook rates every such risk
-    ``2.7e+43`` low while the predictor -- and therefore the base guard, and
-    therefore ``_require_unsaturated_predictor_export`` -- stays entirely
-    healthy.  The cancellation is what hides it: the sum is well behaved
-    precisely when the parts are not.
+    A main-effect block missing ``Relativity`` is a failure rather than a skip.
+    Every builder emits that column today, so this never fires; making it raise
+    means a future block kind that names its factor column something else is
+    caught by the guard rather than quietly exempted from it.
+    """
+    if isinstance(block, InteractionTableBlock):
+        return np.asarray(block.table.iloc[:, 1:].to_numpy(), dtype=np.float64).ravel()
+    if "Relativity" not in block.table:
+        raise ValueError(
+            f"Rating-table block {block.name!r} (kind {block.kind!r}) has no 'Relativity' "
+            "column, so its exported factors cannot be validated. Every block kind must "
+            "name its factor column 'Relativity'."
+        )
+    return np.asarray(block.table["Relativity"], dtype=np.float64)
 
-    Checked against ``_safe_exp``'s own constant rather than a copy of it, and
-    on the emitted values rather than on the fitted coefficients, so it covers
-    every path that reaches a block regardless of centering.
+
+def _require_usable_relativities_export(
+    main_effects: list[RatingTableBlock],
+    interactions: list[InteractionTableBlock],
+) -> None:
+    """No exported factor may be one a consumer cannot multiply by.
+
+    Stated as a property of the EMITTED NUMBER rather than of the routine that
+    produced it, because the export has two different ways of producing an
+    unusable factor and no single provenance covers both.
+
+    * ``_safe_exp`` clips its argument to +/-500 so a quasi-separated
+      CONFIDENCE BOUND comes back finite instead of ``inf``.  Right for a
+      bound, wrong for a factor, for the same reason it was wrong for the base
+      (see ``_base_relativity``): ``exp(+/-500)`` is representable -- 1.4e+217
+      and 7.1e-218 -- so a check for ``inf`` or ``0.0`` never fires on it, and
+      only a comparison against the clip endpoints catches it.  This is the
+      ``Piecewise`` path in both centerings, and ``Categorical`` under
+      ``centering="mean"``.
+    * Everything else exponentiates with a plain ``np.exp``, where the failure
+      is the opposite: ``inf`` above 709.78, subnormals below -708.4, and
+      exactly ``0.0`` below -745.13.  Measured on a fitted interaction --
+      ``a`` and ``b`` as ``Polynomial(degree=4)`` on data lying along a
+      diagonal band -- the exported grid carried three cells of exactly ``0.0``
+      and a maximum of 1.8e+155 (issue #289).
+
+    So both arms are needed and neither is redundant, and the guard is stated
+    over the values rather than over the call graph.
+
+    Interaction cells are checked here for the first time.  The blow-up above
+    needs no cancellation and no extreme coefficient: the export samples a
+    continuous interaction on the parents' BOUNDING BOX, and data that occupies
+    a diagonal band leaves the two off-diagonal corners with no exposure at
+    all, so the corner cells are pure extrapolation of a tensor surface.  Every
+    row's predictor stayed inside +/-3.14 against a saturation bound of 80, the
+    base relativity was 9.7e-24 and representable, and every main-effect
+    relativity was inside the clip -- so the saturation gate, the base guard
+    and the per-block guard were all silent while the workbook shipped a factor
+    of zero.
+
+    Exactly ``0.0`` is refused, and that is a decision rather than a fallout
+    (issue #291).  It used to be carved out of the floor comparison.  It is the
+    one factor that is never usable: it drives every premium for the rows it
+    covers to zero while every relativity RATIO in the workbook still reads
+    correctly, which is the silent shape of issue #253 and precisely the
+    reasoning ``_base_relativity`` already refuses ``0.0`` for.  Negative
+    values fall under the same comparison, since no multiplicative tariff has a
+    negative factor.
+
+    Checked per block, not on the product, because CANCELLATION is what hides
+    it.  Term contributions of ``+800`` and ``-700`` have a perfectly ordinary
+    product, ``exp(100)``; clipped they become ``exp(500) * exp(-500) = 1``, so
+    the workbook rates every such risk 2.7e+43 low while the predictor -- and
+    therefore the base guard, and therefore
+    ``_require_unsaturated_predictor_export`` -- stays entirely healthy.  The
+    sum is well behaved precisely when the parts are not.
     """
     from superglm.inference._term_types import _MAX_LOG_REL
 
     ceiling = float(np.exp(_MAX_LOG_REL))
     floor = float(np.exp(-_MAX_LOG_REL))
+    blocks: list[RatingTableBlock | InteractionTableBlock] = [*main_effects, *interactions]
     for block in blocks:
-        if "Relativity" not in block.table:
-            continue
-        values = np.asarray(block.table["Relativity"], dtype=np.float64)
-        bad = ~np.isfinite(values) | (values >= ceiling) | ((values <= floor) & (values != 0.0))
+        values = _emitted_relativities(block)
+        # ``<= floor`` and not ``< floor``: the floor IS a clip endpoint, so a
+        # value sitting exactly on it is the stand-in this refuses.  It also
+        # sweeps up the subnormals, ``0.0`` and every negative in one
+        # comparison.
+        bad = ~np.isfinite(values) | (values >= ceiling) | (values <= floor)
         if not np.any(bad):
             continue
         raise ValueError(
             f"Rating-table block {block.name!r} carries {int(np.count_nonzero(bad))} "
-            f"relativity value(s) at or beyond the +/-exp({_MAX_LOG_REL:g}) range "
-            "_safe_exp clips to, so the exported factor is a clipped stand-in rather "
-            "than the model's. Two blocks whose contributions cancel can leave the "
-            "prediction well behaved while their individual factors do not, so this "
-            "is checked per block. The fit is quasi-separated or mis-scaled; refit or "
-            "rescale rather than export it."
+            "relativity value(s) that a consumer cannot multiply by: outside "
+            f"(exp(-{_MAX_LOG_REL:g}), exp({_MAX_LOG_REL:g})) = "
+            f"({floor:.4g}, {ceiling:.4g}), or not finite. Such a value is either a "
+            "stand-in _safe_exp clipped to that range or a plain exp that overflowed "
+            "to inf, underflowed to a subnormal or to exactly 0.0 -- and a factor of "
+            "0.0 zeroes every premium it touches while every relativity ratio on the "
+            "sheet still reads correctly. Two blocks whose contributions cancel can "
+            "leave the prediction well behaved while their individual factors do not, "
+            "so this is checked per block. The fit is quasi-separated or mis-scaled, "
+            "or the exported grid reaches far outside the data; refit, rescale or "
+            "narrow the term rather than export it."
         )
 
 
@@ -599,7 +707,27 @@ def _offset_multiplier_block(
     for b in range(actual_n_bins):
         mask = bin_idx == b
         if not np.any(mask):
-            avg_multiplier = 0.0
+            # An empty bin still ships a row, so it still ships a FACTOR, and
+            # ``0.0`` is the one value a multiplicative tariff can never carry:
+            # it prices every risk that lands in the bin at zero while every
+            # relativity ratio on the sheet still reads correctly -- the silent
+            # shape of issue #253, one level down.  ``1.0`` is no better; it is
+            # a neutral-looking number that is generally not even inside the
+            # interval the row is keyed on.
+            #
+            # This block is the one place where the right answer needs no
+            # estimate.  Its "relativity" IS its key: the factor for a risk is
+            # that risk's own offset multiplier, and a risk in this bin has a
+            # multiplier somewhere in ``[edges[b], edges[b + 1])``.  The
+            # midpoint is therefore the representative that minimises the worst
+            # absolute error over everything the bin can contain, and it is the
+            # same statistic the non-empty branch reports -- the weighted mean
+            # multiplier -- under the only distribution an empty bin licenses.
+            # Under ``bin_strategy="exposure_quantile"`` this branch is
+            # unreachable, because every edge is a data value; under
+            # ``"uniform"`` on a skewed exposure it is the normal case (issue
+            # #291: measured 123 of 150 bins on an 800-row fit).
+            avg_multiplier = 0.5 * (float(edges[b]) + float(edges[b + 1]))
             exposure = 0.0
         else:
             exposure = float(weights[mask].sum())
@@ -1001,6 +1129,14 @@ def build_rating_table_payload(
     of the frame and is a lookup, which is why the equivalence tests reconstruct
     through it and treat the binned block as the exposure summary it is.
 
+    A bin of that block with no exposure reports the MIDPOINT of its own
+    interval, weight zero.  It used to report ``0.0``, which is not a summary
+    of anything -- it is a factor that prices every risk landing in the gap at
+    zero while every other number on the sheet stays right (issue #291).  The
+    branch is unreachable under the default ``bin_strategy="exposure_quantile"``,
+    whose edges are all data values; under ``"uniform"`` on a skewed exposure it
+    is the normal case, measured at 123 of 150 bins on an 800-row fit.
+
     Lossy, by construction, for the binned blocks -- ``Spline``,
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
     distinct errors ride on those, and only the first is reported, and then
@@ -1035,20 +1171,21 @@ def build_rating_table_payload(
       committed fixture; what the suite pins is the mechanism they follow from,
       in ``test_the_binning_measure_is_physical_rows_for_tweedie_and_the_
       weights_otherwise``.
-    * Interval-string rounding, which the impact sheet does NOT see.  The
-      impact sweep bins on the exact ``edges`` array while the exported block
-      prints its bin boundaries through ``_format_interval`` at ``.10g``, so a
-      consumer applying the printed strings re-bins the rows that sit within
-      the rounding band of an edge -- and with ``bin_strategy=
-      "exposure_quantile"`` the edges ARE data values, so a row sitting exactly
-      on one flips whenever its printed edge rounds up.  Measured on the
-      equivalence fixture (900 rows, 150 bins, two continuous terms): 302 of
-      302 printed edges differ from exact by up to 4.99e-09, 133 of 900 rows
-      (14.8%) land in a different bin, and the reconstruction carries 2.29e-01
-      maximum relative error against the discretised predictions the blocks are
-      meant to reproduce exactly -- 6.94e-16 with the exact edges.  Tracked
-      separately as issue #278; fixing it changes a public column of the
-      payload, not the centering this function fixed.
+      So the impact sheet is a true bound on the binned blocks' error, which it
+      previously was not.  The sweep bins on the exact ``edges`` array, and the
+      exported block used to print its boundaries at ``.10g`` -- ten
+      significant digits, where a binary64 needs seventeen -- so a consumer
+      applying the printed strings re-binned every row within the rounding band
+      of an edge, and under ``bin_strategy="exposure_quantile"`` the edges ARE
+      data values, so a row sitting exactly on one flipped whenever its printed
+      edge rounded up.  Measured on the equivalence fixture (900 rows, 150
+      bins, two continuous terms): 302 of 302 printed edges differed from exact
+      by up to 4.99e-09, 133 of 900 rows (14.8%) took a different factor, and
+      the reconstruction carried 2.29e-01 maximum relative error against the
+      discretised predictions the blocks are meant to reproduce exactly.  The
+      boundaries are now printed at round-trip precision (``_format_number``),
+      so the printed edge IS the edge the sweep bins on and that second error
+      is identically zero (issue #278).
 
     ``centering`` is a presentation choice and does not change what the
     payload rates.  ``"native"`` reports each term under the model's own
@@ -1091,19 +1228,32 @@ def build_rating_table_payload(
     ValueError
         If ``centering`` is not one of ``("native", "mean")``; if the model's
         link is not ``log``; if the family is ``Binomial``; if
-        ``model.predict`` saturates on this frame; or if any emitted relativity
-        is one ``_safe_exp`` had to clip.
+        ``model.predict`` saturates on this frame; or if any emitted
+        relativity, on a main-effect block or an interaction cell, is one a
+        consumer cannot multiply by -- ``inf``, ``nan``, ``0.0``, negative,
+        subnormal, or at or beyond the ``exp(+/-500)`` range ``_safe_exp``
+        clips to.
     RatingTableBaseNotRepresentableError
         If the exported base relativity overflows or underflows float64.
+    NotImplementedError
+        If the model carries a term type the export does not support -- a
+        ``RandomEffect`` or ``FactorSmooth`` main effect, or an interaction
+        whose reconstruction is neither a cell table nor a grid.
+    RuntimeError
+        If the model has not been fitted.
 
-    Two exception disciplines, deliberately, and the split is by what went
+    Three exception disciplines, deliberately, and the split is by what went
     wrong rather than by when.  ``ValueError`` means THIS MODEL OR FRAME IS NOT
     EXPORTABLE -- a structural refusal a caller answers by changing the model,
-    the frame or the argument.  ``RatingTableBaseNotRepresentableError`` (an
-    ``OverflowError``) means the export ran and A NUMBER CAME OUT UNUSABLE,
+    the frame or the argument.  ``NotImplementedError`` is the third, and it is
+    genuinely distinct by that same test: an unsupported term type is not
+    something a caller answers by changing anything, it is something they
+    answer by waiting for a release.  ``RatingTableBaseNotRepresentableError``
+    (an ``OverflowError``) means the export ran and A NUMBER CAME OUT UNUSABLE,
     which is why it is a distinct root-exported class: it is the one outcome a
     caller might reasonably catch and report per-model in a batch, rather than
-    fix.
+    fix.  (``RuntimeError`` for an unfitted model is the ordinary object-state
+    complaint every method on the class makes, not a discipline of this one.)
     """
     if model._result is None:
         raise RuntimeError("Model must be fitted before exporting rating tables.")
@@ -1207,9 +1357,17 @@ def build_rating_table_payload(
             )
         main_effects.append(offset_block)
 
+    # Built here rather than inline in the constructor call below, so that the
+    # guard can see the interaction cells.  Those are the only exported factors
+    # that never touch ``_safe_exp`` under any centering, so they are the one
+    # place the disciplines this module applies to the base -- reject inf,
+    # reject 0.0, reject subnormal -- used to be absent entirely (issue #289).
+    # ``_interaction_blocks`` is pure, so the hoist changes nothing else.
+    interactions = _interaction_blocks(model, n_bins)
+
     # After the blocks are built, because it is the emitted values it checks
     # rather than the coefficients they came from.
-    _require_unclipped_relativities_export(main_effects)
+    _require_usable_relativities_export(main_effects, interactions)
 
     impact = _impact_sweep(
         model,
@@ -1236,7 +1394,7 @@ def build_rating_table_payload(
         ),
         selected_n_bins=int(n_bins),
         main_effects=main_effects,
-        interactions=_interaction_blocks(model, n_bins),
+        interactions=interactions,
         discretization_impact=impact,
         summary=build_summary_export_payload(model),
     )

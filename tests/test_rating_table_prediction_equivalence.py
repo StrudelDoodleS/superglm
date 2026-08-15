@@ -673,7 +673,7 @@ def _geometry_weight(model, sample_weight: np.ndarray) -> np.ndarray:
     return _validated_discretization_weights(model, sample_weight, len(sample_weight))[1]
 
 
-def _rebinning_bias_bound(payload, X: pd.DataFrame, geometry_weight: np.ndarray) -> float:
+def _binned_bias_roundoff_bound(payload, X: pd.DataFrame, predicted: np.ndarray) -> float:
     """A worst-case bound on the geometry-weighted log bias of the binned blocks.
 
     Derived, not observed.  ``discretize`` sets each bin's log relativity to the
@@ -688,44 +688,34 @@ def _rebinning_bias_bound(payload, X: pd.DataFrame, geometry_weight: np.ndarray)
     weights directly and was right by accident; on a Tweedie fit they differ
     and the identity holds only in the former.
 
-    One thing breaks that identity, and only one: a row that the workbook bins
-    differently from ``discretize``.  The block prints its edges through
-    ``_format_interval`` at ``.10g``, so a printed edge is within 5e-10
-    relative of the exact one and any row inside that band can land one bin to
-    either side.  A displaced row contributes at most its own weight share
-    times the step between neighbouring bins, so summing
+    One thing used to break that identity: a row the workbook binned
+    differently from ``discretize``, because the block printed its edges at
+    ``.10g`` and a ten-digit edge is a different float64 from the exact one.
+    That is issue #278, and it is fixed -- the edges are printed at round-trip
+    precision, so the workbook's partition IS ``discretize``'s partition and no
+    row is displaced at all.  What is left is round-off, and it is what this
+    now budgets, in the two places it enters:
 
-        (weight share of rows within the printing band of an edge)
-        x (largest step between neighbouring log relativities)
+    * Each per-row log ratio.  A relative error ``d`` on either path becomes an
+      ABSOLUTE error ``d`` on its log, and the weighted mean of bounded errors
+      is bounded by the same quantity, so this contributes at most
+      ``_RECONSTRUCTION_RTOL`` -- the same 32-rounding accounting, over a
+      product with two more (exact) lookups in it.
+    * The weighted average itself.  ``|fl(sum a_i) - sum a_i| <= n eps sum|a_i|``
+      for any summation order, so dividing through by ``sum w_i`` leaves
+      ``n eps max_i |r_i|``, and ``|r_i|`` is bounded by the sum of the logs
+      that go into it: the base, one factor per block, and the prediction.
 
-    over the binned blocks bounds the bias from above.  Every input is read
-    from the payload, the frame and the weights -- nothing is fitted to what
-    the reconstruction happens to produce.
+    Every input is read from the payload, the frame and ``model.predict`` --
+    the quantities a consumer holds -- and never from the residual, so this is
+    a bound and not a fit to the headroom.  Measured on this fixture: 8.0e-13
+    (native) and 6.1e-13 (mean), against the 8.1e-02 the printing band used to
+    force.
     """
-    total = 0.0
+    magnitude = np.abs(np.log(float(payload.base_relativity))) + np.abs(np.log(predicted))
     for block in payload.main_effects:
-        if block.kind != "continuous":
-            continue
-        bounds = [_INTERVAL.match(str(label)) for label in block.table[block.name]]
-        assert all(bound is not None for bound in bounds)
-        edges = np.array(
-            [float(bound.group(1)) for bound in bounds] + [float(bounds[-1].group(2))],
-            dtype=np.float64,
-        )
-        log_relativity = np.log(block.table["Relativity"].to_numpy(dtype=np.float64))
-        step = float(np.max(np.abs(np.diff(log_relativity))))
-
-        values = X[block.name].to_numpy(dtype=np.float64)
-        # ``.10g`` keeps ten significant digits, so the printed edge is within
-        # half a unit in the tenth: 5e-10 relative, floored at absolute for
-        # edges near zero.
-        band = 5e-10 * np.maximum(np.abs(edges), 1.0)
-        displaceable = np.zeros(len(values), dtype=bool)
-        for edge, half_width in zip(edges, band):
-            displaceable |= np.abs(values - edge) <= half_width
-        share = float(geometry_weight[displaceable].sum() / geometry_weight.sum())
-        total += share * step
-    return total
+        magnitude = magnitude + np.abs(np.log(_block_multiplier(block, X)))
+    return _RECONSTRUCTION_RTOL + len(X) * _EPS * float(magnitude.max())
 
 
 def test_the_binned_reconstruction_carries_no_uniform_scale_error():
@@ -741,25 +731,26 @@ def test_the_binned_reconstruction_carries_no_uniform_scale_error():
     and moves the exposure-weighted mean log ratio by exactly ``c``, while the
     binning error itself cannot move it at all.
 
-    The tolerance is the derived re-binning bound, not the observed residual.
-    On this fixture it is 8.1e-02 against a measured bias of 5.9e-04, and the
+    The tolerance is the derived round-off budget, not the observed residual.
+    On this fixture it is 8.0e-13 against a measured bias of 4.1e-17, and the
     smallest constant this export actually transfers is the 0.5 that
     ``test_the_base_relativity_moves_by_exactly_the_shift_the_blocks_applied``
-    fixes -- six times the bound.  So the check
+    fixes -- 6.3e+11 times the bound.  So the check
     bites on a real regression and is not sized to the headroom it happens to
     have.  It does NOT catch a scale error smaller than the bound; that is what
     the exactly tabulable sweep is for, on the paths where exactness is
     available.
 
-    ``bound < 0.1`` is a guard against the bound going vacuous, and its margin
-    is the fixture's, not a general one.  The bound is a weight share times a
-    step, summed over blocks, and the share grows with the number of edges: at
-    the committed ``n_bins=150`` it measures 8.1e-02, and on this same fixture
-    it reaches 1.2e-01 at ``n_bins=200`` and 3.1e-01 at 400.  So a future author
-    who raises ``n_bins`` here, or refits onto a denser frame, will see this
-    guard trip -- and it means the bound has stopped discriminating, not that
-    the export regressed.  The fix in that case is a tighter bound, not a
-    larger constant.
+    The bound used to be 8.1e-02, dominated by the rows the ``.10g`` interval
+    strings re-binned (issue #278).  With the edges printed at round-trip
+    precision no row is displaced, the bias collapses from 5.9e-04 to round-off,
+    and what is left to budget is arithmetic -- eleven orders tighter, and the
+    pointwise binning error is untouched at 4.9e-01, because that error was
+    never the biased part.
+
+    ``bound < 0.1`` is a guard against the bound going vacuous, and it is the
+    same guard as before: it says the budget stays far enough below the 0.5
+    constant that a dropped or doubled centering shift cannot hide inside it.
     """
     model, X, y, sample_weight = _fit("all")
     predicted = model.predict(X)
@@ -769,9 +760,90 @@ def test_the_binned_reconstruction_carries_no_uniform_scale_error():
         payload = _payload(model, X, y, sample_weight, centering)
         reconstructed = _predict_from_payload(payload, X)
         bias = float(np.average(np.log(reconstructed) - np.log(predicted), weights=geometry_weight))
-        bound = _rebinning_bias_bound(payload, X, geometry_weight)
+        bound = _binned_bias_roundoff_bound(payload, X, predicted)
         assert bound < 0.1, f"{centering}: bound {bound} is too loose to discriminate"
         assert abs(bias) <= bound, f"{centering}: bias {bias} exceeds derived bound {bound}"
+
+
+def _printed_edges(block) -> np.ndarray:
+    """The bin boundaries a consumer recovers from the interval strings alone."""
+    bounds = [_INTERVAL.match(str(label)) for label in block.table[block.table.columns[0]]]
+    assert all(bound is not None for bound in bounds), "every row is keyed on an interval"
+    return np.array(
+        [float(bound.group(1)) for bound in bounds] + [float(bounds[-1].group(2))],
+        dtype=np.float64,
+    )
+
+
+def test_the_printed_bin_edges_are_the_edges_the_model_binned_on():
+    """A consumer applying the printed table must land every risk in the model's bin.
+
+    This is the assertion the workbook's own numbers could never make.  The
+    binned blocks are checked elsewhere for being unbiased in the geometry
+    measure and for agreeing between centerings, and both of those compare the
+    sheet against itself; the impact sheet quantifies the binning loss, and it
+    bins on the exact ``edges`` array.  So every existing check was made on the
+    inside of an edge representation that the consumer never sees.
+
+    What the consumer sees is a string.  The block used to print its boundaries
+    at ``.10g``, and ten significant digits do not identify a binary64 -- it
+    takes seventeen -- so the printed edge was a DIFFERENT number from the one
+    the model binned on.  For a reported quantity that would be a rounding.
+    Here the map from value to bin is discontinuous at the edge, so an edge
+    moved by 5e-10 relative moves every row inside that band a whole bin over,
+    and under the default ``exposure_quantile`` the edges ARE data values, so a
+    row sits exactly on one by construction.  Measured against the unfixed
+    export on this fixture: 302 of 302 printed edges differed from exact, by up
+    to 4.99e-09; 133 of 900 rows (14.8%) took a different factor; and the
+    reconstruction moved by 2.29e-01 relative.
+
+    Asserted three ways, on the three things a consumer actually does, and each
+    is exact rather than toleranced -- ``repr`` round-trips by construction
+    (Steele and White 1990's first free-format property), so there is no
+    round-off here to allow for.
+    """
+    from superglm.diagnostics.discretize import _compute_edges
+
+    model, X, y, sample_weight = _fit("all")
+    geometry_weight = _geometry_weight(model, sample_weight)
+    payload = _payload(model, X, y, sample_weight, "native")
+
+    binned = [block for block in payload.main_effects if block.kind == "continuous"]
+    assert [block.name for block in binned] == ["age", "score"], "both binned blocks are here"
+
+    exact_edges = {}
+    for block in binned:
+        values = X[block.name].to_numpy(dtype=np.float64)
+        exact = _compute_edges(
+            values, geometry_weight, payload.selected_n_bins, "exposure_quantile"
+        )
+        printed = _printed_edges(block)
+        exact_edges[block.name] = exact
+
+        # 1. The string parses back to the model's own edge, bit for bit.
+        assert len(printed) == len(exact)
+        np.testing.assert_array_equal(printed, exact)
+
+        # 2. So the printed table induces the model's partition, row for row.
+        printed_bin = np.clip(np.digitize(values, printed, right=False), 1, len(printed) - 1)
+        exact_bin = np.clip(np.digitize(values, exact, right=False), 1, len(exact) - 1)
+        np.testing.assert_array_equal(printed_bin, exact_bin)
+
+    # 3. And the premium a consumer computes off the sheet is the premium the
+    #    model's own edges give -- identically, not to a tolerance.
+    def with_exact_edges(frame: pd.DataFrame) -> np.ndarray:
+        out = np.full(len(frame), float(payload.base_relativity), dtype=np.float64)
+        for block in payload.main_effects:
+            if block.kind != "continuous":
+                out = out * _block_multiplier(block, frame)
+                continue
+            relativity = block.table["Relativity"].to_numpy(dtype=np.float64)
+            edges = exact_edges[block.name]
+            index = np.digitize(frame[block.name].to_numpy(dtype=np.float64), edges, right=False)
+            out = out * relativity[np.clip(index, 1, len(relativity)) - 1]
+        return out
+
+    np.testing.assert_array_equal(_predict_from_payload(payload, X), with_exact_edges(X))
 
 
 def test_the_binning_measure_is_physical_rows_for_tweedie_and_the_weights_otherwise():
@@ -1392,12 +1464,92 @@ def test_a_continuous_offset_exports_a_binned_block_that_is_not_a_row_exact_fact
     assert float(relative.max()) > 1e-2 > _RECONSTRUCTION_RTOL
 
 
-def test_a_clipped_relativity_stops_the_export():
-    """A factor ``_safe_exp`` had to clip is not the model's, so it cannot ship.
+def test_an_empty_offset_bin_ships_a_factor_a_risk_can_be_rated_on():
+    """An empty bin still ships a row, so it still ships a factor.
+
+    ``_offset_multiplier_block`` bins the exposure multiplier above 20 distinct
+    values.  Under the default ``bin_strategy="exposure_quantile"`` no bin can
+    be empty -- every edge is a data value, so each bin holds at least the row
+    on its own left edge.  ``bin_strategy`` is a public argument, and
+    ``"uniform"`` is ``linspace(min, max, n_bins + 1)``: on a skewed exposure
+    with a gap in it, empty bins are the normal outcome rather than a corner.
+
+    Those bins used to report ``Relativity = 0.0`` (issue #291).  Measured
+    against the unfixed export on this fixture: 123 of 150 bins, and a risk
+    whose multiplier fell in one priced at exactly zero -- while every other
+    number on the sheet, including every relativity ratio, stayed correct.  That
+    is the failure shape of issue #253 one level down, and it needs no extreme
+    coefficient at all.
+
+    Asserted on what a consumer computes, not on the fill rule: for a multiplier
+    swept across every bin the block prints, the factor it finds must be a
+    multiplier the bin could actually contain, and the premium must be positive.
+    A rule that filled with ``1.0`` would pass "positive" and fail "inside the
+    interval", which is why both are here.
+    """
+    rng = np.random.default_rng(2026)
+    n = 800
+    X = pd.DataFrame({"region": rng.choice(["A", "B", "C"], n)})
+    # A skewed exposure with a real gap: nearly all the mass near 0.1, a tail at 2.
+    exposure = np.concatenate([rng.uniform(0.05, 0.25, n - 20), rng.uniform(1.8, 2.0, 20)])
+    rng.shuffle(exposure)
+    offset = np.log(exposure)
+    region = X["region"].to_numpy()
+    y = rng.poisson(np.exp(-1.0 + 0.4 * (region == "B") + 0.8 * (region == "C")) * exposure).astype(
+        np.float64
+    )
+
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, offset=offset)
+    payload = build_rating_table_payload(
+        model, X, y, offset=offset, n_bins=150, impact_bins=(20,), bin_strategy="uniform"
+    )
+
+    block = next(b for b in payload.main_effects if b.kind == "offset")
+    relativity = block.table["Relativity"].to_numpy(dtype=np.float64)
+    weight = block.table["Weight"].to_numpy(dtype=np.float64)
+    edges = _printed_edges(block)
+
+    # The fixture reaches the branch at all, which is the half a fill rule
+    # cannot fake: without empty bins there is nothing here to get wrong.
+    assert int(np.count_nonzero(weight == 0.0)) > 0, "the uniform strategy leaves bins empty"
+
+    # A risk is rated by keying its own multiplier into the printed intervals.
+    probe = 0.5 * (edges[:-1] + edges[1:])
+    factor = relativity[np.clip(np.digitize(probe, edges, right=False), 1, len(relativity)) - 1]
+    assert np.all(factor > 0.0), "no bin prices a risk at zero"
+    assert np.all((factor >= edges[:-1]) & (factor <= edges[1:])), (
+        "each bin's factor is a multiplier that bin could hold"
+    )
+
+    # And the offset block's boundaries round-trip too -- it shares the printer.
+    from superglm.diagnostics.discretize import _compute_edges
+
+    np.testing.assert_array_equal(edges, _compute_edges(exposure, np.ones(n), 150, "uniform"))
+
+
+def test_a_relativity_a_consumer_cannot_multiply_by_stops_the_export():
+    """Two different mechanisms produce an unusable factor, and both are refused.
 
     ``_safe_exp`` clips its argument to +/-500 so a quasi-separated CONFIDENCE
     BOUND comes back finite.  Right for a bound, wrong for a factor: the clipped
-    value is representable but is no longer the number the model fitted.
+    value is representable -- 1.4e+217 and 7.1e-218 -- so a check for ``inf`` or
+    ``0.0`` never fires on it and only a comparison against the endpoints
+    catches it.  That is the ``Piecewise`` path in both centerings, and
+    ``Categorical`` under ``centering="mean"``.
+
+    Every other path exponentiates with a plain ``np.exp``, where the failure is
+    the opposite: ``inf``, a subnormal, or exactly ``0.0``.  So the guard has to
+    carry both arms, which is why it is stated over the emitted value rather
+    than over which routine produced it.
+
+    ``0.0`` is refused, and that used to be carved out (issue #291).  It is the
+    single worst value a multiplicative tariff can carry: it prices every risk
+    it covers at zero while every relativity RATIO on the sheet still reads
+    correctly -- the same silent shape ``_base_relativity`` already refuses an
+    infinite or zero base for.
 
     The reason it needs its own guard, rather than riding on the base's, is
     CANCELLATION.  Term contributions of +800 and -700 have an ordinary product,
@@ -1407,18 +1559,23 @@ def test_a_clipped_relativity_stops_the_export():
     SUM -- stay entirely healthy.  The sum is well behaved exactly when the
     parts are not.
 
-    Disclosed limit: I could not drive a fitted model into that regime. The
-    closest was two numerics at rho = 1 - 1e-8, which reached beta -35.5/+35.8
-    and relativities spanning 3.9e-16 to 3.5e+15 -- the cancellation is real and
-    the span is already 31 orders of magnitude, but it stays inside the clip.
-    So the guard is exercised on a constructed block rather than a fitted one,
-    and that is stated rather than dressed up as a reproduction.
+    The blocks here are CONSTRUCTED, and that is stated rather than dressed up:
+    no fitted main effect reaches either endpoint.  A fitted reproduction does
+    exist one level out, on the interaction cells, and it has its own test
+    below.
     """
     from superglm.inference._term_types import _MAX_LOG_REL
 
     ceiling = float(np.exp(_MAX_LOG_REL))
     floor = float(np.exp(-_MAX_LOG_REL))
     assert np.isfinite(ceiling) and floor > 0.0, "both clip endpoints are representable"
+    # The mechanism the clip check exists for: a clipped factor is an ordinary
+    # finite positive number, so no range check on inf/0 would ever see it.
+    from superglm.inference._term_types import _safe_exp
+
+    assert float(_safe_exp(800.0)) == ceiling and float(_safe_exp(-800.0)) == floor
+    with np.errstate(over="ignore"):
+        assert np.isinf(np.exp(800.0)) and np.exp(-800.0) == 0.0
 
     def block(*values: float) -> rating_tables.RatingTableBlock:
         return rating_tables.RatingTableBlock(
@@ -1435,21 +1592,130 @@ def test_a_clipped_relativity_stops_the_export():
 
     # Accepted: one ulp inside each endpoint, so the guard rejects the clip and
     # not merely "a large number" -- without this it could have been `> 1e10`.
-    rating_tables._require_unclipped_relativities_export(
-        [block(float(np.nextafter(ceiling, 0.0)), float(np.nextafter(floor, np.inf)), 1.0)]
+    rating_tables._require_usable_relativities_export(
+        [block(float(np.nextafter(ceiling, 0.0)), float(np.nextafter(floor, np.inf)), 1.0)], []
     )
 
-    for bad in (ceiling, floor, float("inf"), float("nan")):
-        with pytest.raises(ValueError, match="_safe_exp clips to"):
-            rating_tables._require_unclipped_relativities_export([block(1.0, bad)])
+    # Both sides of 0.0, which the guard used to cover on neither.
+    for bad in (ceiling, floor, 0.0, -1.0, 5e-324, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="cannot multiply by"):
+            rating_tables._require_usable_relativities_export([block(1.0, bad)], [])
+
+    # A block whose factor column is named something else is caught, not exempt.
+    with pytest.raises(ValueError, match="no 'Relativity' column"):
+        rating_tables._require_usable_relativities_export(
+            [
+                rating_tables.RatingTableBlock(
+                    name="region",
+                    kind="categorical",
+                    table=pd.DataFrame({"region": ["a"], "Factor": [0.0]}),
+                )
+            ],
+            [],
+        )
 
     # And an ordinary tariff is nowhere near either endpoint.
     model, X, y, sample_weight = _fit("exact")
     payload = _payload(model, X, y, sample_weight, "mean")
     for emitted in payload.main_effects:
-        if "Relativity" in emitted.table:
-            values = np.asarray(emitted.table["Relativity"], dtype=np.float64)
-            assert np.all((values > floor) & (values < ceiling))
+        values = np.asarray(emitted.table["Relativity"], dtype=np.float64)
+        assert np.all((values > floor) & (values < ceiling))
+
+
+def _diagonal_band_interaction_fit():
+    """Two continuous parents whose data lies along ``a == b``, fitted honestly.
+
+    Nothing here is extreme.  The response is an ordinary Poisson count, the
+    coefficients come out of the fit untouched, and every row's linear predictor
+    stays inside +/-3.14 against a saturation bound of 80.  What is extreme is
+    the region the EXPORT samples: ``reconstruct`` lays the interaction on
+    ``linspace(lo1, hi1) x linspace(lo2, hi2)``, the parents' bounding BOX, and
+    a diagonal band leaves the two off-diagonal corners with no exposure at all.
+    The corner cells are therefore a tensor surface extrapolated well outside
+    its data, which is where a degree-4 pair goes to 1.8e+155 and to 0.0.
+    """
+    rng = np.random.default_rng(11)
+    n = 800
+    u = rng.uniform(0.0, 10.0, n)
+    X = pd.DataFrame({"a": u + rng.normal(0.0, 0.25, n), "b": u + rng.normal(0.0, 0.25, n)})
+    mu = np.exp(-1.0 + 0.05 * X["a"] + 0.05 * X["b"] + 0.02 * X["a"] * X["b"])
+    y = rng.poisson(mu).astype(np.float64)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"a": Polynomial(degree=4), "b": Polynomial(degree=4)},
+        interactions=[("a", "b")],
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_an_interaction_cell_that_is_not_a_usable_factor_stops_the_export():
+    """Interaction cells are emitted relativities, so they are checked too.
+
+    They were not (issue #289): the guard ran on ``main_effects`` while
+    ``_interaction_blocks`` was built afterwards, inside the constructor call.
+    Interaction cells are also the only exported factors that never touch
+    ``_safe_exp`` under any centering, so they were the one place all three of
+    the disciplines this module applies to the base -- reject ``inf``, reject
+    ``0.0``, reject subnormal -- were absent together.
+
+    Fitted, not constructed, and it needs no cancellation: the export samples
+    the interaction on the parents' bounding box while the data lies along a
+    diagonal band, so the corner cells are pure extrapolation with no exposure
+    behind them.  Measured on the fixture below, against the UNFIXED export,
+    which succeeded and shipped the workbook:
+
+        3 of 400 interaction cells were exactly 0.0 and the smallest non-zero
+        one was 1e-262, while every row's |eta| stayed at 3.14 against a bound
+        of 80, the base relativity was 9.66e-24 and representable, and every
+        main-effect relativity sat inside the clip.
+
+    So the saturation gate, the base guard and the per-block guard were all
+    silent -- correctly, each on its own terms -- and a risk keyed into a corner
+    cell priced at exactly zero.
+    """
+    model, X, y = _diagonal_band_interaction_fit()
+
+    # The reachability claim, stated as the state of the fit rather than assumed:
+    # every other gate really is silent here, so this is not a fit that any
+    # existing check would have refused anyway.
+    raw = predict_eta_raw_exact(model, X)
+    assert np.all(raw == stabilize_eta(raw, model._link)), "no row saturates"
+
+    with pytest.raises(ValueError, match="cannot multiply by"):
+        build_rating_table_payload(model, X, y, n_bins=20, impact_bins=(20,))
+
+    # What was shipping: the cells themselves, read the way _interaction_blocks
+    # builds them, with the main-effect half of the payload entirely healthy.
+    cells = rating_tables._interaction_blocks(model, 20)[0].table.iloc[:, 1:].to_numpy(np.float64)
+    assert int(np.count_nonzero(cells == 0.0)) > 0, "a factor of exactly zero"
+    # It is the FLOOR arm that catches this fixture, not the ceiling: the grid
+    # runs down through the clip floor to exactly 0.0 while its largest cell,
+    # 1.8e+155, is still well inside exp(+500) = 1.4e+217.  Worth pinning,
+    # because a guard written only against the overflow side would pass every
+    # assertion above and still ship this workbook.
+    assert np.all(np.isfinite(cells)), "nothing here overflows to inf"
+    assert float(np.max(cells)) < float(np.exp(500.0)), "and nothing reaches the ceiling"
+    small = cells[cells > 0.0].min()
+    assert float(small) <= float(np.exp(-500.0)), "but the floor is passed on the way to zero"
+
+    # Isolated from the 0.0 predicate: an interaction block carrying inf is
+    # refused too, and it is refused only because the guard now SEES
+    # interactions -- the predicate itself has rejected inf all along.
+    interaction = rating_tables.InteractionTableBlock(
+        name="a:b",
+        table=pd.DataFrame({"a": ["0.0", "1.0"], "1.0": [1.0, float("inf")], "2.0": [1.0, 1.0]}),
+    )
+    with pytest.raises(ValueError, match="cannot multiply by"):
+        rating_tables._require_usable_relativities_export([], [interaction])
+
+    # An ordinary interaction is untouched, and its first column -- level labels,
+    # which may look numeric -- is a key rather than a factor.
+    ordinary, X2, y2, w2 = _fit("interaction")
+    payload = _payload(ordinary, X2, y2, w2, "native")
+    assert payload.interactions, "the fixture really does export an interaction"
+    rating_tables._require_usable_relativities_export(payload.main_effects, payload.interactions)
 
 
 def test_the_impact_sheet_does_not_cover_a_continuous_interaction():

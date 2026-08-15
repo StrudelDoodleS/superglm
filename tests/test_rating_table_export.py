@@ -1810,11 +1810,14 @@ def test_summary_sheet_level_activity_filter_fails_closed_on_a_renamed_field():
         _term_rows(model, source)
 
 
-# Ten significant digits, i.e. 5e-10 relative.  Not chosen: it is parity with
-# ``_format_interval`` and ``_format_axis_value``, which print this module's
-# other public numeric strings at ``.10g``.  The base is the only number on the
-# sheet that multiplies every row, so it must not be the least precisely stated
-# one on it.
+# Ten significant digits, i.e. 5e-10 relative.  This bounds only what a HUMAN
+# reads off the sheet: the stored value is exact and every reconstruction reads
+# that, so a display format cannot move a premium.  It is the number that
+# multiplies every row of the tariff, though, so a reader who cannot reconcile
+# it to ten digits cannot check the workbook at all.  (The bin boundaries and
+# axis values beside it are printed at full round-trip precision, because those
+# are keys a consumer converts back to floats rather than numbers a reader
+# reads -- see ``_format_number``.)
 _REQUIRED_BASE_PRECISION = 5e-10
 
 # Bases spanning the magnitudes a fitted intercept actually reaches.  A Poisson
@@ -1895,6 +1898,67 @@ def test_the_base_cell_holds_its_precision_at_every_magnitude_a_fit_reaches(tmp_
     )
     assert displayed == pytest.approx(base, rel=_REQUIRED_BASE_PRECISION), (
         f"base {base!r} renders as {displayed!r} under number_format {cell.number_format!r}"
+    )
+
+
+# Bases whose ``str()`` is SHORT: exactly ``1.0``, a round ``0.5`` or ``100.0``,
+# and a value near the smallest base the export admits, whose ``str`` is the
+# six characters ``1e-300``.  ``_autosize`` measures ``str(cell.value)``, the
+# base cell is in the column it sizes, and the floor is 12 -- so the column is
+# too narrow precisely when the base's raw ``str`` is short and nothing longer
+# shares the column.  A base like ``exp(-3)`` prints as twenty characters and
+# pulls the column to 22 on its own, which is why the precision sweep above,
+# which only ever used such bases, never saw this.
+_SHORT_STR_BASES = [1.0, 0.5, 100.0, 1e-300]
+
+
+@pytest.mark.parametrize("base", _SHORT_STR_BASES)
+def test_the_base_relativity_cell_is_wide_enough_to_render(tmp_path, base):
+    """A cell Excel renders as ``########`` is a cell nobody can check.
+
+    The base carries eleven significant digits by number format, which is the
+    whole point of that format; the rendering is sixteen characters wide, and
+    seventeen at a three-digit exponent.  ``_autosize`` sizes a column from
+    ``str(cell.value)`` -- the RAW float, not the format -- so the width it
+    picks has nothing to do with what the cell will display (issue #290).
+
+    Sized here with no main-effect block, which is both the shape the issue
+    names -- an intercept-only export -- and the strongest form of the claim:
+    the base cell must fit its own rendering on its own merits, not because a
+    neighbouring ``Weight`` column happened to be long.  Measured against the
+    unfixed renderer: 12 for every base here, against renderings of 16 and 17
+    characters; and 20 for the same bases with the fixture's blocks present,
+    which is why this is reachable rather than universal.
+
+    Cosmetic and loud rather than silent: the stored value is exact and every
+    reconstruction in this suite is unaffected.  It is worth pinning because
+    this is the one cell the mean-centering fix exists to make trustworthy, and
+    a reader who cannot see it cannot check it.
+
+    Asserted against the width the FORMAT needs, derived from the format string
+    rather than from the observed column width, so it stays true if either
+    moves.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, n_bins=20)
+    output = tmp_path / f"width-{base:.3e}.xlsx"
+    _write_workbook(
+        replace(payload, main_effects=[], interactions=[], base_relativity=base), output
+    )
+
+    ws = load_workbook(output)["Rating Tables"]
+    cell = ws["C2"]
+    assert cell.number_format == _BASE_RELATIVITY_NUMBER_FORMAT
+
+    mantissa = _BASE_RELATIVITY_NUMBER_FORMAT.split("E")[0]
+    decimals = len(mantissa.split(".")[-1]) if "." in mantissa else 0
+    rendered = f"{float(cell.value):.{decimals}E}"
+    assert len(rendered) >= 16, "the format really is wider than the autosize floor of 12"
+
+    width = ws.column_dimensions[cell.column_letter].width
+    assert width >= len(rendered), (
+        f"base {base!r} renders as {rendered!r} ({len(rendered)} characters) in a column "
+        f"{width} wide, so Excel shows ########"
     )
 
 
