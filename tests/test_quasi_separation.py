@@ -448,7 +448,9 @@ class TestTheFlagIsAdvisoryOnEveryRenderer:
         editor = _editor_row(model, "cat[RARE]")
         assert editor["quasi_separated"] is True
         assert editor["advisory_code"] == "?"
+        assert editor["advisory_kind"] == "thin_level"
         assert _editor_row(model, "cat[B]")["advisory_code"] == ""
+        assert _editor_row(model, "cat[B]")["advisory_kind"] == ""
 
 
 class TestTheLegendDescribesTheRuleThatExists:
@@ -599,6 +601,20 @@ class TestTheNoteIsTrueOfTheSecondTriggerToo:
         thin = _thin_but_cleanly_estimated()
         level_flagged, _ = _export_term(thin, "cat[RARE]")
         assert level_flagged.warning == "Low credibility"
+
+    def test_the_editor_row_carries_the_same_trigger_the_workbook_names(self):
+        """The browser renders a per-row tooltip, so it needs the row's trigger.
+
+        Naming both possibilities in one tooltip was not false, but it left the
+        editor unable to say what the exported Warning cell says about the same
+        row -- and three renderers agreeing is the whole point of #239.
+        """
+        rescaled, _ = self._rescaled_predictor(1e-6)
+        assert _editor_row(rescaled, "c")["advisory_kind"] == "outsized_se"
+        assert _editor_row(rescaled, "a")["advisory_kind"] == ""
+
+        thin = _thin_but_cleanly_estimated()
+        assert _editor_row(thin, "cat[RARE]")["advisory_kind"] == "thin_level"
 
 
 class TestColumnAlignment:
