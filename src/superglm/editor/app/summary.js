@@ -673,7 +673,7 @@ function renderCompactSummary(payload) {
             <th class="summary-se">SE</th>
             <th class="summary-p">p</th>
             <th class="sig-code">Sig</th>
-            <th class="advisory-code" title="Low credibility">LC</th>
+            <th class="advisory-code" title="Low credibility or outsized standard error">LC</th>
           </tr>
         </thead>
         <tbody>
@@ -876,10 +876,12 @@ function sigTitle(row) {
 const ADVISORY_TITLES = {
   thin_level: "Low credibility: this level carries little experience",
   outsized_se:
-    "Outsized standard error: wide next to this model's typical one — check the predictor's units"
+    "Outsized standard error: wide next to this model's typical one — check the predictor's units",
+  // Neutral, so an unrecognised kind does not fall into either row-level claim.
+  unknown: "Flagged — see the LC note below the table"
 };
 
 function advisoryTitle(row) {
   if (!row.advisory_code) return "";
-  return ADVISORY_TITLES[row.advisory_kind] || "Low credibility";
+  return ADVISORY_TITLES[row.advisory_kind] || ADVISORY_TITLES.unknown;
 }
