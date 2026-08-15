@@ -1174,6 +1174,11 @@ def test_rating_table_payload_passes_offset_to_discretization_impact(monkeypatch
             (),
             {
                 "tables": {"age": table},
+                # The double stands in for a whole ``DiscretizationResult``, so
+                # it carries every mapping the sweep reads; a defaulting
+                # ``getattr`` on the reader's side would have hidden a rename
+                # here rather than surfacing it.
+                "interaction_tables": {},
                 "metrics": {
                     "deviance_original": 1.0,
                     "deviance_discretized": 1.0,

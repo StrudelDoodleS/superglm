@@ -320,27 +320,54 @@ def _block_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     raise AssertionError(f"unhandled exported block kind {block.kind!r}")
 
 
+def _nearest(grid: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Index of the closest printed axis value, ties to the lower index."""
+    right = np.clip(np.searchsorted(grid, x), 1, len(grid) - 1)
+    return np.where((x - grid[right - 1]) <= (grid[right] - x), right - 1, right)
+
+
 def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
-    """The per-row factor one exported interaction cell table implies.
+    """The per-row factor one exported interaction block implies.
 
     Read the same way a consumer reads it off the sheet: the first column
     carries the row key and is named for the first parent, every remaining
-    column header is a level of the second parent, and the cell is the factor.
+    column header is a key of the second parent, and the cell is the factor.
     The second parent's name comes from the block name, which is the only place
     the sheet records it.
+
+    Two keying disciplines, and the consumer picks between them from the ONE
+    thing they hold that the sheet does not: the dtype of their own column.  A
+    categorical parent gives an exact label, so the block is a full cell table
+    and the lookup is exact.  A continuous parent gives a number that is
+    almost never one of the printed axis values, because those are a uniform
+    ``n_bins``-point sample of the fitted range -- so the only lookup available
+    is the nearest one on each axis, and the factor found is the surface at a
+    grid node rather than at the risk.  That gap is the interaction's share of
+    the discretisation error, and it is what issue #287 was about.
     """
     table = block.table
     parent1 = str(table.columns[0])
     parent2 = block.name.split(":")[1]
     assert parent2 in X.columns, f"{block.name!r} names a column the frame does not have"
+
+    gridded = all(pd.api.types.is_numeric_dtype(X[parent]) for parent in (parent1, parent2))
+    if gridded:
+        axis1 = table[parent1].to_numpy(dtype=np.float64)
+        axis2 = np.array([float(column) for column in table.columns[1:]], dtype=np.float64)
+        cells = table.iloc[:, 1:].to_numpy(dtype=np.float64)
+        return cells[
+            _nearest(axis1, X[parent1].to_numpy(dtype=np.float64)),
+            _nearest(axis2, X[parent2].to_numpy(dtype=np.float64)),
+        ]
+
     levels2 = [str(column) for column in table.columns[1:]]
-    cells = {
+    cells_by_pair = {
         (str(row[parent1]), level2): float(row[level2])
         for _, row in table.iterrows()
         for level2 in levels2
     }
     return np.array(
-        [cells[(str(a), str(b))] for a, b in zip(X[parent1], X[parent2])],
+        [cells_by_pair[(str(a), str(b))] for a, b in zip(X[parent1], X[parent2])],
         dtype=np.float64,
     )
 
@@ -1804,24 +1831,9 @@ def test_an_interaction_cell_that_is_not_a_usable_factor_stops_the_export():
     rating_tables._require_usable_relativities_export(payload.main_effects, payload.interactions)
 
 
-def test_the_impact_sheet_does_not_cover_a_continuous_interaction():
-    """The binning the sheet reports is the MAIN EFFECTS' binning only.
-
-    ``_impact_sweep`` is handed ``_continuous_features``, which scans
-    ``model._feature_order`` and never ``model._interaction_order``, while
-    ``_continuous_interaction_block`` samples a continuous-by-continuous
-    interaction onto the same lossy ``n_bins`` grid.  So a workbook can carry a
-    materially approximated interaction whose error the sheet does not
-    quantify.
-
-    Pre-existing -- the interaction export predates issue #253 and centering
-    does not touch it -- and tracked as issue #287.  This is a characterisation
-    of the current shape, so it is written to FAIL once the sweep starts
-    covering the interaction, which is the point: whoever closes #287 has to
-    correct the payload contract beside it.
-    """
-    rng = np.random.default_rng(5)
-    n = 600
+def _grid_interaction_frame(n: int = 600, seed: int = 5):
+    """A continuous-by-continuous interaction, which the export ships as a grid."""
+    rng = np.random.default_rng(seed)
     X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "density": rng.uniform(0.0, 10.0, n)})
     mu = np.exp(-1.0 + 0.02 * X["age"] + 0.05 * X["density"] + 0.004 * X["age"] * X["density"])
     y = rng.poisson(mu).astype(np.float64)
@@ -1832,6 +1844,22 @@ def test_the_impact_sheet_does_not_cover_a_continuous_interaction():
         interactions=[("age", "density")],
     )
     model.fit(X, y)
+    return model, X, y
+
+
+def test_the_impact_sheet_covers_the_binned_continuous_interaction():
+    """Every block the workbook approximates has to be named on the sheet.
+
+    The sheet exists so a reader can see WHERE the exported table stops being
+    the model.  A continuous-by-continuous interaction is sampled onto the same
+    lossy ``n_bins`` grid as a binned main effect, so leaving it off the sheet
+    tells a reader the workbook approximates two terms when it approximates
+    three (issue #287).
+
+    This replaces ``test_the_impact_sheet_does_not_cover_a_continuous_
+    interaction``, which characterised the gap and was written to fail here.
+    """
+    model, X, y = _grid_interaction_frame()
 
     assert list(model._interaction_order) == ["age:density"]
     assert rating_tables._continuous_features(model) == ["age", "density"]
@@ -1843,10 +1871,56 @@ def test_the_impact_sheet_does_not_cover_a_continuous_interaction():
     assert interaction.name == "age:density"
     assert interaction.table.shape == (20, 21)
 
-    # And no row of the sheet is about it.
-    reported = set(payload.discretization_impact["feature"])
-    assert reported == {"age", "density"}
-    assert not any("age:density" in str(feature) for feature in reported)
+    sheet = payload.discretization_impact
+    assert set(sheet["feature"]) == {"age", "density", "age:density"}
+
+    # And it carries the same information as the main-effect rows, rather than a
+    # name beside a row of blanks.
+    row = sheet[sheet["feature"] == "age:density"]
+    assert len(row) == 1
+    assert not row.isna().to_numpy().any()
+    # ``actual_bins`` counts the distinct factors the block carries, which for a
+    # grid is its cells: the sweep asked for 10 points per axis.
+    assert int(row["actual_bins"].iloc[0]) == 100
+    for column in ("deviance_change_pct", "mean_abs_prediction_change_pct"):
+        assert float(row[column].iloc[0]) == pytest.approx(
+            float(sheet[sheet["feature"] == "age"][column].iloc[0])
+        )
+
+
+def test_the_sheets_prediction_change_is_the_whole_workbooks_error():
+    """The number on the sheet is what the reader's own workbook is off by.
+
+    ``max_abs_prediction_change_pct`` is the only quantity on the sheet that
+    reads as a promise: "apply this table and no premium moves further than
+    this".  With the interaction outside the sweep it was not one -- the sheet
+    reported the two main effects' binning while the workbook also carried a
+    gridded interaction, so the reconstruction sat FURTHER from ``model.predict``
+    than the sheet's own maximum.  Measured on this fit at ``n_bins=20``: the
+    sheet claimed 29.75% and the workbook was 32.81% off, and on the mean
+    4.92% against 5.51%.
+
+    Read out of the workbook alone, exactly as ``_predict_from_payload`` does
+    everywhere else in this module, so what is compared is what a consumer
+    holds.
+    """
+    model, X, y = _grid_interaction_frame()
+
+    for n_bins in (20, 50):
+        payload = build_rating_table_payload(model, X, y, n_bins=n_bins, impact_bins=(n_bins,))
+        sheet = payload.discretization_impact
+        row = sheet[sheet["n_bins"] == n_bins].iloc[0]
+
+        predicted = model.predict(X)
+        workbook = _predict_from_payload(payload, X)
+        moved_pct = np.abs(workbook - predicted) / predicted * 100.0
+
+        assert float(row["max_abs_prediction_change_pct"]) == pytest.approx(
+            float(moved_pct.max()), rel=_RECONSTRUCTION_RTOL
+        )
+        assert float(row["mean_abs_prediction_change_pct"]) == pytest.approx(
+            float(moved_pct.mean()), rel=_RECONSTRUCTION_RTOL
+        )
 
 
 # ── ``centering=`` is validated where it is accepted ───────────────────────

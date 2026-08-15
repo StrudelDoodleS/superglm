@@ -504,3 +504,142 @@ class TestWeightContract:
                 sample_weight=weights,
                 features=["age"],
             )
+
+
+@pytest.fixture
+def gridded_interaction_model():
+    """Two spline parents and the tensor interaction between them.
+
+    The interaction is the term the rating-table export ships as a sampled
+    surface rather than as a lookup, so it is the one main effects do not
+    stand in for.
+    """
+    rng = np.random.default_rng(5)
+    n = 600
+    df = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n), "density": rng.uniform(0.0, 10.0, n)})
+    mu = np.exp(-1.0 + 0.02 * df["age"] + 0.05 * df["density"] + 0.004 * df["age"] * df["density"])
+    y = rng.poisson(mu).astype(float)
+    model = SuperGLM(
+        family=Poisson(),
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=6), "density": Spline(n_knots=6)},
+        interactions=[("age", "density")],
+    )
+    model.fit(df, y)
+    return model, df, y
+
+
+class TestContinuousInteractionIsDiscretized:
+    """A gridded interaction is an approximation, so the default answer counts it.
+
+    The impact analysis answers "how far does the discretized table sit from the
+    model".  Reporting only the binned MAIN EFFECTS of a fit that also carries a
+    gridded interaction answers a question about a table nobody exports
+    (issue #287).
+    """
+
+    def test_the_default_call_covers_the_interaction(self, gridded_interaction_model):
+        model, df, y = gridded_interaction_model
+        result = model.discretization_impact(df, y, n_bins=20)
+
+        assert set(result.tables) == {"age", "density"}
+        assert set(result.interaction_tables) == {"age:density"}
+
+    def test_the_grid_carries_a_main_effect_tables_information(self, gridded_interaction_model):
+        model, df, y = gridded_interaction_model
+        grid = model.discretization_impact(df, y, n_bins=20).interaction_tables["age:density"]
+
+        assert set(grid.columns) == {
+            "age",
+            "density",
+            "relativity",
+            "log_relativity",
+            "n_obs",
+            "sample_weight",
+        }
+        # One row per cell of the 20-per-axis grid, and every observation lands
+        # on exactly one of them -- the same completeness a binned table has.
+        assert len(grid) == 400
+        assert int(grid["n_obs"].sum()) == len(df)
+        assert float(grid["sample_weight"].sum()) == pytest.approx(float(len(df)))
+        np.testing.assert_allclose(
+            grid["relativity"].to_numpy(),
+            np.exp(grid["log_relativity"].to_numpy()),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_a_finer_grid_moves_the_predictions_less(self, gridded_interaction_model):
+        """Sampling a continuous surface more finely can only approximate it better.
+
+        Derived rather than calibrated: the surface is continuous on a compact
+        rectangle, so the nearest-node error is bounded by its modulus of
+        continuity at the node spacing, and the spacing falls monotonically with
+        ``n_bins``.  Asserted as a strict inequality with no tolerance, because a
+        constant here would be a number fitted to this fit.
+        """
+        model, df, y = gridded_interaction_model
+        coarse = model.discretization_impact(df, y, n_bins=10, features=["age:density"])
+        fine = model.discretization_impact(df, y, n_bins=100, features=["age:density"])
+
+        assert (
+            fine.metrics["max_abs_prediction_change_pct"]
+            < coarse.metrics["max_abs_prediction_change_pct"]
+        )
+        assert (
+            fine.metrics["mean_abs_prediction_change_pct"]
+            < coarse.metrics["mean_abs_prediction_change_pct"]
+        )
+
+    def test_an_interaction_can_be_asked_for_by_name(self, gridded_interaction_model):
+        model, df, y = gridded_interaction_model
+        result = model.discretization_impact(df, y, n_bins=20, features=["age:density"])
+
+        assert result.tables == {}
+        assert set(result.interaction_tables) == {"age:density"}
+
+    def test_an_unknown_name_is_still_an_unknown_feature(self, gridded_interaction_model):
+        model, df, y = gridded_interaction_model
+        with pytest.raises(ValueError, match="Unknown feature"):
+            model.discretization_impact(df, y, features=["age:nonexistent"])
+
+
+class TestExactlyTabulatedInteractionIsNotDiscretized:
+    """An interaction the export tabulates exactly has no error to report."""
+
+    @staticmethod
+    def _model():
+        rng = np.random.default_rng(11)
+        n = 600
+        df = pd.DataFrame(
+            {
+                "region": rng.choice(["A", "B", "C"], n),
+                "band": rng.choice(["lo", "hi"], n),
+                "age": rng.uniform(18.0, 80.0, n),
+            }
+        )
+        y = rng.poisson(np.exp(-1.0 + 0.02 * df["age"])).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={
+                "region": Categorical(),
+                "band": Categorical(),
+                "age": Spline(n_knots=6),
+            },
+            interactions=[("region", "band")],
+        )
+        model.fit(df, y)
+        return model, df, y
+
+    def test_a_categorical_interaction_contributes_no_grid(self):
+        model, df, y = self._model()
+        result = model.discretization_impact(df, y, n_bins=20)
+
+        assert set(result.tables) == {"age"}
+        assert result.interaction_tables == {}
+
+    def test_asking_for_it_by_name_says_why_not(self):
+        model, df, y = self._model()
+        with pytest.raises(ValueError, match="not continuous-by-continuous"):
+            model.discretization_impact(df, y, features=["region:band"])

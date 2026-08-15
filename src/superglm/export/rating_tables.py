@@ -135,6 +135,23 @@ def _continuous_features(model: SuperGLM) -> list[str]:
     ]
 
 
+def _continuous_interactions(model: SuperGLM) -> list[str]:
+    """The interactions ``_continuous_interaction_block`` ships as a grid.
+
+    Beside ``_continuous_features`` and scanned the same way, because these are
+    the other terms the workbook approximates: they are sampled onto an
+    ``n_bins``-per-axis surface rather than tabulated exactly, so they belong
+    on the impact sheet for the same reason a binned ``Spline`` does.
+    """
+    from superglm.features.interaction import PolynomialInteraction, TensorInteraction
+
+    return [
+        name
+        for name in model._interaction_order
+        if isinstance(model._interaction_specs.get(name), TensorInteraction | PolynomialInteraction)
+    ]
+
+
 def _format_number(value: float) -> str:
     """Print a float so that reading the string back gives the same float.
 
@@ -1035,6 +1052,20 @@ def _impact_sweep(
             }
             row.update(result.metrics)
             rows.append(row)
+        # Beside the main-effect rows and in the same columns, because a
+        # reader has to be able to see every block the workbook approximates
+        # from one place.  ``actual_bins`` counts the distinct factors the
+        # block carries, which for a grid is its CELLS -- one table row per
+        # cell -- so an interaction swept at 20 reports 400 where a main
+        # effect reports 20.
+        for interaction, table in result.interaction_tables.items():
+            row = {
+                "n_bins": int(n_bins),
+                "feature": interaction,
+                "actual_bins": int(len(table)),
+            }
+            row.update(result.metrics)
+            rows.append(row)
     if not rows:
         return _empty_impact_frame()
     return pd.DataFrame(rows)
@@ -1148,19 +1179,31 @@ def build_rating_table_payload(
     whose edges are all data values; under ``"uniform"`` on a skewed exposure it
     is the normal case, measured at 123 of 150 bins on an 800-row fit.
 
-    Lossy, by construction, for the binned blocks -- ``Spline``,
+    Lossy, by construction, for the approximated blocks -- ``Spline``,
     ``Polynomial``, and the continuous-by-continuous interaction grid.  Two
-    distinct errors ride on those, and only the first is reported, and then
-    only for the MAIN EFFECTS.  The impact sweep is handed
-    ``_continuous_features``, which scans ``model._feature_order`` alone, so a
-    continuous-by-continuous interaction is sampled onto the same lossy
-    ``n_bins`` grid by ``_continuous_interaction_block`` and contributes no row
-    to the sheet: measured on an ``age``-by-``density`` fit with two spline
-    parents, the interaction block ships at 20x20 cells while the impact sheet
-    lists ``age`` and ``density`` only.  A workbook can therefore carry a
-    materially approximated interaction whose error the sheet does not
-    quantify.  That gap is pre-existing -- the interaction export predates issue
-    #253 and centering does not touch it -- and is tracked as issue #287.
+    distinct errors ride on those, and the sheet reports the first for all
+    three: the sweep is handed ``_continuous_features`` and
+    ``_continuous_interactions``, so the sheet names every block the workbook
+    approximates and its metrics are joint over all of them.
+
+    The interaction's share is a SAMPLING rather than a binning, and it is the
+    larger of the two differences between the sheet's two row kinds.  A binned
+    main effect gives a consumer an interval to fall into and the bin's
+    geometry-weighted mean inside it; ``_continuous_interaction_block`` gives
+    them an ``n_bins``-per-axis grid keyed on axis VALUES, so a raw risk has no
+    cell to fall into and the only available lookup is the nearest printed
+    value on each axis.  What the reader applies is therefore the surface at a
+    grid node, and the sweep measures exactly that.  Measured on an
+    ``age``-by-``density`` Poisson fit with two ``Spline(n_knots=6)`` parents,
+    600 rows: at ``n_bins=20`` the grid lookup misses the model's own
+    interaction factor by up to 14.24% (mean 2.51%) and at ``n_bins=10`` by up
+    to 36.93% (mean 5.21%).  With that error outside the sweep the sheet was
+    not merely incomplete but WRONG about the workbook it describes -- its
+    ``max_abs_prediction_change_pct`` read 29.75% at ``n_bins=20`` while the
+    reconstruction from the workbook sat 32.81% from ``model.predict``, and its
+    mean read 4.92% against 5.51%.  The two now agree to round-off, which is
+    what ``test_the_sheets_prediction_change_is_the_whole_workbooks_error``
+    pins (issue #287).
 
     * The binning itself, which the ``discretization_impact`` sheet quantifies
       for the main-effect ``Spline`` and ``Polynomial`` blocks.
@@ -1396,7 +1439,10 @@ def build_rating_table_payload(
         offset=export_offset,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
-        features=continuous,
+        # Both lists, because both are approximated.  The ``selected`` call
+        # above stays main-effect-only: its tables are consumed as blocks,
+        # keyed by feature name, and an interaction has no such block.
+        features=continuous + _continuous_interactions(model),
     )
     return RatingTablePayload(
         base_relativity=_base_relativity(
