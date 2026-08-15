@@ -669,9 +669,23 @@ class ModelSummary:
                     # every significant smooth read as flagged.  ``_coef_fields``
                     # emits six numeric fields each preceded by a space, then a
                     # space and the 3-wide Sig, which is the offset below.
-                    prefix = f"{_coef_prefix(row)}  {spline_text}"
-                    sig_col = len(_coef_prefix(row)) + sum(coef_field_widths[:6]) + 7
-                    pad = max(sig_col - len(prefix), 1)
+                    row_prefix = _coef_prefix(row)
+                    sig_col = len(row_prefix) + sum(coef_field_widths[:6]) + 7
+                    # Elided rather than allowed to push the stars right.  A
+                    # clamped pad slides them out of Sig once the group text
+                    # runs long -- an ordered polynomial with a five-digit
+                    # chi-square reaches it -- and three characters further
+                    # puts them back in the advisory column, which is the
+                    # claim this renderer exists to stop making.  It also
+                    # overruns the coefficient table's own width, so the row's
+                    # right border leaves the box.  Truncating keeps both
+                    # invariants for any label; the elided tail is the p-value,
+                    # which the row's own data still carries.
+                    room = sig_col - len(row_prefix) - 2
+                    if len(spline_text) > room:
+                        spline_text = spline_text[: max(room - 1, 0)] + "…"
+                    prefix = f"{row_prefix}  {spline_text}"
+                    pad = max(sig_col - len(prefix), 0)
                     lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s} {'':<3s}"))
                     if detail_str:
                         lines.append(

@@ -668,6 +668,63 @@ class TestWholeTermStarsSitUnderSig:
         assert any(r.is_spline for r in rows.values())
         assert not any(r.quasi_separated for r in rows.values())
 
+    def test_a_long_group_label_still_keeps_its_stars_out_of_the_advisory(self):
+        """The placement must not depend on how long the group text is.
+
+        A padded-to-the-Sig-column line slides right once the text outgrows the
+        room: an ordered polynomial with a five-digit chi-square is enough, and
+        three characters past that the stars are back in the advisory column.
+        The same overrun pushes the row's right border out of the box.
+        """
+        from superglm.inference.summary import ModelSummary, _CoefRow
+
+        long_kind = "ordered polynomial"
+        rows = [
+            _CoefRow(
+                name="band",
+                group="band",
+                is_spline=True,
+                subgroup_type="ordered_polynomial",
+                n_params=12,
+                active=True,
+                wald_chi2=12345.6,
+                wald_p=0.0001,
+                ref_df=12.0,
+            )
+        ]
+        info = {
+            "family": "Poisson",
+            "link": "Log",
+            "penalty": "None",
+            "method": "ML",
+            "n_obs": 100,
+            "effective_df": 4.0,
+            "phi": 1.0,
+            "pearson_chi2": 98.0,
+            "deviance": 95.0,
+            "log_likelihood": -50.0,
+            "aic": 108.0,
+            "aicc": 108.5,
+            "bic": 118.0,
+            "ebic": 118.0,
+            "converged": True,
+            "n_iter": 4,
+        }
+        text = str(ModelSummary({}, info, rows))
+        lines = text.split("\n")
+        header = next(line for line in lines if "P>|z|" in line)
+        group_line = next(line for line in lines if long_kind in line)
+
+        sig_start = header.index("Sig")
+        advisory_start = header.index("LC", sig_start)
+        stars = group_line.index("***")
+        assert sig_start <= stars < advisory_start
+        assert group_line[advisory_start : advisory_start + 3].strip() == ""
+
+        # And the box stays one width, which the overrun used to break.
+        box = [line for line in lines if line.startswith("║")]
+        assert len({len(line) for line in box}) == 1
+
 
 class TestColumnAlignment:
     """Sig and LC columns must not break border alignment."""
