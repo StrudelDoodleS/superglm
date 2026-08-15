@@ -379,9 +379,17 @@ def _export_term(model, name):
 
 
 def _editor_row(model, name):
+    """One editor payload row, built from the source production builds from.
+
+    ``_compact_summary_payload`` reads ``_display_rows``, not ``_coef_rows``,
+    and the expanded level display strips per-level diagnostics from all but
+    the first member of a grouped level -- so a helper that read ``_coef_rows``
+    would test a row the browser never sees.
+    """
     from superglm.editor.summaries import _compact_summary_row
 
-    rows = model.summary(detail="compact")._coef_rows
+    summary = model.summary(detail="compact")
+    rows = getattr(summary, "_display_rows", summary._coef_rows)
     return next(_compact_summary_row(row) for row in rows if str(row.name) == name)
 
 
