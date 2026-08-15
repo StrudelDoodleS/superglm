@@ -972,6 +972,45 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
             atol=0.0,
         )
 
+    class _MappingGrid:
+        """A reconstruction returned as a mapping that is not a ``dict``."""
+
+        parent_names = ("a", "b")
+
+        def score(self, x1, x2, beta):
+            return np.zeros(len(np.asarray(x1).ravel()))
+
+        def reconstruct(self, beta, n_points=50):
+            import collections
+
+            axis = np.array([1.0, 2.0, 3.0])
+            surface = np.repeat(axis[None, :], 3, axis=0)
+            return collections.UserDict(
+                {
+                    "x1": axis,
+                    "x2": np.array([10.0, 20.0, 30.0]),
+                    "relativity": np.exp(surface),
+                    "interaction": True,
+                }
+            )
+
+    def test_a_mapping_that_is_not_a_dict_is_still_a_grid(self):
+        """The exporter's test is a key subset, so the sweep's must be too.
+
+        ``_interaction_blocks`` only iterates keys and subscripts values, so a
+        ``UserDict`` ships as a grid block; an ``isinstance(raw, dict)`` in the
+        sweep would refuse the same reconstruction and take the whole payload
+        down with it.
+        """
+        model, df, y = self._model_with(self._MappingGrid())
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+
+        assert set(result.interaction_tables) == {"a:b"}
+        delta = np.log(result.predictions / result.original_predictions)
+        nodes = np.array([1.0, 2.0, 3.0])
+        expected = nodes[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
+        np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
+
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
 
