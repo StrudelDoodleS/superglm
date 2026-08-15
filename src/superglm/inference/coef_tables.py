@@ -557,7 +557,13 @@ def build_coef_rows(
                         spline_kind=s_kind,
                         knot_strategy=s_knot_strat,
                         boundary=s_bnd,
-                        monotone=getattr(spec._spline, "monotone", None),
+                        # The wrapper's own forward, not a reach past it into
+                        # `_spline`: that private attribute is `None` on a
+                        # step-mode pickle, so the `getattr` default answered
+                        # "no constraint" for a spec that cannot score at all,
+                        # where `constraint_kind` funnels through the property
+                        # that refuses one.
+                        monotone=spec.constraint_kind,
                         monotone_engine=g.monotone_engine,
                         monotone_repaired=g.feature_name in _mono_repairs,
                     )

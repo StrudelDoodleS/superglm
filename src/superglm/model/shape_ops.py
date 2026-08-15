@@ -548,11 +548,31 @@ class _PendingRepair:
     groups: list[object]
 
 
-def _curve_spec(spec):
-    """The basis whose coefficient space a shape repair operates in."""
-    from superglm.features.ordered_categorical import OrderedCategorical
+def _curve_spec(name: str, spec):
+    """The basis whose coefficient space a shape repair operates in.
 
-    return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    Selection is by declaration; this resolution is by type, and the two can
+    drift. A spec that grows a ``constraint=`` without being a spline -- a
+    ``Piecewise`` with a stated monotone segment is the obvious candidate --
+    would pass the filter and arrive here, and every consumer downstream reads
+    spline internals (``_lo``, ``_hi``, ``_knots``, ``reconstruct``). Without
+    this guard the mismatch surfaces as an ``AttributeError`` on ``spec._lo``
+    inside the grid weights, several frames from the declaration that caused
+    it. Refuse by name instead, the same way the ordered wrapper refuses a
+    basis that cannot supply raw QP geometry.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.spline import _SplineBase
+
+    curve_spec = spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+    if not isinstance(curve_spec, _SplineBase):
+        raise NotImplementedError(
+            f"Feature {name!r} declares a post-fit shape constraint, but post-fit "
+            f"repair is only implemented for spline bases; {type(curve_spec).__name__} "
+            "states no curve geometry to project. Drop the constraint, or use a "
+            "Spline basis."
+        )
+    return curve_spec
 
 
 def _pending_repairs(model) -> list[_PendingRepair]:
@@ -582,7 +602,7 @@ def _pending_repairs(model) -> list[_PendingRepair]:
             continue
         groups = spline_groups([group for group in model._groups if group.feature_name == name])
         if groups and any(np.any(beta[group.sl] != 0.0) for group in groups):
-            pending.append(_PendingRepair(name, spec, _curve_spec(spec), kind, groups))
+            pending.append(_PendingRepair(name, spec, _curve_spec(name, spec), kind, groups))
     return pending
 
 
@@ -788,6 +808,18 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
     if scoring_offset is not None:
         current_eta = current_eta + np.asarray(scoring_offset, dtype=np.float64)
 
+    # Why an ordered term carrying `specials=` survives the centering check
+    # below, since this is the first consumer whose NUMERICAL VALIDITY depends
+    # on it. `_validate_repair_for_publication` refuses any repair that moves
+    # the fitted mean. That mean is unmoved here only because the wrapper
+    # builds its inner spline on the ordered rows ALONE and zero-fills the
+    # special rows afterwards: the identifiability projection is therefore a
+    # column sum over exactly the rows the block is nonzero on, so it vanishes
+    # over all n rows once the zeros are scattered back, and any delta confined
+    # to the spline block leaves the mean alone. Building that block over all
+    # rows instead -- which `OrderedCategorical._build_spline` already warns
+    # against for its own reasons -- would break this repair rather than merely
+    # the projection, and would do it silently.
     for pending in pending_repairs:
         name, kind, groups = pending.name, pending.kind, pending.groups
         curve_spec = pending.curve_spec
