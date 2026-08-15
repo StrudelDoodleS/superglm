@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, Constraint, OrderedCategorical, PSpline, Spline, SuperGLM
+from superglm.constraints import shape_constraint_certificate
 
 # ── Fixtures ──────────────────────────────────────────────────────
 
@@ -612,6 +613,16 @@ def _designed_excursion(effect):
 # different BLAS rather than margin fitted to the observation.
 _DIP_REALISATION_FLOOR = 0.10
 
+# Separate constant because it bounds a DIFFERENT quantity, and sharing one
+# would let a single measurement look like it justified both. This floors the
+# movement of the REPAIRED curve on the `decreasing` arm -- `max|after-before|`,
+# not the unrepaired single-step drop above. Measured on the same fixture: the
+# curve moves 1.147x (`cr`) and 1.143x (`ps`) of the designed excursion, because
+# the weighted projection of a rising curve onto the decreasing cone is
+# essentially the constant, so it travels roughly the curve's whole span. A
+# tenth leaves a factor of 11.
+_DECREASING_MOVEMENT_FLOOR = 0.10
+
 
 def _level_curve(model, name, levels):
     rels = model.reconstruct_feature(name)["level_log_relativities"]
@@ -649,8 +660,9 @@ class TestOrderedCategoricalShapeDispatch:
         )
 
         # The unrepaired fit must carry the designed dip, or the repair has
-        # nothing to bind on and a green test would measure nothing. A quarter
-        # of the designed excursion is the floor a fit that tracked it clears.
+        # nothing to bind on and a green test would measure nothing. The
+        # fraction lives at `_DIP_REALISATION_FLOOR` and is justified there --
+        # not restated here, so the two cannot drift.
         before = _level_curve(model, "band", levels)
         assert float(-np.min(np.diff(before))) > _DIP_REALISATION_FLOOR * designed_dip, before
 
@@ -677,9 +689,9 @@ class TestOrderedCategoricalShapeDispatch:
             # below carries `kind == "decreasing"`, and the curve had to move a
             # long way to get flat. Asserting a rise here would be asserting
             # the constraint failed.
-            assert float(np.max(np.abs(after - before))) > _DIP_REALISATION_FLOOR * designed_dip, (
-                after
-            )
+            assert float(np.max(np.abs(after - before))) > (
+                _DECREASING_MOVEMENT_FLOOR * designed_dip
+            ), after
 
         # Pin the DISPATCH as well, not just the shape: a monotone curve alone
         # could come from anywhere, but a recorded repair means the engine saw
@@ -726,6 +738,15 @@ class TestOrderedCategoricalShapeDispatch:
             selection_penalty=0.0,
         ).fit(X, y)
 
+        # Captured before the repair overwrites them: the certificate below is
+        # the object whose roundoff bounds the violation comparison, and it can
+        # only be formed from the coefficients the violation was computed on.
+        wrapped_groups = [g for g in wrapped._groups if g.feature_name == "band"]
+        pre_repair_beta = np.concatenate([wrapped.result.beta[g.sl] for g in wrapped_groups])
+        pre_repair_certificate = shape_constraint_certificate(
+            wrapped._specs["band"]._basis_spline, pre_repair_beta, "increasing"
+        )
+
         wrapped.apply_shape_postfit(X)
         plain.apply_shape_postfit(X)
 
@@ -748,15 +769,37 @@ class TestOrderedCategoricalShapeDispatch:
         # BLAS to order the sums differently, and roughly nine orders of
         # magnitude tighter than the 0.41-0.68 divergence the unfixed code
         # shows, which is what makes the assertion discriminating.
-        n_cols = sum(g.size for g in wrapped._groups if g.feature_name == "band")
+        n_cols = sum(g.size for g in wrapped_groups)
+        eps = np.finfo(np.float64).eps
         scale = max(1.0, float(np.max(np.abs(wrapped_curve))))
-        atol = n_cols**2 * np.finfo(np.float64).eps * scale
+        atol = n_cols**2 * eps * scale
         np.testing.assert_allclose(wrapped_curve, plain_curve, rtol=0.0, atol=atol)
-        # The pre-repair violation is a single reduction over the same curve on
-        # the same grid, so it carries only the grid's own roundoff.
+
+        # `max_violation_before` is NOT a reduction over the fitted curve --
+        # `monotonicity_violation` is that function and nothing here calls it.
+        # This field carries the certificate's `violation`, which is
+        # `max(0, -min(rows @ beta))` over analytically located extrema of the
+        # DERIVATIVE, in raw coefficient space. That is why the numbers exceed
+        # the curve's own range. So the bound has to come from the inner
+        # product the certificate actually forms: `n_cols * eps` for its
+        # accumulation, times the row scale the certificate reports and the
+        # coefficient norm it multiplies -- an ABSOLUTE bound, because the
+        # quantity can cancel to near zero and a relative one would then demand
+        # more than float64 can deliver. The extremum LOCATIONS may differ
+        # slightly between the two paths, but each is a stationary point of the
+        # derivative, so that difference enters the value at second order and
+        # does not govern this bound. Observed 8.9e-16 (`cr`) and exactly 0
+        # (`ps`) against bounds of 5.9e-14 and 1.1e-13.
+        violation_atol = (
+            n_cols
+            * eps
+            * pre_repair_certificate.maximum_row_norm
+            * float(np.linalg.norm(pre_repair_beta))
+        )
         assert wrapped._shape_repairs["band"].max_violation_before == pytest.approx(
             plain._shape_repairs["pos"].max_violation_before,
-            rel=n_cols * np.finfo(np.float64).eps,
+            rel=0.0,
+            abs=violation_atol,
         )
 
         # And the reason the two agree at all, asserted EXACTLY rather than to
@@ -789,16 +832,32 @@ class TestOrderedCategoricalShapeDispatch:
         A TOMBSTONE, NOT AN INVARIANT. Closing #311 makes this configuration
         repair, at which point the ``pytest.raises`` below must be replaced,
         not restored -- its failure then is the fix landing, not a regression.
-        The state assertions after it are the part that survives: whatever the
-        engine decides, refusing must leave the fitted model untouched rather
-        than half-repaired, and nothing else covers that on this path.
+        The strong-exception assertion after it is the part that survives.
+
+        The model carries TWO repairable terms, and the order matters. With the
+        ordered term alone the refusal happens inside
+        ``_validate_repair_for_publication``, before the first
+        ``_replace_result_beta``, so "refused before any mutation" and "rolled
+        back cleanly" are indistinguishable and the state assertion cannot
+        fail. The plain spline ahead of it in the features dict repairs first
+        and writes into the transaction's work model, so the ordered term's
+        raise has something to roll back -- which is the case where the
+        guarantee is a claim rather than an arrangement.
         """
         from superglm.features.spline import Spline
 
-        X, y, levels, _ = dipping_ordinal_data
+        from ._fit_state_oracles import assert_model_behavior_unchanged, snapshot_model_behavior
+
+        X, y, levels, effect = dipping_ordinal_data
+        X = X.copy()
+        # A second, ordinary repairable term whose own repair must be undone.
+        # Its axis is the same designed dip, so it genuinely repairs rather
+        # than being a feasible no-op the engine skips.
+        X["pos"] = np.linspace(0.0, 1.0, len(levels))[[levels.index(lev) for lev in X["band"]]]
         model = SuperGLM(
             family="gaussian",
             features={
+                "pos": Spline(kind="cr", n_knots=8, constraint=Constraint.postfit.increasing),
                 "band": OrderedCategorical(
                     order=levels,
                     basis=Spline(
@@ -807,26 +866,43 @@ class TestOrderedCategoricalShapeDispatch:
                         select=True,
                         constraint=Constraint.postfit.increasing,
                     ),
-                )
+                ),
             },
             selection_penalty=0.0,
         ).fit(X, y)
-        beta_before = np.array(model.result.beta, copy=True)
-        intercept_before = float(model.result.intercept)
-        revision_before = model._fit_revision
+        # Both terms must be queued, or the rollback has nothing to undo.
+        from superglm.model.shape_ops import _pending_repairs
+
+        assert {p.name for p in _pending_repairs(model)} == {"pos", "band"}
+        before = snapshot_model_behavior(model, X)
 
         with pytest.raises(RuntimeError, match="fitted centering changed"):
             model.apply_shape_postfit(X)
 
-        # A refusal that left partial state would be worse than either outcome.
-        # `_validate_repair_for_publication` runs before any mutation and the
-        # work happens on a `FittedStateRevision`, so the published model must
-        # be bit-identical to what it was -- assert that rather than trust it.
+        # The shared oracle rather than a hand-rolled subset: it pins __dict__
+        # and _fit_state identity, every retained projection, beta, intercept,
+        # deviance, predict() and summary() identity. Same reasoning as reusing
+        # `spline_groups` instead of writing a fourth copy of that filter.
+        assert_model_behavior_unchanged(model, X, before)
+        # Not covered by the oracle, and the point of the whole PR: the term
+        # whose repair DID succeed inside the transaction must not have been
+        # published either.
         assert not getattr(model, "_shape_repairs", {})
         assert not getattr(model, "_monotone_repairs", {})
-        np.testing.assert_array_equal(model.result.beta, beta_before)
-        assert float(model.result.intercept) == intercept_before
-        assert model._fit_revision == revision_before
+
+        # And the proof that there WAS something to roll back, rather than the
+        # ordered term simply raising first: the same `pos` term on its own
+        # repairs. Without this the rollback assertions above would be equally
+        # satisfied by a `pos` that was a feasible no-op.
+        solo = SuperGLM(
+            family="gaussian",
+            features={
+                "pos": Spline(kind="cr", n_knots=8, constraint=Constraint.postfit.increasing)
+            },
+            selection_penalty=0.0,
+        ).fit(X, y)
+        solo.apply_shape_postfit(X)
+        assert solo._shape_repairs["pos"].max_violation_before > 0.0
 
     def test_postfit_repair_composes_with_specials(self, dipping_ordinal_data):
         """``specials=`` is the one delegation shape the wrapper reshapes: the
