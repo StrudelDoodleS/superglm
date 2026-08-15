@@ -1483,6 +1483,7 @@ class _LowEdgeFactors(NamedTuple):
     mains_sigma_min: float  # sigma_min of the COLUMN-EQUILIBRATED weighted mains
     n_mains: int  # its column count
     penalty_norm: float  # ||S_a||_2
+    penalty_eps: float  # relative perturbation of S_a implied by forming its root
 
 
 def _reference_factors(grab):
@@ -1527,6 +1528,27 @@ def _reference_factors(grab):
     resid = tensor - Q @ (Q.T @ tensor)
     ev, evec = np.linalg.eigh(0.5 * (S_a + S_a.T))
     root_S = np.kron((evec * np.sqrt(np.clip(ev, 0.0, None))) @ evec.T, np.eye(k_b))
+    # WHAT `root_S' root_S` ACTUALLY IS, RATHER THAN WHAT IT IS MEANT TO BE.
+    # The consumer needs a perturbation of the PENALTY, not of the eigensolver
+    # alone, and rebuilding the root is four more roundings after `eigh`:
+    #
+    #   eigh          the exact decomposition of `S_a + E`, `||E||_2 <= c u
+    #                 ||S_a||_2` with `c` LAPACK's modest polynomial in `k_a`
+    #                 (*LAPACK Users' Guide* 3rd ed. section 4.7); charged at
+    #                 `k_a` deterministically
+    #   the clip      moves a round-off-negative eigenvalue by at most its own
+    #                 magnitude, which is inside that same `||E||_2`
+    #   sqrt          one rounding per eigenvalue, and a relative `u` on the
+    #                 ROOT is `2u` on its Gram
+    #   the scaling   one more rounding
+    #   `@ evec.T`    a `k_a`-term inner product per entry, `gamma_{k_a}`
+    #
+    # so `3 k_a + 4` roundings of `||S_a||_2`, which is what the bound charges
+    # in place of the eigensolver's own constant.  It is 2.6x what the previous
+    # revision carried and 4.5e-07 of the returned bound -- negligible BY
+    # MEASUREMENT rather than by having been left out.  `kron` with an identity
+    # only places entries and rounds nothing.
+    penalty_eps = (3.0 * k_a + 4.0) * 0.5 * np.finfo(np.float64).eps
     # Householder's backward error is COLUMNWISE and range(M) is invariant to a
     # positive column scaling, so the conditioning that governs the projector
     # is the equilibrated one -- the standard reference for column
@@ -1540,11 +1562,22 @@ def _reference_factors(grab):
     # system's own singular values are enclosed against in
     # :func:`_reference_edf_and_bound`.  Carried at its LOWER end for the same
     # reason, and by the same backward-stable-SVD argument plus Horn & Johnson,
-    # *Matrix Analysis* 2nd ed., Cor. 7.3.5.  It costs
-    # 5.7e-13 relative here and moves the bound by 3e-11 of itself; the point is
-    # that it cannot round the wrong way on a machine this one cannot see.
+    # *Matrix Analysis* 2nd ed., Cor. 7.3.5.  The point is that it cannot round
+    # the wrong way on a machine this one cannot see.
+    #
+    # AND THE EQUILIBRATION ITSELF ROUNDS, which an earlier revision charged
+    # nothing for.  Each column norm is an `m`-term sum of squares and a sqrt,
+    # and the division is one more rounding, so the computed matrix is
+    # `equilibrated (I + diag(d))` with `|d_j| <= u sqrt(m) + 2u` -- a
+    # COLUMNWISE relative perturbation, hence at most that times
+    # `||equilibrated||_2` in norm.  It is 18% of the SVD's own allowance here
+    # and it moves `sigma_min` the same way, so leaving it out rounded the
+    # denominator of `eta_R` upward and the bound downward.
     mains_sv = np.linalg.svd(equilibrated, compute_uv=False)
-    mains_eps = 0.5 * np.finfo(np.float64).eps * np.sqrt(equilibrated.size) * float(mains_sv[0])
+    u = 0.5 * np.finfo(np.float64).eps
+    mains_eps = (u * np.sqrt(equilibrated.size) + u * np.sqrt(mains.shape[0]) + 2.0 * u) * float(
+        mains_sv[0]
+    )
     return _LowEdgeFactors(
         resid=resid,
         penalty_root=root_S,
@@ -1552,6 +1585,7 @@ def _reference_factors(grab):
         mains_sigma_min=float(mains_sv[-1]) - mains_eps,
         n_mains=mains.shape[1],
         penalty_norm=float(np.linalg.norm(S_a, 2)),
+        penalty_eps=penalty_eps,
     )
 
 
@@ -1742,8 +1776,10 @@ def _reference_edf_and_bound(factors, lam):
     * **the penalty root**, whose ``eigh`` perturbs ``S_a`` by ``u ||S_a||_2``;
       that enters ``edf`` as ``lambda ||dS||_2 tr(G^-1)`` with ``G = A'A``,
       since ``d edf = -lambda tr(dS G^-1 V G^-1)`` and ``G^-1 V G^-1 <= G^-1``.
-      2.46e-14 at the low edge, carried for completeness and taken over the
-      segment like everything else.
+      ``||dS||_2`` is charged for the WHOLE of rebuilding the root and not for
+      ``eigh`` alone -- see :func:`_reference_factors` -- which is 2.56x what an
+      earlier revision carried.  6.28e-14 at the low edge, 4.5e-07 of the total,
+      carried for completeness and taken over the segment like everything else.
     * **the final accumulation.**  ``edf`` is a sum of ``m p`` squares reaching
       208, so numpy's pairwise summation alone costs
       ``(log2(m p) + 1) u edf = 4.24e-13`` (Higham, *The accuracy of floating
@@ -1797,8 +1833,8 @@ def _reference_edf_and_bound(factors, lam):
     fixture                           bound    realized     caller
     ===========================  ==========  ==========  =========
     ``_thin_level_pair(1.0)``     1.3921e-07  2.8422e-14   71.8x of 1e-5
-    ``_thin_level_pair(0.01)``    1.4152e-07           -   70.7x of 1e-5
-    ``_thin_level_pair(0.001)``   1.4251e-07           -   70.2x of 1e-5
+    ``_thin_level_pair(0.01)``    1.4153e-07           -   70.7x of 1e-5
+    ``_thin_level_pair(0.001)``   1.4252e-07           -   70.2x of 1e-5
     ``_vanishing_mass_pair()``    1.2363e-04           -    2.4x of 3e-4
     ``_vanishing_mass_pair(-10)`` 5.6381e-05           -    5.3x of 3e-4
     ===========================  ==========  ==========  =========
@@ -1962,7 +1998,10 @@ def _reference_edf_and_bound(factors, lam):
     # eigh is backward stable with its own dimensional constant, and clipping a
     # round-off-negative eigenvalue moves S_a by no more than the same amount.
     bound += (
-        lam * u * np.sqrt(p) * factors.penalty_norm * float(np.sum(1.0 / (sing - eps_T - eta) ** 2))
+        lam
+        * factors.penalty_eps
+        * factors.penalty_norm
+        * float(np.sum(1.0 / (sing - eps_T - eta) ** 2))
     )
     bound += (np.log2(m * p) + 1.0) * u * edf  # numpy's pairwise summation
     return edf, bound
@@ -2193,7 +2232,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     * FLOOR, the arbiter's own accuracy.  The arms are judged against
       ``_reference_edf_and_bound``, and a bound below what that oracle can
       guarantee asserts the ORACLE's round-off rather than the arms'.  It is
-      1.3921e-07, 1.4152e-07 and 1.4251e-07 at the three weights -- above both
+      1.3921e-07, 1.4153e-07 and 1.4252e-07 at the three weights -- above both
       floors above, so this is the one that binds, and 1e-5 clears it by 71.8x,
       70.7x and 70.2x.  It is DERIVED rather than observed, which the constant
       it replaced (a hard-coded 1e-9) was not, and it is asserted at every
