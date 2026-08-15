@@ -1985,8 +1985,14 @@ def test_the_sheets_prediction_change_is_the_whole_workbooks_error():
     Read out of the workbook alone, exactly as ``_predict_from_payload`` does
     everywhere else in this module, so what is compared is what a consumer
     holds.
+
+    The fixture is deliberately offset-free.  The binned offset multiplier
+    block is the one approximation the sweep does not cover (issue #314), so
+    the equality below is over a workbook whose every approximated factor the
+    sheet does measure -- which is the claim, stated at its true scope.
     """
     model, X, y = _grid_interaction_frame()
+    assert not rating_tables._fit_used_offset(model)
 
     for n_bins in (20, 50):
         payload = build_rating_table_payload(model, X, y, n_bins=n_bins, impact_bins=(n_bins,))

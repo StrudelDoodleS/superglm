@@ -231,17 +231,25 @@ zero. Pass `offset_source=` to export the exact form, keyed on a raw column of t
 The workbook includes selected-bin rating tables, a discretization impact sweep, and a structured
 Model Summary sheet. The sweep runs the `impact_bins` ladder — `20, 50, 100, 200, 250` by default —
 **plus the `n_bins` the workbook was actually exported at**, marked by the sheet's `exported` column.
-That row is the one that describes the table in hand: the error falls as bins rise, so without it a
-reader taking the smallest number on the sheet as their bound got one below their own. Passing
-`impact_bins=()` still skips the sheet entirely.
+That row is the one that describes the table in hand. Take it rather than the smallest number on the
+sheet: each row is an independently measured error at its own resolution, not a point on a curve
+guaranteed to fall — a finer grid shrinks the worst-case bound, but successive nearest-node grids are
+not nested, so a nearer node can carry a value further from a given row. Passing `impact_bins=()`
+skips the sweep, leaving the worksheet present with its headers and no rows.
 
-The sweep covers every block the workbook approximates: main-effect spline and polynomial terms, and
-a continuous-by-continuous interaction, which is sampled onto an `n_bins`-per-axis grid rather than
+The sweep covers the binned and sampled model terms: main-effect spline and polynomial terms, and a
+continuous-by-continuous interaction, which is sampled onto an `n_bins`-per-axis grid rather than
 binned into intervals. Its row is keyed on the interaction's name and its `actual_bins` counts the
 grid's *cells*, so an interaction swept at 20 reports 400 where a main effect reports 20. The metric
 columns are **joint** over everything discretized at that resolution — within one `n_bins` group only
-`feature` and `actual_bins` vary — which is what makes them the bound for a consumer applying the
-whole table.
+`feature` and `actual_bins` vary.
+
+Two approximations the workbook can carry are outside that measurement, so the sheet is a bound on
+the terms it lists rather than on every factor in the book. The binned **offset multiplier** block —
+the normal case for a continuous exposure, absent `offset_source=` — is not swept
+([#314](https://github.com/StrudelDoodleS/superglm/issues/314)), and the sheet's own discretized
+predictor is stabilized where the workbook's product is not
+([#313](https://github.com/StrudelDoodleS/superglm/issues/313)).
 
 The `ModelOverview` and
 `TermInference` Excel tables use typed cells for metrics, estimates, intervals, and p-values instead
