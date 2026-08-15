@@ -66,6 +66,22 @@ def _hold_open_until(sampler, target_samples: int, timeout: float = _TICK_TIMEOU
     establish rather than something they hope for. Contention then makes them
     slower, never wrong, and a sampler that has genuinely stopped ticking is
     reported as exactly that.
+
+    ONE EXCEPTION, and it is this helper's own overshoot: a target is a LOWER
+    bound, so a waiter that is itself descheduled leaves the sampler ticking
+    past it. `test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures`
+    caps the short side, so there alone contention can make the test wrong
+    rather than slow -- see the ceiling's own comment for the measured margin
+    and the re-take that absorbs an isolated stall. The other three call sites
+    only ever benefit from an overshoot.
+
+    The wait leaves the sampler STOPPED, not merely flagged: `__exit__` joins,
+    so `samples` is frozen once this returns and a caller may read it twice and
+    get the same number. That join carries a 5 s timeout and returns whether or
+    not the thread died, so the freeze is asserted here rather than assumed --
+    once, for all four call sites. It is checked after the count, because a
+    sampler wedged inside `_pool_snapshot()` fails both and "recorded N of M
+    ticks" is the more useful of the two messages.
     """
     deadline = time.monotonic() + timeout
     with sampler:
@@ -73,6 +89,9 @@ def _hold_open_until(sampler, target_samples: int, timeout: float = _TICK_TIMEOU
             time.sleep(0.002)
     assert sampler.samples >= target_samples, (
         f"sampler recorded {sampler.samples} of {target_samples} ticks in {timeout:.0f}s"
+    )
+    assert sampler._thread is None or not sampler._thread.is_alive(), (
+        "sampler thread outlived its join; `samples` is still moving"
     )
 
 
@@ -121,16 +140,24 @@ def test_the_sampler_records_every_fit_not_just_the_first() -> None:
     for _ in range(3):
         # RELATIVE to the count on entry, not an absolute ladder. `samples` is
         # cumulative, so absolute targets (5, 10, 15) are satisfied on ENTRY by
-        # one overshooting first wait -- the poll is 2 ms against a 1 ms
-        # interval, and a delayed wake-up is the same contention this rewrite
-        # exists to survive. The later holds would then skip their `while` body
-        # entirely, and `counts[i] > counts[i-1]` would be left to the race
-        # between a freshly started sampler thread and the `_stop` flag that
-        # `__exit__` sets microseconds later: `__exit__` sets the flag and then
-        # JOINS (`benchmarks/rank_deficient_complete_fit.py`), so a thread that
-        # loses that race records nothing at all and the assertion fires on a
-        # sampler that is working. Asking each re-entry for five ticks OF ITS
-        # OWN is what the docstring claims and what the assertions below need.
+        # one overshooting first wait, and the later holds then establish
+        # NOTHING: they skip their `while` body entirely and `counts[i] >
+        # counts[i-1]` is left to whatever the re-entered sampler happens to do
+        # between `__enter__` and `__exit__`. Measured, injecting a single
+        # delayed main-thread wake-up -- the same contention this rewrite exists
+        # to survive -- at `interval=0.001`: with absolute targets, holds 2 and
+        # 3 performed 0 and 0 polls in 12 trials out of 12, at a 40 ms stall and
+        # again at 60 ms; with relative targets, 3 to 4 polls each.
+        #
+        # What that leaves the comparison resting on is measured too, and it is
+        # NOT a zero-tick race: over 300 re-entries whose wait does nothing, the
+        # sampler recorded one tick in 300 and zero ticks in none. `_run` tests
+        # `_stop` BEFORE its first tick, so the flag check -- not the join -- is
+        # what could make a losing thread record nothing, and `__enter__` clears
+        # the flag before starting the thread, so it reliably registers. The
+        # ladder kept passing on exactly that, which is why passing said so
+        # little. Asking each re-entry for five ticks OF ITS OWN is what the
+        # docstring claims and what the assertions below need.
         _hold_open_until(sampler, sampler.samples + 5)
         counts.append(sampler.samples)
     assert counts[0] > 0
@@ -173,6 +200,29 @@ def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
     # broken measurement, not a reason to triple the long side's work, so it is
     # re-taken instead. 33 is `_LONG_TICKS // 3`, the largest short count the
     # fixed long target can still dominate: 33 * 3 = 99 < 100.
+    #
+    # The ceiling and the ratio are the same number only because the short
+    # sampler is STOPPED between them: `__exit__` sets `_stop` and then joins,
+    # so `short.samples` is frozen when `_hold_open_until` returns and the guard
+    # below is checking the value the premise below it will use. That join takes
+    # a 5 s timeout and returns whether or not the thread died, so
+    # `_hold_open_until` asserts the thread is really gone rather than trusting
+    # it; without that, a short sampler that outlived its join would keep
+    # ticking through the long side's 100 ticks and fail the premise with the
+    # guard already passed.
+    #
+    # The ceiling is the one place in this file where contention can make a test
+    # WRONG rather than slow, so its margin is measured, not assumed. A tick
+    # costs more than its nominal 1 ms interval -- the snapshot dominates -- so
+    # the sampler runs at 0.65 ticks/ms here, and a single waiter stall has to
+    # reach about 50 ms before one attempt clears 33 (8 trials each: 40 ms gave
+    # 25-28 and no breach, 50 ms gave 33-35 and breached 7 times, 60 ms gave
+    # 39-41 and breached 8). Polling faster does not buy that back: at 0.5 ms
+    # against 2 ms the no-stall exit count moves only from 6 to 5, and the 50 ms
+    # stall still breaches, because what overshoots is the stall and not the
+    # poll. Three independent attempts, each needing its own ~50 ms stall, is
+    # the protection -- and if all three overshoot the failure names the short
+    # side rather than blaming the ratio.
     ceiling = _LONG_TICKS // 3
     for _ in range(3):
         short = bench._DispatchSampler(interval=0.001)
