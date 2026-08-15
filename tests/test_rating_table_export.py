@@ -1962,6 +1962,48 @@ def test_the_base_relativity_cell_is_wide_enough_to_render(tmp_path, base):
     )
 
 
+def test_every_block_key_column_is_wide_enough_for_the_keys_it_carries(tmp_path):
+    """The same failure as the base cell, one column over, and quieter.
+
+    ``_autosize`` caps at 36 characters. That cap is a readability limit for
+    prose -- the summary sheet's wrapped ``Notes`` column depends on it -- and a
+    block's KEY column is not prose. Once the bin boundaries are printed at
+    round-trip precision an interval pair runs to 40 characters on this
+    fixture, so the column is clipped.
+
+    Excel clips rather than overflows, because the neighbouring ``Relativity``
+    column is populated on every row. The reader therefore sees
+    ``[20.463050119288255, 23.16627506`` -- which still reads as an interval,
+    with a plausible and *wrong* right edge. That is worse than ``########``:
+    hash marks announce themselves, a truncated number does not.
+
+    Asserted for every block, not only the binned one, so a future block kind
+    with a long key is covered; and against the content of the column rather
+    than against 36 or 40, so it survives either number moving.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, n_bins=20)
+    output = tmp_path / "keys.xlsx"
+    _write_workbook(payload, output)
+    ws = load_workbook(output)["Rating Tables"]
+
+    binned = [block for block in payload.main_effects if block.kind == "continuous"]
+    assert binned, "the fixture carries a block whose keys are interval strings"
+
+    for idx, block in enumerate(payload.main_effects):
+        letter = ws.cell(row=1, column=1 + idx * 3).column_letter
+        longest = max(len(str(cell.value)) for cell in ws[letter] if cell.value is not None)
+        width = ws.column_dimensions[letter].width
+        assert width >= longest, (
+            f"block {block.name!r} key column {letter} is {width} wide against a "
+            f"{longest}-character cell, so Excel truncates the key"
+        )
+
+    # And the fixture really does exceed the prose cap, or this measures nothing.
+    key_letter = ws.cell(row=1, column=1).column_letter
+    assert max(len(str(c.value)) for c in ws[key_letter] if c.value is not None) > 36
+
+
 def test_the_formats_this_cell_did_not_get_would_each_have_lost_the_precision():
     """The chosen format has to beat the alternatives, or the choice is arbitrary.
 

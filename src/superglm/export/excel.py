@@ -103,6 +103,23 @@ _BASE_RELATIVITY_NUMBER_FORMAT = "0.0000000000E+00"
 # eighteenth.  Plus the two columns of padding ``_autosize`` already applies.
 _BASE_RELATIVITY_MIN_WIDTH = 17 + 2
 
+# The same failure, one column over.  ``_autosize`` caps at 36 characters, which
+# is a readability limit for PROSE -- the summary sheet's wrapped ``Notes``
+# column depends on it -- and a block's KEY column is not prose.  Its cells are
+# interval strings printed at round-trip precision, and a pair of them runs to
+# 40 characters on an ordinary fixture.  Excel clips rather than overflows,
+# because the neighbouring ``Relativity`` column is populated on every row, so
+# the reader sees ``[20.463050119288255, 23.16627506`` -- which still reads as
+# an interval, with a plausible and wrong right edge.  That is strictly worse
+# than the ``########`` this module already refuses for the base: hash marks
+# announce themselves, a truncated number does not.
+#
+# Derived, not observed: ``repr`` of a float64 is at most 24 characters
+# (``-1.2345678901234567e-308``), so the widest interval this module can print
+# is ``[`` + 24 + ``, `` + 24 + ``)`` = 52, plus the two columns of padding
+# ``_autosize`` applies.
+_KEY_COLUMN_MAX_WIDTH = 1 + 24 + 2 + 24 + 1 + 2
+
 
 def _resolve_workbook_target(
     target: str | PathLike[str] | BinaryIO,
@@ -330,6 +347,29 @@ def _autosize(ws) -> None:
         ws.column_dimensions[letter].width = min(max(max_length + 2, 12), 36)
 
 
+def _widen_block_key_columns(ws, main_effects) -> None:
+    """Let each block's key column fit its own keys, past the prose cap.
+
+    Only the FIRST column of each main-effect block, because that is the one
+    holding the keys a reader looks a risk up by; the ``Relativity`` and
+    ``Weight`` columns beside it are formatted numbers and are already short.
+    The cap stays, at the width the printer can actually produce, so the rule
+    is still a bound rather than "as wide as it takes".
+    """
+    from openpyxl.utils import get_column_letter
+
+    for idx in range(len(main_effects)):
+        letter = get_column_letter(1 + idx * _MAIN_EFFECT_BLOCK_STRIDE)
+        longest = max(
+            (len(str(cell.value)) for cell in ws[letter] if cell.value is not None),
+            default=0,
+        )
+        ws.column_dimensions[letter].width = min(
+            max(ws.column_dimensions[letter].width or 0, longest + 2),
+            _KEY_COLUMN_MAX_WIDTH,
+        )
+
+
 def write_rating_table_workbook(
     payload,
     target: str | PathLike[str] | BinaryIO,
@@ -395,13 +435,14 @@ def write_rating_table_workbook(
     for sheet in wb.worksheets:
         _autosize(sheet)
 
-    # After ``_autosize``, and a floor rather than an assignment, so a block
-    # whose own column is wider keeps its width.
+    # After ``_autosize``, and floors rather than assignments, so a column that
+    # is already wider keeps its width.
     base_column = ws[_BASE_RELATIVITY_CELL].column_letter
     ws.column_dimensions[base_column].width = max(
         ws.column_dimensions[base_column].width,
         _BASE_RELATIVITY_MIN_WIDTH,
     )
+    _widen_block_key_columns(ws, payload.main_effects)
 
     summary_ws.column_dimensions["A"].width = 32
     summary_ws.column_dimensions["B"].width = 24
