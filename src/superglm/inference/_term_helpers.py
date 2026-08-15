@@ -270,6 +270,39 @@ def _expand_grouped_term(
     Each original level gets the relativity/SE/CI of its group.
     For OrderedCategorical smooth_curve, level_x positions use the original
     level numeric values so each level gets its own x-position on the plot.
+
+    The display curve is REDRAWN only where the collapse moved the display
+    axis.  A ``Piecewise`` or ``Polynomial`` inner basis lives on level
+    positions ``0..L-1`` and every original level sits at its group's position,
+    so the expanded positions are the fitted curve's own ``level_x`` and there
+    is nothing to reconcile: the fitted curve is kept and only the markers
+    move.  Where the axis genuinely moves -- a spline's ``order=`` linspace or
+    ``values=`` spacing, whose grouped curve sits on group MEANS -- the fitted
+    curve cannot be drawn against the expanded markers, so a PCHIP is
+    interpolated through them and exported with NO band, because the fitted
+    curve's standard errors describe the fitted curve and PCHIP's slope limiter
+    is not a linear functional of beta.  Per-level SEs are unaffected either
+    way.
+
+    Literature, because the rule above turns on a documented property of the
+    interpolant rather than on a tolerance.  SciPy's ``PchipInterpolator`` runs
+    the local slope formula of Fritsch & Butland, *SIAM J. Sci. Stat. Comput.*
+    5(2):300-304 (1984), doi:10.1137/0905021, within the monotone piecewise
+    cubic family of Fritsch & Carlson, *SIAM J. Numer. Anal.* 17(2):238-246
+    (1980).  That formula sets the slope to ZERO wherever consecutive secants
+    have opposite signs or either is zero (Moler, *Numerical Computing with
+    MATLAB*, SIAM 2004, §3.4), so a stated break -- which is exactly such a
+    point -- is not rounded but actively flattened; and PCHIP is C1 by
+    construction ("the spline has two continuous derivatives, while pchip has
+    only one", Moler §3.7), so a C0 corner is undrawable at any sampling
+    density.  Evaluating the fitted function on a grid instead is the ordinary
+    practice -- gratia (MIT), pyGAM (Apache-2.0), and Fox, *J. Stat. Soft.*
+    8(15) (2003) all do it -- and breaking a drawn curve at known non-smooth
+    points is standard outside statistics too.  What no source covers is
+    substituting a C1 interpolant for a fitted C0 term, because penalised
+    regression splines are C1 or better by construction and never meet the
+    case.  The inline comment on the branch below carries the measurements and
+    the full citations.
     """
     if ti.levels is None:
         raise ValueError("Grouped term expansion requires categorical levels.")
@@ -356,7 +389,11 @@ def _expand_grouped_term(
         # Butland, "A method for constructing local monotone piecewise cubic
         # interpolants", SIAM J. Sci. Stat. Comput. 5(2):300-304 (1984)
         # (doi:10.1137/0905021) -- the monotone piecewise cubic FAMILY is
-        # Fritsch & Carlson, SIAM J. Numer. Anal. 17(2):238-246 (1980).  Moler,
+        # Fritsch & Carlson, SIAM J. Numer. Anal. 17(2):238-246 (1980), which
+        # SciPy does not cite.  (SciPy's own reference list renders the 1984
+        # journal as "SIAM J. Sci. Comput.", the name it took after a later
+        # rename; in 1984 it was the Journal on Scientific and STATISTICAL
+        # Computing, which is what SIAM and Crossref both record.)  Moler,
         # *Numerical Computing with MATLAB* (SIAM 2004) sets out the rule in
         # section 3.4: "If delta_k and delta_{k-1} have opposite signs or if
         # either of them is zero, then x_k is a discrete local minimum or
@@ -389,11 +426,16 @@ def _expand_grouped_term(
         # Generalised Linear Models", J. Stat. Soft. 8(15) (2003) computes
         # fitted values over a grid.  Breaking the drawn curve at known
         # non-smooth points is equally standard outside statistics: Wolfram's
-        # ``Plot`` splits at detected discontinuities unless told
-        # ``Exclusions -> None``, and Remacle, Chevaugeon, Marchandise &
-        # Geuzaine, Int. J. Numer. Meth. Engng. 69(4):750-771 (2007) tessellate
-        # high-order fields per element because the field is smooth within an
-        # element and not across its boundary.  What no source warns about is
+        # ``Plot`` "breaks curves at discontinuities and singularities it
+        # detects" under its default ``Exclusions -> Automatic`` and joins
+        # across them only under ``Exclusions -> None``, and Remacle,
+        # Chevaugeon, Marchandise & Geuzaine, "Efficient visualization of
+        # high-order finite elements", Int. J. Numer. Meth. Engng.
+        # 69(4):750-771 (2007) build the display grid by per-element "error
+        # estimation and h-refinement" -- their words -- because the field is
+        # smooth within an element and not across its boundary.  (Some indexes
+        # date that paper 2006, from its online-first posting; the issue is
+        # January 2007.)  What no source warns about is
         # substituting a C1 interpolant for a fitted C0 term -- and the reason
         # is structural: penalised regression splines are C1 or better by
         # construction, so the display routines above never meet this case.
