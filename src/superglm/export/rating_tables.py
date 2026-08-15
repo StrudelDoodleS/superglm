@@ -881,11 +881,18 @@ def _continuous_interaction_block(
     parent1: str,
     parent2: str,
 ) -> InteractionTableBlock:
-    from superglm.diagnostics.discretize import orient_grid_surface
+    from superglm.diagnostics.discretize import _ascending_grid, orient_grid_surface
 
     x1 = np.asarray(raw["x1"], dtype=np.float64)
     x2 = np.asarray(raw["x2"], dtype=np.float64)
     relativity = orient_grid_surface(name, x1, x2, raw["relativity"])
+    # Sorted with the same helper the sweep uses, so the block a reader looks
+    # up and the surface the sheet measures are in one order.  The set of cells
+    # is unchanged either way, but a row exactly midway between two nodes has
+    # its tie broken by INDEX -- so on a reconstruction that supplies a
+    # descending axis the two would otherwise pick different nodes for that
+    # row, and the sheet would describe a factor the workbook does not carry.
+    x1, x2, relativity = _ascending_grid(x1, x2, relativity)
 
     table = pd.DataFrame(relativity, columns=[_format_axis_value(v) for v in x2])
     table.insert(0, parent1, [_format_axis_value(v) for v in x1])
