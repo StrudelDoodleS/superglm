@@ -752,17 +752,27 @@ def spline_cat_moments(
     Wq = W_cell[:, level_rows]
     Sq = S_cell[:, level_rows]
 
-    # One GEMM for every level's k_a x k_a curvature: the outer products of
-    # the spline menu are level-independent, so they are formed once and
-    # contracted against each level's weights.
-    AA = (B_a[:, :, None] * B_a[:, None, :]).reshape(n_a, k_a * k_a)
-    V = (Wq.T @ AA).reshape(-1, k_a, k_a)
-    del AA
-    # V persists into the ladder, but its n_a*k_a^2 construction scratch has
-    # been released before the one level-sized suffix stack below is formed.
+    # THE TRACE PASS RUNS FIRST, AND THE ORDER IS THE MEMORY GATE.
+    # ``screening_ops._within_structured_budget`` admits a pair on TWO
+    # coexisting level-sized stacks, which is what this phase held before the
+    # row factors ``R`` were retained: the curvature ``V`` and the trace's
+    # additive suffix.  Keeping ``V``'s construction where it was would make
+    # that three -- ``V``, ``R`` and the suffix -- and admit the same maximum
+    # pair against a budget that never counted the third.  ``V`` is not read
+    # until the pair is assembled, so building it AFTER the suffix has been
+    # released keeps the phase at two stacks and the gate honest, at no cost:
+    # the two passes read ``W_cell`` and ``B_a`` and nothing of each other.
     R = np.zeros((level_rows.size, k_a, k_a), dtype=np.float64)
     profiled_trace = _profiled_curvature_trace(B_a, W_cell, level_rows, keep_factors=R)
     overlap_rows = _unemitted_overlap_rows(B_a, W_cell, level_rows)
+
+    # One GEMM for every level's k_a x k_a curvature: the outer products of
+    # the spline menu are level-independent, so they are formed once and
+    # contracted against each level's weights.  Its n_a*k_a^2 construction
+    # scratch is released before anything else level-sized is formed.
+    AA = (B_a[:, :, None] * B_a[:, None, :]).reshape(n_a, k_a * k_a)
+    V = (Wq.T @ AA).reshape(-1, k_a, k_a)
+    del AA
 
     w_row = W_cell.sum(axis=1)
     s_row = S_cell.sum(axis=1)
