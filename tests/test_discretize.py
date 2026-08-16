@@ -1322,6 +1322,38 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         )
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
+    def test_a_near_miss_log_field_does_not_displace_the_printed_factor(self):
+        """Every representable cell is measured from the factor that ships.
+
+        A log field that exponentiates to *nearly* the supplied relativity is
+        still a different surface, and the workbook prints the relativity. So
+        the log field speaks only for cells the exponential range lost -- here
+        there are none, and the measured delta must follow the printed factor
+        rather than its near-miss.
+        """
+        stub = self._Stub()
+        base = stub.reconstruct
+
+        def _near_miss(beta, n_points=50):
+            raw = dict(base(beta, n_points=n_points))
+            # 1e-10 relative: inside any sane tolerance, and not the surface
+            # the workbook carries.
+            raw["log_relativity"] = np.asarray(raw["log_relativity"], dtype=float) * (1 + 1e-10)
+            return raw
+
+        stub.reconstruct = _near_miss
+        model, df, y = self._model_with(stub)
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+
+        nodes_a = np.array([1.0, 2.0, 3.0])
+        nodes_b = np.array([10.0, 20.0, 30.0])
+        delta = np.log(result.predictions / result.original_predictions)
+        printed = (
+            nodes_a[np.abs(df["a"].to_numpy()[:, None] - nodes_a).argmin(axis=1)]
+            + 0.01 * nodes_b[np.abs(df["b"].to_numpy()[:, None] - nodes_b).argmin(axis=1)]
+        )
+        np.testing.assert_allclose(delta, printed, rtol=_NODE_EXACT_RTOL, atol=0.0)
+
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
 
