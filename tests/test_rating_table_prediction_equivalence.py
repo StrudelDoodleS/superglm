@@ -463,8 +463,73 @@ def test_the_base_relativity_moves_by_exactly_the_shift_the_blocks_applied():
 
     transferred = np.log(mean.base_relativity) - np.log(native.base_relativity)
     assert transferred == pytest.approx(applied, abs=1e-12)
-    assert applied > 0.5
-    assert abs(rederived - applied) > 0.05
+    # Large enough that leaving it unabsorbed would be a premium error, not a
+    # round-off one: ``exp(0.1) - 1`` is 10.5%, three orders above the
+    # reconstruction tolerance the sweep above holds to, so the equality on the
+    # line before is a discriminating measurement rather than 0 == 0.  The
+    # fixture carries 0.4626 of it; it carried 0.5359 until the binned blocks
+    # started contributing their own shifts (issue #293), whose net is -0.0734.
+    assert applied > 0.1
+    # Same kind of bar, on the gap this test exists to show: the naive
+    # re-derivation has to be a DIFFERENT constant by a premium-sized amount,
+    # ``exp(0.01) - 1`` being 1.0%.  Measured at 0.0453 here, driven by the
+    # ``OrderedCategorical`` (never recentered) and the grouped ``Categorical``
+    # (recentered on its grouped levels).  It was wider before #293 only
+    # because the binned blocks were not centered at all, which made the naive
+    # constant wrong about them too -- a gap for the wrong reason.
+    assert abs(rederived - applied) > 0.01
+
+
+def test_every_main_effect_block_is_in_the_centering_that_was_asked_for():
+    """One ``centering=`` request, one behaviour across the workbook.
+
+    The binned blocks come from ``discretization_impact``, which is never told
+    the centering, so a ``Spline`` or ``Polynomial`` block used to ship NATIVE
+    beside categorical and piecewise blocks that had moved.  Measured on a
+    four-term Poisson fit before the fix: ``region`` and ``term`` shifted by
+    exactly what ``term_inference`` reports while ``age`` and ``dens`` shifted
+    by 0.000000 against a reported -0.004169 and +0.006522 (issue #293).
+
+    Read the way a reader compares two workbooks: the log distance between the
+    same block in the two exports, against the constant the term says was
+    removed.  Every block, in one loop, so no kind can be left behind again --
+    and a per-block statement rather than a total, because the totals agreed
+    all along while the terms did not.
+    """
+    model, X, y, sample_weight = _fit("all")
+    native = _payload(model, X, y, sample_weight, "native")
+    mean = _payload(model, X, y, sample_weight, "mean")
+
+    kinds = {block.kind for block in native.main_effects}
+    assert {"categorical", "continuous", "numeric", "piecewise"} <= kinds
+
+    for block_native, block_mean in zip(native.main_effects, mean.main_effects, strict=True):
+        assert block_native.name == block_mean.name
+        reported = float(
+            model.term_inference(block_native.name, with_se=False, centering="mean").centering_shift
+        )
+        log_native = np.log(block_native.table["Relativity"].to_numpy(dtype=np.float64))
+        log_mean = np.log(block_mean.table["Relativity"].to_numpy(dtype=np.float64))
+        # A CONSTANT shift, not a mean one: the whole block moves together, so
+        # every row must show the same distance.  A block that moved only on
+        # average would still be a different curve.
+        np.testing.assert_allclose(
+            log_mean - log_native,
+            np.full(log_native.shape, -reported),
+            rtol=0.0,
+            atol=64 * _EPS * max(1.0, float(np.max(np.abs(log_native)))),
+            err_msg=f"{block_native.name} ({block_native.kind}) is not in the requested centering",
+        )
+        assert block_mean.centering_shift == pytest.approx(reported, rel=0.0, abs=0.0)
+
+    # The blocks that were left native are exactly the ones whose fix could
+    # break the product, so the sweep this shares a file with has to still hold.
+    np.testing.assert_allclose(
+        _predict_from_payload(mean, X),
+        _predict_from_payload(native, X),
+        rtol=_RECONSTRUCTION_RTOL,
+        atol=0.0,
+    )
 
 
 def test_an_ordered_categorical_block_carries_no_centering_shift():
@@ -1489,6 +1554,68 @@ def test_a_continuous_offset_exports_a_binned_block_that_is_not_a_row_exact_fact
         X, offset=offset
     )
     assert float(relative.max()) > 1e-2 > _RECONSTRUCTION_RTOL
+
+
+def test_an_exact_offset_level_is_keyed_on_its_own_multiplier_at_any_magnitude():
+    """The exact-level key is a lookup, so it must not be decimally quantised.
+
+    ``_offset_multiplier_block`` keyed its exact levels on
+    ``np.round(multiplier, 12)`` -- twelve DECIMAL PLACES, absolute.  Near
+    ``1.0`` that is ~1e-12 relative and harmless; the coarseness is in
+    proportion to how small the multiplier is, and a consumer looking up its
+    own multiplier finds a key that is not it, or finds distinct tariff levels
+    merged into one.
+
+    Measured on ten multipliers around 1e-06 spaced 1e-13 apart: the block
+    emitted TWO rows for ten distinct exposures, keyed 1e-06 and 1.000001e-06.
+    At 1e-13 the whole column
+    collapses to a single level keyed exactly ``0.0`` -- a factor that prices
+    every risk at zero, which the payload guard then refuses while blaming the
+    fit for being "quasi-separated or mis-scaled".
+
+    Read as a reader does: every distinct multiplier must have a row whose KEY
+    is that multiplier and whose factor is that multiplier.
+    """
+    multiplier = 1e-06 * (1.0 + 1e-07 * np.arange(10.0))
+    assert len(np.unique(multiplier)) == 10
+
+    block = rating_tables._offset_multiplier_block(
+        np.log(multiplier), len(multiplier), None, n_bins=10, bin_strategy="exposure_quantile"
+    )
+    assert block is not None
+    keys = block.table["Offset Multiplier"].to_numpy(dtype=np.float64)
+    factors = block.table["Relativity"].to_numpy(dtype=np.float64)
+    assert len(keys) == 10, f"distinct multipliers merged into {len(keys)} level(s)"
+
+    # ``exp(log(m))`` is not ``m`` to the last bit, so the tolerance is the
+    # round-trip's own error and nothing wider.
+    round_trip = np.exp(np.log(multiplier))
+    for value in round_trip:
+        row = int(np.argmin(np.abs(keys - value)))
+        assert keys[row] == pytest.approx(value, rel=_RECONSTRUCTION_RTOL, abs=0.0)
+        assert factors[row] == pytest.approx(value, rel=_RECONSTRUCTION_RTOL, abs=0.0)
+    assert float(np.min(factors)) > 0.0, "a multiplicative tariff has no zero factor"
+
+
+def test_offset_multipliers_within_float_noise_are_still_one_level():
+    """The rounding does real work, and the fix has to keep doing it.
+
+    It is what collapses the float noise of ``exp(log(exposure))`` into
+    "distinct tariff levels" and so gates the 20-level exact/binned switch.  A
+    relative tolerance has to keep merging what an absolute one merged near
+    ``1.0``, or a fit with three exposures would export as a binned block.
+    """
+    base = np.array([0.5, 1.0, 2.0])
+    jittered = np.repeat(base, 4) * (1.0 + 1e-14 * np.arange(12.0))
+    assert len(np.unique(jittered)) == 12
+
+    block = rating_tables._offset_multiplier_block(
+        np.log(jittered), len(jittered), None, n_bins=10, bin_strategy="exposure_quantile"
+    )
+    assert block is not None
+    keys = block.table["Offset Multiplier"].to_numpy(dtype=np.float64)
+    assert len(keys) == 3, f"float noise split one tariff level into {len(keys)}"
+    np.testing.assert_allclose(np.sort(keys), base, rtol=1e-11, atol=0.0)
 
 
 def test_an_empty_offset_bin_ships_a_factor_a_risk_can_be_rated_on():

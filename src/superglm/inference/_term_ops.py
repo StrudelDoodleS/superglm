@@ -598,7 +598,13 @@ def term_inference(
 
     # ── Polynomial ───────────────────────────────────────────────
     elif isinstance(spec, Polynomial):
-        raw = spec.reconstruct(beta_combined)
+        # ``n_points`` FORWARDED, as the spline branch above forwards it.
+        # ``feature_se_from_cov`` below honours the caller's resolution, so
+        # reconstructing at the default 200 beside it left the two vectors
+        # different lengths and ``ci_lo = _safe_exp(log_rel - z_alpha * se)``
+        # raised for every resolution but the default -- taking ``plot``,
+        # ``plot_data`` and the editor session down with it (issue #295).
+        raw = spec.reconstruct(beta_combined, n_points=n_points)
         x_grid = raw["x"]
         log_rel = raw["log_relativity"]
         rel = raw["relativity"]

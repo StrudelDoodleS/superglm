@@ -207,18 +207,43 @@ def _format_axis_value(value: float) -> str:
     return _format_number(value)
 
 
-def _continuous_block(name: str, table: pd.DataFrame) -> RatingTableBlock:
+def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) -> RatingTableBlock:
+    """A binned block, moved by the same constant every other block moves by.
+
+    The binned relativities come from ``discretization_impact``, which knows
+    nothing about ``centering=`` -- so a spline or polynomial block used to
+    come out NATIVE while the categorical, piecewise and numeric blocks beside
+    it moved, on one ``centering="mean"`` request.  Measured on a four-term
+    Poisson fit: ``region`` and ``term`` shifted by exactly what
+    ``term_inference`` reports, ``age`` and ``dens`` by 0.000000 against a
+    reported -0.004169 and +0.006522 (issue #293).  One request, two
+    behaviours, and nothing in the workbook says which block is in which.
+
+    The shift is applied HERE rather than by re-binning a centered term,
+    because the constant has to be the same one ``term_inference`` reports and
+    the other blocks subtract -- a re-derivation from the binned values would
+    be the weighted mean of the BINS instead, a different number, and the
+    blocks would no longer share one origin.
+
+    Multiplicative on the emitted factors and recorded on the block, so the
+    payload folds it into ``base_relativity`` exactly as it does for the exact
+    blocks: the product of the base and every block is unchanged by centering,
+    which is the exactness the whole payload rests on.
+    """
+    factor = float(np.exp(-centering_shift))
     out = pd.DataFrame(
         {
             name: [
                 _format_interval(float(row.bin_from), float(row.bin_to))
                 for row in table.itertuples(index=False)
             ],
-            "Relativity": table["relativity"].astype(float).to_numpy(),
+            "Relativity": table["relativity"].astype(float).to_numpy() * factor,
             "Weight": table["sample_weight"].astype(float).to_numpy(),
         }
     )
-    return RatingTableBlock(name=name, kind="continuous", table=out)
+    return RatingTableBlock(
+        name=name, kind="continuous", table=out, centering_shift=float(centering_shift)
+    )
 
 
 def _weights_by_level(
@@ -698,6 +723,39 @@ def _weights_array(n_rows: int, sample_weight: NDArray | None) -> NDArray:
     return weights
 
 
+def _significant_digits(values: NDArray, digits: int) -> NDArray:
+    """Round to ``digits`` SIGNIFICANT digits, so the coarseness is relative.
+
+    ``np.round(x, 12)`` is twelve decimal PLACES, absolute.  What the offset
+    block needs it for is collapsing the float noise of ``exp(log(exposure))``
+    into distinct tariff levels, and that is a relative question: near ``1.0``
+    twelve places is ~1e-12 relative and does exactly that, but the same
+    absolute grid degrades in proportion as the multiplier shrinks -- it merges
+    genuinely distinct small multipliers into one printed key, and below ~5e-13
+    it collapses the column to a single level keyed ``0.0``, a factor that
+    prices every risk at zero (issue #303).
+
+    Twelve significant digits keeps the constant and its intent and makes the
+    grid magnitude-invariant.  Scaled through the MANTISSA rather than by
+    ``10 ** (digits - 1 - exponent)``, because that multiplier overflows for a
+    multiplier near the bottom of float64 while the value it would scale is
+    perfectly ordinary; ``10.0 ** exponent`` never does, since it is the
+    magnitude of a representable number.  Zeros and non-finite values are left
+    exactly as they are -- they have no significant digits to keep, and both
+    are refused downstream on their own terms.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    out = np.array(values, dtype=np.float64, copy=True)
+    scalable = np.isfinite(values) & (values != 0.0)
+    if not np.any(scalable):
+        return out
+    magnitude = 10.0 ** np.floor(np.log10(np.abs(values[scalable])))
+    mantissa = values[scalable] / magnitude
+    keep = 10.0 ** (digits - 1)
+    out[scalable] = np.round(mantissa * keep) / keep * magnitude
+    return out
+
+
 def _offset_multiplier_block(
     offset: NDArray,
     n_rows: int,
@@ -712,7 +770,7 @@ def _offset_multiplier_block(
 
     weights = _weights_array(n_rows, sample_weight)
     multiplier = np.exp(offset_arr)
-    exact_multiplier = np.round(multiplier, 12)
+    exact_multiplier = _significant_digits(multiplier, 12)
     levels, inverse = np.unique(exact_multiplier, return_inverse=True)
 
     if len(levels) < 20:
@@ -1486,7 +1544,18 @@ def build_rating_table_payload(
         if isinstance(spec, Piecewise):
             main_effects.append(_piecewise_block(model, name, centering))
         elif selected is not None and name in selected.tables:
-            main_effects.append(_continuous_block(name, selected.tables[name]))
+            # Through the same term the exact blocks read their shift from, so
+            # every block in the workbook is in the centering the caller asked
+            # for and all of them share one origin.  ``with_se=False``, so this
+            # is the point estimate alone -- the band's own centering is
+            # ``_recenter_term``'s business and is not routed through here.
+            main_effects.append(
+                _continuous_block(
+                    name,
+                    selected.tables[name],
+                    float(_main_effect_inference(model, name, centering).centering_shift),
+                )
+            )
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
         elif isinstance(spec, Numeric):
