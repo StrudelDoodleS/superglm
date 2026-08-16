@@ -132,9 +132,12 @@ module is a boundary moving underneath an unstated choice.  It is:
      all; :func:`_penalty_root` takes it at its MAGNITUDE, which is the only
      choice that is a function of the data rather than of the rounding.  Where
      the eigensolver returns a bit-exact ``0.0`` there is not even a magnitude
-     to take, the direction is reported FREE, and its filter factor is ONE --
-     the opposite end from clause 1, and the more expensive one.  Measured
-     under "WHAT CLAUSE 4 COSTS" below.
+     to take and the direction leaves the penalty entirely -- so WHERE THE
+     LEVEL'S OWN BLOCK STILL CARRIES CURVATURE THERE it is reported FREE and
+     its filter factor is ONE, the opposite end from clause 1 and the more
+     expensive one.  Where the block carries no mass either,
+     :func:`_block_inverse_factors` zeroes it and it contributes zero, which
+     IS clause 1.  Measured under "WHAT CLAUSE 4 COSTS" below.
   5. **THIS POLICY IS ROUTE-LOCAL, AND STATING IT HERE DOES NOT STATE IT FOR
      THE PAIR.**  The DENSE route INTENDS the same zero contribution -- it
      says so, and its fallback whitening discards the common null space
@@ -1289,13 +1292,15 @@ def _penalty_root(S_a: NDArray) -> NDArray:
     :func:`_profile` "then refuses the pair, because the statistic is still
     scoring ``S_a`` raw".
 
-    * **The reason is stale.**  :func:`_evaluate` hands
-      ``root_penalty.T @ root_penalty`` to :func:`_pair_arrow`, so the
-      statistic scores the PROJECTED penalty too -- that is what the
-      "statistic factors the pencil the edf chose lambda from" work did.  The
-      guard's real reason is the one :func:`_profile` states at its own site:
-      cross-route comparability, because the DENSE path still assembles
-      ``S_ti`` raw.
+    * **The reason is stale, and issue #298 made it more so.**  The statistic
+      and the ``edf`` now come off ONE factorization -- :func:`_evaluate`
+      delegates to :func:`_filter_factor_sum`, which stacks
+      ``sqrt(lam) * root_penalty`` under each level's rows -- so the statistic
+      scores the PROJECTED penalty by construction, and there is no separate
+      moment-space arrow left for it to score ``S_a`` raw in.  (An earlier
+      draft here named that arrow; it no longer exists.)  The guard's real
+      reason is the one :func:`_profile` states at its own site: cross-route
+      comparability, because the DENSE path still assembles ``S_ti`` raw.
     * **The refusal is not guaranteed, and there is a silent window.**
       Dropping happens at ``|c| > n eps ||S||_2``; :func:`_profile` raises
       only at ``clip = |c| / |tr S| > 2 n^2 eps``.  Those are different
@@ -1563,7 +1568,14 @@ def _block_inverse_factors(triangular: NDArray) -> NDArray:
     same convention :func:`_filter_factor_sum`'s ``keep`` applies at the
     border, applied to the per-level blocks.  The cut itself is the
     ``matrix_rank`` CONVENTION and not a derived bound, which clause 3 says
-    out loud; changing either site alone splits the pencil's two halves.
+    out loud.
+
+    **THE TWO SITES SHARE THAT CONVENTION AND NOT A FORMULA, SO DO NOT MIRROR
+    AN EDIT BETWEEN THEM MECHANICALLY.**  Here the zero really is the whole
+    clause-1 decision, because it feeds ``K_q`` and nothing else.  At the
+    border the same ``keep`` also gates two ``1.0`` branches -- ``extended``
+    and ``xi`` -- which reach ``edf`` and must NOT move with it; read
+    :func:`_filter_factor_sum`'s comment before changing either.
     """
     u, singular, vt = np.linalg.svd(triangular)
     cut = max(triangular.shape[-2:]) * np.finfo(np.float64).eps
