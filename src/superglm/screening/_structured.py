@@ -618,8 +618,16 @@ class _UnstableStructuredEDFError(FloatingPointError):
     the one the DENSE route scores, which still assembles ``S_ti`` raw.
     ``V_eff`` is DERIVED, by this kernel's own residualization of the data;
     its going materially outside the cone (measured at ``-1.95e-11`` on 1 of
-    12 fixtures) is arithmetic, not specification, and is published under
-    clause 1.  Refuse a changed MODEL, publish a hard PENCIL.
+    12 fixtures) is arithmetic, not specification, and NO RAISE SITE HERE IS
+    KEYED TO IT.  The pencil is evaluated, and it publishes if it passes the
+    ordinary numerical and ordering guards -- which it may also FAIL, since
+    that same indefiniteness is what makes ``edf`` rise by ``+0.014141`` and
+    the monotone guards refuse.  **It is not "published under clause 1", and
+    saying so would repeat the overbroad promise clause 2 was corrected to
+    avoid**: clause 1 governs an IDENTIFIED ``null(V_eff) & null(S)``
+    direction, where an otherwise undefined ``0/0`` factor is assigned zero.
+    Indefiniteness is neither that condition nor sufficient to reach it.
+    Refuse a changed MODEL, evaluate a hard PENCIL.
 
     So what clause 2 forbids is a raise site keyed to the pencil's
     SINGULARITY, which is the undecidable predicate above -- not any condition
