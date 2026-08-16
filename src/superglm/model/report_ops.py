@@ -644,8 +644,9 @@ def _withhold_repaired_term_inference(coef_rows, repaired_features) -> None:
     """
     if not repaired_features:
         return
+    repaired_labels = {str(name) for name in repaired_features}
     for row in coef_rows:
-        if row.group not in {str(name) for name in repaired_features}:
+        if row.group not in repaired_labels:
             continue
         row.wald_chi2 = None
         row.wald_p = None
