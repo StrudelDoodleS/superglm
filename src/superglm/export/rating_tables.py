@@ -1412,10 +1412,9 @@ def build_rating_table_payload(
     payload rates.  ``"native"`` reports each term under the model's own
     identifiability constraint.  ``"mean"`` shifts the terms that have a mean
     to shift -- ``Categorical``, ``Piecewise``, and the binned ``Spline`` and
-    ``Polynomial`` blocks -- so their relativities have geometric mean 1, and
-    ``base_relativity`` absorbs the total so the product is unchanged; before
-    issue #253 it did not, and every reconstructed prediction came out scaled
-    by ``exp(-sum_t shift_t)``.
+    ``Polynomial`` blocks -- and ``base_relativity`` absorbs the total so the
+    product is unchanged; before issue #253 it did not, and every reconstructed
+    prediction came out scaled by ``exp(-sum_t shift_t)``.
 
     A binned block takes the constant from the SAME term the exact blocks read
     theirs from rather than re-deriving it from its own bins, which would be
@@ -1425,6 +1424,20 @@ def build_rating_table_payload(
     ``centering="mean"`` request produced a mean-centred categorical block
     beside a native spline block, with nothing on the sheet saying which was
     which (issue #293).
+
+    Being SHIFTED is therefore not the same as arriving at geometric mean 1,
+    and only the exact blocks do both.  The constant is the mean of the log
+    relativities over the vector ``term_inference`` reports, which for a
+    ``Categorical`` or a ``Piecewise`` IS that block's own rows, so
+    ``exp(mean(log(Relativity)))`` over one of those is exactly 1.  A binned
+    block's rows are ``discretization_impact`` bin averages while its constant
+    is the mean over the reporting grid, so the same quantity comes out at
+    ``exp(bin_mean - grid_mean)`` -- equal to 1 only where the covariate is
+    uniform over the fitted range.  Measured on the equivalence fixture:
+    1.000000 for the categorical and the piecewise blocks, 0.997889 and
+    1.077824 for the two binned continuous ones.  One origin across the
+    workbook is the trade being made; per-block geometric normalisation is what
+    it is traded for, and it is a reader's ratio that has to know.
 
     That mode is still a PARTIAL centering, and deliberately so.  An
     ``OrderedCategorical`` is already anchored on its base level and is not
