@@ -796,13 +796,13 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
 
 
 @pytest.mark.parametrize(
-    ("name", "build"),
+    "build",
     (
-        ("thin-level", lambda: _structured_inputs(_thin_level_pair(low_weight=1.0))),
-        ("near-absorbed", lambda: _near_absorbed_cells(1e-12)),
+        pytest.param(lambda: _structured_inputs(_thin_level_pair(low_weight=1.0)), id="thin-level"),
+        pytest.param(lambda: _near_absorbed_cells(1e-12), id="near-absorbed"),
     ),
 )
-def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(name, build):
+def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build):
     """Issue #298: ``edf`` moved onto the factors and the statistic did not.
 
     Two assertions, and they are the same statement from either end.

@@ -6645,6 +6645,8 @@
     "tests/test_structured_screening.py::test_the_penalty_residue_s_sign_cannot_move_the_published_edf[1e-12]": 0.6839232398197055,
     "tests/test_structured_screening.py::test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff": 0.3602652456611395,
     "tests/test_structured_screening.py::test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from": 0.05510306404903531,
+    "tests/test_structured_screening.py::test_the_statistic_reads_the_design_and_not_the_pair_s_moments[near-absorbed]": 0.004398077027872205,
+    "tests/test_structured_screening.py::test_the_statistic_reads_the_design_and_not_the_pair_s_moments[thin-level]": 0.6650433640461415,
     "tests/test_structured_screening.py::test_the_structured_path_bins_rather_than_allocate_its_own_intermediate": 0.2547907260013744,
     "tests/test_structured_screening.py::test_the_wide_path_never_allocates_the_dense_blocks": 0.808504251006525,
     "tests/test_structured_screening.py::test_the_zero_penalty_family_is_not_refused_wholesale": 0.48976550227962434,
