@@ -30,6 +30,26 @@ from superglm.screening._structured import _evaluate, _profile, spline_cat_momen
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
 
 
+def _single_rung(p, budget=2.0):
+    """The ladder's one published rung, with a refusal NAMED rather than raised.
+
+    ``structured_ladder`` returns ``None`` when it refuses, and subscripting
+    that raises ``'NoneType' object is not subscriptable`` — which names
+    neither the ladder nor the budget it refused.  Every caller below is
+    pinning something else, and several are mutation checks whose whole job is
+    to report WHICH constant they killed; a bare attribute error three frames
+    from the assertion that matters reports the opposite.
+
+    This is a live path rather than a defensive one: the reach-aware count
+    made refusal reachable at geometries that previously returned a value.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    rungs = structured_ladder(p, budgets=(budget,))
+    assert rungs is not None, f"structured_ladder refused the pair at budget {budget}"
+    return rungs[0]
+
+
 def _dense_arrow(G, E, border):
     """The same matrix ``factor_arrow`` takes, assembled densely."""
     n_blocks, g, _ = G.shape
@@ -424,6 +444,7 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     struct = structured_ladder(
         spline_cat_moments(*_structured_inputs(moderate_pair)), budgets=BUDGETS
     )
+    assert struct is not None and len(struct) == len(BUDGETS)
     for d, s in zip(dense, struct, strict=True):
         assert s.statistic == pytest.approx(d.statistic, rel=1e-5)
         assert s.edf0 == pytest.approx(d.edf0, rel=1e-5)
@@ -522,10 +543,8 @@ def test_profiled_trace_keeps_exact_and_weak_complement_energy(base_energy):
 
 
 def test_exact_absorption_returns_finite_nonnegative_ladder_values():
-    from superglm.screening._structured import structured_ladder
-
     p = spline_cat_moments(*_near_absorbed_cells(0.0))
-    result = structured_ladder(p, budgets=(0.5,))[0]
+    result = _single_rung(p, 0.5)
     assert p.profiled_trace == 0.0
     assert np.isfinite([result.statistic, result.edf0, result.lambda0]).all()
     assert result.statistic >= 0.0
@@ -2508,6 +2527,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
         U, V, C, M, S_ti, budgets=_EDGE_BUDGETS, U_nuisance=u_m
     )
     struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
+    assert struct is not None and len(struct) == len(_EDGE_BUDGETS)
     lam_lo, edf_lo, lam_hi, edf_hi = _CERTIFIED_EDGES[low_weight]
     # THIS PIN DOES TWO JOBS AND ONLY ONE OF THEM IS DERIVED.  Both are worth
     # having; conflating them is not.
@@ -3358,7 +3378,7 @@ def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
         struct = structured_ladder(
             spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows), budgets=BUDGETS
         )
-        assert len(struct) == len(BUDGETS)
+        assert struct is not None and len(struct) == len(BUDGETS)
         for d, s in zip(dense, struct, strict=True):
             assert s.lambda0 == 0.0
             assert np.isfinite(s.statistic) and np.isfinite(s.edf0)
@@ -3737,7 +3757,9 @@ def test_profiled_scale_preserves_the_lower_edge_clamp(monkeypatch, moderate_pai
         return real(*args, **kwargs)
 
     monkeypatch.setattr(st, "_evaluate", counted)
-    result = st.structured_ladder(p, budgets=(1e6,), max_evaluations=2)[0]
+    rungs = st.structured_ladder(p, budgets=(1e6,), max_evaluations=2)
+    assert rungs is not None, "structured_ladder refused under max_evaluations=2"
+    result = rungs[0]
     expected_lo = 1e-10 * p.profiled_trace / (np.trace(p.S_a) * p.dims[0])
     assert calls == 2
     assert result.lambda0 == pytest.approx(expected_lo, rel=2e-15)
@@ -3895,6 +3917,7 @@ def test_a_full_rank_penalty_makes_every_rung_search():
         finally:
             st._evaluate = real
         counts[kind] = calls[0]
+        assert out is not None, f"structured_ladder refused the full-rank {kind} pair"
         assert all(np.isfinite(r.edf0) for r in out)
 
     assert counts["ps"] == 2
