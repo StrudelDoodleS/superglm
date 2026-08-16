@@ -57,10 +57,14 @@ and the edf well defined; Hansen assumes ``rank(L) = p`` and ``N(A) & N(L) =
 {0}`` -- his GSVD is stated with ``X`` NONSINGULAR and ``mu_p > 0``, so the
 degenerate case is assumed away and not handled.  Here ``S`` is semidefinite
 by construction, and the intersection is genuinely nonempty on the starved
-family -- an earlier probe put it at 6 of 77 directions there, and a count at
-the LAPACK cut across this suite's twelve fixtures finds it nonempty on that
-family and NOWHERE ELSE, one direction of 78.  The condition is rare; what is
-not rare is being unable to decide it, which is clause 2 below.
+family.  **THE AUTHORITATIVE COUNT IS THE SECOND ONE**: at the LAPACK cut
+across this suite's twelve fixtures the intersection is nonempty on that
+family and NOWHERE ELSE, at ONE direction of 78 on ``_starved_bs_pair``
+(6 emitted levels x a 13-column ``bs(10)`` margin).  An earlier probe reported
+6 of 77 -- a different ambient dimension, so a different starved pair, taken
+at a cut this docstring does not record.  It is superseded here and kept only
+so the two numbers are not read as one drifting.  Either way the condition is
+rare; what is not rare is being unable to decide it, which is clause 2 below.
 
 ============================== THE SINGULAR-PENCIL POLICY ====================
 
@@ -599,11 +603,27 @@ class _UnstableStructuredEDFError(FloatingPointError):
     nearly dependent subspaces landed on.  Where the intersection is
     identified, clause 1 scores it by contributing zero.
 
-    Every raise site is therefore a statement about ARITHMETIC and each one
-    carries its own derived bound: the range guard and the uncertified-clip
-    guard in :func:`_evaluate`, and the penalty-projection guard in
-    :func:`_profile`.  Adding a raise site whose condition is a property of the
-    pencil rather than of the evaluation would silently reverse clause 2.
+    **TWO OF THE THREE RAISE SITES ARE STATEMENTS ABOUT ARITHMETIC; THE THIRD
+    IS NOT, AND THE ASYMMETRY IS THE THING TO UNDERSTAND.**  The range guard
+    and the uncertified-clip guard in :func:`_evaluate` each judge a computed
+    sum against its own derived bound.  :func:`_profile`'s penalty-projection
+    guard does not: it is computed from ``S_a`` ALONE, in the lambda-
+    independent half, before any sum exists, and it fires or does not fire
+    identically at every lambda.  Its condition is a property of an OPERAND.
+
+    That is admissible where a refusal keyed to singularity is not, and the
+    reason is which operand.  ``S_a`` is the CALLER'S SPECIFICATION -- the
+    model that was asked for -- so a projection that moves it materially means
+    this route is scoring a different model from the one specified, and from
+    the one the DENSE route scores, which still assembles ``S_ti`` raw.
+    ``V_eff`` is DERIVED, by this kernel's own residualization of the data;
+    its going materially outside the cone (measured at ``-1.95e-11`` on 1 of
+    12 fixtures) is arithmetic, not specification, and is published under
+    clause 1.  Refuse a changed MODEL, publish a hard PENCIL.
+
+    So what clause 2 forbids is a raise site keyed to the pencil's
+    SINGULARITY, which is the undecidable predicate above -- not any condition
+    on an operand whatsoever.
 
     **AND THIS CLASS IS NOT THE ONLY WAY THE KERNEL DECLINES.**
     :func:`structured_ladder` also returns ``None`` without raising -- on
@@ -1280,13 +1300,27 @@ def _penalty_root(S_a: NDArray) -> NDArray:
       penalty the caller did not specify, and the range guard cannot see it
       because every filter factor stays in ``[0, 1]``.
 
-    That window is a GUARD GAP, not a policy choice, and it is recorded here
-    rather than papered over: under clause 3 it is a deflation on a direction
-    the pencil resolves.  Closing it means keying the guard to the largest
-    DROPPED eigenvalue instead of to aggregate trace mass, which is a
-    behaviour change and is deliberately not made in a documentation-only
-    change.  What is fixed here is the prose asserting a guarantee the code
-    does not provide.
+    **AND WHICH WAY THAT WINDOW MOVES ``edf`` IS CLAUSE 4's DIRECTION, NOT
+    CLAUSE 3's.**  Dropping a direction from ``rootS`` removes it from the
+    PENALTY, not from the sum: ``T_q' T_q = D_q + lambda rootS' rootS``, so in
+    that direction the filter factor becomes ``d / (d + 0) = 1``.  The
+    direction is reported FREE and ``edf`` goes UP by as much as one per level
+    -- the same end as "WHAT CLAUSE 4 COSTS", and the OPPOSITE of clause 3's
+    harm, which is losing a degree of freedom.  (If ``D_q`` carries no mass
+    there either, :func:`_block_inverse_factors` zeroes it and it contributes
+    zero, which is clause 1.)  Stating the sign because getting it backwards
+    once already cost this docstring a correction.
+
+    The sharper reading is that enlarging ``null(S)`` can MANUFACTURE a common
+    null space where none existed -- a penalty projection creating clause-1
+    directions is the exact condition this policy is organized around, and is
+    more interesting than a deflation rather than less.
+
+    That window is a GUARD GAP and not a policy choice.  Closing it means
+    keying the guard to the largest DROPPED eigenvalue instead of to aggregate
+    trace mass, which is a behaviour change and is deliberately not made in a
+    documentation-only change.  What is fixed here is the prose asserting a
+    guarantee the code does not provide.
 
     **AND ON A TWO-COLUMN MARGIN THERE IS NOTHING LEFT TO TAKE THE MAGNITUDE
     OF, WHICH IS CLAUSE 4 OF THE SINGULAR-PENCIL POLICY AT ITS WORST.**
