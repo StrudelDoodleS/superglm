@@ -320,7 +320,7 @@ def _non_grid_builtin_interactions() -> tuple[type, ...]:
 def _grid_log_surface(
     name: str, axis1: NDArray, axis2: NDArray, grid: dict, relativity: NDArray
 ) -> NDArray:
-    """The log surface, in the space that keeps the most range and still ships.
+    """The log surface, taking the printed factor wherever it is one.
 
     Two requirements pull against each other.  The sweep must measure the
     surface the workbook PRINTS, which is ``relativity`` -- a custom
@@ -329,43 +329,55 @@ def _grid_log_surface(
     ``relativity`` is ``exp`` of the log surface for both built-ins, and a
     finite log surface outside float64's exponential range comes back as ``0``
     or ``inf`` while the fit's own predictor stays perfectly representable --
-    so validating the factor would refuse a diagnostic that has nothing wrong
-    with it.
+    so refusing on the factor would reject a diagnostic with nothing wrong.
 
-    Resolved by preferring ``log_relativity`` only where it is DEMONSTRABLY the
-    same surface: it must be finite, and ``exp`` of it must reproduce
-    ``relativity`` cell for cell.  A cell that underflowed to ``0`` or
-    overflowed to ``inf`` reproduces exactly, because ``exp`` does the same
-    thing to the same number -- so the only disagreement accepted is the one
-    the range explains.  A caller whose two fields genuinely differ, or who
-    supplies a zero where the log says otherwise, still falls through to the
-    printed factor and has to have supplied a factor, since nothing else
-    vouches for it.
+    Resolved CELL BY CELL rather than by choosing one field for the whole
+    grid: every cell whose printed factor is usable is measured from it, and
+    only the cells where it is not fall back to the log field -- and only when
+    ``exp`` of the log value reproduces that cell exactly, which is what the
+    range losing it looks like.  So the sheet never measures a surface the
+    workbook does not carry, at any tolerance, the log field's extra range is
+    used exactly where it is the only thing left, and a caller who supplied a
+    factor the log contradicts is still refused.
+
+    ``log_relativity`` is not part of the grid contract -- the exporter reads
+    ``x1``/``x2``/``relativity`` and nothing else -- so a field that will not
+    even normalise is treated as absent rather than allowed to refuse an
+    interaction the exporter accepts.
     """
+    usable = np.isfinite(relativity) & (relativity > 0.0)
+    if np.all(usable):
+        return np.log(relativity)
+
+    log_surface = None
     if "log_relativity" in grid:
-        # Guarded, because ``log_relativity`` is NOT part of the grid contract:
-        # ``_GRID_RECONSTRUCTION_KEYS`` does not name it and the exporter never
-        # reads it.  A custom spec can ship a perfectly usable ``relativity``
-        # beside a mis-shaped or non-numeric log field, and orienting that
-        # would raise -- refusing an interaction the exporter accepts.  A field
-        # that will not normalise is one that genuinely differs, which is the
-        # case the paragraph above already sends to the printed factor.
         try:
-            log_surface = orient_grid_surface(name, axis1, axis2, grid["log_relativity"])
+            candidate = orient_grid_surface(name, axis1, axis2, grid["log_relativity"])
         except (ValueError, TypeError):
-            log_surface = None
-        if log_surface is not None and np.all(np.isfinite(log_surface)):
+            candidate = None
+        if candidate is not None and np.all(np.isfinite(candidate[~usable])):
+            # The log field may only speak for a cell whose printed factor the
+            # exponential RANGE lost -- ``exp`` of it must reproduce that cell
+            # exactly, which an underflow to ``0`` or an overflow to ``inf``
+            # does because ``exp`` does the same thing to the same number.  A
+            # caller who simply supplied a zero the log contradicts is still
+            # refused, since nothing explains the disagreement.
             with np.errstate(over="ignore", under="ignore"):
-                round_trip = np.exp(log_surface)
-            if np.allclose(round_trip, relativity, rtol=1e-9, atol=0.0, equal_nan=True):
-                return log_surface
-    if not np.all(np.isfinite(relativity)) or np.any(relativity <= 0.0):
+                round_trip = np.exp(candidate[~usable])
+            if np.array_equal(round_trip, relativity[~usable], equal_nan=True):
+                log_surface = candidate
+
+    if log_surface is None:
         raise ValueError(
             f"Interaction {name!r} reconstructed a relativity that is not a usable "
-            "factor: every cell must be finite and strictly positive, and its "
-            "``log_relativity`` (if any) must be finite and agree with it."
+            "factor: every cell must be finite and strictly positive, or carry a "
+            "finite ``log_relativity`` for the cells that are not."
         )
-    return np.log(relativity)
+
+    surface = np.empty_like(relativity, dtype=np.float64)
+    surface[usable] = np.log(relativity[usable])
+    surface[~usable] = log_surface[~usable]
+    return surface
 
 
 def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
