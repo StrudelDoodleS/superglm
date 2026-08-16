@@ -646,7 +646,12 @@ class ModelSummary:
                     if row.monotone_engine is not None:
                         mono_str += f" ({row.monotone_engine})"
                     if row.monotone_repaired:
-                        mono_str += ", repaired"
+                        # The term test, ref_df and the curve SE band are
+                        # WITHHELD for a repaired term rather than printed
+                        # against the unconstrained fit's reference
+                        # distribution -- say which, beside the marker, or the
+                        # row reads as a term that simply had no test.
+                        mono_str += ", repaired (inference withheld)"
                     detail_parts.append(mono_str)
                 detail_str = ", ".join(detail_parts)
 
@@ -1087,7 +1092,12 @@ class ModelSummary:
                     if row.monotone_engine is not None:
                         mono_str += f" ({row.monotone_engine})"
                     if row.monotone_repaired:
-                        mono_str += ", repaired"
+                        # The term test, ref_df and the curve SE band are
+                        # WITHHELD for a repaired term rather than printed
+                        # against the unconstrained fit's reference
+                        # distribution -- say which, beside the marker, or the
+                        # row reads as a term that simply had no test.
+                        mono_str += ", repaired (inference withheld)"
                     detail_parts.append(mono_str)
                 detail_str = ", ".join(detail_parts)
                 detail_html = (

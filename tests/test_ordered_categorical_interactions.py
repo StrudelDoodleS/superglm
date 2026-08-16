@@ -582,3 +582,82 @@ def test_a_specials_term_may_still_be_a_factor_smooth_group():
     # The group kept its label identity, the special included as a level of it.
     fs = model._interaction_specs["power:age_band:fs"]
     assert set(fs._levels) == set(BANDS) | {"MISSING"}
+
+
+def test_resolver_reads_a_level_the_way_transform_reads_it():
+    """The interaction parent path must resolve level identity the way its three
+    siblings do.
+
+    ``transform``/``score``/``shape_axis`` all begin at ``_resolved_labels``,
+    whose first act is ``_canonical`` -- "the single point where the data's
+    spelling of a level meets the declaration's".  ``resolve_interaction_parent``
+    was a fourth copy of that preamble with the canonicalization missing, so a
+    band code declared as ``"3"`` and stored as ``int64`` denoted level ``"3"``
+    on three paths and nothing at all on the fourth.  Asserted against the
+    sibling rather than against a hand-written expected array: the claim is that
+    the four agree, and a literal would still pass if all four drifted together.
+    """
+    spec = _oc()
+    numeric_spec = OrderedCategorical(order=[1, 2, 3, 4, 5], basis=Spline(kind="ps", n_knots=4))
+    # int64 column against a string declaration, and its mirror -- the exact
+    # pair ``_declared_matcher`` exists to reconcile.
+    for probe, column in (
+        (
+            OrderedCategorical(
+                order=[str(i) for i in range(1, 6)], basis=Spline(kind="ps", n_knots=4)
+            ),
+            np.array([1, 3, 5, 2], dtype=np.int64),
+        ),
+        (numeric_spec, np.array(["1", "3", "5", "2"], dtype=object)),
+        (numeric_spec, np.array([1.0, 3.0, 5.0, 2.0], dtype=np.float64)),
+    ):
+        eff_spec, eff_x = resolve_interaction_parent(probe, column)
+        assert eff_spec is probe._spline
+        sibling = probe._map_to_numeric(probe._resolved_labels(column))
+        np.testing.assert_array_equal(eff_x, sibling)
+        # ... and it is a real mapping, not a column of NaN that happens to
+        # match a sibling that also failed.
+        assert np.all(np.isfinite(eff_x))
+
+    # The label spelling that already worked keeps working.
+    labels = np.array(["18-25", "56+", "36-45"], dtype=object)
+    _, eff_x = resolve_interaction_parent(spec, labels)
+    np.testing.assert_allclose(eff_x, [spec._level_to_value[v] for v in labels])
+
+
+def test_an_interaction_parent_accepts_the_column_its_main_effect_accepted():
+    """End to end, and the reason the unit test above matters: the identical
+    ``OrderedCategorical`` fits as a main effect and refused as an interaction
+    parent, with a message that named the levels it was rejecting and the
+    identical-looking levels it wanted."""
+    rng = np.random.default_rng(7)
+    n = 3000
+    codes = rng.integers(1, 6, n)
+    df = pd.DataFrame(
+        {
+            "band": codes,  # int64 column ...
+            "power": rng.uniform(20.0, 200.0, n),
+            "region": rng.choice(list("AB"), n),
+        }
+    )
+    y = rng.poisson(np.exp(-1.5 + 0.1 * codes + 0.002 * df["power"])).astype(np.float64)
+    # ... against a declaration that spells the same levels as strings.
+    bands = [str(i) for i in range(1, 6)]
+
+    def _spec():
+        return OrderedCategorical(order=bands, basis=Spline(kind="ps", n_knots=4))
+
+    main = SuperGLM(family="poisson", features={"band": _spec()}).fit(df, y)
+    assert set(main.reconstruct_feature("band")["level_values"]) == set(bands)
+
+    for pair in (("band", "power"), ("band", "region")):
+        model = SuperGLM(
+            family="poisson",
+            features={
+                "band": _spec(),
+                "power": Spline(kind="ps", n_knots=4),
+                "region": Categorical(),
+            },
+            interactions=[pair],
+        ).fit(df, y)
+        assert np.isfinite(model._result.deviance)

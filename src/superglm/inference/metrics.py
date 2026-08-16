@@ -1308,7 +1308,13 @@ class ModelMetrics:
             if centered_data_gram is not None
             else None
         )
-        return build_coef_rows(
+        from superglm.model.report_ops import (
+            _withhold_repaired_term_inference,
+            shape_repaired_feature_names,
+        )
+
+        repaired = shape_repaired_feature_names(self._model)
+        rows = build_coef_rows(
             groups=self._groups,
             specs=self._model._specs,
             interaction_specs=self._model._interaction_specs,
@@ -1324,6 +1330,10 @@ class ModelMetrics:
             lambda2=fitted_lambda2(self._model),
             n_obs=self.n_obs,
             alpha=alpha,
+            monotone_repairs=repaired,
+            # A shape repair republishes coefficients from a constrained
+            # estimator; the marker and the withholding that go with it belong
+            # on every summary surface, not only ``model.summary()``.
             precomputed_R_a=R_a,
             precomputed_edf=edf,
             precomputed_edf1=edf1,
@@ -1339,6 +1349,8 @@ class ModelMetrics:
                 fitted_penalty(self._model), self._groups
             ),
         )
+        _withhold_repaired_term_inference(rows, repaired)
+        return rows
 
     def summary(
         self,

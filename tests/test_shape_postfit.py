@@ -1431,3 +1431,74 @@ def test_degree_one_curvature_resolves_adjacent_float_slope_jumps():
     assert shape_constraint_certificate(spec, beta, "convex").minimum_scaled_slack == pytest.approx(
         expected_slack, rel=2e-8, abs=2e-8
     )
+
+
+@pytest.mark.parametrize("kind", ["increasing", "convex"])
+def test_summary_withholds_term_inference_after_a_shape_repair(kind):
+    """A repair republishes coefficients from a CONSTRAINED estimator, and the
+    reference distribution of that estimator is not the unconstrained fit's.
+
+    Meyer & Woodroofe (*Ann. Statist.* 28(4):1083-1104, 2000) make the effective
+    dimension of a shape-restricted fit depend on the number of active cone
+    edges, which is a random variable; Meyer (*Ann. Appl. Statist.*
+    2(3):1013-1033, 2008, Sec. 3) makes the null a mixture rather than the
+    fixed-df chi-square the Wood test computes. A binding repair sits on the
+    boundary, which is precisely where the constrained and unconstrained
+    estimators stop agreeing. So the term test, ``ref_df`` and the curve SE band
+    are withheld rather than printed against the wrong null -- issue #308.
+
+    Both arms matter for a second reason: the engine records a curvature repair
+    in ``_shape_repairs`` alone, and every reporting surface read
+    ``_monotone_repairs``, so a ``convex`` repair was neither marked nor
+    withheld anywhere.
+    """
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 1.0, 400)
+    truth = -((x - 0.35) ** 2) if kind == "convex" else np.where(x < 0.5, x, 1.2 - 1.4 * x)
+    y = truth + 0.05 * rng.normal(size=len(x))
+    df = pd.DataFrame({"x": x})
+
+    constraint = getattr(Constraint.postfit, kind)
+    model = SuperGLM(
+        family="gaussian", features={"x": PSpline(n_knots=10, constraint=constraint)}
+    ).fit(df, y)
+
+    def _spline_row(m):
+        (row,) = [r for r in m.summary()._coef_rows if r.group == "x" and r.is_spline]
+        return row
+
+    # Before the repair the term reports everything, or the assertions below
+    # would pass against a term that never had a test to withhold.
+    before = _spline_row(model)
+    assert before.wald_p is not None and np.isfinite(before.wald_p)
+    assert before.ref_df is not None
+    assert before.curve_se_min is not None
+    assert before.monotone_repaired is False
+
+    model.apply_shape_postfit(df)
+    assert model._shape_repairs["x"].max_violation_before > 0.0  # it bound
+
+    after = _spline_row(model)
+    assert after.monotone_repaired is True
+    assert after.wald_chi2 is None
+    assert after.wald_p is None
+    assert after.ref_df is None
+    assert after.curve_se_min is None
+    assert after.curve_se_max is None
+    # The point estimate is NOT withheld: projecting onto the cone is a weak
+    # L_p improvement whatever produced the original estimate (Chernozhukov,
+    # Fernandez-Val & Galichon, *Biometrika* 96(3):559-575, 2009, Prop. 1).
+    assert after.edf is not None and np.isfinite(after.edf)
+
+    # Rendered, in words, on both surfaces -- a row that merely lost its test
+    # is indistinguishable from an inactive one otherwise.
+    assert "repaired (inference withheld)" in str(model.summary())
+    assert "repaired (inference withheld)" in model.summary()._repr_html_()
+
+    # And on `metrics().summary()`, which built its rows without the repairs
+    # dict at all and so printed a p-value the model itself had withheld.
+    (metrics_row,) = [
+        r for r in model.metrics(df, y)._build_coef_rows(0.05) if r.group == "x" and r.is_spline
+    ]
+    assert metrics_row.monotone_repaired is True
+    assert metrics_row.wald_p is None
