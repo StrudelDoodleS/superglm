@@ -813,96 +813,117 @@ class TestOrderedCategoricalShapeDispatch:
         assert axis_rows.all()
         assert np.array_equal(axis, X["pos"].to_numpy())
 
-    def test_postfit_repair_on_a_selected_wrapper_refuses_rather_than_no_ops(
+    def test_postfit_repair_on_a_selected_wrapper_repairs_and_carries_the_level(
         self, dipping_ordinal_data
     ):
         """``select=True`` skips the inner spline's identifiability projection,
-        so the term's columns no longer sum to zero and a repair would move the
-        fitted mean. The repair engine's own publication check catches that and
-        refuses.
+        so the term's design columns no longer sum to zero. A plain ``Spline``
+        in that state still repairs, because runtime canonicalization registers
+        it and its recorded ``column_means`` cancel the level the repair moves;
+        an ``OrderedCategorical`` is not registered -- it fails that module's
+        ``hasattr(spec, "_basis_matrix")`` test, because it WRAPS the spline
+        that carries the matrix -- so nothing cancelled it and the publication
+        check refused with "fitted centering changed". Issue #311: a declared
+        constraint that is unusable on the wrapper for a reason that has
+        nothing to do with the constraint.
 
-        A plain ``Spline`` in the same configuration repairs instead, because
-        runtime canonicalization registers it and its recorded column means
-        cancel the shift; an ``OrderedCategorical`` is never registered, so
-        nothing cancels it. That asymmetry is issue #311 -- what this test pins
-        is the part that must not regress: the ordered term REFUSES, loudly,
-        rather than returning silently unrepaired the way it did before the
-        constraint reached the engine at all.
+        Shape alone would not say the fix is right -- it passes for a repair
+        that dropped the level the guard was reading, which is the one way
+        relaxing that guard could go wrong. So the level is measured on the
+        published model and the deviance is bounded by what LOSING it would
+        cost, against the unwrapped ``select=True`` control, which repairs today
+        from a bit-identical fit.
 
-        A TOMBSTONE, NOT AN INVARIANT. Closing #311 makes this configuration
-        repair, at which point the ``pytest.raises`` below must be replaced,
-        not restored -- its failure then is the fix landing, not a regression.
-        The strong-exception assertion after it is the part that survives.
-
-        The model carries TWO repairable terms, and the order matters. With the
-        ordered term alone the refusal happens inside
-        ``_validate_repair_for_publication``, before the first
-        ``_replace_result_beta``, so "refused before any mutation" and "rolled
-        back cleanly" are indistinguishable and the state assertion cannot
-        fail. The plain spline ahead of it in the features dict repairs first
-        and writes into the transaction's work model, so the ordered term's
-        raise has something to roll back -- which is the case where the
-        guarantee is a claim rather than an arrangement.
+        Not compared curve-for-curve with that control, unlike the
+        ``select=False`` case above: canonicalization moves the registered
+        term's level into the intercept and leaves the wrapper's in its
+        coefficients, so the two reconstructions anchor at different constants,
+        and the weighted projection of a shifted target is a different point.
+        That asymmetry is pre-existing -- the fits are bit-identical, asserted
+        below -- and is not what this test is about.
         """
         from superglm.features.spline import Spline
 
-        from ._fit_state_oracles import assert_model_behavior_unchanged, snapshot_model_behavior
-
         X, y, levels, effect = dipping_ordinal_data
         X = X.copy()
-        # A second, ordinary repairable term whose own repair must be undone.
-        # Its axis is the same designed dip, so it genuinely repairs rather
-        # than being a feasible no-op the engine skips.
-        X["pos"] = np.linspace(0.0, 1.0, len(levels))[[levels.index(lev) for lev in X["band"]]]
-        model = SuperGLM(
-            family="gaussian",
-            features={
-                "pos": Spline(kind="cr", n_knots=8, constraint=Constraint.postfit.increasing),
+        positions = np.linspace(0.0, 1.0, len(levels))
+        X["pos"] = positions[[levels.index(lev) for lev in X["band"]]]
+        constraint = Constraint.postfit.increasing
+
+        def _selected(spec):
+            return SuperGLM(family="gaussian", features=spec, selection_penalty=0.0).fit(X, y)
+
+        wrapped = _selected(
+            {
                 "band": OrderedCategorical(
                     order=levels,
-                    basis=Spline(
-                        kind="cr",
-                        n_knots=8,
-                        select=True,
-                        constraint=Constraint.postfit.increasing,
-                    ),
-                ),
-            },
-            selection_penalty=0.0,
-        ).fit(X, y)
-        # Both terms must be queued, or the rollback has nothing to undo.
-        from superglm.model.shape_ops import _pending_repairs
+                    basis=Spline(kind="cr", n_knots=8, select=True, constraint=constraint),
+                )
+            }
+        )
+        plain = _selected({"pos": Spline(kind="cr", n_knots=8, select=True, constraint=constraint)})
 
-        assert {p.name for p in _pending_repairs(model)} == {"pos", "band"}
-        before = snapshot_model_behavior(model, X)
+        # The premise: the ordered term genuinely is the un-registered one, and
+        # its columns genuinely do not sum to zero. Without this the comparison
+        # below could pass because ``select=True`` quietly stopped mattering.
+        assert "band" not in wrapped._runtime_canonical_state.get("terms", {})
+        assert "pos" in plain._runtime_canonical_state.get("terms", {})
 
-        with pytest.raises(RuntimeError, match="fitted centering changed"):
-            model.apply_shape_postfit(X)
+        # Gaussian identity, so the prediction IS the linear predictor -- and
+        # read through ``predict`` rather than assembled from ``beta`` and the
+        # intercept, because those two carry different conventions here: the
+        # registered term's level lives in its intercept, the wrapper's in its
+        # coefficients.
+        eta_before = np.asarray(wrapped.predict(X), dtype=float)
+        # The same fit, so any post-repair difference is the repair's. Equal to
+        # the accumulation error of one k-term inner product and nothing more
+        # (Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed.,
+        # Lemma 3.1): the two paths sum the same k products in different orders.
+        eta_scale = max(1.0, float(np.max(np.abs(eta_before))))
+        n_cols = sum(g.size for g in wrapped._groups if g.feature_name == "band")
+        np.testing.assert_allclose(
+            eta_before,
+            np.asarray(plain.predict(X), dtype=float),
+            rtol=0.0,
+            atol=n_cols * np.finfo(np.float64).eps * eta_scale,
+        )
+        intercept_before = float(wrapped._result.intercept)
 
-        # The shared oracle rather than a hand-rolled subset: it pins __dict__
-        # and _fit_state identity, every retained projection, beta, intercept,
-        # deviance, predict() and summary() identity. Same reasoning as reusing
-        # `spline_groups` instead of writing a fourth copy of that filter.
-        assert_model_behavior_unchanged(model, X, before)
-        # Not covered by the oracle, and the point of the whole PR: the term
-        # whose repair DID succeed inside the transaction must not have been
-        # published either.
-        assert not getattr(model, "_shape_repairs", {})
-        assert not getattr(model, "_monotone_repairs", {})
+        wrapped.apply_shape_postfit(X)
+        plain.apply_shape_postfit(X)
+        eta_after = np.asarray(wrapped.predict(X), dtype=float)
 
-        # And the proof that there WAS something to roll back, rather than the
-        # ordered term simply raising first: the same `pos` term on its own
-        # repairs. Without this the rollback assertions above would be equally
-        # satisfied by a `pos` that was a feasible no-op.
-        solo = SuperGLM(
-            family="gaussian",
-            features={
-                "pos": Spline(kind="cr", n_knots=8, constraint=Constraint.postfit.increasing)
-            },
-            selection_penalty=0.0,
-        ).fit(X, y)
-        solo.apply_shape_postfit(X)
-        assert solo._shape_repairs["pos"].max_violation_before > 0.0
+        # It repaired at all -- the refusal is gone, and the repair bound.
+        assert wrapped._shape_repairs["band"].max_violation_before > 0.0
+        assert wrapped._monotone_repairs["band"].max_violation_after == pytest.approx(
+            plain._monotone_repairs["pos"].max_violation_after, abs=1e-10
+        )
+
+        wrapped_curve = _level_curve(wrapped, "band", levels)
+        slack = _monotone_slack(wrapped_curve)
+        assert np.all(np.diff(wrapped_curve) >= -slack)
+        assert wrapped._shape_repairs["band"].max_violation_after <= slack
+
+        # The quantity the refusal was reading, measured on the published model:
+        # the level the repair moved, separated from the intercept that absorbed
+        # it. `mean(eta)` moves by the term's own design level plus whatever the
+        # intercept profile added, so differencing the two isolates the level.
+        level = (float(np.mean(eta_after)) - float(np.mean(eta_before))) - (
+            float(wrapped._result.intercept) - intercept_before
+        )
+        # The fixture must actually exercise the uncentered case, or the test
+        # is measuring a repair that never needed the relaxation.
+        assert abs(level) > 1e-4
+
+        # And the level is CARRIED, not lost. Publishing it without the
+        # intercept absorbing it would shift every fitted value by `level`,
+        # which on a Gaussian deviance costs `n * level**2` -- the bound below
+        # is derived from that quantity, not from the observed gap. The plain
+        # `select=True` spline is the reference: it repairs today, from an
+        # identical fit (asserted pre-repair, exactly), so a wrapped repair that
+        # dropped the level would sit a whole `n * level**2` above it.
+        lost_level_deviance = float(len(y)) * level**2
+        assert wrapped._result.deviance <= plain._result.deviance + 0.1 * lost_level_deviance
 
     def test_postfit_repair_composes_with_specials(self, dipping_ordinal_data):
         """``specials=`` is the one delegation shape the wrapper reshapes: the

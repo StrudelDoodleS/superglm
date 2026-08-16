@@ -777,7 +777,21 @@ class OrderedCategorical:
 
     @property
     def constraint_kind(self) -> str | None:
-        """Shape token declared on the inner basis (``"increasing"``, ...)."""
+        """Shape token declared on the inner basis (``"increasing"``, ...).
+
+        The constraint binds on the WHOLE LEVEL AXIS, not only on the ``L``
+        fitted level values -- a stated contract, and deliberately conservative.
+        Every published method for a monotone ordinal effect constrains the
+        level effects directly (Rufibach, *Comput. Statist. Data Anal.*
+        54(6):1442-1456, 2010, Sec. 5; Barlow, Bartholomew, Bremner & Brunk,
+        1972); none constrains a curve between category positions, and the
+        interval version is strictly stronger, since coefficient sign
+        conditions are "sufficient but not necessary" for a monotone effect
+        (Hofner, Kneib & Hothorn, *Statist. Comput.* 26:1-14, 2016, Sec. 3.3)
+        and no proper linear-inequality basis exists for monotone CUBICS at all
+        (Meyer, *Ann. Appl. Statist.* 2(3):1013-1033, 2008, Sec. 2). See
+        ``docs/guide/monotone.md`` for the measured cost.
+        """
         inner = self._basis_spline
         return getattr(inner, "constraint_kind", getattr(inner, "monotone", None))
 
@@ -1569,18 +1583,24 @@ def resolve_interaction_parent(spec: Any, x: NDArray) -> tuple[Any, NDArray]:
             "parametric block. Use basis=Spline(...) for an interactable ordinal "
             "parent, or a Categorical feature for level-by-level structure."
         )
-    x = np.asarray(x).ravel()
-    if spec._grouping is not None:
-        x = _grouping_labels(x)
-        valid = spec._known_levels | set(spec._grouping.grouped_levels)
-        _validate_categorical_levels(x, valid)
-        x = np.array([spec._grouping.original_to_group.get(v, v) for v in x], dtype=object)
-    else:
-        _validate_categorical_levels(x, spec._known_levels)
+    # `_resolved_labels`, not a fourth copy of it. This preamble was written out
+    # again here with the leading `_canonical` MISSING, so the interaction path
+    # matched levels by raw equality while `transform`/`score`/`shape_axis`
+    # matched them in the declaration's namespace: a band declared `"3"` against
+    # an int64 column denoted level `"3"` on three paths and nothing at all on
+    # the fourth, and the same model that fitted as a main effect refused as an
+    # interaction parent, naming the levels it rejected beside the
+    # identical-looking levels it wanted.
+    #
+    # Safe to canonicalize HERE because the one caller that must NOT remap --
+    # `FactorSmooth`, whose second parent is a grouping column read as labels --
+    # returns from `resolve_interaction_parent_of` before reaching this function
+    # at all.
+    #
     # _basis_spline rather than _spline: a pre-0.24 step-mode pickle has no
     # inner spline, and the property refuses it loudly instead of handing the
     # caller ``None`` as a parent spec.
-    return spec._basis_spline, spec._map_to_numeric(x)
+    return spec._basis_spline, spec._map_to_numeric(spec._resolved_labels(x))
 
 
 def resolve_interaction_parent_of(ispec: Any, spec: Any, x: NDArray) -> tuple[Any, NDArray]:

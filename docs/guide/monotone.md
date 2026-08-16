@@ -178,6 +178,86 @@ convex, or concave repair. Do not treat it as the preferred modeling path when
 a solver-backed
 fit is available.
 
+### Inference after a repair is withheld, not reported
+
+A repair replaces the published coefficients with a **projection onto the
+shape cone**. That projection is a constrained estimator, and its reference
+distribution is not the unconstrained fit's, so `summary()` withholds the
+repaired term's chi-square test, its p-value, its `ref_df` and its curve SE
+band and prints `repaired (inference withheld)` in their place. The point
+estimate, `edf` and the fitted level or curve values are still reported.
+
+The reason is that the effective dimension of a shape-restricted fit depends
+on how many cone edges are active, which is a random variable, not a quantity
+readable off the penalty (Meyer and Woodroofe, "On the degrees of freedom in
+shape-restricted regression", *Annals of Statistics* 28(4):1083–1104, 2000),
+and the null distribution of the corresponding test is a mixture rather than a
+fixed-df chi-square (Meyer, "Inference using shape-restricted regression
+splines", *Annals of Applied Statistics* 2(3):1013–1033, 2008, §3). A repair
+that binds is by definition on the boundary of the constrained parameter
+space, which is exactly where the constrained and unconstrained estimators
+stop agreeing. The point estimate itself needs no such caveat: projecting onto
+the cone is a weak improvement in every `L_p` norm regardless of how the
+original estimate was produced (Chernozhukov, Fernández-Val and Galichon,
+"Improving point and interval estimators of monotone functions by
+rearrangement", *Biometrika* 96(3):559–575, 2009, Proposition 1).
+
+If you need a test or an interval for a shape-constrained term, fit the
+constraint — `Constraint.fit.*` — rather than repairing after the fact.
+
+### Constraints on an `OrderedCategorical` bind on the whole level axis
+
+An `OrderedCategorical` maps its `L` levels to `L` positions and fits a spline
+through them. Nothing is ever predicted between those positions, but **both
+shape engines constrain the continuous curve over the whole interval**, not
+only the `L` fitted level values. This is deliberately conservative and is a
+stated contract, not an accident — but it is stronger than what the ordinal
+literature prescribes, and the difference is measurable: against a level-only
+projection of the same fitted values, the interval constraint costs roughly
+1–8% of weighted SSE at `L` between 6 and 12, in the direction theory
+predicts.
+
+The published methods for a monotone effect of an ordinal predictor constrain
+the `L` level effects directly, and none constrains a curve between category
+positions:
+
+- Rufibach, "An active set algorithm to estimate parameters in generalized
+  linear models with ordered predictors", *Computational Statistics and Data
+  Analysis* 54(6):1442–1456, 2010 — inequalities on the level dummies; §5,
+  Lemma 5.1 reduces the Gaussian one-factor case exactly to weighted isotonic
+  regression on the level means, solved by PAVA.
+- Barlow, Bartholomew, Bremner and Brunk, *Statistical Inference under Order
+  Restrictions*, Wiley, 1972; Robertson, Wright and Dykstra, *Order Restricted
+  Statistical Inference*, Wiley, 1988 — the isotonic-cone projection and PAVA.
+- Bürkner and Charpentier, "Modelling monotonic effects of ordinal predictors
+  in Bayesian regression models", *British Journal of Mathematical and
+  Statistical Psychology* 73(3):420–451, 2020 — a simplex over the `L`
+  categories, monotone at the levels by construction.
+- Gertheiss, Scheipl, Lauer and Ehrhardt, "Statistical inference for ordinal
+  predictors in generalized additive models with application to Bronchopulmonary
+  Dysplasia", *BMC Research Notes* 15:112, 2022 — a level-dummy basis with a
+  difference penalty, which cannot express an interval constraint at all.
+- Helwig, "Regression with ordered predictors via ordinal smoothing splines",
+  *Frontiers in Applied Mathematics and Statistics* 3:15, 2017 — the ordinal
+  reproducing kernel is defined only on the `L` category values.
+
+The reason the interval version is strictly stronger is standard: positive
+differences of adjacent spline coefficients are "sufficient but not necessary
+for monotonically increasing effects" (Hofner, Kneib and Hothorn, "A unified
+framework of constrained regression", *Statistics and Computing* 26:1–14, 2016,
+§3.3), and for cubic bases the gap is unavoidable — "a linear combination of
+cubic I-splines might be nondecreasing while one or more of the coefficients is
+negative", and the necessary and sufficient conditions for a cubic to be
+monotone on an interval "can not be written as a set of linear inequality
+constraints" (Meyer 2008, §2). Meyer's own prescription, §1, is to constrain at
+the design points and interpolate monotonically afterwards only if a curve is
+actually wanted. For an ordered factor no curve between levels is ever wanted.
+
+So the current behaviour is safe — every level-only-feasible shape our engine
+accepts is also level-wise feasible — but it can refuse fits the literature
+would accept. A level-only projection is not offered as a separate engine
+today.
+
 ## Practical Advice
 
 - choose solver-backed monotone / curvature constraints when the business rule
