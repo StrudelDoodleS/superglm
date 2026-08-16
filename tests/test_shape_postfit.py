@@ -1618,6 +1618,11 @@ def test_term_level_uncertainty_apis_qualify_a_repaired_term():
     with pytest.raises(RuntimeError, match="post-fit shape repair"):
         model.simultaneous_bands("x")
 
+    # `metrics().feature_se` is the same band by another door -- a per-feature
+    # accessor, so it can refuse exactly rather than be caveated in prose.
+    with pytest.raises(RuntimeError, match="post-fit shape repair"):
+        model.metrics(df, y).feature_se("x")
+
     # An unrepaired term in the same model is untouched.
     assert model.term_inference("x", with_se=False).se_log_relativity is None
 
