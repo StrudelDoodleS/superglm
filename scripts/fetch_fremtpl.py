@@ -248,36 +248,63 @@ def _diagnose_pin_miss(art: Artifact, raw: Path, found: str) -> FetchError:
 
     Two discriminators, because neither alone is complete:
 
-    * the pinned byte length -- decides every truncation, including one a proxy
-      makes at the same offset every time, which a repeat download would not;
     * a second, independent download -- decides same-length corruption, which a
-      length check cannot see.  Two downloads agreeing with each other and not
-      with the pin is upstream; two downloads disagreeing is transport.
+      length check cannot see.  Two bodies that disagree with each other cannot
+      both be upstream, so that is transport, whatever the length says;
+    * the pinned byte length -- separates a re-encode this script may advise
+      re-pinning against from one it may not.  A proxy truncating at the same
+      offset every time survives a repeat download, so agreement alone does not
+      make bytes upstream.
+
+    The second download runs FIRST, and the length only LABELS the answer.  The
+    other way round -- which this did -- the length decided, and a real
+    re-encode almost always changes the length, so the realistic re-encode
+    landed in a branch asserting as fact that it was not one, never took the
+    second download that could have told the difference, and repeated that on
+    every rerun.  Measured on the unfixed code, a re-encoded body against the
+    real freq pin: ONE download taken, and "A short or overlong body is a
+    DAMAGED TRANSFER ... Do not re-pin against these bytes."  The documented
+    recovery was reachable only by a re-encode that preserved the byte length
+    exactly, and the workflow routes that wording to "re-run this job".  The
+    suite shared the blind spot by construction: its only re-encode case set
+    the PIN's length to the re-encoded length.
+
+    So three outcomes, not two, and the third is named rather than guessed at:
+    two agreeing downloads at an unpinned length are genuinely ambiguous
+    between a deterministic truncation and a re-encode, and nothing available
+    here separates them.  It says so, and sends the operator to the artifact's
+    published length instead of to a re-pin.
     """
     size = raw.stat().st_size
     raw.unlink(missing_ok=True)
-    if size != art.size:
-        return FetchError(
-            f"{art.name}: got {size} bytes, expected {art.size} ({found[:12]} != "
-            f"{art.sha256[:12]}). A short or overlong body is a DAMAGED TRANSFER, not a "
-            f"re-encoded upstream -- re-run the fetch. Do not re-pin against these bytes."
-        )
     second = raw.parent / f"{raw.name}.recheck"
     try:
         _download(art, second)
         again = _sha256(second)
+        again_size = second.stat().st_size
     finally:
         second.unlink(missing_ok=True)
     if again != found:
         return FetchError(
-            f"{art.name}: two downloads of the pinned length disagreed ({found[:12]} then "
-            f"{again[:12]}), so the body is being corrupted in transit -- re-run the fetch. "
-            f"Do not re-pin against these bytes."
+            f"{art.name}: two downloads disagreed ({found[:12]} then {again[:12]}, at "
+            f"{size} then {again_size} bytes against the pinned {art.size}). Bodies that "
+            f"disagree with each other cannot both be upstream: this is a DAMAGED TRANSFER, "
+            f"corrupted in transit -- re-run the fetch. Do not re-pin against these bytes."
+        )
+    if size == art.size:
+        return FetchError(
+            f"{art.name}: sha256 {found} does not match the pinned {art.sha256}, and two "
+            f"independent downloads agree on it at the pinned length. The upstream artifact "
+            f"changed; re-pin deliberately after re-measuring the suites' anchors against it."
         )
     return FetchError(
-        f"{art.name}: sha256 {found} does not match the pinned {art.sha256}, and two "
-        f"independent downloads agree on it at the pinned length. The upstream artifact "
-        f"changed; re-pin deliberately after re-measuring the suites' anchors against it."
+        f"{art.name}: sha256 {found[:12]} does not match the pinned {art.sha256[:12]}, and "
+        f"both downloads agree on it at {size} bytes rather than the pinned {art.size}. "
+        f"That is AMBIGUOUS and is not routed either way: a proxy truncating at the same "
+        f"offset every time is indistinguishable from a re-encoded upstream from this end. "
+        f"Check the artifact's published byte length at {art.url} before touching anything "
+        f"-- only if upstream really is {size} bytes may you re-measure the suites' anchors "
+        f"and re-pin."
     )
 
 
