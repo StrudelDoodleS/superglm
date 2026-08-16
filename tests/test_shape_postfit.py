@@ -1657,3 +1657,38 @@ def test_relativities_drops_the_band_of_the_repaired_feature_only():
     # The curve survives in both.
     assert "log_relativity" in after["a"].columns
     assert np.all(np.isfinite(after["a"]["log_relativity"].to_numpy(dtype=float)))
+
+
+def test_the_repaired_frame_is_found_under_a_non_string_feature_label():
+    """`_shape_repaired_features` stringifies so one spelling answers for every
+    surface; `relativities()` keys its output by the ORIGINAL feature label,
+    which need not be a string.
+
+    Intersecting the two key sets is therefore empty for a feature named `0`,
+    and the guard goes silently inert -- the same failure mode as every defect
+    this PR fixes, reintroduced one layer up. Asserted on a column label that
+    is an int, since that is the reachable non-string case.
+    """
+    rng = np.random.default_rng(5)
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    df = pd.DataFrame({0: x})
+    y = np.where(x < 0.5, x, 1.2 - 1.4 * x) + 0.05 * rng.normal(size=n)
+
+    model = SuperGLM(
+        family="gaussian",
+        features={0: PSpline(n_knots=10, constraint=Constraint.postfit.increasing)},
+    ).fit(df, y)
+    assert "se_log_relativity" in model.relativities(with_se=True)[0].columns
+
+    model.apply_shape_postfit(df)
+    assert set(model._shape_repairs) == {0}
+
+    with pytest.warns(UserWarning, match="post-fit shape projection"):
+        after = model.relativities(with_se=True)
+    assert "se_log_relativity" not in after[0].columns
+    # The sibling surfaces resolve the same label too.
+    with pytest.warns(UserWarning, match="post-fit shape projection"):
+        assert model.term_inference(0, with_se=True).se_log_relativity is None
+    (row,) = [r for r in model.summary()._coef_rows if r.group == "0" and r.is_spline]
+    assert row.wald_p is None
