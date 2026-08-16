@@ -348,15 +348,102 @@ class SplineCatPair:
     # THE ROW-SPACE FACTORS, NOT THE MOMENTS.  ``R[q]' R[q] == D_q`` exactly
     # in the sense that both are Grams of the same centered weighted rows, but
     # ``R`` is that geometry's FACTOR: it carries kappa where ``D_q`` carries
-    # kappa^2.  The ladder's edf is computed from these and from
-    # ``overlap_rows`` alone, never from ``V``/``c``/``m``; see the module
-    # docstring's "WHAT THE MOMENTS COST".
+    # kappa^2.  The ladder's edf AND its statistic are computed from these and
+    # from ``overlap_rows``/``score_rows``/``base_score`` alone, never from
+    # ``V``/``c``/``m``; see the module docstring's "WHAT THE MOMENTS COST".
     R: NDArray  # (L, k_a, k_a)     centered row factor of each emitted level
     overlap_rows: NDArray  # (., 1 + k_a)  compacted rows of the unemitted levels
+    # THE SCORE, RESIDUALIZED ON THE CATEGORICAL MAIN THE SAME WAY ``R`` IS.
+    # ``score_rows[q]`` is ``Zc_q' zw_q`` -- level q's centered design rows
+    # against its own score -- and ``base_score`` is ``[1' s ; B' s]`` over the
+    # levels the menu does not emit, which is the score against the SAME
+    # ``overlap_rows`` those levels contribute.  Together they are everything
+    # ``U_eff`` needs from the design, so the profiled score no longer goes
+    # through ``M^+``.
+    score_rows: NDArray  # (L, k_a)      Zc_q' zw_q per emitted level
+    base_score: NDArray  # (1 + k_a,)    unemitted levels' overlap score
 
     @property
     def dims(self) -> tuple[int, int]:
         return self.U.shape  # (L, k_a)
+
+
+def _centered_level_means(shifted: NDArray, W: NDArray) -> NDArray:
+    """Weighted mean of the shifted basis rows inside each level.
+
+    Shared by :func:`_centered_level_factors` and :func:`_centered_level_scores`
+    rather than written twice: the curvature factor and the score are the same
+    residualization on the categorical main applied to two different right-hand
+    sides, and if the two centerings ever differed the profiled score would be
+    residualized on one design and the profiled curvature on another.  A
+    zero-mass level keeps a mean of exactly zero, which sends its whole
+    contribution to zero on both sides.
+    """
+    n_levels = W.shape[1]
+    mass = W.sum(axis=0)
+    means = np.zeros((n_levels, shifted.shape[1]), dtype=np.float64)
+    np.divide(W.T @ shifted, mass[:, None], out=means, where=mass[:, None] > 0.0)
+    return means
+
+
+def _centered_level_scores(
+    B: NDArray, W_cell: NDArray, S_cell: NDArray, level_rows: NDArray
+) -> NDArray:
+    """``Zc_q' zw_q`` per emitted level, from the design and not from ``M^+``.
+
+    The statistic profiles the score on the overlap span exactly as the
+    curvature is profiled on it, and Frisch-Waugh-Lovell splits that in the
+    same two stages: residualize on the categorical main first -- which is
+    level-local, so it is a within-level centering -- then on what is left of
+    ``[intercept | spline main]``.  This is the first stage, and it is the
+    score's counterpart of :func:`_centered_level_factors`.
+
+    Written out, level ``q``'s contribution is
+
+        Zc_q' zw_q = ((B - mean_q)' sqrt(W_q)) (S_q / sqrt(W_q))
+                   = (B - mean_q)' S_q,
+
+    so the weight cancels ALGEBRAICALLY and is never divided out: a level whose
+    weight is 1e-12 of the pair's does not have its score divided by 1e-6.  The
+    same shift by ``B[0]`` that :func:`_centered_level_factors` uses is applied
+    here, and it cancels for the same reason -- ``B - mean^B_q`` is invariant to
+    a common offset -- so the two sides are centered by one arithmetic.
+    """
+    B = np.asarray(B, dtype=np.float64)
+    level_rows = np.asarray(level_rows, dtype=np.intp)
+    k = B.shape[1]
+    if level_rows.size == 0 or k == 0 or B.shape[0] == 0:
+        return np.zeros((level_rows.size, k), dtype=np.float64)
+    shifted = B - B[0]
+    Wq = np.asarray(W_cell, dtype=np.float64)[:, level_rows]
+    Sq = np.asarray(S_cell, dtype=np.float64)[:, level_rows]
+    means = _centered_level_means(shifted, Wq)
+    return (shifted.T @ Sq).T - means * Sq.sum(axis=0)[:, None]
+
+
+def _unemitted_overlap_score(B: NDArray, S_cell: NDArray, level_rows: NDArray) -> NDArray:
+    """``[1' s ; B' s]`` over the levels the contrast menu does not emit.
+
+    The counterpart of :func:`_unemitted_overlap_rows` on the right-hand side:
+    those levels carry no indicator of their own, so their overlap rows are
+    ``[sqrt(w) | sqrt(w) B]`` untouched and the score against them is
+    ``[1' s ; B' s]`` with the weight cancelling as it does above.  Only the
+    SUM over those levels is ever needed, which is one ``(1 + k_a)`` vector
+    however many of them there are.
+    """
+    B = np.asarray(B, dtype=np.float64)
+    S_cell = np.asarray(S_cell, dtype=np.float64)
+    k_a = B.shape[1]
+    out = np.zeros(1 + k_a, dtype=np.float64)
+    unemitted = np.ones(S_cell.shape[1], dtype=bool)
+    unemitted[np.asarray(level_rows, dtype=np.intp)] = False
+    columns = np.flatnonzero(unemitted)
+    if columns.size == 0 or S_cell.shape[0] == 0:
+        return out
+    rows = S_cell[:, columns].sum(axis=1)
+    out[0] = float(rows.sum())
+    out[1:] = B.T @ rows
+    return out
 
 
 def _centered_level_factors(B: NDArray, W: NDArray) -> NDArray:
@@ -384,9 +471,7 @@ def _centered_level_factors(B: NDArray, W: NDArray) -> NDArray:
         return np.zeros((n_levels, k, k), dtype=np.float64)
 
     shifted = B - B[0]
-    mass = W.sum(axis=0)
-    means = np.zeros((n_levels, k), dtype=np.float64)
-    np.divide(W.T @ shifted, mass[:, None], out=means, where=mass[:, None] > 0.0)
+    means = _centered_level_means(shifted, W)
     centered = shifted[:, None, :] - means[None, :, :]
     centered *= np.sqrt(W)[:, :, None]
     raw = np.linalg.qr(np.moveaxis(centered, 1, 0), mode="r")
@@ -765,6 +850,8 @@ def spline_cat_moments(
     R = np.zeros((level_rows.size, k_a, k_a), dtype=np.float64)
     profiled_trace = _profiled_curvature_trace(B_a, W_cell, level_rows, keep_factors=R)
     overlap_rows = _unemitted_overlap_rows(B_a, W_cell, level_rows)
+    score_rows = _centered_level_scores(B_a, W_cell, S_cell, level_rows)
+    base_score = _unemitted_overlap_score(B_a, S_cell, level_rows)
 
     # One GEMM for every level's k_a x k_a curvature: the outer products of
     # the spline menu are level-independent, so they are formed once and
@@ -799,6 +886,8 @@ def spline_cat_moments(
         profiled_trace=profiled_trace,
         R=R,
         overlap_rows=overlap_rows,
+        score_rows=score_rows,
+        base_score=base_score,
     )
 
 
@@ -989,14 +1078,25 @@ def _pair_arrow(p: SplineCatPair, lam: float, penalty: NDArray | None = None):
 def _profile(p: SplineCatPair) -> _PairGeometry:
     """The whole lambda-independent half of the work.
 
-    ``U_eff = U - C' M^-1 u_m``.  Column ``(p, q)`` of ``C`` is nonzero in
-    exactly three places — the intercept row, the spline-main rows, and level
-    q's own contrast row — so the contraction never touches a level other
-    than its own.  ``M`` depends on no lambda, so this is computed once and
-    every rung of the ladder reuses it.  That is the STATISTIC's half and it
-    still reads the moments.
+    **NEITHER HALF READS THE MOMENTS ANY MORE, AND THE SCORE WAS THE LAST ONE
+    THAT DID.**  ``U_eff = U - C' M^+ u_m`` is the profiled score, and written
+    that way it is a difference of two moment-space quantities taken through a
+    pseudo-inverse of a GRAM -- the identical construction the ``edf`` half was
+    moved off, applied to the right-hand side instead of to the curvature, and
+    carrying ``kappa(Abar)^2`` for the same reason.  It is instead the
+    Frisch-Waugh-Lovell residual of the score on the residualized overlap span,
 
-    The ``edf`` half reads none of them.  One orthonormal basis for the
+        U_eff = J' (I - P) zw = g - Psi' (Q' zw),
+
+    with ``g_q = Zc_q' zw_q`` the within-level centered score
+    (:func:`_centered_level_scores`), ``Q'zw`` the same score in the
+    orthonormal overlap coordinates this function already builds, and
+    ``Psi_q' = R_q' (R_q coupling)``.  Every piece is a product of factors; no
+    Gram is inverted and the weight never appears in a denominator.  ``M``
+    depends on no lambda, so this is computed once and every rung of the ladder
+    reuses it.
+
+    The ``edf`` half reads none of them either.  One orthonormal basis for the
     residualized overlap span is built by TSQR over the per-level row factors
     the trace pass already formed -- ``[0 | R_q]`` for an emitted level,
     ``p.overlap_rows`` for the rest -- and rank-revealed by an SVD of that
@@ -1012,10 +1112,7 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     Nothing here is ``L``-sized: the TSQR accumulates chunk by chunk into one
     ``(1 + k_a, 1 + k_a)`` factor.
     """
-    f = _overlap_arrow(p)
     L, k_a = p.dims
-    w_cat, w_border = f.solve(p.u_cat.reshape(L, 1), p.u_border)
-    U_eff = p.U - (p.c * (w_border[0] + w_cat.reshape(L))[:, None] + p.V @ w_border[1:])
 
     width = 1 + k_a
     combined_base = np.asarray(p.overlap_rows, dtype=np.float64).reshape(-1, width)
@@ -1037,14 +1134,30 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
         rank = 0
         basis = np.zeros((width, 0), dtype=np.float64)
 
+    # ``U_eff = g - Psi' (Q' zw)``, the score's Frisch-Waugh-Lovell residual on
+    # the same orthonormal overlap coordinates the curvature is residualized
+    # on.  ``Q' zw`` is one ``rank``-vector: the emitted levels reach the
+    # overlap span only through their spline columns, since their intercept
+    # column is what the within-level centering annihilates, so the whole
+    # right-hand side is ``base_score`` plus the emitted levels' centered
+    # scores in the spline slots.  ``Psi_q' theta`` is then two contractions
+    # against ``R_q`` and nothing L-sized is built.
+    coupling = np.ascontiguousarray(basis[1:])
+    overlap_score = np.array(p.base_score, dtype=np.float64)
+    if L:
+        overlap_score[1:] += p.score_rows.sum(axis=0)
+    direction = coupling @ (basis.T @ overlap_score)
+    U_eff = p.score_rows - np.einsum("lji,lj->li", p.R, p.R @ direction, optimize=True)
+
     root_penalty = _penalty_root(p.S_a)
     trace_S = float(np.trace(p.S_a))
     kept_S = float(np.sum(np.square(root_penalty)))
     clip = abs(trace_S - kept_S) / max(abs(trace_S), np.finfo(np.float64).tiny)
     # THE TWO HALVES SCORE ONE PENCIL AND THIS IS THE SECOND LINE, NOT THE
-    # FIRST.  ``_evaluate`` hands this same projection to ``_pair_arrow``, so
-    # the statistic and the edf are built from ``rootS' rootS`` together; what
-    # is left to check is that the PROJECTION ITSELF is roundoff, because the
+    # FIRST.  Both are now read off ONE block-angular QR whose penalty rows are
+    # ``sqrt(lambda) root_penalty``, so they are built from ``rootS' rootS``
+    # together by construction; what is left to check is that the PROJECTION
+    # ITSELF is roundoff, because the
     # DENSE path still assembles ``S_ti`` raw and the two routes have to stay
     # comparable.  A projection that removed something material would mean the
     # structured route was scoring a different model from the one the caller
@@ -1076,7 +1189,6 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # identity in disguise.  Its computed residual is the floor those bounds
     # actually hold to, so it is measured here rather than assumed, in one
     # chunked pass that touches nothing the trace pass has not already formed.
-    coupling = np.ascontiguousarray(basis[1:])
     base_gram = combined_base @ basis
     closure = base_gram.T @ base_gram
     if L:
@@ -1212,8 +1324,37 @@ def _absorption_floor(n_terms: int, rank: int, defect: float) -> float:
 
 def _filter_factor_sum(
     p: SplineCatPair, geometry: _PairGeometry, lam: float
-) -> tuple[float, float]:
-    """``tr(A(lambda)^+ V_eff)`` as a sum of squared norms, and its clip bound.
+) -> tuple[float, float, float]:
+    """``(T, edf, clip bound)`` at one lambda, both quantities from ONE QR.
+
+    ``T = U_eff' A(lambda)^+ U_eff`` and ``edf = tr(A(lambda)^+ V_eff)`` are
+    two readings of the same pseudo-inverse, so they are taken off the same
+    block-angular factorization rather than off two representations of the same
+    pencil.  Splitting them was the whole of issue #298: ``edf`` came off the
+    factors below and ``T`` off the moment-space arrow, which is a
+    pseudo-inverse of a GRAM, so a perturbation of ``V``/``c``/``m`` that left
+    ``edf`` bit-identical moved ``T`` by up to 1.5e-05 relative on the suite's
+    own thin-level pair.
+
+    **THE STATISTIC IS THE SAME SUM OF SQUARED NORMS.**  With
+    ``B = N^+ + N^+ Psi' H^+ Psi N^+`` -- the same generalized inverse the
+    trace below contracts against, and equal to ``A^+`` on ``range(A)`` --
+    and ``u_q`` level ``q``'s profiled score,
+
+        z_q = T_q^+' u_q,      v = sum_q Phi_q' K_q z_q,
+        T   = sum_q ||z_q||^2 + ||H^(+/2) v||^2,
+
+    both terms nonnegative and neither a difference.  ``U_eff`` lies in
+    ``range(V_eff) <= range(A)`` because it IS ``G' zw`` for the same
+    residualized ``G`` whose Gram is ``V_eff``, which is what makes the
+    generalized inverse exact here rather than merely close.  Every factor is
+    one the trace already forms: ``T_q`` and ``Y_q`` from the level's QR,
+    ``K_q = R_q T_q^+`` from its contraction, ``H^+`` from the border's
+    singular values.  The statistic costs two contractions per level on top of
+    the trace and no extra factorization at all -- where it used to cost a
+    whole second one, of a DIFFERENT matrix.
+
+    What follows is the trace's own derivation.
 
     **THIS IS THE SUM THE MODULE HEADLINE CLAIMS, AND NOW IT IS ONE.**  With
     ``E_q`` the selector for level ``q``'s block, ``M_q = [E_q, -Psi']`` and
@@ -1295,11 +1436,20 @@ def _filter_factor_sum(
     cross = np.empty((L, k_a, r), dtype=np.float64)
     border = np.asarray(geometry.base_gram, dtype=np.float64)
     local = np.zeros((min(chunk, max(L, 1)), height, width), dtype=np.float64)
+    # The statistic's two accumulators.  ``local_stat`` is ``sum_q u_q' N_q^+
+    # u_q`` and ``coupled_score`` is ``Psi N^+ U_eff``, the border's share
+    # BEFORE ``H^+`` is known -- it does not depend on the deflation, so it is
+    # taken here rather than in a third pass.  Nothing L-sized is retained:
+    # ``z_q`` is consumed inside the chunk that forms it.
+    local_stat = 0.0
+    stat_correction = 0.0
+    coupled_score = np.zeros(r, dtype=np.float64)
     for start, stop in blocks:
         rows = p.R[start:stop]
+        phi = rows @ coupling
         view = local[: stop - start]
         view[:, :k_a, :k_a] = rows
-        view[:, :k_a, k_a:] = rows @ coupling
+        view[:, :k_a, k_a:] = phi
         view[:, k_a:, :k_a] = root
         # Scale the leading column block to unit norm.  The QR's backward
         # error is relative to the WHOLE matrix, and ``X_q`` is bounded by 1
@@ -1311,11 +1461,38 @@ def _filter_factor_sum(
         scale = np.where(scale > 0.0, scale, 1.0)
         view[:, :, :k_a] /= scale[:, None, None]
         factored = np.linalg.qr(view, mode="r")
-        contracted[start:stop] = (rows @ _block_inverse_factors(factored[:, :k_a, :k_a])) / (
-            scale[:, None, None]
-        )
+        inverse = _block_inverse_factors(factored[:, :k_a, :k_a])
+        block_contracted = (rows @ inverse) / scale[:, None, None]
+        contracted[start:stop] = block_contracted
         cross[start:stop] = factored[:, :k_a, k_a:]
         border = _reduce_row_factors(border, factored[:, k_a:, k_a:])
+
+        # ``z_q = T_q^+' u_q``, so ``||z_q||^2 = u_q' N_q^+ u_q`` -- the
+        # level's own share of the statistic as a SQUARED NORM, never as
+        # ``u' N^+ u`` through an assembled inverse.  ``inverse`` is
+        # ``(T_q / scale)^+``, so undoing the column scaling divides once.
+        whitened = (
+            np.einsum("lij,li->lj", inverse, geometry.U_eff[start:stop], optimize=True)
+            / scale[:, None]
+        )
+        term = float(np.sum(np.square(whitened)))
+        # Neumaier-style compensated accumulation, as for the trace below: the
+        # chunk totals are nonnegative, so this only keeps the scalar
+        # independent of how the levels were chunked.
+        updated = local_stat + term
+        if abs(local_stat) >= abs(term):
+            stat_correction += (local_stat - updated) + term
+        else:
+            stat_correction += (term - updated) + local_stat
+        local_stat = updated
+        if r:
+            coupled_score += np.einsum(
+                "lkr,lk->r",
+                phi,
+                np.einsum("lij,lj->li", block_contracted, whitened, optimize=True),
+                optimize=True,
+            )
+    local_stat += stat_correction
 
     # --- H's spectrum, from its factor's singular values -------------------
     if r:
@@ -1337,6 +1514,16 @@ def _filter_factor_sum(
     else:
         resolved = extended = coupled = np.zeros((0, 0), dtype=np.float64)
         deflation = 1.0
+
+    # ``||H^(+/2) v||^2`` for ``v = Psi N^+ U_eff``, taken through ``H^+``'s
+    # own spectral factor so the border's share of the statistic is a squared
+    # norm too.  ``resolved`` is exactly ``H^+``: a direction the absorption
+    # floor deflates carries no score, which is the same convention the trace
+    # takes on the common null space.
+    statistic = local_stat
+    if r:
+        whitened_border = (right * np.where(keep, 1.0 / singular, 0.0)[:, None]) @ coupled_score
+        statistic += float(np.dot(whitened_border, whitened_border))
 
     # --- pass 2: one PSD factor per level, and the squared norms -----------
     total = 0.0
@@ -1390,40 +1577,28 @@ def _filter_factor_sum(
         0.0,
     )
     uncertified += float(np.sum(np.square(geometry.base_gram)) * float(excess))
-    return total + correction, uncertified
+    return statistic, total + correction, uncertified
 
 
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
-    """``(T, edf)`` at one lambda.
+    """``(T, edf)`` at one lambda, both off ONE factorization of the design.
 
-    ``T`` still reads the pair arrow, and therefore still reads the moments.
-    ``edf`` reads neither: :func:`_filter_factor_sum` works from the row-space
-    factors ``p.R`` and the compacted overlap rows, which is why the two are
-    two factorizations rather than one.  What that buys is stated in the
-    module docstring under "WHAT THE MOMENTS COST"; what it costs is one extra
-    factorization per evaluation, measured there too.  The one thing they DO
-    share is the penalty: both are built from ``rootS' rootS``, so the lambda
-    the ladder chooses and the statistic it publishes come from one pencil.
+    Neither reads ``V``, ``c``, ``m`` or ``border`` any more.  ``T`` used to,
+    through :func:`_pair_arrow`, and that asymmetry is issue #298: the ladder
+    published an ``edf`` decided by the row-space factors beside a statistic
+    decided by a pseudo-inverse of the pair's float64 moments, and
+    ``screen_interactions`` then ranked on ``z = (T/phi - edf)/sqrt(2 edf)``,
+    which mixes the two.  What forming those moments costs is stated in the
+    module docstring under "WHAT THE MOMENTS COST" and it does not stop at the
+    trace: the same three defensible ``M^+`` policies that move ``edf`` by a
+    degree of freedom move ``T`` for the identical reason.
+
+    Merging them also removes a whole factorization per evaluation rather than
+    adding one -- the arrow was a second, DIFFERENT matrix -- and with it the
+    two level-sized stacks (``Ginv`` and ``Y``) it held while the filter pass
+    was allocating its own.
     """
-    L, k_a = p.dims
-    f = _pair_arrow(p, lam, geometry.root_penalty.T @ geometry.root_penalty)
-    b = np.zeros((L, k_a + 1), dtype=np.float64)
-    b[:, :k_a] = geometry.U_eff
-    x, _ = f.solve(b, np.zeros(1 + k_a, dtype=np.float64))
-    T = float(np.sum(geometry.U_eff * x[:, :k_a]))
-
-    # THE TWO HALVES ARE INDEPENDENT, SO THEIR TEMPORARIES MUST NOT OVERLAP.
-    # ``f`` holds the arrow's ``Ginv`` and ``Y``, both level-sized, and ``b``
-    # and ``x`` are two more; the filter pass then allocates ``contracted``
-    # and ``cross``.  Nothing below reads any of the four, and the structured
-    # allocation gate is written for the stacks that have to COEXIST, so they
-    # are released here rather than at the end of the frame.  Measured peak of
-    # one evaluation at L = 2000, k_a = 13: 26.18 -> 19.46 MB, which is the
-    # 6.72 MB those four arrays hold (Ginv 2000x14x14, Y 2000x14x14, b and x
-    # 2000x14) to three digits.
-    del f, b, x
-
-    edf, uncertified = _filter_factor_sum(p, geometry, lam)
+    T, edf, uncertified = _filter_factor_sum(p, geometry, lam)
 
     # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
     # with both parts nonnegative, so the sum lies in ``[0, L * k_a]`` for
