@@ -59,9 +59,8 @@ class RatingTableBlock:
     # The constant ``centering=`` removed from this block's log relativities.
     # The payload's ``base_relativity`` carries the total back, so the
     # workbook's product still reproduces ``model.predict``.  Zero on every
-    # block a centering leaves alone -- the offset blocks, the binned
-    # continuous blocks, an ``OrderedCategorical``, a single-valued
-    # ``Numeric`` -- which is why the total is summed from the blocks rather
+    # block a centering leaves alone -- the offset blocks, an
+    # ``OrderedCategorical``, a single-valued ``Numeric`` -- which is why the total is summed from the blocks rather
     # than assumed to run over every exported term.
     centering_shift: float = 0.0
 
@@ -230,7 +229,11 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     blocks: the product of the base and every block is unchanged by centering,
     which is the exactness the whole payload rests on.
     """
-    factor = float(np.exp(-centering_shift))
+    # Same discipline as ``_base_relativity``: an extreme shift is a condition
+    # ``_require_usable_relativities_export`` is there to refuse, and it should
+    # arrive as that refusal rather than as a ``RuntimeWarning`` from here.
+    with np.errstate(over="ignore", under="ignore"):
+        factor = float(np.exp(-centering_shift))
     out = pd.DataFrame(
         {
             name: [
@@ -749,6 +752,15 @@ def _significant_digits(values: NDArray, digits: int) -> NDArray:
     scalable = np.isfinite(values) & (values != 0.0)
     if not np.any(scalable):
         return out
+    # Normal magnitudes only.  Below ``2.2e-308`` the magnitude is itself
+    # subnormal, so ``x / magnitude`` loses mantissa bits and the twelve-digit
+    # claim degrades with no signal; nearer the floor ``10.0 ** exponent``
+    # underflows to ``0.0`` and would turn the value into a ``nan``, which is a
+    # worse answer than the value itself.  Such a multiplier is refused
+    # downstream on its own terms.
+    scalable &= np.abs(values) >= np.finfo(np.float64).tiny
+    if not np.any(scalable):
+        return out
     magnitude = 10.0 ** np.floor(np.log10(np.abs(values[scalable])))
     mantissa = values[scalable] / magnitude
     keep = 10.0 ** (digits - 1)
@@ -1022,9 +1034,10 @@ def _total_centering_shift(blocks: list[RatingTableBlock]) -> float:
     Summed over the blocks, from the constant each one recorded, for two
     reasons.  The set of shifted terms is not the set of exported terms:
     ``OrderedCategorical`` is never recentered, a single-valued ``Numeric``
-    has nothing to center, the binned continuous blocks come from the
-    discretisation path and never see ``centering=`` at all, and the offset
-    blocks are not relativities of a fitted term.  And the constant removed
+    has nothing to center, and the offset blocks are not relativities of a
+    fitted term.  The binned continuous blocks DO carry a shift -- read from
+    the same term the exact blocks read theirs from, since the discretisation
+    path they are built on is never told the centering (issue #293).  And the constant removed
     from a grouped categorical is the mean over its GROUPED levels, computed
     before the term is expanded back to the original ones -- so even for the
     terms that are shifted, re-deriving the constant from the values on the
@@ -1398,16 +1411,25 @@ def build_rating_table_payload(
     ``centering`` is a presentation choice and does not change what the
     payload rates.  ``"native"`` reports each term under the model's own
     identifiability constraint.  ``"mean"`` shifts the terms that have a mean
-    to shift -- ``Categorical`` and ``Piecewise`` -- so their relativities have
-    geometric mean 1, and ``base_relativity`` absorbs the total so the product
-    is unchanged; before issue #253 it did not, and every reconstructed
-    prediction came out scaled by ``exp(-sum_t shift_t)``.
+    to shift -- ``Categorical``, ``Piecewise``, and the binned ``Spline`` and
+    ``Polynomial`` blocks -- so their relativities have geometric mean 1, and
+    ``base_relativity`` absorbs the total so the product is unchanged; before
+    issue #253 it did not, and every reconstructed prediction came out scaled
+    by ``exp(-sum_t shift_t)``.
 
-    That mode is a PARTIAL centering, and deliberately so.  An
+    A binned block takes the constant from the SAME term the exact blocks read
+    theirs from rather than re-deriving it from its own bins, which would be
+    the weighted mean of the bins -- a different number, leaving the workbook's
+    blocks without one origin.  It used to take no constant at all: the
+    discretisation path it is built on is never told the centering, so one
+    ``centering="mean"`` request produced a mean-centred categorical block
+    beside a native spline block, with nothing on the sheet saying which was
+    which (issue #293).
+
+    That mode is still a PARTIAL centering, and deliberately so.  An
     ``OrderedCategorical`` is already anchored on its base level and is not
     recentered; a ``Numeric`` reports one per-unit relativity with no mean to
-    take; and the binned ``Spline``/``Polynomial`` blocks come from the
-    discretisation path, which never sees ``centering`` at all.  Only the
+    take; and an offset block is not a fitted term's relativity.  Only the
     blocks that were shifted contribute to the transferred constant, which is
     why it is summed from the shift each block recorded rather than assumed to
     run over every exported term.
