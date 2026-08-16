@@ -1231,6 +1231,57 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         assert type(_GridSubclass()) not in listed
         assert SplineCategorical in listed
 
+    def test_a_grid_over_a_categorical_parent_is_declined_by_both_sides(self):
+        """A surface is only a rating table if a risk can be found on its axes.
+
+        ``interactions=`` accepts any object carrying ``parent_names`` and
+        ``name``, so a caller can hand over a spec whose ``reconstruct``
+        returns a numeric grid over a parent whose column holds labels. The
+        exporter used to ship that: an axis column of ``0.0, 0.5, 1.0`` beside
+        a data column of ``A, B, C``, which no reader can look a risk up in.
+        Then the sweep read the label column as float64 and took the whole
+        export down with ``could not convert string to float: 'B'``.
+
+        Both sides now decline it, with the same message -- the exporter
+        shipping what the sweep refuses is the fork this file exists to
+        prevent, and here neither should ship it.
+        """
+        from superglm.export.rating_tables import build_rating_table_payload
+        from superglm.features.interaction import SplineCategorical
+
+        class _GridOverLabels(SplineCategorical):
+            name = "age:region"
+
+            def reconstruct(self, beta, n_points=50):
+                axis = np.linspace(0.0, 1.0, 3)
+                surface = np.outer(axis, axis)
+                return {
+                    "x1": axis,
+                    "x2": axis,
+                    "relativity": np.exp(surface),
+                    "interaction": True,
+                }
+
+        rng = np.random.default_rng(3)
+        n = 200
+        df = pd.DataFrame(
+            {"age": rng.uniform(20.0, 60.0, n), "region": rng.choice(["A", "B", "C"], n)}
+        )
+        y = rng.poisson(1.0, n).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={"age": Spline(n_knots=5), "region": Categorical()},
+            interactions=[_GridOverLabels("age", "region")],
+        )
+        model.fit(df, y)
+
+        match = r"no position on a grid axis"
+        with pytest.raises(NotImplementedError, match=match):
+            build_rating_table_payload(model, df, y, impact_bins=())
+        with pytest.raises(NotImplementedError, match=match):
+            model.discretization_impact(df, y, n_bins=3)
+
     @pytest.mark.parametrize(
         ("factor", "log_value", "why"),
         [
