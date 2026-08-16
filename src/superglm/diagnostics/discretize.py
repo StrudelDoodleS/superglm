@@ -311,6 +311,47 @@ def _non_grid_builtin_interactions() -> tuple[type, ...]:
     )
 
 
+def _grid_log_surface(
+    name: str, axis1: NDArray, axis2: NDArray, grid: dict, relativity: NDArray
+) -> NDArray:
+    """The log surface, in the space that keeps the most range and still ships.
+
+    Two requirements pull against each other.  The sweep must measure the
+    surface the workbook PRINTS, which is ``relativity`` -- a custom
+    reconstruction can return two fields that disagree, and measuring the one
+    that does not ship reports error for a table nobody holds.  But
+    ``relativity`` is ``exp`` of the log surface for both built-ins, and a
+    finite log surface outside float64's exponential range comes back as ``0``
+    or ``inf`` while the fit's own predictor stays perfectly representable --
+    so validating the factor would refuse a diagnostic that has nothing wrong
+    with it.
+
+    Resolved by preferring ``log_relativity`` only where it is DEMONSTRABLY the
+    same surface: it must be finite, and ``exp`` of it must reproduce
+    ``relativity`` cell for cell.  A cell that underflowed to ``0`` or
+    overflowed to ``inf`` reproduces exactly, because ``exp`` does the same
+    thing to the same number -- so the only disagreement accepted is the one
+    the range explains.  A caller whose two fields genuinely differ, or who
+    supplies a zero where the log says otherwise, still falls through to the
+    printed factor and has to have supplied a factor, since nothing else
+    vouches for it.
+    """
+    if "log_relativity" in grid:
+        log_surface = orient_grid_surface(name, axis1, axis2, grid["log_relativity"])
+        if np.all(np.isfinite(log_surface)):
+            with np.errstate(over="ignore", under="ignore"):
+                round_trip = np.exp(log_surface)
+            if np.allclose(round_trip, relativity, rtol=1e-9, atol=0.0, equal_nan=True):
+                return log_surface
+    if not np.all(np.isfinite(relativity)) or np.any(relativity <= 0.0):
+        raise ValueError(
+            f"Interaction {name!r} reconstructed a relativity that is not a usable "
+            "factor: every cell must be finite and strictly positive, and its "
+            "``log_relativity`` (if any) must be finite and agree with it."
+        )
+    return np.log(relativity)
+
+
 def _grid_reconstruction(ispec, beta: NDArray, n_points: int) -> dict | None:
     """The spec's reconstruction if it is a sampled surface, else ``None``.
 
@@ -686,20 +727,7 @@ def discretization_impact(
         axis1 = np.asarray(grid["x1"], dtype=np.float64)
         axis2 = np.asarray(grid["x2"], dtype=np.float64)
         relativity = orient_grid_surface(name, axis1, axis2, grid["relativity"])
-        # Checked before the logarithm rather than after.  A caller-supplied
-        # reconstruction can hand back a zero, negative or non-finite factor,
-        # and ``np.log`` would turn it into ``-inf``/``nan`` that flows through
-        # ``stabilize_eta`` into every metric -- so the result would report
-        # clipped or non-finite predictions beside a table that no longer
-        # contains the factor it was given.  The rating-table builder rejects
-        # unusable relativities before it reaches here; a direct call has no
-        # such guard.
-        if not np.all(np.isfinite(relativity)) or np.any(relativity <= 0.0):
-            raise ValueError(
-                f"Interaction {name!r} reconstructed a relativity that is not a usable "
-                "factor: every cell must be finite and strictly positive."
-            )
-        surface = np.log(relativity)
+        surface = _grid_log_surface(name, axis1, axis2, grid, relativity)
         # Ascending, because the nearest-node search is a binary search and the
         # exporter applies no monotonicity gate to a supplied axis. Sorting the
         # surface with its axes leaves the set of cells -- and so every factor a
