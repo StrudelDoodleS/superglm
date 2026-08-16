@@ -10,6 +10,7 @@ refused for.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import NamedTuple
 
 import numpy as np
@@ -214,6 +215,25 @@ def _wood_stacked_edf(p, geometry, lam):
     from superglm.screening._structured import _penalty_root
 
     L, k_a = p.dims
+    G = _residualized_design(p, geometry)
+    root = _penalty_root(p.S_a)
+    stacked = np.concatenate((G, np.sqrt(lam) * scipy.linalg.block_diag(*([root] * L))), axis=0)
+    T = np.linalg.qr(stacked, mode="r")
+    u, sv, vt = np.linalg.svd(T)
+    keep = sv > max(T.shape) * np.finfo(np.float64).eps * sv[0]
+    inv = np.where(keep, 1.0 / np.where(keep, sv, 1.0), 0.0)
+    return float(np.sum(np.square(G @ ((vt.T * inv) @ u.T))))
+
+
+def _residualized_design(p, geometry):
+    """``G`` with ``G' G == V_eff``, assembled densely from the row factors.
+
+    The O(L^2) reference form of the same residualized design the kernel keeps
+    factored: ``blockdiag(R_q)`` with the overlap span's contribution written
+    out.  Test-only, and the two consumers below are the arbiters that need a
+    representation the kernel does not use.
+    """
+    L, k_a = p.dims
     carried = p.R @ geometry.coupling
     psi = np.concatenate(list(np.swapaxes(carried, -1, -2) @ p.R), axis=1)  # (r, L k_a)
     G = np.zeros((L * k_a + geometry.base_gram.shape[0], L * k_a))
@@ -222,13 +242,39 @@ def _wood_stacked_edf(p, geometry, lam):
         G[rows, :] = -carried[q] @ psi
         G[rows, rows] += p.R[q]
     G[L * k_a :, :] = -geometry.base_gram @ psi
-    root = _penalty_root(p.S_a)
+    return G
+
+
+def _wood_stacked_statistic(p, geometry, lam):
+    """``T = U_eff' A(lambda)^+ U_eff`` by the textbook O(L^3) stacked QR.
+
+    The statistic's counterpart of :func:`_wood_stacked_edf`, and an ARBITER
+    rather than a parity partner: ``A = [G ; sqrt(lam) rootS]' [.]`` is never
+    formed, so this takes no pseudo-inverse of a near-singular Gram and can
+    settle which of two routes is right where both are plausible.  With ``T``
+    the stack's ``R`` factor, ``A^+ = T^+ T^+'`` and
+
+        U_eff' A^+ U_eff = || T^+' U_eff ||^2,
+
+    one squared norm through the stack's own singular values at the LAPACK cut.
+
+    Checked against 60-digit mpmath on ``moderate_pair``'s high-edge rung,
+    where the pair's condition number is ~1e11 and the three routes separate:
+    this form and the kernel agree with the oracle to 7.4e-12 and 2.4e-15
+    relative, the moment-space arrow the kernel used before issue #298 sits at
+    5.1e-06, and the DENSE ladder at 1.2e-05.
+    """
+    L, k_a = p.dims
+    G = _residualized_design(p, geometry)
+    root = geometry.root_penalty
     stacked = np.concatenate((G, np.sqrt(lam) * scipy.linalg.block_diag(*([root] * L))), axis=0)
-    T = np.linalg.qr(stacked, mode="r")
-    u, sv, vt = np.linalg.svd(T)
-    keep = sv > max(T.shape) * np.finfo(np.float64).eps * sv[0]
+    R = np.linalg.qr(stacked, mode="r")
+    u, sv, vt = np.linalg.svd(R)
+    keep = sv > max(R.shape) * np.finfo(np.float64).eps * sv[0]
     inv = np.where(keep, 1.0 / np.where(keep, sv, 1.0), 0.0)
-    return float(np.sum(np.square(G @ ((vt.T * inv) @ u.T))))
+    # ``R^+ = V inv U'``, so ``R^+' = U inv V'`` -- formed as the operator, not
+    # as an inverse of the Gram.
+    return float(np.sum(np.square((u * inv) @ vt @ geometry.U_eff.reshape(-1))))
 
 
 def _factored_v_eff(p, geometry):
@@ -446,9 +492,33 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     )
     assert struct is not None and len(struct) == len(BUDGETS)
     for d, s in zip(dense, struct, strict=True):
-        assert s.statistic == pytest.approx(d.statistic, rel=1e-5)
         assert s.edf0 == pytest.approx(d.edf0, rel=1e-5)
         assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12)
+
+    # THE STATISTIC IS HELD AGAINST THE ARBITER, NOT AGAINST THE OTHER PATH,
+    # AND THAT IS TIGHTER RATHER THAN LOOSER.  Both routes used to be moment
+    # space, so `rel=1e-5` between them was two correlated errors agreeing;
+    # since issue #298 the structured half reads the design and the dense half
+    # does not, and at this rung -- the ladder's HIGH edge, where the pencil's
+    # condition number is ~1e11 -- they part by 1.25e-05.  Which is right is
+    # not a matter of opinion: against 60-digit mpmath on the pair's exact
+    # design the structured value is 7.4e-12 relative and the dense value
+    # 1.2e-05, so the assertion that used to bind was pinning the dense path's
+    # own error.  The float64 stacked QR below reproduces that oracle to
+    # 2.4e-15 and is what the pair is held to here, at 1e-9 -- FOUR ORDERS
+    # TIGHTER than the parity bound it replaces.
+    #
+    # The dense arm keeps a bound too, so nothing is left unasserted: its own
+    # accuracy at this rung is `eps * kappa` ~ 2.2e-05, which is the number
+    # this file's sibling test already names as the edges' resolution limit.
+    # Issue #298 scope item 3 is the dense path's half of this and is not
+    # touched here.
+    pair = spline_cat_moments(*_structured_inputs(moderate_pair))
+    geometry = _profile(pair)
+    for d, s in zip(dense, struct, strict=True):
+        arbiter = _wood_stacked_statistic(pair, geometry, s.lambda0)
+        assert s.statistic == pytest.approx(arbiter, rel=1e-9), (s.statistic, arbiter)
+        assert abs(d.statistic - arbiter) / abs(arbiter) < 2.2e-5, (d.statistic, arbiter)
 
 
 def test_issue_204_reachable_half_df_uses_the_profiled_trace():
@@ -590,15 +660,15 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     assert 0.0 < band < 1e-13, band
 
     for injected in (1e-300, -1e-300, 0.5 * band, -0.5 * band):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (_v, 0.0))
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (0.0, _v, 0.0))
         assert st._evaluate(pair, geometry, 1.0)[1] == 0.0, injected
 
     for injected, expected in ((1.0, 1.0), (0.25, 0.25)):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (_v, 0.0))
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (0.0, _v, 0.0))
         assert st._evaluate(pair, geometry, 1.0)[1] == pytest.approx(expected, abs=1e-12)
 
     for outside in (1.25, -1.25):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=outside, **k: (_v, 0.0))
+        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=outside, **k: (0.0, _v, 0.0))
         with pytest.raises(st._UnstableStructuredEDFError, match="not a filter-factor sum"):
             st._evaluate(pair, geometry, 1.0)
 
@@ -606,7 +676,7 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     # the lower end as reachable as a pair can make it.
     monkeypatch.undo()
     for lam in np.geomspace(1e-30, 1e30, 61):
-        assert st._filter_factor_sum(pair, geometry, float(lam))[0] >= 0.0
+        assert st._filter_factor_sum(pair, geometry, float(lam))[1] >= 0.0
 
 
 def test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff(monkeypatch):
@@ -670,10 +740,10 @@ def test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff(monkeypatch):
 def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     """One projection, both halves -- and the gap it closes is 5.9e-02.
 
-    The ladder chooses lambda from ``edf``, evaluated against
-    ``rootS' rootS``, and then publishes a statistic from ``_pair_arrow``.
-    If that added ``p.S_a`` raw, the two would be different matrices wherever
-    the projection did anything, and the largest ``lambda`` in the bracket is
+    The ladder chooses lambda from ``edf``, evaluated against ``rootS' rootS``,
+    and publishes a statistic beside it.  If the statistic scored ``p.S_a``
+    raw the two would be different matrices wherever the projection did
+    anything, and the largest ``lambda`` in the bracket is
     ``lambda_hi = 1e10 * scale`` -- a rung the ladder publishes, not a corner.
 
     Measured on the nullity-two pair, where the penalty's smallest eigenvalue
@@ -682,10 +752,12 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     from a perturbation twelve orders below the penalty's scale.  Which of the
     two is published is therefore not a detail.
 
-    What is asserted is the identity, not the gap: ``_evaluate``'s statistic
-    must equal the one the projected pencil gives and must NOT equal the raw
-    one.  RED against passing ``p.S_a`` -- the equality and the inequality swap
-    places.
+    Since issue #298 there is no second pencil to keep in step with: both
+    halves read ``geometry.root_penalty`` off ONE block-angular QR, so this
+    asserts the property through an INDEPENDENT stacked-QR reference of the
+    same two pencils -- the published statistic must match the projected one
+    and must not match the raw one.  RED against a kernel whose statistic
+    reads ``p.S_a``: the equality and the inequality swap places.
     """
     import superglm.screening._structured as st
 
@@ -698,23 +770,93 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     projected = geometry.root_penalty.T @ geometry.root_penalty
     assert not np.allclose(projected, pair.S_a, rtol=0.0, atol=0.0)
 
-    def statistic(penalty):
-        f = st._pair_arrow(pair, lam, penalty)
-        L, k_a = pair.dims
-        b = np.zeros((L, k_a + 1))
-        b[:, :k_a] = geometry.U_eff
-        x, _ = f.solve(b, np.zeros(1 + k_a))
-        return float(np.sum(geometry.U_eff * x[:, :k_a]))
+    # The rival pencil is the policy :func:`_penalty_root` documents and
+    # refuses: DROP the below-resolution eigenvalue instead of taking it at its
+    # magnitude.  It is PSD, it is defensible, and at ``lambda_hi`` it is a
+    # materially different matrix -- which is what makes "the statistic scores
+    # the pencil the edf chose lambda from" an assertion rather than a
+    # tautology.
+    w, Q = np.linalg.eigh(0.5 * (pair.S_a + pair.S_a.T))
+    dropped = (Q[:, w > 0.0] * np.sqrt(w[w > 0.0])).T
+    rival = dataclasses.replace(geometry, root_penalty=dropped)
 
+    on_projected = _wood_stacked_statistic(pair, geometry, lam)
+    on_rival = _wood_stacked_statistic(pair, rival, lam)
     published = st._evaluate(pair, geometry, lam)[0]
-    on_projected, on_raw = statistic(projected), statistic(pair.S_a)
 
     # The two pencils are far enough apart here that the identity below is a
     # real choice: a relative gap of 1e-2 is four orders above the 1e-6 the
     # ladder's own tolerance works to.
-    assert abs(on_raw - on_projected) / abs(on_raw) > 1e-2, (on_raw, on_projected)
-    assert published == on_projected, (published, on_projected)
-    assert published != on_raw, (published, on_raw)
+    assert abs(on_rival - on_projected) / abs(on_rival) > 1e-2, (on_rival, on_projected)
+    # The reference is a DIFFERENT factorization of the same pencil, so it
+    # agrees to that pencil's own conditioning rather than to the bit -- and
+    # the two pencils are 1e-2 apart, six orders above it.
+    assert published == pytest.approx(on_projected, rel=1e-8), (published, on_projected)
+    assert abs(published - on_rival) / abs(on_rival) > 1e-2, (published, on_rival)
+
+
+@pytest.mark.parametrize(
+    ("name", "build"),
+    (
+        ("thin-level", lambda: _structured_inputs(_thin_level_pair(low_weight=1.0))),
+        ("near-absorbed", lambda: _near_absorbed_cells(1e-12)),
+    ),
+)
+def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(name, build):
+    """Issue #298: ``edf`` moved onto the factors and the statistic did not.
+
+    Two assertions, and they are the same statement from either end.
+
+    **A MOMENT-ONLY PERTURBATION MOVES NEITHER.**  ``V``, ``c`` and ``m`` are
+    the pair's float64 Grams.  ``edf`` has been blind to them since #285 --
+    perturb them by 1e-8 relative and it does not move by one ulp -- while the
+    statistic went through ``_pair_arrow`` and ``M^+``, both of which are
+    pseudo-inverses of those Grams.  Measured on the shipped tree at the same
+    three lambdas asserted here, ``edf`` moves 0.0 and the statistic moves up
+    to **1.5e-05 relative**.  The two numbers are divided into each other by
+    ``z = (T/phi - edf0)/sqrt(2 edf0)``, so one of them being a function of the
+    moments and the other not is a defect in the RANKING and not only in a
+    published column.
+
+    **AND THE DESIGN IS THE ONE THAT IS RIGHT.**  Against the stacked-QR
+    arbiter, which forms no Gram and inverts none, the moment route is up to
+    **8.0e-05** relative out on ``near-absorbed`` and **1.6e-06** at
+    ``thin-level``'s high edge.  This route is at round-off on both.  The bound
+    asserted is the arbiter's own: it and the kernel are two organizations of
+    one exact quantity, so what separates them is the pencil's conditioning,
+    and 1e-9 is four orders above the worst measured (4.7e-13) while still
+    three orders below the moment route's best miss.
+
+    RED against the shipped tree on both halves.
+    """
+    import superglm.screening._structured as st
+
+    p = spline_cat_moments(*build())
+    geometry = _profile(p)
+    rng = np.random.default_rng(0)
+    jittered = dataclasses.replace(
+        p,
+        V=p.V * (1.0 + 1e-8 * rng.standard_normal(p.V.shape)),
+        c=p.c * (1.0 + 1e-8 * rng.standard_normal(p.c.shape)),
+        m=p.m * (1.0 + 1e-8 * rng.standard_normal(p.m.shape)),
+    )
+    jittered_geometry = _profile(jittered)
+
+    scale = max(p.profiled_trace, 1e-300) / max(float(np.trace(p.S_a)) * p.dims[0], 1e-300)
+    for mult in (1e-10, 1e-2, 1e10):
+        lam = mult * scale
+        try:
+            statistic, edf = st._evaluate(p, geometry, lam)
+        except st._UnstableStructuredEDFError:
+            continue
+        moved_statistic, moved_edf = st._evaluate(jittered, jittered_geometry, lam)
+        # Bit equality, not a tolerance: a quantity that does not READ an array
+        # cannot round differently when that array moves.
+        assert moved_statistic == statistic, (lam, statistic, moved_statistic)
+        assert moved_edf == edf, (lam, edf, moved_edf)
+
+        arbiter = _wood_stacked_statistic(p, geometry, lam)
+        assert statistic == pytest.approx(arbiter, rel=1e-9), (lam, statistic, arbiter)
 
 
 def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch):
@@ -3325,24 +3467,28 @@ def test_the_pair_geometry_is_built_once_and_carries_no_lambda(build, budget, mu
 
     p = spline_cat_moments(*_structured_inputs(build()))
     profiles, factors = [], []
-    real_profile, real_arrow = st._profile, st._pair_arrow
+    real_profile, real_sum = st._profile, st._filter_factor_sum
 
     def spy_profile(pair):
         profiles.append(1)
         return real_profile(pair)
 
-    def spy_arrow(pair, lam, *args, **kwargs):
+    def spy_sum(pair, geometry, lam, *args, **kwargs):
         factors.append(float(lam))
-        return real_arrow(pair, lam, *args, **kwargs)
+        return real_sum(pair, geometry, lam, *args, **kwargs)
 
-    st._profile, st._pair_arrow = spy_profile, spy_arrow
+    # The per-lambda factorization is the BLOCK-ANGULAR QR, and since #298 it
+    # is the only one: the statistic used to be read off a second, moment-space
+    # arrow at every lambda and is now read off this one.  Counting it is
+    # counting what a rung costs.
+    st._profile, st._filter_factor_sum = spy_profile, spy_sum
     try:
         # The budget sits strictly inside this pair's bracket, so the rung
         # bisects rather than clamps and the ladder pays many factorizations
         # for its one profile.
         rungs = st.structured_ladder(p, budgets=(budget,))
     finally:
-        st._profile, st._pair_arrow = real_profile, real_arrow
+        st._profile, st._filter_factor_sum = real_profile, real_sum
 
     if must_attain:
         assert rungs is not None, "this pair's curve is well posed; the target must be reachable"
