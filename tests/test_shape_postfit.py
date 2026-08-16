@@ -1495,6 +1495,22 @@ def test_summary_withholds_term_inference_after_a_shape_repair(kind):
     assert "repaired (inference withheld)" in str(model.summary())
     assert "repaired (inference withheld)" in model.summary()._repr_html_()
 
+    # Coefficient-level uncertainty goes with it, or the same summary says
+    # "inference withheld" and then prints the withheld quantities immediately
+    # below: the level rows carry per-level SEs and intervals from the same
+    # unconstrained covariance, and `detail="full"` prints a per-coefficient
+    # SE, z, p and interval under the term line.
+    for row in model.summary(detail="full")._coef_rows:
+        if row.group != "x":
+            continue
+        assert row.se is None
+        assert row.z is None
+        assert row.p is None
+        assert row.ci_low is None
+        assert row.ci_high is None
+    full = model.summary(detail="full")
+    assert not [name for name in full._basis_detail if name.startswith("x")]
+
     # And on `metrics().summary()`, which built its rows without the repairs
     # dict at all and so printed a p-value the model itself had withheld.
     (metrics_row,) = [
@@ -1502,3 +1518,101 @@ def test_summary_withholds_term_inference_after_a_shape_repair(kind):
     ]
     assert metrics_row.monotone_repaired is True
     assert metrics_row.wald_p is None
+
+
+def test_an_already_feasible_term_beside_a_repaired_one_keeps_its_inference():
+    """The early exit is a statement about the WHOLE model: once any one term
+    binds, the loop runs the repairer for every pending term, and an
+    already-feasible one comes back with its coefficients copied through
+    unchanged.
+
+    Recording that as a repair used to cost a cosmetic marker. With #308's
+    withholding it would cost the term its entire published inference -- and the
+    reason for withholding does not apply to it, because no cone projection
+    happened, so there is no active edge and no boundary to sit on. The
+    parametrized test above cannot see this case: it carries one term, so the
+    early exit fires whenever that term is feasible.
+    """
+    rng = np.random.default_rng(3)
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    dips = np.where(x < 0.5, x, 1.2 - 1.4 * x)  # must be projected
+    rises = 2.0 * x  # already increasing
+    df = pd.DataFrame({"a": x, "b": rng.permutation(x)})
+    y = dips + np.interp(df["b"], x, rises) + 0.05 * rng.normal(size=n)
+
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "a": PSpline(n_knots=10, constraint=Constraint.postfit.increasing),
+            "b": PSpline(n_knots=10, constraint=Constraint.postfit.increasing),
+        },
+    ).fit(df, y)
+    before = {r.group: r for r in model.summary()._coef_rows if r.is_spline}
+
+    model.apply_shape_postfit(df)
+
+    # The premise: exactly one term bound. Without it the test measures nothing
+    # -- if `b` also needed projecting there is no feasible term to protect, and
+    # if `a` did not the whole call is an early-exit no-op.
+    assert set(model._shape_repairs) == {"a"}
+
+    after = {r.group: r for r in model.summary()._coef_rows if r.is_spline}
+    assert after["a"].wald_p is None
+    assert after["a"].monotone_repaired is True
+    # `b` was never projected, so it keeps its inference. Present and finite,
+    # NOT bit-identical to `before`: the repair refreshes the model's
+    # dispersion and effective df, and every standard error is scaled by
+    # those, so an untouched term's SE legitimately moves. What must not
+    # happen is that it disappears.
+    assert after["b"].monotone_repaired is False
+    for field in ("wald_chi2", "wald_p", "ref_df", "curve_se_min", "curve_se_max"):
+        value = getattr(after["b"], field)
+        assert value is not None, field
+        assert np.all(np.isfinite(np.asarray(value, dtype=float))), field
+    assert before["b"].wald_p is not None  # it had one to keep
+
+
+def test_term_level_uncertainty_apis_qualify_a_repaired_term():
+    """`summary()` is not the only surface that publishes a band.
+
+    `term_inference()` is the public curve-plus-uncertainty API and the one
+    `plot()`/`plot_data()` funnel through, and it hard-coded
+    `monotone_repaired=False` while returning `se_log_relativity` and intervals
+    from the unconstrained fit's covariance. `simultaneous_bands()` simulates
+    from that same covariance around constrained coefficients, which is not a
+    band around anything that was fitted. Both now qualify a repaired term the
+    way the editor-stale path already qualifies an edited one.
+    """
+    rng = np.random.default_rng(0)
+    x = np.linspace(0.0, 1.0, 400)
+    y = np.where(x < 0.5, x, 1.2 - 1.4 * x) + 0.05 * rng.normal(size=len(x))
+    df = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        features={"x": PSpline(n_knots=10, constraint=Constraint.postfit.increasing)},
+    ).fit(df, y)
+
+    # Before: the band is published and the flag is silent about the repair.
+    baseline = model.term_inference("x", with_se=True)
+    assert baseline.se_log_relativity is not None
+    assert baseline.monotone_repaired is False
+    model.simultaneous_bands("x")  # available
+
+    model.apply_shape_postfit(df)
+    assert model._shape_repairs["x"].max_violation_before > 0.0
+
+    with pytest.warns(UserWarning, match="post-fit shape projection"):
+        after = model.term_inference("x", with_se=True)
+    assert after.se_log_relativity is None
+    assert after.ci_lower is None
+    assert after.monotone_repaired is True
+    # The curve itself is kept -- the projection improves the point estimate.
+    assert after.log_relativity is not None
+    assert np.all(np.isfinite(np.asarray(after.log_relativity, dtype=float)))
+
+    with pytest.raises(RuntimeError, match="post-fit shape repair"):
+        model.simultaneous_bands("x")
+
+    # An unrepaired term in the same model is untouched.
+    assert model.term_inference("x", with_se=False).se_log_relativity is None
