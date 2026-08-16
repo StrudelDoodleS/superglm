@@ -119,10 +119,15 @@ and that was verified rather than assumed: ``V_eff`` is block-diagonal minus
 rank ``k_a``, hence dense, so any factor of it is dense — O(L^2) memory and
 O(L^3) time, which is the cost this module exists to avoid.
 
-**WHAT THE MOMENTS COST, AND WHY THE edf HALF NO LONGER READS THEM.**  The
-``edf`` half is computed from the row-space factors ``p.R`` and the compacted
-overlap rows, which come from the DESIGN.  ``V``, ``c``, ``m`` and ``border``
-are read only by the statistic.  That is not a tidiness argument: forming the
+**WHAT THE MOMENTS COST, AND WHY NEITHER HALF READS THEM.**  Both ``edf`` and
+the statistic are computed from the row-space factors ``p.R``, the compacted
+overlap rows and the centered per-level scores, all of which come from the
+DESIGN.  ``V``, ``c``, ``m`` and ``border`` are read by nothing the ladder
+publishes.  The statistic was the last holdout and issue #298 is that gap: it
+went through ``_pair_arrow`` and ``M^+``, both pseudo-inverses of those Grams,
+so a 1e-8 perturbation of them left ``edf`` bit-identical and moved the
+statistic by up to 1.5e-05 relative -- on two numbers ``screen_interactions``
+divides into each other as ``z = (T/phi - edf0)/sqrt(2 edf0)``.  That is not a tidiness argument: forming the
 pair's moments in float64 destroys the quantity before any screening rule
 runs.  Measured on the starved family, three defensible exact-arithmetic
 policies for ``M^+`` applied to the SAME delivered float64 moments -- invert
