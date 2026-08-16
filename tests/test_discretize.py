@@ -1253,6 +1253,37 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         with pytest.raises(ValueError, match="not a usable factor"):
             model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
+    def test_a_finite_log_surface_survives_an_unrepresentable_factor(self):
+        """``exp`` of a finite log surface can leave float64; the fit does not.
+
+        Both built-ins return ``relativity = exp(log_relativity)``, so a finite
+        log surface outside the exponential range comes back as ``0`` or
+        ``inf`` while the fit's own predictor stays perfectly representable.
+        Validating the printed factor would then refuse a diagnostic with
+        nothing wrong with it -- so the log field is taken wherever ``exp`` of
+        it reproduces the factor cell for cell, which an overflowed cell does
+        exactly.
+        """
+        stub = self._Stub()
+        base = stub.reconstruct
+
+        def _huge(beta, n_points=50):
+            raw = dict(base(beta, n_points=n_points))
+            surface = np.asarray(raw["log_relativity"], dtype=float) + 900.0
+            raw["log_relativity"] = surface
+            with np.errstate(over="ignore"):
+                raw["relativity"] = np.exp(surface)
+            return raw
+
+        stub.reconstruct = _huge
+        model, df, y = self._model_with(stub)
+        assert not np.all(np.isfinite(_huge(np.zeros(1), n_points=3)["relativity"]))
+
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+        grid = result.interaction_tables["a:b"]
+        assert np.all(np.isfinite(grid["log_relativity"].to_numpy()))
+        assert int(grid["n_obs"].sum()) == len(df)
+
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
 
