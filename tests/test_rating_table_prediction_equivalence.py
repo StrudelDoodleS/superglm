@@ -472,11 +472,15 @@ def test_the_base_relativity_moves_by_exactly_the_shift_the_blocks_applied():
     assert applied > 0.1
     # Same kind of bar, on the gap this test exists to show: the naive
     # re-derivation has to be a DIFFERENT constant by a premium-sized amount,
-    # ``exp(0.01) - 1`` being 1.0%.  Measured at 0.0453 here, driven by the
-    # ``OrderedCategorical`` (never recentered) and the grouped ``Categorical``
-    # (recentered on its grouped levels).  It was wider before #293 only
-    # because the binned blocks were not centered at all, which made the naive
-    # constant wrong about them too -- a gap for the wrong reason.
+    # ``exp(0.01) - 1`` being 1.0%.  Measured at 0.0453 here.  Every block with
+    # more than one row contributes ``mean(log_mean)`` to it, so the total is a
+    # sum over three causes, not one: the ``OrderedCategorical`` -0.1276 (never
+    # recentered), the BINNED blocks +0.0728 (recentered on the reporting grid
+    # while their rows are bin averages, so their own geometric mean is not 1 --
+    # new in #293 and the second largest term), and the grouped ``Categorical``
+    # +0.0095 (recentered on its grouped levels).  It was wider before #293
+    # only because the binned blocks were not centered at all, which made the
+    # naive constant wrong about them for a different reason.
     assert abs(rederived - applied) > 0.01
 
 
