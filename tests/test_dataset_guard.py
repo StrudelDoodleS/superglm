@@ -23,7 +23,12 @@ from pathlib import Path
 import pytest
 
 from . import _datasets
-from .conftest import pytest_runtest_setup, skip_mark_reason, skipif_is_active
+from .conftest import (
+    _SKIPPING_MARKS,
+    pytest_runtest_setup,
+    skip_mark_reason,
+    skipif_is_active,
+)
 from .test_fetch_fremtpl import data_guarded_suites
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -417,16 +422,35 @@ def _unpack_marks(obj):
     return [getattr(mark, "mark", mark) for mark in marks]
 
 
+def _mark_holders(module: str, mod):
+    """Every object in *mod* whose ``pytestmark`` pytest would apply to a test.
+
+    The module, its module-level values, and -- one level down -- the members of
+    any class among them.  The class level is not a refinement.  ``pytestmark``
+    is the CLASS's own attribute, so a reader that stops at the class sees a
+    class-wide ``@NB2_SKIP`` and is blind to a ``skipif`` decorating one test
+    METHOD; ``tests/test_realdata_parity.py`` is nine decorated classes, which
+    is exactly where a method-level guard would be written.
+    """
+    yield mod, module
+    for name, value in vars(mod).items():
+        label = f"{module}.{name}"
+        yield value, label
+        if isinstance(value, type):
+            for attr, member in vars(value).items():
+                yield member, f"{label}.{attr}"
+
+
 def _dataset_skip_marks(module: str, mod) -> list[tuple[str, object]]:
-    """Every ``skipif`` the freshly-imported *mod* would hand pytest.
+    """Every skipping mark the freshly-imported *mod* would hand pytest.
 
     Read two ways, because each alone is fail-open in the other's direction:
 
     * **by name** -- module-level bindings ending ``_SKIP``.  This is the only
       reading that catches a guard DECLARED and never applied to anything.
-    * **by shape** -- every ``pytestmark`` in the module namespace, plus the
-      module's own.  This is the only reading that catches a mark written
-      INLINE on a new test function or class.
+    * **by shape** -- every ``pytestmark`` in the module namespace, its classes'
+      members, plus the module's own.  This is the only reading that catches a
+      mark written INLINE on a new test function, class or method.
 
     The shape reading is the one that was missing, and it re-opened #261 one
     level down.  Measured on this tree: a single new test carrying
@@ -434,14 +458,23 @@ def _dataset_skip_marks(module: str, mod) -> list[tuple[str, object]]:
     left all 52 gate tests green, and the real-data job's own command then
     reported ``29 passed, 1 skipped`` with the switch armed -- a silent skip
     inside the job whose entire purpose is that a skip cannot read as a pass.
+
+    The names accepted are :data:`~tests.conftest._SKIPPING_MARKS`, IMPORTED
+    rather than restated, because the two halves had already drifted apart once:
+    the hook was widened to ``("skip", "skipif")`` while this scan still
+    collected ``skipif``, so the one shape the hook had just been taught to
+    escalate was the one shape discovery could not see.  A plain
+    ``@pytest.mark.skip`` on a data-guarded test then bought a green tick --
+    this branch's own sentence, made true again by half a fix.  Restating the
+    pair here would let it drift a second time.
     """
     found: list[tuple[str, object]] = []
     for name, value in vars(mod).items():
         if name.endswith("_SKIP"):
             found.append((f"{module}.{name}", getattr(value, "mark", value)))
-    for holder, label in [(mod, module), *((v, f"{module}.{k}") for k, v in vars(mod).items())]:
+    for holder, label in _mark_holders(module, mod):
         for mark in _unpack_marks(holder):
-            if getattr(mark, "name", None) == "skipif":
+            if getattr(mark, "name", None) in _SKIPPING_MARKS:
                 found.append((label, mark))
     return found
 
@@ -515,6 +548,82 @@ def test_the_discovery_sees_a_skipif_written_inline_on_a_test(tmp_path, monkeypa
     assert [label for label, _ in found] == [f"{module}.test_guarded"], found
 
 
+def test_the_discovery_sees_a_plain_skip_written_inline_on_a_test(tmp_path, monkeypatch):
+    """The hook was widened to ``skip``; this scan was not.  That gap is #261.
+
+    ``tests/conftest.py`` grew ``_SKIPPING_MARKS = ("skip", "skipif")`` so the
+    switch could escalate an unconditional guard -- and discovery went on
+    collecting ``skipif`` alone, so the one shape the hook had just learned to
+    reach was the one shape nothing looked for.  A one-line
+    ``@pytest.mark.skip`` on a data-guarded test then skipped behind a green
+    tick, which is the sentence this branch exists to make false.
+
+    Worse on the machine the real-data job runs on: with the parquet PRESENT,
+    ``skip_reason`` returns ``None``, so even a guard that routes through it
+    carries the reason ``"None"``, has no sentinel, and cannot be escalated --
+    while ``skip`` remains unconditional and skips anyway.
+    """
+    module = _fake_suite(
+        tmp_path,
+        "test_plain_skip_inline",
+        "import pytest\n\n\n"
+        '@pytest.mark.skip(reason="flaky on the real book")\n'
+        "def test_guarded():\n    pass\n",
+    )
+    probe = _suite_imported_with_the_dataset_absent(module, monkeypatch, tmp_path)
+    found = _dataset_skip_marks(module, probe)
+    assert [label for label, _ in found] == [f"{module}.test_guarded"], found
+
+    label, mark = found[0]
+    with pytest.raises(AssertionError, match="is not a skipif mark"):
+        _assert_is_a_dataset_guard(label, mark)
+
+
+def test_the_discovery_sees_a_skipif_on_a_test_method_inside_a_class(tmp_path, monkeypatch):
+    """``pytestmark`` on a class says nothing about its methods' own marks.
+
+    ``tests/test_realdata_parity.py`` is nine classes, each decorated whole with
+    ``@NB2_SKIP`` or ``@GAMMA_SKIP`` -- so a reader that stopped at the class
+    saw a guard on every one of them and reported the suite covered, while a
+    ``skipif`` added to a single METHOD with a hardcoded reason sat underneath
+    it unseen and unescalatable.
+    """
+    module = _fake_suite(
+        tmp_path,
+        "test_method_level",
+        "import pytest\n\n\n"
+        "class TestThing:\n"
+        '    @pytest.mark.skipif(True, reason="not routed through skip_reason")\n'
+        "    def test_guarded(self):\n        pass\n",
+    )
+    probe = _suite_imported_with_the_dataset_absent(module, monkeypatch, tmp_path)
+    found = _dataset_skip_marks(module, probe)
+    assert [label for label, _ in found] == [f"{module}.TestThing.test_guarded"], found
+
+    label, mark = found[0]
+    with pytest.raises(AssertionError, match="bypasses _datasets.skip_reason"):
+        _assert_is_a_dataset_guard(label, mark)
+
+
+@pytest.mark.parametrize("name", _SKIPPING_MARKS)
+def test_the_discovery_sees_every_mark_name_the_hook_escalates(name, tmp_path, monkeypatch):
+    """Parametrized on the HOOK's tuple, so the two halves cannot drift again.
+
+    The defect this closes was not that ``skip`` was missing from a list.  It
+    was that there were two lists and only one of them got widened.  Widening
+    the hook alone now reds here, on the name that was added.
+    """
+    module = _fake_suite(
+        tmp_path,
+        f"test_escalated_{name}",
+        f"import pytest\n\n\n@pytest.mark.{name}(reason='guarded')\n"
+        "def test_guarded():\n    pass\n",
+    )
+    probe = _suite_imported_with_the_dataset_absent(module, monkeypatch, tmp_path)
+    found = _dataset_skip_marks(module, probe)
+    assert [label for label, _ in found] == [f"{module}.test_guarded"], found
+
+
 def test_the_discovery_still_sees_a_guard_declared_and_never_applied(tmp_path, monkeypatch):
     """And the shape scan cannot see THAT one, which is why both readings stay."""
     module = _fake_suite(
@@ -540,7 +649,12 @@ def _assert_is_a_dataset_guard(label: str, mark) -> None:
     dataset guard", naming an env var that is unset here and a role the mark
     does not have.
     """
-    assert getattr(mark, "name", None) == "skipif", f"{label} is not a skipif mark"
+    assert getattr(mark, "name", None) == "skipif", (
+        f"{label} is not a skipif mark. A dataset guard has to be a skipif in these "
+        f"suites: a skip is unconditional, so with the parquet PRESENT -- which is what "
+        f"the real-data job runs on -- skip_reason returns None, the reason loses the "
+        f"sentinel, and the item skips behind a green tick with nothing able to escalate it"
+    )
     assert skip_mark_reason(mark).startswith(_datasets.SKIP_SENTINEL), (
         f"{label} builds a skip reason that bypasses _datasets.skip_reason, "
         "so SUPERGLM_REQUIRE_DATA cannot reach it"
@@ -579,16 +693,57 @@ def test_the_parametrized_module_list_is_not_empty():
     assert _GUARDED_MODULES, "the data-guarded suite discovery found nothing"
 
 
+#: The two pytest callables that skip an item from inside a test body.
+_SKIPPING_CALLS = ("skip", "importorskip")
+
+
+def _pytest_spellings(tree: ast.AST) -> tuple[set[str], dict[str, str]]:
+    """How this source spells pytest: module aliases, and names bound from it.
+
+    A predicate rooted at the literal name ``pytest`` reads the one spelling
+    everything in this repository happens to use, and is blind to the two the
+    language allows -- ``import pytest as pt`` and ``from pytest import skip``.
+    Both skip identically and neither is exotic, so the scan below would have
+    reported nothing for either while calling itself complete.  This is a
+    guard against a guard: its whole value is that it has no gaps.
+
+    ``pytest`` itself is always in the alias set, imported or not, so the scan
+    stays fail-closed on an import this reader does not model (inside a
+    function, under a conditional, via ``importlib``).  Aliases are collected
+    from anywhere in the tree for the same reason.
+    """
+    aliases = {"pytest"}
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.name == "pytest" or name.name.startswith("pytest."):
+                    aliases.add((name.asname or name.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module == "pytest":
+            for name in node.names:
+                if name.name in _SKIPPING_CALLS:
+                    bound[name.asname or name.name] = name.name
+    return aliases, bound
+
+
 def _imperative_skip_calls(source: str) -> list[str]:
-    """Calls that skip from inside a test body rather than from a mark."""
+    """Calls that skip from inside a test body rather than from a mark.
+
+    Reported by the spelling the source actually uses, so the message points at
+    a line a reader can find rather than at a canonical form that is not there.
+    """
+    tree = ast.parse(source)
+    aliases, bound = _pytest_spellings(tree)
     found = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in ("skip", "importorskip"):
-            if isinstance(func.value, ast.Name) and func.value.id == "pytest":
-                found.append(f"pytest.{func.attr} at line {node.lineno}")
+        if isinstance(func, ast.Attribute) and func.attr in _SKIPPING_CALLS:
+            if isinstance(func.value, ast.Name) and func.value.id in aliases:
+                found.append(f"{func.value.id}.{func.attr} at line {node.lineno}")
+        elif isinstance(func, ast.Name) and func.id in bound:
+            found.append(f"{func.id} at line {node.lineno}")
     return found
 
 
@@ -631,6 +786,30 @@ def test_the_imperative_skip_scan_actually_matches_one():
     assert _imperative_skip_calls("import pytest\ndef t():\n    other.skip('why')\n") == []
 
 
+def test_the_imperative_skip_scan_follows_the_two_other_spellings():
+    """``import pytest as pt`` and ``from pytest import skip`` skip identically.
+
+    The predicate matched an attribute rooted at the literal name ``pytest``
+    only, so either of these walked straight through a scan whose entire value
+    is that it has no gaps.  Neither spelling is exotic and neither is used in
+    these suites today -- which is the point: the check exists to stay true of
+    a suite nobody has written yet.
+    """
+    assert _imperative_skip_calls("import pytest as pt\ndef t():\n    pt.skip('why')\n") == [
+        "pt.skip at line 3"
+    ]
+    assert _imperative_skip_calls("from pytest import skip\ndef t():\n    skip('why')\n") == [
+        "skip at line 3"
+    ]
+    assert _imperative_skip_calls(
+        "from pytest import importorskip as need\ndef t():\n    need('x')\n"
+    ) == ["need at line 3"]
+    # A same-named callable from somewhere else is not pytest's, and is not reported.
+    assert (
+        _imperative_skip_calls("from shutil import move as skip\ndef t():\n    skip('a')\n") == []
+    )
+
+
 @pytest.mark.parametrize("module", _GUARDED_MODULES)
 def test_every_data_guarded_suite_carries_the_sentinel(module, monkeypatch):
     """The enforcement switch must reach every suite that skips on a dataset.
@@ -642,7 +821,7 @@ def test_every_data_guarded_suite_carries_the_sentinel(module, monkeypatch):
     with no engine as "not found".  A suite that guards on a dataset without
     routing through ``skip_reason`` evades enforcement, so assert the tag.
 
-    Three ways this check has already been vacuous, all closed here:
+    Five ways this check has already been vacuous, all closed here:
 
     * it read module variables named ``*_SKIP_REASON``, and the bug it is named
       for had none -- the reason was inlined into the mark;
@@ -653,6 +832,14 @@ def test_every_data_guarded_suite_carries_the_sentinel(module, monkeypatch):
       real-data job is a data-present machine.
     * it discovered guards by NAME only, so a ``skipif`` written inline on a new
       test evaded it entirely -- see :func:`_dataset_skip_marks`.
+    * it collected ``skipif`` only, in the same round that widened the
+      escalation hook to ``("skip", "skipif")`` -- so the shape the hook had
+      just been taught to reach was the one shape discovery could not see, and
+      a one-line ``@pytest.mark.skip`` on a guarded test bought a green tick.
+      The names come from the hook now, imported.
+    * it read a class's own ``pytestmark`` and stopped, so a ``skipif`` on a
+      single test METHOD was invisible -- in a suite that is nine decorated
+      classes.
 
     The module list is the one ``tests/test_fetch_fremtpl.py`` derives from the
     source, not a second hardcoded copy: a fourth data-guarded suite has to be
@@ -669,8 +856,13 @@ def test_every_data_guarded_suite_carries_the_sentinel(module, monkeypatch):
 
     Reserved by this check, and stated because it is stronger than "route
     through ``skip_reason``": in these suites a module-level ``*_SKIP`` name,
-    and any inline ``skipif``, is a dataset guard.  A ``WIN_SKIP`` for an
-    unrelated platform condition belongs in a differently named binding.
+    and any inline ``skip`` or ``skipif`` -- on a function, a class or a method
+    -- is a dataset guard.  A ``WIN_SKIP`` for an unrelated platform condition
+    belongs in a differently named binding, and an unconditional ``skip``
+    belongs nowhere here at all: it is rejected on sight by
+    :func:`_assert_is_a_dataset_guard`, because on the data-PRESENT machine the
+    real-data job runs on, ``skip_reason`` returns ``None`` and the sentinel the
+    switch keys on goes with it.
     """
     mod = _suite_imported_with_the_dataset_absent(module, monkeypatch)
     marks = _dataset_skip_marks(module, mod)
