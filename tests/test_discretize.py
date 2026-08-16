@@ -1231,7 +1231,20 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         assert type(_GridSubclass()) not in listed
         assert SplineCategorical in listed
 
-    def test_an_unusable_reconstructed_factor_is_refused(self):
+    @pytest.mark.parametrize(
+        ("factor", "log_value", "why"),
+        [
+            (0.0, None, "a zero the log field contradicts"),
+            (-1.0, None, "a negative factor"),
+            (np.inf, None, "an infinity no finite log explains"),
+            (np.nan, None, "a NaN beside a finite log"),
+            # The one the finiteness guard alone refuses: `exp(nan)` IS `nan`,
+            # so the round trip would accept this pair under `equal_nan=True`.
+            (np.nan, np.nan, "a NaN in both fields"),
+            (0.0, -np.inf, "a zero whose log is not finite either"),
+        ],
+    )
+    def test_an_unusable_reconstructed_factor_is_refused(self, factor, log_value, why):
         """A caller's grid can hand back something that is not a factor.
 
         ``np.log`` would turn a zero or a negative into ``-inf``/``nan`` that
@@ -1239,18 +1252,30 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         report clipped or non-finite predictions beside a table that no longer
         contains the factor it was given. The rating-table builder rejects
         unusable relativities before the sweep; a direct call has no such guard.
+
+        Every case here is one the log field cannot explain, so the fallback
+        must decline it. Two guards share the work -- the log values covering
+        the unusable cells must be finite, and ``exp`` of them must reproduce
+        those cells exactly -- and the cases are chosen so each is load-bearing
+        for at least one row: dropping the finiteness check admits the
+        NaN-in-both pair, since ``exp(nan)`` is ``nan`` and the round trip
+        compares with ``equal_nan=True``.
         """
         stub = self._Stub()
         base = stub.reconstruct
 
-        def _zeroed(beta, n_points=50):
+        def _spoiled(beta, n_points=50):
             raw = dict(base(beta, n_points=n_points))
             relativity = np.array(raw["relativity"], dtype=float)
-            relativity[0, 0] = 0.0
+            relativity[0, 0] = factor
             raw["relativity"] = relativity
+            if log_value is not None:
+                log_relativity = np.array(raw["log_relativity"], dtype=float)
+                log_relativity[0, 0] = log_value
+                raw["log_relativity"] = log_relativity
             return raw
 
-        stub.reconstruct = _zeroed
+        stub.reconstruct = _spoiled
         model, df, y = self._model_with(stub)
         with pytest.raises(ValueError, match="not a usable factor"):
             model.discretization_impact(df, y, n_bins=3, features=["a:b"])
@@ -1547,6 +1572,16 @@ class TestExactlyTabulatedInteractionIsNotDiscretized:
             "extend the fixture so the fast path is checked for every one"
         )
 
+        def _forbidden(self, *args, **kwargs):
+            raise AssertionError("the fast path must not reconstruct")
+
+        # Patched to raise, so this loop pins that the short-circuit is TAKEN,
+        # not merely that it agrees. Every one of these reconstructs to a cell
+        # table, so a loop that only checked the verdict would pass with the
+        # fast path deleted -- and the quadratic default-path cost it exists to
+        # avoid would be back with the suite green.
+        for cls in listed:
+            monkeypatch.setattr(cls, "reconstruct", _forbidden)
         for cls in listed:
             name = built[cls]
             spec = model._interaction_specs[name]
@@ -1554,10 +1589,12 @@ class TestExactlyTabulatedInteractionIsNotDiscretized:
             assert discretize._grid_reconstruction(spec, beta, 5) is None, (
                 f"{cls.__name__} is short-circuited as a non-grid type"
             )
+        monkeypatch.undo()
 
-        # With the list emptied, every one of them goes through the
-        # reconstruction contract instead -- and must still come back not a
-        # grid, or the exporter and the sweep have parted company.
+        # With the list emptied -- and every ``reconstruct`` restored -- each
+        # one goes through the reconstruction contract instead, and must still
+        # come back not a grid, or the exporter and the sweep have parted
+        # company.
         monkeypatch.setattr(discretize, "_non_grid_builtin_interactions", lambda: ())
         for cls in listed:
             name = built[cls]
