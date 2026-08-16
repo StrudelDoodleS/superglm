@@ -1231,6 +1231,49 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         assert type(_GridSubclass()) not in listed
         assert SplineCategorical in listed
 
+    @pytest.mark.parametrize(
+        ("axis", "match"),
+        [
+            (np.array([1.0, 2.0, np.nan]), "non-finite x1 axis"),
+            (np.array([]), "empty x1 axis"),
+        ],
+    )
+    def test_an_axis_that_is_not_a_lookup_key_is_refused_by_both_sides(self, axis, match):
+        """An axis a risk cannot be found on is not a rating table.
+
+        ``np.argsort`` puts a ``NaN`` last, ``_nearest_grid_index`` compares
+        against it and gets ``False``, and every finite risk above the last
+        real node is priced off the ``NaN``-keyed cell -- which the exported
+        block prints as the string ``nan``. Measured before this guard: the
+        exporter shipped the block and its axis column read
+        ``['1.0', '2.0', 'nan']``.
+        """
+        from superglm.export.rating_tables import _interaction_blocks
+
+        n_nodes = len(axis)
+        other = np.linspace(10.0, 30.0, max(n_nodes, 1))
+
+        class _BadAxis:
+            parent_names = ("a", "b")
+
+            def score(self, x1, x2, beta):
+                return np.zeros(len(np.asarray(x1).ravel()))
+
+            def reconstruct(self, beta, n_points=50):
+                surface = np.zeros((len(other), n_nodes))
+                return {
+                    "x1": axis,
+                    "x2": other,
+                    "relativity": np.exp(surface),
+                    "interaction": True,
+                }
+
+        model, df, y = self._model_with(_BadAxis())
+        with pytest.raises(ValueError, match=match):
+            _interaction_blocks(model, 3)
+        with pytest.raises(ValueError, match=match):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+
     def test_a_grid_over_a_categorical_parent_is_declined_by_both_sides(self):
         """A surface is only a rating table if a risk can be found on its axes.
 
