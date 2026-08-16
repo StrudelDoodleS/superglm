@@ -57,7 +57,7 @@ and the edf well defined; Hansen assumes ``rank(L) = p`` and ``N(A) & N(L) =
 {0}`` -- his GSVD is stated with ``X`` NONSINGULAR and ``mu_p > 0``, so the
 degenerate case is assumed away and not handled.  Here ``S`` is semidefinite
 by construction, and the intersection is genuinely nonempty on the starved
-family.  **THE AUTHORITATIVE COUNT IS THE SECOND ONE**: at the LAPACK cut
+family.  **THE AUTHORITATIVE COUNT IS THE ONE AT THE LAPACK CUT**: there,
 across this suite's twelve fixtures the intersection is nonempty on that
 family and NOWHERE ELSE, at ONE direction of 78 on ``_starved_bs_pair``
 (6 emitted levels x a 13-column ``bs(10)`` margin).  An earlier probe reported
@@ -1860,25 +1860,43 @@ def _filter_factor_sum(
     # --- H's spectrum, from its factor's singular values -------------------
     if r:
         # THIS ``keep`` IS CLAUSE 1 OF THE SINGULAR-PENCIL POLICY, AT THE
-        # BORDER.  It is one of TWO sites that decide it -- the other is
-        # :func:`_block_inverse_factors`, on the per-level blocks -- so an
-        # edit here that is not mirrored there leaves the two halves of the
-        # same pencil on different null-space behaviour.  A direction dropped here contributes
-        # ZERO to ``edf`` -- ``np.where(keep, 1 / safe, 0.0)`` below -- which
-        # is the Moore-Penrose reading of a ``0/0`` filter factor and a choice
-        # about an undefined quantity, not an approximation to a defined one.
+        # BORDER.  What a dropped direction loses is its ``H^+`` COEFFICIENT
+        # and nothing else -- ``np.where(keep, 1 / safe, 0.0)`` in ``resolved``
+        # below -- which is the Moore-Penrose reading of a ``0/0`` filter
+        # factor: a choice about an undefined quantity, not an approximation
+        # to a defined one.
+        #
+        # **IT DOES NOT MAKE THE DIRECTION CONTRIBUTE ZERO TO ``edf``, AND
+        # READING IT THAT WAY IS THE EDIT THAT COSTS A DEGREE OF FREEDOM.**
+        # The same ``keep`` gates three coefficients, and the other two take
+        # the ``1.0`` branch: ``extended`` and ``xi`` both reach the answer,
+        # through ``crossed`` and ``coupled``.  Both are FORCED rather than
+        # chosen -- ``I + H^+ (I - H) = H^+ + P_null(H)``, and ``xi`` is
+        # ``1 - h`` exactly once ``H^+``'s null component is zero -- so they
+        # are the REST OF THE SAME Moore-Penrose expansion and must not be
+        # zeroed with it.  The next comment prices exactly that mistake.
+        #
+        # :func:`_block_inverse_factors` also decides clause 1, on the
+        # per-level blocks, and it is NOT the same: there a dropped direction
+        # really does contribute nothing, because its zero feeds ``K_q`` and
+        # nothing else.  The two sites share a convention, not a formula, so
+        # an edit is not to be mirrored between them mechanically.
+        #
         # Clause 3 is why the cut beside it is :func:`_absorption_floor` and
-        # not a constant: on a direction the pencil DOES resolve, the same
-        # line loses a whole degree of freedom.
+        # not a constant: dropping a direction the pencil DOES resolve is
+        # wrong by a whole degree of freedom.
         singular, right = np.linalg.svd(border)[1:]
         keep = singular > _absorption_floor(L * k_a, r, geometry.orthonormality)
         occupied = singular * singular
         free = (1.0 - singular) * (1.0 + singular)
         safe = np.where(keep, occupied, 1.0)
         # ``I + H^+ (I - H)`` is ``H^+`` PLUS the projector onto
-        # ``null(H)``: dropping the second term loses a whole degree of
-        # freedom per deflated direction -- measured, 22.0 against a certified
-        # 6.000 on the starved fixture.
+        # ``null(H)``: dropping the second term is wrong by a whole degree of
+        # freedom per deflated direction, and the sign is UPWARD -- measured,
+        # the counterfactual reads 22.0 against a certified 6.000 on the
+        # starved fixture, i.e. 16 df HIGH.  Stated rather than left to
+        # "loses", because the cross term has no sign guaranteed a priori and
+        # this is what was measured.
         resolved = (right.T * np.where(keep, 1.0 / safe, 0.0)) @ right
         extended = (right.T * np.where(keep, 1.0 / safe, 1.0)) @ right
         xi = np.where(keep, free / safe, free)
