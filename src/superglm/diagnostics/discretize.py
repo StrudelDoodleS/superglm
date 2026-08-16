@@ -288,9 +288,15 @@ def _non_grid_builtin_interactions() -> tuple[type, ...]:
     level and each call walks them again, so on a high-cardinality parent the
     default diagnostic paid quadratic work to learn the term is a cell table.
 
-    ``test_the_class_fast_path_agrees_with_the_contract`` checks every shipped
-    interaction type both ways, so a class that later starts returning a grid
-    cannot stay on this list silently.
+    ``test_the_class_fast_path_covers_every_shipped_interaction`` checks that
+    this list and the two grid types PARTITION the interaction classes the
+    module ships, so a new one cannot land unclassified, and
+    ``test_the_fast_path_only_skips_work`` checks a listed type's verdict
+    against the contract with the fast path disabled.  What neither can see is
+    a listed class that later starts returning a grid: the partition still
+    holds and the contract is never consulted for it.  Changing a shipped
+    type's reconstruction therefore means revisiting this list -- there is no
+    test that will say so.
     """
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.interaction import (
@@ -337,8 +343,18 @@ def _grid_log_surface(
     vouches for it.
     """
     if "log_relativity" in grid:
-        log_surface = orient_grid_surface(name, axis1, axis2, grid["log_relativity"])
-        if np.all(np.isfinite(log_surface)):
+        # Guarded, because ``log_relativity`` is NOT part of the grid contract:
+        # ``_GRID_RECONSTRUCTION_KEYS`` does not name it and the exporter never
+        # reads it.  A custom spec can ship a perfectly usable ``relativity``
+        # beside a mis-shaped or non-numeric log field, and orienting that
+        # would raise -- refusing an interaction the exporter accepts.  A field
+        # that will not normalise is one that genuinely differs, which is the
+        # case the paragraph above already sends to the printed factor.
+        try:
+            log_surface = orient_grid_surface(name, axis1, axis2, grid["log_relativity"])
+        except (ValueError, TypeError):
+            log_surface = None
+        if log_surface is not None and np.all(np.isfinite(log_surface)):
             with np.errstate(over="ignore", under="ignore"):
                 round_trip = np.exp(log_surface)
             if np.allclose(round_trip, relativity, rtol=1e-9, atol=0.0, equal_nan=True):
