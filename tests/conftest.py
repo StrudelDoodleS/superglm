@@ -76,6 +76,15 @@ def skipif_is_active(mark) -> bool:
 #: skips exactly like the ``skipif`` beside it, and was never escalated --
 #: measured, ``1 skipped`` under an armed switch.  A ``skip`` has no condition,
 #: so it always skips and therefore always escalates.
+#:
+#: That makes ``skip`` reachable here, NOT a shape a data-guarded suite may use.
+#: With the parquet present -- the real-data job's own machine -- ``skip_reason``
+#: returns ``None``, so the reason is the string ``"None"``, the sentinel is gone
+#: and this hook is blind again while the mark still skips unconditionally.
+#: ``tests/test_dataset_guard.py`` rejects a ``skip`` in those three suites on
+#: sight, and IMPORTS this tuple to do it: the two halves were widened apart once
+#: -- the hook here, not the discovery there -- and a one-line
+#: ``@pytest.mark.skip`` bought a green tick in the window between.
 _SKIPPING_MARKS = ("skip", "skipif")
 
 
