@@ -912,6 +912,21 @@ def _interaction_blocks(model: SuperGLM, n_bins: int) -> list[InteractionTableBl
         # last copy of that rule; sharing it makes a fifth divergence
         # inexpressible.
         if _grid_reconstruction_keys() <= set(raw):
+            # ...and the same rule for whether a grid is a LOOKUP, so a
+            # surface over a categorical parent is declined here rather than
+            # exported as an axis a reader cannot find their risk on and then
+            # read as float64 by the sweep.
+            from superglm.diagnostics.discretize import unpositionable_grid_parent
+
+            offender = unpositionable_grid_parent(ispec, model._specs)
+            if offender is not None:
+                raise NotImplementedError(
+                    f"Interaction {name!r} reconstructs a numeric grid, but its parent "
+                    f"{offender!r} is a Categorical whose values have no position on a "
+                    "grid axis, so the surface is not a lookup table for it. Use an "
+                    "OrderedCategorical parent, whose level scores do have positions, "
+                    "or reconstruct the term as a cell table."
+                )
             parent2 = ispec.parent_names[1]
             blocks.append(_continuous_interaction_block(name, raw, parent1, parent2))
             continue

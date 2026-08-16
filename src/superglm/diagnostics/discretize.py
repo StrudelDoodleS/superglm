@@ -318,6 +318,43 @@ def _non_grid_builtin_interactions() -> tuple[type, ...]:
     )
 
 
+def unpositionable_grid_parent(ispec, specs: dict) -> str | None:
+    """The parent of a would-be grid whose observations have no axis position.
+
+    A grid is a lookup keyed on two NUMERIC axes: a risk is priced by finding
+    the nearest printed value on each.  That only means something if the
+    parent's own column can be placed on that axis.  A spline, polynomial or
+    plain numeric parent can; a spline-mode ``OrderedCategorical`` can, through
+    the level scores ``resolve_interaction_parent_of`` maps it to.  A plain
+    ``Categorical`` cannot -- its column holds labels, and no label has a
+    position among ``0.0, 0.5, 1.0``.
+
+    Shipped grid types never hit this: both have numeric parents by
+    construction, and every categorical-parent type is on the non-grid list.
+    It is reachable through an explicit spec -- ``interactions=`` accepts any
+    object carrying ``parent_names`` and ``name`` -- whose ``reconstruct``
+    returns a surface over a categorical parent.  The exporter used to ship
+    that as a grid whose axis column a reader could not look anything up in,
+    and the sweep then read the label column as float64 and died on
+    ``could not convert string to float``.  Both now decline it here, together,
+    rather than one shipping what the other refuses.
+
+    Returns the offending parent's name, or ``None`` when both are positionable.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    if isinstance(ispec, FactorSmooth):
+        # Its second parent is a GROUPING column read as labels, never an axis.
+        return None
+    for parent in ispec.parent_names:
+        spec = specs.get(parent)
+        if isinstance(spec, Categorical) and not isinstance(spec, OrderedCategorical):
+            return parent
+    return None
+
+
 def _grid_log_surface(
     name: str, axis1: NDArray, axis2: NDArray, grid: dict, relativity: NDArray
 ) -> NDArray:
@@ -770,6 +807,19 @@ def discretization_impact(
         # directly raised ``could not convert string to float`` and took every
         # rating-table export of such a model down with it.
         parent1, parent2 = term["parent_names"]
+        # The exporter's rule for whether a grid is a lookup, applied here so
+        # the two decline the same terms.  Without it the label column reached
+        # ``np.asarray(..., dtype=np.float64)`` below and the whole export died
+        # on ``could not convert string to float``.
+        offender = unpositionable_grid_parent(ispec, model._specs)
+        if offender is not None:
+            raise NotImplementedError(
+                f"Interaction {name!r} reconstructs a numeric grid, but its parent "
+                f"{offender!r} is a Categorical whose values have no position on a "
+                "grid axis, so the surface is not a lookup table for it. Use an "
+                "OrderedCategorical parent, whose level scores do have positions, "
+                "or reconstruct the term as a cell table."
+            )
         left_spec, right_spec = term.get("parent_specs", (None, None))
         _, values1 = resolve_interaction_parent_of(ispec, left_spec, frame.column_array(parent1))
         _, values2 = resolve_interaction_parent_of(ispec, right_spec, frame.column_array(parent2))
