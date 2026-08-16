@@ -290,13 +290,14 @@ def _non_grid_builtin_interactions() -> tuple[type, ...]:
 
     ``test_the_class_fast_path_covers_every_shipped_interaction`` checks that
     this list and the two grid types PARTITION the interaction classes the
-    module ships, so a new one cannot land unclassified, and
-    ``test_the_fast_path_only_skips_work`` checks a listed type's verdict
-    against the contract with the fast path disabled.  What neither can see is
-    a listed class that later starts returning a grid: the partition still
-    holds and the contract is never consulted for it.  Changing a shipped
-    type's reconstruction therefore means revisiting this list -- there is no
-    test that will say so.
+    module ships, so a new one cannot land unclassified.
+    ``test_the_fast_path_only_skips_work`` then fits a term of EVERY listed
+    type and checks each verdict against the contract with the short-circuit
+    patched away -- so a listed class that later starts returning a surface,
+    which the partition cannot see because membership is still correct, fails
+    there instead of silently making the exporter ship a term the sweep will
+    refuse.  Adding a type to this list means adding a term of it to that
+    fixture; the test asserts the coverage rather than assuming it.
     """
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.interaction import (

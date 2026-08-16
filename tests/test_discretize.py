@@ -1215,8 +1215,10 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
                 }
 
         # The exporter's own predicate accepts it...
+        from superglm.export.rating_tables import _grid_reconstruction_keys
+
         raw = _GridSubclass().reconstruct(np.zeros(1), n_points=3)
-        assert {"x1", "x2", "relativity"} <= set(raw)
+        assert _grid_reconstruction_keys() <= set(raw)
         # ...so the sweep must too, rather than short-circuiting on the base.
         assert _grid_reconstruction(_GridSubclass(), np.zeros(1), 3) is not None
 
@@ -1354,6 +1356,60 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         )
         np.testing.assert_allclose(delta, printed, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
+    def test_one_lost_cell_does_not_hand_the_whole_surface_to_the_log_field(self):
+        """The fallback is per cell, not a switch for the whole grid.
+
+        One cell underflowing to zero is a fact about that cell. The other
+        eight still print a perfectly good factor, and those are the numbers
+        the workbook shows -- so the sweep must keep measuring them from
+        ``relativity`` and reach for the log field only at the cell that lost
+        it. Taking the log surface wholesale instead would report error
+        against nine numbers when only one was ever in question.
+        """
+        stub = self._Stub()
+        base = stub.reconstruct
+
+        def _one_lost_cell(beta, n_points=50):
+            raw = dict(base(beta, n_points=n_points))
+            surface = np.array(raw["log_relativity"], dtype=float)
+            surface[0, 0] = -800.0  # exp underflows to exactly 0.0
+            relativity = np.exp(surface)
+            assert relativity[0, 0] == 0.0
+            # Everywhere the factor SURVIVED, the log field is a near miss --
+            # close enough for any tolerance, and not what the workbook prints.
+            near_miss = surface * (1 + 1e-10)
+            near_miss[0, 0] = surface[0, 0]  # the lost cell must round-trip
+            raw["relativity"] = relativity
+            raw["log_relativity"] = near_miss
+            return raw
+
+        stub.reconstruct = _one_lost_cell
+        model, df, y = self._model_with(stub)
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+
+        nodes_a = np.array([1.0, 2.0, 3.0])
+        nodes_b = np.array([10.0, 20.0, 30.0])
+        i = np.abs(df["a"].to_numpy()[:, None] - nodes_a).argmin(axis=1)
+        j = np.abs(df["b"].to_numpy()[:, None] - nodes_b).argmin(axis=1)
+        lost = (i == 0) & (j == 0)
+        assert lost.any(), "the lost cell must be reached"
+        assert (~lost).any(), "surviving cells must be reached"
+
+        delta = np.log(result.predictions / result.original_predictions)
+        # The surviving cells read the factor the workbook prints, exactly --
+        # the near-miss log field never touches them.
+        np.testing.assert_allclose(
+            delta[~lost],
+            (nodes_a[i] + 0.01 * nodes_b[j])[~lost],
+            rtol=_NODE_EXACT_RTOL,
+            atol=0.0,
+        )
+        # The lost cell took the log field rather than ``log(0) == -inf``, so
+        # it stays finite and far below every surviving cell.  Stabilization
+        # clips how far, which is why the bound is an inequality.
+        assert np.all(np.isfinite(delta[lost]))
+        assert delta[lost].max() < delta[~lost].min() - 1.0
+
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
 
@@ -1410,32 +1466,107 @@ class TestExactlyTabulatedInteractionIsNotDiscretized:
         model.fit(df, y)
         return model, df, y
 
-    def test_the_fast_path_only_skips_work(self):
+    @staticmethod
+    def _model_with_every_listed_interaction():
+        """One fit carrying a term of each type the fast path lists.
+
+        ``FactorSmooth`` forces ``fit_reml`` and forbids a categorical main
+        effect on its own grouping column, so the group ``fs`` is deliberately
+        absent from ``features``.
+        """
+        from superglm.features.factor_smooth import FactorSmooth
+        from superglm.features.polynomial import Polynomial
+
+        rng = np.random.default_rng(7)
+        n = 400
+        df = pd.DataFrame(
+            {
+                "sp": rng.uniform(0.0, 1.0, n),
+                "po": rng.uniform(0.0, 1.0, n),
+                "n1": rng.uniform(0.0, 1.0, n),
+                "n2": rng.uniform(0.0, 1.0, n),
+                "xs": rng.uniform(0.0, 1.0, n),
+                "c1": rng.choice(["A", "B"], n),
+                "c2": rng.choice(["X", "Y"], n),
+                "fs": rng.choice(["P", "Q"], n),
+            }
+        )
+        y = rng.poisson(1.0, n).astype(float)
+        model = SuperGLM(
+            family=Poisson(),
+            selection_penalty=0.0,
+            features={
+                "sp": Spline(k=5),
+                "po": Polynomial(degree=2),
+                "n1": Numeric(),
+                "n2": Numeric(),
+                "xs": Spline(k=5),
+                "c1": Categorical(),
+                "c2": Categorical(),
+            },
+            interactions=[
+                ("sp", "c1"),  # SplineCategorical
+                ("po", "c1"),  # PolynomialCategorical
+                ("n1", "c1"),  # NumericCategorical
+                ("c1", "c2"),  # CategoricalInteraction
+                ("n1", "n2"),  # NumericInteraction
+                FactorSmooth("xs", group="fs", k=5),  # FactorSmooth
+            ],
+        )
+        model.fit_reml(df, y)
+        return model
+
+    def test_the_fast_path_only_skips_work(self, monkeypatch):
         """Disabling the short-circuit must not change the answer.
 
         The fast path exists to avoid reconstructing a term whose answer is
         already known, so with it disabled the contract must reach the same
-        verdict. Checked on a real fitted ``CategoricalInteraction`` -- the
-        listed type this file already builds -- because the partition test
-        above is membership algebra and cannot see a behavioural divergence.
+        verdict -- for EVERY listed type, not a representative one. The
+        partition test above is membership algebra and cannot see a listed
+        class whose reconstruction has since become a surface; this can,
+        because with the short-circuit patched away the contract is actually
+        consulted. The fork that would follow is the one this file has had to
+        close repeatedly: the exporter routes on the reconstruction keys and
+        ships the term, and the sweep then refuses it as not
+        continuous-by-continuous.
+
+        One fit carries all six, so a type added to the list without a way to
+        build it here fails on the coverage assertion rather than passing
+        unexamined.
         """
         from superglm.diagnostics import discretize
         from superglm.export import rating_tables
 
-        model, df, y = self._model()
-        name = next(iter(model._interaction_order))
-        spec = model._interaction_specs[name]
-        beta = rating_tables._interaction_beta(model, name)
+        model = self._model_with_every_listed_interaction()
+        listed = discretize._non_grid_builtin_interactions()
+        built = {type(model._interaction_specs[n]): n for n in model._interaction_order}
 
-        assert type(spec) in discretize._non_grid_builtin_interactions()
-        assert discretize._grid_reconstruction(spec, beta, 5) is None
+        uncovered = set(listed) - set(built)
+        assert not uncovered, (
+            f"no fitted term for listed types {sorted(t.__name__ for t in uncovered)} -- "
+            "extend the fixture so the fast path is checked for every one"
+        )
 
-        patch = pytest.MonkeyPatch()
-        try:
-            patch.setattr(discretize, "_non_grid_builtin_interactions", tuple)
-            assert discretize._grid_reconstruction(spec, beta, 5) is None
-        finally:
-            patch.undo()
+        for cls in listed:
+            name = built[cls]
+            spec = model._interaction_specs[name]
+            beta = rating_tables._interaction_beta(model, name)
+            assert discretize._grid_reconstruction(spec, beta, 5) is None, (
+                f"{cls.__name__} is short-circuited as a non-grid type"
+            )
+
+        # With the list emptied, every one of them goes through the
+        # reconstruction contract instead -- and must still come back not a
+        # grid, or the exporter and the sweep have parted company.
+        monkeypatch.setattr(discretize, "_non_grid_builtin_interactions", lambda: ())
+        for cls in listed:
+            name = built[cls]
+            spec = model._interaction_specs[name]
+            beta = rating_tables._interaction_beta(model, name)
+            assert discretize._grid_reconstruction(spec, beta, 5) is None, (
+                f"{cls.__name__} now reconstructs a grid, so the fast path no longer "
+                "only skips work -- it is hiding a term the exporter will ship"
+            )
 
     def test_a_categorical_interaction_contributes_no_grid(self):
         model, df, y = self._model()
