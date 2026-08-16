@@ -1513,11 +1513,15 @@ def test_summary_withholds_term_inference_after_a_shape_repair(kind):
 
     # And on `metrics().summary()`, which built its rows without the repairs
     # dict at all and so printed a p-value the model itself had withheld.
-    (metrics_row,) = [
-        r for r in model.metrics(df, y)._build_coef_rows(0.05) if r.group == "x" and r.is_spline
-    ]
+    metrics_summary = model.metrics(df, y).summary(detail="full")
+    (metrics_row,) = [r for r in metrics_summary._coef_rows if r.group == "x" and r.is_spline]
     assert metrics_row.monotone_repaired is True
     assert metrics_row.wald_p is None
+    # ... including the per-coefficient disclosure, which `ModelMetrics.summary`
+    # builds itself and which the HTML renderer emits unconditionally, so
+    # missing it here would reach a notebook at the default detail level.
+    assert not [name for name in metrics_summary._basis_detail if name.startswith("x")]
+    assert "repaired (inference withheld)" in metrics_summary._repr_html_()
 
 
 def test_an_already_feasible_term_beside_a_repaired_one_keeps_its_inference():
@@ -1616,3 +1620,40 @@ def test_term_level_uncertainty_apis_qualify_a_repaired_term():
 
     # An unrepaired term in the same model is untouched.
     assert model.term_inference("x", with_se=False).se_log_relativity is None
+
+
+def test_relativities_drops_the_band_of_the_repaired_feature_only():
+    """`relativities(with_se=True)` publishes `se_log_relativity` from the same
+    covariance `term_inference` now withholds.
+
+    Blanked per FEATURE, not per call: this API returns every term at once, and
+    dropping the band on unrepaired terms because one term was projected would
+    be exactly the over-reach the repair record itself avoids.
+    """
+    rng = np.random.default_rng(4)
+    n = 400
+    x = np.linspace(0.0, 1.0, n)
+    df = pd.DataFrame({"a": x, "b": rng.permutation(x)})
+    y = np.where(x < 0.5, x, 1.2 - 1.4 * x) + 2.0 * df["b"] + 0.05 * rng.normal(size=n)
+
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "a": PSpline(n_knots=10, constraint=Constraint.postfit.increasing),
+            "b": PSpline(n_knots=10),
+        },
+    ).fit(df, y)
+    before = model.relativities(with_se=True)
+    assert "se_log_relativity" in before["a"].columns
+    assert "se_log_relativity" in before["b"].columns
+
+    model.apply_shape_postfit(df)
+    assert set(model._shape_repairs) == {"a"}
+
+    with pytest.warns(UserWarning, match="post-fit shape projection"):
+        after = model.relativities(with_se=True)
+    assert "se_log_relativity" not in after["a"].columns
+    assert "se_log_relativity" in after["b"].columns
+    # The curve survives in both.
+    assert "log_relativity" in after["a"].columns
+    assert np.all(np.isfinite(after["a"]["log_relativity"].to_numpy(dtype=float)))
