@@ -124,7 +124,8 @@ the statistic are computed from the row-space factors ``p.R``, the compacted
 overlap rows and the centered per-level scores, all of which come from the
 DESIGN.  ``V``, ``c``, ``m`` and ``border`` are read by nothing the ladder
 publishes.  The statistic was the last holdout and issue #298 is that gap: it
-went through ``_pair_arrow`` and ``M^+``, both pseudo-inverses of those Grams,
+went through a second, moment-space arrow factorization and ``M^+``, both
+pseudo-inverses of those Grams,
 so a 1e-8 perturbation of them left ``edf`` bit-identical and moved the
 statistic by up to 1.5e-05 relative -- on two numbers ``screen_interactions``
 divides into each other as ``z = (T/phi - edf0)/sqrt(2 edf0)``.  That is not a tidiness argument: forming the
@@ -296,7 +297,6 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.screening._arrow import factor_arrow
 from superglm.screening._score_stat import ScreenedPair
 
 _EDF_TOL = 1e-6
@@ -413,6 +413,26 @@ def _centered_level_scores(
     same shift by ``B[0]`` that :func:`_centered_level_factors` uses is applied
     here, and it cancels for the same reason -- ``B - mean^B_q`` is invariant to
     a common offset -- so the two sides are centered by one arithmetic.
+
+    **A NEGATIVE RESULT, RECORDED BECAUSE IT IS ONE.**  Review asked for the
+    rows to be centered BEFORE the contraction -- ``sum_i (shifted_i - mean_q)
+    S_i`` rather than ``shifted' S_q - mean_q (1' S_q)`` -- on the grounds that
+    the second is a difference of two accumulated dot products and can lose
+    every significant digit when a level's score is nearly explained by its own
+    categorical main.  That is the right instinct and it is the discipline the
+    curvature side follows, so it was implemented and measured against 60-digit
+    mpmath, and the two forms agree TO EVERY DIGIT in four regimes: the suite's
+    four fixtures; a score set exactly proportional to the weight, so the
+    centered result is pure cancellation (residual 1e-6, 1e-10 and 0, where
+    both forms degrade identically to 2.9e-09, 3.2e-05 and no correct digit);
+    and levels on disjoint x-ranges spaced 1e3 and 1e6 apart, where both read
+    3.4e-12 and 2.6e-09.  The reason is that ``mean_q`` is itself accumulated
+    from ``shifted``, so both arrangements carry the same
+    ``eps sum_i |shifted_i| |S_i|``: the cancellation is a property of the
+    QUANTITY and not of where the subtraction is written.  The centering that
+    does pay here is the ``B[0]`` shift above, which is already applied.  The
+    contract-first form costs a chunk loop and an ``(n_rows, chunk, k_a)``
+    temporary for no measured accuracy, so it is not adopted.
     """
     B = np.asarray(B, dtype=np.float64)
     level_rows = np.asarray(level_rows, dtype=np.intp)
@@ -896,33 +916,6 @@ def spline_cat_moments(
     )
 
 
-def _overlap_arrow(p: SplineCatPair):
-    """The overlap curvature ``M`` in arrow form: one scalar block per level.
-
-    ``M``'s categorical-main block is diagonal and its border is the same
-    ``[intercept | spline main]`` corner, so ``M`` is an arrow matrix with
-    ``g = 1``.  Profiling therefore costs O(L) rather than the O(L^3) a dense
-    ``M^-1`` would.
-    """
-    L, k_a = p.dims
-    E = np.empty((L, 1 + k_a, 1), dtype=np.float64)
-    E[:, 0, 0] = p.m
-    E[:, 1:, 0] = p.c
-    return factor_arrow(p.m.reshape(L, 1, 1), E, p.border)
-
-
-def _unpenalized_blocks(p: SplineCatPair) -> NDArray:
-    """The ``(L, k_a + 1, k_a + 1)`` level blocks at ``lambda = 0``."""
-    L, k_a = p.dims
-    g = k_a + 1
-    G = np.empty((L, g, g), dtype=np.float64)
-    G[:, :k_a, :k_a] = p.V
-    G[:, :k_a, k_a] = p.c
-    G[:, k_a, :k_a] = p.c
-    G[:, k_a, k_a] = p.m
-    return G
-
-
 def _penalty_root(S_a: NDArray) -> NDArray:
     """``rootS`` with ``rootS' rootS`` the NEAREST PSD matrix to ``S_a``.
 
@@ -1047,39 +1040,6 @@ class _PairGeometry:
     ceiling: float  # L * k_a
 
 
-def _pair_arrow(p: SplineCatPair, lam: float, penalty: NDArray | None = None):
-    """``K(lambda)`` in arrow form: one ``(k_a + 1)`` block per level.
-
-    Level q's block holds its tensor coefficients beside its own contrast;
-    the border holds the intercept and the spline main, the only two things
-    every level shares.  ``C``'s spline-main rows are literally ``V``'s
-    diagonal blocks — both are ``sum_i w_i A_i A_i'`` restricted to the level
-    — so they are taken from the same array rather than reassembled.
-
-    **``penalty`` IS HOW THE TWO HALVES ARE MADE TO SCORE ONE PENCIL.**  The
-    ladder chooses lambda from ``edf``, which is evaluated against
-    ``rootS' rootS``, and then publishes a statistic from this factorization.
-    Adding ``p.S_a`` raw here would make those two different matrices whenever
-    the projection did anything -- and it is at ``lambda_hi = 1e10 * scale``
-    that the difference is largest, which is exactly a rung the ladder
-    publishes.  Measured before this argument was threaded through: on a
-    nullity-two pair the high-edge statistic reads 2.999250 against 2.821425,
-    a 5.9e-02 relative gap, on a penalty perturbation of ``2.2e-14``.  The
-    caller passes the same projection ``edf`` uses; ``None`` keeps ``S_a`` for
-    the callers that have no geometry to hand.
-    """
-    L, k_a = p.dims
-    g, r = k_a + 1, 1 + k_a
-    G = _unpenalized_blocks(p)
-    G[:, :k_a, :k_a] += lam * (p.S_a if penalty is None else penalty)
-    E = np.empty((L, r, g), dtype=np.float64)
-    E[:, 0, :k_a] = p.c
-    E[:, 0, k_a] = p.m
-    E[:, 1:, :k_a] = p.V
-    E[:, 1:, k_a] = p.c
-    return factor_arrow(G, E, p.border)
-
-
 def _profile(p: SplineCatPair) -> _PairGeometry:
     """The whole lambda-independent half of the work.
 
@@ -1149,8 +1109,7 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # against ``R_q`` and nothing L-sized is built.
     coupling = np.ascontiguousarray(basis[1:])
     overlap_score = np.array(p.base_score, dtype=np.float64)
-    if L:
-        overlap_score[1:] += p.score_rows.sum(axis=0)
+    overlap_score[1:] += p.score_rows.sum(axis=0)
     direction = coupling @ (basis.T @ overlap_score)
     U_eff = p.score_rows - np.einsum("lji,lj->li", p.R, p.R @ direction, optimize=True)
 
@@ -1481,9 +1440,11 @@ def _filter_factor_sum(
             / scale[:, None]
         )
         term = float(np.sum(np.square(whitened)))
-        # Neumaier-style compensated accumulation, as for the trace below: the
-        # chunk totals are nonnegative, so this only keeps the scalar
-        # independent of how the levels were chunked.
+        # Neumaier-style compensated accumulation across the CHUNK totals.
+        # ``term`` is already a pairwise sum over the whole chunk, so this
+        # bounds the error of adding the chunks together and does NOT make the
+        # scalar independent of where the chunk boundaries fall; ``chunk`` is a
+        # deterministic function of ``(height, width, L)``, so nothing is live.
         updated = local_stat + term
         if abs(local_stat) >= abs(term):
             stat_correction += (local_stat - updated) + term
@@ -1527,7 +1488,18 @@ def _filter_factor_sum(
     # takes on the common null space.
     statistic = local_stat
     if r:
-        whitened_border = (right * np.where(keep, 1.0 / singular, 0.0)[:, None]) @ coupled_score
+        # The reciprocal is guarded the way ``safe`` is seventeen lines above,
+        # and for the same reason: numpy evaluates ``1.0 / singular`` over the
+        # whole array before ``where`` selects, so an exactly-zero singular
+        # value -- reachable at ``lam = 0`` on an unpenalized pair whose base
+        # level carries no mass, where ``base_gram`` is exactly zero -- would
+        # materialize an ``inf``.  The value would still be right, but
+        # ``_UnstableStructuredEDFError`` subclasses ``FloatingPointError``, so
+        # under ``np.errstate(divide="raise")`` the bare error would escape the
+        # ladder's own except clause and abort the sweep instead of handing the
+        # pair back to the dense path.
+        inverse_singular = np.where(keep, 1.0 / np.where(keep, singular, 1.0), 0.0)
+        whitened_border = (right * inverse_singular[:, None]) @ coupled_score
         statistic += float(np.dot(whitened_border, whitened_border))
 
     # --- pass 2: one PSD factor per level, and the squared norms -----------
@@ -1589,7 +1561,8 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     """``(T, edf)`` at one lambda, both off ONE factorization of the design.
 
     Neither reads ``V``, ``c``, ``m`` or ``border`` any more.  ``T`` used to,
-    through :func:`_pair_arrow`, and that asymmetry is issue #298: the ladder
+    through a moment-space arrow factorization of ``K(lambda)`` this module no
+    longer builds, and that asymmetry is issue #298: the ladder
     published an ``edf`` decided by the row-space factors beside a statistic
     decided by a pseudo-inverse of the pair's float64 moments, and
     ``screen_interactions`` then ranked on ``z = (T/phi - edf)/sqrt(2 edf)``,
@@ -1715,10 +1688,10 @@ def structured_ladder(
     the ``z`` the screen ranks on moves 9.11e-05, 2.81e-04, 1.13e-04 and
     1.3e-12.  That is the user-visible size of this change on wide pairs.
 
-    Arrow factorizations for a WHOLE ladder at the default ``(2, 4, 8, 16)``,
-    counted by instrumenting :func:`_pair_arrow`: 2 for ``ps(8)`` at ``L = 50``
-    and ``L = 100``, ``cr(6)`` at ``L = 100``, ``bs(6)`` at ``L = 50`` and
-    ``ps(8)`` at ``L = 20``.  Their edf at maximum penalty is far above every
+    Factorizations for a WHOLE ladder at the default ``(2, 4, 8, 16)``, counted
+    by instrumenting the per-lambda block-angular pass: 2 for ``ps(8)`` at
+    ``L = 50`` and ``L = 100``, ``cr(6)`` at ``L = 100``, ``bs(6)`` at
+    ``L = 50`` and ``ps(8)`` at ``L = 20``.  Their edf at maximum penalty is far above every
     budget in use, so no rung's target falls inside the bracket and every one
     of them clamps.  The one margin that searches by default is ``ns``: its
     penalty is full rank, edf at maximum penalty is 0, and ``L = 100`` pays
