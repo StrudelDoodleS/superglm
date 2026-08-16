@@ -54,18 +54,107 @@ the general one and uses no GSVD.)
 SO WHERE THE BOUND IS CLAIMED RATHER THAN IN AN ASIDE.**  Wood 2011 assumes
 Fisher weights, which make both ``X'WX + S`` and ``X'WX`` positive definite
 and the edf well defined; Hansen assumes ``rank(L) = p`` and ``N(A) & N(L) =
-{0}``.  Here ``S`` is semidefinite by construction and a probe on the starved
-family found 6 of 77 directions in ``null(V_eff) & null(S)``.  A pencil with a
-common null space is SINGULAR, not merely ill conditioned (Cao, *LAA*
-92:187-196, 1987), and LAPACK says the same about what it can return: the
-trivial eigenvalues, "those corresponding to the leading ``n - r`` columns of
-``X``, which span the common null space of ``A^T A`` and ``B^T B``", are NOT
-WELL DEFINED (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, §2.3.5).  Fix &
-Heiberger, *SIAM J. Numer. Anal.* 9:78-88 (1972), doi:10.1137/0709009, refuse
-such a pencil outright.  Contribution ZERO on the common null space is the
-defensible convention, it is what ``tr(A^+ V_eff)`` already implements, and it
-is a CHOICE about an undefined quantity rather than an approximation to a
-defined one.
+{0}`` -- his GSVD is stated with ``X`` NONSINGULAR and ``mu_p > 0``, so the
+degenerate case is assumed away and not handled.  Here ``S`` is semidefinite
+by construction and a probe on the starved family found 6 of 77 directions in
+``null(V_eff) & null(S)``.
+
+============================== THE SINGULAR-PENCIL POLICY ====================
+
+On a direction in ``null(V_eff) & null(S)`` the generalized eigenvalue is
+``0/0`` and the filter factor with it.  SOMETHING has to be decided there, the
+decision is not derivable, and until it is written down every guard in this
+module is a boundary moving underneath an unstated choice.  It is:
+
+  1. **CONTRIBUTE ZERO ON THE COMMON NULL SPACE, AND PUBLISH.**  Such a
+     direction adds nothing to ``edf`` and the pair is scored anyway.  That is
+     what ``tr(A^+ V_eff)`` computes with ``A^+`` the Moore-Penrose inverse,
+     and it is what every deflation site here already did before it was
+     stated: :func:`_filter_factor_sum`'s ``keep``, and
+     :func:`_block_inverse_factors`'.  It is a CHOICE about an undefined
+     quantity, not an approximation to a defined one, so no error bound
+     attaches to it and none is claimed.
+  2. **REFUSE ONLY A BROKEN EVALUATION, NEVER A SINGULAR PENCIL.**
+     :class:`_UnstableStructuredEDFError` means the delivered number is not a
+     filter-factor sum.  Singularity is NOT one of its conditions and must not
+     become one: the routing rule sends this kernel the wide thin-level pairs,
+     where a common null space is the ordinary case and not the corner.  A
+     policy that refused it would refuse the population the kernel exists for.
+  3. **NEVER DEFLATE WHERE THE PENCIL IS NOT SINGULAR.**  Clause 1 is free
+     only on directions the pencil genuinely does not resolve; applied to one
+     it does, the same line loses a whole degree of freedom (measured, 22.0
+     against a certified 6.000 on the starved fixture).  So every cut that
+     decides which side a direction is on is a DOCUMENTED ERROR BOUND and
+     never a chosen tolerance -- :func:`_absorption_floor`,
+     :func:`_penalty_root`, :func:`_psd_clip_allowance`.
+  4. **WHERE THE CUT ITSELF IS UNDECIDABLE, SAY SO RATHER THAN PICK.**  A
+     penalty residue below ``eigh``'s own error bar has no float64 answer at
+     all; :func:`_penalty_root` takes it at its MAGNITUDE, which is the only
+     choice that is a function of the data rather than of the rounding, and
+     the cost of that is measured under "WHAT CLAUSE 1 COSTS" below.
+
+**WHAT THE LITERATURE SETTLES AND WHAT IT DOES NOT, CHECKED RATHER THAN
+RECALLED.**  Three citations this module carried were re-verified against the
+sources in 2026-08; two were being overstated and are corrected here.
+
+* A SYMMETRIC pencil is singular iff ``null(A) & null(B) != {0}`` -- Z.-h.
+  Cao, "On a deflation method for the symmetric generalized eigenvalue
+  problem", *LAA* 92:187-196 (1987), doi:10.1016/0024-3795(87)90256-4.  The
+  direction this module uses is ELEMENTARY and needs no citation: ``x`` in
+  both null spaces gives ``(A - lambda B) x = 0`` for every lambda, so the
+  determinant vanishes identically.  It is the CONVERSE that needs symmetry --
+  it is false for general pencils -- and Cao is the reference for that.  Cao's
+  own subject is the deflation, and the characterization is a consequence of
+  it rather than its headline.
+* The values on that intersection are UNDEFINED, and undefined is all LAPACK
+  says.  *LAPACK Users' Guide*, 3rd ed. (SIAM 1999), sec. 2.3.5.3, "Generalized
+  Singular Value Decomposition (GSVD)": the trivial eigenvalues, "those
+  corresponding to the leading ``n - r`` columns of ``X``, which span the
+  common null space of ``A^T A`` and ``B^T B``", "are not well defined", with
+  footnote 2.1 giving the reason -- taken as ratios of the corresponding
+  diagonal entries "we would get 0/0".  It does not license a zero.  (The
+  section number carried here before was 2.3.5, which is the parent; the GSVD
+  is its third subsection.)
+* Fix & Heiberger, *SIAM J. Numer. Anal.* 9(1):78-88 (1972),
+  doi:10.1137/0709009, deflate the INFINITE structure of a semidefinite
+  pencil.  The common null space is not what their reduction removes: Cao's
+  abstract says so, since it took a GENERALIZATION of that reduction to deflate
+  the singular structure as well.  What refuses is the FH-based LAPACK-style
+  implementation -- Jiang & Bai, "Working notes on the Fix-Heiberger reduction
+  algorithm" (UC Davis, 2015), which terminates with a singular-pencil flag at
+  seven distinct branches rather than assigning a value.  This module's earlier
+  claim that the 1972 paper refuses "outright" was never checked against the
+  paper and is WITHDRAWN.
+* **THERE IS NO PUBLISHED CONVENTION TO ADOPT FOR CLAUSE 1, AND THE NEAREST
+  ONE GOES THE OTHER WAY.**  Hansen's general-form expansion (*Regularization
+  Tools* v4.1, sec. 2.4, Eq. (2.19)) carries the ``null(L)`` component with
+  coefficient ONE, unfiltered -- but it is stated for a pencil with
+  ``null(A) & null(L) = {0}``, so it is the non-degenerate case and not a
+  convention for this one.  Clause 1 is a LOCAL choice made in the open, not a
+  standard being followed, and it is the reverse of the only nearby published
+  formula.  Searched: Cao 1987, the LAPACK guide's GSEP/GNEP/GSVD sections,
+  Fix & Heiberger 1972 and its modern implementations, Hansen 1994/1998/2007,
+  Stewart arXiv:2411.03534 (2024).  Nothing names it.
+
+**WHAT CLAUSE 1 COSTS, MEASURED, AND WHY NO FLOAT64 METHOD DOES BETTER.**  On
+``_rank_one_penalty_pair(2, 10, 20, 1e-4, 3)`` at the ladder's own high edge
+this publishes ``edf = 9.000000`` against a 40-digit oracle's ``5.720073``:
+3.28 df, and the whole of it is clause 1 firing on a direction the oracle can
+resolve and float64 cannot.  ``S_a``'s smallest eigenvalue there is bracketed
+EXACTLY, by rational arithmetic over the float entries, in
+``[3.269e-17, 6.538e-17]`` -- against ``n eps ||S||_2 = 4.441e-16``, so it is
+under one ulp of the largest eigenvalue and ``eigh`` returns a bit-exact
+``0.0``.  The information is destroyed by the eigensolver, not by the policy.
+And the textbook O(L^3) stacked-QR reference in the suite -- Wood's own method,
+a different computation of the same identity -- reads ``9.000000`` on that
+point too.  So the gap is not this kernel's organization of the arithmetic and
+not something a better factorization reaches; it is the price of deciding an
+undecidable direction, paid the same way by every float64 route.  The
+rank-differencing form this replaced read 5.405 there and was NEARER, which is
+a coincidence of where its own arbitrary cut landed and not a method to go
+back to.
+
+=============================================================================
 
 **THE ONE SUBTRACTION LEFT WAS THE WHOLE DEFECT, AND ITS CAUSE WAS ONE
 MATRIX.**  This used to be evaluated as ``edf = local - border``, a difference
@@ -166,14 +255,30 @@ Do not read the range guard as implying exactness.
 near-absorbed 1-column pair, whose ``V_eff`` is 1e-12 of its own level block,
 the relative error is 4e-16 at ten of eleven lambdas across the bracket
 against the old form's 1e-10 to 1.3e-04 -- but at the two lambdas where the
-0.5 rung sits it is 2.4e-04, against 5e-13 for the old form, and that is
-enough that a bisection targeting ``_EDF_TOL = 1e-6`` no longer converges and
-the pair is refused where it used to publish.  The cause is located: ``H``'s
-small eigenvalue is 2e-12 there and ``1/h`` multiplies an ``eps``-level
-residue.  Writing the level's contribution in the shifted coordinates
-``[K_q | K_q Y_q - Phi_q]``, and separately equilibrating ``W_q`` before its
-PSD factorization, each fix that rung and each break three others; both were
-measured and neither is adopted.
+0.5 rung sits it is 2.4e-04, against 5e-13 for the old form.  The cause is
+located: ``H``'s small eigenvalue is 2e-12 there and ``1/h`` multiplies an
+``eps``-level residue, so the error is ``eps ||H^+|| = 1.1e-04`` and the
+measured excursions are 2^-13 and 2^-12 of the answer.  Writing the level's
+contribution in the shifted coordinates ``[K_q | K_q Y_q - Phi_q]``, and
+separately equilibrating ``W_q`` before its PSD factorization, each fix that
+rung and each break three others; both were measured and neither is adopted.
+
+**AND THE REFUSAL ON THAT PAIR IS NOT THE BISECTION, WHICH THIS PARAGRAPH USED
+TO SAY.**  Re-measured 2026-08-16: ``structured_ladder`` returns ``None`` there
+for EVERY budget, including ones that clamp and never search, because the LOW
+bracket edge alone refuses -- the sum reads ``1.0001220702125002`` against a
+ceiling of ``1.0``, an excess of 1.22e-04, which is that same ``eps ||H^+||``
+and 4.3e+09 times the range guard's own ``64 eps`` allowance.  The curve
+through the 0.5 crossover is monotone and a bisection over it would converge;
+it is never reached.  The guard is doing exactly what clause 2 says -- refusing
+a number that is not a filter-factor sum -- and the allowance it refuses
+against carries no term for the deflation's amplification, where
+:func:`_psd_clip_allowance` beside it does.  Widening it to ``n eps ||H^+||``
+was measured and is NOT adopted: it covers this excess 5.5x over, but
+``||H^+||`` is unbounded, and on ``_multi_null_pair(3)`` the same expression is
+already an allowance of 0.18 df -- so the guard would stop being able to refuse
+the 2237-against-77 breakdown it exists for.  A bounded form of that term is
+the open question, and it is issue #299's.
 
 **WHAT THE RANGE GUARD IS FOR NOW.**  Every term of the sum is a squared norm,
 so ``edf >= 0`` holds by construction rather than by luck, and on the suite's
@@ -210,26 +315,44 @@ reduced in a different order.  This form spreads 1.44e-12, 1.29e-12 and
 8.24e-13.  Its low-edge spread moves the other way, 0.0 -> 2.8e-09, which is
 3600x inside the bound asserted there.
 
-**WHAT IT IS NOT WORTH: MONOTONICITY.**  ``edf`` is decreasing in lambda for a
-DEFINITE pencil (Kaufman & Rosset, *Biometrika* 101:771-784, 2014); this one is
-not always definite, and evaluating the right identity does not make it so.
-Walking 81 lambdas across the bracket of issue #263's own geometry — ``ps(8)``,
-20 levels, 30 rows each, four squeezed into a narrow band — at band width 1e-3
-the old form increases at 12 of the 80 steps with a worst increase of +6.17 df
-and the new one at 4 of 80 with +0.75; at width 1e-4, 19 of 80 with +70.78
-against 16 of 80 with +37.89.  On the vanishing-mass pairs both sit at 1 to 2
-of 80 and every increase is +0.0000.  On a nullity-2 ``m = 3`` family the old
-form increases at 30 of 76 with +7.56 and refuses 2 points; the new one at 35
-of 80 with +1.36 and refuses none.  So the worst increase falls 1.9x to 8.3x
-and the refusals go, but the COUNT does not improve.  **#263 is reduced and NOT
-closed**, and a bisection over this curve can still land on a step it cannot
-attain.  Monotonicity would follow from delivering NONNEGATIVE per-direction
-shares, which this route does not.
+**WHAT IT IS NOT WORTH: MONOTONICITY, AND WHAT IS LEFT OF THAT IS THE POLICY'S
+OPERAND AND NOT THE LADDER.**  ``edf`` is decreasing in lambda for a DEFINITE
+pencil (Kaufman & Rosset, *Biometrika* 101:771-784, 2014); this one is not
+always definite, and evaluating the right identity does not make it so.
+
+Re-measured 2026-08-16 on twelve draws of issue #263's own geometry --
+``ps(8)``, 20 levels, 30 rows each, four squeezed into a narrow band, seeds 3-8
+at widths 1e-3 and 1e-4, 81 lambdas across each bracket.  ``edf`` INCREASES at
+**3 of 960 steps**, worst **+0.014141 df** on a value of 169, i.e. 8.4e-05
+relative.  Six of the twelve draws have no increase at all and every one of the
+three sits at width 1e-4.  Against the +47.36 df over 14 of 80 that #263 was
+filed on, that is 3350x smaller.
+
+**AND THE FILED MECHANISM IS REFUTED.**  #263 attributes it to the rank count
+stepping, and proposes counting consistently across the bracket as the fix.
+There is no count left to step, and the deflation that replaced it does NOT
+move: over both draws that rise, ``keep`` retains **12 of 12** directions at
+every one of the 81 lambdas, so clause 1 of the policy fires identically at
+each end of the rising step.  Every rise instead sits within four steps of the
+bracket's LOW edge, where ``A -> V_eff`` and ``V_eff``'s own extreme
+eigenvalues are at ``+-1e-16`` of its norm, so ``A`` is numerically singular
+and the sum is evaluated with an amplified residue.  What is left of #263 is
+the low-edge conditioning of an indefinite delivered operand -- issue #269's
+subject, not this one's -- and not a search over a non-monotone curve.
+Monotonicity would follow from delivering NONNEGATIVE per-direction shares,
+which this route does not.
 
 **WHERE THE ARITHMETIC IS BEYOND EVERY FORM.**  Give a pair 8 levels with 3
 rows in each against an eleven-column margin and the overlap arrow's border
 Schur complement is nearly singular; its inverse then runs to 1e+10-1e+12 and
-every organization of this quantity loses eleven digits.  The three traces the
+every organization of this quantity loses eleven digits.  It is also the ONE
+fixture of twelve whose delivered ``V_eff`` is materially outside the PSD cone
+-- ``min eig / max eig = -1.95e-11``, where the other eleven sit between
+``-1.2e-16`` and ``+1.0`` -- so the pencil handed to clause 1 is not merely
+singular there but indefinite, and two poles of the exact ``edf`` fall inside
+the ladder's own bracket.  That is issue #269, and it is a property of the
+OPERANDS: no reading of the identity removes it, and it is what the low-edge
+rises under "WHAT IT IS NOT WORTH" are made of.  The three traces the
 old form summed measure 6.7e+10, -1.3e+11 and 6.7e+10 against an answer of 8.1.
 Both forms are wrong there — the old by up to 53.08 df, the new by up to
 22.01 — and what the new one buys is that its worst cases leave ``[0, L k_a]``
@@ -277,16 +400,19 @@ reference scale, and that disagreement turning out to be two-signed.  There is
 no rank here to make any of those statements about, so they go with it; #271
 in particular asked whether the invariant was one-signed, and an invariant
 between a count and an inverse cannot be violated in either direction once
-there is no count.  #263 is REDUCED, NOT closed, with the numbers above.
-#262's three geometries were re-measured on both forms: at ``bs(6)``/1e-5 the
-old form refuses at the high edge and the whole ladder returns ``None``, while
-this one returns 3.0003 and one rung -- that refusal is lifted; at
-``cr(4)``/4.64e-5 both publish one rung, 2.5336 against 3.0038; but at
-``bs(8)``/2.15e-4 the old form publishes three rungs (3.0, 8.0, 16.0) and this
-one publishes one, because its lower high edge (3.0001 against 3.0000, with a
-low edge of 28.24 against 35.22) leaves two budgets bisecting over the
-non-monotone curve #263 describes, and they fail.  So #262 moves in both
-directions and stays open.
+there is no count.
+
+#263 and #262 are SETTLED BY THE POLICY ABOVE rather than by a further change
+of arithmetic, and the measurements that settle them are stated where the
+claim is: #263's residue under "WHAT IT IS NOT WORTH", #262's here.  #262 is
+that a value which was returned is now refused, filed at -0.18 and -0.34 df.
+Both are impossible under this form -- ``edf >= 0`` holds by construction --
+and re-measured 2026-08-16 on all three of its geometries at 20 levels x 30
+rows, four in the band, the ladder publishes **4 rungs of 4** on each of
+``bs(6)``/1e-5, ``bs(8)``/2.15e-4 and ``cr(4)``/4.64e-5, with ``edf`` never
+below 15.00 anywhere in the bracket (81 lambdas).  What #262 was actually
+asking -- "whether the REFUSAL is the right response" -- is clause 2, and it
+is now answered in writing instead of being a boundary that moves.
 """
 
 from __future__ import annotations
@@ -317,7 +443,23 @@ _MAX_STEPS_PER_RUNG = min(_MAX_BISECT, 46)
 
 
 class _UnstableStructuredEDFError(FloatingPointError):
-    """A filter-factor sum came back outside ``[0, k]``, so it is not one."""
+    """A filter-factor sum came back outside ``[0, k]``, so it is not one.
+
+    **THIS IS CLAUSE 2 OF THE SINGULAR-PENCIL POLICY AND ITS SCOPE IS THE
+    POINT.**  Raising this says the delivered NUMBER is not a filter-factor
+    sum: outside ``[0, ceiling]``, non-finite, or resting on a projection
+    larger than the backward error that would explain it.  It does NOT say the
+    pencil is singular, and singularity must never be added to its conditions
+    -- the routing rule sends this kernel the wide thin-level pairs, where
+    ``null(V_eff) & null(S) != {0}`` is the ordinary case rather than the
+    corner, and those are scored under clause 1 by contributing zero.
+
+    Every raise site is therefore a statement about ARITHMETIC and each one
+    carries its own derived bound: the range guard and the uncertified-clip
+    guard in :func:`_evaluate`, and the penalty-projection guard in
+    :func:`_profile`.  Adding a raise site whose condition is a property of the
+    pencil rather than of the evaluation would silently reverse clause 2.
+    """
 
 
 def _edf_roundoff(*values: float) -> float:
@@ -962,6 +1104,19 @@ def _penalty_root(S_a: NDArray) -> NDArray:
     Outside the bar a negative eigenvalue is real, no magnitude is taken and
     the direction is dropped -- and :func:`_profile` then refuses the pair,
     because the statistic is still scoring ``S_a`` raw.
+
+    **AND ON A TWO-COLUMN MARGIN THERE IS NOTHING LEFT TO TAKE THE MAGNITUDE
+    OF, WHICH IS CLAUSE 4 OF THE SINGULAR-PENCIL POLICY AT ITS WORST.**
+    ``_rank_one_penalty_pair``'s ``S_a`` has ``|sigma_min|`` bracketed EXACTLY,
+    by rational arithmetic over the float entries, in ``[3.269e-17,
+    6.538e-17]`` -- a fifth of an ulp of ``sigma_max``, so ``eigh`` hands back
+    a bit-exact ``0.0`` and the residue is not merely unresolved but absent.
+    The direction is then free, and the ladder's high edge publishes
+    ``edf = 9.000000`` where a 40-digit oracle on the same exact design reads
+    ``5.720073``.  That 3.28 df is the policy, not this routine: the suite's
+    textbook stacked-QR reference reads 9.000000 on the same point.  No float64
+    penalty factorization recovers it, so nothing here is waiting on a better
+    cut.
     """
     n = S_a.shape[0]
     if n == 0:
@@ -1462,6 +1617,14 @@ def _filter_factor_sum(
 
     # --- H's spectrum, from its factor's singular values -------------------
     if r:
+        # THIS ``keep`` IS CLAUSE 1 OF THE SINGULAR-PENCIL POLICY, AND IT IS
+        # THE ONLY PLACE IT IS DECIDED.  A direction dropped here contributes
+        # ZERO to ``edf`` -- ``np.where(keep, 1 / safe, 0.0)`` below -- which
+        # is the Moore-Penrose reading of a ``0/0`` filter factor and a choice
+        # about an undefined quantity, not an approximation to a defined one.
+        # Clause 3 is why the cut beside it is :func:`_absorption_floor` and
+        # not a constant: on a direction the pencil DOES resolve, the same
+        # line loses a whole degree of freedom.
         singular, right = np.linalg.svd(border)[1:]
         keep = singular > _absorption_floor(L * k_a, r, geometry.orthonormality)
         occupied = singular * singular
