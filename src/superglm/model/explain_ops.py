@@ -176,7 +176,14 @@ def relativities(model, with_se=False, centering="native"):
     # repaired frames lose their SE column; the curve stays in all of them.
     if with_se:
         repaired = _shape_repaired_features(model)
-        for name in repaired & frames.keys():
+        # Iterate the FRAMES and normalize on the way in, rather than
+        # intersecting the two key sets: `_shape_repaired_features` stringifies
+        # so that one spelling answers for every surface, while `_relativities`
+        # keys its output by the original feature label -- which need not be a
+        # string. A feature named `0` or `None` would make that intersection
+        # empty and leave this guard silently inert, which is the failure mode
+        # the whole PR is about.
+        for name in [key for key in frames if str(key) in repaired]:
             frame = frames[name]
             if "se_log_relativity" in frame.columns:
                 warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
