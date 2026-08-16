@@ -9,6 +9,7 @@ from superglm import (
     InteractionInference,
     Numeric,
     OrderedCategorical,
+    Polynomial,
     Spline,
     SplineMetadata,
     SuperGLM,
@@ -234,6 +235,63 @@ class TestTermInferenceNumeric:
         ti = fitted_model.term_inference("density")
         assert ti.se_log_relativity is not None
         assert np.all(np.isfinite(ti.se_log_relativity))
+
+
+class TestTermInferencePolynomialResolution:
+    """``n_points`` has to reach the grid, not only the standard errors.
+
+    ``feature_se_from_cov`` honoured the caller's ``n_points`` while the
+    polynomial branch reconstructed at the default 200, and ``term_inference``
+    zipped the two: measured on a pristine checkout, ``n_points=50`` raised
+    ``operands could not be broadcast together with shapes (200,) (50,)`` from
+    ``ci_lo = _safe_exp(log_rel - z_alpha * se)``.  So the term, and every
+    surface that forwards ``n_points`` -- ``plot``, ``plot_data``, the editor
+    session -- was unusable on a ``Polynomial`` at any resolution but 200.
+    """
+
+    @pytest.fixture
+    def poly_model(self, sample_data):
+        X, y, sample_weight = sample_data
+        model = SuperGLM(
+            selection_penalty=0.0,
+            features={"age": Polynomial(degree=3), "region": Categorical(base="first")},
+        )
+        model.fit(X, y, sample_weight=sample_weight)
+        return model
+
+    @pytest.mark.parametrize("n_points", [7, 50, 200, 401])
+    def test_every_reported_vector_is_at_the_requested_resolution(self, poly_model, n_points):
+        ti = poly_model.term_inference("age", n_points=n_points)
+        for field in ("x", "log_relativity", "relativity", "se_log_relativity"):
+            assert getattr(ti, field).shape == (n_points,), field
+        assert ti.ci_lower.shape == (n_points,)
+        assert ti.ci_upper.shape == (n_points,)
+
+    def test_a_coarser_grid_is_the_same_curve_read_at_fewer_points(self, poly_model):
+        """Resolution changes where the curve is sampled, not what it is.
+
+        397 and 100 are chosen so the coarse grid is an exact SUBSET of the
+        fine one: ``linspace`` spans the same fitted range in both, and
+        ``396 / 99 == 4``, so ``fine.x[::4]`` and ``coarse.x`` are the same
+        points.  (200 and 50 are not such a pair -- 199 is prime -- which is
+        why the sizes here are not the defaults.)  The two spellings of each
+        point differ only by the float64 rounding of ``lo + i*(hi-lo)/n``, so
+        one cubic on one coefficient vector must agree to round-off; the
+        tolerance is that, not headroom.
+        """
+        fine = poly_model.term_inference("age", n_points=397)
+        coarse = poly_model.term_inference("age", n_points=100)
+
+        np.testing.assert_allclose(coarse.x, fine.x[::4], rtol=1e-14, atol=0.0)
+        np.testing.assert_allclose(
+            coarse.log_relativity, fine.log_relativity[::4], rtol=1e-12, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            coarse.se_log_relativity, fine.se_log_relativity[::4], rtol=1e-12, atol=1e-14
+        )
+        # A band, not a translated one: every point's interval brackets it.
+        assert np.all(coarse.ci_lower <= coarse.relativity)
+        assert np.all(coarse.relativity <= coarse.ci_upper)
 
 
 class TestTermInferenceWithoutSE:
