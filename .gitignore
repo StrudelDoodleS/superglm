@@ -29,6 +29,23 @@ data/
 # cache holds the raw artifacts and not the normalised output.
 .fremtpl-raw/
 
+# Datasets are never tracked. `data/` only covers the directory, so a file
+# dropped at the repo root -- data.parquet is the usual one -- was previously
+# stageable by a plain `git add -A`. Belt and braces: no parquet is tracked
+# anywhere, and none is tracked today, so this orphans nothing.
+#
+# If a fixture parquet is ever genuinely wanted in the tree it needs
+# `git add -f`; without that it will silently not appear in the commit, which
+# is the same trap `docs/superpowers/` already sets. Prefer generating fixtures
+# in-test over committing one.
+#
+# Naming rule, which the ignore cannot enforce: the public freMTPL2freq /
+# freMTPL2sev files may be referred to by name -- they are CASdatasets/OpenML
+# and are already named across tests/ and docs/. Any other dataset must not be
+# referenced by filename, path, column name or identifying row count in
+# committed code, tests, comments, commit messages, PR bodies or issues.
+*.parquet
+
 # Other
 .claude/
 .ruff_cahce/
