@@ -485,7 +485,27 @@ def _ascending_grid(
     gate. Sorting rather than refusing, because the set of cells is unchanged:
     every factor a reader can look up off the exported block is still here,
     and the lookup that finds it is now the documented one.
+
+    A non-finite or empty axis IS refused, because there is no order that
+    rescues it.  ``np.argsort`` puts a ``NaN`` last, the binary search then
+    compares against it and gets ``False`` for every finite risk above the
+    last real node, and that risk is priced off the ``NaN``-keyed cell -- a
+    cell the exported block prints as the string ``nan``, which no reader can
+    find themselves in.  Both sides normalise through here, so the refusal
+    reaches the workbook and the sheet together.
     """
+    for axis, which in ((axis1, "x1"), (axis2, "x2")):
+        if axis.size == 0:
+            raise ValueError(
+                f"A reconstructed interaction grid has an empty {which} axis; "
+                "a grid with no nodes is not a lookup table."
+            )
+        if not np.all(np.isfinite(axis)):
+            raise ValueError(
+                f"A reconstructed interaction grid has a non-finite {which} axis; "
+                "a risk has no nearest node among values that are not numbers, and "
+                "the exported block would print the cell's key as 'nan'."
+            )
     order1 = np.argsort(axis1, kind="stable")
     order2 = np.argsort(axis2, kind="stable")
     return axis1[order1], axis2[order2], surface[np.ix_(order1, order2)]
