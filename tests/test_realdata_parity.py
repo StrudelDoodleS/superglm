@@ -80,12 +80,16 @@ MGCV_GAMMA = {
 NB2_THETA = 1000
 
 
+_FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
+_SEV_SKIP_REASON = _datasets.skip_reason("freMTPL2sev.parquet")
+
+
 def _freq_available():
-    return _datasets.find("freMTPL2freq.parquet") is not None
+    return _FREQ_SKIP_REASON is None
 
 
 def _sev_available():
-    return _datasets.find("freMTPL2sev.parquet") is not None
+    return _SEV_SKIP_REASON is None
 
 
 def _prep_freq(df):
@@ -140,8 +144,8 @@ def _features(discrete=False):
 # ═══════════════════════════════════════════════════════════════════════
 
 NB2_SKIP = pytest.mark.skipif(
-    not _freq_available(),
-    reason="data/freMTPL2freq.parquet not found (gitignored)",
+    _FREQ_SKIP_REASON is not None,
+    reason=_FREQ_SKIP_REASON or "",
 )
 
 
@@ -323,8 +327,8 @@ class TestNB2GroupLassoSanity:
 # ═══════════════════════════════════════════════════════════════════════
 
 GAMMA_SKIP = pytest.mark.skipif(
-    not _sev_available(),
-    reason="data/freMTPL2sev.parquet not found (gitignored)",
+    _SEV_SKIP_REASON is not None,
+    reason=_SEV_SKIP_REASON or "",
 )
 
 

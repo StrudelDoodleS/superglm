@@ -54,6 +54,10 @@ Repository = "https://github.com/StrudelDoodleS/superglm"
 dev = [
     "playwright>=1.55",
     "psutil>=7.2",
+    # pandas.read_parquet needs an engine; without one the real-data suites
+    # raise ImportError from inside the test body instead of skipping, so a
+    # developer holding the gitignored parquet still gets no coverage.
+    "pyarrow>=17",
     "pytest>=7.0",
     "pytest-cov",
     "pytest-split>=0.11.0",

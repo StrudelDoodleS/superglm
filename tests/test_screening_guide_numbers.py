@@ -361,13 +361,11 @@ def test_screening_guide_ti_floor_survives_the_dispersion_contract_change(guide)
 # ── the fixture is anchored to the real book (skips without the parquet) ────
 
 
-def _freq_available() -> bool:
-    return _datasets.find("freMTPL2freq.parquet") is not None
-
+_FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
 
 FREQ_SKIP = pytest.mark.skipif(
-    not _freq_available(),
-    reason="data/freMTPL2freq.parquet not found (gitignored)",
+    _FREQ_SKIP_REASON is not None,
+    reason=_FREQ_SKIP_REASON or "",
 )
 
 

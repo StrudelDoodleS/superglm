@@ -11,8 +11,8 @@
   "n_rows": 80000,
   "sample": {"source": "freMTPL2freq.parquet", "random_state": 0, "exposure_clip_lower": 0.01},
   "sum_sample_weight": 42405.3,
-  "mains_edf": 52.866921516271546,
-  "mains_deviance": 25016.433016529278,
+  "mains_edf": 52.86778948250816,
+  "mains_deviance": 25016.43132435702,
   "phi": 4.821131435487084,
   "_retired_phi_comment": [
     "The same Pearson sum over the RETIRED count_nonzero(w) - edf denominator,",
