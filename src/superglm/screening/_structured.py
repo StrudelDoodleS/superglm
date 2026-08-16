@@ -92,6 +92,14 @@ module is a boundary moving underneath an unstated choice.  It is:
      all; :func:`_penalty_root` takes it at its MAGNITUDE, which is the only
      choice that is a function of the data rather than of the rounding, and
      the cost of that is measured under "WHAT CLAUSE 1 COSTS" below.
+  5. **THIS POLICY IS ROUTE-LOCAL, AND STATING IT HERE DOES NOT STATE IT FOR
+     THE PAIR.**  The DENSE route scores the same pairs by its own mechanism
+     and does not share these clauses; the suite's cross-arm parity
+     assertions are the only thing holding the two together on a pencil where
+     the answer is a convention.  See "THE OTHER ROUTE" below, which measures
+     what that costs.  Anything asserting agreement between the arms on a
+     singular pencil is asserting that two different conventions coincide,
+     which is a fact about the fixtures and not about either route.
 
 **WHAT THE LITERATURE SETTLES AND WHAT IT DOES NOT, CHECKED RATHER THAN
 RECALLED.**  Three citations this module carried were re-verified against the
@@ -153,6 +161,43 @@ undecidable direction, paid the same way by every float64 route.  The
 rank-differencing form this replaced read 5.405 there and was NEARER, which is
 a coincidence of where its own arbitrary cut landed and not a method to go
 back to.
+
+**THE OTHER ROUTE, AND THE SHARPEST EVIDENCE THAT THE QUANTITY IS UNDER-
+DETERMINED AT ALL.**  Clause 5 is not hypothetical, and the demonstration is
+better than any excursion bound: on the dense route the published ``edf`` moves
+with THREAD COUNT at a lambda that is bit-identical across the same runs.
+Measured 2026-08-16, all six thread pools pinned together, the pair's dense
+``V_eff``/``S`` operands frozen and only the reduction order varying:
+
+    fixture                 kappa(G)     edf at 1 / 4 / 8 threads     spread
+    _thin_level_pair(.001)  3.04e+03     18.999023 18.998757 18.998762  2.7e-04
+    _vanishing_mass(1e-12)  3.66e+12    181.191309 181.191333 181.191321 2.4e-05
+    _starved_bs_pair        1.99e+307   (bit-identical here)           0.0
+
+Same inputs, same lambda, same code; the answer depends on the order the
+machine added things up.  A quantity that does that is not one this module is
+approximating badly -- it is one that is not determined by the data, which is
+LAPACK's "not well defined" measured rather than quoted.  A sibling measurement
+on a wider band geometry puts the same swing at 1.102 df.
+
+The mechanism is visible in the operands: ``G = V_eff + balance * S`` has
+``kappa(G) = 1.99e+307`` on the starved pair -- the common null space, exactly
+-- and 3.7e+12 to 3.1e+14 on three more, and the dense route hands that ``G`` to
+the generalized symmetric-DEFINITE driver.  Its fallback whitening, which does
+apply a cut, is reached only when that driver raises, i.e. only when its
+Cholesky of ``G`` actually breaks down; on a ``G`` that is numerically singular
+but whose Cholesky still completes, no cut is taken and the shares are only
+clipped into ``[0, 1]`` afterwards.  The LAPACK Users' Guide states the
+precondition being crossed there in as many words (3rd ed., sec. 2.3.5.2):
+"The current routines in LAPACK are intended only for regular matrix pencils."
+
+Nothing about that is fixed here -- it is the dense route's, it is tracked
+separately, and this module owns neither the file nor the fix.  It is recorded
+because a policy that describes one arm of a two-arm comparison, on the exact
+condition where the two arms are free to differ, would be incomplete.  THIS
+ROUTE is bit-identical across thread settings on every one of these fixtures,
+which is the property clause 3's derived cuts buy and a clipped
+symmetric-definite driver does not.
 
 =============================================================================
 
