@@ -289,7 +289,7 @@ def summary(
         lambda2=fitted_lambda2(model),
         n_obs=n,
         alpha=alpha,
-        monotone_repairs=getattr(model, "_monotone_repairs", None),
+        monotone_repairs=shape_repaired_feature_names(model),
         precomputed_R_a=inf["R_a"],
         precomputed_edf=inf["edf"],
         precomputed_edf1=inf["edf1"],
@@ -302,6 +302,7 @@ def summary(
             fitted_penalty(model), model._groups
         ),
     )
+    _withhold_repaired_term_inference(coef_rows, shape_repaired_feature_names(model))
     phi = res.phi
     se_dict: dict[str, np.ndarray] = {}
     se_raw_dict: dict[str, np.ndarray] = {}
@@ -599,6 +600,58 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
         )
 
     return rows
+
+
+def shape_repaired_feature_names(model) -> dict:
+    """Every feature whose published coefficients came out of a shape repair.
+
+    ``_shape_repairs``, not ``_monotone_repairs``: the engine records a
+    curvature repair only in the former, so reading the monotone dict alone
+    left ``convex``/``concave`` repairs unmarked and un-withheld on every
+    reporting surface.
+    """
+    repairs = getattr(model, "_shape_repairs", None)
+    if repairs:
+        return dict(repairs)
+    return dict(getattr(model, "_monotone_repairs", None) or {})
+
+
+def _withhold_repaired_term_inference(coef_rows, repaired_features) -> None:
+    """Withhold the term statistics a shape repair invalidates.
+
+    A post-fit repair projects the fitted curve onto the monotone or curvature
+    cone. The projection is a CONSTRAINED estimator, and its reference
+    distribution is not the unconstrained fit's: the effective dimension of a
+    shape-restricted fit depends on the number of active cone edges, which is a
+    random variable (Meyer & Woodroofe, "On the degrees of freedom in
+    shape-restricted regression", *Ann. Statist.* 28(4):1083-1104, 2000), and
+    the null distribution of the corresponding test is a mixture of betas --
+    equivalently a chi-square mixture -- rather than the fixed-df chi-square
+    the Wood test computes (Meyer, "Inference using shape-restricted regression
+    splines", *Ann. Appl. Statist.* 2(3):1013-1033, 2008, Sec. 3). A binding
+    repair is by definition on the boundary of the constrained parameter space,
+    which is exactly where the constrained and unconstrained estimators are NOT
+    asymptotically equivalent.
+
+    The point estimate is fine and stays: projecting onto the cone is a weak
+    L_p improvement whatever produced the original estimate (Chernozhukov,
+    Fernandez-Val & Galichon, "Improving point and interval estimators of
+    monotone functions by rearrangement", *Biometrika* 96(3):559-575, 2009,
+    Prop. 1). It is only the uncertainty reported beside it that belongs to a
+    model that was not fitted, so that is what is withheld -- the same move the
+    editor-stale path already makes for statistics it cannot certify, rather
+    than printing a correct-looking number attached to the wrong null.
+    """
+    if not repaired_features:
+        return
+    for row in coef_rows:
+        if row.group not in {str(name) for name in repaired_features}:
+            continue
+        row.wald_chi2 = None
+        row.wald_p = None
+        row.ref_df = None
+        row.curve_se_min = None
+        row.curve_se_max = None
 
 
 def _suppress_editor_inference(coef_rows) -> None:

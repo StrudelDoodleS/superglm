@@ -85,6 +85,47 @@ def _canonical_intercept_shift(model, beta) -> float:
     return shift
 
 
+def _term_publishes_a_centred_contribution(model, groups) -> bool:
+    """Whether the published basis for this term asserts a zero-mean contribution.
+
+    The centering check below is a statement about the CANONICALIZED public
+    basis: runtime canonicalization records a per-group ``column_means`` for
+    every term it registered and the public intercept carries ``means @ beta``
+    for them, so a registered term's published contribution has mean zero by
+    construction and a repair cannot move it. A term the canonicalizer never
+    registered has no such invariant to assert -- its design columns are
+    published as they stand, and the whole of a repair's level is carried by the
+    intercept the engine reprofiles immediately afterwards.
+
+    Membership is decided by ``hasattr(spec, "_basis_matrix")``, which an
+    ``OrderedCategorical`` fails because it WRAPS the spline that carries the
+    matrix. With ``select=True`` the inner spline's identifiability projection
+    is skipped as well, so the columns genuinely do not sum to zero; the check
+    then read a nonzero mean off a term that never claimed a zero one and
+    refused every repair on it, while the identical unwrapped ``Spline`` --
+    registered, its recorded means cancelling the same quantity -- repaired.
+    Issue #311: a declared constraint made unusable on the wrapper for a reason
+    that has nothing to do with the constraint.
+
+    Nothing is given up by asking first. For a term the check does clear, its
+    quantity is ``column_means @ delta`` minus the recorded shift of the same
+    name, which is zero for EVERY ``delta`` -- so on the terms where it passes
+    today it is not discriminating between repairs at all. The guards that are
+    (feasibility of the certificate, and the objective against the zero-term
+    fallback) run on this term exactly as before.
+    """
+    runtime_state = getattr(model, "_runtime_canonical_state", None)
+    if not isinstance(runtime_state, dict):
+        return False
+    registered = {
+        tuple(group_state["solver_slice"])
+        for term_state in runtime_state.get("terms", {}).values()
+        if term_state.get("applied_to_public_model", False)
+        for group_state in term_state.get("groups", [])
+    }
+    return any((group.start, group.end) in registered for group in groups)
+
+
 def _synchronize_repaired_intercept_state(model) -> None:
     """Keep solver/public intercepts coherent after a public-basis coefficient repair."""
     public_result = model._result
@@ -467,7 +508,13 @@ def _validate_repair_for_publication(
     )
     mean_shift = float(np.mean(candidate_eta_delta))
     centering_tolerance = 2e-10 * (1.0 + float(np.max(np.abs(candidate_eta_delta))))
-    if not np.isfinite(mean_shift) or abs(mean_shift) > centering_tolerance:
+    if not np.isfinite(mean_shift):
+        raise RuntimeError(
+            "Unsafe shape repair rejected before publication: fitted centering changed"
+        )
+    if abs(mean_shift) > centering_tolerance and _term_publishes_a_centred_contribution(
+        model, groups
+    ):
         raise RuntimeError(
             "Unsafe shape repair rejected before publication: fitted centering changed"
         )
