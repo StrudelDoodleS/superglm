@@ -189,6 +189,7 @@ repaired term is withheld rather than reported:
 |---|---|
 | `summary()` / `metrics().summary()` | chi-square, p-value, `ref_df`, curve SE band, per-level SE and CI all withheld; the row prints `repaired (inference withheld)`; `detail="full"` prints no per-coefficient rows |
 | `term_inference(name)` | warns and returns without SE/CI; `monotone_repaired` is `True` |
+| `relativities(with_se=True)` | warns and drops `se_log_relativity` for the repaired feature's frame only |
 | `simultaneous_bands(name)` | refuses |
 | `plot()` / `plot_data()` | no interval band, via `term_inference` |
 

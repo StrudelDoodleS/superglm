@@ -31,6 +31,22 @@ _EDITOR_STALE_INFERENCE_MESSAGE = (
 )
 
 
+def _shape_repaired_features(model) -> set[str]:
+    """The features whose published coefficients came out of a shape repair.
+
+    Routed through ``report_ops.shape_repaired_feature_names`` rather than
+    reading ``_shape_repairs`` directly, so this half of the contract cannot
+    disagree with the summary's half about which terms are repaired -- that
+    helper falls back to ``_monotone_repairs`` for a model pickled before
+    ``_shape_repairs`` existed, and reading the newer attribute alone would
+    withhold in ``summary()`` and publish here on exactly the input the
+    fallback was written for.
+    """
+    from superglm.model.report_ops import shape_repaired_feature_names
+
+    return {str(key) for key in shape_repaired_feature_names(model)}
+
+
 def _shape_repaired(model, name) -> bool:
     """Whether this term's published coefficients came out of a shape repair.
 
@@ -44,7 +60,7 @@ def _shape_repaired(model, name) -> bool:
     Fernandez-Val & Galichon, *Biometrika* 96(3):559-575, 2009, Prop. 1); the
     band around them belongs to a model that was not fitted.
     """
-    return str(name) in {str(key) for key in (getattr(model, "_shape_repairs", None) or {})}
+    return str(name) in _shape_repaired_features(model)
 
 
 _SHAPE_REPAIRED_INFERENCE_MESSAGE = (
@@ -143,7 +159,7 @@ def relativities(model, with_se=False, centering="native"):
     if getattr(model, "_editor_inference_stale", False) and with_se:
         warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
-    return _relativities(
+    frames = _relativities(
         model._feature_order,
         model._interaction_order,
         model._specs,
@@ -154,6 +170,18 @@ def relativities(model, with_se=False, centering="native"):
         covariance_fn=(lambda: model._coef_covariance) if with_se else None,
         centering=centering,
     )
+    # Per FEATURE, not for the whole call: this returns every term at once, and
+    # dropping the band on unrepaired terms because one term was projected
+    # would be the over-reach the repair record already avoids. Only the
+    # repaired frames lose their SE column; the curve stays in all of them.
+    if with_se:
+        repaired = _shape_repaired_features(model)
+        for name in repaired & frames.keys():
+            frame = frames[name]
+            if "se_log_relativity" in frame.columns:
+                warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
+                frames[name] = frame.drop(columns=["se_log_relativity"])
+    return frames
 
 
 def model_feature_se_from_cov(model, name, Cov_active, active_groups, n_points=200):
