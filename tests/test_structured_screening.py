@@ -245,6 +245,56 @@ def _residualized_design(p, geometry):
     return G
 
 
+def _cell_table_profiled_score(B_a, S_cell, W_cell, level_rows):
+    """``U_eff`` from the CELL TABLES, sharing nothing with the kernel.
+
+    :func:`_wood_stacked_statistic` takes ``geometry.U_eff`` verbatim and
+    rebuilds ``G`` from ``p.R``, so it arbitrates the application of ``A^+``
+    and would reproduce a wrong profiled score exactly.  This is the missing
+    half: the pair's weighted design assembled from ``B_a``/``W_cell``, the
+    tensor block residualized on the mains by one pivoted QR, and the score
+    contracted against the residual --
+
+        U_eff = X_tensor' (I - P) zw,    zw = s / sqrt(w),
+
+    which is the definition, taken through no ``M^+`` and no row-space factor.
+    The mains are REQUIRED to be full rank, as in :func:`_reference_factors`
+    and for the same reason: residualizing on a pseudo-inverse would make this
+    a third quantity rather than an arbiter.  Returned in the kernel's
+    level-major order.
+    """
+    B_a = np.asarray(B_a, dtype=np.float64)
+    level_rows = np.asarray(level_rows, dtype=np.intp)
+    k_a, k_b = B_a.shape[1], level_rows.size
+    cells = np.argwhere(W_cell > 0.0)
+    rows_a, rows_b = cells[:, 0], cells[:, 1]
+    weight = W_cell[rows_a, rows_b]
+    root_w = np.sqrt(weight)[:, None]
+    indicator = (rows_b[:, None] == level_rows[None, :]).astype(np.float64)
+    tensor = (B_a[rows_a][:, :, None] * indicator[:, None, :]).reshape(cells.shape[0], k_a * k_b)
+    tensor = tensor * root_w
+    mains = np.concatenate([np.ones((cells.shape[0], 1)), B_a[rows_a], indicator], axis=1) * root_w
+    Q, R_mains, _ = scipy.linalg.qr(mains, mode="economic", pivoting=True)
+    diag = np.abs(np.diag(R_mains))
+    tol = max(mains.shape) * np.finfo(np.float64).eps * diag[0]
+    assert int(np.sum(diag > tol)) == mains.shape[1], (
+        "the reference residualizes on a full-rank set of mains or not at all: "
+        f"{int(np.sum(diag > tol))} of {mains.shape[1]} clear {tol:.3e}"
+    )
+    resid = tensor - Q @ (Q.T @ tensor)
+    zw = S_cell[rows_a, rows_b] / np.sqrt(weight)
+    # dense column order is p*k_b + q; the kernel groups by level
+    perm = np.arange(k_a * k_b).reshape(k_a, k_b).T.reshape(-1)
+    scale = float(np.linalg.norm(tensor)) * float(np.linalg.norm(zw))
+    # Both forms are ``X'(I - P) zw`` and both reach it by orthogonal
+    # transformations, so their difference is bounded by the QR's own backward
+    # error, ``c(n) eps ||X|| ||zw||`` with ``c(n)`` the reduction depth
+    # (Higham, ASNA 2nd ed., Thm 19.4).  ``n_cells`` is that depth here and the
+    # factor of 8 rounds it up rather than fitting it.
+    bound = 8.0 * cells.shape[0] * np.finfo(np.float64).eps * scale
+    return (resid.T @ zw)[perm], bound
+
+
 def _wood_stacked_statistic(p, geometry, lam):
     """``T = U_eff' A(lambda)^+ U_eff`` by the textbook O(L^3) stacked QR.
 
@@ -645,8 +695,9 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     the shipped tree, which returns ``1e-300`` for the positive one.
 
     This test reds against the form it replaces for a structural reason: that
-    one reached the guard through a ``FakeFactor`` standing in for
-    ``_pair_arrow``, and ``_pair_arrow`` no longer computes ``edf``.
+    one reached the guard through a ``FakeFactor`` standing in for the
+    moment-space arrow, which no longer computes ``edf`` and, since issue
+    #298, is not built at all.
     """
     import superglm.screening._structured as st
 
@@ -796,27 +847,33 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
 
 
 @pytest.mark.parametrize(
-    "build",
+    ("build", "full_rank_mains"),
     (
-        pytest.param(lambda: _structured_inputs(_thin_level_pair(low_weight=1.0)), id="thin-level"),
-        pytest.param(lambda: _near_absorbed_cells(1e-12), id="near-absorbed"),
+        pytest.param(
+            lambda: _structured_inputs(_thin_level_pair(low_weight=1.0)), True, id="thin-level"
+        ),
+        pytest.param(lambda: _near_absorbed_cells(1e-12), False, id="near-absorbed"),
     ),
 )
-def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build):
+def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build, full_rank_mains):
     """Issue #298: ``edf`` moved onto the factors and the statistic did not.
 
-    Two assertions, and they are the same statement from either end.
+    Three assertions, and they are the same statement from three sides.
 
-    **A MOMENT-ONLY PERTURBATION MOVES NEITHER.**  ``V``, ``c`` and ``m`` are
-    the pair's float64 Grams.  ``edf`` has been blind to them since #285 --
-    perturb them by 1e-8 relative and it does not move by one ulp -- while the
-    statistic went through ``_pair_arrow`` and ``M^+``, both of which are
-    pseudo-inverses of those Grams.  Measured on the shipped tree at the same
-    three lambdas asserted here, ``edf`` moves 0.0 and the statistic moves up
-    to **1.5e-05 relative**.  The two numbers are divided into each other by
-    ``z = (T/phi - edf0)/sqrt(2 edf0)``, so one of them being a function of the
-    moments and the other not is a defect in the RANKING and not only in a
-    published column.
+    **A MOMENT-ONLY PERTURBATION MOVES NEITHER, AND BOTH CHANNELS ARE
+    PERTURBED.**  ``V``, ``c`` and ``m`` are the pair's float64 curvature
+    Grams; ``U``, ``u_cat`` and ``u_border`` are its score moments.  ``edf`` has
+    been blind to the first three since #285 -- perturb them by 1e-8 relative
+    and it does not move by one ulp -- while the statistic went through a
+    moment-space arrow AND through ``U_eff = U - C' M^+ u_m``, so it read all
+    six.  Jittering only the curvature half would red against the shipped tree
+    for the arrow's reason alone and leave the ``U_eff`` claim -- the half this
+    change actually rewrites -- unpinned, so both halves are jittered here.
+    Measured on the shipped tree at the same three lambdas asserted below,
+    ``edf`` moves 0.0 and the statistic moves up to **1.5e-05 relative**.  The
+    two numbers are divided into each other by ``z = (T/phi - edf0)/sqrt(2
+    edf0)``, so one of them being a function of the moments and the other not
+    is a defect in the RANKING and not only in a published column.
 
     **AND THE DESIGN IS THE ONE THAT IS RIGHT.**  Against the stacked-QR
     arbiter, which forms no Gram and inverts none, the moment route is up to
@@ -827,11 +884,23 @@ def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build):
     and 1e-9 is four orders above the worst measured (4.7e-13) while still
     three orders below the moment route's best miss.
 
-    RED against the shipped tree on both halves.
+    **THE ARBITER CANNOT SEE AN ERROR IN ``U_eff``, SO THAT IS CHECKED
+    SEPARATELY.**  :func:`_wood_stacked_statistic` takes ``geometry.U_eff``
+    verbatim and rebuilds ``G`` from ``p.R``, so it verifies the application of
+    ``A^+`` and would reproduce a wrong profiled score exactly.  On the
+    ``thin-level`` arm -- where :func:`_reference_factors` asserts the mains are
+    full rank, clearing the LAPACK tolerance by 4.4e+10 -- ``U_eff`` is
+    therefore held against a reference built from the CELL TABLES and nothing
+    the kernel carries.  ``near-absorbed`` is excluded from that arm and said
+    so: its overlap span is rank deficient by construction, which is what
+    ``_reference_factors`` refuses rather than truncates.
+
+    RED against the shipped tree on the invariance half.
     """
     import superglm.screening._structured as st
 
-    p = spline_cat_moments(*build())
+    inputs = build()
+    p = spline_cat_moments(*inputs)
     geometry = _profile(p)
     rng = np.random.default_rng(0)
     jittered = dataclasses.replace(
@@ -839,16 +908,21 @@ def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build):
         V=p.V * (1.0 + 1e-8 * rng.standard_normal(p.V.shape)),
         c=p.c * (1.0 + 1e-8 * rng.standard_normal(p.c.shape)),
         m=p.m * (1.0 + 1e-8 * rng.standard_normal(p.m.shape)),
+        U=p.U * (1.0 + 1e-8 * rng.standard_normal(p.U.shape)),
+        u_cat=p.u_cat * (1.0 + 1e-8 * rng.standard_normal(p.u_cat.shape)),
+        u_border=p.u_border * (1.0 + 1e-8 * rng.standard_normal(p.u_border.shape)),
     )
     jittered_geometry = _profile(jittered)
 
     scale = max(p.profiled_trace, 1e-300) / max(float(np.trace(p.S_a)) * p.dims[0], 1e-300)
+    evaluated = 0
     for mult in (1e-10, 1e-2, 1e10):
         lam = mult * scale
         try:
             statistic, edf = st._evaluate(p, geometry, lam)
         except st._UnstableStructuredEDFError:
             continue
+        evaluated += 1
         moved_statistic, moved_edf = st._evaluate(jittered, jittered_geometry, lam)
         # Bit equality, not a tolerance: a quantity that does not READ an array
         # cannot round differently when that array moves.
@@ -858,12 +932,24 @@ def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build):
         arbiter = _wood_stacked_statistic(p, geometry, lam)
         assert statistic == pytest.approx(arbiter, rel=1e-9), (lam, statistic, arbiter)
 
+    # A refusal at every lambda would leave the loop above asserting nothing,
+    # so an implementation mutated to raise unconditionally would pass.
+    assert evaluated >= 2, evaluated
+
+    if full_rank_mains:
+        B_a, _, S_cell, W_cell, level_rows = inputs
+        reference, bound = _cell_table_profiled_score(B_a, S_cell, W_cell, level_rows)
+        assert np.allclose(geometry.U_eff.reshape(-1), reference, rtol=0.0, atol=bound), (
+            np.max(np.abs(geometry.U_eff.reshape(-1) - reference)),
+            bound,
+        )
+
 
 def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch):
     """``edf`` uses the PSD projection of ``S_a``; the statistic uses ``S_a``.
 
-    ``_evaluate`` hands the same ``rootS' rootS`` to ``_pair_arrow`` that the
-    filter-factor sum uses, so the two halves score one pencil by
+    Both halves are read off ONE block-angular QR whose penalty rows are
+    ``sqrt(lambda) root_penalty``, so they score one pencil by
     construction.  What that does NOT settle is whether the projection is
     entitled to change the pencil at all: the DENSE route still assembles
     ``S_ti`` raw, so a projection that removed something material would leave
