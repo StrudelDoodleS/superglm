@@ -589,13 +589,11 @@ def test_mixed_null_z_stays_bounded_dispersed_gaussian(seed):
 # ── real-book end-to-end sanity (skips when the parquet is absent) ─────
 
 
-def _freq_available():
-    return _datasets.find("freMTPL2freq.parquet") is not None
-
+_FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
 
 FREQ_SKIP = pytest.mark.skipif(
-    not _freq_available(),
-    reason="data/freMTPL2freq.parquet not found (gitignored)",
+    _FREQ_SKIP_REASON is not None,
+    reason=_FREQ_SKIP_REASON or "",
 )
 
 
