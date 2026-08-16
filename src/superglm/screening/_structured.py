@@ -56,8 +56,11 @@ Fisher weights, which make both ``X'WX + S`` and ``X'WX`` positive definite
 and the edf well defined; Hansen assumes ``rank(L) = p`` and ``N(A) & N(L) =
 {0}`` -- his GSVD is stated with ``X`` NONSINGULAR and ``mu_p > 0``, so the
 degenerate case is assumed away and not handled.  Here ``S`` is semidefinite
-by construction and a probe on the starved family found 6 of 77 directions in
-``null(V_eff) & null(S)``.
+by construction, and the intersection is genuinely nonempty on the starved
+family -- an earlier probe put it at 6 of 77 directions there, and a count at
+the LAPACK cut across this suite's twelve fixtures finds it nonempty on that
+family and NOWHERE ELSE, one direction of 78.  The condition is rare; what is
+not rare is being unable to decide it, which is clause 2 below.
 
 ============================== THE SINGULAR-PENCIL POLICY ====================
 
@@ -70,16 +73,26 @@ module is a boundary moving underneath an unstated choice.  It is:
      direction adds nothing to ``edf`` and the pair is scored anyway.  That is
      what ``tr(A^+ V_eff)`` computes with ``A^+`` the Moore-Penrose inverse,
      and it is what every deflation site here already did before it was
-     stated: :func:`_filter_factor_sum`'s ``keep``, and
-     :func:`_block_inverse_factors`'.  It is a CHOICE about an undefined
+     stated: :func:`_filter_factor_sum`'s ``keep``, and the one in
+     :func:`_block_inverse_factors`.  It is a CHOICE about an undefined
      quantity, not an approximation to a defined one, so no error bound
      attaches to it and none is claimed.
   2. **REFUSE ONLY A BROKEN EVALUATION, NEVER A SINGULAR PENCIL.**
      :class:`_UnstableStructuredEDFError` means the delivered number is not a
      filter-factor sum.  Singularity is NOT one of its conditions and must not
-     become one: the routing rule sends this kernel the wide thin-level pairs,
-     where a common null space is the ordinary case and not the corner.  A
-     policy that refused it would refuse the population the kernel exists for.
+     become one -- and the reason is that it is not a DECIDABLE one, which is
+     a better reason than frequency and was measured rather than assumed.
+     Counting the intersection at the LAPACK cut across the twelve fixtures
+     this suite builds, ``null(V_eff) & null(S) != {0}`` on exactly ONE of
+     them -- the starved ``bs`` pair, one direction of 78.  So a common null
+     space is NOT the ordinary case, and any claim here that it is should be
+     read as refuted.  What IS ordinary is being unable to tell: BOTH operands
+     are individually rank deficient on 10 of the 12 (``null(V_eff)`` 1 to 73
+     directions, ``null(S)`` 5 to 19), and ``kappa(V_eff + balance S)`` runs
+     3.0e+03 to 2.0e+307 over the same bank.  A refusal keyed to singularity
+     would therefore be keyed to which side of a round-off cut two nearly
+     dependent subspaces landed on -- the same coin flip clause 4 exists to
+     keep out of a published ``edf0``.
   3. **NEVER DEFLATE WHERE THE PENCIL IS NOT SINGULAR.**  Clause 1 is free
      only on directions the pencil genuinely does not resolve; applied to one
      it does, the same line loses a whole degree of freedom (measured, 22.0
