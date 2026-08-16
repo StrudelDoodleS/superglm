@@ -191,7 +191,8 @@ sources in 2026-08; two were being overstated and are corrected here.
   paper and is WITHDRAWN.
 * **THERE IS NO PUBLISHED CONVENTION TO ADOPT FOR CLAUSE 1, AND THE NEAREST
   ONE GOES THE OTHER WAY.**  Hansen's general-form expansion (*Regularization
-  Tools* v4.1, sec. 2.4, Eq. (2.19)) carries the ``null(L)`` component with
+  Tools* v4.1, sec. 2.4, Eq. (2.19) -- the containing expansion, of which
+  Eq. (2.30) cited above is the ``null(L)`` term) carries that component with
   coefficient ONE, unfiltered -- but it is stated for a pencil with
   ``null(A) & null(L) = {0}``, so it is the non-degenerate case and not a
   convention for this one.  Clause 1 is a LOCAL choice made in the open, not a
@@ -253,9 +254,23 @@ the generalized symmetric-DEFINITE driver.  Its fallback whitening, which does
 apply a cut, is reached only when that driver raises, i.e. only when its
 Cholesky of ``G`` actually breaks down; on a ``G`` that is numerically singular
 but whose Cholesky still completes, no cut is taken and the shares are only
-clipped into ``[0, 1]`` afterwards.  The LAPACK Users' Guide states the
-precondition being crossed there in as many words (3rd ed., sec. 2.3.5.2):
-"The current routines in LAPACK are intended only for regular matrix pencils."
+clipped into ``[0, 1]`` afterwards.  **THE PRECONDITION CROSSED THERE IS
+DEFINITENESS, NOT REGULARITY**, and an earlier draft of this paragraph quoted
+the wrong one: the LAPACK guide's "intended only for regular matrix pencils"
+is sec. 2.3.5.2, the NONSYMMETRIC (GNEP) drivers, which is not the routine in
+use.  The symmetric-definite driver is sec. 2.3.5.1 (GSEP) and its documented
+requirement is that the second operand be positive DEFINITE -- which is
+exactly what ``kappa(G) = 1.99e+307`` fails, and it fails it without raising.
+
+**AND THIS IS NOT A FRESH MEASUREMENT: THE SUITE ALREADY PRICED IT IN.**
+``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom``'s docstring
+records the dense arm's high-edge value moving ``8.33e-06``, ``1.04e-05`` and
+**``4.05e-04``** across 1/2/4/8 threads on this same fixture family, where the
+structured arm is bit-identical -- and that 4.05e-04, LARGER than the 2.7e-04
+above, is why the dense arm was given ``abs=1e-2`` where the structured arm
+holds ``abs=3e-3``.  A tolerance in this suite is already carrying the defect.
+Both readings sit inside the asserted parity bound, so nothing here is a red
+test; what is new is naming the mechanism rather than only budgeting for it.
 
 Nothing about that is fixed here -- it is the dense route's, it is tracked
 separately, and this module owns neither the file nor the fix.  It is recorded
