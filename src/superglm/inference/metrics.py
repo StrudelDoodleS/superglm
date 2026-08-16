@@ -1279,7 +1279,23 @@ class ModelMetrics:
         Uses the same dispersion convention as :attr:`coefficient_se`,
         including Pearson dispersion for known-scale families. Rendered
         coefficient tables retain fitted-family scale.
+
+        Refuses for a term carrying a post-fit shape repair: the band would be
+        propagated from the unconstrained fit's covariance around constrained
+        coefficients, which is the quantity ``summary()`` withholds for that
+        term. A per-feature accessor can say so exactly, so it does -- unlike
+        :attr:`coefficient_se`, which is one dict over every group and already
+        spends the all-zeros array on "not selected".
         """
+        from superglm.model.explain_ops import _shape_repaired
+
+        if _shape_repaired(self._model, name):
+            raise RuntimeError(
+                f"Feature {name!r} carries a post-fit shape repair, so its standard errors "
+                "would be propagated from the unconstrained fit's covariance around "
+                "constrained coefficients -- the quantity summary() withholds for this term. "
+                "Fit the constraint (Constraint.fit.*) if you need a band."
+            )
         return self._feature_se_impl(name, n_points=n_points, phi_scale=True)
 
     # ── Summary ───────────────────────────────────────────────────

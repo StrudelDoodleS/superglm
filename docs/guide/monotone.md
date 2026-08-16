@@ -198,11 +198,16 @@ reported everywhere. Only a term that was **actually projected** is affected —
 a constrained term that was already shape-feasible when another term's repair
 ran keeps its inference in full.
 
-Two surfaces are deliberately **not** qualified, because they are bulk
-covariance readouts rather than a statement about one term:
-`summary()["standard_errors"]["coefficient_se"]` and
-`metrics().feature_se(name)`. Both still return the unconstrained fit's values
-for a repaired term. Read them with the same caveat this section states.
+`metrics().feature_se(name)` refuses for a repaired term, for the same reason
+as `simultaneous_bands`.
+
+One surface is deliberately **not** qualified:
+`summary()["standard_errors"]["coefficient_se"]` (and its `_raw` sibling). It
+is a single dict over every group rather than a statement about one term, and
+it already spends the all-zeros array on "not selected", so blanking a repaired
+group there would collide with that sentinel and change what a consumer reads
+as a live value. It still returns the unconstrained fit's values for a repaired
+term; read it with the caveat this section states.
 
 The reason is that the effective dimension of a shape-restricted fit depends
 on how many cone edges are active, which is a random variable, not a quantity
