@@ -841,6 +841,30 @@ def test_an_empty_impact_bins_still_means_no_sweep():
         "actual_bins",
     ]
 
+    # And what the reader actually opens: the worksheet is still there, with
+    # its headers and no data rows. The payload docstring says so because the
+    # renderer creates it unconditionally, and a claim about the workbook has
+    # to be checked against a workbook.
+    import io
+
+    from openpyxl import load_workbook
+
+    from superglm.export.excel import write_rating_table_workbook
+
+    buffer = io.BytesIO()
+    write_rating_table_workbook(
+        payload,
+        buffer,
+        sheet_name="Rating Tables",
+        summary_sheet_name="Summary",
+        impact_sheet_name="Discretization Impact",
+    )
+    buffer.seek(0)
+    sheet = load_workbook(buffer)["Discretization Impact"]
+    header = [cell.value for cell in sheet[1]]
+    assert header[:4] == ["n_bins", "exported", "feature", "actual_bins"]
+    assert sheet.max_row == 1, "an opted-out sweep must leave no data rows"
+
 
 def test_categorical_and_numeric_blocks_are_exported():
     model, X, y, w = _fit_export_model()
