@@ -1274,6 +1274,95 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         with pytest.raises(ValueError, match=match):
             model.discretization_impact(df, y, n_bins=3, features=["a:b"])
 
+    class _DuplicateAxis:
+        """A grid reconstructor that repeats an axis-1 coordinate.
+
+        ``surface[j, i] = f(x1[i], x2[j])``, so the two columns of the surface
+        under the repeated coordinate are the two factors a reader would find
+        printed against the SAME key.  ``agree`` makes them identical, which is
+        the only case where the repeat costs a reader nothing.
+        """
+
+        parent_names = ("a", "b")
+
+        def __init__(self, *, agree=False):
+            self.agree = agree
+
+        def score(self, x1, x2, beta):
+            return np.zeros(len(np.asarray(x1).ravel()))
+
+        def reconstruct(self, beta, n_points=50):
+            axis = np.array([1.0, 1.0, 3.0])
+            other = np.array([10.0, 20.0, 30.0])
+            second = 0.0 if self.agree else 5.0
+            surface = np.tile(np.array([0.0, second, 9.0]), (3, 1))
+            return {
+                "x1": axis,
+                "x2": other,
+                "relativity": np.exp(surface),
+                "interaction": True,
+            }
+
+    def test_a_repeated_axis_node_with_two_factors_is_refused_by_both_sides(self):
+        """Two rows under one key are a lookup a reader cannot perform.
+
+        The exported block is keyed on axis VALUES, so a repeated coordinate
+        prints the same key twice; ``_nearest_grid_index`` bisects and resolves
+        the tie to one of them, and nothing in the workbook says which. Measured
+        before this guard: the block's axis column read ``[1.0, 1.0, 3.0]`` with
+        relativities ``1.0`` and ``148.41`` against the two ``1.0`` keys, and
+        the sweep priced 146 of 300 rows off the second -- a factor a reader
+        picking the first row would have missed by 148x.
+
+        Refused rather than sorted, because unlike an axis merely out of order
+        there is no ordering that makes the two distinguishable.
+        """
+        from superglm.export.rating_tables import _interaction_blocks
+
+        model, df, y = self._model_with(self._DuplicateAxis())
+        match = "repeated x1 axis"
+        with pytest.raises(ValueError, match=match):
+            _interaction_blocks(model, 3)
+        with pytest.raises(ValueError, match=match):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+
+    def test_a_repeated_axis_node_carrying_one_factor_is_collapsed(self):
+        """A repeat a reader cannot misread costs them nothing, so keep the grid.
+
+        When both copies carry the same factor either row answers the lookup
+        identically, so refusing would reject an export with nothing wrong with
+        it. The duplicate key still goes -- a reader should not have to check
+        that two rows under one key agree -- and what survives has to remain the
+        documented nearest-node lookup, which the deltas below read out loud.
+        """
+        from superglm.export.rating_tables import _interaction_blocks
+
+        model, df, y = self._model_with(self._DuplicateAxis(agree=True))
+
+        block = next(b for b in _interaction_blocks(model, 3) if b.name == "a:b")
+        keys = list(block.table[block.table.columns[0]])
+        assert keys == ["1.0", "3.0"], f"the block still prints a repeated key: {keys}"
+
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+        assert list(
+            result.interaction_tables["a:b"][model._interaction_specs["a:b"].parent_names[0]]
+        ) == [
+            1.0,
+            1.0,
+            1.0,
+            3.0,
+            3.0,
+            3.0,
+        ]
+        # The surviving node is the one a reader finds, so every risk's delta is
+        # the factor printed against its nearest key -- 0 below the midpoint of
+        # 1 and 3, and 9 above it.
+        nodes = np.array([1.0, 3.0])
+        factors = np.array([0.0, 9.0])
+        delta = np.log(result.predictions / result.original_predictions)
+        expected = factors[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
+        np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
+
     def test_a_grid_over_a_categorical_parent_is_declined_by_both_sides(self):
         """A surface is only a rating table if a risk can be found on its axes.
 
