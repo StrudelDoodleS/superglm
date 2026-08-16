@@ -589,15 +589,28 @@ class _UnstableStructuredEDFError(FloatingPointError):
     sum: outside ``[0, ceiling]``, non-finite, or resting on a projection
     larger than the backward error that would explain it.  It does NOT say the
     pencil is singular, and singularity must never be added to its conditions
-    -- the routing rule sends this kernel the wide thin-level pairs, where
-    ``null(V_eff) & null(S) != {0}`` is the ordinary case rather than the
-    corner, and those are scored under clause 1 by contributing zero.
+    -- **NOT because it is common, which was measured and is false**, but
+    because it is not DECIDABLE.  The intersection is nonempty on 1 of this
+    suite's 12 fixtures, and on NONE of the three thin-level pairs an earlier
+    draft of this docstring named as the family where it is ordinary; what IS
+    ordinary is that both operands are individually rank deficient (10 of 12)
+    with ``kappa(V_eff + balance S)`` from 3.0e+03 to 2.0e+307, so a refusal
+    keyed to singularity would be keyed to which side of a round-off cut two
+    nearly dependent subspaces landed on.  Where the intersection is
+    identified, clause 1 scores it by contributing zero.
 
     Every raise site is therefore a statement about ARITHMETIC and each one
     carries its own derived bound: the range guard and the uncertified-clip
     guard in :func:`_evaluate`, and the penalty-projection guard in
     :func:`_profile`.  Adding a raise site whose condition is a property of the
     pencil rather than of the evaluation would silently reverse clause 2.
+
+    **AND THIS CLASS IS NOT THE ONLY WAY THE KERNEL DECLINES.**
+    :func:`structured_ladder` also returns ``None`` without raising -- on
+    ``profiled_trace is None`` and on the monotone-ordering guards -- and the
+    second of those IS reachable from a property of the pencil.  Clause 2
+    governs what may be added HERE; it does not promise the ladder publishes
+    on every singular pencil.
     """
 
 
@@ -1241,8 +1254,39 @@ def _penalty_root(S_a: NDArray) -> NDArray:
     function of the data rather than of the rounding.
 
     Outside the bar a negative eigenvalue is real, no magnitude is taken and
-    the direction is dropped -- and :func:`_profile` then refuses the pair,
-    because the statistic is still scoring ``S_a`` raw.
+    the direction is dropped.
+
+    **WHAT THIS DOCSTRING USED TO PROMISE NEXT WAS WRONG IN BOTH HALVES, AND
+    THE CORRECTION IS THE POINT OF STATING A POLICY AT ALL.**  It said
+    :func:`_profile` "then refuses the pair, because the statistic is still
+    scoring ``S_a`` raw".
+
+    * **The reason is stale.**  :func:`_evaluate` hands
+      ``root_penalty.T @ root_penalty`` to :func:`_pair_arrow`, so the
+      statistic scores the PROJECTED penalty too -- that is what the
+      "statistic factors the pencil the edf chose lambda from" work did.  The
+      guard's real reason is the one :func:`_profile` states at its own site:
+      cross-route comparability, because the DENSE path still assembles
+      ``S_ti`` raw.
+    * **The refusal is not guaranteed, and there is a silent window.**
+      Dropping happens at ``|c| > n eps ||S||_2``; :func:`_profile` raises
+      only at ``clip = |c| / |tr S| > 2 n^2 eps``.  Those are different
+      thresholds, so ``n eps ||S||_2 < |c| <= 2 n^2 eps |tr S|`` is dropped
+      WITHOUT a refusal.  Checked, not reasoned: ``n = 10``, spectrum
+      ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``.  The bar is 2.220e-15 so the
+      eigenvalue is 4.5x outside it and dropped -- ``rootS`` comes back with 9
+      rows of 10 -- while ``clip`` is 7.895e-16 against a threshold of
+      4.441e-14, a factor of 56 short.  **No raise.**  The pair publishes on a
+      penalty the caller did not specify, and the range guard cannot see it
+      because every filter factor stays in ``[0, 1]``.
+
+    That window is a GUARD GAP, not a policy choice, and it is recorded here
+    rather than papered over: under clause 3 it is a deflation on a direction
+    the pencil resolves.  Closing it means keying the guard to the largest
+    DROPPED eigenvalue instead of to aggregate trace mass, which is a
+    behaviour change and is deliberately not made in a documentation-only
+    change.  What is fixed here is the prose asserting a guarantee the code
+    does not provide.
 
     **AND ON A TWO-COLUMN MARGIN THERE IS NOTHING LEFT TO TAKE THE MAGNITUDE
     OF, WHICH IS CLAUSE 4 OF THE SINGULAR-PENCIL POLICY AT ITS WORST.**
