@@ -1480,6 +1480,11 @@ class ModelMetrics:
             model_info["tweedie_phi"] = tw_pr.phi_hat
             model_info["tweedie_p_method"] = tweedie_profile_method_label(tw_pr)
 
+        from superglm.model.report_ops import (
+            _drop_repaired_basis_detail,
+            shape_repaired_feature_names,
+        )
+
         coef_rows = self._build_coef_rows(alpha=alpha)
 
         X_a, W, XtWX_inv, XtWX_inv_aug, active_groups = self._active_info
@@ -1495,6 +1500,15 @@ class ModelMetrics:
             alpha=alpha,
             coefficient_estimable_override=self._current_coefficient_estimable,
             selected_group_names={group.name for group in active_groups},
+        )
+        # The other half of the withholding, and it does not come with the
+        # rows: `build_basis_detail` is an independent pass, so `summary()`
+        # here would otherwise print a term row reading "inference withheld"
+        # above a per-coefficient disclosure of exactly the withheld
+        # quantities -- which the HTML renderer emits unconditionally, so it
+        # reaches a notebook at the default `detail="compact"`.
+        _drop_repaired_basis_detail(
+            basis_detail, self._groups, shape_repaired_feature_names(self._model)
         )
 
         level_presentation = build_summary_level_display(
