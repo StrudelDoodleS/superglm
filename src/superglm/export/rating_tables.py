@@ -1261,7 +1261,9 @@ def build_rating_table_payload(
     binning, not the interaction's own.  That is what makes it the bound a
     consumer of the whole table needs, and it is stated because this issue
     exists precisely because one number on this sheet was read as more than it
-    was.  ``impact_bins`` sweeps that ladder; an empty one means no sheet.
+    was.  ``impact_bins`` sweeps that ladder; an empty one skips the sweep
+    entirely, and the worksheet is still created with its column headers and
+    no rows -- ``write_rating_table_workbook`` creates it unconditionally.
 
     The bound is over the TERMS the sheet lists, not over every factor the
     workbook carries, and three limits on it are tracked rather than fixed
