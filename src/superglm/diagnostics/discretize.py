@@ -342,15 +342,27 @@ def unpositionable_grid_parent(ispec, specs: dict) -> str | None:
     Returns the offending parent's name, or ``None`` when both are positionable.
     """
     from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.ordered_categorical import OrderedCategorical
 
-    if isinstance(ispec, FactorSmooth):
-        # Its second parent is a GROUPING column read as labels, never an axis.
-        return None
     for parent in ispec.parent_names:
         spec = specs.get(parent)
-        if isinstance(spec, Categorical) and not isinstance(spec, OrderedCategorical):
+        # A parent with NO spec entry is unpositionable for the same reason a
+        # ``Categorical`` is: nothing says its column holds numbers, and the
+        # sweep reads it as float64.  It is the state a ``FactorSmooth`` group
+        # column is in -- ``validate_factor_smooth_configuration`` refuses a
+        # ``Categorical`` or ``RandomEffect`` group, so the group is either
+        # numeric or absent from ``specs`` -- and reading ``None`` as
+        # positionable is what let a ``FactorSmooth`` SUBCLASS returning a
+        # surface be shipped as a grid and then die in the sweep on
+        # ``could not convert string to float``.  There was an exemption here
+        # for ``FactorSmooth`` that made that worse and bought nothing: the
+        # exact type cannot reach this function from either side, since its
+        # ``reconstruct`` carries no grid keys and it is on the non-grid list,
+        # and its stated reason -- the second parent is a grouping column read
+        # as labels -- is an argument for REFUSING a grid over it.
+        if spec is None or (
+            isinstance(spec, Categorical) and not isinstance(spec, OrderedCategorical)
+        ):
             return parent
     return None
 
@@ -474,10 +486,18 @@ def _axis_column_labels(parent1: str, parent2: str) -> tuple[str, str]:
     return parent1, parent2
 
 
-def _ascending_grid(
-    axis1: NDArray, axis2: NDArray, surface: NDArray
-) -> tuple[NDArray, NDArray, NDArray]:
-    """Put both axes in ascending order, carrying the surface with them.
+def _grid_lookup_index(axis1: NDArray, axis2: NDArray, printed: NDArray) -> tuple[NDArray, NDArray]:
+    """The rows and columns a lookup keeps, in ascending axis order.
+
+    Returned as INDICES rather than as reordered arrays because the sweep holds
+    two surfaces -- the printed factor and the log surface it measures through
+    -- and the decision has to be made on the printed one on both sides.  ``log``
+    is not injective in float64: above ``|log r| ~ 2`` the gap between adjacent
+    doubles is below ``ulp(log r)``, so ``1e100`` and ``nextafter(1e100)`` are
+    distinct factors with an identical logarithm.  Comparing log rows on one
+    side and factor rows on the other would refuse a repeated node in the
+    workbook and collapse it on the sheet -- the exporter-refuses/sweep-accepts
+    fork, in the guard written to close the reverse of it.
 
     ``_nearest_grid_index`` is a binary search, so a descending or unsorted
     axis would silently map a risk onto a non-nearest node -- and the exporter
@@ -512,11 +532,19 @@ def _ascending_grid(
             )
     order1 = np.argsort(axis1, kind="stable")
     order2 = np.argsort(axis2, kind="stable")
-    axis1, axis2 = axis1[order1], axis2[order2]
-    surface = surface[np.ix_(order1, order2)]
-    keep1 = _distinct_grid_nodes(axis1, surface, "x1")
-    keep2 = _distinct_grid_nodes(axis2, surface.T, "x2")
-    return axis1[keep1], axis2[keep2], surface[np.ix_(keep1, keep2)]
+    sorted1, sorted2 = axis1[order1], axis2[order2]
+    printed = printed[np.ix_(order1, order2)]
+    keep1 = _distinct_grid_nodes(sorted1, printed, "x1")
+    keep2 = _distinct_grid_nodes(sorted2, printed.T, "x2")
+    return order1[keep1], order2[keep2]
+
+
+def _ascending_grid(
+    axis1: NDArray, axis2: NDArray, surface: NDArray
+) -> tuple[NDArray, NDArray, NDArray]:
+    """``_grid_lookup_index`` applied to one surface, for a caller holding only it."""
+    index1, index2 = _grid_lookup_index(axis1, axis2, surface)
+    return axis1[index1], axis2[index2], surface[np.ix_(index1, index2)]
 
 
 def _distinct_grid_nodes(axis: NDArray, slices: NDArray, which: str) -> NDArray:
@@ -867,7 +895,13 @@ def discretization_impact(
         # exporter applies no monotonicity gate to a supplied axis. Sorting the
         # surface with its axes leaves the set of cells -- and so every factor a
         # reader can look up -- unchanged.
-        axis1, axis2, surface = _ascending_grid(axis1, axis2, surface)
+        # Decided on ``relativity`` -- the factor the workbook PRINTS -- and
+        # applied to the log surface, so the exporter and the sweep refuse the
+        # same grids rather than the sweep deciding on a logarithm that is
+        # coarser than the factor it came from.
+        index1, index2 = _grid_lookup_index(axis1, axis2, relativity)
+        axis1, axis2 = axis1[index1], axis2[index2]
+        surface = surface[np.ix_(index1, index2)]
 
         # Through the same parent resolution prediction and design assembly
         # use.  A spline-mode ``OrderedCategorical`` parent contributes its
