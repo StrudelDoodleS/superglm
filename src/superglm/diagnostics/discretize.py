@@ -486,6 +486,10 @@ def _ascending_grid(
     every factor a reader can look up off the exported block is still here,
     and the lookup that finds it is now the documented one.
 
+    A REPEATED node is settled here too, by ``_distinct_grid_nodes``: the set of
+    cells a reader can look up is what matters, and two nodes printing one key
+    are either the same cell twice or a lookup with no answer.
+
     A non-finite or empty axis IS refused, because there is no order that
     rescues it.  ``np.argsort`` puts a ``NaN`` last, the binary search then
     compares against it and gets ``False`` for every finite risk above the
@@ -508,7 +512,52 @@ def _ascending_grid(
             )
     order1 = np.argsort(axis1, kind="stable")
     order2 = np.argsort(axis2, kind="stable")
-    return axis1[order1], axis2[order2], surface[np.ix_(order1, order2)]
+    axis1, axis2 = axis1[order1], axis2[order2]
+    surface = surface[np.ix_(order1, order2)]
+    keep1 = _distinct_grid_nodes(axis1, surface, "x1")
+    keep2 = _distinct_grid_nodes(axis2, surface.T, "x2")
+    return axis1[keep1], axis2[keep2], surface[np.ix_(keep1, keep2)]
+
+
+def _distinct_grid_nodes(axis: NDArray, slices: NDArray, which: str) -> NDArray:
+    """First-occurrence mask, refusing a repeated node that carries two factors.
+
+    The exported block is keyed on axis VALUES, so a repeated coordinate prints
+    the same key twice.  ``_nearest_grid_index`` bisects and resolves the tie to
+    one of the copies, but nothing the workbook carries says which -- a reader
+    holding a risk finds two rows under its nearest key and no way to tell which
+    factor the sheet measured.  Unlike an axis merely out of order, no ordering
+    rescues that, so it is refused.
+
+    A repeat whose copies carry the SAME factor is a different thing: either row
+    answers the lookup identically, so nothing is ambiguous and refusing would
+    reject an export with nothing wrong with it.  Those collapse to one node --
+    the set of distinct cells is unchanged, and a reader is spared checking that
+    two rows under one key agree.
+
+    ``axis`` is sorted and finite by the time this runs, so equal values are
+    adjacent and ``==`` decides them; ``slices`` is the surface indexed along
+    that axis, so ``slices[i]`` is the factor row printed against ``axis[i]``.
+    """
+    repeated = np.empty(axis.shape, dtype=bool)
+    repeated[:1] = False
+    repeated[1:] = axis[1:] == axis[:-1]
+    if not np.any(repeated):
+        return np.ones(axis.shape, dtype=bool)
+    at = np.flatnonzero(repeated)
+    # Consecutive comparison is enough: a run is identical throughout exactly
+    # when each member equals the one before it.  ``equal_nan`` because a
+    # reconstruction may carry a ``NaN`` cell, and two NaNs print the same key
+    # and the same string, so they are not what makes a repeat ambiguous.
+    rows = np.asarray(slices, dtype=np.float64)
+    if not np.array_equal(rows[at], rows[at - 1], equal_nan=True):
+        raise ValueError(
+            f"A reconstructed interaction grid has a repeated {which} axis node whose "
+            "copies carry different factors; the exported block would print the same "
+            "key twice and a reader could not tell which of them the nearest-node "
+            "lookup used."
+        )
+    return ~repeated
 
 
 def _nearest_grid_index(grid: NDArray, x: NDArray) -> NDArray:
