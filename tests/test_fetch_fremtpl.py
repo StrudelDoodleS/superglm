@@ -430,7 +430,10 @@ def test_a_silently_truncated_body_is_reported_as_transport_not_a_re_encode(tmp_
     art = Artifact(
         **{**vars(FREQ), "sha256": hashlib.sha256(whole).hexdigest(), "size": len(whole)}
     )
-    _stub_urlopen_bodies(monkeypatch, [_ShortStream(whole, len(whole) // 2)])
+    _stub_urlopen_bodies(
+        monkeypatch,
+        [_ShortStream(whole, len(whole) // 2), _ShortStream(whole, len(whole))],
+    )
 
     with pytest.raises(FetchError) as excinfo:
         obtain(art, tmp_path)
@@ -438,6 +441,40 @@ def test_a_silently_truncated_body_is_reported_as_transport_not_a_re_encode(tmp_
     assert "DAMAGED TRANSFER" in message, message
     assert "Do not re-pin" in message, message
     assert "upstream artifact changed" not in message, message
+
+
+def test_agreeing_downloads_at_an_unpinned_length_are_reported_as_ambiguous(tmp_path, monkeypatch):
+    """The realistic re-encode, and the deterministic truncation, are ONE branch.
+
+    A re-encode almost always changes the byte length, so the length check --
+    which used to return before the second download ever ran -- caught every
+    realistic re-encode and told the operator, as fact, that it was a damaged
+    transfer and not to re-pin.  Every rerun repeated it, and the workflow
+    repeated it again, so the documented recovery was reachable only by a
+    re-encode that preserved the length exactly.  The suite could not see that:
+    its only re-encode case set the PIN's length to the re-encoded length.
+
+    The honest answer is that these bytes are ambiguous.  A proxy truncating at
+    a fixed offset survives a repeat download exactly as a re-encode does, and
+    nothing available here separates them -- so the message says both and sends
+    the reader to the artifact's published length, rather than picking one.
+
+    Serving two bodies is itself the assertion that the second download runs:
+    the early return took one, so it never reached ``remaining.pop(0)`` twice.
+    """
+    reencoded = b"upstream wrote this instead" * 49
+    assert len(reencoded) != FREQ.size, "the point of the case is a length that is not the pin's"
+    _stub_urlopen_bodies(monkeypatch, [_ShortStream(reencoded, len(reencoded)) for _ in range(2)])
+
+    with pytest.raises(FetchError) as excinfo:
+        obtain(FREQ, tmp_path)
+    message = str(excinfo.value)
+    assert "AMBIGUOUS" in message, message
+    assert str(len(reencoded)) in message and str(FREQ.size) in message, message
+    assert FREQ.url in message, message
+    # Neither of the two routed diagnoses may claim this one.
+    assert "re-pin deliberately after re-measuring" not in message, message
+    assert "DAMAGED TRANSFER" not in message, message
 
 
 def test_same_length_corruption_is_reported_as_transport_not_a_re_encode(tmp_path, monkeypatch):
