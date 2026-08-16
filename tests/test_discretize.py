@@ -1363,6 +1363,80 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         expected = factors[np.abs(df["a"].to_numpy()[:, None] - nodes).argmin(axis=1)]
         np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
 
+    def test_a_parent_with_no_spec_entry_is_not_a_grid_axis_on_either_side(self):
+        """``specs.get`` returns ``None``, and ``None`` is not a number.
+
+        A ``FactorSmooth`` subclass overriding ``reconstruct`` to return a
+        surface is classified as a grid by the contract -- the exact-type fast
+        path does not match a subclass -- and its GROUP column is the one thing
+        a grid axis cannot be: labels with no spec entry, since
+        ``validate_factor_smooth_configuration`` refuses a ``Categorical`` or
+        ``RandomEffect`` group and leaves the column out of ``specs`` entirely.
+        Read as positionable, the exporter shipped the block and the sweep then
+        died on ``could not convert string to float`` -- the whole payload, on a
+        block the exporter had just built.
+
+        There was a ``FactorSmooth`` exemption above this loop that made the
+        case worse and bought nothing: the exact type never reaches here from
+        either side, because its ``reconstruct`` carries no grid keys and it is
+        on the non-grid list.
+        """
+        from superglm.diagnostics.discretize import unpositionable_grid_parent
+
+        class _Spec:
+            parent_names = ("age", "group")
+            name = "age:group"
+
+        # No entry for ``group`` at all, which is the FactorSmooth group's state.
+        assert unpositionable_grid_parent(_Spec(), {"age": Numeric()}) == "group"
+        # And an exempted type is not exempted: the rule is about the PARENT.
+        from superglm.features.factor_smooth import FactorSmooth
+
+        class _SmoothGrid(FactorSmooth):
+            parent_names = ("age", "group")
+
+        smooth = _SmoothGrid.__new__(_SmoothGrid)
+        assert unpositionable_grid_parent(smooth, {"age": Numeric()}) == "group"
+
+    def test_the_two_sides_refuse_a_repeated_node_on_the_same_array(self):
+        """``log`` is coarser than the factor, so it cannot be what decides.
+
+        The exporter sorts and de-duplicates the RELATIVITY it prints; the
+        sweep held a log surface at the same call.  Above ``|log r| ~ 2`` the
+        gap between adjacent doubles is below ``ulp(log r)``, so ``1e100`` and
+        ``nextafter(1e100, inf)`` are distinct printed factors with an
+        identical logarithm -- the workbook would refuse the grid as ambiguous
+        while the sheet collapsed it and reported an impact for a table nobody
+        can hold.  Both now decide on the factor.
+        """
+        big = 1e100
+        nudged = float(np.nextafter(big, np.inf))
+        assert nudged != big
+        assert np.log(nudged) == np.log(big), "the premise: log loses the difference"
+
+        class _UlpApart:
+            parent_names = ("a", "b")
+
+            def score(self, x1, x2, beta):
+                return np.zeros(len(np.asarray(x1).ravel()))
+
+            def reconstruct(self, beta, n_points=50):
+                return {
+                    "x1": np.array([1.0, 1.0, 3.0]),
+                    "x2": np.array([10.0, 20.0, 30.0]),
+                    "relativity": np.tile(np.array([big, nudged, 1.0]), (3, 1)),
+                    "interaction": True,
+                }
+
+        from superglm.export.rating_tables import _interaction_blocks
+
+        model, df, y = self._model_with(_UlpApart())
+        match = "repeated x1 axis"
+        with pytest.raises(ValueError, match=match):
+            _interaction_blocks(model, 3)
+        with pytest.raises(ValueError, match=match):
+            model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+
     def test_a_grid_over_a_categorical_parent_is_declined_by_both_sides(self):
         """A surface is only a rating table if a risk can be found on its axes.
 
