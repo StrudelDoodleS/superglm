@@ -1220,14 +1220,14 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         # ...so the sweep must too, rather than short-circuiting on the base.
         assert _grid_reconstruction(_GridSubclass(), np.zeros(1), 3) is not None
 
-        # And the exact listed type is still short-circuited, which is the
-        # speedup the fast path exists for.
-        assert (
-            type(_GridSubclass())
-            not in __import__(
-                "superglm.diagnostics.discretize", fromlist=["x"]
-            )._non_grid_builtin_interactions()
-        )
+        # The subclass is not a listed type -- which is exactly why the
+        # contract has to decide it, and why the match is on the exact type
+        # while the BASE stays listed and short-circuited.
+        from superglm.diagnostics import discretize as _discretize
+
+        listed = _discretize._non_grid_builtin_interactions()
+        assert type(_GridSubclass()) not in listed
+        assert SplineCategorical in listed
 
     def test_an_unusable_reconstructed_factor_is_refused(self):
         """A caller's grid can hand back something that is not a factor.
@@ -1284,6 +1284,44 @@ class TestTheSweepAndTheExporterAgreeOnWhatAGridIs:
         assert np.all(np.isfinite(grid["log_relativity"].to_numpy()))
         assert int(grid["n_obs"].sum()) == len(df)
 
+    def test_a_malformed_log_field_falls_through_to_the_printed_factor(self):
+        """``log_relativity`` is not part of the grid contract, so it cannot refuse.
+
+        ``_GRID_RECONSTRUCTION_KEYS`` names ``x1``/``x2``/``relativity``, and
+        ``_continuous_interaction_block`` reads only those -- the exporter
+        never looks at the log field. A custom spec can therefore ship a
+        perfectly usable ``relativity`` beside a flattened or non-numeric log
+        field; orienting that unguarded would raise and take the payload down
+        on an interaction the exporter accepts.
+        """
+        from superglm.export import rating_tables
+
+        stub = self._Stub()
+        base = stub.reconstruct
+
+        def _flattened(beta, n_points=50):
+            raw = dict(base(beta, n_points=n_points))
+            raw["log_relativity"] = np.asarray(raw["log_relativity"], dtype=float).ravel()
+            return raw
+
+        stub.reconstruct = _flattened
+        model, df, y = self._model_with(stub)
+
+        # The exporter ships it, because it never reads the field...
+        blocks = rating_tables._interaction_blocks(model, 3)
+        assert [(b.name, b.kind) for b in blocks] == [("a:b", "grid")]
+
+        # ...so the sweep has to measure it, from the printed factor.
+        result = model.discretization_impact(df, y, n_bins=3, features=["a:b"])
+        nodes_a = np.array([1.0, 2.0, 3.0])
+        nodes_b = np.array([10.0, 20.0, 30.0])
+        delta = np.log(result.predictions / result.original_predictions)
+        expected = (
+            nodes_a[np.abs(df["a"].to_numpy()[:, None] - nodes_a).argmin(axis=1)]
+            + 0.01 * nodes_b[np.abs(df["b"].to_numpy()[:, None] - nodes_b).argmin(axis=1)]
+        )
+        np.testing.assert_allclose(delta, expected, rtol=_NODE_EXACT_RTOL, atol=0.0)
+
     def test_a_grid_reconstructor_without_n_points_is_still_a_grid(self):
         from superglm.diagnostics.discretize import _grid_reconstruction
 
@@ -1339,6 +1377,33 @@ class TestExactlyTabulatedInteractionIsNotDiscretized:
         )
         model.fit(df, y)
         return model, df, y
+
+    def test_the_fast_path_only_skips_work(self):
+        """Disabling the short-circuit must not change the answer.
+
+        The fast path exists to avoid reconstructing a term whose answer is
+        already known, so with it disabled the contract must reach the same
+        verdict. Checked on a real fitted ``CategoricalInteraction`` -- the
+        listed type this file already builds -- because the partition test
+        above is membership algebra and cannot see a behavioural divergence.
+        """
+        from superglm.diagnostics import discretize
+        from superglm.export import rating_tables
+
+        model, df, y = self._model()
+        name = next(iter(model._interaction_order))
+        spec = model._interaction_specs[name]
+        beta = rating_tables._interaction_beta(model, name)
+
+        assert type(spec) in discretize._non_grid_builtin_interactions()
+        assert discretize._grid_reconstruction(spec, beta, 5) is None
+
+        patch = pytest.MonkeyPatch()
+        try:
+            patch.setattr(discretize, "_non_grid_builtin_interactions", tuple)
+            assert discretize._grid_reconstruction(spec, beta, 5) is None
+        finally:
+            patch.undo()
 
     def test_a_categorical_interaction_contributes_no_grid(self):
         model, df, y = self._model()
