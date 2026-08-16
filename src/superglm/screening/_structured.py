@@ -93,40 +93,83 @@ module is a boundary moving underneath an unstated choice.  It is:
      would therefore be keyed to which side of a round-off cut two nearly
      dependent subspaces landed on -- the same coin flip clause 4 exists to
      keep out of a published ``edf0``.
+     **AND CLAUSE 2 IS ABOUT THE EXCEPTION, NOT ABOUT THE WHOLE KERNEL.**
+     :func:`structured_ladder` has refusal paths that raise nothing and ARE
+     keyed to the geometry: ``p.profiled_trace is None``, where
+     :func:`_representative_projection` could not place the centered-row rank
+     outside its own ambiguity band, and the monotone-ordering guards at the
+     endpoints and inside the bisection.  The second is reachable by a
+     property of the PENCIL -- the measured ``+0.014141 df`` rise on an
+     indefinite delivered ``V_eff`` is 14000x ``_EDF_TOL`` -- so a singular
+     and indefinite pencil CAN lose a rung with no clause here violated.  What
+     clause 2 forbids is adding singularity to the EXCEPTION's conditions; it
+     does not claim the ladder publishes on every singular pencil, and reading
+     it that way would overstate what #262 was closed on.
   3. **NEVER DEFLATE WHERE THE PENCIL IS NOT SINGULAR.**  Clause 1 is free
      only on directions the pencil genuinely does not resolve; applied to one
-     it does, the same line loses a whole degree of freedom (measured, 22.0
-     against a certified 6.000 on the starved fixture).  So every cut that
-     decides which side a direction is on is a DOCUMENTED ERROR BOUND and
-     never a chosen tolerance -- :func:`_absorption_floor`,
-     :func:`_penalty_root`, :func:`_psd_clip_allowance`.
+     it does, the same line drops a direction that was carrying a filter
+     factor, and the error is a whole degree of freedom per direction rather
+     than a rounding.  So the cuts that decide which side a direction is on
+     are DOCUMENTED ERROR BOUNDS and not chosen tolerances:
+     :func:`_absorption_floor`, :func:`_penalty_root`,
+     :func:`_psd_clip_allowance`.
+     **THAT LIST IS THE DERIVED ONES AND IT IS NOT ALL OF THEM.**  Three more
+     cuts upstream decide which directions ever reach ``keep``, and they are
+     CONVENTIONS rather than bounds: :func:`_profile`'s ``max(shape) eps
+     s_max`` (the ``matrix_rank`` convention, which fixes ``r`` and hence the
+     size of ``H``), :func:`_block_inverse_factors`' cut at the same
+     convention, and :func:`_representative_projection`'s ``sqrt(k eps)``,
+     which its own docstring describes as carried from the DENSE path for
+     cross-path agreement -- clause 5 in miniature, and the one place this
+     module adopts another route's policy on purpose.  Anyone extending
+     clause 3 has to say which of the two kinds a new cut is.
   4. **WHERE THE CUT ITSELF IS UNDECIDABLE, SAY SO RATHER THAN PICK.**  A
      penalty residue below ``eigh``'s own error bar has no float64 answer at
      all; :func:`_penalty_root` takes it at its MAGNITUDE, which is the only
-     choice that is a function of the data rather than of the rounding, and
-     the cost of that is measured under "WHAT CLAUSE 1 COSTS" below.
+     choice that is a function of the data rather than of the rounding.  Where
+     the eigensolver returns a bit-exact ``0.0`` there is not even a magnitude
+     to take, the direction is reported FREE, and its filter factor is ONE --
+     the opposite end from clause 1, and the more expensive one.  Measured
+     under "WHAT CLAUSE 4 COSTS" below.
   5. **THIS POLICY IS ROUTE-LOCAL, AND STATING IT HERE DOES NOT STATE IT FOR
-     THE PAIR.**  The DENSE route scores the same pairs by its own mechanism
-     and does not share these clauses; the suite's cross-arm parity
-     assertions are the only thing holding the two together on a pencil where
-     the answer is a convention.  See "THE OTHER ROUTE" below, which measures
-     what that costs.  Anything asserting agreement between the arms on a
-     singular pencil is asserting that two different conventions coincide,
-     which is a fact about the fixtures and not about either route.
+     THE PAIR.**  The DENSE route INTENDS the same zero contribution -- it
+     says so, and its fallback whitening discards the common null space
+     exactly as clause 1 does.  What it does not have is a place where that
+     intent is guaranteed to be REACHED: the fallback is entered only when the
+     definite driver raises, so a numerically singular pencil the driver
+     accepts is never cut at all.  See "THE OTHER ROUTE" below.  **THAT IS A
+     DEFECT IN THE OTHER ROUTE AND NOT A SECOND LEGITIMATE CONVENTION**, and
+     saying otherwise would dress a user-visible instability up as a design
+     choice.  The clause is that a policy stated in one module is not a
+     property of the pair, so a cross-arm assertion on a singular pencil is
+     evidence about the fixtures until the other route has a stated policy
+     too.
 
 **WHAT THE LITERATURE SETTLES AND WHAT IT DOES NOT, CHECKED RATHER THAN
 RECALLED.**  Three citations this module carried were re-verified against the
 sources in 2026-08; two were being overstated and are corrected here.
 
-* A SYMMETRIC pencil is singular iff ``null(A) & null(B) != {0}`` -- Z.-h.
-  Cao, "On a deflation method for the symmetric generalized eigenvalue
-  problem", *LAA* 92:187-196 (1987), doi:10.1016/0024-3795(87)90256-4.  The
-  direction this module uses is ELEMENTARY and needs no citation: ``x`` in
-  both null spaces gives ``(A - lambda B) x = 0`` for every lambda, so the
-  determinant vanishes identically.  It is the CONVERSE that needs symmetry --
-  it is false for general pencils -- and Cao is the reference for that.  Cao's
-  own subject is the deflation, and the characterization is a consequence of
-  it rather than its headline.
+* For a symmetric pencil with ``B`` POSITIVE SEMIDEFINITE, singular iff
+  ``null(A) & null(B) != {0}`` -- Z.-h. Cao, "On a deflation method for the
+  symmetric generalized eigenvalue problem", *LAA* 92:187-196 (1987),
+  doi:10.1016/0024-3795(87)90256-4, whose subject is the deflation and whose
+  abstract states the special Kronecker form precisely "if ``B`` is positive
+  semidefinite".  The direction this module uses is ELEMENTARY and needs no
+  citation: ``x`` in both null spaces gives ``(A - lambda B) x = 0`` for every
+  lambda, so the determinant vanishes identically.
+  **THE CONVERSE NEEDS THE SEMIDEFINITENESS AND NOT MERELY THE SYMMETRY, AND
+  AN EARLIER DRAFT HERE DROPPED THAT HYPOTHESIS.**  ``A = [[0,1,0],[1,0,0],
+  [0,0,0]]`` and ``B = [[0,0,1],[0,0,0],[1,0,0]]`` are both symmetric with
+  ``null(A) = span(e3)``, ``null(B) = span(e2)`` and an intersection of
+  ``{0}``, yet ``det(A - lambda B) = 0`` identically -- checked, at seven
+  lambdas from -3 to 1e6.  ``B`` there has eigenvalues ``-1, 0, 1``, so it is
+  the cone that the counterexample leaves.
+  **AND THAT HYPOTHESIS IS NOT ALWAYS SATISFIED HERE EITHER.**  The delivered
+  ``V_eff`` is measured materially outside the cone on the starved pair
+  ("WHERE THE ARITHMETIC IS BEYOND EVERY FORM"), so on exactly the geometry
+  where the intersection is nonempty, the iff is not available and only the
+  elementary direction is.  That is enough for clause 1, which needs a common
+  null vector to imply singularity and never the reverse.
 * The values on that intersection are UNDEFINED, and undefined is all LAPACK
   says.  *LAPACK Users' Guide*, 3rd ed. (SIAM 1999), sec. 2.3.5.3, "Generalized
   Singular Value Decomposition (GSVD)": the trivial eigenvalues, "those
@@ -153,15 +196,25 @@ sources in 2026-08; two were being overstated and are corrected here.
   ``null(A) & null(L) = {0}``, so it is the non-degenerate case and not a
   convention for this one.  Clause 1 is a LOCAL choice made in the open, not a
   standard being followed, and it is the reverse of the only nearby published
-  formula.  Searched: Cao 1987, the LAPACK guide's GSEP/GNEP/GSVD sections,
+  formula.  Worth noticing that clause 4's OUTCOME on the fixture below is
+  Hansen's coefficient of one, reached by a different route and by accident
+  rather than by adoption -- the two clauses land at opposite ends and only
+  one of them was chosen.  Searched: Cao 1987, the LAPACK guide's GSEP/GNEP/GSVD sections,
   Fix & Heiberger 1972 and its modern implementations, Hansen 1994/1998/2007,
   Stewart arXiv:2411.03534 (2024).  Nothing names it.
 
-**WHAT CLAUSE 1 COSTS, MEASURED, AND WHY NO FLOAT64 METHOD DOES BETTER.**  On
+**WHAT CLAUSE 4 COSTS, MEASURED, AND WHY NO FLOAT64 METHOD DOES BETTER.**  On
 ``_rank_one_penalty_pair(2, 10, 20, 1e-4, 3)`` at the ladder's own high edge
-this publishes ``edf = 9.000000`` against a 40-digit oracle's ``5.720073``:
-3.28 df, and the whole of it is clause 1 firing on a direction the oracle can
-resolve and float64 cannot.  ``S_a``'s smallest eigenvalue there is bracketed
+this publishes ``edf = 9.000000`` against a 40-digit oracle's ``5.720073``.
+**THE SIGN IS THE WHOLE POINT AND AN EARLIER DRAFT OF THIS SECTION HAD IT
+BACKWARDS.**  It is 3.28 df ABOVE the oracle, so it cannot be clause 1, which
+can only subtract: the pair has 9 levels and one free direction each, the
+delivered value is 9.000000318, and those are NINE FILTER FACTORS OF ONE.
+This is clause 4 at the far end -- the penalty residue is not merely
+unresolved but gone, so the direction is reported free and contributes the
+maximum rather than nothing.  The exact pencil gives the same nine directions
+factors below one, summing to 5.720073.  ``S_a``'s smallest eigenvalue is
+bracketed
 EXACTLY, by rational arithmetic over the float entries, in
 ``[3.269e-17, 6.538e-17]`` -- against ``n eps ||S||_2 = 4.441e-16``, so it is
 under one ulp of the largest eigenvalue and ``eigh`` returns a bit-exact
@@ -390,8 +443,9 @@ filed on, that is 3350x smaller.
 stepping, and proposes counting consistently across the bracket as the fix.
 There is no count left to step, and the deflation that replaced it does NOT
 move: over both draws that rise, ``keep`` retains **12 of 12** directions at
-every one of the 81 lambdas, so clause 1 of the policy fires identically at
-each end of the rising step.  Every rise instead sits within four steps of the
+every one of the 81 lambdas, so clause 1 of the policy is INERT at both ends
+of every rising step -- nothing is dropped, so nothing a deflation did can be
+what changed.  Every rise instead sits within four steps of the
 bracket's LOW edge, where ``A -> V_eff`` and ``V_eff``'s own extreme
 eigenvalues are at ``+-1e-16`` of its norm, so ``A`` is numerically singular
 and the sum is evaluated with an amplified residue.  What is left of #263 is
@@ -399,6 +453,18 @@ the low-edge conditioning of an indefinite delivered operand -- issue #269's
 subject, not this one's -- and not a search over a non-monotone curve.
 Monotonicity would follow from delivering NONNEGATIVE per-direction shares,
 which this route does not.
+
+**AND THE FIXTURE THE SUITE SAYS LOSES RUNGS TO IT NO LONGER DOES.**
+``test_the_pair_geometry_is_built_once_and_carries_no_lambda``'s docstring
+records ``_vanishing_mass_pair(1e-12)`` increasing at 10 of 400 steps with
+only 5 of 11 interior budgets attainable, and permits a refusal there for that
+reason.  Re-measured 2026-08-16 on the same fixture and the same 400-step
+walk: **0 rises of 400**, and **11 of 11** interior budgets from 16.5 to 60
+attained, each to 1e-6 of its target.  That docstring is stale rather than
+wrong -- it was written before the last commits of #285 -- and the permissive
+branch it justifies is now unnecessary on this pair.  The ASSERTIONS are left
+alone: attainment there was flaky across machines once, and re-tightening it
+on one machine's reading is how that flake was introduced.
 
 **WHERE THE ARITHMETIC IS BEYOND EVERY FORM.**  Give a pair 8 levels with 3
 rows in each against an eleven-column margin and the overlap arrow's border
@@ -1388,7 +1454,16 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
 
 
 def _block_inverse_factors(triangular: NDArray) -> NDArray:
-    """Batched ``T^+`` for a stack of small triangular factors, at the LAPACK cut."""
+    """Batched ``T^+`` for a stack of small triangular factors, at the LAPACK cut.
+
+    **THE SECOND SITE THAT DECIDES CLAUSE 1 OF THE SINGULAR-PENCIL POLICY.**
+    ``T_q' T_q = D_q + lambda S_a``, so a direction of that block inside the
+    cut is inverted to ZERO here and contributes nothing to ``edf`` -- the
+    same convention :func:`_filter_factor_sum`'s ``keep`` applies at the
+    border, applied to the per-level blocks.  The cut itself is the
+    ``matrix_rank`` CONVENTION and not a derived bound, which clause 3 says
+    out loud; changing either site alone splits the pencil's two halves.
+    """
     u, singular, vt = np.linalg.svd(triangular)
     cut = max(triangular.shape[-2:]) * np.finfo(np.float64).eps
     top = np.maximum(singular[..., :1], np.finfo(np.float64).tiny)
@@ -1399,6 +1474,8 @@ def _block_inverse_factors(triangular: NDArray) -> NDArray:
 
 def _psd_clip_allowance(n: int, scale: float, closure: float) -> float:
     """Largest negative eigenvalue an exactly-PSD block can show at ``scale``.
+
+    **CLAUSE 3 OF THE SINGULAR-PENCIL POLICY, AND ONE OF ITS DERIVED CUTS.**
 
     ``_psd_factor``'s ``max(w, 0)`` is the Euclidean projection onto the PSD
     cone (Higham, *LAA* 103:103-118, 1988) and is the right thing to do to
@@ -1472,6 +1549,12 @@ def _psd_factor(M: NDArray) -> tuple[NDArray, NDArray, NDArray]:
 
 def _absorption_floor(n_terms: int, rank: int, defect: float) -> float:
     """Cut below which a singular value of ``H``'s factor is not resolvable.
+
+    **CLAUSE 3 OF THE SINGULAR-PENCIL POLICY, AND ONE OF ITS DERIVED CUTS.**
+    This is what separates a direction the pencil does not resolve -- where
+    clause 1 contributes zero -- from one it does, where dropping it costs a
+    whole degree of freedom.  Both terms below are dimensions or measured
+    residuals, which is what clause 3 requires of a cut in this position.
 
     ``H = I_r - Psi N^+ Psi'`` is delivered here as ``R_H' R_H`` with ``R_H``
     assembled by orthogonal transformations only, so the quantity being cut is
@@ -1675,8 +1758,11 @@ def _filter_factor_sum(
 
     # --- H's spectrum, from its factor's singular values -------------------
     if r:
-        # THIS ``keep`` IS CLAUSE 1 OF THE SINGULAR-PENCIL POLICY, AND IT IS
-        # THE ONLY PLACE IT IS DECIDED.  A direction dropped here contributes
+        # THIS ``keep`` IS CLAUSE 1 OF THE SINGULAR-PENCIL POLICY, AT THE
+        # BORDER.  It is one of TWO sites that decide it -- the other is
+        # :func:`_block_inverse_factors`, on the per-level blocks -- so an
+        # edit here that is not mirrored there leaves the two halves of the
+        # same pencil on different null-space behaviour.  A direction dropped here contributes
         # ZERO to ``edf`` -- ``np.where(keep, 1 / safe, 0.0)`` below -- which
         # is the Moore-Penrose reading of a ``0/0`` filter factor and a choice
         # about an undefined quantity, not an approximation to a defined one.
