@@ -182,10 +182,26 @@ fit is available.
 
 A repair replaces the published coefficients with a **projection onto the
 shape cone**. That projection is a constrained estimator, and its reference
-distribution is not the unconstrained fit's, so `summary()` withholds the
-repaired term's chi-square test, its p-value, its `ref_df` and its curve SE
-band and prints `repaired (inference withheld)` in their place. The point
-estimate, `edf` and the fitted level or curve values are still reported.
+distribution is not the unconstrained fit's, so the uncertainty attached to a
+repaired term is withheld rather than reported:
+
+| surface | behaviour for a repaired term |
+|---|---|
+| `summary()` / `metrics().summary()` | chi-square, p-value, `ref_df`, curve SE band, per-level SE and CI all withheld; the row prints `repaired (inference withheld)`; `detail="full"` prints no per-coefficient rows |
+| `term_inference(name)` | warns and returns without SE/CI; `monotone_repaired` is `True` |
+| `simultaneous_bands(name)` | refuses |
+| `plot()` / `plot_data()` | no interval band, via `term_inference` |
+
+The point estimate, `edf`, and the fitted level or curve values are still
+reported everywhere. Only a term that was **actually projected** is affected —
+a constrained term that was already shape-feasible when another term's repair
+ran keeps its inference in full.
+
+Two surfaces are deliberately **not** qualified, because they are bulk
+covariance readouts rather than a statement about one term:
+`summary()["standard_errors"]["coefficient_se"]` and
+`metrics().feature_se(name)`. Both still return the unconstrained fit's values
+for a repaired term. Read them with the same caveat this section states.
 
 The reason is that the effective dimension of a shape-restricted fit depends
 on how many cone edges are active, which is a random variable, not a quantity

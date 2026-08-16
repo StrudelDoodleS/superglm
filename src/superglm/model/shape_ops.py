@@ -875,6 +875,7 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
         name, kind, groups = pending.name, pending.kind, pending.groups
         curve_spec = pending.curve_spec
         beta = work_model.result.beta
+        beta_before = np.asarray(beta, dtype=np.float64).copy()
         x_col, axis_rows = _repair_axis_column(pending, frame)
         # Rows a `specials=` level holds out of the smooth carry no coordinate
         # on the axis, so the histogram behind the grid weights has to lose the
@@ -905,12 +906,23 @@ def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: in
             selection_penalty=selection_penalty,
             current_eta=current_eta,
         )
+        # Recorded only if this term's coefficients actually moved. The early
+        # exit above is a statement about the WHOLE model -- once any one term
+        # binds, the loop runs for every pending term, and a term that was
+        # already feasible comes back from the repairer with its coefficients
+        # copied through unchanged. Recording that as a repair used to cost a
+        # cosmetic `repaired` marker; now it would cost the term its entire
+        # published inference, and the reason the withholding exists does not
+        # apply to it -- no cone projection happened, so there is no active edge
+        # and no boundary to sit on.
+        projected = not np.array_equal(candidate_beta, beta_before)
         _replace_result_beta(work_model, candidate_beta)
         work_model._result.intercept = float(work_model._result.intercept) + intercept_shift
         _synchronize_repaired_intercept_state(work_model)
-        work_model._shape_repairs[name] = repair_result
-        if kind in {"increasing", "decreasing"}:
-            work_model._monotone_repairs[name] = repair_result
+        if projected:
+            work_model._shape_repairs[name] = repair_result
+            if kind in {"increasing", "decreasing"}:
+                work_model._monotone_repairs[name] = repair_result
 
     from superglm.model.fit_state import invalidate_revised_coefficient_mode
 

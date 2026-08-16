@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 from superglm.inference._term_covariance import (
@@ -27,6 +28,30 @@ from superglm.model.fit_state import fitted_lambda2
 _EDITOR_STALE_INFERENCE_MESSAGE = (
     "Editor coefficient edits make fitted standard errors and confidence "
     "intervals reference-only; returning term inference without SE/CI."
+)
+
+
+def _shape_repaired(model, name) -> bool:
+    """Whether this term's published coefficients came out of a shape repair.
+
+    A repair replaces them with a projection onto the shape cone. The
+    projection is a constrained estimator whose reference distribution is not
+    the unconstrained fit's -- the effective dimension depends on the number of
+    active cone edges, a random variable (Meyer & Woodroofe, *Ann. Statist.*
+    28(4):1083-1104, 2000) -- and a binding repair sits on the boundary, where
+    the constrained and unconstrained estimators stop agreeing. The curve and
+    the point estimate are an improvement whatever produced them (Chernozhukov,
+    Fernandez-Val & Galichon, *Biometrika* 96(3):559-575, 2009, Prop. 1); the
+    band around them belongs to a model that was not fitted.
+    """
+    return str(name) in {str(key) for key in (getattr(model, "_shape_repairs", None) or {})}
+
+
+_SHAPE_REPAIRED_INFERENCE_MESSAGE = (
+    "This term's coefficients were replaced by a post-fit shape projection, so "
+    "fitted standard errors and confidence intervals reference the "
+    "unconstrained fit rather than the published one; returning term inference "
+    "without SE/CI. Fit the constraint (Constraint.fit.*) if you need a band."
 )
 
 
@@ -153,6 +178,12 @@ def simultaneous_bands(model, feature, *, alpha=0.05, n_sim=10_000, n_points=200
         raise RuntimeError(
             "Editor coefficient edits make simultaneous bands unavailable until the model is refit."
         )
+    if _shape_repaired(model, feature):
+        raise RuntimeError(
+            f"Feature {feature!r} carries a post-fit shape repair, so simultaneous bands "
+            "would be simulated from the unconstrained fit's covariance around constrained "
+            "coefficients. Fit the constraint (Constraint.fit.*) if you need a band."
+        )
     return _simultaneous_bands(
         feature,
         result=model.result,
@@ -185,7 +216,12 @@ def term_inference(
         warnings.warn(_EDITOR_STALE_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
         with_se = False
         simultaneous = False
-    return _term_inference(
+    repaired = _shape_repaired(model, name)
+    if repaired and with_se:
+        warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
+        with_se = False
+        simultaneous = False
+    inference = _term_inference(
         name,
         result=model.result,
         groups=model._groups,
@@ -203,6 +239,13 @@ def term_inference(
         seed=seed,
         centering=centering,
     )
+    # `_term_ops` has no model handle, so it hard-codes `monotone_repaired=False`
+    # with a comment inviting the caller to override. This is that caller: a
+    # consumer that reads the object rather than the summary text has no other
+    # way to learn the curve came out of a projection.
+    if repaired and not inference.monotone_repaired:
+        inference = dataclasses.replace(inference, monotone_repaired=True)
+    return inference
 
 
 def term_importance(model, X, sample_weight=None):

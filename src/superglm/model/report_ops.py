@@ -346,6 +346,7 @@ def summary(
         coefficient_estimable_override=inf.get("coefficient_estimable"),
         selected_group_names=selected_names,
     )
+    _drop_repaired_basis_detail(basis_detail, model._groups, shape_repaired_feature_names(model))
 
     level_presentation = build_summary_level_display(
         coef_rows,
@@ -641,6 +642,13 @@ def _withhold_repaired_term_inference(coef_rows, repaired_features) -> None:
     model that was not fitted, so that is what is withheld -- the same move the
     editor-stale path already makes for statistics it cannot certify, rather
     than printing a correct-looking number attached to the wrong null.
+
+    Every uncertainty field on the term's rows goes, not only the whole-term
+    ones. A repaired ``OrderedCategorical``'s LEVEL rows carry per-level
+    standard errors and intervals from the same unconstrained covariance, and
+    ``detail="full"`` prints a per-coefficient SE, z, p and interval below the
+    term line; leaving those would let one summary say "inference withheld" and
+    then show the withheld quantities immediately underneath.
     """
     if not repaired_features:
         return
@@ -648,11 +656,33 @@ def _withhold_repaired_term_inference(coef_rows, repaired_features) -> None:
     for row in coef_rows:
         if row.group not in repaired_labels:
             continue
+        row.se = None
+        row.z = None
+        row.p = None
+        row.ci_low = None
+        row.ci_high = None
         row.wald_chi2 = None
         row.wald_p = None
         row.ref_df = None
         row.curve_se_min = None
         row.curve_se_max = None
+
+
+def _drop_repaired_basis_detail(basis_detail, groups, repaired_features) -> None:
+    """Drop the per-coefficient detail rows of a shape-repaired term.
+
+    ``build_basis_detail`` is a second, independent pass and does not go through
+    the coefficient rows, so withholding there does not reach it. Its rows are
+    nothing BUT inference beside a coefficient -- SE, z, p and an interval -- so
+    for a repaired term there is nothing left to keep once the uncertainty goes,
+    and the entry is dropped rather than blanked.
+    """
+    if not basis_detail or not repaired_features:
+        return
+    repaired_labels = {str(name) for name in repaired_features}
+    for group in groups:
+        if str(group.feature_name) in repaired_labels:
+            basis_detail.pop(group.name, None)
 
 
 def _suppress_editor_inference(coef_rows) -> None:
