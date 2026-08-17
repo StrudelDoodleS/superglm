@@ -221,6 +221,70 @@ Bin boundaries and interaction axis values are printed at **round-trip precision
 the workbook converts back to exactly the number the model binned on, so applying the printed table
 puts every risk in the same bin the model did.
 
+### Exact continuous blocks with `continuous_kind="ppform"`
+
+A binned continuous block is an approximation, and the default `n_bins=150` is a **budget** rather
+than a target: the exporter emits at most that many intervals, and a covariate with fewer distinct
+values than the budget is still binned — 30 distinct ages export as 29 interval rows, not 30 exact
+ones. On a motor book with 81 distinct ages the worst row came out **mis-rated by 60%**,
+concentrated in the wide intervals the quantile strategy opens in the sparse tails, which is where
+exposure is thinnest and a single large risk absorbs all of it.
+
+`continuous_kind="ppform"` declines that approximation and exports the fitted spline as the exact
+piecewise cubic it already is — one row per knot interval, four coefficients:
+
+```python
+model.export_rating_tables(
+    "rating_tables.xlsx",
+    X_train,
+    y_train,
+    sample_weight=exposure_train,
+    continuous_kind="ppform",
+)
+```
+
+A consumer evaluates `exp(a + b*u + c*u**2 + d*u**3)` with `u = (x - from) / (to - from)`, and the
+result reproduces `model.predict` to machine precision — 2.4e-15 against 6.0e-01 for the binned
+block it replaces — in usually an order of magnitude fewer rows. `u` is **normalised** onto
+`[0, 1]`; a raw `x - from` on a covariate ranging to 1e5 loses enough precision in a fixed-scale
+decimal column to produce a 3.3× relativity error, which is worse than the binning it replaces.
+
+The block is **nine columns rather than three**, and a superset rather than a new shape. The
+familiar `<feature>`, `Relativity` and `Weight` stay in front of it unchanged, with `from`, `to`,
+`a`, `b`, `c`, `d` appended behind them, so a loader that cannot evaluate a polynomial still finds
+the block by the same header signature, slices the same three columns, and scores it as the step
+function it scores today, while an upgraded one reads the coefficients and is exact. `Relativity`
+is the curve's value at `from` rather than the interval's average, so the two readings of one row
+agree at its left edge. Because the blocks are laid out at their own widths, a nine-column block
+moves every block to its right — read the header row rather than assuming the three-column stride.
+
+If you store the coefficients, include them in any **content digest** you fingerprint a published
+package with. Two models differing only in their coefficients otherwise fingerprint identically,
+and the second is silently deduplicated into the first.
+
+Extrapolation is carried in the table rather than described beside it, because a cubic continued
+past its last knot is unbounded — 1581× the correct factor twenty-one years past the boundary of a
+real age curve. Under the default `extrapolation="clip"` the block emits a constant leading and a
+constant trailing row, so "match an interval and evaluate it" is correct outside the training range
+too. Under `extrapolation="error"` there are no unbounded rows at all and a value outside the knot
+range matches nothing, which is the answer the model itself gives. `extrapolation="extend"` is
+refused unless you pass `allow_unbounded_extrapolation=True`, because it exports a tariff with no
+upper bound; exported with that acknowledgement its tails clip where the model extends, since an
+unbounded interval has no width and the normalised `u` does not exist there.
+
+In the workbook, **an unbounded bound is written as a blank cell** and reads back as null — a
+spreadsheet cell cannot hold an infinity — while the interval key beside it still says
+`[-inf, 18.0)`. Those rows are the constant tails, `b = c = d = 0`, so a consumer that treats a
+blank bound as unbounded and skips `u` there is exact; one that computes `u` from a null bound gets
+no number at all.
+
+Two term kinds are not converted. Terms carrying a `Constraint.postfit` repair are refused by name,
+because that path's repaired curve has never been verified to be piecewise polynomial on the term's
+own knots; `Constraint.fit` constraints convert unchanged. And `Polynomial` terms stay binned, as
+does the continuous-by-continuous interaction grid — the block is fixed at four coefficients while a
+polynomial's degree is not. One workbook therefore carries both kinds of block at once, and the
+discretization impact sweep still describes the ones that stayed binned.
+
 The **offset multiplier** block is exact only while the fit carries fewer than 20 distinct offset
 multipliers. Above that — the normal case for a continuous exposure — it is binned like a spline
 block, with rows keyed on interval strings and each carrying its bin's exposure-weighted average, so

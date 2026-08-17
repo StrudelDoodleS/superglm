@@ -288,7 +288,7 @@ def _continuous_ppform_block(
     The first and last rows are UNBOUNDED and constant.  Extrapolation is
     carried in the table rather than described beside it: a cubic evaluated past
     its last knot is not merely wrong but unbounded -- measured at 1581x the
-    correct factor five years past the boundary of a real age curve -- and no
+    correct factor twenty-one years past the boundary of a real age curve -- and no
     note reliably prevents a consumer from doing it.  With the tails emitted,
     the only operation a consumer performs is "match an interval, evaluate it",
     and that operation is correct everywhere.
@@ -1631,6 +1631,87 @@ def build_rating_table_payload(
       so the printed edge IS the edge the sweep bins on and that second error
       is identically zero (issue #278).
 
+    ``continuous_kind : {"binned", "ppform"}, default "binned"`` is how a
+    caller declines that binning, and it is stated here beside the loss it
+    removes rather than in a parameter list of its own, because the choice is
+    only meaningful against what the default costs.
+
+    ``"binned"`` emits the key/relativity/weight block described above, which a
+    consumer applies by pure lookup with no arithmetic.  It is an
+    APPROXIMATION: the fitted curve is chopped into intervals carrying one
+    exposure-weighted average each, so a row inside an interval receives a
+    factor that is not its own.  Measured on a motor book with 81 distinct ages
+    at ``n_bins=150``, the worst row was mis-rated by 60%, concentrated in the
+    wide intervals the quantile strategy opens in the sparse tails -- which is
+    where exposure is thinnest, where it is hardest to notice, and where a
+    single large risk absorbs all of it.  ``discretization_impact`` quantifies
+    the loss for a given model.
+
+    ``n_bins`` is a BUDGET rather than a target, and a covariate with fewer
+    distinct values than that budget is still binned today -- into fewer rows
+    than it has values.  Measured on the documentation fixture in
+    ``tests/test_rating_table_export.py``: 30 distinct ages under a budget of
+    150 export as 29 interval rows.  So staying under the budget is not a route
+    to an exact block; ``"ppform"`` is.
+
+    ``"ppform"`` emits the exact piecewise-polynomial form of the fitted curve
+    instead: one row per knot interval carrying four coefficients, evaluated as
+    ``exp(a + b*u + c*u**2 + d*u**3)`` where ``u = (x - from) / (to - from)``.
+    It reproduces the fitted model to machine precision -- 2.4e-15 maximum
+    relative error against ``model.predict`` on the book above, against 6.0e-01
+    for the binned block it replaces -- and usually in an order of magnitude
+    fewer rows.  What it costs is a consumer that can evaluate a polynomial.
+    ``u`` is NORMALISED onto ``[0, 1]`` rather than being the raw ``x - from``:
+    on a covariate ranging to 1e5 a raw local variable loses enough precision
+    in a fixed-scale decimal column to produce a 3.3x relativity error, which
+    would be worse than the binning it replaces.
+
+    The block is NINE columns rather than three, and it is a superset rather
+    than a new shape.  ``<feature>``, ``Relativity`` and ``Weight`` stay in
+    front of it unchanged, and ``from``, ``to``, ``a``, ``b``, ``c``, ``d`` are
+    appended behind them, so an un-upgraded loader still reads it as a step
+    function: it locates the block by the same header signature, slices the same
+    three columns positionally, and gets the same approximate factor it gets
+    today, while an upgraded one reads the coefficients and is exact.
+    ``Relativity`` is the curve's value at ``from`` rather than the interval's
+    average, so the two readings of one row agree at its left edge instead of
+    disagreeing everywhere.  A consumer that STORES the coefficients must
+    include them in any content digest it fingerprints a published package
+    with; otherwise two models differing only in their coefficients fingerprint
+    identically and the second is silently deduplicated into the first.
+
+    Extrapolation is carried in the table rather than described beside it,
+    because a cubic continued past its last knot is not merely wrong but
+    unbounded -- 1581x the correct factor twenty-one years past the boundary of
+    a real age curve -- and no note reliably stops a consumer evaluating one.
+    Under the default ``extrapolation="clip"`` the block emits a constant
+    leading row and a constant trailing row, so "match an interval, evaluate
+    it" is correct outside the training range as well as inside.
+    ``extrapolation="error"`` emits no unbounded rows at all: a value outside
+    the knot range matches nothing and the consumer's lookup fails, which is the
+    answer the model itself gives.  ``extrapolation="extend"`` is REFUSED unless
+    ``allow_unbounded_extrapolation=True``, because it exports a tariff with no
+    upper bound and filing guidance asks specifically about behaviour beyond the
+    range of the training data; exported with that acknowledgement, its tails
+    CLIP where the model extends -- an unbounded interval has no width, so the
+    normalised ``u`` the coefficients are written against does not exist there
+    -- and the exactness claim above is then over the knot range alone.
+
+    Terms carrying a ``Constraint.postfit`` repair are refused under
+    ``"ppform"``, naming the term.  That path's repaired curve has never been
+    verified to be piecewise polynomial on the term's own knots, and silently
+    converting an unmeasured path inside a block whose entire value is
+    exactness is the failure this mode exists to remove.  ``Constraint.fit``
+    constraints convert unchanged: the constraint transform leaves ordinary
+    B-spline coefficients over the same knot vector.
+
+    ``Polynomial`` terms stay binned under ``"ppform"``, and so does the
+    continuous-by-continuous interaction grid -- the block is fixed at four
+    coefficients while a ``Polynomial``'s degree is not, and a tensor patch is a
+    materially different consumer contract.  Only ``Spline`` main effects
+    convert, so one ``"ppform"`` workbook can carry both kinds of block at once
+    and the sweep above still describes the ones that stayed binned.
+
     ``centering`` is a presentation choice and does not change what the
     payload rates.  ``"native"`` reports each term under the model's own
     identifiability constraint.  ``"mean"`` shifts the terms that have a mean
@@ -1692,13 +1773,17 @@ def build_rating_table_payload(
     Raises
     ------
     ValueError
-        If ``centering`` is not one of ``("native", "mean")``; if the model's
+        If ``centering`` is not one of ``("native", "mean")``; if
+        ``continuous_kind`` is not one of ``("binned", "ppform")``; if the model's
         link is not ``log``; if the family is ``Binomial``; if
         ``model.predict`` saturates on this frame; or if any emitted
         relativity, on a main-effect block or an interaction cell, is one a
         consumer cannot multiply by -- ``inf``, ``nan``, ``0.0``, negative,
         subnormal, or at or beyond the ``exp(+/-500)`` range ``_safe_exp``
-        clips to.
+        clips to.  Under ``continuous_kind="ppform"`` also if a convertible term
+        carries a ``Constraint.postfit`` repair, or uses
+        ``extrapolation="extend"`` without ``allow_unbounded_extrapolation=True``;
+        both name the term.
     RatingTableBaseNotRepresentableError
         If the exported base relativity overflows or underflows float64.
     NotImplementedError
@@ -1958,6 +2043,68 @@ def export_rating_tables(
     is represented and whether an unbounded extrapolation may be exported, both
     of which are properties of the payload rather than of the rendering, so the
     mode's validation and its refusals happen once, where the blocks are built.
+
+    The mode is documented here as well as there, and deliberately: this is the
+    entry point most callers reach it through, and its sheet -- not the payload
+    -- is what the downstream consumer parses.
+
+    ``continuous_kind : {"binned", "ppform"}, default "binned"`` selects how a
+    continuous main-effect term is represented.
+
+    ``"binned"`` writes a key/relativity/weight block a consumer applies by
+    pure lookup, with no arithmetic.  It is an APPROXIMATION: the fitted curve
+    is chopped into intervals carrying one exposure-weighted average each, so a
+    row inside an interval receives a factor that is not its own.  Measured on a
+    motor book with 81 distinct ages at ``n_bins=150``, the worst row was
+    mis-rated by 60%, concentrated in the wide intervals the quantile strategy
+    opens in the sparse tails.  ``n_bins`` is a budget rather than a target, and
+    staying under it is not a route to an exact block -- see
+    :func:`build_rating_table_payload`, where that is measured.
+
+    ``"ppform"`` writes the exact piecewise-polynomial form of the fitted
+    curve: one row per knot interval carrying four coefficients, evaluated as
+    ``exp(a + b*u + c*u**2 + d*u**3)`` where ``u = (x - from) / (to - from)``,
+    normalised onto ``[0, 1]`` rather than the raw ``x - from``.  It reproduces
+    the fitted model to machine precision -- 2.4e-15 against 6.0e-01 for the
+    block it replaces -- in usually an order of magnitude fewer rows, and costs
+    a consumer that can evaluate a polynomial.
+
+    On the sheet that block is NINE columns rather than three, and a superset
+    rather than a new shape: ``<feature>``, ``Relativity`` and ``Weight`` stay
+    in front unchanged, with ``from``, ``to``, ``a``, ``b``, ``c``, ``d``
+    appended behind them.  An un-upgraded loader still reads it as a step
+    function -- it locates the block by the same header signature and slices the
+    same three columns positionally -- while an upgraded one reads the
+    coefficients and is exact.  A consumer that STORES the coefficients must
+    include them in any content digest it fingerprints a published package
+    with, or two models differing only in their coefficients fingerprint
+    identically and the second is silently deduplicated into the first.
+
+    Blocks are laid out at their own widths, so a nine-column block moves every
+    block to its right; a reader keyed on the old fixed three-column stride
+    reads the header row instead.
+
+    The unbounded tail bounds do not survive the workbook as numbers.  A
+    spreadsheet cell cannot hold an infinity, so an unbounded bound is written
+    as a BLANK cell and reads back as null, while the interval key beside it
+    still says ``[-inf, 18.0)``.  Those rows are the constant tails --
+    ``b = c = d = 0`` -- so a consumer that reads a blank bound as unbounded and
+    short-circuits ``u`` there is exact; one that computes ``u`` from a null
+    bound gets no number at all.
+
+    Extrapolation is otherwise carried in the table rather than described
+    beside it: constant leading and trailing rows under the default
+    ``extrapolation="clip"``, no unbounded rows at all under
+    ``extrapolation="error"``, and a refusal under ``extrapolation="extend"``
+    unless ``allow_unbounded_extrapolation=True`` acknowledges that the model
+    prices beyond its training range with an unbounded cubic -- which the
+    block's tails cannot carry and therefore clip.
+
+    Terms carrying a ``Constraint.postfit`` repair are refused under
+    ``"ppform"``, naming the term; ``Constraint.fit`` constraints convert
+    unchanged.  ``Polynomial`` terms stay binned under ``"ppform"``, as does the
+    continuous-by-continuous interaction grid, so one workbook can carry both
+    kinds of block at once.
     """
     out = Path(file_path)
     fmt = _resolve_format(out, format)

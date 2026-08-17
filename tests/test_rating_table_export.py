@@ -2,6 +2,7 @@ import math
 import warnings
 from dataclasses import replace
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -911,8 +912,8 @@ def test_the_ppform_block_keeps_the_three_lookup_columns_in_front():
 def test_the_ppform_block_carries_its_extrapolation_rule_as_rows():
     """A cubic past its last knot is unbounded; a note does not stop that.
 
-    Measured on a real age curve: five years past the boundary the naive cubic
-    tail returns 1581x the correct factor.  The block therefore emits constant
+    Measured on a real age curve: twenty-one years past the boundary the naive
+    cubic tail returns 1581x the correct factor.  The block therefore emits constant
     unbounded tail rows, so that "match an interval and evaluate it" -- the only
     thing a consumer does -- is correct outside the training range too.
     """
@@ -1147,6 +1148,171 @@ def test_ppform_coefficients_are_written_at_full_precision(tmp_path):
     weight = start + block.table.columns.tolist().index("Weight")
     assert ws.cell(row=_MAIN_EFFECT_HEADER_ROW + 2, column=relativity).number_format == "0.000000"
     assert ws.cell(row=_MAIN_EFFECT_HEADER_ROW + 2, column=weight).number_format == "#,##0.00"
+
+
+# ── documentation contracts for ``continuous_kind`` ──────────────────────────
+#
+# The mode's claim is comparative: exact where the default is an approximation.
+# A reader told only what ``"ppform"`` does, and not what ``"binned"`` costs,
+# cannot make the choice the keyword exists to offer -- so ``"binned"`` would
+# read as the safe option by omission.  These tests MEASURE each documented
+# claim against the live export first and then require the prose to state it,
+# which is what stops the two drifting apart the way a hand-written note does.
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+_CONTINUOUS_KIND_ENTRY_POINTS = {
+    "build_rating_table_payload": build_rating_table_payload,
+    "export_rating_tables": export_rating_tables,
+}
+
+_CONTINUOUS_KIND_CLAIMS = (
+    'continuous_kind : {"binned", "ppform"}, default "binned"',
+    "exp(a + b*u + c*u**2 + d*u**3)",
+    "u = (x - from) / (to - from)",
+    "worst row was mis-rated by 60%",
+    "NINE columns rather than three",
+    "un-upgraded loader still reads it as a step function",
+    "content digest",
+    "fingerprint identically",
+    "``Polynomial`` terms stay binned",
+    "``Constraint.postfit``",
+    "allow_unbounded_extrapolation=True",
+    'extrapolation="error"',
+)
+
+
+def _flat(text: str) -> str:
+    """Line wrapping is not part of a documentation contract."""
+    return " ".join(text.split())
+
+
+def _fit_ppform_doc_model():
+    """A spline beside a polynomial, on a covariate with few distinct values.
+
+    Three documented facts need exactly this shape: the spline converts, the
+    polynomial does not, and the 30 distinct ages sit far under the default
+    ``n_bins`` budget without that making the binned block exact.
+    """
+    rng = np.random.default_rng(21)
+    n = 400
+    X = pd.DataFrame(
+        {
+            "age": rng.integers(18, 48, n).astype(float),
+            "score": rng.normal(0.0, 1.0, n),
+        }
+    )
+    eta = -1.0 + 0.15 * np.sin(X["age"].to_numpy() / 8.0) + 0.05 * X["score"].to_numpy()
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=8), "score": Polynomial(degree=3)},
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+@pytest.mark.parametrize("entry_point", sorted(_CONTINUOUS_KIND_ENTRY_POINTS))
+def test_both_export_entry_points_document_the_continuous_kind_mode(entry_point):
+    """Both, because either one is where a caller reaches the mode.
+
+    ``export_rating_tables`` defers to the payload's docstring for the export
+    contract, but the mode is the one thing a caller passes to whichever entry
+    point they already use, and the nine-column sheet and the digest trap are
+    workbook facts -- so the workbook function cannot be the one that stays
+    silent about them.
+    """
+    doc = _flat(_CONTINUOUS_KIND_ENTRY_POINTS[entry_point].__doc__ or "")
+
+    assert [claim for claim in _CONTINUOUS_KIND_CLAIMS if claim not in doc] == []
+    # Re-derived from the constant rather than quoted, so renaming a
+    # coefficient column has to move the prose with it.
+    assert ", ".join(f"``{column}``" for column in _PPFORM_COLUMNS) in doc
+
+
+def test_the_continuous_kind_documentation_states_what_the_payload_emits():
+    """Every claim asserted here is measured here and stated there.
+
+    A documentation test that only greps for prose pins the prose, not the
+    truth of it.  The three facts a caller most needs -- the block's shape, that
+    a ``Polynomial`` is not converted, and that ``n_bins`` is a budget rather
+    than a promise of exactness -- are measured off a real payload first.
+    """
+    model, X, y = _fit_ppform_doc_model()
+
+    ppform = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+    spline = next(block for block in ppform.main_effects if block.name == "age")
+
+    assert list(spline.table.columns) == ["age", "Relativity", "Weight", *_PPFORM_COLUMNS]
+    assert len(spline.table.columns) == 3 + len(_PPFORM_COLUMNS) == 9
+    # A ``Polynomial`` stays binned: the block carries four coefficients and a
+    # polynomial's degree is not bounded by four.
+    assert {block.name: block.kind for block in ppform.main_effects} == {
+        "age": "continuous_ppform",
+        "score": "continuous",
+    }
+
+    # ``n_bins`` is a budget, and staying under it does not make the block
+    # exact today -- 30 distinct ages under a budget of 150 are still binned,
+    # into fewer rows than the covariate has values.
+    binned = build_rating_table_payload(model, X, y, n_bins=150)
+    age = next(block for block in binned.main_effects if block.name == "age")
+    assert age.kind == "continuous"
+    assert len(age.table) < X["age"].nunique()
+
+    for function in _CONTINUOUS_KIND_ENTRY_POINTS.values():
+        assert "``Polynomial`` terms stay binned" in _flat(function.__doc__ or "")
+    payload_doc = _flat(build_rating_table_payload.__doc__ or "")
+    assert "``n_bins`` is a BUDGET" in payload_doc
+    assert "fewer distinct values than that budget is still binned" in payload_doc
+
+
+def test_the_guide_documents_the_ppform_block_and_its_blank_workbook_bounds(tmp_path):
+    """The workbook cannot carry an infinite bound, and the guide must say so.
+
+    ``openpyxl`` writes a non-finite number as an EMPTY cell, so the payload's
+    ``-inf``/``+inf`` tail bounds arrive at the consumer as blanks while the
+    interval key beside them still reads ``[-inf, ...)``.  A consumer reading
+    the machine-readable columns therefore meets a null bound -- the exact
+    condition the design calls out as undefined for ``u`` -- and the only thing
+    standing between them and it is this being written down.
+    """
+    model, X, y = _fit_ppform_doc_model()
+    output = tmp_path / "guide.xlsx"
+    export_rating_tables(model, output, X, y, continuous_kind="ppform")
+    sheet = load_workbook(output, data_only=True)["Rating Tables"]
+
+    headers = [
+        sheet.cell(row=_MAIN_EFFECT_HEADER_ROW, column=column).value
+        for column in range(1, sheet.max_column + 1)
+    ]
+    payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+    rows = len(next(b for b in payload.main_effects if b.name == "age").table)
+
+    first_column = headers.index("from") + 1
+    key_column = headers.index("age") + 1
+    top = _MAIN_EFFECT_HEADER_ROW + 1
+    bottom = _MAIN_EFFECT_HEADER_ROW + rows
+    assert sheet.cell(row=top, column=first_column).value is None
+    assert "-inf" in sheet.cell(row=top, column=key_column).value
+    assert sheet.cell(row=bottom, column=first_column + 1).value is None
+    assert "inf" in sheet.cell(row=bottom, column=key_column).value
+
+    guide = _flat((_ROOT / "docs/guide/results.md").read_text(encoding="utf-8"))
+    columns = ", ".join(f"`{column}`" for column in _PPFORM_COLUMNS)
+    for claim in (
+        '`continuous_kind="ppform"`',
+        columns,
+        "nine columns",
+        "an unbounded bound is written as a blank cell",
+        "content digest",
+        "`Polynomial` terms stay binned",
+        "mis-rated by 60%",
+        "`Constraint.postfit`",
+        "allow_unbounded_extrapolation=True",
+    ):
+        assert claim in guide
 
 
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
