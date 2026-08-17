@@ -1376,6 +1376,60 @@ def test_the_unbounded_tails_survive_the_workbook_as_text(tmp_path):
         assert claim in guide
 
 
+def test_a_ppform_export_reports_no_binning_error_for_the_term_it_exported_exactly():
+    """The sheet must describe the workbook, not the model's specs.
+
+    Naming an exactly-exported term as approximated is a disclosure error on
+    a filing artifact, even though the magnitude moves in the safe direction.
+    This is the same drift _gridded_interaction_names exists to prevent,
+    reintroduced on the main-effect side.
+    """
+    model, X, y = _fit_ppform_doc_model()  # a Spline and a Polynomial
+
+    payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+
+    swept = set(payload.discretization_impact["feature"])
+    assert "age" not in swept, "the ppform term carries no binning error to report"
+    assert "score" in swept, "the Polynomial stayed binned and must still be swept"
+
+
+def test_a_ppform_export_emits_one_block_per_term_with_nothing_left_to_sweep():
+    """Routing the exact block on the SPEC is what keeps the term in the table.
+
+    With every convertible spline taken out of the binned sweep there is no
+    ``selected`` table left to route on, so a spline routed on ``selected``
+    would fall through every branch and emit NO block -- silently dropping a
+    factor from the product a consumer multiplies.  Both halves are asserted
+    together because they are the same change: nothing is swept, and nothing
+    is lost.
+    """
+    rng = np.random.default_rng(37)
+    n = 400
+    X = pd.DataFrame(
+        {
+            "age": rng.integers(18, 48, n).astype(float),
+            "region": rng.choice(["a", "b", "c"], n),
+        }
+    )
+    eta = -1.0 + 0.15 * np.sin(X["age"].to_numpy() / 8.0) + 0.1 * (X["region"] == "b")
+    y = rng.poisson(np.exp(eta.to_numpy())).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=8), "region": Categorical(base="first")},
+    )
+    model.fit(X, y)
+
+    payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+
+    assert [block.name for block in payload.main_effects] == ["age", "region"]
+    assert {block.name: block.kind for block in payload.main_effects} == {
+        "age": "continuous_ppform",
+        "region": "categorical",
+    }
+    assert payload.discretization_impact.empty, "the only continuous term is exported exactly"
+
+
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
     rng = np.random.default_rng(124)
     n = 120
