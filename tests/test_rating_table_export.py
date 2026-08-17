@@ -1525,6 +1525,13 @@ def test_fit_offset_source_rejects_inconsistent_mapping():
 
 
 def test_fit_offset_source_rejects_high_cardinality_source():
+    """The cap still binds exactly where the caller asked for a lookup.
+
+    Pinned to ``offset_kind="discrete"``: under ``"auto"`` this source now
+    routes to the per-unit block instead of being refused, which is the point of
+    that mode.  ``"discrete"`` is where the cap still means what its message
+    says.
+    """
     model, X, y, w, term, offset = _fit_term_offset_export_model(distinct_terms=40)
 
     with pytest.raises(ValueError, match="exceeding offset_max_exact_levels=20"):
@@ -1536,6 +1543,79 @@ def test_fit_offset_source_rejects_high_cardinality_source():
             offset=offset,
             offset_source=term,
             offset_name="Term",
+            offset_kind="discrete",
+        )
+
+
+def test_a_continuous_declared_offset_exports_one_per_unit_row():
+    """The relation is known, so the block states it rather than sampling it.
+
+    An offset's coefficient is 1 by construction: it has no standard error, no
+    lambda and nothing estimated.  So a continuous offset is not a curve to
+    approximate, it is a column to multiply by -- and the block that says so is
+    one row, whatever the cardinality.
+    """
+    rng = np.random.default_rng(4)
+    n = 6000
+    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n), "sum_insured": sum_insured})
+    offset = np.log(sum_insured)
+    y = rng.poisson(np.exp(-11.5 + 0.25 * (X["region"] == "B") + offset)).astype(float)
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, offset=offset)
+
+    payload = build_rating_table_payload(
+        model, X, y, offset=offset, offset_source="sum_insured", offset_name="SumInsured"
+    )
+
+    block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    assert block.table.columns.tolist() == ["SumInsured", "Relativity", "Weight"]
+    assert block.table["SumInsured"].tolist() == ["per_unit"]
+    # log(SumInsured) exponentiates to SumInsured, so the scale is exactly 1.
+    assert block.table["Relativity"].iloc[0] == pytest.approx(1.0, abs=1e-12)
+
+
+def test_a_two_level_offset_still_exports_as_a_lookup():
+    """For a handful of levels a lookup IS the exact answer.
+
+    Term in {12, 36} gives relativities 1 and 3.  Nothing about the per-unit
+    block improves on that, and a consumer that can only join is better served
+    by the two rows -- so 'auto' must not reach for the formula here.
+    """
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+
+    payload = build_rating_table_payload(
+        model,
+        X,
+        y,
+        sample_weight=w,
+        offset=offset,
+        offset_source=term,
+        offset_name="Term",
+    )
+
+    block = next(b for b in payload.main_effects if b.name == "Term")
+    assert block.kind == "offset"
+    assert sorted(block.table["Term"].tolist()) == [12.0, 36.0]
+
+
+def test_a_per_unit_offset_refuses_a_column_it_is_not_proportional_to():
+    """The block states one relation for every row, so it must verify one."""
+    rng = np.random.default_rng(9)
+    n = 3000
+    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
+    mileage = rng.uniform(3000.0, 20000.0, n)
+    X = pd.DataFrame({"sum_insured": sum_insured, "mileage": mileage})
+    offset = np.log(sum_insured)
+    y = rng.poisson(np.exp(-11.5 + offset)).astype(float)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={})
+    model.fit(X, y, offset=offset)
+
+    with pytest.raises(ValueError, match="not proportional"):
+        build_rating_table_payload(
+            model, X, y, offset=offset, offset_source="mileage", offset_name="Mileage"
         )
 
 

@@ -1086,6 +1086,84 @@ def _offset_multiplier_block(
     )
 
 
+class OffsetRelationError(ValueError):
+    """A declared offset source does not carry the offset's own relation."""
+
+
+def _offset_per_unit_block(
+    offset: NDArray,
+    source,
+    source_name: str,
+    sample_weight: NDArray | None,
+    *,
+    offset_mapping_rtol: float,
+    offset_mapping_atol: float,
+) -> RatingTableBlock:
+    """A continuous offset as the one relation it is, not as a sample of it.
+
+    Shaped like ``_numeric_block`` and for the same reason: this is a PER UNIT
+    factor, not a banded one.  It was routed to the binned path because it is
+    continuous, but what decides the shape is that the consumer multiplies by a
+    column rather than looking a value up in a table.
+
+    There are no bounds and there is no extrapolation rule, deliberately.  An
+    offset's coefficient is 1 by construction -- nothing is estimated, so
+    nothing is only known over a training range.  The relation holds at a sum
+    insured of 10m on a book that saw 2m for exactly the reason it holds at 10k,
+    and the binned block it replaces did not: its top bin capped every large
+    risk at that bin's average.
+
+    Derived on the log scale and verified on the multiplier scale, on EVERY row.
+    A declared source that does not hold the relation is refused by name; the
+    point of the block is that it is exact, so a block that is not exact must
+    not be written.
+    """
+    offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+    try:
+        column = np.asarray(source, dtype=np.float64).ravel()
+    except (TypeError, ValueError) as exc:
+        # A bare numpy cast error names neither the column nor the remedy, and
+        # this is the branch a high-cardinality categorical source lands in.
+        raise OffsetRelationError(
+            f"Offset source {source_name!r} is not numeric, so the offset cannot be a "
+            "log of it, and it has too many distinct values to publish as a lookup. "
+            "Declare the numeric column the offset was computed from, or keep the "
+            "offset calculation outside the rating table."
+        ) from exc
+    weights = _weights_array(len(offset_arr), sample_weight)
+
+    if np.any(~np.isfinite(column)) or np.any(column <= 0.0):
+        raise OffsetRelationError(
+            f"Offset source {source_name!r} has non-positive or non-finite values, so "
+            "the offset cannot be a log of it. Declare a different column, or keep the "
+            "offset calculation outside the rating table."
+        )
+
+    log_ratio = offset_arr - np.log(column)
+    total = float(weights.sum())
+    scale = float(
+        np.exp(np.average(log_ratio, weights=weights) if total > 0.0 else log_ratio.mean())
+    )
+
+    if not np.allclose(
+        np.exp(log_ratio), scale, rtol=offset_mapping_rtol, atol=offset_mapping_atol
+    ):
+        worst = float(np.max(np.abs(np.exp(log_ratio) / scale - 1.0)))
+        raise OffsetRelationError(
+            f"Offset is not proportional to {source_name!r}: the worst row deviates by "
+            f"{worst:.3e}, outside offset_mapping_rtol/atol. A per-unit offset block "
+            "states one relation for every row, so it cannot describe this offset. "
+            "Declare the column the offset is actually a function of, or keep the "
+            "offset calculation outside the rating table."
+        )
+
+    return RatingTableBlock(
+        name=source_name,
+        kind="offset_per_unit",
+        table=pd.DataFrame({source_name: ["per_unit"], "Relativity": [scale], "Weight": [total]}),
+    )
+
+
 def _offset_source_block(
     offset: NDArray,
     offset_source,
@@ -1098,16 +1176,28 @@ def _offset_source_block(
     offset_mapping_rtol: float,
     offset_mapping_atol: float,
 ) -> RatingTableBlock:
-    if offset_kind not in {"auto", "discrete"}:
-        raise ValueError("offset_kind must be 'auto' or 'discrete'.")
+    if offset_kind not in {"auto", "discrete", "per_unit"}:
+        raise ValueError("offset_kind must be 'auto', 'discrete' or 'per_unit'.")
 
     source, source_name = _resolve_offset_source(offset_source, X, offset_name=offset_name)
     n_unique = int(source.nunique(dropna=False))
+
+    if offset_kind == "per_unit" or (offset_kind == "auto" and n_unique > offset_max_exact_levels):
+        return _offset_per_unit_block(
+            offset,
+            source,
+            source_name,
+            sample_weight,
+            offset_mapping_rtol=offset_mapping_rtol,
+            offset_mapping_atol=offset_mapping_atol,
+        )
+
     if n_unique > offset_max_exact_levels:
         raise ValueError(
             f"Offset source {source_name!r} has {n_unique} distinct values, exceeding "
             f"offset_max_exact_levels={offset_max_exact_levels}. Increase "
-            "offset_max_exact_levels explicitly if all values are intended tariff levels."
+            "offset_max_exact_levels explicitly if all values are intended tariff "
+            "levels, or pass offset_kind='per_unit' to export the relation itself."
         )
 
     offset_arr = np.asarray(offset, dtype=np.float64).ravel()
