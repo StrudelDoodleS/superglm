@@ -1463,6 +1463,66 @@ def test_the_undeclared_per_unit_offset_reproduces_every_multiplier():
     np.testing.assert_allclose(scale * np.exp(offset), np.exp(offset), rtol=1e-13, atol=0.0)
 
 
+def test_the_offset_documentation_states_the_one_rule_for_both_paths():
+    """One rule now governs both paths, so the docs must stop describing two.
+
+    Every claim asserted here is measured here first.  A documentation test that
+    only greps for prose pins the prose rather than the truth of it, and the
+    prose this replaces was true when it was written -- the guide and the
+    payload docstring both promised binning above twenty distinct multipliers,
+    which is exactly the behaviour that has just been removed.
+    """
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+    few_model, few_X, few_y, few_w = _fit_offset_export_model(distinct_terms=2)
+    term_model, term_X, term_y, term_w, term, term_offset = _fit_term_offset_export_model(
+        distinct_terms=40
+    )
+
+    many = build_rating_table_payload(model, X, y, sample_weight=w)
+    few = build_rating_table_payload(few_model, few_X, few_y, sample_weight=few_w)
+    binned = build_rating_table_payload(model, X, y, sample_weight=w, offset_kind="binned")
+
+    # The undeclared path: cardinality decides lookup-or-per-unit, and neither
+    # answer is an approximation.
+    assert next(b for b in many.main_effects if "offset" in b.kind).kind == "offset_per_unit"
+    assert next(b for b in few.main_effects if "offset" in b.kind).kind == "offset"
+    assert len(next(b for b in binned.main_effects if "offset" in b.kind).table) > 1
+
+    # And ``"binned"`` reaches that path only.  A declared source refuses it,
+    # so the docs must not present it as a fourth value of one shared enum.
+    with pytest.raises(ValueError, match="offset_kind must be"):
+        build_rating_table_payload(
+            term_model,
+            term_X,
+            term_y,
+            sample_weight=term_w,
+            offset=term_offset,
+            offset_source=term,
+            offset_name="Term",
+            offset_kind="binned",
+        )
+
+    doc = _flat(build_rating_table_payload.__doc__ or "")
+    for claim in (
+        "``offset_max_exact_levels`` governs BOTH paths",
+        '``"binned"``',
+        "keyed on the MULTIPLIER itself",
+        "no column was declared",
+    ):
+        assert claim in doc, claim
+    assert "only while there are fewer than 20 of them" not in doc
+
+    guide = _flat((_ROOT / "docs/guide/results.md").read_text(encoding="utf-8"))
+    for claim in (
+        '`offset_kind="binned"`',
+        "`offset_max_exact_levels` governs both paths",
+        "no `offset_source=`",
+    ):
+        assert claim in guide, claim
+    assert "exact only while the fit carries fewer than 20 distinct offset" not in guide
+    assert "Undeclared offsets — no `offset_source=` — are unchanged and still bin." not in guide
+
+
 def test_fit_offset_exports_binned_multiplier_block_when_support_is_large():
     """Binning is now a requested summary of the fitted exposure, not the default.
 

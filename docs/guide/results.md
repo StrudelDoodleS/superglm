@@ -292,12 +292,13 @@ does the continuous-by-continuous interaction grid — the block is fixed at fou
 polynomial's degree is not. One workbook therefore carries both kinds of block at once, and the
 discretization impact sweep still describes the ones that stayed binned.
 
-The **offset multiplier** block is exact only while the fit carries fewer than 20 distinct offset
-multipliers. Above that — the normal case for a continuous exposure — it is binned like a spline
-block, with rows keyed on interval strings and each carrying its bin's exposure-weighted average, so
-it is a summary rather than a per-row lookup. A bin with no exposure — reachable with
-`bin_strategy="uniform"` on a skewed exposure — reports the midpoint of its own interval at weight
-zero. Pass `offset_source=` to export the exact form, keyed on a raw column of the frame.
+The **offset multiplier** block is exact whatever the fit's cardinality. Up to
+`offset_max_exact_levels` distinct multipliers it lists them; above that it is a single `per_unit`
+row. Binning it is opt-in, and a binned block is a summary rather than a per-row lookup — its rows
+are keyed on interval strings and each carries its bin's exposure-weighted average, and a bin with
+no exposure, reachable with `bin_strategy="uniform"` on a skewed exposure, reports the midpoint of
+its own interval at weight zero. Pass `offset_source=` to key the block on a raw column of the frame
+instead of on the multiplier.
 
 ### Continuous offsets: `offset_kind="per_unit"`
 
@@ -306,13 +307,16 @@ error, no lambda, nothing fitted — so a continuous offset is not a curve to ap
 to multiply by. What decides the exported shape is therefore not how many distinct values the source
 takes, but that the consumer multiplies rather than looks up.
 
-With `offset_source=` declared, `offset_kind` chooses between the two:
+One rule covers both paths: `offset_max_exact_levels` governs both paths — the declared one reached
+through `offset_source=`, and the undeclared one that has nothing but the fitted offset vector.
+`offset_kind` chooses what each emits:
 
 | value | behaviour |
 |---|---|
 | `"auto"` (default) | one row per level up to `offset_max_exact_levels`, a single `per_unit` row above it |
-| `"discrete"` | levels only; refuses above the cap |
+| `"discrete"` | levels only; a declared source refuses above the cap, an undeclared one falls through to `per_unit` |
 | `"per_unit"` | always the relation |
+| `"binned"` | the exposure summary below; undeclared offsets only, a declared source rejects it |
 
 A per-unit block is one row, applied by multiplying the named column by its `Relativity`:
 
@@ -337,7 +341,25 @@ to is refused by name rather than approximated.
 
 Low cardinality is left alone: `Term ∈ {12, 36}` still exports as the two-row lookup `12 → 1`,
 `36 → 3`, because for a handful of levels a lookup already *is* the exact answer and asks nothing
-of the consumer. Undeclared offsets — no `offset_source=` — are unchanged and still bin.
+of the consumer.
+
+**An undeclared offset follows that same rule.** Exported with no `offset_source=`, an offset above
+the cap is one `per_unit` row as well — keyed on the offset multiplier rather than on a column,
+because the exporter is not told which column produced the offset and does not guess one from the
+frame. Its `Relativity` is exactly `1.0`: the consumer computes `exp(offset)` and the block hands
+that number back unchanged. That reads as though it says nothing, and it says exactly as much as the
+binned block it replaces — which was *also* keyed on the multiplier, so a consumer had to compute the
+same number before it could look anything up, and then received its bin's exposure-weighted average
+instead of the value it had just computed. Nothing bins an offset now unless a caller asks for it by
+name with `offset_kind="binned"`.
+
+**This changes the exported block for any model with a continuous offset and no `offset_source=`.**
+Where such a model used to ship a block of `n_bins` rows keyed on interval strings, it now ships one
+row keyed `per_unit`, carried on the new `offset_per_unit` block kind. A consumer that stages the
+binned form — matching a computed multiplier against an interval key — needs the per-unit kind before
+it can load such a workbook; exporting with `offset_kind="binned"` reproduces the old shape in the
+meantime. What it reproduces was never rateable: the factor it returns is the bin average of a number
+the consumer had already computed exactly.
 
 The workbook includes selected-bin rating tables, a discretization impact sweep, and a structured
 Model Summary sheet. The sweep runs the `impact_bins` ladder — `20, 50, 100, 200, 250` by default —
@@ -356,9 +378,10 @@ columns are **joint** over everything discretized at that resolution — within 
 `feature` and `actual_bins` vary.
 
 Two approximations the workbook can carry are outside that measurement, so the sheet is a bound on
-the terms it lists rather than on every factor in the book. The binned **offset multiplier** block —
-the normal case for a continuous exposure, absent `offset_source=` — is not swept
-([#314](https://github.com/StrudelDoodleS/superglm/issues/314)), and the sheet's own discretized
+the terms it lists rather than on every factor in the book. An **offset multiplier** block asked for
+as `offset_kind="binned"` is not swept
+([#314](https://github.com/StrudelDoodleS/superglm/issues/314)) — under the default there is no
+offset approximation left to sweep — and the sheet's own discretized
 predictor is stabilized where the workbook's product is not
 ([#313](https://github.com/StrudelDoodleS/superglm/issues/313)).
 
