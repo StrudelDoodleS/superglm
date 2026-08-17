@@ -4295,6 +4295,27 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     is Type 1 in this module's taxonomy, rather than dividing by a quantity that
     has no correct digits.
 
+    **The obvious objection to a COUNT is that an eigenvalue could cross the
+    cut on another BLAS, so it was measured on the axis this repo already knows
+    breaks things.**  #280 records ``structured_ladder``'s rows moving 3.86 df
+    and flipping to refusal on 2 of 7 microkernels, selected by
+    ``OPENBLAS_CORETYPE``.  Over those same seven -- SKYLAKEX, HASWELL,
+    SANDYBRIDGE, NEHALEM, PRESCOTT, CORE2, ZEN, single-threaded -- the starved
+    pair's two counts are **4 and 1 on every one**, and this test passes on all
+    seven.  The discarded ratio over the same sweep runs **8.45e+15 to
+    2.78e+20**, four and a half orders, which is the same experiment showing
+    why it had to go.
+
+    **But the objection is half right, and the margin is asserted rather than
+    assumed.**  Separation from the cut is not uniform.  At 1.0 the nearest
+    eigenvalue above it is 1086x the cut, and at 1e-12 it is 1295x with the one
+    unresolved direction sitting 8.2x below -- both unambiguous.  At 1e-4 the
+    nearest is **2.4x**, which is thin: that geometry is the transitional one,
+    close to carrying an unresolved direction without having one, and a
+    reduction with enough backward error could move it across.  So the
+    separation is asserted alongside the count, and a narrowing margin is
+    reported as a margin failure rather than as an unexplained count flip.
+
     It fails closed in the useful direction: if the moment assembly is ever
     changed so the starved pair's operator resolves that direction, the regime
     moved and the disagreement is worth chasing again.
@@ -4338,7 +4359,25 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     # these eigenvalues already carry, and the cut and the counted values
     # belong on the same factorization.
     floor = np.finfo(np.float64).eps * float(np.max(edge_spectrum))
-    unresolved = int(np.sum(edge_spectrum < 10.0 * floor))
+    cut = 10.0 * floor
+    unresolved = int(np.sum(edge_spectrum < cut))
+
+    # The count is only as trustworthy as its margin, so assert the margin too.
+    # ``1e-4`` is the transitional geometry and clears the cut by 2.4x, where
+    # the other two clear it by more than a thousand; a reduction with enough
+    # backward error to close that gap should fail HERE, naming the margin,
+    # rather than as a count nobody can explain.
+    above = edge_spectrum[edge_spectrum >= cut]
+    clearance = float(above.min() / cut)
+    assert clearance > 2.0, (
+        f"the nearest resolved direction clears the noise cut by only {clearance:.2f}x; "
+        "the counts below stop being decidable once this approaches 1"
+    )
+    if unresolved:
+        below = edge_spectrum[edge_spectrum < cut]
+        assert float(cut / below.max()) > 4.0, (
+            f"the unresolved direction sits only {cut / below.max():.2f}x below the cut"
+        )
     assert unresolved == (1 if unresolved_dirs else 0), (
         f"{unresolved} directions of the high-edge operator sit at its noise floor; "
         "the documented disagreement is one degree of freedom on the starved pair and "
