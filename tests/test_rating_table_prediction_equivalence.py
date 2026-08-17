@@ -708,6 +708,86 @@ def test_an_offset_model_reconstructs_from_the_offset_lookup_and_the_blocks(cent
     )
 
 
+def test_the_per_unit_offset_block_reproduces_predict_on_every_row():
+    """The claim the block makes, checked the way a consumer would apply it.
+
+    The binned block it replaces mis-rated all 6,000 rows of this fixture, the
+    worst by 1.022e+00 -- more than double.  This asserts the replacement is
+    exact rather than merely better.
+    """
+    rng = np.random.default_rng(4)
+    n = 6000
+    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n), "sum_insured": sum_insured})
+    offset = np.log(sum_insured)
+    y = rng.poisson(np.exp(-11.5 + 0.25 * (X["region"] == "B") + offset)).astype(float)
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, offset=offset)
+
+    payload = build_rating_table_payload(
+        model, X, y, offset=offset, offset_source="sum_insured", offset_name="SumInsured"
+    )
+    block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    scale = float(block.table["Relativity"].iloc[0])
+
+    # A consumer multiplies by the column, which is the whole instruction.
+    applied = scale * X["sum_insured"].to_numpy(dtype=np.float64)
+    np.testing.assert_allclose(applied, np.exp(offset), rtol=1e-13, atol=0.0)
+
+    # And the factor multiplies into the workbook's product like any other, so
+    # the whole tariff -- not just the offset term -- comes back row by row.
+    region = next(b for b in payload.main_effects if b.kind == "categorical")
+    lookup = {
+        str(k): float(v) for k, v in zip(region.table[region.name], region.table["Relativity"])
+    }
+    reconstructed = (
+        float(payload.base_relativity)
+        * np.array([lookup[str(value)] for value in X[region.name]], dtype=np.float64)
+        * applied
+    )
+    np.testing.assert_allclose(
+        reconstructed,
+        model.predict(X, offset=offset),
+        rtol=_RECONSTRUCTION_RTOL,
+        atol=0.0,
+    )
+
+
+def test_the_per_unit_offset_is_exact_above_the_largest_fitted_value():
+    """The relation is known, not estimated, so it does not have a range.
+
+    This is what the binned block could not do: its top bin capped every large
+    risk at that bin's average, so a 10m sum insured on a book that saw 2m was
+    silently truncated rather than rated.
+    """
+    rng = np.random.default_rng(4)
+    n = 6000
+    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n), "sum_insured": sum_insured})
+    offset = np.log(sum_insured)
+    y = rng.poisson(np.exp(-11.5 + 0.25 * (X["region"] == "B") + offset)).astype(float)
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, offset=offset)
+
+    payload = build_rating_table_payload(
+        model, X, y, offset=offset, offset_source="sum_insured", offset_name="SumInsured"
+    )
+    block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    scale = float(block.table["Relativity"].iloc[0])
+
+    # One row, keyed on no value at all: there is no top bin to fall into and
+    # no interval to clip against, which is what makes the next line possible.
+    assert block.table[block.name].tolist() == ["per_unit"]
+
+    probe = 10_000_000.0
+    assert probe > 10.0 * float(sum_insured.max()), "the probe must be off the fitted book"
+    assert scale * probe == pytest.approx(probe, rel=1e-13)
+
+
 # ── The interaction half of the payload's product claim ────────────────────
 #
 # ``build_rating_table_payload``'s docstring states a contract over the
