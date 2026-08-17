@@ -1096,7 +1096,8 @@ def test_the_trace_guard_still_catches_what_the_spectrum_cannot_see(monkeypatch)
     truncated = root[:-1]
     removed = abs(float(np.trace(pair.S_a)) - float(np.sum(np.square(truncated))))
     trace_bound = 2.0 * pair.S_a.shape[0] ** 2 * np.finfo(np.float64).eps
-    assert removed / abs(float(np.trace(pair.S_a))) > 1e3 * trace_bound, removed
+    relative = removed / abs(float(np.trace(pair.S_a)))
+    assert relative > 1e3 * trace_bound, (relative, trace_bound)
 
     monkeypatch.setattr(st, "_penalty_root", lambda S: (truncated, 0.0, cut))
     with pytest.raises(st._UnstableStructuredEDFError, match="different pencils"):
@@ -1109,7 +1110,7 @@ def test_a_dropped_direction_is_reported_on_the_cut_that_dropped_it():
     ``n = 10``, spectrum ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``: the residue is
     4.4x outside ``eigh``'s bar, so :func:`_penalty_root` drops it and ``rootS``
     comes back with 9 rows of 10.  The old aggregate guard read
-    ``clip = 9.9e-16`` against ``2 n^2 eps = 4.4e-14`` -- 45x short -- and said
+    ``clip = 7.9e-16`` against ``2 n^2 eps = 4.4e-14`` -- 56x short -- and said
     nothing, so the pair published an ``edf`` counting a free direction the
     dense route still penalizes.
 
@@ -1117,14 +1118,16 @@ def test_a_dropped_direction_is_reported_on_the_cut_that_dropped_it():
     that decided it) and the SLACK (that the aggregate guard is nowhere near
     firing, so it cannot be what refuses).  Swept over seven
     ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads the drop is 4.425x to
-    4.475x outside the bar and the aggregate guard 37.5x to 45.0x short; the
-    assertions take 2x and 8x of that.
+    4.475x outside the bar and the aggregate guard 37.5x to 56.25x short; the
+    assertions take 2x and 8x of that, so the binding end is the 37.5x one.
+    ``clip`` here is ``sum(rootS**2)`` against ``tr S``, which is what
+    :func:`_profile` computes -- an earlier draft of this docstring summed the
+    EIGENVALUES instead and recorded 9.9e-16 and 45x, a quantity the code never
+    evaluates.  Same fixture, same sweep, corrected expression.
 
     RED before #323, where ``_penalty_root`` returned the factor alone and
     there was nothing for a caller to key on.
     """
-    from superglm.screening._structured import _penalty_root
-
     n = 10
     eps = np.finfo(np.float64).eps
     Q = np.linalg.qr(np.random.default_rng(0).standard_normal((n, n)))[0]
@@ -1161,7 +1164,7 @@ def test_a_singular_penalty_still_publishes_because_clause_2_says_so():
     wrong way to spell "a direction was dropped": the first shape has a
     bit-exact zero eigenvalue and would refuse.
     """
-    from superglm.screening._structured import _penalty_root, structured_ladder
+    from superglm.screening._structured import structured_ladder
 
     # A bit-exact zero, a below-bar negative, and a below-bar positive.  None
     # is an indefiniteness the eigensolver can certify, so none may refuse --
@@ -1185,9 +1188,12 @@ def test_a_singular_penalty_still_publishes_because_clause_2_says_so():
         pair = spline_cat_moments(*_structured_inputs(build()))
         root, dropped, cut = _penalty_root(pair.S_a)
         smallest = float(np.linalg.eigvalsh(0.5 * (pair.S_a + pair.S_a.T))[0])
-        # Genuinely at or below the bar -- the pencils this policy is about --
-        # and genuinely NOT certified indefinite, so they publish.
-        assert smallest <= cut, (label, smallest, cut)
+        # ``|smallest| <= cut`` is the claim -- inside the bar on BOTH sides --
+        # so it is asserted that way.  ``smallest <= cut`` alone would be
+        # satisfied by a certified-negative eigenvalue too and would only bite
+        # on the positive side; the next line closes that, but the pair reads
+        # as one statement and should be one.
+        assert abs(smallest) <= cut, (label, smallest, cut)
         assert dropped == 0.0, (label, dropped, cut)
         assert structured_ladder(pair, budgets=BUDGETS) is not None, label
 
