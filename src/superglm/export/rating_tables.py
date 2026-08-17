@@ -250,7 +250,19 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     )
 
 
-_PPFORM_COLUMNS = ("from", "to", "a", "b", "c", "d")
+# The interval bounds are NOT emitted as their own columns.  They are already in
+# the key column beside them, exactly: ``_format_number`` prints via ``repr``, the
+# shortest string that reads back as the same binary64, so a consumer parsing
+# ``"[18.0, 25.363636363636363)"`` recovers both bounds bit-identically -- measured
+# at 0.000e+00 against the exact breaks across every row of a real block.  Two float
+# columns restating them would be duplicate state that can only ever disagree.
+#
+# The local variable is therefore ``u = (x - lower) / (upper - lower)`` with both
+# bounds read from the key.  That makes the key load-bearing for arithmetic and not
+# only for matching, which is a constraint on ``_format_number``: it must keep the
+# round-trip property.  Its docstring already records why, and issue #278 is what
+# happens when a printed key is not exact.
+_PPFORM_COLUMNS = ("a", "b", "c", "d")
 
 # The tail rows are CONSTANT pieces, so their higher coefficients are exactly
 # zero and the local variable never matters.  That is deliberate: a consumer
@@ -354,7 +366,7 @@ def _continuous_ppform_block(
     # ``strict=True`` against the declared column names, so a change in the
     # number of coefficients has to be a change to ``_PPFORM_COLUMNS`` too
     # rather than a silently mis-headed column.
-    exact_form = dict(zip(_PPFORM_COLUMNS, (lo, hi, *coefficients.T), strict=True))
+    exact_form = dict(zip(_PPFORM_COLUMNS, coefficients.T, strict=True))
     table = pd.DataFrame(
         {
             name: [_format_interval(left, right) for left, right in zip(lo, hi, strict=True)],

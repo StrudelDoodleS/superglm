@@ -243,20 +243,27 @@ model.export_rating_tables(
 )
 ```
 
-A consumer evaluates `exp(a + b*u + c*u**2 + d*u**3)` with `u = (x - from) / (to - from)`, and the
-result reproduces `model.predict` to machine precision — 2.4e-15 against 6.0e-01 for the binned
-block it replaces — in usually an order of magnitude fewer rows. `u` is **normalised** onto
-`[0, 1]`; a raw `x - from` on a covariate ranging to 1e5 loses enough precision in a fixed-scale
-decimal column to produce a 3.3× relativity error, which is worse than the binning it replaces.
+A consumer **reads both bounds back out of the interval key** — `"[18.0, 25.363636363636363)"` — and
+evaluates `exp(a + b*u + c*u**2 + d*u**3)` with `u = (x - lower) / (upper - lower)`. The result
+reproduces `model.predict` to machine precision — 2.4e-15 against 6.0e-01 for the binned block it
+replaces — in usually an order of magnitude fewer rows. `u` is **normalised** onto `[0, 1]`; a raw
+`x - lower` on a covariate ranging to 1e5 loses enough precision in a fixed-scale decimal column to
+produce a 3.3× relativity error, which is worse than the binning it replaces.
 
-The block is **nine columns rather than three**, and a superset rather than a new shape. The
-familiar `<feature>`, `Relativity` and `Weight` stay in front of it unchanged, with `from`, `to`,
-`a`, `b`, `c`, `d` appended behind them, so a loader that cannot evaluate a polynomial still finds
-the block by the same header signature, slices the same three columns, and scores it as the step
-function it scores today, while an upgraded one reads the coefficients and is exact. `Relativity`
-is the curve's value at `from` rather than the interval's average, so the two readings of one row
-agree at its left edge. Because the blocks are laid out at their own widths, a nine-column block
-moves every block to its right — read the header row rather than assuming the three-column stride.
+The bounds are not repeated as their own columns. The key already holds them *exactly*: it is
+printed through `repr`, the shortest string that reads back as the same binary64, so parsing it
+recovers both bounds bit for bit and each row's upper bound is identically the next row's lower
+bound. A separate pair of float columns could only ever disagree with the key — and, being numbers,
+could not carry the infinite bound of a tail row through a spreadsheet at all.
+
+The block is **seven columns rather than three**, and a superset rather than a new shape. The
+familiar `<feature>`, `Relativity` and `Weight` stay in front of it unchanged, with `a`, `b`, `c`,
+`d` appended behind them, so a loader that cannot evaluate a polynomial still finds the block by the
+same header signature, slices the same three columns, and scores it as the step function it scores
+today, while an upgraded one reads the coefficients and is exact. `Relativity` is the curve's value
+at the row's lower bound rather than the interval's average, so the two readings of one row agree at
+its left edge. Because the blocks are laid out at their own widths, a seven-column block moves every
+block to its right — read the header row rather than assuming the three-column stride.
 
 If you store the coefficients, include them in any **content digest** you fingerprint a published
 package with. Two models differing only in their coefficients otherwise fingerprint identically,
@@ -272,11 +279,11 @@ refused unless you pass `allow_unbounded_extrapolation=True`, because it exports
 upper bound; exported with that acknowledgement its tails clip where the model extends, since an
 unbounded interval has no width and the normalised `u` does not exist there.
 
-In the workbook, **an unbounded bound is written as a blank cell** and reads back as null — a
-spreadsheet cell cannot hold an infinity — while the interval key beside it still says
-`[-inf, 18.0)`. Those rows are the constant tails, `b = c = d = 0`, so a consumer that treats a
-blank bound as unbounded and skips `u` there is exact; one that computes `u` from a null bound gets
-no number at all.
+The tail rows read `[-inf, 18.0)` and `[99.0, inf)` in the key, and every numeric cell in the block
+is a real number. A spreadsheet cell cannot hold an infinity, so keeping the bounds in the key —
+which is text — is what lets those rows survive the workbook at all. Their coefficients are
+`b = c = d = 0`, so a consumer that recognises an infinite bound and skips `u` there and one that
+clamps `u` to `[0, 1]` arrive at the same factor.
 
 Two term kinds are not converted. Terms carrying a `Constraint.postfit` repair are refused by name,
 because that path's repaired curve has never been verified to be piecewise polynomial on the term's
