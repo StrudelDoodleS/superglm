@@ -506,12 +506,19 @@ def test_a_probe_exactly_nested_in_the_overlap_reports_only_its_free_directions(
 def test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty():
     """``G = V + S`` must not round the smaller term away.
 
-    With ``V = 1e20 I`` and ``S = I`` the sum IS ``V`` in float64, so a pencil
-    that derives the penalty share as ``1 - v`` loses it entirely and reports
-    the full dimension as its edf at every lambda.  The answer would then
-    depend on the units the curvature is carried in, or on a frequency-weight
-    scale.  The direct problem reaches edf 2 at ``lambda = 1e20`` with
-    statistic 0.5.
+    With ``V = 1e20 I`` and ``S = I`` the sum IS ``V`` in float64, so the
+    penalty is lost before any share is taken and the pencil reports the full
+    dimension as its edf at every lambda.  The answer would then depend on the
+    units the curvature is carried in, or on a frequency-weight scale.  The
+    direct problem reaches edf 2 at ``lambda = 1e20`` with statistic 0.5.
+
+    **This test holds the BALANCING and nothing else.**  It used to be
+    described as also holding the ``(v, s)`` parameterisation -- "a pencil
+    that derives the penalty share as ``1 - v`` loses it entirely".  The
+    shipped pencil DOES derive ``s`` as ``1 - share`` and this test is green,
+    so that reading was never true: what it catches is ``G`` formed on two
+    scales, which is a different defect at a different line.  Reverting the
+    balancing fails it; there is no revert of the parameterisation that does.
     """
     from superglm.screening import penalized_score_statistic
 

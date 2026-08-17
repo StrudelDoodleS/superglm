@@ -43,8 +43,9 @@ or by thresholding separately and differencing.
 * the original units lesson (e9f7227): an ABSOLUTE whitening cut made the
   statistic depend on the units the curvature was carried in;
 * ``G = V + S`` formed in floating point, which loses ``S`` entirely when the
-  curvature dwarfs it -- and then deriving ``s`` as ``1 - a``, which loses it
-  again;
+  curvature dwarfs it.  Deriving ``s`` as ``1 - a`` then loses it a second
+  time -- **and that half was never removed, only made harmless**; see rule 2
+  below and :class:`_Pencil`, which measure it;
 * the same ``1 - a`` parameterisation in the test oracle, where it disagreed
   with two algebraically equivalent forms by 2.3e-03 at the ladder's high edge;
 * two ranks thresholded independently and then DIFFERENCED, where a probe
@@ -57,9 +58,20 @@ The rule, and it is enforceable rather than advisory:
      Scale symmetrically by the diagonal first -- a congruence, so rank is
      preserved -- and only then ask whether a direction is small.
   2. **Two quantities may only be added, subtracted or differenced once they
-     share a scale.**  Balance before summing (:func:`_build_pencil`); carry
-     both transformed terms rather than deriving one from the other
-     (:class:`_Pencil`); equilibrate before counting (:func:`_psd_rank`).
+     share a scale.**  Balance before summing (:func:`_build_pencil`);
+     equilibrate before counting (:func:`_psd_rank`).
+
+     This rule once also read "carry both transformed terms rather than
+     deriving one from the other (:class:`_Pencil`)".  **That clause was
+     false about the code and has been removed rather than reworded.**
+     :func:`_build_pencil` returns ``s = (1 - share) / balance`` and always
+     has.  What makes the subtraction safe is the BALANCE, which puts the two
+     terms on one scale before ``G`` is formed, so ``1 - share`` cancels only
+     where the penalty share is genuinely zero -- measured in
+     :class:`_Pencil` on three geometries, all such directions in
+     ``null(S)``, none fabricated.  Deriving one term from the other is still
+     the wrong default; it is tolerated at exactly one site, for a stated and
+     measured reason.
 
 **There are exactly two such sites**, which is what makes this a chokepoint
 rather than a habit: :func:`_psd_rank` is the module's only relative-rank
@@ -75,11 +87,18 @@ site is reverted -- stated separately because they do NOT cover each other:
   a numeric covariate is a change of units and nothing else, so the whole
   table must come back identical.  Reverting the equilibration turns a
   ``numeric_numeric`` pair from ``edf0 = 1`` into a NaN row at a scale of 1e4.
-* ``G`` and the ``(v, s)`` parameterisation --
+* ``G``'s BALANCING, and that alone --
   ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``.  Reverting
   the balancing fails it while the units test still PASSES, which is measured
   rather than assumed: rescaling a spline's covariate rescales its penalty
   with it, so that route never reaches the ``V >> S`` regime.
+
+  **It does NOT enforce the ``(v, s)`` parameterisation, and this entry used
+  to claim it did.**  The shipped pencil derives ``s`` as ``1 - share`` and
+  that test is green, so it cannot be holding the two apart; it is green
+  because the balancing keeps the smaller term representable in ``G``.  A
+  test for the parameterisation would have to defeat the balancing first and
+  none exists.  That is the honest state: one site, one enforced property.
 
 **THRESHOLD TYPES.  Read this before adding a constant to this module.**
 
@@ -174,10 +193,14 @@ is reporting its own threshold.
 
 **Four remedies have been measured and refused.  Do not re-derive them.**
 
-1. *Port the arrow path's stated cut* (``_solve_floor``) to ``_edge``:
-   -8.17 df against the shipped -1.21 df.  No scalar cut can work, because
-   the deciding curvature (8.896e-05) sits BELOW the eigensolver's noise floor
-   on the matrix it is read from (``eps ||A|| = 1.653e-04``).
+1. *Give the pseudo-inverse fallback a stated cut.*  ``_edge`` already counts
+   its unpenalized rank at :func:`_rank_floor`; what has no stated cut is the
+   ``np.linalg.pinv`` branch it falls to when ``cho_factor`` refuses, which
+   takes NumPy's shape-derived default ``rcond``.  Passing the arrow path's
+   ``_solve_floor`` there -- the same ``max(n, 1) * eps`` expression -- gives
+   **-8.17 df** against the shipped -1.21 df.  No scalar cut can work,
+   because the deciding curvature (8.896e-05) sits BELOW the eigensolver's
+   noise floor on the matrix it is read from (``eps ||A|| = 1.653e-04``).
 2. *Answer every rung from the pencil* instead of from ``_edge``, the
    "balanced congruence" remedy: measured WORSE.  Across 1/2/4/8 threads the
    pencil's high-edge ``edf`` moves 1.0000 df on the starved pair (18.99998 at
@@ -616,9 +639,13 @@ def _build_pencil(V: NDArray, S: NDArray, U: NDArray) -> _Pencil:
         Vt = whiten.T @ V @ whiten
         share, R = np.linalg.eigh(0.5 * (Vt + Vt.T))
         basis = whiten @ R
-    # In the balanced G-metric the two shares sum to one by construction, so
-    # both are recovered directly rather than one by subtracting from the
-    # other -- which is what kept the smaller term representable.
+    # In the balanced G-metric the two shares sum to one by construction, and
+    # ``s`` IS the subtraction -- the comment here used to claim the opposite,
+    # three lines above the line that does it.  What keeps the smaller term
+    # representable is the BALANCE above, not this parameterisation: on one
+    # scale, ``1 - share`` cancels only where the penalty share is genuinely
+    # zero.  Measured in :class:`_Pencil`; the congruence ``basis' S basis``
+    # is the drop-in replacement if a geometry ever contradicts it.
     share = np.clip(share, 0.0, 1.0)
     return _Pencil(v=share, s=(1.0 - share) / balance, u=basis.T @ U)
 
