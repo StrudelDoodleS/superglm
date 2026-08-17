@@ -1458,6 +1458,36 @@ def test_binning_an_offset_requires_asking_for_it():
     assert len(next(b for b in binned.main_effects if "offset" in b.kind).table) > 1
 
 
+def test_an_unknown_offset_kind_is_refused_on_the_undeclared_path_too():
+    """A typo must not silently deliver the new default.
+
+    "binned" is the only route back to the pre-PR behaviour, so a
+    mistyped kind falling through to "auto" hands the caller the exact
+    thing they were trying to opt out of, with no error anywhere.
+    """
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+
+    with pytest.raises(ValueError, match="offset_kind"):
+        build_rating_table_payload(model, X, y, sample_weight=w, offset_kind="Binned")
+
+
+def test_binned_is_still_refused_on_the_declared_path_with_its_own_message():
+    """The asymmetry is documented behaviour, not an oversight to paper over."""
+    model, X, y, w, term, offset = _fit_term_offset_export_model()
+
+    with pytest.raises(ValueError, match="'auto', 'discrete' or 'per_unit'"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            sample_weight=w,
+            offset=offset,
+            offset_source=term,
+            offset_name="Term",
+            offset_kind="binned",
+        )
+
+
 def test_the_undeclared_per_unit_offset_reproduces_every_multiplier():
     """The measured cost of the block it replaces was 15.3x on a one-day policy."""
     model, X, y, w = _fit_offset_export_model(distinct_terms=40)

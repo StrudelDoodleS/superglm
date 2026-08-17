@@ -432,6 +432,29 @@ def _require_supported_continuous_kind(continuous_kind: str) -> None:
         )
 
 
+_SUPPORTED_OFFSET_KINDS = frozenset({"auto", "discrete", "per_unit", "binned"})
+
+
+def _require_supported_offset_kind(offset_kind: str) -> None:
+    """Refuse a kind neither offset path recognises, whichever path will run.
+
+    Only ``_offset_source_block`` validated, so on the undeclared path an
+    unrecognised string fell through every comparison and was scored as
+    ``"auto"``.  That is the wrong direction to fail in: ``"binned"`` is the
+    only route back to the pre-``per_unit`` behaviour, so a mistyped kind
+    handed the caller the exact default they were opting out of, silently.
+
+    This guard catches values no path supports.  The per-path refusals stay
+    where they are and keep their own messages -- ``_offset_source_block``
+    rejecting ``"binned"`` is a known kind that is unsupported *there*, which
+    is a different complaint and deserves to say so.
+    """
+    if offset_kind not in _SUPPORTED_OFFSET_KINDS:
+        raise ValueError(
+            f"offset_kind must be one of {sorted(_SUPPORTED_OFFSET_KINDS)}, got {offset_kind!r}."
+        )
+
+
 def _ppform_convertible_terms(model: SuperGLM) -> list[str]:
     """The names ``continuous_kind="ppform"`` would actually convert.
 
@@ -2063,6 +2086,11 @@ def build_rating_table_payload(
     # since a postfit constraint and an unbounded extrapolation are both
     # perfectly exportable as binned blocks.
     _require_supported_continuous_kind(continuous_kind)
+    # Beside the continuous kind and for the same reason: the mode is checked
+    # once, up front, whatever the model turns out to carry.  Leaving it to the
+    # block builders meant only the declared-source path ever looked, so an
+    # unknown kind reached the undeclared path as ``"auto"``.
+    _require_supported_offset_kind(offset_kind)
     if continuous_kind == "ppform":
         _require_ppform_exportable(
             model,
