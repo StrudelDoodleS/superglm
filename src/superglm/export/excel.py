@@ -435,6 +435,64 @@ def _annotate_piecewise_blocks(ws, main_effects) -> None:
         )
 
 
+def _per_unit_offset_note(name: str) -> str:
+    """The multiply rule for one per-unit offset block, stated on the sheet.
+
+    A ``Numeric`` block and a per-unit offset block are the SAME SHAPE -- a
+    single row keyed ``per_unit``, with a ``Relativity`` and a ``Weight`` -- and
+    take DIFFERENT arithmetic: ``Relativity ** x`` for the numeric term, whose
+    coefficient was estimated, against ``Relativity * x`` for the offset, whose
+    coefficient is 1 by construction.  ``RatingTableBlock.kind`` is never
+    written to the workbook, and the per-unit offset block is now the default
+    for a continuous offset and is named after a raw frame column just like a
+    feature block, so a consumer holding only the sheet has nothing else to
+    route on.  This note is that routing information.
+
+    Written for both flavours of the block without branching, because the
+    sentence is true of both: the declared form is keyed on the source column
+    the caller named, the undeclared form on the offset multiplier the consumer
+    computes for itself, and in each case the factor is that value times this
+    ``Relativity`` (which is exactly 1.0 in the undeclared form, so the block
+    returns the input unchanged).
+
+    The absence of a rated range is stated rather than left to be inferred.  It
+    is the property that separates this block from every banded one on the
+    sheet: nothing here is estimated, so there is no training range outside
+    which the relation stops holding, and no extrapolation rule to apply.
+    """
+    return (
+        f"Multiply this risk's {name} by the Relativity below: "
+        f"factor = {name} x Relativity. "
+        f"NOT Relativity to the power of {name} -- a Numeric term exports an "
+        "identically shaped per_unit row that does take the power rule, and the "
+        "block's kind is not written to this sheet, so this note is what "
+        "separates them. "
+        "An offset's coefficient is 1 by construction, so nothing here is "
+        "estimated: the relation is exact, it carries no rated range and no "
+        "extrapolation rule, and it holds above the largest value the fit saw."
+    )
+
+
+def _annotate_per_unit_offset_blocks(ws, main_effects) -> None:
+    """Write each per-unit offset block's multiply rule into its note row.
+
+    Separate from ``_annotate_piecewise_blocks`` and run beside it: that
+    function also re-formats the piecewise cells, and this block kind needs no
+    re-formatting at all -- its ``Relativity`` and ``Weight`` already carry the
+    formats their names earn from ``_MAIN_EFFECT_ROLE_FORMATS``.  All this adds
+    is the note, in the same otherwise-unused row 6.
+    """
+    starts = _main_effect_start_columns(main_effects)
+    for idx, block in enumerate(main_effects):
+        if block.kind != "offset_per_unit":
+            continue
+        ws.cell(
+            row=_MAIN_EFFECT_NOTE_ROW,
+            column=starts[idx],
+            value=_per_unit_offset_note(block.name),
+        )
+
+
 def _autosize(ws) -> None:
     from openpyxl.utils import get_column_letter
 
@@ -505,6 +563,7 @@ def write_rating_table_workbook(
 
     ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT
     _annotate_piecewise_blocks(ws, payload.main_effects)
+    _annotate_per_unit_offset_blocks(ws, payload.main_effects)
 
     interaction_row = max_main_row + 3
     for block in payload.interactions:
