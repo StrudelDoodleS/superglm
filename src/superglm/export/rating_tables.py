@@ -161,6 +161,21 @@ def _gridded_interaction_names(blocks: list[InteractionTableBlock]) -> list[str]
     return [block.name for block in blocks if block.kind == "grid"]
 
 
+def _binned_continuous_names(blocks: list[RatingTableBlock]) -> list[str]:
+    """The exported main effects that are binned curves, read off the blocks.
+
+    The main-effect counterpart of ``_gridded_interaction_names``, and for the
+    same reason.  ``_continuous_features`` says which terms COULD be binned; it
+    is derived from the specs and knows nothing about ``continuous_kind``, so
+    handing it to the sweep made the impact sheet report a binning error for a
+    term the workbook carries exactly -- the sheet describing the model rather
+    than the artifact, which is a disclosure error on a filing document even
+    though it overstates the error rather than understating it.  Reading the
+    kind off the block that was BUILT cannot drift from what shipped.
+    """
+    return [block.name for block in blocks if block.kind == "continuous"]
+
+
 def _format_number(value: float) -> str:
     """Print a float so that reading the string back gives the same float.
 
@@ -2130,7 +2145,16 @@ def build_rating_table_payload(
     # only once there is data to answer it about.
     _require_unsaturated_predictor_export(model, frame, export_offset)
 
-    continuous = _continuous_features(model)
+    # Only the terms that will actually be BINNED, so the tables are built for
+    # the blocks that need them.  Under ``"ppform"`` a spline is exported from
+    # its own coefficients and never reads a bin average, so sweeping it here
+    # is work whose result is discarded -- and it is what used to make the term
+    # continuous in the sweep's eyes further down.
+    binned_continuous = [
+        name
+        for name in _continuous_features(model)
+        if not (continuous_kind == "ppform" and isinstance(model._specs[name], _SplineBase))
+    ]
     selected = (
         model.discretization_impact(
             frame,
@@ -2139,9 +2163,9 @@ def build_rating_table_payload(
             offset=export_offset,
             n_bins=n_bins,
             bin_strategy=bin_strategy,
-            features=continuous,
+            features=binned_continuous,
         )
-        if continuous
+        if binned_continuous
         else None
     )
 
@@ -2149,44 +2173,48 @@ def build_rating_table_payload(
     for name in model._feature_order:
         spec = model._specs[name]
         # Piecewise is tested FIRST and deliberately does not join
-        # ``_continuous_features``.  That list is what gets handed to
-        # ``discretization_impact``, whose continuity gate raises for anything
-        # that is not a spline or a polynomial; and every name it returns is
-        # routed to the BINNED ``_continuous_block`` below, which is the lossy
-        # path this feature exists to remove.  A piecewise term therefore also
-        # contributes no row to the impact sheet -- correctly, since its export
-        # has no discretisation error to measure.
+        # ``_continuous_features``.  That list is what ``binned_continuous`` is
+        # drawn from and what reaches ``discretization_impact``, whose
+        # continuity gate raises for anything that is not a spline or a
+        # polynomial; and every name that survives into it is routed to the
+        # BINNED ``_continuous_block`` below, which is the lossy path this
+        # feature exists to remove.  A piecewise term therefore also contributes
+        # no row to the impact sheet -- correctly, since its export has no
+        # discretisation error to measure, which is the same reason a ppform
+        # block contributes none.
         if isinstance(spec, Piecewise):
             main_effects.append(_piecewise_block(model, name, centering))
+        elif continuous_kind == "ppform" and isinstance(spec, _SplineBase):
+            # Routed on the SPEC, not on ``name in selected.tables``.  The exact
+            # block needs no bin average, so the term is no longer in that dict
+            # at all; routing on it would drop the term through every branch
+            # below and emit no block, silently losing a factor from the
+            # product.  ``Polynomial`` stays binned -- the block is fixed at
+            # four coefficients while a polynomial's degree is not -- which is
+            # why the test is ``_SplineBase`` rather than "is continuous".
+            #
+            # No shift passed in.  The ppform block reads its curve and its
+            # shift off ONE ``term_inference`` call, because under
+            # ``centering="mean"`` the shift is that call's grid mean; a
+            # constant computed here, on a differently sized grid, would be
+            # the wrong constant for the curve the block emits.
+            main_effects.append(
+                _continuous_ppform_block(
+                    model,
+                    name,
+                    centering,
+                    _export_weights(frame, sample_weight),
+                    np.asarray(frame.column_array(name), dtype=np.float64),
+                )
+            )
         elif selected is not None and name in selected.tables:
-            # ``Polynomial`` stays binned under ``"ppform"``: the block is fixed
-            # at four coefficients while a polynomial's degree is not, so it is
-            # routed on ``_SplineBase`` rather than on "is continuous".
-            if continuous_kind == "ppform" and isinstance(spec, _SplineBase):
-                # No shift passed in.  The ppform block reads its curve and its
-                # shift off ONE ``term_inference`` call, because under
-                # ``centering="mean"`` the shift is that call's grid mean; a
-                # constant computed here, on a differently sized grid, would be
-                # the wrong constant for the curve the block emits.
-                main_effects.append(
-                    _continuous_ppform_block(
-                        model,
-                        name,
-                        centering,
-                        _export_weights(frame, sample_weight),
-                        np.asarray(frame.column_array(name), dtype=np.float64),
-                    )
-                )
-            else:
-                # Through the same term the exact blocks read their shift from,
-                # so every block in the workbook is in the centering the caller
-                # asked for and all of them share one origin.  ``with_se=False``,
-                # so this is the point estimate alone -- the band's own centering
-                # is ``_recenter_term``'s business and is not routed through here.
-                centering_shift = float(
-                    _main_effect_inference(model, name, centering).centering_shift
-                )
-                main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
+            # Through the same term the exact blocks read their shift from,
+            # so every block in the workbook is in the centering the caller
+            # asked for and all of them share one origin.  ``with_se=False``,
+            # so this is the point estimate alone -- the band's own centering
+            # is ``_recenter_term``'s business and is not routed through here.
+            centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
+            main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
         elif isinstance(spec, Numeric):
@@ -2238,12 +2266,13 @@ def build_rating_table_payload(
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
         exported_n_bins=int(n_bins),
-        # Both lists, because both are approximated, and the second read off
-        # the blocks that were BUILT rather than re-derived from the specs.
+        # Both lists, because both are approximated, and BOTH read off the
+        # blocks that were built rather than re-derived from the specs -- so a
+        # term the workbook carries exactly cannot be reported as approximated.
         # The ``selected`` call above stays main-effect-only: its tables are
         # consumed as blocks keyed by feature name, and an interaction has no
         # such block.
-        features=continuous + _gridded_interaction_names(interactions),
+        features=_binned_continuous_names(main_effects) + _gridded_interaction_names(interactions),
     )
     return RatingTablePayload(
         base_relativity=_base_relativity(
