@@ -1682,20 +1682,17 @@ def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
 
 
 def test_a_continuous_offset_exports_a_binned_block_that_is_not_a_row_exact_factor():
-    """The offset multiplier block is binned above 20 distinct values, not looked up.
+    """The binned offset block is a summary, and this is what it costs to rate from.
 
-    ``_offset_multiplier_block`` emits one exact row per distinct multiplier only
-    while there are fewer than 20 of them.  At 20 or more -- the normal case for
-    a continuous exposure -- it bins them like a continuous block: rows keyed on
-    interval STRINGS, each carrying the exposure-weighted average multiplier of
-    its bin.  So a consumer cannot look its own multiplier up at all, and the
-    factor it does find is an average.
+    ``offset_kind="binned"`` bins the multiplier like a continuous block: rows
+    keyed on interval STRINGS, each carrying the exposure-weighted average
+    multiplier of its bin.  So a consumer cannot look its own multiplier up at
+    all, and the factor it does find is an average.
 
-    This is a characterisation of a pre-existing shape, not a fix.  What is new
-    is that the payload contract claimed row-exact equivalence over every
-    main-effect block without excepting this one, and the equivalence tests
-    reconstruct through the ``offset_source=`` form, which IS an exact lookup,
-    so nothing here would have noticed.
+    Pinned to ``"binned"`` because that shape is no longer what a continuous
+    offset exports by default -- it is what a caller asks for when they want the
+    fitted exposure summarised.  The measurement below is why it must be asked
+    for: it is the error a workbook carries if anything scores from it.
     """
     rng = np.random.default_rng(19)
     n = 800
@@ -1711,7 +1708,9 @@ def test_a_continuous_offset_exports_a_binned_block_that_is_not_a_row_exact_fact
         family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
     )
     model.fit(X, y, offset=offset)
-    payload = build_rating_table_payload(model, X, y, offset=offset, n_bins=150, impact_bins=(20,))
+    payload = build_rating_table_payload(
+        model, X, y, offset=offset, n_bins=150, impact_bins=(20,), offset_kind="binned"
+    )
 
     block = next(b for b in payload.main_effects if b.kind == "offset")
     multiplier = np.exp(offset)
@@ -1776,7 +1775,13 @@ def test_an_exact_offset_level_is_keyed_on_its_own_multiplier_at_any_magnitude()
     assert len(np.unique(multiplier)) == 10
 
     block = rating_tables._offset_multiplier_block(
-        np.log(multiplier), len(multiplier), None, n_bins=10, bin_strategy="exposure_quantile"
+        np.log(multiplier),
+        len(multiplier),
+        None,
+        n_bins=10,
+        bin_strategy="exposure_quantile",
+        offset_kind="auto",
+        offset_max_exact_levels=20,
     )
     assert block is not None
     keys = block.table["Offset Multiplier"].to_numpy(dtype=np.float64)
@@ -1797,16 +1802,23 @@ def test_offset_multipliers_within_float_noise_are_still_one_level():
     """The rounding does real work, and the fix has to keep doing it.
 
     It is what collapses the float noise of ``exp(log(exposure))`` into
-    "distinct tariff levels" and so gates the 20-level exact/binned switch.  A
-    relative tolerance has to keep merging what an absolute one merged near
-    ``1.0``, or a fit with three exposures would export as a binned block.
+    "distinct tariff levels" and so gates the ``offset_max_exact_levels``
+    lookup/per-unit switch.  A relative tolerance has to keep merging what an
+    absolute one merged near ``1.0``, or a fit with three exposures would lose
+    its printed levels and export as a single per-unit row.
     """
     base = np.array([0.5, 1.0, 2.0])
     jittered = np.repeat(base, 4) * (1.0 + 1e-14 * np.arange(12.0))
     assert len(np.unique(jittered)) == 12
 
     block = rating_tables._offset_multiplier_block(
-        np.log(jittered), len(jittered), None, n_bins=10, bin_strategy="exposure_quantile"
+        np.log(jittered),
+        len(jittered),
+        None,
+        n_bins=10,
+        bin_strategy="exposure_quantile",
+        offset_kind="auto",
+        offset_max_exact_levels=20,
     )
     assert block is not None
     keys = block.table["Offset Multiplier"].to_numpy(dtype=np.float64)
@@ -1854,7 +1866,14 @@ def test_an_empty_offset_bin_ships_a_factor_a_risk_can_be_rated_on():
     )
     model.fit(X, y, offset=offset)
     payload = build_rating_table_payload(
-        model, X, y, offset=offset, n_bins=150, impact_bins=(20,), bin_strategy="uniform"
+        model,
+        X,
+        y,
+        offset=offset,
+        n_bins=150,
+        impact_bins=(20,),
+        bin_strategy="uniform",
+        offset_kind="binned",
     )
 
     block = next(b for b in payload.main_effects if b.kind == "offset")
@@ -1932,6 +1951,7 @@ def test_a_bin_holding_only_zero_weight_rows_ships_a_factor_too():
         n_bins=150,
         impact_bins=(20,),
         bin_strategy="uniform",
+        offset_kind="binned",
     )
 
     block = next(b for b in payload.main_effects if b.kind == "offset")
