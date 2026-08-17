@@ -299,6 +299,46 @@ it is a summary rather than a per-row lookup. A bin with no exposure — reachab
 `bin_strategy="uniform"` on a skewed exposure — reports the midpoint of its own interval at weight
 zero. Pass `offset_source=` to export the exact form, keyed on a raw column of the frame.
 
+### Continuous offsets: `offset_kind="per_unit"`
+
+An offset is not an estimated surface. Its coefficient is fixed at 1 by construction — no standard
+error, no lambda, nothing fitted — so a continuous offset is not a curve to approximate but a column
+to multiply by. What decides the exported shape is therefore not how many distinct values the source
+takes, but that the consumer multiplies rather than looks up.
+
+With `offset_source=` declared, `offset_kind` chooses between the two:
+
+| value | behaviour |
+|---|---|
+| `"auto"` (default) | one row per level up to `offset_max_exact_levels`, a single `per_unit` row above it |
+| `"discrete"` | levels only; refuses above the cap |
+| `"per_unit"` | always the relation |
+
+A per-unit block is one row, applied by multiplying the named column by its `Relativity`:
+
+```
+SumInsured | Relativity | Weight
+per_unit   | 1.0        | 6000.0
+```
+
+`log(Exposure)` gives a scale of exactly `1.0`; `log(Term/12)` gives `1/12`. It is the same shape
+`Numeric` terms already export, for the same reason.
+
+**It has no bounds and no extrapolation rule.** Nothing in it is estimated, so nothing is known only
+over a training range — the relation holds at a sum insured of 10m on a book that saw 442k for
+exactly the reason it holds at 10k. The binned alternative could not: its top bin capped every risk
+above the fitted range at that bin's average. Measured on a continuous sum-insured offset, 6,000
+rows with 5,998 distinct values — binned, all 6,000 receive a factor that is not their own and the
+worst is out by **1.022e+00**, more than double; per-unit, the worst row is out by **9.99e-16**.
+
+The relation is derived on the log scale and verified on the multiplier scale against
+`offset_mapping_rtol`/`offset_mapping_atol`, on every row. A column the offset is not proportional
+to is refused by name rather than approximated.
+
+Low cardinality is left alone: `Term ∈ {12, 36}` still exports as the two-row lookup `12 → 1`,
+`36 → 3`, because for a handful of levels a lookup already *is* the exact answer and asks nothing
+of the consumer. Undeclared offsets — no `offset_source=` — are unchanged and still bin.
+
 The workbook includes selected-bin rating tables, a discretization impact sweep, and a structured
 Model Summary sheet. The sweep runs the `impact_bins` ladder — `20, 50, 100, 200, 250` by default —
 **plus the `n_bins` the workbook was actually exported at**, marked by the sheet's `exported` column.
