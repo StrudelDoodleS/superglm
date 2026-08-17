@@ -31,7 +31,7 @@ _TERM_NUMERIC_COLUMNS = frozenset(
 
 # The width of an ordinary main-effect block: a key column, a relativity and a
 # weight.  It is no longer the STRIDE -- blocks are placed by their own widths
-# (``_main_effect_start_columns``) because a ppform block is nine columns wide,
+# (``_main_effect_start_columns``) because a ppform block is seven columns wide,
 # and the number formats are chosen by a column's role in its block rather than
 # by ``column % 3``.  What the constant still names is the mandatory
 # three-column prefix every block carries: the downstream loader locates blocks
@@ -51,11 +51,11 @@ _MAIN_EFFECT_BLOCK_GAP = 0
 def _main_effect_start_columns(blocks) -> list[int]:
     """The first column of each main-effect block, by cumulative width.
 
-    A ppform block is nine columns and every other block is three, so "block
+    A ppform block is seven columns and every other block is three, so "block
     ``i`` starts at ``1 + i * 3``" stopped being true the moment the first wide
-    block could appear in the list.  Under the old rule a nine-column block's
+    block could appear in the list.  Under the old rule a wide block's
     right-hand neighbour was written straight over its coefficients, and
-    openpyxl raised nothing -- the sheet simply lost six columns and repeated a
+    openpyxl raised nothing -- the sheet simply lost four columns and repeated a
     ``Relativity``/``Weight`` pair where they had been.
 
     Every caller that places or re-reaches a block goes through this, so the
@@ -82,21 +82,24 @@ _MAIN_EFFECT_HEADER_ROW = 7
 # entire purpose of publishing that column.
 _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 
-# The ppform block's six exact-form columns.  Coefficients are not factors and
+# The ppform block's four exact-form columns.  Coefficients are not factors and
 # must not be read at six decimal places: a reader copying ``b`` into a stored
 # procedure needs every digit that was fitted, and the magnitude is not bounded
-# the way a relativity's is -- ``b``, ``c`` and ``d`` are signed log-space
-# numbers, and ``from``/``to`` are covariate values, which on a sum-insured or a
-# mileage covariate run to 1e5 and above.  Significant digits, not decimal
-# places, for the same reason the base relativity gets a scientific format.
+# the way a relativity's is -- ``a``, ``b``, ``c`` and ``d`` are signed
+# log-space numbers whose scale follows the fitted curve rather than the [0, 1]
+# local variable they multiply.  Significant digits, not decimal places, for the
+# same reason the base relativity gets a scientific format.  (The interval
+# bounds need no format at all: they live in the text key, not in columns of
+# their own.)
 _PPFORM_NUMBER_FORMAT = "0.00000000000000E+00"
 
 # The two formats the main-effect blocks have always carried, keyed by the
 # column's ROLE rather than by its position.  The loop these replace keyed on
 # ``cell.column % _MAIN_EFFECT_BLOCK_STRIDE``, which means "the second and third
 # column of a three-wide block" and means nothing at all once blocks differ in
-# width: with one nine-column block on the sheet, ``% 3 == 2`` lands on a
-# coefficient and ``% 3 == 0`` on an interval bound.  Reading the header the
+# width: with one seven-column block on the sheet, ``% 3 == 2`` lands on the
+# ``b`` coefficient and then on the NEXT block's interval key, and ``% 3 == 0``
+# on ``c`` and then on that block's ``Relativity``.  Reading the header the
 # block itself declared cannot drift that way.
 _MAIN_EFFECT_ROLE_FORMATS = {
     "Relativity": "0.000000",
@@ -371,7 +374,7 @@ def _main_effect_number_format(block, column_name: str, offset: int) -> str | No
     places -- a coefficient rendered as ``0.00`` is stored exactly and read
     wrongly, which is the failure this whole export exists to remove.
 
-    Keyed on the block's ``kind`` rather than on the six column names, so a
+    Keyed on the block's ``kind`` rather than on the four column names, so a
     coefficient column renamed in ``rating_tables`` cannot quietly fall back to
     the default rendering.
     """

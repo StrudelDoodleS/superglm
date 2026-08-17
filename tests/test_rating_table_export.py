@@ -1095,7 +1095,7 @@ def test_export_rating_tables_carries_both_ppform_keywords_to_the_payload(tmp_pa
     deliberately: a keyword that never arrives cannot raise, so a refusal that
     fires under ``continuous_kind="ppform"`` and then lifts under
     ``allow_unbounded_extrapolation=True`` proves both of them travelled -- and
-    it proves it without depending on how a nine-column block is laid out in
+    it proves it without depending on how a seven-column block is laid out in
     the workbook, which is a separate piece of work.
 
     One spline and nothing else, so the sheet this writes has a single
@@ -1122,7 +1122,7 @@ def test_export_rating_tables_carries_both_ppform_keywords_to_the_payload(tmp_pa
 
 
 def test_a_wide_block_does_not_overwrite_its_neighbour(tmp_path):
-    """The layout used a fixed stride; a nine-column block breaks that.
+    """The layout used a fixed stride; a seven-column block breaks that.
 
     Placing block i at 1 + i*3 assumes every block is three wide.  With a ppform
     block in the list, block i+1 lands on top of block i's coefficients.  The
@@ -1209,9 +1209,15 @@ _CONTINUOUS_KIND_ENTRY_POINTS = {
 _CONTINUOUS_KIND_CLAIMS = (
     'continuous_kind : {"binned", "ppform"}, default "binned"',
     "exp(a + b*u + c*u**2 + d*u**3)",
-    "u = (x - from) / (to - from)",
+    # The bounds are NOT columns.  They are read back out of the interval key,
+    # which is what ``test_the_unbounded_tails_survive_the_workbook_as_text``
+    # measures and what a ``from``/``to`` phrasing here would contradict: the
+    # block ships seven columns, not nine, and a consumer told to divide by
+    # ``to - from`` has no such column to divide by.
+    "u = (x - lower) / (upper - lower)",
     "worst row was mis-rated by 60%",
-    "NINE columns rather than three",
+    "SEVEN columns rather than three",
+    "both bounds back out of the interval key",
     "un-upgraded loader still reads it as a step function",
     "content digest",
     "fingerprint identically",
@@ -1259,7 +1265,7 @@ def test_both_export_entry_points_document_the_continuous_kind_mode(entry_point)
 
     ``export_rating_tables`` defers to the payload's docstring for the export
     contract, but the mode is the one thing a caller passes to whichever entry
-    point they already use, and the nine-column sheet and the digest trap are
+    point they already use, and the seven-column sheet and the digest trap are
     workbook facts -- so the workbook function cannot be the one that stays
     silent about them.
     """
