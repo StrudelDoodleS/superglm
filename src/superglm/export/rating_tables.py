@@ -11,6 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.export._ppform import extract_ppform
 from superglm.export.summary import SummaryExportPayload, build_summary_export_payload
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -247,6 +248,132 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
     return RatingTableBlock(
         name=name, kind="continuous", table=out, centering_shift=float(centering_shift)
     )
+
+
+_PPFORM_COLUMNS = ("from", "to", "a", "b", "c", "d")
+
+# The tail rows are CONSTANT pieces, so their higher coefficients are exactly
+# zero and the local variable never matters.  That is deliberate: a consumer
+# that computes ``u`` unconditionally on an unbounded row would divide by an
+# infinite width, and a consumer that clamps would not -- with b = c = d = 0
+# both arrive at the same number.
+_PPFORM_TAIL_COEFFICIENTS = (0.0, 0.0, 0.0)
+
+
+def _continuous_ppform_block(
+    model: SuperGLM,
+    name: str,
+    centering: str,
+    centering_shift: float,
+    weights: NDArray,
+    values: NDArray,
+) -> RatingTableBlock:
+    """A continuous term as its exact polynomial pieces, plus a lookup fallback.
+
+    Nine columns, in two halves.  The first three are the ordinary binned-block
+    columns -- an interval key, a relativity, an exposure weight -- so a
+    consumer that cannot evaluate a polynomial still finds this block, reads it,
+    and scores it as a step function exactly as it scores a binned block today.
+    The remaining six are the exact form.
+
+    That superset is not cosmetic.  The downstream loader locates blocks by a
+    header signature at fixed offsets and fails the WHOLE package when a block
+    does not match, so a six-column block would force two repositories to ship
+    in lockstep and would break every other term's publication in between.  See
+    the design's section 4.2a and 7.1.
+
+    ``Relativity`` is the curve's value at ``from``, not the interval's average,
+    so the two readings of one row agree at its left edge instead of disagreeing
+    everywhere.
+
+    The first and last rows are UNBOUNDED and constant.  Extrapolation is
+    carried in the table rather than described beside it: a cubic evaluated past
+    its last knot is not merely wrong but unbounded -- measured at 1581x the
+    correct factor five years past the boundary of a real age curve -- and no
+    note reliably prevents a consumer from doing it.  With the tails emitted,
+    the only operation a consumer performs is "match an interval, evaluate it",
+    and that operation is correct everywhere.
+
+    The ``centering_shift`` is RECORDED and not applied.  ``_continuous_block``
+    multiplies its binned relativities by ``exp(-centering_shift)`` because
+    ``discretization_impact`` knows nothing about centering; the segments here
+    come from ``term_inference(centering=...)``, which has already subtracted
+    it.  Applying it a second time would double-count the constant while
+    ``base_relativity`` added it back once, so the block would be wrong by
+    exactly one shift.  Recording it is still required: that is how the payload
+    folds the constant back into the base.
+    """
+    segments = extract_ppform(model, name, centering=centering)
+
+    lo = np.concatenate([[-np.inf], segments.breaks[:-1], [segments.breaks[-1]]])
+    hi = np.concatenate([[segments.breaks[0]], segments.breaks[1:], [np.inf]])
+
+    boundary_low = float(segments.evaluate(np.asarray([segments.breaks[0]]))[0])
+    boundary_high = float(segments.evaluate(np.asarray([segments.breaks[-1]]))[0])
+
+    coefficients = np.vstack(
+        [
+            [boundary_low, *_PPFORM_TAIL_COEFFICIENTS],
+            segments.coefficients,
+            [boundary_high, *_PPFORM_TAIL_COEFFICIENTS],
+        ]
+    )
+
+    # ``a`` is the log relativity at u = 0, so exp(a) is the factor a step-function
+    # reader applies across the row -- the same convention the exact blocks use.
+    with np.errstate(over="ignore", under="ignore"):
+        relativity = np.exp(coefficients[:, 0])
+
+    weight_by_row = _ppform_row_weights(lo, values, weights)
+
+    # ``strict=True`` against the declared column names, so a change in the
+    # number of coefficients has to be a change to ``_PPFORM_COLUMNS`` too
+    # rather than a silently mis-headed column.
+    exact_form = dict(zip(_PPFORM_COLUMNS, (lo, hi, *coefficients.T), strict=True))
+    table = pd.DataFrame(
+        {
+            name: [_format_interval(left, right) for left, right in zip(lo, hi, strict=True)],
+            "Relativity": relativity,
+            "Weight": weight_by_row,
+            **exact_form,
+        }
+    )
+    return RatingTableBlock(
+        name=name,
+        kind="continuous_ppform",
+        table=table,
+        extrapolation=segments.extrapolation,
+        centering_shift=float(centering_shift),
+    )
+
+
+def _export_weights(X: EagerFrame, sample_weight: NDArray | None) -> NDArray:
+    """The per-row exposure a weight column sums, with the unweighted default.
+
+    An unweighted fit still gets a ``Weight`` column, carrying counts -- the
+    same convention ``_weights_by_level`` uses for a categorical block, so the
+    two block kinds report the same quantity rather than one reporting counts
+    and the other nothing.
+    """
+    if sample_weight is None:
+        return np.ones(len(X), dtype=np.float64)
+    return np.asarray(sample_weight, dtype=np.float64)
+
+
+def _ppform_row_weights(lo: NDArray, values: NDArray, weights: NDArray) -> NDArray:
+    """Exposure falling in each segment, including the unbounded tails.
+
+    Reported so the block carries the same weight column every other block
+    does; a reviewer reads it to see which segments the book actually populates
+    and which are shape carried by the penalty alone.
+
+    Keyed on ``lo`` alone because the rows partition the whole line: every
+    interval's upper bound is the next one's lower bound, so the count of row
+    starts at or below a value IS its row, and reading ``hi`` as well would be a
+    second statement of the same fact that could disagree with the first.
+    """
+    idx = np.clip(np.searchsorted(lo[1:], values, side="right"), 0, len(lo) - 1)
+    return np.bincount(idx, weights=weights, minlength=len(lo)).astype(np.float64)
 
 
 def _weights_by_level(
@@ -1217,6 +1344,7 @@ def build_rating_table_payload(
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
     centering: str = "native",
+    continuous_kind: str = "binned",
 ) -> RatingTablePayload:
     """Build the renderer-independent rating-table payload.
 
@@ -1584,13 +1712,23 @@ def build_rating_table_payload(
             # for and all of them share one origin.  ``with_se=False``, so this
             # is the point estimate alone -- the band's own centering is
             # ``_recenter_term``'s business and is not routed through here.
-            main_effects.append(
-                _continuous_block(
-                    name,
-                    selected.tables[name],
-                    float(_main_effect_inference(model, name, centering).centering_shift),
+            centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
+            # ``Polynomial`` stays binned under ``"ppform"``: the block is fixed
+            # at four coefficients while a polynomial's degree is not, so it is
+            # routed on ``_SplineBase`` rather than on "is continuous".
+            if continuous_kind == "ppform" and isinstance(spec, _SplineBase):
+                main_effects.append(
+                    _continuous_ppform_block(
+                        model,
+                        name,
+                        centering,
+                        centering_shift,
+                        _export_weights(frame, sample_weight),
+                        np.asarray(frame.column_array(name), dtype=np.float64),
+                    )
                 )
-            )
+            else:
+                main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
         elif isinstance(spec, Numeric):
