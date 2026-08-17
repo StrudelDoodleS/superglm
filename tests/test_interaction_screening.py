@@ -13,7 +13,11 @@ import pytest
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
 from superglm.screening import pair_cell_moments, pair_score_curvature, working_score
-from superglm.screening._score_stat import _build_pencil, penalized_score_statistic_ladder
+from superglm.screening._score_stat import (
+    _build_pencil,
+    _pencil_edf,
+    penalized_score_statistic_ladder,
+)
 
 
 def _pair_case(seed, n=4000, n_a=17, n_b=13, k_a=4, k_b=3, signed=False):
@@ -1769,9 +1773,10 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
     lam = float(penalized_score_statistic_ladder(U, V, S_ti=S, budgets=(4.0 * p,))[0].lambda0)
 
     def edf(operand):
-        pencil = _build_pencil(0.5 * (operand + operand.T), S, U)
-        v, s = np.asarray(pencil.v, dtype=float), np.asarray(pencil.s, dtype=float)
-        return float(np.sum(v / (v + lam * s)))
+        # The SHIPPED evaluator, not a re-derivation of its formula.  Rewriting
+        # ``sum v / (v + lam s)`` here would drop the ``den > 0`` guard the
+        # shipped one carries and would keep passing if the two ever parted.
+        return _pencil_edf(_build_pencil(0.5 * (operand + operand.T), S, U), lam)
 
     scale = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
     noise = np.random.default_rng(1234)
