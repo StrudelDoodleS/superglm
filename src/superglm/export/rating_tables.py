@@ -293,6 +293,11 @@ def _continuous_ppform_block(
     the only operation a consumer performs is "match an interval, evaluate it",
     and that operation is correct everywhere.
 
+    Except under ``extrapolation="error"``, where the tails are omitted and the
+    block covers the knot range alone.  That term declines to price outside its
+    training range, so a matching failure in the consumer is the model's own
+    answer rather than a gap in the table.
+
     The centering shift is RECORDED and not applied.  ``_continuous_block``
     multiplies its binned relativities by ``exp(-centering_shift)`` because
     ``discretization_impact`` knows nothing about centering; the segments here
@@ -315,19 +320,29 @@ def _continuous_ppform_block(
     """
     segments = extract_ppform(model, name, centering=centering)
 
-    lo = np.concatenate([[-np.inf], segments.breaks[:-1], [segments.breaks[-1]]])
-    hi = np.concatenate([[segments.breaks[0]], segments.breaks[1:], [np.inf]])
+    if segments.extrapolation == "error":
+        # No tails at all.  The term refuses to price outside its training
+        # range, so the block must refuse too: a value below the first knot or
+        # above the last matches no row and the consumer's lookup fails, which
+        # is the same answer the model gives.  Emitting bounded tails here would
+        # be the export quietly deciding a question the model declined.
+        lo = segments.breaks[:-1]
+        hi = segments.breaks[1:]
+        coefficients = segments.coefficients
+    else:
+        lo = np.concatenate([[-np.inf], segments.breaks[:-1], [segments.breaks[-1]]])
+        hi = np.concatenate([[segments.breaks[0]], segments.breaks[1:], [np.inf]])
 
-    boundary_low = float(segments.evaluate(np.asarray([segments.breaks[0]]))[0])
-    boundary_high = float(segments.evaluate(np.asarray([segments.breaks[-1]]))[0])
+        boundary_low = float(segments.evaluate(np.asarray([segments.breaks[0]]))[0])
+        boundary_high = float(segments.evaluate(np.asarray([segments.breaks[-1]]))[0])
 
-    coefficients = np.vstack(
-        [
-            [boundary_low, *_PPFORM_TAIL_COEFFICIENTS],
-            segments.coefficients,
-            [boundary_high, *_PPFORM_TAIL_COEFFICIENTS],
-        ]
-    )
+        coefficients = np.vstack(
+            [
+                [boundary_low, *_PPFORM_TAIL_COEFFICIENTS],
+                segments.coefficients,
+                [boundary_high, *_PPFORM_TAIL_COEFFICIENTS],
+            ]
+        )
 
     # ``a`` is the log relativity at u = 0, so exp(a) is the factor a step-function
     # reader applies across the row -- the same convention the exact blocks use.
@@ -384,6 +399,75 @@ def _ppform_row_weights(lo: NDArray, values: NDArray, weights: NDArray) -> NDArr
     """
     idx = np.clip(np.searchsorted(lo[1:], values, side="right"), 0, len(lo) - 1)
     return np.bincount(idx, weights=weights, minlength=len(lo)).astype(np.float64)
+
+
+_SUPPORTED_CONTINUOUS_KINDS = frozenset({"binned", "ppform"})
+
+
+def _require_supported_continuous_kind(continuous_kind: str) -> None:
+    if continuous_kind not in _SUPPORTED_CONTINUOUS_KINDS:
+        raise ValueError(
+            f"continuous_kind must be one of {sorted(_SUPPORTED_CONTINUOUS_KINDS)}, "
+            f"got {continuous_kind!r}."
+        )
+
+
+def _ppform_convertible_terms(model: SuperGLM) -> list[str]:
+    """The names ``continuous_kind="ppform"`` would actually convert.
+
+    The same two conditions the assembly loop routes on -- continuous enough to
+    reach the discretisation path, and a spline rather than a ``Polynomial``,
+    whose degree is not bounded by the block's four coefficients.  Derived here
+    so a guard cannot come to disagree with the router about which terms it
+    covers, which would make it refuse terms that stay binned or wave through
+    terms that do not.
+    """
+    return [
+        name for name in _continuous_features(model) if isinstance(model._specs[name], _SplineBase)
+    ]
+
+
+def _require_ppform_exportable(
+    model: SuperGLM, names: list[str], *, allow_unbounded_extrapolation: bool
+) -> None:
+    """Refuse the two cases a ppform block cannot state honestly.
+
+    Both are refusals rather than fallbacks.  Silently binning a term the
+    caller asked to export exactly would put an approximation in a workbook
+    that claims, block by block, to be exact -- which is the failure mode this
+    whole feature exists to remove.
+    """
+    for name in names:
+        spec = model._specs[name]
+        # The spec does NOT keep the ConstraintSpec it was constructed with --
+        # ``getattr(spec, "constraint")`` is None even when one was passed.  It
+        # is unpacked at construction into ``constraint_kind`` /
+        # ``constraint_mode`` (mirrored as ``monotone`` / ``monotone_mode``).
+        #
+        # BOTH are read, and that is load-bearing: ``constraint_mode`` is
+        # ``"postfit"`` on an UNCONSTRAINED spline too, because that is the
+        # default mode a token would have been given rather than a record that
+        # one was.  ``constraint_kind is None`` is what says "no constraint", so
+        # keying on the mode alone would refuse every spline ever fitted.
+        constraint_kind = getattr(spec, "constraint_kind", None)
+        if constraint_kind is not None and getattr(spec, "constraint_mode", None) == "postfit":
+            raise ValueError(
+                f"Term {name!r} carries a postfit {constraint_kind} constraint, whose "
+                "repaired curve has not been verified to be piecewise polynomial. It "
+                "cannot be exported with continuous_kind='ppform'; export it with "
+                "continuous_kind='binned', or use Constraint.fit instead."
+            )
+        if getattr(spec, "extrapolation", None) == "extend" and not allow_unbounded_extrapolation:
+            raise ValueError(
+                f"Term {name!r} uses extrapolation='extend', so the fitted model prices "
+                "beyond the training range with an unbounded cubic. The block's tail "
+                "rows cannot carry that cubic -- an unbounded interval has no width, so "
+                "the normalised u the coefficients are written against does not exist "
+                "there -- and are emitted as the constant pieces continuous_kind="
+                "'ppform' emits under 'clip'. The exported block therefore clips where "
+                "the model extends. Pass allow_unbounded_extrapolation=True to export "
+                "it on those terms, or refit the term with extrapolation='clip'."
+            )
 
 
 def _weights_by_level(
@@ -1355,6 +1439,7 @@ def build_rating_table_payload(
     bin_strategy: str = "exposure_quantile",
     centering: str = "native",
     continuous_kind: str = "binned",
+    allow_unbounded_extrapolation: bool = False,
 ) -> RatingTablePayload:
     """Build the renderer-independent rating-table payload.
 
@@ -1655,6 +1740,18 @@ def build_rating_table_payload(
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     _preflight_rating_table_terms(model)
+    # Immediately after the term preflight, so a caller hears about the mode
+    # before any curve is swept or any block built.  The kind is checked whatever
+    # it is; the per-term refusals only for the mode that would convert them,
+    # since a postfit constraint and an unbounded extrapolation are both
+    # perfectly exportable as binned blocks.
+    _require_supported_continuous_kind(continuous_kind)
+    if continuous_kind == "ppform":
+        _require_ppform_exportable(
+            model,
+            _ppform_convertible_terms(model),
+            allow_unbounded_extrapolation=allow_unbounded_extrapolation,
+        )
     # After the term preflight and before anything is built.  After, because an
     # unsupported term type is the more fundamental complaint -- a model with a
     # ``RandomEffect`` has no rating table under any link, and hearing about the
