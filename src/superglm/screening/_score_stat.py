@@ -269,17 +269,31 @@ derivative instead of the noise floor::
     d edf / d v_j -> 1 / (lambda s_j)   as v_j -> 0
 
 so a perturbation of the operand at the level float64 cannot see -- ``eps
-||V_eff||``, SMALLER than the error already committed in forming it from the
-moments -- moves ``edf`` by ``~eps / lambda``.  Measured over ten orders of
-``lambda`` on a design whose smallest singular value is 1e-8 of its largest,
-the width of the answer set over ``eps / lambda`` reads 0.647 at
+||V_eff||_F``, SMALLER than the error already committed in forming it from the
+moments -- moves ``edf`` by ``eps ||V_eff||_F / (lambda ||S||_2)``.  Measured
+over ten orders of ``lambda`` on a design whose smallest singular value is 1e-8
+of its largest, the width of the answer set over that response reads 0.647 at
 ``lambda = 5.22e-12``, 0.939 at 1.00e-08 and 0.939 at 9.39e-02 -- within 1.45x
 of each other.  It is the quotient, not the rung.
 
-The bracket's low end is ``1e-10`` times the pair's own scale, which puts that
-quotient at 9.66e-06 to 9.86e-06 across all 21 draws -- a 2% band.  **So the
-``abs=1e-5`` the suite asserts at that edge is not a tolerance somebody chose;
-it is ``eps / lambda_lo``**, and the worst miss over the 21 draws is 1.29x it.
+**BOTH NORMS BELONG THERE.**  An earlier revision of this section wrote the
+response as ``eps / lambda``, which is dimensionally wrong rather than merely
+loose: rescaling the design leaves ``edf`` and the width alike -- ``V``, the
+perturbation and the bracket's ``lambda`` all move together -- while
+``eps / lambda`` moves inversely.  Measured on one geometry scaled by 1, 1e3
+and 1e-3, and with the PENALTY scaled by 1e4, the dropped-norm quotient reads
+6.47e-01, 6.38e+05, 8.47e-07 and 6.47e-05: twelve orders from a change of
+units alone.  The form above is invariant under both.
+
+Since ``lambda_lo = 1e-10 tr(V_eff) / tr(S)``, the response is
+``1e10 eps (||V_eff||_F / tr(V_eff)) (tr(S) / ||S||_2)`` -- a property of the
+PAIR, bounded only by ``k`` in either direction, and NOT a constant.  On this
+family it is 9.66e-06 to 9.86e-06 across all 21 draws, a 2% band, because
+their trace ratio barely moves.  **So the ``abs=1e-5`` the suite asserts at
+that edge is not a tolerance somebody chose; it is this pair family's
+first-order response**, and the worst miss over the 21 draws is 1.29x it.  A
+family with a tenth of the curvature beside its penalty would need ``1e-4``,
+so do not carry the number to another fixture -- carry the derivation.
 The seed the fixture happens to run clears it by 193x only because its
 round-off cancels: perturbing that same pair's Gram at the same level opens an
 answer set 6.87e-06 wide -- FIFTY THOUSAND times its own reported error of
@@ -296,12 +310,14 @@ direction under ``eps``; ``1 / lambda`` then multiplies whatever round-off is
 left there by 4.4e+10.  A perturbation experiment separates the regimes
 cleanly and is pinned in
 ``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``.
-Over 7 microkernels x 2 thread counts the width over ``eps / lambda`` is
-1.09e-09 to 2.07e-06 at ``sigma_min / sigma_max`` of 1e-1 and 1e-3, and 0.647
-to 0.990 at 1e-8 and 1e-12 -- five orders apart, and evaluated through
-:func:`_edge`, which is what answers a CLAMPED rung.  The pencil is built only
-when some budget genuinely has to search; measuring it instead would test a
-route this rung does not take.
+Over 7 microkernels x 2 thread counts x 3 unit scales the width over the
+first-order response is 6.28e-10 to 2.11e-06 at ``sigma_min / sigma_max`` of
+1e-1 and 1e-3, and 0.579 to 0.986 at 1e-8 and 1e-12 -- five orders apart, and
+the unresolved figure is the DERIVED value of 1 confirmed to within 1.73x
+rather than a number read off a run.  Evaluated through :func:`_edge`, which is
+what answers a CLAMPED rung; the pencil is built only when some budget
+genuinely has to search, so measuring it instead would test a route this rung
+does not take.
 
 **No arrangement of the arithmetic below narrows this.**  It is the same
 architectural ceiling as the high edge, reached by a different route, and it
