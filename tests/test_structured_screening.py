@@ -4299,6 +4299,12 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     changed so the starved pair's operator resolves that direction, the regime
     moved and the disagreement is worth chasing again.
 
+    **Why a dense-path test lives in the arrow kernel's file.**  Its subject is
+    ``_score_stat``, whose other tests are in ``test_interaction_screening.py``.
+    It is here because ``_thin_level_pair`` is here, and that fixture is the
+    whole point: it is the geometry both paths score, so it is where the two
+    can be compared at all.  Moving the test would mean exporting the fixture.
+
     See the module docstring of :mod:`superglm.screening._score_stat` for the
     measurements and the four refusals.
     """
@@ -4327,8 +4333,12 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     S = 0.5 * (S + S.T)
     scale = max(float(np.trace(V_eff)), 1e-300) / max(float(np.trace(S)), 1e-300)
     A = V_eff + 1e10 * scale * S
-    floor = np.finfo(np.float64).eps * float(np.linalg.norm(A, 2))
-    unresolved = int(np.sum(np.abs(np.linalg.eigvalsh(A)) < 10.0 * floor))
+    edge_spectrum = np.abs(np.linalg.eigvalsh(A))
+    # One decomposition, not two: ``norm(A, 2)`` would run an SVD for a number
+    # these eigenvalues already carry, and the cut and the counted values
+    # belong on the same factorization.
+    floor = np.finfo(np.float64).eps * float(np.max(edge_spectrum))
+    unresolved = int(np.sum(edge_spectrum < 10.0 * floor))
     assert unresolved == (1 if unresolved_dirs else 0), (
         f"{unresolved} directions of the high-edge operator sit at its noise floor; "
         "the documented disagreement is one degree of freedom on the starved pair and "
