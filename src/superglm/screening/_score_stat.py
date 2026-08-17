@@ -272,9 +272,9 @@ so a perturbation of the operand at the level float64 cannot see -- ``eps
 ||V_eff||``, SMALLER than the error already committed in forming it from the
 moments -- moves ``edf`` by ``~eps / lambda``.  Measured over ten orders of
 ``lambda`` on a design whose smallest singular value is 1e-8 of its largest,
-the width of the answer set over ``eps / lambda`` reads 0.796 at
-``lambda = 5.22e-12``, 1.123 at 1.00e-08 and 1.691 at 9.39e-02.  It is the
-quotient, not the rung.
+the width of the answer set over ``eps / lambda`` reads 0.647 at
+``lambda = 5.22e-12``, 0.939 at 1.00e-08 and 0.939 at 9.39e-02 -- within 1.45x
+of each other.  It is the quotient, not the rung.
 
 The bracket's low end is ``1e-10`` times the pair's own scale, which puts that
 quotient at 9.66e-06 to 9.86e-06 across all 21 draws -- a 2% band.  **So the
@@ -282,8 +282,11 @@ quotient at 9.66e-06 to 9.86e-06 across all 21 draws -- a 2% band.  **So the
 it is ``eps / lambda_lo``**, and the worst miss over the 21 draws is 1.29x it.
 The seed the fixture happens to run clears it by 193x only because its
 round-off cancels: perturbing that same pair's Gram at the same level opens an
-answer set 5.48e-06 wide, forty thousand times its own reported error.  A draw
-is not evidence about the family here, and neither is a passing bound.
+answer set 6.87e-06 wide -- FIFTY THOUSAND times its own reported error of
+1.37e-10, and 0.708 of ``eps / lambda`` like every other draw.  Two
+well-conditioned draws of the same family give 3.07e-11 and 1.95e-11, five
+orders below.  A draw is not evidence about the family here, and neither is a
+passing bound.
 
 Which draws are bad is decided in the DESIGN, before this module is called: the
 dense arm's low-edge error tracks the residualized design's smallest singular
@@ -292,10 +295,13 @@ vector in the span of that level's own spline columns.  Squaring sends such a
 direction under ``eps``; ``1 / lambda`` then multiplies whatever round-off is
 left there by 4.4e+10.  A perturbation experiment separates the regimes
 cleanly and is pinned in
-``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``:
-at ``sigma_min / sigma_max`` of 1e-1 and 1e-3 the answer set has width exactly
-0.0 on all 14 of 7 microkernels x 2 thread counts, and at 1e-8 and 1e-12 it is
-0.514 to 0.977 of ``eps / lambda``.
+``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``.
+Over 7 microkernels x 2 thread counts the width over ``eps / lambda`` is
+1.09e-09 to 2.07e-06 at ``sigma_min / sigma_max`` of 1e-1 and 1e-3, and 0.647
+to 0.990 at 1e-8 and 1e-12 -- five orders apart, and evaluated through
+:func:`_edge`, which is what answers a CLAMPED rung.  The pencil is built only
+when some budget genuinely has to search; measuring it instead would test a
+route this rung does not take.
 
 **No arrangement of the arithmetic below narrows this.**  It is the same
 architectural ceiling as the high edge, reached by a different route, and it
