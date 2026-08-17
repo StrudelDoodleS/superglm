@@ -439,10 +439,14 @@ separates a penalty the two halves can share from one where the statistic and
 the edf would be scoring different pencils.  None fires on data: over the five
 screening suites, 86 pair geometries and 767 evaluations, there are ZERO
 refusals from any, and the worst approach is 0.25 of the first allowance and
-0.1875 of the trace one.  The drop branch is not approached at all -- across
-the twelve pair geometries here and ten structured-route factorizations on the
-public ``freMTPL2freq`` screen, no penalty carries a negative eigenvalue
-outside the bar.
+0.1875 of the trace one.  The drop branch is never REACHED -- across the twelve
+pair geometries here, fifteen ``bs`` / ``cr`` / ``ps`` margin shapes and ten
+structured-route factorizations on the public ``freMTPL2freq`` screen, no
+penalty carries a negative eigenvalue outside the bar.  "Not APPROACHED" would
+be the stronger claim and it is not made: the closest constructor-built margin
+is 22x inside, and the suite's reconstructed vanishing-mass fixture comes to
+10.0x on one kernel of the fourteen swept.  See :func:`_penalty_root`, which
+records what does and does not move with the kernel.
 
 **WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
 leaves ``edf`` unchanged in exact arithmetic and changes only the order of
@@ -1392,9 +1396,17 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     trade clause 2 makes deliberately: a coin flip over a value that no one can
     tell is a coin flip is worse than a coin flip over a route.  It is not free,
     and calling it free would be the same overstatement this docstring has had
-    to withdraw twice.  Nothing measured is anywhere near the cut -- the
-    closest margin shape is 22x inside it -- so the exposure is a property of
-    the boundary and not of any pair the suite or ``freMTPL2freq`` produces.
+    to withdraw twice.  **AND THE NUMBER THAT BELONGS HERE IS THE ONE WITH A
+    SPREAD, NOT THE SMALLEST ONE.**  No PIPELINE-BUILT margin penalty comes
+    near the cut -- fifteen ``bs`` / ``cr`` / ``ps`` shapes, the closest 22x
+    inside -- but that is a spread-free property of the constructors and so
+    says nothing about kernel-dependence, which is what this paragraph is
+    about.  The measured quantity that HAS that property is the vanishing-mass
+    fixture's reconstruction, whose distance to the cut moves 7x across
+    kernels: 69.6x inside on SKYLAKEX down to **10.0x on NEHALEM**.  Still an
+    order clear, and it is a reconstructed test fixture rather than anything a
+    caller builds, but 10.0x-with-a-7x-spread is the honest headroom for a
+    claim about which side of the cut something lands on.
 
     **THE TRACE WAS ALSO THE WRONG NORM, AND THAT IS A PUBLISHED RESULT
     RATHER THAN A PREFERENCE.**  ``|tr S - ||rootS||_F^2|`` is the TRACE-NORM
