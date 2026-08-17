@@ -1865,12 +1865,12 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     **How big it is in practice is a property of the PAIR, not a constant.**
     ``lambda_lo = 1e-10 tr(V) / tr(S)``, so the ceiling is
     ``1e10 eps (||V||_F / tr(V)) (tr(S) / ||S||_2)`` -- bounded only by ``p``
-    either way.  This test's own geometries span it: at ``sigma_min = 1e-1``
-    the ceiling is 1.70e-05 and at ``1e-8`` it is 4.34e-05, a factor of 2.6
-    from the trace ratio alone.  The ``1e-05`` that matches the suite's
-    low-edge bound belongs to ONE family's trace ratio and is quoted below as
-    such; an earlier revision of this docstring called it "``1e-05``-ish for
-    any pair", which is false and is withdrawn.
+    either way.  This test's own geometries span it: the ceiling is 1.6972e-05
+    at ``sigma_min = 1e-1``, 2.8778e-05 at 1e-3, 4.3442e-05 at 1e-8 and
+    4.8669e-05 at 1e-12 -- a factor of 2.9 from the trace ratio alone.  The
+    suite's ``1e-05`` low-edge bound is 0.58x ONE family's response and is
+    quoted below as such; an earlier revision of this docstring called the
+    quantity "``1e-05``-ish for any pair", which is false and is withdrawn.
 
     **Measured to be exactly that law, over TEN orders of lambda.**  On the
     ``1e-8`` geometry the width over ``eps / lambda`` reads 0.647 at the
@@ -1892,10 +1892,13 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     design-space oracle runs 4.06e-12 to 1.2574e-05 -- and the draws at the
     bad end are exactly the ones whose residualized design is rank deficient or
     nearly so, which happens when one level's rows put the constant vector in
-    the span of that level's own spline columns.  ``eps / lambda`` over those
-    21 draws is 9.66e-06 to 9.86e-06, a 2% band, and the worst observed miss is
-    1.29x it.  So the suite's ``abs=1e-5`` at that edge is not a property of
-    the seed it runs; it is this quotient.  The one seed that clears it by 193x
+    the span of that level's own spline columns.  The response over those 21
+    draws is 1.7079e-05 to 1.7472e-05, a 2.3% band, and the worst observed miss
+    is 0.73x it -- inside the floor, as every draw must be.  So the suite's
+    ``abs=1e-5`` at that edge is not a property of the seed it runs: it sits at
+    **0.58x** this quotient, BELOW the floor the Gram imposes, which is why
+    some draw exceeds it eventually and why nothing was mis-tuned to make that
+    happen.  The one seed that clears it by 193x
     does so because its round-off cancels: perturbing ITS Gram at the same
     level opens an answer set 6.87e-06 wide, FIFTY THOUSAND times its own
     reported error of 1.37e-10, and 0.708 of ``eps / lambda`` like every other
