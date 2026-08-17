@@ -1842,8 +1842,9 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigm
     0.514 to 0.977 of ``eps / lambda``.  The cut of 0.1 below therefore clears
     the binding measurement by 5.14x and the resolved side by infinity.  The
     transitional geometry the table deliberately omits, ``sigma_min = 1e-5``,
-    reads 1.0e-03 -- so the cut has an order of headroom over the nearest
-    thing that is neither.
+    reads 1.050e-03 to 1.318e-03 over the SAME 14 -- so the cut keeps 76x over
+    the nearest thing that is neither, and the omission is because there is no
+    honest expectation to assert there, not because it was inconvenient.
     """
     width, ceiling = _low_edge_answer_set(sigma_min)
     ratio = width / ceiling

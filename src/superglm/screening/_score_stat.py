@@ -303,6 +303,61 @@ has the same remedy and the same tracking issue -- design factors, #257.  What
 is genuinely different is that at the low edge there is nothing to COUNT, so
 the high edge's probe reports a clean bill on exactly the draws that miss.
 
+**WHERE THIS SITS IN THE LITERATURE, because half of it is textbook and half
+of it is not.**  ``edf`` is the trace of the influence matrix of a general-form
+Tikhonov problem -- equivalently the sum of filter factors over the generalized
+singular values of the pair ``(X_w, L)`` with ``L' L = S``.  Every standard
+algorithm for it takes the DESIGN or a backward-stable factor of it, never the
+Gram: Elden, *BIT* 17 (1977) 134-145 and *BIT* 24 (1984) 467-472; Golub, Heath
+and Wahba, *Technometrics* 21 (1979) 215-223; Hutchinson and de Hoog, *Numer.
+Math.* 47 (1985) 99-106; Wood, *JRSS-B* 70 (2008) 495-518 sec. 3.2, which gives
+exactly the stacked-QR form ``[W X; E] = Q R`` with ``A = K K'`` and calls the
+Cholesky-of-``X'W^2X`` alternative the less stable of the two for "the
+exacerbation of any numerical ill-conditioning that accompanies explicit
+formation of ``X'W^2X``".  So the moment route is published, and published as
+the route the standard method exists to avoid.
+
+Two halves of the mechanism are settled and one is not.
+
+* SQUARING.  Conventional eigen/SVD drivers are accurate ABSOLUTELY, to
+  ``eps sigma_1``, so directions at or below ``eps sigma_1`` carry no relative
+  accuracy (Demmel, *Accurate SVDs of Structured Matrices*, LAPACK Working Note
+  130, 1997; the *LAPACK Users' Guide*'s own SVD error bound).  Forming a Gram
+  squares ``sigma_1``.  Huang and Jia, arXiv:1907.10392, reject the
+  cross-product pencil ``(A'A, B'B)`` for the GSVD on precisely this ground --
+  small generalized singular values from it "may be recovered much less
+  accurately and even may have no accuracy" -- which is one algebraic step from
+  the quantity summed here.
+* AMPLIFICATION.  ``1 / (lambda s_j)`` is elementary calculus, above.
+* THE COMPOSITION IS OURS.  A sweep of the GCV/edf and inverse-problems
+  literature found NO published forward-error bound for
+  ``tr((A + lambda S)^-1 A)`` under perturbation of ``A``, and no method that
+  recovers it accurately from a Gram alone.  The nearest published relatives
+  bound the generalized singular values themselves (Huang and Jia, sec. 2.1,
+  improving Stewart and Sun, *Matrix Perturbation Theory*, 1990) or the
+  Tikhonov SOLUTION, not this trace.  Stated as ours rather than cited.
+
+AND DO NOT REACH FOR THE STANDARD RESCUES; they were checked and each needs
+what this module does not have.  Seminormal equations and its corrected form,
+and iterative refinement on the normal equations, all require ``A`` itself or
+an ``R`` that is the factor of a backward-stable decomposition of it (Bjorck,
+*BIT* 7 (1967) 257-278 and *LAA* 88 (1987) 31-48).  The high-relative-accuracy
+theory needs a rank-revealing decomposition whose factors are themselves
+accurate (Demmel and Veselic, *SIMAX* 13 (1992) 1204-1245; Demmel et al.,
+*LAA* 299 (1999) 21-80), and a Gram formed in floating point is not one: its
+entries carry ABSOLUTE errors, which is an unbounded RELATIVE error exactly in
+the direction that matters.  This is an information barrier, not an algorithmic
+one.
+
+One caution about the published tripwire, since it is the obvious thing to
+reach for.  ``cond <= eps^-1/2`` recurs across that literature as the boundary
+for the cross-product route, and here it is NOT conservative enough: the draw
+that misses worst has ``sigma_min / sigma_max = 2.72e-07``, i.e. a design
+condition number of 3.7e+06 against an ``eps^-1/2`` of 6.7e+07, and it is still
+1.2574e-05 out.  ``1 / lambda`` moves the boundary, which is why the regime
+test above is keyed to the width of the answer set and not to a conditioning
+threshold.
+
 What this costs in practice is small, and that is measured too rather than
 assumed: on the published twelve-row freMTPL2 screen, one thread against
 eight, the table order is identical, the ``z > sqrt(edf0 / 2)`` gate admits
