@@ -220,7 +220,7 @@ def _wood_stacked_edf(p, geometry, lam):
 
     L, k_a = p.dims
     G = _residualized_design(p, geometry)
-    root = _penalty_root(p.S_a)
+    root = _penalty_root(p.S_a)[0]
     stacked = np.concatenate((G, np.sqrt(lam) * scipy.linalg.block_diag(*([root] * L))), axis=0)
     T = np.linalg.qr(stacked, mode="r")
     u, sv, vt = np.linalg.svd(T)
@@ -950,7 +950,7 @@ def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build, full_r
 
 
 def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch):
-    """``edf`` uses the PSD projection of ``S_a``; the statistic uses ``S_a``.
+    """The projection may only move the penalty by the eigensolver's own error.
 
     Both halves are read off ONE block-angular QR whose penalty rows are
     ``sqrt(lambda) root_penalty``, so they score one pencil by
@@ -960,38 +960,171 @@ def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch)
     the structured route scoring a different model from the one the caller
     specified, and only on the pairs wide enough to route here.
 
-    The certification is the eigensolver's documented bound, ``n^2 eps``
-    relative trace mass -- see :func:`_profile`.  Both arms are checked:
-    a negative eigenvalue at a tenth of that bound is projected silently, one
-    at ten times it refuses the pair.
+    The certification is the eigensolver's own documented bound, and the
+    scale it is spent on is PER-DIRECTION: a negative eigenvalue outside
+    ``n eps ||S||_2`` is one :func:`_penalty_root` has certified is not
+    backward error, so it refuses.  Inside that bar the sign is undecidable,
+    the magnitude is taken (clause 4) and the pair publishes.
 
-    RED against the shipped tree, where ``penalty_clip`` is computed, stored
-    on ``_PairGeometry`` and never read by anything.
+    **THIS TEST USED TO PIN THE DEFECT, WHICH IS WHY THE ARMS ARE STATED IN
+    THE BAR AND NOT IN THE TRACE.**  Issue #323: the guard was keyed to
+    RELATIVE TRACE MASS at ``2 n^2 eps`` while the drop was keyed to
+    ``n eps ||S||_2``, and the ratio between the two is
+    ``2 n tr(S) / ||S||_2`` -- between ``2n`` and ``2n^2``, never empty.  The
+    arm below at a tenth of the TRACE bound sits inside that window: swept over
+    seven ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads it is 8.51x to 8.63x
+    OUTSIDE the eigensolver's bar, so the direction was dropped, and 9.6x to
+    10.3x UNDER the trace threshold, so nothing refused.  It asserted that as
+    correct.
+
+    Three arms now, and the middle one is the regression:
+
+    * ``-0.1`` bars: undecidable, magnitude taken, publishes.
+    * ``-8`` bars: dropped, and the trace guard is measured too slack to see
+      it, so only the per-direction guard can refuse.  RED before #323.
+    * ``-10`` trace bounds: dropped by 857 bars; both guards would fire, and
+      the per-direction one gets there first.
     """
     import superglm.screening._structured as st
 
     grab = _thin_level_pair(low_weight=1.0)
     B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
     n = S_a.shape[0]
-    bound = 2.0 * n * n * np.finfo(np.float64).eps
+    eps = np.finfo(np.float64).eps
+    trace_bound = 2.0 * n * n * eps
 
-    # A negative direction of a KNOWN relative trace weight, added to the
-    # penalty's own smallest eigenvector so nothing else about the pair moves.
+    # A negative direction on the penalty's own smallest eigenvector, so
+    # nothing else about the pair moves.
     w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
     direction = np.outer(Q[:, 0], Q[:, 0])
     trace = float(np.trace(S_a))
+    bar = n * eps * float(np.max(np.abs(w)))
 
-    for factor, refused in ((0.1, False), (10.0, True)):
-        injected = S_a - (w[0] + factor * bound * trace) * direction
-        assert np.linalg.eigvalsh(0.5 * (injected + injected.T))[0] < 0.0
+    arms = (
+        ("magnitude", -0.1 * bar, False),
+        ("dropped, trace-invisible", -8.0 * bar, True),
+        ("dropped, trace-visible", -10.0 * trace_bound * trace, True),
+    )
+    for label, target, refused in arms:
+        injected = S_a - (w[0] - target) * direction
+        got = np.linalg.eigvalsh(0.5 * (injected + injected.T))[0]
+        assert got < 0.0, (label, got)
         pair = spline_cat_moments(B_a, injected, S_cell, W_cell, level_rows)
-        if refused:
-            with pytest.raises(st._UnstableStructuredEDFError, match="PSD projection"):
-                st._profile(pair)
-            assert st.structured_ladder(pair, budgets=BUDGETS) is None
-        else:
+
+        root, dropped, cut = st._penalty_root(pair.S_a)
+        clip = abs(float(np.trace(pair.S_a)) - float(np.sum(np.square(root)))) / trace
+        if not refused:
+            # Inside the bar by 5.8x at the worst kernel swept, so the arm is
+            # on the magnitude branch on every one of them and not by luck.
+            assert dropped == 0.0, (label, dropped, cut)
+            assert abs(got) * 5.0 < cut, (label, got, cut)
             rungs = st.structured_ladder(pair, budgets=BUDGETS)
             assert rungs is not None and len(rungs) == len(BUDGETS)
+            continue
+
+        # Outside it by 7.9x at the worst kernel swept: a real direction, gone.
+        assert dropped > 4.0 * cut, (label, dropped, cut)
+        assert root.shape[0] == n - 1, (label, root.shape, n)
+        with pytest.raises(st._UnstableStructuredEDFError, match="negative eigenvalue"):
+            st._profile(pair)
+        assert st.structured_ladder(pair, budgets=BUDGETS) is None
+
+        if label == "dropped, trace-invisible":
+            # The point of the arm: the AGGREGATE guard cannot see this, so the
+            # refusal above is the per-direction one and nothing else.  10.1x
+            # of headroom at the worst kernel swept, asserted at 5x.
+            assert clip * 5.0 < trace_bound, (label, clip, trace_bound)
+        else:
+            assert clip > trace_bound, (label, clip, trace_bound)
+
+
+def test_a_dropped_direction_is_reported_on_the_cut_that_dropped_it():
+    """Issue #323's own spectrum, and the two guards it put on two scales.
+
+    ``n = 10``, spectrum ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``: the residue is
+    4.4x outside ``eigh``'s bar, so :func:`_penalty_root` drops it and ``rootS``
+    comes back with 9 rows of 10.  The old aggregate guard read
+    ``clip = 9.9e-16`` against ``2 n^2 eps = 4.4e-14`` -- 45x short -- and said
+    nothing, so the pair published an ``edf`` counting a free direction the
+    dense route still penalizes.
+
+    The two numbers this pins are the DROP (a magnitude against the same cut
+    that decided it) and the SLACK (that the aggregate guard is nowhere near
+    firing, so it cannot be what refuses).  Swept over seven
+    ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads the drop is 4.425x to
+    4.475x outside the bar and the aggregate guard 37.5x to 45.0x short; the
+    assertions take 2x and 8x of that.
+
+    RED before #323, where ``_penalty_root`` returned the factor alone and
+    there was nothing for a caller to key on.
+    """
+    from superglm.screening._structured import _penalty_root
+
+    n = 10
+    eps = np.finfo(np.float64).eps
+    Q = np.linalg.qr(np.random.default_rng(0).standard_normal((n, n)))[0]
+    S = Q @ np.diag(np.array([1.0] * (n - 1) + [-1e-14])) @ Q.T
+    S = 0.5 * (S + S.T)
+
+    root, dropped, cut = _penalty_root(S)
+
+    assert root.shape == (n - 1, n)
+    assert dropped > 2.0 * cut, (dropped, cut)
+    # The aggregate test the guard used to be: relative trace mass against
+    # ``2 n^2 eps``.  It is not close, which is the whole of the issue.
+    clip = abs(float(np.trace(S)) - float(np.sum(np.square(root)))) / abs(float(np.trace(S)))
+    assert clip * 8.0 < 2.0 * n * n * eps, (clip, 2.0 * n * n * eps)
+
+
+def test_a_singular_penalty_still_publishes_because_clause_2_says_so():
+    """A null direction is not an indefinite one, and only one of them refuses.
+
+    The refusal is keyed to ``w < -n eps ||S||_2``, so an EXACT zero -- and a
+    positive eigenvalue inside the bar -- leaves ``rootS`` through ``keep``
+    without being counted as a drop.  That distinction is the whole reason the
+    guard can be per-direction at all: clause 2 forbids refusing a singular
+    pencil, and the published practice agrees (Wood, Pya & Safken, *JASA*
+    111(516):1548-1563, 2016, deflate a rank-deficient penalty and report on
+    the deflated model rather than refusing).
+
+    Three shapes, all of which the shipped fixture bank actually contains:
+    ``_rank_one_penalty_pair`` factors a ``[0, 1]`` spectrum, ``_multi_null_pair``
+    a ``-6.8e-16`` residue inside a 3.0e-14 bar, and ``_starved_bs_pair`` a
+    5.3e-11 against a 1.7e-09 bar.
+
+    RED against a guard keyed to ``rootS.shape[0] < n``, which is the obvious
+    wrong way to spell "a direction was dropped": the first shape has a
+    bit-exact zero eigenvalue and would refuse.
+    """
+    from superglm.screening._structured import _penalty_root, structured_ladder
+
+    # A bit-exact zero, a below-bar negative, and a below-bar positive.  None
+    # is an indefiniteness the eigensolver can certify, so none may refuse --
+    # and the ROW COUNTS differ between them, which is why "a direction left
+    # rootS" is not the event to key on.  Only the exact zero loses its row;
+    # the below-bar negative keeps one, at its magnitude, which is clause 4.
+    for label, S, rows in (
+        ("exact zero", np.diag([1.0, 0.0]), 1),
+        ("negative inside the bar", np.diag([1.0, -1e-17]), 2),
+        ("positive inside the bar", np.diag([1.0, 1e-17]), 2),
+    ):
+        root, dropped, cut = _penalty_root(S)
+        assert dropped == 0.0, (label, dropped, cut)
+        assert root.shape[0] == rows, (label, root.shape, rows)
+
+    for label, build in (
+        ("rank_one", lambda: _rank_one_penalty_pair(13, 6, 12, 2e-3, 3)),
+        ("multi_null", lambda: _multi_null_pair(0)),
+        ("starved_bs", _starved_bs_pair),
+    ):
+        pair = spline_cat_moments(*_structured_inputs(build()))
+        root, dropped, cut = _penalty_root(pair.S_a)
+        smallest = float(np.linalg.eigvalsh(0.5 * (pair.S_a + pair.S_a.T))[0])
+        # Genuinely at or below the bar -- the pencils this policy is about --
+        # and genuinely NOT certified indefinite, so they publish.
+        assert smallest <= cut, (label, smallest, cut)
+        assert dropped == 0.0, (label, dropped, cut)
+        assert structured_ladder(pair, budgets=BUDGETS) is not None, label
 
 
 def test_material_negative_edf_refuses_an_only_search_rung(monkeypatch):

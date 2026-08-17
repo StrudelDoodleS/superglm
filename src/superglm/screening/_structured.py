@@ -430,12 +430,19 @@ as well and leaves a plausible number inside ``[0, ceiling]`` either way.
 the deflation, the second dominating three orders on the starved family --
 and what it removes beyond that is carried into DEGREES OF FREEDOM by
 ``||F_q||_F^2`` and refused against the same dust allowance the range guard
-takes.  :func:`_penalty_root`'s projection is held to ``n^2 eps`` of the
-penalty's trace, which is what separates a penalty the two halves can share
-from one where the statistic and the edf would be scoring different pencils.
-Neither fires on data: over the five screening suites, 86 pair geometries
-and 767 evaluations, there are ZERO refusals from either, and the worst
-approach is 0.25 of the first allowance and 0.1875 of the second.
+takes.  :func:`_penalty_root`'s projection is held on BOTH of its branches,
+and holding only one of them was issue #323: the DROP branch is refused at the
+eigensolver's own ``n eps ||S||_2``, the same cut that decided to drop, and
+the MAGNITUDE branch at ``2 n^2 eps`` of the penalty's trace, which is the
+aggregate that branch's derivation actually bounds.  Together they are what
+separates a penalty the two halves can share from one where the statistic and
+the edf would be scoring different pencils.  None fires on data: over the five
+screening suites, 86 pair geometries and 767 evaluations, there are ZERO
+refusals from any, and the worst approach is 0.25 of the first allowance and
+0.1875 of the trace one.  The drop branch is not approached at all -- across
+the twelve pair geometries here and ten structured-route factorizations on the
+public ``freMTPL2freq`` screen, no penalty carries a negative eigenvalue
+outside the bar.
 
 **WHAT IS NOT A TRADE: REPRODUCIBILITY.**  Permuting the level coordinates
 leaves ``edf`` unchanged in exact arithmetic and changes only the order of
@@ -1241,8 +1248,24 @@ def spline_cat_moments(
     )
 
 
-def _penalty_root(S_a: NDArray) -> NDArray:
-    """``rootS`` with ``rootS' rootS`` the NEAREST PSD matrix to ``S_a``.
+def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
+    """``rootS`` with ``rootS' rootS`` a PSD matrix WITHIN ``eigh``'s bar of ``S_a``.
+
+    Returns the factor, the spectral-norm distance the DROP branch below moved
+    ``S_a``, and the CUT that branch cut on -- so the caller decides on the
+    same bar this function decided on rather than on a second one of its own.
+    Issue #323 is what happens when it does not.
+
+    **THE SUMMARY LINE USED TO SAY "NEAREST" AND THAT IS THE ONE WORD IT MAY
+    NOT SAY.**  The nearest PSD matrix in ANY unitarily invariant norm is
+    ``max(w, 0)`` -- Higham, *Linear Algebra Appl.* 103:103-118 (1988) for the
+    Frobenius case, and Goulart, Nakatsukasa & Rontsis, "Accuracy of
+    approximate projection to the semidefinite cone", arXiv:1908.01606, Lemma
+    2.1, for every unitarily invariant norm.  Taking ``|w|`` instead moves
+    ``2|w|`` in that direction where clipping moves ``|w|``, so this is a
+    PERTURBATION BOUNDED BY ``2 n eps ||S||_2`` and deliberately not a
+    projection.  The reason is below and it is a good one, but the two are not
+    the same object and the docstring may not claim the cheaper word.
 
     ``edf`` is a sum of filter factors ``a_j / (a_j + lambda s_j)``, and a
     NEGATIVE ``s_j`` puts that term outside ``[0, 1]``: there is no bound to
@@ -1285,12 +1308,14 @@ def _penalty_root(S_a: NDArray) -> NDArray:
     function of the data rather than of the rounding.
 
     Outside the bar a negative eigenvalue is real, no magnitude is taken and
-    the direction is dropped.
+    the direction is dropped -- and the largest such magnitude is RETURNED, so
+    :func:`_profile` refuses on the cut this function made rather than on a
+    second one.  That is the whole of issue #323's fix and the rest of this
+    docstring is why it is one cut and not two.
 
-    **WHAT THIS DOCSTRING USED TO PROMISE NEXT WAS WRONG IN BOTH HALVES, AND
-    THE CORRECTION IS THE POINT OF STATING A POLICY AT ALL.**  It said
-    :func:`_profile` "then refuses the pair, because the statistic is still
-    scoring ``S_a`` raw".
+    **THE OLD PROMISE WAS WRONG IN BOTH HALVES.**  It said :func:`_profile`
+    "then refuses the pair, because the statistic is still scoring ``S_a``
+    raw".
 
     * **The reason is stale, and issue #298 made it more so.**  The statistic
       and the ``edf`` now come off ONE factorization -- :func:`_evaluate`
@@ -1301,39 +1326,79 @@ def _penalty_root(S_a: NDArray) -> NDArray:
       draft here named that arrow; it no longer exists.)  The guard's real
       reason is the one :func:`_profile` states at its own site: cross-route
       comparability, because the DENSE path still assembles ``S_ti`` raw.
-    * **The refusal is not guaranteed, and there is a silent window.**
-      Dropping happens at ``|c| > n eps ||S||_2``; :func:`_profile` raises
-      only at ``clip = |c| / |tr S| > 2 n^2 eps``.  Those are different
-      thresholds, so ``n eps ||S||_2 < |c| <= 2 n^2 eps |tr S|`` is dropped
-      WITHOUT a refusal.  Checked, not reasoned: ``n = 10``, spectrum
-      ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``.  The bar is 2.220e-15 so the
-      eigenvalue is 4.5x outside it and dropped -- ``rootS`` comes back with 9
-      rows of 10 -- while ``clip`` is 7.895e-16 against a threshold of
-      4.441e-14, a factor of 56 short.  **No raise.**  The pair publishes on a
-      penalty the caller did not specify, and the range guard cannot see it
-      because every filter factor stays in ``[0, 1]``.
+    * **The refusal was not guaranteed, and the window it left has a closed
+      form.**  Dropping happened at ``|c| > n eps ||S||_2``; :func:`_profile`
+      raised only at ``clip = |c| / |tr S| > 2 n^2 eps``.  Two thresholds on
+      two scales, so ``n eps ||S||_2 < |c| <= 2 n^2 eps |tr S|`` was dropped
+      WITHOUT a refusal, and the ratio between them is
 
-    **AND WHICH WAY THAT WINDOW MOVES ``edf`` IS CLAUSE 4's DIRECTION, NOT
-    CLAUSE 3's.**  Dropping a direction from ``rootS`` removes it from the
-    PENALTY, not from the sum: ``T_q' T_q = D_q + lambda rootS' rootS``, so in
-    that direction the filter factor becomes ``d / (d + 0) = 1``.  The
-    direction is reported FREE and ``edf`` goes UP by as much as one per level
-    -- the same end as "WHAT CLAUSE 4 COSTS", and the OPPOSITE of clause 3's
-    harm, which is losing a degree of freedom.  (If ``D_q`` carries no mass
-    there either, :func:`_block_inverse_factors` zeroes it and it contributes
-    zero, which is clause 1.)  Stating the sign because getting it backwards
-    once already cost this docstring a correction.
+          (2 n^2 eps |tr S|) / (n eps ||S||_2)  =  2 n tr(S) / ||S||_2,
+
+      which is ``2 n`` times the INTRINSIC DIMENSION ``tr(S) / ||S||_2`` of the
+      penalty -- between ``2n`` and ``2n^2``, and never empty, because
+      ``tr S >= ||S||_2`` holds for everything in the cone.  Measured, not
+      reasoned: ``n = 10``, spectrum ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``.
+      The bar is 2.220e-15 so the eigenvalue is 4.43x to 4.48x outside it,
+      depending on the kernel, and dropped -- ``rootS`` came back with 9 rows
+      of 10 -- while ``clip`` was 9.87e-16 to 1.18e-15 against a threshold of
+      4.441e-14, a factor of 37x to 45x short.  (Swept over seven
+      ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads; a single run would not
+      have been evidence for either number.)  On the public ``freMTPL2freq``
+      screen the same ratio measures 85.6x, 157.8x and 160.0x over ten
+      structured-route factorizations, matching ``2 n tr(S)/||S||_2`` to four
+      figures at ``n = 11`` and ``n = 15``.  A window two orders wide is not a
+      seam, so it is closed rather than documented.
+
+    **THE FIX ADDS NO TOLERANCE, WHICH IS WHY IT IS ALLOWED TO BE THIS CHEAP.**
+    The drop branch fires exactly when this function has CERTIFIED the
+    negativity is not the eigensolver's backward error.  "Was the projection
+    roundoff?" is the question :func:`_profile`'s guard asks, and the drop
+    branch is definitionally its NO.  So the refusal keys to the drop itself,
+    at ``|c| > n eps ||S||_2`` and no other constant.  LAPACK's ``?PSTRF`` --
+    Cholesky with complete pivoting for a semidefinite matrix -- is the same
+    shape: ONE tolerance, defaulting to ``n u max_k A(k,k)``, decides both the
+    ``RANK`` it returns and the ``INFO > 0`` it raises, and its documentation
+    declines to distinguish "rank deficient" from "not positive semidefinite"
+    at that tolerance because there they are one event.  What this module must
+    do differently is split them by SIGN, since clause 2 forbids refusing on
+    singularity: ``w = 0`` leaves ``rootS`` through ``keep`` and publishes,
+    ``w < -bar`` refuses.
+
+    **THE TRACE WAS ALSO THE WRONG NORM, AND THAT IS A PUBLISHED RESULT
+    RATHER THAN A PREFERENCE.**  ``|tr S - ||rootS||_F^2|`` is the TRACE-NORM
+    distance to the PSD cone, and the projection onto that cone is
+    nonexpansive in the Frobenius norm and in no other standard one -- Goulart,
+    Nakatsukasa & Rontsis, arXiv:1908.01606, sec. 2.2, which gives
+    counterexamples for the spectral and trace norms by name.  The per-direction
+    question is a SPECTRAL one (Halmos's distance to the cone is
+    ``max{|w| : w < 0}``), so it gets a spectral answer.
+
+    **WHICH WAY THAT WINDOW MOVED ``edf`` IS CLAUSE 4's DIRECTION, NOT CLAUSE
+    3's.**  Dropping a direction from ``rootS`` removes it from the PENALTY,
+    not from the sum: ``T_q' T_q = D_q + lambda rootS' rootS``, so in that
+    direction the filter factor becomes ``d / (d + 0) = 1``.  The direction is
+    reported FREE and ``edf`` goes UP by as much as one per level -- the same
+    end as "WHAT CLAUSE 4 COSTS", and the OPPOSITE of clause 3's harm, which is
+    losing a degree of freedom.  (If ``D_q`` carries no mass there either,
+    :func:`_block_inverse_factors` zeroes it and it contributes zero, which is
+    clause 1.)  Stating the sign because getting it backwards once already cost
+    this docstring a correction.
 
     The sharper reading is that enlarging ``null(S)`` can MANUFACTURE a common
     null space where none existed -- a penalty projection creating clause-1
     directions is the exact condition this policy is organized around, and is
     more interesting than a deflation rather than less.
 
-    That window is a GUARD GAP and not a policy choice.  Closing it means
-    keying the guard to the largest DROPPED eigenvalue instead of to aggregate
-    trace mass, which is a behaviour change and is deliberately not made in a
-    documentation-only change.  What is fixed here is the prose asserting a
-    guarantee the code does not provide.
+    **WHAT THE REFUSAL COSTS, MEASURED BEFORE IT WAS CHOSEN.**  Across the
+    twelve pair geometries this suite builds, ZERO factor a penalty with a
+    negative eigenvalue outside the bar, so none of them changes.  Across the
+    public ``freMTPL2freq`` screen at five ``max_cells`` settings, ten
+    structured-route factorizations, again ZERO.  What DID sit in the window
+    was one arm of the suite's own guard test, which injected a negative
+    direction at a tenth of the TRACE bound -- 8.5x to 8.6x outside the
+    eigensolver's bar on every kernel swept -- and asserted it published.  The
+    suite pinned the defect; it is re-pinned the other way and a third arm now
+    holds the magnitude branch open.
 
     **AND ON A TWO-COLUMN MARGIN THERE IS NOTHING LEFT TO TAKE THE MAGNITUDE
     OF, WHICH IS CLAUSE 4 OF THE SINGULAR-PENCIL POLICY AT ITS WORST.**
@@ -1350,12 +1415,21 @@ def _penalty_root(S_a: NDArray) -> NDArray:
     """
     n = S_a.shape[0]
     if n == 0:
-        return np.zeros((0, 0), dtype=np.float64)
+        return np.zeros((0, 0), dtype=np.float64), 0.0, 0.0
     w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
-    unresolved = float(n) * np.finfo(np.float64).eps * float(np.max(np.abs(w), initial=0.0))
+    unresolved = float(float(n) * np.finfo(np.float64).eps * float(np.max(np.abs(w), initial=0.0)))
     lifted = np.where(w >= -unresolved, np.abs(w), 0.0)
     keep = lifted > 0.0
-    return (Q[:, keep] * np.sqrt(lifted[keep])).T
+    # The spectral-norm distance to the cone contributed by the CERTIFIED
+    # negatives only.  A zero eigenvalue -- exact, or positive and inside the
+    # bar -- leaves ``rootS`` through ``keep`` and is not counted here: that is
+    # clause 1's deflation of a null direction, and clause 2 forbids refusing
+    # on it.  Only ``w < -unresolved`` is the eigensolver saying the sign is
+    # real.  ``unresolved`` travels out with it so the caller reports the cut
+    # this function cut on rather than recomputing ``||S||_2`` by a second
+    # routine that would agree only to roundoff.
+    dropped = float(np.max(-w, initial=0.0, where=w < -unresolved))
+    return (Q[:, keep] * np.sqrt(lifted[keep])).T, dropped, unresolved
 
 
 @dataclass(frozen=True)
@@ -1498,7 +1572,7 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     direction = coupling @ (basis.T @ overlap_score)
     U_eff = p.score_rows - np.einsum("lji,lj->li", p.R, p.R @ direction, optimize=True)
 
-    root_penalty = _penalty_root(p.S_a)
+    root_penalty, dropped, bar = _penalty_root(p.S_a)
     trace_S = float(np.trace(p.S_a))
     kept_S = float(np.sum(np.square(root_penalty)))
     clip = abs(trace_S - kept_S) / max(abs(trace_S), np.finfo(np.float64).tiny)
@@ -1517,14 +1591,36 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # eigenvalues within ``p(n) eps ||S||_2`` of the true ones, with
     # ``p(n) = n`` in the LAPACK Users' Guide's bound (3rd ed., SIAM 1999,
     # sec. 4.7), so a genuinely PSD ``S_a`` cannot show a negative eigenvalue
-    # below ``-n eps ||S||_2``.  There are at most ``n`` of them; each moves
-    # the trace by ``|w|`` if dropped and by ``2 |w|`` if taken at its
-    # magnitude, which is what :func:`_penalty_root` does inside that bar; and
-    # ``tr(S) >= ||S||_2`` for a matrix in the cone.  So the relative trace
-    # mass a certified-roundoff projection can move is at most ``2 n^2 eps``.
-    # Measured across every geometry this suite exercises, the worst observed
-    # is 0.1875 of that -- the bound is derived, and it is not tight to what was
-    # seen.
+    # below ``-n eps ||S||_2``.
+    #
+    # THAT CERTIFICATION IS PER-DIRECTION, SO THIS IS WHERE IT IS SPENT.
+    # ``dropped`` is the largest magnitude :func:`_penalty_root` removed
+    # OUTSIDE that bar, which is to say the largest one it certified is not
+    # backward error.  It is nonzero exactly when the answer to "was the
+    # projection roundoff?" is no, so the refusal keys to it directly and
+    # introduces no second constant -- issue #323, where the aggregate test
+    # below was the only guard and missed the event by a factor of
+    # ``2 n tr(S)/||S||_2``, between 85x and 160x on the public freMTPL2freq
+    # screen.  A SINGULAR penalty does not reach here: ``w = 0`` is inside the
+    # bar, so ``dropped`` stays 0 and the pair publishes, which clause 2
+    # requires.
+    if dropped > 0.0:
+        raise _UnstableStructuredEDFError(
+            f"the penalty has a negative eigenvalue of {dropped}, which is "
+            f"outside an eigensolver's backward error of {bar}: the direction was "
+            "dropped from the structured route's penalty, so its edf would count "
+            "a free direction the dense route still penalizes"
+        )
+    # The aggregate test survives it, on the branch its derivation actually
+    # covers: the MAGNITUDE branch.  At most ``n`` eigenvalues sit inside the
+    # bar, each moves the trace by ``2 |w| <= 2 n eps ||S||_2`` when taken at
+    # its magnitude, and ``tr(S) >= ||S||_2`` in the cone, so a lift can move
+    # at most ``2 n^2 eps`` of relative trace mass.  With the drop branch
+    # refusing above, nothing else can reach this line, so it is now a
+    # self-check on the FACTOR rather than a second opinion on the spectrum --
+    # ``kept_S`` is read off ``root_penalty`` itself, so a wrong ``keep`` mask
+    # trips it where an eigenvalue test would not.  Measured across every
+    # geometry this suite exercises, the worst observed is 0.1875 of the bound.
     if clip > 2.0 * p.S_a.shape[0] ** 2 * np.finfo(np.float64).eps:
         raise _UnstableStructuredEDFError(
             f"the penalty's PSD projection removed {clip} of its trace, which is "
