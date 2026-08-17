@@ -1284,7 +1284,7 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     ``bs`` pair refuses or the sentence was overstated.  It was the sentence.
     Measured over fifteen margin shapes, ``bs``, ``cr`` and ``ps`` at 5, 8, 12,
     16 and 20 knots, taken through the same route the kernel takes ``S_a``:
-    NONE is dropped, five carry no negative eigenvalue at all, and the worst
+    NONE is dropped, SIX carry no negative eigenvalue at all, and the worst
     margin is ``ps(12)`` at 22x INSIDE the bar.  The ``bs`` family -- the one
     the sentence was about -- runs 37x to 1339x inside, because its
     ``||S||_2`` is eight to ten orders larger, so its bar is too.  Their
