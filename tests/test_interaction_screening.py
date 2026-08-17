@@ -544,11 +544,25 @@ def test_a_weakly_identified_block_is_scored_not_discarded():
     guard set by SMALLNESS rather than by round-off classifies the whole block
     as absorbed and drops the pair.
 
-    Only arithmetic may discard a pair.  The threshold is ``10 * k^3 * eps``,
-    nine orders below this block's 5.0e-05 at ``k = 2``, so a merely weak
-    interaction keeps its degrees of freedom and its statistic; a pair that is
-    genuinely uninteresting is for ``z`` to rank down, not for the kernel to
-    delete.
+    Only arithmetic may discard a pair -- and the way that rule is kept here is
+    that **no absorption guard exists at all**, which is stronger than the
+    threshold this docstring used to name.
+
+    It said "the threshold is ``10 * k^3 * eps``, nine orders below this
+    block's 5.0e-05 at ``k = 2``".  There is no such cut: ``grep`` finds no
+    ``k**3`` anywhere in :mod:`superglm.screening` except a cost gate on
+    ``max_cells``, and :mod:`superglm.screening._score_stat`'s docstring
+    records the guard's removal under "That rule cost a guard" -- no Type 1
+    bound could separate absorption from weak identification, and the fitted
+    one that was tried deleted a legitimately weak block while missing a
+    genuinely absorbed one at the same ``k``.  So a weak interaction keeps its
+    degrees of freedom because nothing is looking to take them, not because a
+    threshold sits far enough away.  A pair that is genuinely uninteresting is
+    for ``z`` to rank down, not for the kernel to delete.
+
+    Corrected in passing while PR #324 removed the same defect class from
+    ``_score_stat``: a docstring crediting a threshold that is not there makes
+    a property look guarded when nothing guards it.
     """
     from superglm.screening import penalized_score_statistic
 

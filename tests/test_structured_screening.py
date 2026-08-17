@@ -25,7 +25,11 @@ from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
 from superglm.screening._overlap import pair_overlap_moments
 from superglm.screening._pair_moments import pair_score_curvature
-from superglm.screening._score_stat import _solve_psd, penalized_score_statistic_ladder
+from superglm.screening._score_stat import (
+    _rank_floor,
+    _solve_psd,
+    penalized_score_statistic_ladder,
+)
 from superglm.screening._structured import _evaluate, _profile, spline_cat_moments
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
@@ -4263,6 +4267,38 @@ def test_degenerate_levels_are_scored_not_skipped():
     assert row["edf0"] > 0.0
 
 
+def _above_ratio(magnitudes, cut):
+    """How far the nearest RESOLVED direction clears ``cut``; ``inf`` if none."""
+    above = magnitudes[magnitudes >= cut]
+    return float(above.min() / cut) if above.size else float("inf")
+
+
+def _below_ratio(magnitudes, cut):
+    """How far the nearest UNRESOLVED direction sits below ``cut``; ``inf`` if none."""
+    below = magnitudes[magnitudes < cut]
+    return float(cut / below.max()) if below.size else float("inf")
+
+
+def _cut_separation(magnitudes, cut):
+    """Both ratios, for interpolation into a count assertion's message.
+
+    Reported on EVERY failure of a count, so a direction crossing the cut names
+    the margin exactly as an approaching one does.
+    """
+    return (
+        f"(nearest resolved {_above_ratio(magnitudes, cut):.2f}x above, "
+        f"nearest unresolved {_below_ratio(magnitudes, cut):.2f}x below)"
+    )
+
+
+def _separation(magnitudes, cut):
+    """``_cut_separation`` for a cut whose margin is reported but not bounded."""
+    return (
+        f"(clearance {_above_ratio(magnitudes, cut):.2f}x above, "
+        f"{_below_ratio(magnitudes, cut):.2f}x below)"
+    )
+
+
 @pytest.mark.parametrize(
     ("low_weight", "unresolved_dirs"),
     [(1.0, False), (1e-4, False), (1e-12, True)],
@@ -4280,7 +4316,11 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     rounding of information that is not there.  Asserting an ``edf`` for such a
     pair would assert this module's threshold and not the data -- an
     independent stacked-QR evaluation gives 19.000 at a rank cut of 1e-14 and
-    18.275 at 1e-12, with no plateau between them.
+    18.275 at 1e-12 -- and each of those is a PLATEAU, three decades wide and
+    six decades wide respectively.  That is the argument, not its absence: a
+    single wide plateau would certify a cut, whereas plateaus separated by
+    0.725 df say the answer is a property of which one the cut lands on, and
+    nothing in the data chooses.
 
     **The count is the assertion because a CONDITION NUMBER here is not
     measurable.**  The first version of this test divided ``V_eff``'s largest
@@ -4339,12 +4379,20 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
 
     # ``V_eff``'s own unresolved directions: the Gram is a squared design, so a
     # starved level lands here first, before any penalty is added.
-    spectrum = np.linalg.eigvalsh(V_eff)
-    bar = V_eff.shape[0] * np.finfo(np.float64).eps * float(np.max(np.abs(spectrum)))
-    at_floor = int(np.sum(np.abs(spectrum) < bar))
+    spectrum = np.abs(np.linalg.eigvalsh(V_eff))
+    bar = _rank_floor(V_eff.shape[0]) * float(np.max(spectrum))
+    at_floor = int(np.sum(spectrum < bar))
+    # Report this count's own separation, which is NOT symmetric with the
+    # high-edge one below and is the tighter of the two: over the sweep the
+    # starved pair's nearest resolved direction clears ``bar`` by 1.35-1.36x,
+    # against 2.5e+05 and 3.0e+06 on the other geometries.  No bound is set on
+    # it -- at 1.35x any bound would be measuring the sweep rather than the
+    # regime, and what carries this assertion is the 4-versus-1 gap, which is
+    # coarse.  Stated rather than left to inference.
+    v_clear = _separation(spectrum, bar)
     assert at_floor == (4 if unresolved_dirs else 1), (
-        f"{at_floor} directions of V_eff sit below k*eps*||V_eff||; the documented regime is "
-        "four on the starved pair and one otherwise"
+        f"{at_floor} directions of V_eff sit below k*eps*||V_eff|| {v_clear}; the documented "
+        "regime is four on the starved pair and one otherwise"
     )
 
     # And at the ladder's high edge, where the disagreement is reported: the
@@ -4362,24 +4410,32 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     cut = 10.0 * floor
     unresolved = int(np.sum(edge_spectrum < cut))
 
-    # The count is only as trustworthy as its margin, so assert the margin too.
-    # ``1e-4`` is the transitional geometry and clears the cut by 2.4x, where
-    # the other two clear it by more than a thousand; a reduction with enough
-    # backward error to close that gap should fail HERE, naming the margin,
-    # rather than as a count nobody can explain.
-    above = edge_spectrum[edge_spectrum >= cut]
-    clearance = float(above.min() / cut)
-    assert clearance > 2.0, (
-        f"the nearest resolved direction clears the noise cut by only {clearance:.2f}x; "
-        "the counts below stop being decidable once this approaches 1"
-    )
-    if unresolved:
-        below = edge_spectrum[edge_spectrum < cut]
-        assert float(cut / below.max()) > 4.0, (
-            f"the unresolved direction sits only {cut / below.max():.2f}x below the cut"
-        )
+    # BOTH sides of the cut, unconditionally: an eigenvalue that CROSSES is the
+    # event worth naming, and a guard that only watches the side it started on
+    # goes quiet exactly then.  The first version of this did that -- it read
+    # ``above.min()`` only, so a direction dropping below the cut left ``above``
+    # entirely, ``above.min()`` jumped to the next resolved mode, the margin
+    # passed, and the failure surfaced as a bare count.  An empty side scores
+    # ``inf``, which is the safe direction.
+    margins = _cut_separation(edge_spectrum, cut)
     assert unresolved == (1 if unresolved_dirs else 0), (
-        f"{unresolved} directions of the high-edge operator sit at its noise floor; "
+        f"{unresolved} directions of the high-edge operator sit at its noise floor {margins}; "
         "the documented disagreement is one degree of freedom on the starved pair and "
         "none otherwise"
+    )
+
+    # BOUND SET FROM THE SPREAD, NOT FROM ONE RUN.  Measured over 7
+    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings = 14
+    # configurations: the nearest direction ABOVE the cut clears it by
+    # 2.091-2.426x on ``1e-4`` and ~1086x and ~1295x on the other two, and on
+    # ``1e-12`` the unresolved direction sits 2.60-188.09x BELOW it.  So the
+    # binding measurements are 2.091 and 2.598, and 1.5 leaves 1.39x and 1.73x.
+    #
+    # The bound this replaces was 2.0 above and 4.0 below, both read off a
+    # single pinned run -- and 4.0 was ABOVE the observed minimum, so it failed
+    # on SANDYBRIDGE at eight threads.  Setting a tolerance from one
+    # configuration is what this file's own policy forbids.
+    assert min(_above_ratio(edge_spectrum, cut), _below_ratio(edge_spectrum, cut)) > 1.5, (
+        f"the noise cut has lost its separation {margins}; the counts stop being decidable "
+        "as this approaches 1, and the regime this test pins has moved"
     )
