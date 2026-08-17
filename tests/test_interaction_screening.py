@@ -1743,7 +1743,7 @@ def test_numeric_numeric_moments_match_dense_assembly():
     np.testing.assert_allclose(u_m, X_o.T @ score, rtol=1e-12, atol=1e-9)
 
 
-def _low_edge_answer_set(sigma_min, p=24, reps=32):
+def _low_edge_answer_set(sigma_min, p=24, reps=32, units=1.0):
     """How wide the low-edge ``edf`` is, over perturbations the Gram cannot see.
 
     Builds a design with a prescribed smallest singular value, hands
@@ -1757,19 +1757,36 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
     that is what answers a CLAMPED rung -- the pencil is built only when some
     budget genuinely has to search, and a budget above ``p`` never does.
     Measuring the pencil here instead would test a route this rung does not
-    take.  Over the same sweep the two agree on the REGIME -- the pencil reads
-    0.563-0.796 and 0.626-0.767 where ``_edge`` reads 0.647-0.749 and
+    take.  Over the microkernel sweep the two agree on the REGIME -- the pencil
+    reads 0.563-0.796 and 0.626-0.767 where ``_edge`` reads 0.647-0.749 and
     0.901-0.990 -- but they part on the resolved side, where the pencil is
     exactly 0.0 and ``_edge`` is 1.09e-09 to 2.07e-06.  So the pencil form
     would have asserted a bit-identity belonging to a route not under test.
 
-    Returns the width of the resulting answer set alongside ``eps / lambda``,
-    which is what that width is a multiple of.
+    **THE DENOMINATOR IS A NORM RATIO AND THAT IS NOT DECORATION.**  Returns
+    the width against ``eps ||V||_F / (lambda ||S||_2)``, which is what
+    first-order perturbation theory makes it a multiple of: the response of
+    ``edf = sum_j v_j / (v_j + lambda s_j)`` to a perturbation of ``V`` is
+    ``dv_j / (lambda s_j)`` as ``v_j -> 0``, and the perturbation this applies
+    has size ``eps ||V||_F``.
+
+    An earlier revision divided by ``eps / lambda``, dropping both norms.  That
+    is DIMENSIONALLY WRONG, not merely loose, and this fixture hid it by
+    holding ``sigma_max = 1`` and ``S = I`` so both norms were one.  Rescaling
+    the design by a constant leaves ``edf`` and the width invariant -- ``V``,
+    the perturbations and the bracket's ``lambda`` all scale together -- while
+    ``eps / lambda`` moves inversely.  Measured: at ``sigma_min = 1e-8`` the
+    dropped-norm quotient reads 6.47e-01, 6.38e+05 and 8.47e-07 as the design
+    is scaled by 1, 1e3 and 1e-3, and 6.47e-05 when the PENALTY is scaled by
+    1e4 -- twelve orders, from a change of units alone, straddling any cut.
+    The ratio returned here reads 0.634, 0.625, 0.830 and 0.634 on the same
+    four, and the last is exact to every digit.  ``units`` exists so the test
+    asserts that invariance rather than claiming it.
     """
     rng = np.random.default_rng(0)
     Q, _ = np.linalg.qr(rng.standard_normal((4 * p, p)))
     Z, _ = np.linalg.qr(rng.standard_normal((p, p)))
-    X = (Q * np.geomspace(1.0, sigma_min, p)) @ Z.T
+    X = units * ((Q * np.geomspace(1.0, sigma_min, p)) @ Z.T)
     V = 0.5 * (X.T @ X + (X.T @ X).T)
     S, U = np.eye(p), np.ones(p)
 
@@ -1784,7 +1801,8 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
         # passing if the module's own arithmetic ever moved away from it.
         return _edge(0.5 * (operand + operand.T), S, lam)[0]
 
-    scale = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
+    v_norm = float(np.linalg.norm(V, "fro"))
+    scale = np.finfo(np.float64).eps * v_norm
     noise = np.random.default_rng(1234)
     seen = []
     for _ in range(reps):
@@ -1792,26 +1810,67 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
         E = 0.5 * (E + E.T)
         seen.append(edf(V + E * (scale / float(np.linalg.norm(E, "fro")))))
     seen = np.asarray(seen)
-    return float(seen.max() - seen.min()), np.finfo(np.float64).eps / lam
+    ceiling = np.finfo(np.float64).eps * v_norm / (lam * float(np.linalg.norm(S, 2)))
+    return float(seen.max() - seen.min()), float(ceiling)
+
+
+# The cut is placed against a DERIVED value, not against observed headroom.
+# First-order perturbation theory puts the width of the answer set AT the
+# response ``eps ||V||_F / (lambda ||S||_2)`` when the deciding direction is
+# unresolved -- ratio 1 -- and the measured 0.5787-0.9863 is that prediction
+# confirmed to within 1.73x rather than a number read off a run.  So the cut is
+# "one order below the derived response", and ``_LOW_EDGE_MARGIN`` is what the
+# sweep then has to clear.
+_LOW_EDGE_CUT = 0.1
+_LOW_EDGE_MARGIN = 2.0
 
 
 @pytest.mark.parametrize(
-    ("sigma_min", "determined"),
-    [(1e-1, True), (1e-3, True), (1e-8, False), (1e-12, False)],
+    ("sigma_min", "units", "determined"),
+    [
+        (1e-1, 1.0, True),
+        (1e-3, 1.0, True),
+        (1e-8, 1.0, False),
+        (1e-12, 1.0, False),
+        # THE SAME TWO GEOMETRIES IN OTHER UNITS.  Rescaling the design changes
+        # nothing about it, so a normalization that is a property of the pair
+        # must not move -- and the one this replaced moved twelve orders.  These
+        # three rows ARE the review finding that caught it, kept as a test, and
+        # they scale in BOTH directions on purpose: the wrong normalization
+        # sends the ratio up on one and down on the other, so a single rescale
+        # would only have caught it from the side it happened to be tried on.
+        # Reverting the ceiling to ``eps / lam`` reds the 1e3-resolved row and
+        # the 1e-3-unresolved row, and leaves the 1e3-unresolved one green.
+        (1e-8, 1e3, False),
+        (1e-8, 1e-3, False),
+        (1e-3, 1e3, True),
+    ],
 )
-def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigma_min, determined):
-    """At the ladder's LOW edge the ceiling is ``eps / lambda``, not the arithmetic.
+def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
+    sigma_min, units, determined
+):
+    """At the ladder's LOW edge the ceiling is the first-order response, not the arithmetic.
 
     This module is handed MOMENTS, so what it can resolve is the design's
     spectrum SQUARED.  A direction sitting at ``sigma`` in the design sits at
     ``sigma^2`` in the Gram, and once that is under ``eps`` the Gram carries
     round-off there and nothing else.  The low edge then divides by
     ``lambda``: ``edf = sum_j v_j / (v_j + lambda s_j)`` has slope
-    ``1 / (lambda s_j)`` at ``v_j = 0``, so an ``eps ||V||`` perturbation of
+    ``1 / (lambda s_j)`` at ``v_j = 0``, so an ``eps ||V||_F`` perturbation of
     the operand -- SMALLER than the error already in it -- moves ``edf`` by
-    ``~eps / lambda``.  The bracket's low end is ``1e-10`` times the pair's own
-    scale, which makes that quotient ``1e-05``-ish for any pair, and it is not
-    a fitted constant: it is ``eps`` over a lambda the caller can print.
+    ``eps ||V||_F / (lambda ||S||_2)``.  That is the ceiling, it is DERIVED
+    rather than fitted, and it is scale-free: rescaling the design or the
+    penalty leaves it and the width alike.
+
+    **How big it is in practice is a property of the PAIR, not a constant.**
+    ``lambda_lo = 1e-10 tr(V) / tr(S)``, so the ceiling is
+    ``1e10 eps (||V||_F / tr(V)) (tr(S) / ||S||_2)`` -- bounded only by ``p``
+    either way.  This test's own geometries span it: at ``sigma_min = 1e-1``
+    the ceiling is 1.70e-05 and at ``1e-8`` it is 4.34e-05, a factor of 2.6
+    from the trace ratio alone.  The ``1e-05`` that matches the suite's
+    low-edge bound belongs to ONE family's trace ratio and is quoted below as
+    such; an earlier revision of this docstring called it "``1e-05``-ish for
+    any pair", which is false and is withdrawn.
 
     **Measured to be exactly that law, over TEN orders of lambda.**  On the
     ``1e-8`` geometry the width over ``eps / lambda`` reads 0.647 at the
@@ -1850,47 +1909,77 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigm
 
     **BOUNDS FROM A SWEEP, NOT FROM ONE RUN.**  Over 7 ``OPENBLAS_CORETYPE``
     microkernels -- SKYLAKEX, HASWELL, SANDYBRIDGE, NEHALEM, PRESCOTT, CORE2,
-    ZEN -- at 1 and 4 threads, 14 configurations.  Width over ``eps / lambda``::
+    ZEN -- at 1 and 4 threads, and at both unit scales, 28 configurations.
+    Width over the derived response::
 
-        sigma_min / sigma_max      over the 14
-        1e-1                       1.093e-09 .. 1.822e-09
-        1e-3                       1.592e-06 .. 2.072e-06
-        (1e-5, not asserted)       7.841e-03 .. 1.092e-02
-        1e-8                       0.6474 .. 0.7494
-        1e-12                      0.9008 .. 0.9904
+        sigma_min / sigma_max      units      over the 14
+        1e-1                       1          6.280e-10 .. 1.047e-09
+        1e-3                       1          1.331e-06 .. 1.733e-06
+        1e-3                       1e3        1.203e-06 .. 2.111e-06
+        (1e-5, not asserted)       1          7.292e-03 .. 1.015e-02
+        (1e-5, not asserted)       1e3        6.075e-03 .. 1.052e-02
+        1e-8                       1          0.6342 .. 0.7340
+        1e-8                       1e3        0.5924 .. 0.7818
+        1e-8                       1e-3       0.5787 .. 0.8299
+        1e-12                      1          0.8971 .. 0.9863
+
+    The ceiling itself is identical at both unit scales to every digit
+    (2.8778e-05, 3.6244e-05, 4.3442e-05), which is the invariance the two
+    rescaled rows exist to assert
 
     The cut of 0.1 therefore clears the binding measurement on the unresolved
-    side (0.6474) by **6.47x** and the resolved side (2.072e-06) by 48264x.
-    The transitional geometry is omitted from the parametrization because
-    there is no honest expectation to assert there, not because it was
-    inconvenient -- and the cut still keeps 9.2x over its worst reading, so
-    omitting it costs no separation.
+    side (0.5787) by **5.79x** and the resolved side (2.111e-06) by 47367x.  The transitional
+    geometry is omitted from the parametrization because there is no honest
+    expectation to assert there, not because it was inconvenient -- and the cut
+    still keeps 9.5x over its worst reading (1.052e-02), so omitting it costs no
+    separation.
+
+    **The sweep CONFIRMS the placement; it does not set it.**  What sets it is
+    the paragraph at the top: first-order theory puts an unresolved geometry AT
+    ratio 1, and the measurements agree with that to within 1.73x.  A cut one
+    order below a derived value is a statement about the derivation.  This
+    matters because the objection to any empirical separation -- that another
+    LAPACK could cross it -- applies to a fitted boundary and not to this one:
+    a backend that moved the unresolved side to 0.1 would have to be violating
+    the perturbation bound by an order, which is a finding and not a flake.
     """
-    width, ceiling = _low_edge_answer_set(sigma_min)
+    width, ceiling = _low_edge_answer_set(sigma_min, units=units)
     ratio = width / ceiling
-    # BOTH sides of the cut are reported on EVERY failure, so a geometry
-    # crossing it names its margin exactly as an approaching one does.  A cut
-    # watched from one side alone goes quiet at the moment it is crossed.
-    margins = (
-        f"(width {width:.4e}, eps/lambda {ceiling:.4e}, ratio {ratio:.4f}, "
-        f"cut 0.1, margin {max(ratio / 0.1, 0.1 / ratio) if ratio > 0.0 else float('inf'):.2f}x)"
-    )
-    if determined:
-        assert ratio < 0.1, (
-            f"a design the Gram RESOLVES left the low-edge edf undetermined {margins}; "
-            "the documented regime is below 2.1e-06 of eps/lambda once sigma_min/sigma_max "
-            "is 1e-3 or above"
-        )
+    # ONE threshold, and the number reported is the number enforced.  An
+    # earlier revision asserted ``ratio > CUT`` and then ``ratio / CUT > 2.0``,
+    # so the boundary actually enforced was ``2 * CUT`` while every message
+    # said ``CUT`` -- a failure at 1.5x would have printed "margin 1.50x" on
+    # the line that had just gone red, reading like headroom.  The separation
+    # IS the assertion now, so there is nothing left to disagree.
+    # A width of EXACTLY zero is the best possible outcome on a resolved
+    # geometry and it must score ``inf``, not raise.  The first version divided
+    # unconditionally, so the one reading that most strongly confirms the claim
+    # -- an operand whose answer does not move at all -- crashed the test with
+    # ZeroDivisionError instead of passing it.  Not hypothetical: the pencil
+    # route returns exactly 0.0 on both resolved geometries.
+    if ratio == 0.0:
+        separation = 0.0 if determined is False else float("inf")
     else:
-        assert ratio > 0.1, (
-            f"a design the Gram CANNOT resolve left the low-edge edf determined {margins}; "
-            "the documented regime is a width of 0.65-0.99 of eps/lambda, and if it has "
-            "collapsed then this module is no longer being handed a Gram -- see #257"
+        separation = (_LOW_EDGE_CUT / ratio) if determined else (ratio / _LOW_EDGE_CUT)
+    boundary = _LOW_EDGE_CUT / _LOW_EDGE_MARGIN if determined else _LOW_EDGE_CUT * _LOW_EDGE_MARGIN
+    # BOTH sides are named on EVERY failure, so a geometry crossing the cut
+    # reports its position exactly as an approaching one does.  A cut watched
+    # from one side alone goes quiet at the moment it is crossed.
+    where = (
+        f"(width {width:.4e}, ceiling eps||V||_F/(lam ||S||_2) {ceiling:.4e}, "
+        f"ratio {ratio:.4e}, cut {_LOW_EDGE_CUT}, separation {separation:.2f}x, "
+        f"enforced boundary {boundary:.3g})"
+    )
+    assert separation > _LOW_EDGE_MARGIN, (
+        (
+            f"a design the Gram RESOLVES left the low-edge edf undetermined {where}; "
+            "the documented regime is at or below 2.1e-06 of the first-order response "
+            "once sigma_min/sigma_max is 1e-3 or above"
         )
-        # The margin is asserted, not merely reported: the count above is only
-        # as trustworthy as its separation from the cut, and 2.0 leaves 3.24x
-        # against the binding 0.6474 of the sweep.
-        assert ratio / 0.1 > 2.0, (
-            f"the low-edge cut has lost its separation {margins}; this regime stops being "
-            "decidable as the ratio approaches the cut"
+        if determined
+        else (
+            f"a design the Gram CANNOT resolve left the low-edge edf determined {where}; "
+            "the documented regime is 0.58-0.99 of the first-order response, and if it "
+            "has collapsed then this module is no longer being handed a Gram -- see #257"
         )
+    )
