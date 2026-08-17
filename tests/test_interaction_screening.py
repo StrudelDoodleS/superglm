@@ -13,6 +13,7 @@ import pytest
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
 from superglm.screening import pair_cell_moments, pair_score_curvature, working_score
+from superglm.screening._score_stat import _build_pencil, penalized_score_statistic_ladder
 
 
 def _pair_case(seed, n=4000, n_a=17, n_b=13, k_a=4, k_b=3, signed=False):
@@ -1740,3 +1741,134 @@ def test_numeric_numeric_moments_match_dense_assembly():
     np.testing.assert_allclose(M, X_o.T @ (X_o * w[:, None]), rtol=1e-12, atol=1e-9)
     np.testing.assert_allclose(C, X_o.T @ (X_T * w[:, None]), rtol=1e-12, atol=1e-9)
     np.testing.assert_allclose(u_m, X_o.T @ score, rtol=1e-12, atol=1e-9)
+
+
+def _low_edge_answer_set(sigma_min, p=24, reps=32):
+    """How wide the low-edge ``edf`` is, over perturbations the Gram cannot see.
+
+    Builds a design with a prescribed smallest singular value, hands
+    :mod:`superglm.screening._score_stat` its GRAM the way the dense path is
+    called, and re-evaluates ``edf`` at a FIXED ``lambda`` under symmetric
+    perturbations of Frobenius norm exactly ``eps ||V||_F`` -- smaller than the
+    error already committed in forming that Gram, so every perturbed operand is
+    an equally valid reading of the same design.
+
+    Returns the width of the resulting answer set alongside ``eps / lambda``,
+    which is what that width is a multiple of.
+    """
+    rng = np.random.default_rng(0)
+    Q, _ = np.linalg.qr(rng.standard_normal((4 * p, p)))
+    Z, _ = np.linalg.qr(rng.standard_normal((p, p)))
+    X = (Q * np.geomspace(1.0, sigma_min, p)) @ Z.T
+    V = 0.5 * (X.T @ X + (X.T @ X).T)
+    S, U = np.eye(p), np.ones(p)
+
+    # A budget above ``p`` is unreachable, so the rung clamps to the bracket's
+    # LOW edge and reports the lambda it clamped at.  Read back rather than
+    # hard-coded: the bracket is scale-relative and this pins no constant.
+    lam = float(penalized_score_statistic_ladder(U, V, S_ti=S, budgets=(4.0 * p,))[0].lambda0)
+
+    def edf(operand):
+        pencil = _build_pencil(0.5 * (operand + operand.T), S, U)
+        v, s = np.asarray(pencil.v, dtype=float), np.asarray(pencil.s, dtype=float)
+        return float(np.sum(v / (v + lam * s)))
+
+    scale = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
+    noise = np.random.default_rng(1234)
+    seen = []
+    for _ in range(reps):
+        E = noise.standard_normal((p, p))
+        E = 0.5 * (E + E.T)
+        seen.append(edf(V + E * (scale / float(np.linalg.norm(E, "fro")))))
+    seen = np.asarray(seen)
+    return float(seen.max() - seen.min()), np.finfo(np.float64).eps / lam
+
+
+@pytest.mark.parametrize(
+    ("sigma_min", "determined"),
+    [(1e-1, True), (1e-3, True), (1e-8, False), (1e-12, False)],
+)
+def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigma_min, determined):
+    """At the ladder's LOW edge the ceiling is ``eps / lambda``, not the arithmetic.
+
+    This module is handed MOMENTS, so what it can resolve is the design's
+    spectrum SQUARED.  A direction sitting at ``sigma`` in the design sits at
+    ``sigma^2`` in the Gram, and once that is under ``eps`` the Gram carries
+    round-off there and nothing else.  The low edge then divides by
+    ``lambda``: ``edf = sum_j v_j / (v_j + lambda s_j)`` has slope
+    ``1 / (lambda s_j)`` at ``v_j = 0``, so an ``eps ||V||`` perturbation of
+    the operand -- SMALLER than the error already in it -- moves ``edf`` by
+    ``~eps / lambda``.  The bracket's low end is ``1e-10`` times the pair's own
+    scale, which makes that quotient ``1e-05``-ish for any pair, and it is not
+    a fitted constant: it is ``eps`` over a lambda the caller can print.
+
+    **Measured to be exactly that law, over TEN orders of lambda.**  On the
+    ``1e-8`` geometry the width over ``eps / lambda`` reads 0.796 at the
+    clamped low edge (``lambda`` 5.22e-12), 1.123 at ``lambda`` 1.00e-08 and
+    1.691 at ``lambda`` 9.39e-02.  So this is not an observation about one
+    rung; ``eps / lambda`` is the quantity, and the low edge is merely where
+    ``lambda`` is smallest.
+
+    **Why a WIDTH and not an error.**  There is no value to assert.  Every
+    operand perturbed here is as faithful to the design as the one the caller
+    passed, so each answer in the set is as correct as any other -- asserting
+    one would assert this module's rounding rather than the data, which is the
+    same refusal :func:`superglm.screening._structured` records at the high
+    edge.  What IS a property of the pair is how wide the set is.
+
+    **It is why the fixture family's low-edge accuracy is a lottery in the
+    draw** (issue #279).  Rebuilding a 20-level spline-by-categorical pair at
+    seeds 0-20 of the same generator, the dense path's low-edge distance from a
+    design-space oracle runs 4.06e-12 to 1.2574e-05 -- and the draws at the
+    bad end are exactly the ones whose residualized design is rank deficient or
+    nearly so, which happens when one level's rows put the constant vector in
+    the span of that level's own spline columns.  ``eps / lambda`` over those
+    21 draws is 9.66e-06 to 9.86e-06, a 2% band, and the worst observed miss is
+    1.29x it.  So the suite's ``abs=1e-5`` at that edge is not a property of
+    the seed it runs; it is this quotient.  The one seed that clears it by 193x
+    does so because its round-off cancels: perturbing ITS Gram at the same
+    level opens an answer set 5.48e-06 wide, forty thousand times its own
+    reported error.
+
+    **No arithmetic in this module can narrow it**, which is why #279 closed
+    without a code change.  The information is destroyed by the squaring,
+    before the call.  Handing the module design factors is the fix and it is
+    a change to the CALLER, tracked at #257.
+
+    **BOUNDS FROM A SWEEP, NOT FROM ONE RUN.**  Over 7 ``OPENBLAS_CORETYPE``
+    microkernels -- SKYLAKEX, HASWELL, SANDYBRIDGE, NEHALEM, PRESCOTT, CORE2,
+    ZEN -- at 1 and 4 threads, 14 configurations: the two RESOLVED geometries
+    give a width of exactly 0.0 on all 14, and the two unresolved ones give
+    0.514 to 0.977 of ``eps / lambda``.  The cut of 0.1 below therefore clears
+    the binding measurement by 5.14x and the resolved side by infinity.  The
+    transitional geometry the table deliberately omits, ``sigma_min = 1e-5``,
+    reads 1.0e-03 -- so the cut has an order of headroom over the nearest
+    thing that is neither.
+    """
+    width, ceiling = _low_edge_answer_set(sigma_min)
+    ratio = width / ceiling
+    # BOTH sides of the cut are reported on EVERY failure, so a geometry
+    # crossing it names its margin exactly as an approaching one does.  A cut
+    # watched from one side alone goes quiet at the moment it is crossed.
+    margins = (
+        f"(width {width:.4e}, eps/lambda {ceiling:.4e}, ratio {ratio:.4f}, "
+        f"cut 0.1, margin {max(ratio / 0.1, 0.1 / ratio) if ratio > 0.0 else float('inf'):.2f}x)"
+    )
+    if determined:
+        assert ratio < 0.1, (
+            f"a design the Gram RESOLVES left the low-edge edf undetermined {margins}; "
+            "the documented regime is a width of zero once sigma_min/sigma_max is 1e-3 or above"
+        )
+    else:
+        assert ratio > 0.1, (
+            f"a design the Gram CANNOT resolve left the low-edge edf determined {margins}; "
+            "the documented regime is a width of 0.51-0.98 of eps/lambda, and if it has "
+            "collapsed then this module is no longer being handed a Gram -- see #257"
+        )
+        # The margin is asserted, not merely reported: the count above is only
+        # as trustworthy as its separation from the cut, and 2.0 leaves 2.57x
+        # against the binding 0.514 of the sweep.
+        assert ratio / 0.1 > 2.0, (
+            f"the low-edge cut has lost its separation {margins}; this regime stops being "
+            "decidable as the ratio approaches the cut"
+        )
