@@ -184,14 +184,32 @@ the routes disagree about.  They are not disagreeing about an answer; they are
 each reading a different rounding of the same absent information.
 
 That is why the disagreement is a CONVENTION and not an error, and it is
-measurable as one: sweeping the rank cut of an independent stacked-QR
-evaluation over ``1e-18 .. 1e-6`` gives 19.000 on ``1e-15 .. 1e-13`` and
-18.275 on ``1e-12 .. 1e-7``.  **There is no plateau**: the widest window
-giving one answer is under three decades, so no cut here is certified by the
-data, and any routine that reports a number for such a pair is reporting its
-own threshold.
+measurable as one.  Sweeping the rank cut of an independent stacked-QR
+evaluation over ``1e-18 .. 1e-6``:
 
-An earlier draft contrasted this with "the arrow kernel's own nine-decade
+======================  =============  ==========
+rank cut                ``edf(hi)``    decades
+======================  =============  ==========
+``1e-18 .. 1e-16``      18.99995       three
+``1e-15 .. 1e-13``      19.00000       three
+``1e-12 .. 1e-7``       **18.27481**   **six**
+``1e-6``                18.05829       --
+======================  =============  ==========
+
+**THERE ARE THREE PLATEAUS AND THEY DISAGREE BY 0.725 df.**  Two earlier
+drafts of this paragraph said "there is no plateau", then "the widest window
+giving one answer is under three decades".  Both were false against the table
+directly above them -- 18.27481 holds to eight significant figures across six
+decades, twice the width claimed.
+
+The correct statement is stronger than either.  A single wide plateau is what
+would CERTIFY a cut: it says the answer is insensitive to where the cut is put
+within it.  Three of them, separated by most of a degree of freedom, say the
+answer is a property of WHICH plateau the cut lands on -- and nothing in the
+data chooses between them.  Any routine reporting a number for such a pair is
+reporting its own threshold.
+
+An earlier draft also contrasted this with "the arrow kernel's own nine-decade
 plateau".  **That comparison was stale and is withdrawn** — it described a
 rank cut the structured path no longer has.  Since it moved onto design
 factors it evaluates ``edf`` as a sum of filter factors and takes no rank
