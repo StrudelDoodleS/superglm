@@ -132,6 +132,77 @@ and its eigendecomposition is 8x the ``k`` one -- about 1.1 s to 2.3 s at the
 budget's own ceiling, against the ~1.5 s per-pair target the cubic constants
 were fitted to.  It is affordable for ``cat_cat``, where the overlap is small
 beside the probe.  Worth its own issue rather than this module's guesswork.
+
+**THE ACCURACY CEILING IS ARCHITECTURAL, NOT ALGORITHMIC.  Read this before
+rearranging the arithmetic below to chase a degree of freedom.**
+
+This module is handed MOMENTS.  ``V_eff`` arrives as a Gram, so
+``cond(V_eff) = cond(design)^2``, and squaring is what decides the whole
+question: on a pair with a starved level the square crosses float64's own
+resolution and the deciding direction has no correct digits left to read.
+
+Measured on ``_thin_level_pair`` at three weightings, one thread, at the
+ladder's high edge:
+
+===================  ================  ==========================
+low weight           ``cond(V_eff)``   directions of ``A`` within
+                                       10x ``eps ||A||``
+===================  ================  ==========================
+1.0                  7.24e+06          0
+1e-4                 8.46e+07          0
+1e-12                **2.78e+20**      **1**
+===================  ================  ==========================
+
+``1 / eps`` is 4.5e+15.  At 2.78e+20 the starved direction is five orders
+BEYOND representable conditioning, and the single direction sitting at the
+noise floor is exactly the one degree of freedom the routes disagree about.
+They are not disagreeing about an answer; they are each reading a different
+rounding of the same absent information.
+
+That is why the disagreement is a CONVENTION and not an error, and it is
+measurable as one: sweeping the rank cut of an independent stacked-QR
+evaluation over ``1e-18 .. 1e-6`` gives 19.000 on ``1e-15 .. 1e-13`` and
+18.275 on ``1e-12 .. 1e-7``.  **There is no plateau** — unlike the arrow
+kernel's own rank decision, which has a nine-decade one — so no cut here is
+certified by the data, and any routine that reports a number for such a pair
+is reporting its own threshold.
+
+**Four remedies have been measured and refused.  Do not re-derive them.**
+
+1. *Port the arrow path's stated cut* (``_solve_floor``) to ``_edge``:
+   -8.17 df against the shipped -1.21 df.  No scalar cut can work, because
+   the deciding curvature (8.896e-05) sits BELOW the eigensolver's noise floor
+   on the matrix it is read from (``eps ||A|| = 1.653e-04``).
+2. *Answer every rung from the pencil* instead of from ``_edge``, the
+   "balanced congruence" remedy: measured WORSE.  Across 1/2/4/8 threads the
+   pencil's high-edge ``edf`` moves 1.0000 df on the starved pair (18.99998 at
+   one thread, 17.99997 at two or more) where ``_edge`` moves 5.3e-07, and it
+   is worse on three of four geometries.  The claim that this comes back
+   bit-identical across thread counts does not reproduce.
+3. *Force the whitening branch* (the Fix & Heiberger construction already
+   below) rather than reaching it only on a hard ``LinAlgError``: still flips
+   at eight threads, and 29x worse than the generalized driver on the 1e-4
+   pair.
+4. *The GSVD*, which is what the LAPACK Users' Guide (3rd ed., SIAM 1999,
+   sec. 4.7 and its "Further Details" for the generalized symmetric definite
+   eigenproblem) actually recommends here — it gives the driver's error as
+   ``sqrt(n) (||B^-1||_2 ||A||_2 + cond(B) |lambda_i|) eps`` and names
+   Cholesky-plus-GSVD as the tighter alternative when ``B`` is ill
+   conditioned.  **SciPy exposes no GSVD**: ``dggsvd3``, ``dggsvp3`` and
+   ``dtgsja`` are all absent from ``scipy.linalg.lapack`` at 1.18.0.  So the
+   recommended method is unavailable, not rejected.
+
+The remedy that WOULD work is the one :mod:`superglm.screening._structured`
+took: read the design factors and never form the Gram, which faces
+``sqrt(cond)`` — 1.67e+10 on the starved pair, comfortably representable,
+against 2.78e+20 for the Gram.  That is a change to what the CALLER hands
+this module, not to anything in it.
+
+What this costs in practice is small, and that is measured too rather than
+assumed: on the published twelve-row freMTPL2 screen, one thread against
+eight, the table order is identical, the ``z > sqrt(edf0 / 2)`` gate admits
+the same single pair, and the worst ``|dz|`` is 2.93e-05.  The instability is
+real, and it lives on geometries the screen ranks at the bottom anyway.
 """
 
 from __future__ import annotations
@@ -361,11 +432,24 @@ class ScreenedPair:
 class _Pencil:
     """Simultaneous diagonalization of ``(V_eff, S)`` with ``U_eff`` rotated in.
 
-    ``v`` and ``s`` are the two transformed diagonal terms, held SEPARATELY
-    rather than one derived from the other: ``edf(lam) = sum v / (v + lam s)``
-    and ``T(lam) = sum u^2 / (v + lam s)``.  Deriving ``s`` as ``1 - v`` loses
-    it whenever ``v`` rounds to 1, which is exactly what happens when the
-    curvature dwarfs the penalty -- see :func:`_build_pencil`.
+    ``v`` and ``s`` are the two transformed diagonal terms, carried as two
+    fields so a rung costs no arithmetic beyond ``edf(lam) = sum v / (v + lam
+    s)`` and ``T(lam) = sum u^2 / (v + lam s)``.
+
+    ``s`` IS formed as ``(1 - v) / balance`` in :func:`_build_pencil`, and an
+    earlier revision of this docstring claimed the opposite -- that the two
+    were held independently so the subtraction could not lose ``s`` where
+    ``v`` rounds to 1.  The subtraction is real; what was measured is that it
+    does not cost anything here.  Reading ``s`` instead off the congruence
+    ``basis' S basis``, which takes no difference at all, agrees on every
+    direction where ``v`` rounds to 1 on ``moderate_pair`` and on
+    ``_thin_level_pair`` at 1.0 and 1e-4: 13, 5 and 10 such directions, whose
+    direct quotient is 1.8e-17 to 4.2e-17 relative to ``||S||_2`` against an
+    ``eigh`` error bar of ``k eps`` ~ 4.6e-14.  **All of them are genuinely in
+    ``null(S)``, none is fabricated by the cancellation**, so ``s = 0`` there
+    is the right answer arrived at by a suspect route.  Kept because it is
+    measured, not because it is safe by construction; the congruence form is
+    the drop-in replacement if a geometry ever contradicts this.
     """
 
     v: NDArray

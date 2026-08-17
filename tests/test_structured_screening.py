@@ -25,7 +25,7 @@ from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
 from superglm.screening._overlap import pair_overlap_moments
 from superglm.screening._pair_moments import pair_score_curvature
-from superglm.screening._score_stat import penalized_score_statistic_ladder
+from superglm.screening._score_stat import _solve_psd, penalized_score_statistic_ladder
 from superglm.screening._structured import _evaluate, _profile, spline_cat_moments
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
@@ -4261,3 +4261,70 @@ def test_degenerate_levels_are_scored_not_skipped():
     assert np.isfinite(row["z"])
     assert np.isfinite(row["edf0"])
     assert row["edf0"] > 0.0
+
+
+@pytest.mark.parametrize(
+    ("low_weight", "beyond_float64"),
+    [(1.0, False), (1e-4, False), (1e-12, True)],
+)
+def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight, beyond_float64):
+    """``cond(V_eff) = cond(design)^2``, and the square is what decides.
+
+    This asserts the REGIME, not a value, and that is deliberate.  Four
+    separate remedies for the dense path's high-edge disagreement have been
+    measured and refused -- porting the arrow path's cut, answering every rung
+    from the pencil, forcing the whitening branch, and the GSVD the LAPACK
+    Users' Guide recommends (absent from SciPy).  They failed for one reason,
+    and it is the reason pinned here: on the starved pair the deciding
+    direction is below float64's own resolution, so each remedy reads a
+    different rounding of information that is not there.  Asserting an ``edf``
+    for such a pair would be asserting this module's threshold, not the data
+    -- the independent stacked-QR evaluation gives 19.000 at a rank cut of
+    1e-14 and 18.275 at 1e-12, with no plateau between them.
+
+    Type 1 in this module's own taxonomy: ``1 / eps`` is a property of the
+    arithmetic, not of any dataset, so this cannot be invalidated by a
+    geometry nobody has seen.  It fails closed in the useful direction -- if
+    the moment assembly is ever changed so a starved pair's Gram stays inside
+    float64, the regime moved and the disagreement is worth chasing again.
+
+    See the module docstring of :mod:`superglm.screening._score_stat` for the
+    measurements and the four refusals.
+    """
+    U, V, C, M, S_ti, u_m = _thin_level_pair(low_weight)["args"]
+    V = np.asarray(V, dtype=float)
+    V = 0.5 * (V + V.T)
+    C = np.asarray(C, dtype=float)
+    M = np.asarray(M, dtype=float)
+    V_eff = V - C.T @ _solve_psd(M, C)
+    V_eff = 0.5 * (V_eff + V_eff.T)
+
+    positive = np.linalg.eigvalsh(V_eff)
+    positive = positive[positive > 0.0]
+    condition = float(positive.max() / positive.min())
+    representable = 1.0 / np.finfo(np.float64).eps
+
+    if beyond_float64:
+        assert condition > representable, (
+            f"the starved pair's Gram is conditioned at {condition:.3e}, inside float64's "
+            f"{representable:.3e} -- the regime this module documents has moved"
+        )
+    else:
+        assert condition < representable, (
+            f"a pair that is not starved is conditioned at {condition:.3e}, beyond float64's "
+            f"{representable:.3e} -- the moment assembly has lost accuracy it used to have"
+        )
+
+    # The count of directions at the noise floor of ``V_eff + lam S`` is the
+    # count of degrees of freedom the routes are entitled to disagree about.
+    S = np.asarray(S_ti, dtype=float)
+    S = 0.5 * (S + S.T)
+    scale = max(float(np.trace(V_eff)), 1e-300) / max(float(np.trace(S)), 1e-300)
+    A = V_eff + 1e10 * scale * S
+    floor = np.finfo(np.float64).eps * float(np.linalg.norm(A, 2))
+    unresolved = int(np.sum(np.abs(np.linalg.eigvalsh(A)) < 10.0 * floor))
+    assert unresolved == (1 if beyond_float64 else 0), (
+        f"{unresolved} directions of the high-edge operator sit at its noise floor; "
+        "the documented disagreement is one degree of freedom on the starved pair and "
+        "none otherwise"
+    )
