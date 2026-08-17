@@ -288,12 +288,17 @@ units alone.  The form above is invariant under both.
 Since ``lambda_lo = 1e-10 tr(V_eff) / tr(S)``, the response is
 ``1e10 eps (||V_eff||_F / tr(V_eff)) (tr(S) / ||S||_2)`` -- a property of the
 PAIR, bounded only by ``k`` in either direction, and NOT a constant.  On this
-family it is 9.66e-06 to 9.86e-06 across all 21 draws, a 2% band, because
-their trace ratio barely moves.  **So the ``abs=1e-5`` the suite asserts at
-that edge is not a tolerance somebody chose; it is this pair family's
-first-order response**, and the worst miss over the 21 draws is 1.29x it.  A
-family with a tenth of the curvature beside its penalty would need ``1e-4``,
-so do not carry the number to another fixture -- carry the derivation.
+family it is **1.7079e-05 to 1.7472e-05** across all 21 draws -- a 2.3% band,
+because their trace ratio barely moves.
+
+**So the ``abs=1e-5`` the suite asserts at that edge sits 0.58x of the floor
+the Gram imposes on it**, and that is the whole of issue #279: a bound BELOW
+the family's own information floor is exceeded by some draw eventually, and
+the worst of the 21 is at 0.73x the response and 1.26x the bound.  Nothing was
+mis-tuned; the number was placed against errors rather than against the floor,
+because the floor had not been derived.  A family with a tenth of the
+curvature beside its penalty would need ``1e-4``, so do not carry the number
+to another fixture -- carry the derivation.
 The seed the fixture happens to run clears it by 193x only because its
 round-off cancels: perturbing that same pair's Gram at the same level opens an
 answer set 6.87e-06 wide -- FIFTY THOUSAND times its own reported error of
