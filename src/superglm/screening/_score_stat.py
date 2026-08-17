@@ -276,6 +276,17 @@ of its largest, the width of the answer set over that response reads 0.647 at
 ``lambda = 5.22e-12``, 0.939 at 1.00e-08 and 0.939 at 9.39e-02 -- within 1.45x
 of each other.  It is the quotient, not the rung.
 
+**``||S||_2`` IS AN UPPER BOUND ON THE PENALTY THAT ACTUALLY DIVIDES.**  The
+``s_j`` in ``1 / (lambda s_j)`` is the penalty's magnitude IN THE DECIDING
+DIRECTION, and only an isotropic ``S`` makes that ``||S||_2``.  This pair's
+penalty is a Kronecker tensor and is not isotropic, so ``s_j <= ||S||_2`` and
+the figures below are a LOWER bound on the response -- which is the safe
+direction for every claim made from them: the floor is at least this, so a
+bound sitting under it sits under it a fortiori.  Recovering ``s_j`` itself
+would mean diagonalizing the pencil, which is the cost the clamped rung exists
+to avoid, and would divide by a quantity read off the unresolved direction --
+the thing this module refuses to do.
+
 **BOTH NORMS BELONG THERE.**  An earlier revision of this section wrote the
 response as ``eps / lambda``, which is dimensionally wrong rather than merely
 loose: rescaling the design leaves ``edf`` and the width alike -- ``V``, the
@@ -288,8 +299,9 @@ units alone.  The form above is invariant under both.
 Since ``lambda_lo = 1e-10 tr(V_eff) / tr(S)``, the response is
 ``1e10 eps (||V_eff||_F / tr(V_eff)) (tr(S) / ||S||_2)`` -- a property of the
 PAIR, bounded only by ``k`` in either direction, and NOT a constant.  On this
-family it is **1.7079e-05 to 1.7472e-05** across all 21 draws -- a 2.3% band,
-because their trace ratio barely moves.
+family it is **at least 1.7079e-05 to 1.7472e-05** across all 21 draws -- a
+2.3% band, because their trace ratio barely moves, and a lower bound because of
+the ``||S||_2`` caveat above.
 
 **So the ``abs=1e-5`` the suite asserts at that edge sits 0.58x of the floor
 the Gram imposes on it**, and that is the whole of issue #279: a bound BELOW
