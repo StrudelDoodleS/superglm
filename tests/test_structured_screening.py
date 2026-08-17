@@ -30,7 +30,12 @@ from superglm.screening._score_stat import (
     _solve_psd,
     penalized_score_statistic_ladder,
 )
-from superglm.screening._structured import _evaluate, _profile, spline_cat_moments
+from superglm.screening._structured import (
+    _evaluate,
+    _penalty_root,
+    _profile,
+    spline_cat_moments,
+)
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
 
@@ -949,7 +954,7 @@ def test_the_statistic_reads_the_design_and_not_the_pair_s_moments(build, full_r
         )
 
 
-def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch):
+def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty():
     """The projection may only move the penalty by the eigensolver's own error.
 
     Both halves are read off ONE block-angular QR whose penalty rows are
@@ -1055,6 +1060,47 @@ def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch)
             assert clip * 5.0 < trace_bound, (label, clip, trace_bound)
         else:
             assert clip > trace_bound, (label, clip, trace_bound)
+
+
+def test_the_trace_guard_still_catches_what_the_spectrum_cannot_see(monkeypatch):
+    """The retained aggregate guard, exercised on the only path that reaches it.
+
+    #323 keys the refusal to the DROP, which fires first, so the trace guard at
+    the end of :func:`_profile` is no longer reachable from any penalty: with
+    every certified negative refused above it, the most a magnitude lift can
+    move is ``2 n^2 eps`` of relative trace mass by its own derivation.  A
+    guard nothing can trip is a guard the next refactor deletes for free, so
+    the argument for keeping it has to be demonstrated rather than asserted.
+
+    That argument is that ``clip`` is read off the RETURNED FACTOR --
+    ``sum(rootS**2)`` -- and not off the spectrum, so it sees a wrong ``keep``
+    mask where an eigenvalue test cannot.  This injects exactly that: a
+    :func:`_penalty_root` that truncates its factor while truthfully reporting
+    ``dropped == 0.0``, which is what a mask bug looks like from the outside.
+
+    RED against deleting the trace guard, and RED against a version of it that
+    recomputes ``kept`` from the eigenvalues instead of from the factor -- both
+    of which would let the truncated factor through.
+    """
+    import superglm.screening._structured as st
+
+    pair = spline_cat_moments(*_structured_inputs(_thin_level_pair(low_weight=1.0)))
+    root, dropped, cut = _penalty_root(pair.S_a)
+    assert dropped == 0.0, (dropped, cut)
+
+    # Drop the LARGEST penalty direction, which is nowhere near any cut, and
+    # report no drop -- the spectrum still says everything is fine.  ``eigh``
+    # returns ascending, so that is the last row; dropping the first would
+    # remove the smallest, which is the roundoff case the guard must NOT fire
+    # on and which measures 4.7e-16 of relative trace against a 5.4e-14 bound.
+    truncated = root[:-1]
+    removed = abs(float(np.trace(pair.S_a)) - float(np.sum(np.square(truncated))))
+    trace_bound = 2.0 * pair.S_a.shape[0] ** 2 * np.finfo(np.float64).eps
+    assert removed / abs(float(np.trace(pair.S_a))) > 1e3 * trace_bound, removed
+
+    monkeypatch.setattr(st, "_penalty_root", lambda S: (truncated, 0.0, cut))
+    with pytest.raises(st._UnstableStructuredEDFError, match="different pencils"):
+        st._profile(pair)
 
 
 def test_a_dropped_direction_is_reported_on_the_cut_that_dropped_it():
@@ -3182,6 +3228,22 @@ def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
     separation = float(np.linalg.norm(both[0] - both[1], 2))
     assert separation == pytest.approx(2.0 * abs(w[0]), rel=1e-6), separation
 
+    # PRECONDITION, BECAUSE #323 GAVE THIS TEST A SECOND WAY TO FAIL AND THE
+    # NEW ONE HAS NO DIAGNOSTIC.  Reconstructing from the spectrum only places
+    # the smallest eigenvalue to ``n eps ||S||_2`` -- the refusal cut exactly --
+    # so a kernel that lands the NEGATIVE arm past the cut now gets a bare
+    # ``None`` from the ladder instead of a small edf shift.  Assert the branch
+    # first, so that failure says which side of the cut it fell on.  Swept over
+    # seven ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads: neither arm drops
+    # on any of them, but the margin MOVES -- 69.6x inside the cut on SKYLAKEX
+    # down to 10.0x on NEHALEM, a 7x spread on a fixture whose reconstruction
+    # noise is the same size as the cut.  The POSITIVE arm never goes negative
+    # at all; the negative one is what carries that spread and what this
+    # precondition is for.
+    for sign, penalty in zip((+1.0, -1.0), both, strict=True):
+        _, dropped, cut = _penalty_root(0.5 * (penalty + penalty.T))
+        assert dropped == 0.0, (low_weight, sign, dropped, cut)
+
     rungs = [
         structured_ladder(
             spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows),
@@ -3534,6 +3596,19 @@ def test_a_round_off_penalty_residue_moves_edf_the_way_the_pencil_says(
     for multiple in (0.0, 1.0, 3.0, 10.0):
         lifted = symmetric + multiple * eps * float(sigma[-1]) * null_direction
         pair = spline_cat_moments(B_a, lifted, S_cell, W_cell, level_rows)
+        # PRECONDITION, BECAUSE #323 GAVE ``_profile`` A NEW WAY TO RAISE AND
+        # THIS CALL IS BARE.  ``S_a`` is 2x2 here, so the bar is ``2 eps
+        # ||S||_2`` -- the tightest in the suite -- and the ``multiple = 0``
+        # arm's residue is bounded above by ``3 eps sigma_max``.  A kernel that
+        # read that residue NEGATIVE past the bar would raise
+        # ``_UnstableStructuredEDFError`` out of the loop as a test ERROR with
+        # no diagnostic; this makes it a failure that names the branch.  Swept
+        # over seven ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads: every
+        # arm of every draw reads its smallest eigenvalue NON-NEGATIVE, so
+        # none is near the cut on any of them.  The exact bracket above still
+        # allows the other sign, which is why this is asserted and not assumed.
+        _, dropped, cut = _penalty_root(lifted)
+        assert dropped == 0.0, (seed, width, multiple, dropped, cut)
         _, edf = _evaluate(pair, _profile(pair), _ladder_high_edge(pair))
         moved.append(edf)
     # ...and each rung matches the 40-digit value on that lifted design.  The
