@@ -1414,10 +1414,67 @@ def test_fit_offset_exports_exact_multiplier_block_when_support_is_small():
     assert np.isclose(offset_block.table["Weight"].sum(), w.sum())
 
 
-def test_fit_offset_exports_binned_multiplier_block_when_support_is_large():
+def test_an_undeclared_continuous_offset_exports_one_per_unit_row():
+    """No declared column still means no reason to approximate.
+
+    Today's binned block is keyed on the multiplier, so a consumer must compute
+    exp(offset) before it can look anything up -- then gets that bin's average
+    back instead of the number it just computed.  The per-unit row takes the
+    same input and returns it unchanged.
+    """
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+    offset = np.log(np.linspace(12.0, 48.0, len(X)) / 12.0)
+
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, offset=offset)
+
+    block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    assert block.name == "Offset Multiplier"
+    assert block.table["Offset Multiplier"].tolist() == ["per_unit"]
+    assert block.table["Relativity"].iloc[0] == pytest.approx(1.0, abs=1e-12)
+
+
+def test_a_low_cardinality_undeclared_offset_still_lists_its_levels():
+    """Two levels is a lookup, and a lookup is already exact."""
+    model, X, y, w = _fit_offset_export_model(distinct_terms=2)
+    payload = build_rating_table_payload(model, X, y, sample_weight=w)
+
+    block = next(b for b in payload.main_effects if b.kind == "offset")
+    assert sorted(block.table["Offset Multiplier"].tolist()) == [1.0, 3.0]
+
+
+def test_binning_an_offset_requires_asking_for_it():
     model, X, y, w = _fit_offset_export_model(distinct_terms=40)
 
-    payload = build_rating_table_payload(model, X, y, sample_weight=w, n_bins=5)
+    default = build_rating_table_payload(model, X, y, sample_weight=w)
+    binned = build_rating_table_payload(model, X, y, sample_weight=w, offset_kind="binned")
+
+    assert next(b for b in default.main_effects if "offset" in b.kind).kind == "offset_per_unit"
+    assert len(next(b for b in binned.main_effects if "offset" in b.kind).table) > 1
+
+
+def test_the_undeclared_per_unit_offset_reproduces_every_multiplier():
+    """The measured cost of the block it replaces was 15.3x on a one-day policy."""
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+    offset = np.log(np.linspace(12.0, 48.0, len(X)) / 12.0)
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, offset=offset)
+    block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+
+    scale = float(block.table["Relativity"].iloc[0])
+    np.testing.assert_allclose(scale * np.exp(offset), np.exp(offset), rtol=1e-13, atol=0.0)
+
+
+def test_fit_offset_exports_binned_multiplier_block_when_support_is_large():
+    """Binning is now a requested summary of the fitted exposure, not the default.
+
+    Pinned to ``offset_kind="binned"`` because an offset nobody asked to bin is
+    no longer binned; what this still asserts is that the summary a caller does
+    ask for is the block it always was.
+    """
+    model, X, y, w = _fit_offset_export_model(distinct_terms=40)
+
+    payload = build_rating_table_payload(
+        model, X, y, sample_weight=w, n_bins=5, offset_kind="binned"
+    )
 
     offset_block = next(
         block for block in payload.main_effects if block.name == "Offset Multiplier"
