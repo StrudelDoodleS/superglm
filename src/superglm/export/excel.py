@@ -29,37 +29,91 @@ _TERM_NUMERIC_COLUMNS = frozenset(
     {"Estimate", "Std Error", "Statistic", "P Value", "CI Lower", "CI Upper", "EDF", "Lambda"}
 )
 
-# Main-effect blocks sit on a fixed three-column stride, named here rather than
-# repeated as a bare 3.  It is NOT sufficient for a widening: the number-format
-# loop below takes it as the modulus but still hard-codes the remainders ``2``
-# and ``0``, which mean "second and third column of a THREE-wide block".  Set
-# this to 4 and blocks start at columns 1, 5, 9, so their columns are congruent
-# to 1, 2, 3 (mod 4) -- ``% 4 == 2`` still finds the Relativity column but
-# ``% 4 == 0`` matches nothing and the third column silently loses its format.
-# ``test_main_effect_blocks_keep_a_three_column_stride_and_their_number_formats``
-# keeps its own literal 3 and asserts both formats by hand, so a widening fails
-# there loudly; that test is the actual guard, and this constant is only the
-# name.
+# The width of an ordinary main-effect block: a key column, a relativity and a
+# weight.  It is no longer the STRIDE -- blocks are placed by their own widths
+# (``_main_effect_start_columns``) because a ppform block is nine columns wide,
+# and the number formats are chosen by a column's role in its block rather than
+# by ``column % 3``.  What the constant still names is the mandatory
+# three-column prefix every block carries: the downstream loader locates blocks
+# by a header signature requiring ``relativity`` at +1 and ``weight`` at +2, so
+# anything a block adds is added to the RIGHT of these three, and that is what
+# makes "past the prefix" a usable test for the exact-form columns.
 _MAIN_EFFECT_BLOCK_STRIDE = 3
+
+# Blocks sit end to end with no blank column between them, which is what the
+# fixed stride of 3 already did when every block was exactly three wide.  Named
+# rather than left implicit because it is now a layout choice instead of an
+# arithmetic accident: keeping it at 0 is what makes the all-three-wide default
+# layout land on columns 1, 4, 7 exactly as it did before.
+_MAIN_EFFECT_BLOCK_GAP = 0
+
+
+def _main_effect_start_columns(blocks) -> list[int]:
+    """The first column of each main-effect block, by cumulative width.
+
+    A ppform block is nine columns and every other block is three, so "block
+    ``i`` starts at ``1 + i * 3``" stopped being true the moment the first wide
+    block could appear in the list.  Under the old rule a nine-column block's
+    right-hand neighbour was written straight over its coefficients, and
+    openpyxl raised nothing -- the sheet simply lost six columns and repeated a
+    ``Relativity``/``Weight`` pair where they had been.
+
+    Every caller that places or re-reaches a block goes through this, so the
+    placement, the number formats, the piecewise notes and the key-column widths
+    cannot come to disagree about where a block is.
+    """
+    starts: list[int] = []
+    column = 1
+    for block in blocks:
+        starts.append(column)
+        column += len(block.table.columns) + _MAIN_EFFECT_BLOCK_GAP
+    return starts
+
+
 _MAIN_EFFECT_TITLE_ROW = 5
 _MAIN_EFFECT_NOTE_ROW = 6
 _MAIN_EFFECT_HEADER_ROW = 7
 
-# The piecewise block's two numeric columns are re-formatted after the global
-# loop.  ``Log relativity`` lands on ``column % 3 == 0`` and would otherwise
-# render at two decimal places: the value stored in the cell stays exact, but a
+# The piecewise block's two numeric columns are re-formatted after the per-block
+# format pass.  ``Log relativity`` is not one of the roles that pass knows, and
+# under the ``column % 3`` loop that preceded it the column rendered at two
+# decimal places: the value stored in the cell stays exact either way, but a
 # human reading or copy-pasting the sheet would see ``0.00``, which defeats the
 # entire purpose of publishing that column.
 _PIECEWISE_NUMBER_FORMAT = "0.000000000000"
 
+# The ppform block's six exact-form columns.  Coefficients are not factors and
+# must not be read at six decimal places: a reader copying ``b`` into a stored
+# procedure needs every digit that was fitted, and the magnitude is not bounded
+# the way a relativity's is -- ``b``, ``c`` and ``d`` are signed log-space
+# numbers, and ``from``/``to`` are covariate values, which on a sum-insured or a
+# mileage covariate run to 1e5 and above.  Significant digits, not decimal
+# places, for the same reason the base relativity gets a scientific format.
+_PPFORM_NUMBER_FORMAT = "0.00000000000000E+00"
+
+# The two formats the main-effect blocks have always carried, keyed by the
+# column's ROLE rather than by its position.  The loop these replace keyed on
+# ``cell.column % _MAIN_EFFECT_BLOCK_STRIDE``, which means "the second and third
+# column of a three-wide block" and means nothing at all once blocks differ in
+# width: with one nine-column block on the sheet, ``% 3 == 2`` lands on a
+# coefficient and ``% 3 == 0`` on an interval bound.  Reading the header the
+# block itself declared cannot drift that way.
+_MAIN_EFFECT_ROLE_FORMATS = {
+    "Relativity": "0.000000",
+    "Weight": "#,##0.00",
+}
+
 # The base relativity cell, for the same reason and re-applied at the same
-# point.  ``C2`` is column 3, so the global loop's ``column % 3 == 0`` arm
-# claims it and renders the base at two decimal places; the value stored keeps
-# its sixteen significant digits, so no reader of the file object notices, but
-# a human reading the sheet does.  It is the one cell that multiplies EVERY row
-# of the tariff, and under ``centering="mean"`` it additionally carries the
-# whole transferred centering constant, so a reader rating off the displayed
-# number is uniformly wrong.  Measured on a two-term Poisson fit: base
+# point.  ``C2`` sits five rows above the first block, so the per-block format
+# pass never reaches it -- and under the ``column % 3`` loop that preceded that
+# pass it was worse than unformatted, because the loop walked the whole sheet
+# and its ``== 0`` arm claimed column 3, rendering the base at two decimal
+# places.  Either way the value stored keeps its sixteen significant digits, so
+# no reader of the file object notices, but a human reading the sheet does.  It
+# is the one cell that multiplies EVERY row of the tariff, and under
+# ``centering="mean"`` it additionally carries the whole transferred centering
+# constant, so a reader rating off the displayed number is uniformly wrong.
+# Measured on a two-term Poisson fit: base
 # 0.3719954211385351 displays as 0.37, a 5.4e-03 relative error on every risk;
 # 0.4027922135365106 -> 0.40 (6.9e-03) in the mean-centered export of the same
 # model.
@@ -307,17 +361,59 @@ def _piecewise_interpolation_note(
     )
 
 
+def _main_effect_number_format(block, column_name: str, offset: int) -> str | None:
+    """The format one column of one block should carry, or ``None`` for plain.
+
+    ``Relativity`` and ``Weight`` are recognised by name wherever they appear,
+    so the lookup half of a ppform block renders exactly like the binned block
+    it stands in for.  Everything past that block's mandatory three-column
+    prefix is its exact form, and gets significant digits rather than decimal
+    places -- a coefficient rendered as ``0.00`` is stored exactly and read
+    wrongly, which is the failure this whole export exists to remove.
+
+    Keyed on the block's ``kind`` rather than on the six column names, so a
+    coefficient column renamed in ``rating_tables`` cannot quietly fall back to
+    the default rendering.
+    """
+    role = _MAIN_EFFECT_ROLE_FORMATS.get(column_name)
+    if role is not None:
+        return role
+    if block.kind == "continuous_ppform" and offset >= _MAIN_EFFECT_BLOCK_STRIDE:
+        return _PPFORM_NUMBER_FORMAT
+    return None
+
+
+def _format_main_effect_blocks(ws, main_effects) -> None:
+    """Apply each block's number formats within its own columns.
+
+    Per block rather than over the whole sheet, because a sheet-wide rule can
+    only be expressed in column arithmetic and column arithmetic stopped being
+    able to say which column is which the moment blocks could differ in width.
+    """
+    for block, start_col in zip(
+        main_effects, _main_effect_start_columns(main_effects), strict=True
+    ):
+        first_row = _MAIN_EFFECT_HEADER_ROW + 1
+        for offset, column_name in enumerate(block.table.columns):
+            number_format = _main_effect_number_format(block, str(column_name), offset)
+            if number_format is None:
+                continue
+            for row in range(first_row, first_row + len(block.table)):
+                ws.cell(row=row, column=start_col + offset).number_format = number_format
+
+
 def _annotate_piecewise_blocks(ws, main_effects) -> None:
     """Re-format the piecewise cells and write each block's interpolation note.
 
-    Runs *after* the global ``column % 3`` format loop and touches nothing
-    else: the block placement and the format loop stay exactly as they were, so
-    every other block keeps its coordinates and its formats.
+    Runs *after* the per-block format pass and touches nothing else: the block
+    placement stays exactly as it was, so every other block keeps its
+    coordinates and its formats.
     """
+    starts = _main_effect_start_columns(main_effects)
     for idx, block in enumerate(main_effects):
         if block.kind != "piecewise":
             continue
-        start_col = 1 + idx * _MAIN_EFFECT_BLOCK_STRIDE
+        start_col = starts[idx]
         first_row = _MAIN_EFFECT_HEADER_ROW + 1
         for row in range(first_row, first_row + len(block.table)):
             for offset in (1, 2):
@@ -358,8 +454,8 @@ def _widen_block_key_columns(ws, main_effects) -> None:
     """
     from openpyxl.utils import get_column_letter
 
-    for idx in range(len(main_effects)):
-        letter = get_column_letter(1 + idx * _MAIN_EFFECT_BLOCK_STRIDE)
+    for start_col in _main_effect_start_columns(main_effects):
+        letter = get_column_letter(start_col)
         longest = max(
             (len(str(cell.value)) for cell in ws[letter] if cell.value is not None),
             default=0,
@@ -392,21 +488,17 @@ def write_rating_table_workbook(
     ws[_BASE_RELATIVITY_CELL] = float(payload.base_relativity)
 
     max_main_row = 8
-    for idx, block in enumerate(payload.main_effects):
-        start_col = 1 + idx * _MAIN_EFFECT_BLOCK_STRIDE
+    for block, start_col in zip(
+        payload.main_effects,
+        _main_effect_start_columns(payload.main_effects),
+        strict=True,
+    ):
         title_cell = ws.cell(row=_MAIN_EFFECT_TITLE_ROW, column=start_col, value=block.name)
         title_cell.font = Font(bold=True)
         end_row, _ = _write_dataframe(ws, block.table, _MAIN_EFFECT_HEADER_ROW, start_col)
         max_main_row = max(max_main_row, end_row)
 
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value is None:
-                continue
-            if cell.column % _MAIN_EFFECT_BLOCK_STRIDE == 2:
-                cell.number_format = "0.000000"
-            if cell.column % _MAIN_EFFECT_BLOCK_STRIDE == 0:
-                cell.number_format = "#,##0.00"
+    _format_main_effect_blocks(ws, payload.main_effects)
 
     ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT
     _annotate_piecewise_blocks(ws, payload.main_effects)
