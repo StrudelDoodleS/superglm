@@ -881,6 +881,48 @@ def test_categorical_and_numeric_blocks_are_exported():
     assert score.table["score"].tolist() == ["per_unit"]
 
 
+def test_the_ppform_block_keeps_the_three_lookup_columns_in_front():
+    """An un-upgraded consumer must still find and read this block.
+
+    The downstream loader locates blocks by scanning for a header signature
+    with 'relativity' at +1 and 'weight' at +2 and slices those three columns
+    positionally.  A block that fails that signature is not skipped, it fails
+    the whole package publication -- so the coefficients go BEHIND the existing
+    three columns, never instead of them.
+    """
+    model, X, y, w = _fit_export_model()
+
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+    assert block.table.columns.tolist()[:3] == [block.name, "Relativity", "Weight"]
+    assert block.table.columns.tolist()[3:] == ["from", "to", "a", "b", "c", "d"]
+
+
+def test_the_ppform_block_carries_its_extrapolation_rule_as_rows():
+    """A cubic past its last knot is unbounded; a note does not stop that.
+
+    Measured on a real age curve: five years past the boundary the naive cubic
+    tail returns 1581x the correct factor.  The block therefore emits constant
+    unbounded tail rows, so that "match an interval and evaluate it" -- the only
+    thing a consumer does -- is correct outside the training range too.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+
+    first, last = block.table.iloc[0], block.table.iloc[-1]
+    assert first["from"] == -np.inf
+    assert last["to"] == np.inf
+    # Constant, so an unbounded width can never reach the arithmetic.
+    for row in (first, last):
+        assert (row["b"], row["c"], row["d"]) == (0.0, 0.0, 0.0)
+
+    # The tails continue the curve rather than inventing a value.
+    interior_low = block.table.iloc[1]
+    assert first["a"] == pytest.approx(interior_low["a"], abs=1e-12)
+
+
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
     rng = np.random.default_rng(124)
     n = 120
