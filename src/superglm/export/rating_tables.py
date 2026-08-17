@@ -1001,6 +1001,42 @@ def _significant_digits(values: NDArray, digits: int) -> NDArray:
     return out
 
 
+def _offset_per_unit_block_from_multiplier(
+    multiplier: NDArray,
+    sample_weight: NDArray | None,
+) -> RatingTableBlock:
+    """The undeclared offset as one per-unit row, keyed on the multiplier itself.
+
+    The declared form (``_offset_per_unit_block``) has a scale to derive from a
+    named column and to verify on every row.  This one has neither: no column
+    was declared, so the only input the block can ask for is the multiplier the
+    consumer already computes, and the relation between that input and the
+    factor is the identity.  ``Relativity`` is therefore ``1.0`` exactly, and
+    there is nothing to check -- the block returns what it was handed.
+
+    That reads as though it says nothing.  It says exactly as much as the binned
+    block it replaces, and says it correctly: that block is *also* keyed on the
+    multiplier, so a consumer must compute ``exp(offset)`` before it can look
+    anything up -- and then receives its bin's exposure-weighted average back
+    instead of the number it just computed.  A lossy round-trip of a value the
+    consumer already held.  This row asks for the same input and returns it
+    unmodified, at every magnitude, including above the largest multiplier the
+    book happened to contain.
+    """
+    weights = _weights_array(len(multiplier), sample_weight)
+    return RatingTableBlock(
+        name="Offset Multiplier",
+        kind="offset_per_unit",
+        table=pd.DataFrame(
+            {
+                "Offset Multiplier": ["per_unit"],
+                "Relativity": [1.0],
+                "Weight": [float(weights.sum())],
+            }
+        ),
+    )
+
+
 def _offset_multiplier_block(
     offset: NDArray,
     n_rows: int,
@@ -1008,26 +1044,44 @@ def _offset_multiplier_block(
     *,
     n_bins: int,
     bin_strategy: str,
+    offset_kind: str,
+    offset_max_exact_levels: int,
 ) -> RatingTableBlock | None:
+    """An undeclared offset under the same rule the declared path follows.
+
+    An offset is never estimated -- it is a known function of known inputs, so
+    it has no estimation error for binning to trade against.  Cardinality
+    therefore does not decide whether it is published exactly: few distinct
+    multipliers make a lookup worth printing, many make a per-unit row, and
+    neither is an approximation.  Binning survives only where a caller asks for
+    it by name, as a summary of the fitted exposure rather than something to
+    rate from.
+    """
     offset_arr = np.asarray(offset, dtype=np.float64).ravel()
     if len(offset_arr) != n_rows:
         raise ValueError("offset must have the same length as X.")
 
     weights = _weights_array(n_rows, sample_weight)
     multiplier = np.exp(offset_arr)
+    # The rounding exists to stop the float noise of ``exp(log(x))`` splitting
+    # one tariff level into thousands, which would push a genuine lookup onto
+    # the per-unit row.  It is relative rather than absolute, so it stays
+    # proportionate at any magnitude of multiplier.
     exact_multiplier = _significant_digits(multiplier, 12)
     levels, inverse = np.unique(exact_multiplier, return_inverse=True)
 
-    if len(levels) < 20:
-        exposure = np.bincount(inverse, weights=weights, minlength=len(levels))
-        table = pd.DataFrame(
-            {
-                "Offset Multiplier": levels.astype(float),
-                "Relativity": levels.astype(float),
-                "Weight": exposure.astype(float),
-            }
-        )
-        return RatingTableBlock(name="Offset Multiplier", kind="offset", table=table)
+    if offset_kind != "binned":
+        if offset_kind != "per_unit" and len(levels) <= offset_max_exact_levels:
+            exposure = np.bincount(inverse, weights=weights, minlength=len(levels))
+            table = pd.DataFrame(
+                {
+                    "Offset Multiplier": levels.astype(float),
+                    "Relativity": levels.astype(float),
+                    "Weight": exposure.astype(float),
+                }
+            )
+            return RatingTableBlock(name="Offset Multiplier", kind="offset", table=table)
+        return _offset_per_unit_block_from_multiplier(multiplier, sample_weight)
 
     from superglm.diagnostics.discretize import _compute_edges
 
@@ -2077,6 +2131,8 @@ def build_rating_table_payload(
                 sample_weight,
                 n_bins=n_bins,
                 bin_strategy=bin_strategy,
+                offset_kind=offset_kind,
+                offset_max_exact_levels=offset_max_exact_levels,
             )
         else:
             offset_block = _offset_source_block(
