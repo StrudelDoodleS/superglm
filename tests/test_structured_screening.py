@@ -979,7 +979,12 @@ def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch)
 
     Three arms now, and the middle one is the regression:
 
-    * ``-0.1`` bars: undecidable, magnitude taken, publishes.
+    * ``-0.1`` bars: undecidable, magnitude taken, publishes.  What is
+      achieved is not ``-0.1`` bars exactly -- forming the matrix costs
+      ``O(eps ||S||)``, which is the target's own size -- so the arm lands
+      anywhere in 0.04 to 0.17 bars over the kernels swept.  Every one of
+      those is on the magnitude branch, and the floor is structural rather
+      than lucky: see the comment at the assertion.
     * ``-8`` bars: dropped, and the trace guard is measured too slack to see
       it, so only the per-direction guard can refuse.  RED before #323.
     * ``-10`` trace bounds: dropped by 857 bars; both guards would fire, and
@@ -1008,21 +1013,35 @@ def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty(monkeypatch)
     for label, target, refused in arms:
         injected = S_a - (w[0] - target) * direction
         got = np.linalg.eigvalsh(0.5 * (injected + injected.T))[0]
-        assert got < 0.0, (label, got)
         pair = spline_cat_moments(B_a, injected, S_cell, W_cell, level_rows)
 
         root, dropped, cut = st._penalty_root(pair.S_a)
         clip = abs(float(np.trace(pair.S_a)) - float(np.sum(np.square(root)))) / trace
+        # NOTHING HERE ASSERTS THE SIGN OF AN UNRESOLVED EIGENVALUE, WHICH THIS
+        # TEST OF ALL TESTS MAY NOT DO.  The magnitude arm sits INSIDE the bar
+        # by construction, so its sign is precisely what the module says is a
+        # function of the rounding rather than of the data -- clause 4, and the
+        # docstring above records the same fixture reading either sign on
+        # different machines.  Each arm is asserted on the certified quantity
+        # instead: a MAGNITUDE against the cut, and the branch actually taken.
         if not refused:
-            # Inside the bar by 5.8x at the worst kernel swept, so the arm is
-            # on the magnitude branch on every one of them and not by luck.
+            # The reconstruction cannot place an eigenvalue below ``O(eps
+            # ||S||)`` -- the entries are O(10) and the target is O(1e-15), so
+            # the round-off in forming ``injected`` is the same size as the
+            # target itself.  That is a FLOOR of about ``bar / n`` by
+            # construction, which is why this arm is inside the bar by roughly
+            # ``n`` however it is written: 5.8x to 23x over the kernels swept.
+            # Asserted at 3x, so the scatter has to grow 2x before it lies.
             assert dropped == 0.0, (label, dropped, cut)
-            assert abs(got) * 5.0 < cut, (label, got, cut)
+            assert abs(got) * 3.0 < cut, (label, got, cut)
             rungs = st.structured_ladder(pair, budgets=BUDGETS)
             assert rungs is not None and len(rungs) == len(BUDGETS)
             continue
 
         # Outside it by 7.9x at the worst kernel swept: a real direction, gone.
+        # Here the sign IS certified -- that is what being outside the bar
+        # means -- so it may be asserted, and only here.
+        assert got < -cut, (label, got, cut)
         assert dropped > 4.0 * cut, (label, dropped, cut)
         assert root.shape[0] == n - 1, (label, root.shape, n)
         with pytest.raises(st._UnstableStructuredEDFError, match="negative eigenvalue"):
