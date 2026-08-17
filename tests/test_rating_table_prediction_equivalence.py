@@ -237,15 +237,32 @@ def _interaction_features() -> dict:
     }
 
 
+def _ppform_features() -> dict:
+    """Every exactly tabulable term, plus the one continuous term ppform covers.
+
+    Deliberately NOT ``_every_term_type_features``, which also carries a
+    ``Polynomial``.  ``continuous_kind="ppform"`` routes on ``_SplineBase``, so
+    a polynomial stays binned and drags its binning error into the product --
+    which would mean the exactness claim below could only ever be asserted at
+    the binned tolerance, i.e. it could not be asserted at all.  The spline is
+    the term the mode converts, so the spline is what the fixture carries.
+    """
+    features = {"age": Spline(n_knots=8)}
+    features.update(_exactly_tabulable_features())
+    return features
+
+
 @cache
 def _fit(kind: str) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
     """Fit once per model shape; every test here reads the fit, none mutates it.
 
     ``"exact"`` carries only exactly tabulable terms, ``"all"`` adds the binned
-    ``Spline`` and ``Polynomial``, and ``"interaction"`` puts a
-    categorical-by-categorical interaction beside centered main effects -- the
-    one interaction kind the export tabulates as a full cell table, and so the
-    only one for which the payload's product claim can be exact.
+    ``Spline`` and ``Polynomial``, ``"ppform"`` swaps that polynomial back out
+    so every continuous term is one the exact mode converts, and
+    ``"interaction"`` puts a categorical-by-categorical interaction beside
+    centered main effects -- the one interaction kind the export tabulates as a
+    full cell table, and so the only one for which the payload's product claim
+    can be exact.
     """
     if kind == "grouped_interaction":
         X, y, sample_weight = _interaction_frame(grouped_parent=True)
@@ -259,6 +276,10 @@ def _fit(kind: str) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
         X, y, sample_weight = _interaction_frame()
         features = _interaction_features()
         interactions = [("region", "segment")]
+    elif kind == "ppform":
+        X, y, sample_weight = _frame()
+        features = _ppform_features()
+        interactions = None
     else:
         X, y, sample_weight = _frame()
         features = _exactly_tabulable_features() if kind == "exact" else _every_term_type_features()
@@ -273,7 +294,7 @@ def _fit(kind: str) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
     return model, X, y, sample_weight
 
 
-def _payload(model, X, y, sample_weight, centering: str):
+def _payload(model, X, y, sample_weight, centering: str, continuous_kind: str = "binned"):
     return build_rating_table_payload(
         model,
         X,
@@ -282,6 +303,7 @@ def _payload(model, X, y, sample_weight, centering: str):
         n_bins=150,
         impact_bins=(20,),
         centering=centering,
+        continuous_kind=continuous_kind,
     )
 
 
@@ -309,6 +331,8 @@ def _block_multiplier(block, X: pd.DataFrame) -> np.ndarray:
         relativity = table["Relativity"].to_numpy(dtype=np.float64)
         index = np.digitize(X[name].to_numpy(dtype=np.float64), edges, right=False)
         return relativity[np.clip(index, 1, len(relativity)) - 1]
+    if block.kind == "continuous_ppform":
+        return _ppform_multiplier(block, X)
     if block.kind == "offset":
         # The ``offset_source=`` form, which is the one a consumer can actually
         # apply: the block is keyed on a raw column of the frame, exactly like
@@ -318,6 +342,40 @@ def _block_multiplier(block, X: pd.DataFrame) -> np.ndarray:
         lookup = {str(k): float(v) for k, v in zip(table[name], table["Relativity"])}
         return np.array([lookup[str(value)] for value in X[name]], dtype=np.float64)
     raise AssertionError(f"unhandled exported block kind {block.kind!r}")
+
+
+def _ppform_multiplier(block, X: pd.DataFrame) -> np.ndarray:
+    """The per-row factor a ppform block implies, evaluated as a consumer would.
+
+    Written here rather than imported from ``superglm.export``, and written
+    from the block's SIX published columns rather than from ``PpformSegments``:
+    a producer that scores its own output proves only that it agrees with
+    itself.  This is the stored procedure -- match the half-open interval on
+    ``from``/``to``, normalise, run Horner, exponentiate -- and nothing else is
+    available to it.
+
+    The width of a tail row is infinite, so ``u`` there is not a number.  That
+    is why the tails are emitted as constant pieces: ``b = c = d = 0`` means a
+    consumer that short-circuits ``u`` on an unbounded row and one that clamps
+    it arrive at the same factor.  This one short-circuits, which is the reading
+    the design's section 7.2 says a SQL consumer must be safe under.
+    """
+    name = block.name
+    table = block.table
+    lo = table["from"].to_numpy(dtype=np.float64)
+    hi = table["to"].to_numpy(dtype=np.float64)
+    coefficients = table[["a", "b", "c", "d"]].to_numpy(dtype=np.float64)
+    x = X[name].to_numpy(dtype=np.float64)
+
+    row = np.searchsorted(lo, x, side="right") - 1
+    matched = (row >= 0) & (x < hi[np.clip(row, 0, len(lo) - 1)])
+    assert matched.all(), f"{name!r}: {int((~matched).sum())} rows match no interval"
+
+    width = hi[row] - lo[row]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        u = np.where(np.isfinite(width), (x - lo[row]) / width, 0.0)
+    a, b, c, d = coefficients[row].T
+    return np.exp(a + u * (b + u * (c + u * d)))
 
 
 def _nearest(grid: np.ndarray, x: np.ndarray) -> np.ndarray:
@@ -404,6 +462,54 @@ def test_the_exactly_tabulable_workbook_reproduces_the_predictions(centering):
         rtol=_RECONSTRUCTION_RTOL,
         atol=0.0,
     )
+
+
+@pytest.mark.parametrize("centering", _CENTERINGS)
+def test_the_ppform_workbook_reproduces_predict_exactly(centering):
+    """The claim the feature exists to make, asserted end to end.
+
+    No existing test asserts an exported CONTINUOUS block reproduces the model:
+    every claim above derives its tolerance FROM the binning error rather than
+    bounding it, which is why a 60% worst-row error survived every green run.
+    This one applies the block the way a consumer applies it -- match a
+    half-open interval, evaluate its cubic in the normalised local variable --
+    and demands machine precision of the whole product.
+
+    Swept over BOTH centerings deliberately, as everything else in this module
+    is.  ``centering="mean"`` is the mode that carries a per-term constant the
+    base relativity has to absorb, and the ppform block's constant is a mean
+    over the grid its own curve was read on.  Under ``"native"`` that constant
+    is 0.0, so a native-only assertion cannot tell a right shift from a wrong
+    one -- an earlier draft of the block recorded a shift measured on a
+    different grid and was uniformly wrong by 0.177%, with every relativity
+    RATIO on the sheet still correct.  Only this comparison, absolute and under
+    ``"mean"``, can see that.
+    """
+    model, X, y, sample_weight = _fit("ppform")
+    payload = _payload(model, X, y, sample_weight, centering, continuous_kind="ppform")
+
+    assert [block.kind for block in payload.main_effects].count("continuous_ppform") == 1
+
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, X),
+        model.predict(X),
+        rtol=1e-13,
+        atol=0.0,
+    )
+
+
+@pytest.mark.parametrize("centering", _CENTERINGS)
+def test_the_default_export_is_unchanged_by_the_new_mode(centering):
+    """Opt-in means opt-in: the binned default must not move at all."""
+    model, X, y, sample_weight = _fit("all")
+
+    default = _payload(model, X, y, sample_weight, centering)
+    explicit = _payload(model, X, y, sample_weight, centering, continuous_kind="binned")
+
+    assert [b.kind for b in default.main_effects] == [b.kind for b in explicit.main_effects]
+    assert default.base_relativity == explicit.base_relativity
+    for left, right in zip(default.main_effects, explicit.main_effects, strict=True):
+        pd.testing.assert_frame_equal(left.table, right.table)
 
 
 def test_the_reconstruction_does_not_depend_on_the_reporting_centering():
