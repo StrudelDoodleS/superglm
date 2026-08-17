@@ -281,17 +281,25 @@ def _continuous_ppform_block(
 ) -> RatingTableBlock:
     """A continuous term as its exact polynomial pieces, plus a lookup fallback.
 
-    Nine columns, in two halves.  The first three are the ordinary binned-block
-    columns -- an interval key, a relativity, an exposure weight -- so a
-    consumer that cannot evaluate a polynomial still finds this block, reads it,
-    and scores it as a step function exactly as it scores a binned block today.
-    The remaining six are the exact form.
+    Seven columns, in two halves.  The first three are the ordinary
+    binned-block columns -- an interval key, a relativity, an exposure weight --
+    so a consumer that cannot evaluate a polynomial still finds this block,
+    reads it, and scores it as a step function exactly as it scores a binned
+    block today.  The remaining four are the exact form, one coefficient each.
+
+    The interval bounds are NOT among them.  They are already in the key, at
+    round-trip precision, so ``u = (x - lower) / (upper - lower)`` is computed
+    from the string a consumer has already parsed to match the row.  Restating
+    them as ``from``/``to`` floats would be duplicate state that can only ever
+    disagree -- and a float column cannot carry a tail row's infinity through a
+    spreadsheet at all.
 
     That superset is not cosmetic.  The downstream loader locates blocks by a
     header signature at fixed offsets and fails the WHOLE package when a block
-    does not match, so a six-column block would force two repositories to ship
-    in lockstep and would break every other term's publication in between.  See
-    the design's section 4.2a and 7.1.
+    does not match, so a block that dropped those three columns for its
+    coefficients alone would force two repositories to ship in lockstep and
+    would break every other term's publication in between.  See the design's
+    section 4.2a and 7.1.
 
     ``Relativity`` is the curve's value at ``from``, not the interval's average,
     so the two readings of one row agree at its left edge instead of disagreeing
@@ -1871,26 +1879,34 @@ def build_rating_table_payload(
     to an exact block; ``"ppform"`` is.
 
     ``"ppform"`` emits the exact piecewise-polynomial form of the fitted curve
-    instead: one row per knot interval carrying four coefficients, evaluated as
-    ``exp(a + b*u + c*u**2 + d*u**3)`` where ``u = (x - from) / (to - from)``.
-    It reproduces the fitted model to machine precision -- 2.4e-15 maximum
-    relative error against ``model.predict`` on the book above, against 6.0e-01
-    for the binned block it replaces -- and usually in an order of magnitude
-    fewer rows.  What it costs is a consumer that can evaluate a polynomial.
-    ``u`` is NORMALISED onto ``[0, 1]`` rather than being the raw ``x - from``:
-    on a covariate ranging to 1e5 a raw local variable loses enough precision
-    in a fixed-scale decimal column to produce a 3.3x relativity error, which
-    would be worse than the binning it replaces.
+    instead: one row per knot interval carrying four coefficients.  A consumer
+    reads both bounds back out of the interval key -- ``"[18.0,
+    25.363636363636363)"`` -- and evaluates ``exp(a + b*u + c*u**2 + d*u**3)``
+    with ``u = (x - lower) / (upper - lower)``.  It reproduces the fitted model
+    to machine precision -- 2.4e-15 maximum relative error against
+    ``model.predict`` on the book above, against 6.0e-01 for the binned block it
+    replaces -- and usually in an order of magnitude fewer rows.  What it costs
+    is a consumer that can evaluate a polynomial.  ``u`` is NORMALISED onto
+    ``[0, 1]`` rather than being the raw ``x - lower``: on a covariate ranging
+    to 1e5 a raw local variable loses enough precision in a fixed-scale decimal
+    column to produce a 3.3x relativity error, which would be worse than the
+    binning it replaces.
 
-    The block is NINE columns rather than three, and it is a superset rather
+    The bounds are not repeated as their own columns.  The key already holds
+    them exactly -- it is printed through ``repr``, the shortest string that
+    reads back as the same binary64, so each row's upper bound is identically
+    the next row's lower bound -- and a second pair of float columns could only
+    ever disagree with it.
+
+    The block is SEVEN columns rather than three, and it is a superset rather
     than a new shape.  ``<feature>``, ``Relativity`` and ``Weight`` stay in
-    front of it unchanged, and ``from``, ``to``, ``a``, ``b``, ``c``, ``d`` are
-    appended behind them, so an un-upgraded loader still reads it as a step
-    function: it locates the block by the same header signature, slices the same
-    three columns positionally, and gets the same approximate factor it gets
-    today, while an upgraded one reads the coefficients and is exact.
-    ``Relativity`` is the curve's value at ``from`` rather than the interval's
-    average, so the two readings of one row agree at its left edge instead of
+    front of it unchanged, and ``a``, ``b``, ``c``, ``d`` are appended behind
+    them, so an un-upgraded loader still reads it as a step function: it locates
+    the block by the same header signature, slices the same three columns
+    positionally, and gets the same approximate factor it gets today, while an
+    upgraded one reads the coefficients and is exact.  ``Relativity`` is the
+    curve's value at the row's lower bound rather than the interval's average,
+    so the two readings of one row agree at its left edge instead of
     disagreeing everywhere.  A consumer that STORES the coefficients must
     include them in any content digest it fingerprints a published package
     with; otherwise two models differing only in their coefficients fingerprint
@@ -2280,35 +2296,37 @@ def export_rating_tables(
     :func:`build_rating_table_payload`, where that is measured.
 
     ``"ppform"`` writes the exact piecewise-polynomial form of the fitted
-    curve: one row per knot interval carrying four coefficients, evaluated as
-    ``exp(a + b*u + c*u**2 + d*u**3)`` where ``u = (x - from) / (to - from)``,
-    normalised onto ``[0, 1]`` rather than the raw ``x - from``.  It reproduces
-    the fitted model to machine precision -- 2.4e-15 against 6.0e-01 for the
-    block it replaces -- in usually an order of magnitude fewer rows, and costs
-    a consumer that can evaluate a polynomial.
+    curve: one row per knot interval carrying four coefficients.  A consumer
+    reads both bounds back out of the interval key and evaluates
+    ``exp(a + b*u + c*u**2 + d*u**3)`` with ``u = (x - lower) / (upper -
+    lower)``, normalised onto ``[0, 1]`` rather than the raw ``x - lower``.  It
+    reproduces the fitted model to machine precision -- 2.4e-15 against 6.0e-01
+    for the block it replaces -- in usually an order of magnitude fewer rows,
+    and costs a consumer that can evaluate a polynomial.
 
-    On the sheet that block is NINE columns rather than three, and a superset
+    On the sheet that block is SEVEN columns rather than three, and a superset
     rather than a new shape: ``<feature>``, ``Relativity`` and ``Weight`` stay
-    in front unchanged, with ``from``, ``to``, ``a``, ``b``, ``c``, ``d``
-    appended behind them.  An un-upgraded loader still reads it as a step
-    function -- it locates the block by the same header signature and slices the
-    same three columns positionally -- while an upgraded one reads the
-    coefficients and is exact.  A consumer that STORES the coefficients must
-    include them in any content digest it fingerprints a published package
-    with, or two models differing only in their coefficients fingerprint
-    identically and the second is silently deduplicated into the first.
+    in front unchanged, with ``a``, ``b``, ``c``, ``d`` appended behind them.
+    An un-upgraded loader still reads it as a step function -- it locates the
+    block by the same header signature and slices the same three columns
+    positionally -- while an upgraded one reads the coefficients and is exact.
+    A consumer that STORES the coefficients must include them in any content
+    digest it fingerprints a published package with, or two models differing
+    only in their coefficients fingerprint identically and the second is
+    silently deduplicated into the first.
 
-    Blocks are laid out at their own widths, so a nine-column block moves every
+    Blocks are laid out at their own widths, so a seven-column block moves every
     block to its right; a reader keyed on the old fixed three-column stride
     reads the header row instead.
 
-    The unbounded tail bounds do not survive the workbook as numbers.  A
-    spreadsheet cell cannot hold an infinity, so an unbounded bound is written
-    as a BLANK cell and reads back as null, while the interval key beside it
-    still says ``[-inf, 18.0)``.  Those rows are the constant tails --
-    ``b = c = d = 0`` -- so a consumer that reads a blank bound as unbounded and
-    short-circuits ``u`` there is exact; one that computes ``u`` from a null
-    bound gets no number at all.
+    The bounds live in the KEY, which is text, and that is what lets the
+    unbounded tail rows survive the workbook: they read ``[-inf, 18.0)`` and
+    ``[99.0, inf)`` exactly as they left the payload, and every numeric cell in
+    the block is a real number.  A spreadsheet cell cannot hold an infinity, so
+    a float bound column could not have carried those rows at all.  Their
+    coefficients are ``b = c = d = 0``, so a consumer that recognises an
+    infinite bound and skips ``u`` there and one that clamps ``u`` to
+    ``[0, 1]`` arrive at the same factor.
 
     Extrapolation is otherwise carried in the table rather than described
     beside it: constant leading and trailing rows under the default

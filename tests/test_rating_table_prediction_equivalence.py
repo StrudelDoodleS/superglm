@@ -348,11 +348,11 @@ def _ppform_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     """The per-row factor a ppform block implies, evaluated as a consumer would.
 
     Written here rather than imported from ``superglm.export``, and written
-    from the block's SIX published columns rather than from ``PpformSegments``:
-    a producer that scores its own output proves only that it agrees with
-    itself.  This is the stored procedure -- match the half-open interval on
-    ``from``/``to``, normalise, run Horner, exponentiate -- and nothing else is
-    available to it.
+    from the block's SEVEN published columns rather than from
+    ``PpformSegments``: a producer that scores its own output proves only that
+    it agrees with itself.  This is the stored procedure -- read both bounds out
+    of the interval key, match the half-open interval, normalise, run Horner,
+    exponentiate -- and nothing else is available to it.
 
     The width of a tail row is infinite, so ``u`` there is not a number.  That
     is why the tails are emitted as constant pieces: ``b = c = d = 0`` means a
