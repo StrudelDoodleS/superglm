@@ -1039,6 +1039,39 @@ def test_ppform_under_error_extrapolation_emits_no_unbounded_rows():
     assert np.isfinite(block.table["to"]).all()
 
 
+def test_export_rating_tables_carries_both_ppform_keywords_to_the_payload(tmp_path):
+    """The workbook entry point is where a caller actually reaches this mode.
+
+    Asserted through the refusal rather than through the written sheet, and
+    deliberately: a keyword that never arrives cannot raise, so a refusal that
+    fires under ``continuous_kind="ppform"`` and then lifts under
+    ``allow_unbounded_extrapolation=True`` proves both of them travelled -- and
+    it proves it without depending on how a nine-column block is laid out in
+    the workbook, which is a separate piece of work.
+
+    One spline and nothing else, so the sheet this writes has a single
+    main-effect block and no neighbour for a wide one to reach.
+    """
+    model, X, y = _fit_ppform_refusal_model(8, extrapolation="extend")
+    output = tmp_path / "ppform.xlsx"
+
+    # Reached only if ``continuous_kind`` arrived: the default binned path
+    # exports an ``extend`` term without complaint.
+    with pytest.raises(ValueError, match="extrapolation"):
+        export_rating_tables(model, output, X, y, continuous_kind="ppform")
+    assert not output.exists()
+
+    written = export_rating_tables(
+        model,
+        output,
+        X,
+        y,
+        continuous_kind="ppform",
+        allow_unbounded_extrapolation=True,
+    )
+    assert written.exists()
+
+
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
     rng = np.random.default_rng(124)
     n = 120

@@ -1941,6 +1941,8 @@ def export_rating_tables(
     summary_sheet_name: str = "Model Summary",
     impact_sheet_name: str = "Discretization Impact",
     centering: str = "native",
+    continuous_kind: str = "binned",
+    allow_unbounded_extrapolation: bool = False,
 ) -> Path:
     """Render the rating-table payload to a workbook and return the path.
 
@@ -1950,6 +1952,12 @@ def export_rating_tables(
     change, and which errors the export raises.  Read that docstring before
     relying on an exported workbook; this function adds only the file format,
     the sheet names, and the extra rounding a renderer imposes.
+
+    ``continuous_kind`` and ``allow_unbounded_extrapolation`` are forwarded
+    verbatim and are not interpreted here.  They select how a continuous term
+    is represented and whether an unbounded extrapolation may be exported, both
+    of which are properties of the payload rather than of the rendering, so the
+    mode's validation and its refusals happen once, where the blocks are built.
     """
     out = Path(file_path)
     fmt = _resolve_format(out, format)
@@ -1972,6 +1980,8 @@ def export_rating_tables(
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
         centering=centering,
+        continuous_kind=continuous_kind,
+        allow_unbounded_extrapolation=allow_unbounded_extrapolation,
     )
 
     from superglm.export.excel import write_rating_table_workbook
