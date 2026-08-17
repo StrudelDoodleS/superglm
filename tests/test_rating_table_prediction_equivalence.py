@@ -362,8 +362,14 @@ def _ppform_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     """
     name = block.name
     table = block.table
-    lo = table["from"].to_numpy(dtype=np.float64)
-    hi = table["to"].to_numpy(dtype=np.float64)
+    # Both bounds come out of the key column, which is where the block puts
+    # them: ``_format_number`` prints via ``repr``, so the string is the exact
+    # pair of floats and no separate bound columns exist to disagree with it.
+    # Parsing here is what a consumer does, so this evaluator does it too.
+    parsed = [re.match(r"^\[(.+), (.+)\)$", str(label)) for label in table.iloc[:, 0]]
+    assert all(parsed), f"{name!r}: every ppform key must read back as an interval"
+    lo = np.array([float(m.group(1)) for m in parsed], dtype=np.float64)
+    hi = np.array([float(m.group(2)) for m in parsed], dtype=np.float64)
     coefficients = table[["a", "b", "c", "d"]].to_numpy(dtype=np.float64)
     x = X[name].to_numpy(dtype=np.float64)
 
