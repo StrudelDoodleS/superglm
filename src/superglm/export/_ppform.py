@@ -57,6 +57,15 @@ class PpformSegments:
     A term fitted below cubic degree still reports four coefficients, with the
     unused high powers exactly zero, so every block this feeds has one column
     shape regardless of the degree the caller happened to fit.
+
+    ``centering_shift`` is the constant these coefficients have ALREADY had
+    subtracted, reported so a consumer that has to put it back adds the number
+    that was actually taken out.  It travels with the coefficients rather than
+    being re-derived beside them because under ``centering="mean"`` the shift is
+    the mean of the curve OVER THE GRID it was read on: a second
+    ``term_inference`` call at a different ``n_points`` returns a different
+    constant for the same fitted term, and the difference lands whole on every
+    exported premium.  Zero under ``centering="native"``.
     """
 
     breaks: NDArray[np.float64]
@@ -64,6 +73,7 @@ class PpformSegments:
     residual: float
     degree: int
     extrapolation: str
+    centering_shift: float
 
     @property
     def n_segments(self) -> int:
@@ -171,4 +181,9 @@ def extract_ppform(
         residual=residual,
         degree=degree,
         extrapolation=str(meta.extrapolation),
+        # Read off THIS inference call -- the one whose curve the coefficients
+        # above were solved against.  Not ``getattr(..., 0.0)``: a term that
+        # stopped reporting the field should fail here, not silently export a
+        # zero shift for a curve that had a constant removed.
+        centering_shift=float(ti.centering_shift),
     )

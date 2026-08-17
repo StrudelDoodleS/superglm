@@ -923,6 +923,58 @@ def test_the_ppform_block_carries_its_extrapolation_rule_as_rows():
     assert first["a"] == pytest.approx(interior_low["a"], abs=1e-12)
 
 
+def _score_ppform_block(table: pd.DataFrame, x: np.ndarray) -> np.ndarray:
+    """Evaluate a ppform block the way a stored procedure would.
+
+    Deliberately not ``PpformSegments.evaluate`` and not anything in ``src``: a
+    producer checked against its own evaluator proves only that it agrees with
+    itself.  Match the half-open interval on ``from``/``to``, form
+    ``u = (x - from) / (to - from)``, and read ``a + b*u + c*u**2 + d*u**3``.
+    """
+    lo = table["from"].to_numpy(dtype=np.float64)
+    hi = table["to"].to_numpy(dtype=np.float64)
+    coefficients = table[["a", "b", "c", "d"]].to_numpy(dtype=np.float64)
+    idx = np.clip(
+        np.searchsorted(lo, np.asarray(x, dtype=np.float64), side="right") - 1, 0, len(lo) - 1
+    )
+    with np.errstate(invalid="ignore"):
+        u = (np.asarray(x, dtype=np.float64) - lo[idx]) / (hi[idx] - lo[idx])
+    # The unbounded tail rows have an infinite width, so ``u`` is not a number
+    # there; they are constant, so any finite value gives the same answer.
+    u = np.clip(np.where(np.isfinite(u), u, 0.0), 0.0, 1.0)
+    c = coefficients[idx]
+    return c[:, 0] + u * (c[:, 1] + u * (c[:, 2] + u * c[:, 3]))
+
+
+def test_the_ppform_block_records_the_shift_its_own_curve_carries():
+    """Under mean centering the recorded constant must be the removed constant.
+
+    ``centering_shift`` is not decoration: the payload folds every block's shift
+    back into ``base_relativity``, so a block whose curve had one constant taken
+    out while it reports a DIFFERENT one prices every risk wrong by the
+    difference -- uniformly, silently, and invisibly to every relativity ratio
+    on the sheet, which all stay correct.
+
+    The mean shift is a GRID mean, so it is a property of the grid the curve was
+    read on.  Reading the curve on one grid and the shift on another is exactly
+    how the two come apart.  Ground truth here is the NATIVE curve, which no
+    shift touches, so the assertion cannot be satisfied by the two halves of the
+    export agreeing with each other.
+    """
+    model, X, y, w = _fit_export_model()
+
+    payload = build_rating_table_payload(
+        model, X, y, sample_weight=w, continuous_kind="ppform", centering="mean"
+    )
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+
+    native = model.term_inference("age", n_points=257, with_se=False, centering="native")
+    grid = np.asarray(native.x, dtype=np.float64)
+
+    restored = _score_ppform_block(block.table, grid) + block.centering_shift
+    assert np.abs(restored - np.asarray(native.log_relativity, dtype=np.float64)).max() < 1e-12
+
+
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
     rng = np.random.default_rng(124)
     n = 120

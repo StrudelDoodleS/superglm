@@ -264,7 +264,6 @@ def _continuous_ppform_block(
     model: SuperGLM,
     name: str,
     centering: str,
-    centering_shift: float,
     weights: NDArray,
     values: NDArray,
 ) -> RatingTableBlock:
@@ -294,7 +293,7 @@ def _continuous_ppform_block(
     the only operation a consumer performs is "match an interval, evaluate it",
     and that operation is correct everywhere.
 
-    The ``centering_shift`` is RECORDED and not applied.  ``_continuous_block``
+    The centering shift is RECORDED and not applied.  ``_continuous_block``
     multiplies its binned relativities by ``exp(-centering_shift)`` because
     ``discretization_impact`` knows nothing about centering; the segments here
     come from ``term_inference(centering=...)``, which has already subtracted
@@ -302,6 +301,17 @@ def _continuous_ppform_block(
     ``base_relativity`` added it back once, so the block would be wrong by
     exactly one shift.  Recording it is still required: that is how the payload
     folds the constant back into the base.
+
+    It is taken from ``segments`` and NOT accepted from the caller.  Under
+    ``centering="mean"`` the shift is the mean of the curve over the grid it was
+    read on, so the same term yields a different constant at a different
+    ``n_points``: a shift sourced from a second inference call is a real number
+    for a curve this block does not carry.  Measured on the export fixture, the
+    200-point default and this module's 1201-point grid disagree by 1.77e-3 in
+    log space -- a uniform 0.177% on every premium, with every relativity RATIO
+    on the sheet still correct, which is precisely the shape of error that only
+    an absolute comparison against ``predict`` can see.  Sourcing it from the
+    curve's own call is what makes that mismatch unexpressible.
     """
     segments = extract_ppform(model, name, centering=centering)
 
@@ -343,7 +353,7 @@ def _continuous_ppform_block(
         kind="continuous_ppform",
         table=table,
         extrapolation=segments.extrapolation,
-        centering_shift=float(centering_shift),
+        centering_shift=segments.centering_shift,
     )
 
 
@@ -1707,27 +1717,33 @@ def build_rating_table_payload(
         if isinstance(spec, Piecewise):
             main_effects.append(_piecewise_block(model, name, centering))
         elif selected is not None and name in selected.tables:
-            # Through the same term the exact blocks read their shift from, so
-            # every block in the workbook is in the centering the caller asked
-            # for and all of them share one origin.  ``with_se=False``, so this
-            # is the point estimate alone -- the band's own centering is
-            # ``_recenter_term``'s business and is not routed through here.
-            centering_shift = float(_main_effect_inference(model, name, centering).centering_shift)
             # ``Polynomial`` stays binned under ``"ppform"``: the block is fixed
             # at four coefficients while a polynomial's degree is not, so it is
             # routed on ``_SplineBase`` rather than on "is continuous".
             if continuous_kind == "ppform" and isinstance(spec, _SplineBase):
+                # No shift passed in.  The ppform block reads its curve and its
+                # shift off ONE ``term_inference`` call, because under
+                # ``centering="mean"`` the shift is that call's grid mean; a
+                # constant computed here, on a differently sized grid, would be
+                # the wrong constant for the curve the block emits.
                 main_effects.append(
                     _continuous_ppform_block(
                         model,
                         name,
                         centering,
-                        centering_shift,
                         _export_weights(frame, sample_weight),
                         np.asarray(frame.column_array(name), dtype=np.float64),
                     )
                 )
             else:
+                # Through the same term the exact blocks read their shift from,
+                # so every block in the workbook is in the centering the caller
+                # asked for and all of them share one origin.  ``with_se=False``,
+                # so this is the point estimate alone -- the band's own centering
+                # is ``_recenter_term``'s business and is not routed through here.
+                centering_shift = float(
+                    _main_effect_inference(model, name, centering).centering_shift
+                )
                 main_effects.append(_continuous_block(name, selected.tables[name], centering_shift))
         elif isinstance(spec, Categorical | OrderedCategorical):
             main_effects.append(_categorical_block(model, frame, name, sample_weight, centering))
