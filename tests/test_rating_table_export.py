@@ -1,4 +1,5 @@
 import math
+import re
 import warnings
 from dataclasses import replace
 from io import BytesIO
@@ -906,7 +907,44 @@ def test_the_ppform_block_keeps_the_three_lookup_columns_in_front():
 
     block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
     assert block.table.columns.tolist()[:3] == [block.name, "Relativity", "Weight"]
-    assert block.table.columns.tolist()[3:] == ["from", "to", "a", "b", "c", "d"]
+    assert block.table.columns.tolist()[3:] == ["a", "b", "c", "d"]
+
+
+def _interval_bounds(labels) -> tuple[np.ndarray, np.ndarray]:
+    """Read both interval bounds back out of the block's own key column.
+
+    The block emits no ``from``/``to`` columns: ``_format_number`` prints through
+    ``repr``, the shortest string that reads back as the same binary64, so the key
+    already carries both bounds exactly and a separate pair of float columns could
+    only ever disagree with it.  Parsing here is therefore not a convenience -- it
+    is the operation a consumer performs, so the tests exercise the same path.
+    """
+    parsed = [re.match(r"^\[(.+), (.+)\)$", str(label)) for label in labels]
+    assert all(parsed), f"every ppform key must read back as an interval: {list(labels)}"
+    return (
+        np.array([float(m.group(1)) for m in parsed], dtype=np.float64),
+        np.array([float(m.group(2)) for m in parsed], dtype=np.float64),
+    )
+
+
+def test_the_ppform_key_carries_its_bounds_back_exactly():
+    """The key is load-bearing for arithmetic, not only for matching.
+
+    With no bound columns, ``u = (x - lower) / (upper - lower)`` is computed from
+    numbers read out of the key string, so the key has to round-trip exactly --
+    ``_format_number``'s whole purpose, and what issue #278 was about.  A rounded
+    key would not merely mis-match a row here, it would rescale the local variable
+    inside the row it did match.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+
+    lower, upper = _interval_bounds(block.table.iloc[:, 0])
+
+    # Consecutive rows partition the line: each row's upper bound IS the next
+    # row's lower bound, bit for bit.  Any rounding in the key breaks this.
+    assert np.array_equal(upper[:-1], lower[1:])
 
 
 def test_the_ppform_block_carries_its_extrapolation_rule_as_rows():
@@ -921,9 +959,10 @@ def test_the_ppform_block_carries_its_extrapolation_rule_as_rows():
     payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
     block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
 
+    lower, upper = _interval_bounds(block.table.iloc[:, 0])
     first, last = block.table.iloc[0], block.table.iloc[-1]
-    assert first["from"] == -np.inf
-    assert last["to"] == np.inf
+    assert lower[0] == -np.inf
+    assert upper[-1] == np.inf
     # Constant, so an unbounded width can never reach the arithmetic.
     for row in (first, last):
         assert (row["b"], row["c"], row["d"]) == (0.0, 0.0, 0.0)
@@ -938,11 +977,11 @@ def _score_ppform_block(table: pd.DataFrame, x: np.ndarray) -> np.ndarray:
 
     Deliberately not ``PpformSegments.evaluate`` and not anything in ``src``: a
     producer checked against its own evaluator proves only that it agrees with
-    itself.  Match the half-open interval on ``from``/``to``, form
-    ``u = (x - from) / (to - from)``, and read ``a + b*u + c*u**2 + d*u**3``.
+    itself.  Read both bounds out of the key column, match the half-open
+    interval, form ``u = (x - lower) / (upper - lower)``, and read
+    ``a + b*u + c*u**2 + d*u**3``.
     """
-    lo = table["from"].to_numpy(dtype=np.float64)
-    hi = table["to"].to_numpy(dtype=np.float64)
+    lo, hi = _interval_bounds(table.iloc[:, 0])
     coefficients = table[["a", "b", "c", "d"]].to_numpy(dtype=np.float64)
     idx = np.clip(
         np.searchsorted(lo, np.asarray(x, dtype=np.float64), side="right") - 1, 0, len(lo) - 1
@@ -1044,8 +1083,9 @@ def test_ppform_under_error_extrapolation_emits_no_unbounded_rows():
     payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
     block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
 
-    assert np.isfinite(block.table["from"]).all()
-    assert np.isfinite(block.table["to"]).all()
+    lower, upper = _interval_bounds(block.table.iloc[:, 0])
+    assert np.isfinite(lower).all()
+    assert np.isfinite(upper).all()
 
 
 def test_export_rating_tables_carries_both_ppform_keywords_to_the_payload(tmp_path):
@@ -1245,7 +1285,7 @@ def test_the_continuous_kind_documentation_states_what_the_payload_emits():
     spline = next(block for block in ppform.main_effects if block.name == "age")
 
     assert list(spline.table.columns) == ["age", "Relativity", "Weight", *_PPFORM_COLUMNS]
-    assert len(spline.table.columns) == 3 + len(_PPFORM_COLUMNS) == 9
+    assert len(spline.table.columns) == 3 + len(_PPFORM_COLUMNS) == 7
     # A ``Polynomial`` stays binned: the block carries four coefficients and a
     # polynomial's degree is not bounded by four.
     assert {block.name: block.kind for block in ppform.main_effects} == {
@@ -1268,15 +1308,19 @@ def test_the_continuous_kind_documentation_states_what_the_payload_emits():
     assert "fewer distinct values than that budget is still binned" in payload_doc
 
 
-def test_the_guide_documents_the_ppform_block_and_its_blank_workbook_bounds(tmp_path):
-    """The workbook cannot carry an infinite bound, and the guide must say so.
+def test_the_unbounded_tails_survive_the_workbook_as_text(tmp_path):
+    """The infinite bounds live in the key, which is text, so they survive.
 
-    ``openpyxl`` writes a non-finite number as an EMPTY cell, so the payload's
-    ``-inf``/``+inf`` tail bounds arrive at the consumer as blanks while the
-    interval key beside them still reads ``[-inf, ...)``.  A consumer reading
-    the machine-readable columns therefore meets a null bound -- the exact
-    condition the design calls out as undefined for ``u`` -- and the only thing
-    standing between them and it is this being written down.
+    They did not always.  While the block still carried ``from``/``to`` float
+    columns, ``openpyxl`` wrote a non-finite number as an EMPTY cell, so the
+    tail bounds reached a consumer as BLANKS while the key beside them still
+    read ``[-inf, ...)`` -- a null where ``u``'s denominator should be, in the
+    one row whose whole purpose is to be safe.  Dropping those columns removed
+    the failure rather than documenting it: the key is a string, and a string
+    carries ``-inf`` through a spreadsheet without trouble.
+
+    So this asserts the infinity arrives, and that no numeric column is left
+    holding one.
     """
     model, X, y = _fit_ppform_doc_model()
     output = tmp_path / "guide.xlsx"
@@ -1290,22 +1334,33 @@ def test_the_guide_documents_the_ppform_block_and_its_blank_workbook_bounds(tmp_
     payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
     rows = len(next(b for b in payload.main_effects if b.name == "age").table)
 
-    first_column = headers.index("from") + 1
+    assert "from" not in headers, "the bounds live in the key, not in their own columns"
+    assert "to" not in headers
+
     key_column = headers.index("age") + 1
     top = _MAIN_EFFECT_HEADER_ROW + 1
     bottom = _MAIN_EFFECT_HEADER_ROW + rows
-    assert sheet.cell(row=top, column=first_column).value is None
     assert "-inf" in sheet.cell(row=top, column=key_column).value
-    assert sheet.cell(row=bottom, column=first_column + 1).value is None
     assert "inf" in sheet.cell(row=bottom, column=key_column).value
+
+    # Every numeric cell the block writes is a real number.  A blank here would
+    # be the old failure returning under a different column name.
+    coefficient_columns = [headers.index(column) + 1 for column in _PPFORM_COLUMNS]
+    for row in range(top, bottom + 1):
+        for column in coefficient_columns:
+            value = sheet.cell(row=row, column=column).value
+            # ``int`` as well as ``float``: a tail row's b/c/d are exactly zero
+            # and openpyxl stores that as ``0``.  What must never appear is
+            # ``None``, which is how a non-finite number arrives.
+            assert isinstance(value, int | float), f"blank coefficient at row {row}"
 
     guide = _flat((_ROOT / "docs/guide/results.md").read_text(encoding="utf-8"))
     columns = ", ".join(f"`{column}`" for column in _PPFORM_COLUMNS)
     for claim in (
         '`continuous_kind="ppform"`',
         columns,
-        "nine columns",
-        "an unbounded bound is written as a blank cell",
+        "seven columns",
+        "both bounds back out of the interval key",
         "content digest",
         "`Polynomial` terms stay binned",
         "mis-rated by 60%",
