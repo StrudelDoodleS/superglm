@@ -254,6 +254,55 @@ still there.  Measured on the structured side, that took the high-edge error
 from 5.1e-06 to 7.4e-12 against a 60-digit oracle.  It is a change to what the
 CALLER hands this module, not to anything in it.
 
+**THE LOW EDGE HAS ITS OWN CEILING AND IT IS ``eps / lambda``.**  The section
+above is about the ladder's HIGH edge, and it left the impression -- recorded
+in issue #279 and in the sweep that opened it -- that the low edge was the good
+end.  It is not; it fails differently, and the two must not be conflated.
+
+At the low edge nothing is unresolved in the sense counted above.  Over 21
+draws of the 20-level spline-by-categorical geometry, the operator
+``V_eff + lambda_lo S`` has ZERO directions within ``10x eps ||A||`` on every
+one, the nearest clearing that cut by at least 1879x.  The mechanism is the
+derivative instead of the noise floor::
+
+    edf(lambda) = sum_j v_j / (v_j + lambda s_j),
+    d edf / d v_j -> 1 / (lambda s_j)   as v_j -> 0
+
+so a perturbation of the operand at the level float64 cannot see -- ``eps
+||V_eff||``, SMALLER than the error already committed in forming it from the
+moments -- moves ``edf`` by ``~eps / lambda``.  Measured over ten orders of
+``lambda`` on a design whose smallest singular value is 1e-8 of its largest,
+the width of the answer set over ``eps / lambda`` reads 0.796 at
+``lambda = 5.22e-12``, 1.123 at 1.00e-08 and 1.691 at 9.39e-02.  It is the
+quotient, not the rung.
+
+The bracket's low end is ``1e-10`` times the pair's own scale, which puts that
+quotient at 9.66e-06 to 9.86e-06 across all 21 draws -- a 2% band.  **So the
+``abs=1e-5`` the suite asserts at that edge is not a tolerance somebody chose;
+it is ``eps / lambda_lo``**, and the worst miss over the 21 draws is 1.29x it.
+The seed the fixture happens to run clears it by 193x only because its
+round-off cancels: perturbing that same pair's Gram at the same level opens an
+answer set 5.48e-06 wide, forty thousand times its own reported error.  A draw
+is not evidence about the family here, and neither is a passing bound.
+
+Which draws are bad is decided in the DESIGN, before this module is called: the
+dense arm's low-edge error tracks the residualized design's smallest singular
+value, and the bad draws are the ones where a level's rows put the constant
+vector in the span of that level's own spline columns.  Squaring sends such a
+direction under ``eps``; ``1 / lambda`` then multiplies whatever round-off is
+left there by 4.4e+10.  A perturbation experiment separates the regimes
+cleanly and is pinned in
+``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``:
+at ``sigma_min / sigma_max`` of 1e-1 and 1e-3 the answer set has width exactly
+0.0 on all 14 of 7 microkernels x 2 thread counts, and at 1e-8 and 1e-12 it is
+0.514 to 0.977 of ``eps / lambda``.
+
+**No arrangement of the arithmetic below narrows this.**  It is the same
+architectural ceiling as the high edge, reached by a different route, and it
+has the same remedy and the same tracking issue -- design factors, #257.  What
+is genuinely different is that at the low edge there is nothing to COUNT, so
+the high edge's probe reports a clean bill on exactly the draws that miss.
+
 What this costs in practice is small, and that is measured too rather than
 assumed: on the published twelve-row freMTPL2 screen, one thread against
 eight, the table order is identical, the ``z > sqrt(edf0 / 2)`` gate admits
