@@ -13,11 +13,7 @@ import pytest
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
 from superglm.screening import pair_cell_moments, pair_score_curvature, working_score
-from superglm.screening._score_stat import (
-    _build_pencil,
-    _pencil_edf,
-    penalized_score_statistic_ladder,
-)
+from superglm.screening._score_stat import _edge, penalized_score_statistic_ladder
 
 
 def _pair_case(seed, n=4000, n_a=17, n_b=13, k_a=4, k_b=3, signed=False):
@@ -1757,6 +1753,15 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
     error already committed in forming that Gram, so every perturbed operand is
     an equally valid reading of the same design.
 
+    Evaluated through :func:`~superglm.screening._score_stat._edge`, because
+    that is what answers a CLAMPED rung -- the pencil is built only when some
+    budget genuinely has to search, and a budget above ``p`` never does.
+    Measuring the pencil here instead would test a route this rung does not
+    take; it agrees on the regime (0.796 and 0.720 against ``_edge``'s 0.647
+    and 0.982 on the two unresolved geometries) but it is not the shipped
+    answer, and the two part on the RESOLVED side, where the pencil reads
+    exactly 0.0 and ``_edge`` reads 1.5e-09 and 2.1e-06.
+
     Returns the width of the resulting answer set alongside ``eps / lambda``,
     which is what that width is a multiple of.
     """
@@ -1773,10 +1778,10 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
     lam = float(penalized_score_statistic_ladder(U, V, S_ti=S, budgets=(4.0 * p,))[0].lambda0)
 
     def edf(operand):
-        # The SHIPPED evaluator, not a re-derivation of its formula.  Rewriting
-        # ``sum v / (v + lam s)`` here would drop the ``den > 0`` guard the
-        # shipped one carries and would keep passing if the two ever parted.
-        return _pencil_edf(_build_pencil(0.5 * (operand + operand.T), S, U), lam)
+        # The SHIPPED evaluator, not a re-derivation of its formula, and the
+        # one this rung actually reaches.  Rewriting the edf inline would keep
+        # passing if the module's own arithmetic ever moved away from it.
+        return _edge(0.5 * (operand + operand.T), S, lam)[0]
 
     scale = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
     noise = np.random.default_rng(1234)
@@ -1808,11 +1813,11 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigm
     a fitted constant: it is ``eps`` over a lambda the caller can print.
 
     **Measured to be exactly that law, over TEN orders of lambda.**  On the
-    ``1e-8`` geometry the width over ``eps / lambda`` reads 0.796 at the
-    clamped low edge (``lambda`` 5.22e-12), 1.123 at ``lambda`` 1.00e-08 and
-    1.691 at ``lambda`` 9.39e-02.  So this is not an observation about one
-    rung; ``eps / lambda`` is the quantity, and the low edge is merely where
-    ``lambda`` is smallest.
+    ``1e-8`` geometry the width over ``eps / lambda`` reads 0.647 at the
+    clamped low edge (``lambda`` 5.22e-12), 0.939 at ``lambda`` 1.00e-08 and
+    0.939 at ``lambda`` 9.39e-02 -- within 1.45x of each other across ten
+    orders.  So this is not an observation about one rung; ``eps / lambda`` is
+    the quantity, and the low edge is merely where ``lambda`` is smallest.
 
     **Why a WIDTH and not an error.**  There is no value to assert.  Every
     operand perturbed here is as faithful to the design as the one the caller
@@ -1832,8 +1837,10 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigm
     1.29x it.  So the suite's ``abs=1e-5`` at that edge is not a property of
     the seed it runs; it is this quotient.  The one seed that clears it by 193x
     does so because its round-off cancels: perturbing ITS Gram at the same
-    level opens an answer set 5.48e-06 wide, forty thousand times its own
-    reported error.
+    level opens an answer set 6.87e-06 wide, FIFTY THOUSAND times its own
+    reported error of 1.37e-10, and 0.708 of ``eps / lambda`` like every other
+    draw.  Two well-conditioned draws of the same family give 3.07e-11 and
+    1.95e-11, five orders below.
 
     **No arithmetic in this module can narrow it**, which is why #279 closed
     without a code change.  The information is destroyed by the squaring,
@@ -1842,14 +1849,21 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigm
 
     **BOUNDS FROM A SWEEP, NOT FROM ONE RUN.**  Over 7 ``OPENBLAS_CORETYPE``
     microkernels -- SKYLAKEX, HASWELL, SANDYBRIDGE, NEHALEM, PRESCOTT, CORE2,
-    ZEN -- at 1 and 4 threads, 14 configurations: the two RESOLVED geometries
-    give a width of exactly 0.0 on all 14, and the two unresolved ones give
-    0.514 to 0.977 of ``eps / lambda``.  The cut of 0.1 below therefore clears
-    the binding measurement by 5.14x and the resolved side by infinity.  The
-    transitional geometry the table deliberately omits, ``sigma_min = 1e-5``,
-    reads 1.050e-03 to 1.318e-03 over the SAME 14 -- so the cut keeps 76x over
-    the nearest thing that is neither, and the omission is because there is no
-    honest expectation to assert there, not because it was inconvenient.
+    ZEN -- at 1 and 4 threads, 14 configurations.  Width over ``eps / lambda``::
+
+        sigma_min / sigma_max      over the 14
+        1e-1                       1.093e-09 .. 1.822e-09
+        1e-3                       1.592e-06 .. 2.072e-06
+        (1e-5, not asserted)       7.841e-03 .. 1.092e-02
+        1e-8                       0.6474 .. 0.7494
+        1e-12                      0.9008 .. 0.9904
+
+    The cut of 0.1 therefore clears the binding measurement on the unresolved
+    side (0.6474) by **6.47x** and the resolved side (2.072e-06) by 48264x.
+    The transitional geometry is omitted from the parametrization because
+    there is no honest expectation to assert there, not because it was
+    inconvenient -- and the cut still keeps 9.2x over its worst reading, so
+    omitting it costs no separation.
     """
     width, ceiling = _low_edge_answer_set(sigma_min)
     ratio = width / ceiling
@@ -1863,17 +1877,18 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(sigm
     if determined:
         assert ratio < 0.1, (
             f"a design the Gram RESOLVES left the low-edge edf undetermined {margins}; "
-            "the documented regime is a width of zero once sigma_min/sigma_max is 1e-3 or above"
+            "the documented regime is below 2.1e-06 of eps/lambda once sigma_min/sigma_max "
+            "is 1e-3 or above"
         )
     else:
         assert ratio > 0.1, (
             f"a design the Gram CANNOT resolve left the low-edge edf determined {margins}; "
-            "the documented regime is a width of 0.51-0.98 of eps/lambda, and if it has "
+            "the documented regime is a width of 0.65-0.99 of eps/lambda, and if it has "
             "collapsed then this module is no longer being handed a Gram -- see #257"
         )
         # The margin is asserted, not merely reported: the count above is only
-        # as trustworthy as its separation from the cut, and 2.0 leaves 2.57x
-        # against the binding 0.514 of the sweep.
+        # as trustworthy as its separation from the cut, and 2.0 leaves 3.24x
+        # against the binding 0.6474 of the sweep.
         assert ratio / 0.1 > 2.0, (
             f"the low-edge cut has lost its separation {margins}; this regime stops being "
             "decidable as the ratio approaches the cut"
