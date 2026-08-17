@@ -27,10 +27,18 @@ from superglm import (
 from superglm.editor import EditorSession
 from superglm.export.excel import (
     _BASE_RELATIVITY_NUMBER_FORMAT,
+    _MAIN_EFFECT_HEADER_ROW,
+    _MAIN_EFFECT_TITLE_ROW,
     _PIECEWISE_NUMBER_FORMAT,
+    _PPFORM_NUMBER_FORMAT,
+    _main_effect_start_columns,
     write_rating_table_workbook,
 )
-from superglm.export.rating_tables import RatingTablePayload, build_rating_table_payload
+from superglm.export.rating_tables import (
+    _PPFORM_COLUMNS,
+    RatingTablePayload,
+    build_rating_table_payload,
+)
 from superglm.export.summary import (
     SummaryExportPayload,
     SummaryOverviewRow,
@@ -1070,6 +1078,75 @@ def test_export_rating_tables_carries_both_ppform_keywords_to_the_payload(tmp_pa
         allow_unbounded_extrapolation=True,
     )
     assert written.exists()
+
+
+def test_a_wide_block_does_not_overwrite_its_neighbour(tmp_path):
+    """The layout used a fixed stride; a nine-column block breaks that.
+
+    Placing block i at 1 + i*3 assumes every block is three wide.  With a ppform
+    block in the list, block i+1 lands on top of block i's coefficients.  The
+    number-format loop has the same assumption, keyed on column % 3.
+
+    The title row alone does not show this -- the titles are one cell per block
+    and land at 1, 4, 7 whatever the widths are, so they survive the collision
+    that destroys the data underneath them.  The header row is what shows it:
+    every block's headers must appear, in its own columns, with no block's
+    columns standing on another's.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    output = tmp_path / "wide.xlsx"
+    _write_workbook(payload, output)
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+
+    titles = [
+        ws.cell(row=_MAIN_EFFECT_TITLE_ROW, column=column).value
+        for column in range(1, ws.max_column + 1)
+    ]
+    named = [title for title in titles if title]
+    assert named == [block.name for block in payload.main_effects]
+    assert len(named) == len(set(named)), "a block was overwritten by its neighbour"
+
+    # Every block's own columns, laid end to end, with nothing lost between
+    # them: a wide block that overwrote its neighbour would show up here as a
+    # short header row with a repeated ``Relativity``/``Weight`` pair standing
+    # where its coefficients should be.
+    headers = [
+        ws.cell(row=_MAIN_EFFECT_HEADER_ROW, column=column).value
+        for column in range(1, ws.max_column + 1)
+    ]
+    assert headers == [column for block in payload.main_effects for column in block.table.columns]
+
+    # And the block's own titles sit over its own first column, which is what
+    # a reader uses to tell whose block they are reading.
+    starts = _main_effect_start_columns(payload.main_effects)
+    for block, start in zip(payload.main_effects, starts, strict=True):
+        assert ws.cell(row=_MAIN_EFFECT_TITLE_ROW, column=start).value == block.name
+
+
+def test_ppform_coefficients_are_written_at_full_precision(tmp_path):
+    """Six decimal places would silently truncate a fitted coefficient."""
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    output = tmp_path / "precision.xlsx"
+    _write_workbook(payload, output)
+    ws = load_workbook(output)["Rating Tables"]
+
+    index, block = next(
+        (i, b) for i, b in enumerate(payload.main_effects) if b.kind == "continuous_ppform"
+    )
+    start = _main_effect_start_columns(payload.main_effects)[index]
+    for name in _PPFORM_COLUMNS:
+        column = start + block.table.columns.tolist().index(name)
+        cell = ws.cell(row=_MAIN_EFFECT_HEADER_ROW + 2, column=column)
+        assert cell.number_format == _PPFORM_NUMBER_FORMAT
+
+    # The lookup half keeps the formats every other block's lookup half has,
+    # so the degraded reading of this block still renders like a binned one.
+    relativity = start + block.table.columns.tolist().index("Relativity")
+    weight = start + block.table.columns.tolist().index("Weight")
+    assert ws.cell(row=_MAIN_EFFECT_HEADER_ROW + 2, column=relativity).number_format == "0.000000"
+    assert ws.cell(row=_MAIN_EFFECT_HEADER_ROW + 2, column=weight).number_format == "#,##0.00"
 
 
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
