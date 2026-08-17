@@ -1757,10 +1757,11 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32):
     that is what answers a CLAMPED rung -- the pencil is built only when some
     budget genuinely has to search, and a budget above ``p`` never does.
     Measuring the pencil here instead would test a route this rung does not
-    take; it agrees on the regime (0.796 and 0.720 against ``_edge``'s 0.647
-    and 0.982 on the two unresolved geometries) but it is not the shipped
-    answer, and the two part on the RESOLVED side, where the pencil reads
-    exactly 0.0 and ``_edge`` reads 1.5e-09 and 2.1e-06.
+    take.  Over the same sweep the two agree on the REGIME -- the pencil reads
+    0.563-0.796 and 0.626-0.767 where ``_edge`` reads 0.647-0.749 and
+    0.901-0.990 -- but they part on the resolved side, where the pencil is
+    exactly 0.0 and ``_edge`` is 1.09e-09 to 2.07e-06.  So the pencil form
+    would have asserted a bit-identity belonging to a route not under test.
 
     Returns the width of the resulting answer set alongside ``eps / lambda``,
     which is what that width is a multiple of.
