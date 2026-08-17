@@ -30,6 +30,7 @@ from superglm.editor import EditorSession
 from superglm.export.excel import (
     _BASE_RELATIVITY_NUMBER_FORMAT,
     _MAIN_EFFECT_HEADER_ROW,
+    _MAIN_EFFECT_NOTE_ROW,
     _MAIN_EFFECT_TITLE_ROW,
     _PIECEWISE_NUMBER_FORMAT,
     _PPFORM_NUMBER_FORMAT,
@@ -2458,6 +2459,81 @@ def test_excel_workbook_includes_source_aware_fit_offset(tmp_path):
     )
     assert [row[0] for row in rows] == [12.0, 36.0]
     np.testing.assert_allclose([row[1] for row in rows], [1.0, 3.0])
+
+
+def _fit_per_unit_offset_and_numeric_model():
+    """One model whose workbook carries a ``Numeric`` block AND a per-unit offset.
+
+    Both render as ``<name> | per_unit | Relativity | Weight`` and neither
+    writes its ``kind`` anywhere on the sheet, so the fixture is what makes the
+    ambiguity below a real one rather than a hypothetical.
+    """
+    rng = np.random.default_rng(4242)
+    n = 400
+    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
+    X = pd.DataFrame(
+        {
+            "region": rng.choice(["A", "B"], n),
+            "score": rng.normal(0.0, 1.0, n),
+            "sum_insured": sum_insured,
+        }
+    )
+    offset = np.log(sum_insured)
+    eta = -11.5 + 0.25 * (X["region"].to_numpy() == "B") + 0.1 * X["score"].to_numpy() + offset
+    y = rng.poisson(np.exp(eta)).astype(float)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first"), "score": Numeric()},
+    )
+    model.fit(X, y, offset=offset)
+    return model, X, y, offset
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_a_per_unit_offset_block_states_its_multiply_rule_in_the_workbook(tmp_path, declared):
+    """A numeric block and this one look identical and score differently.
+
+    numeric is Relativity ** x; a per-unit offset is Relativity * x.  The kind
+    is not written to the sheet, so without a note a consumer holding the
+    workbook cannot tell which rule to apply to a row keyed 'per_unit'.
+
+    Both flavours of the block are swept because both are ambiguous in the same
+    way: the declared one is named after a column the caller chose and looks
+    exactly like a feature block, and the undeclared one is the default for a
+    continuous offset, which is what made this reachable.
+    """
+    model, X, y, offset = _fit_per_unit_offset_and_numeric_model()
+    declaration = {"offset_source": "sum_insured", "offset_name": "SumInsured"} if declared else {}
+
+    payload = build_rating_table_payload(model, X, y, offset=offset, **declaration)
+    output = tmp_path / "per_unit_offset.xlsx"
+    model.export_rating_tables(output, X, y, offset=offset, **declaration)
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+
+    starts = dict(
+        zip(
+            [b.name for b in payload.main_effects], _main_effect_start_columns(payload.main_effects)
+        )
+    )
+    per_unit = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    numeric = next(b for b in payload.main_effects if b.kind == "numeric")
+    assert per_unit.name == ("SumInsured" if declared else "Offset Multiplier")
+
+    # The ambiguity, measured rather than asserted from the source: the two
+    # blocks are the same shape, the same key, and the sheet says nothing about
+    # which arithmetic each one takes.
+    assert list(per_unit.table.columns)[1:] == list(numeric.table.columns)[1:]
+    assert per_unit.table.iloc[:, 0].tolist() == numeric.table.iloc[:, 0].tolist() == ["per_unit"]
+
+    note = ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=starts[per_unit.name]).value
+    assert note is not None, "the per-unit offset block carries no note at all"
+    assert "multiply" in note.lower()
+    assert per_unit.name in note
+    assert "power" in note.lower(), "the rule it is NOT is half of what makes the note useful"
+    # And the note is what a consumer routes on, so the block taking the other
+    # rule must not carry one.
+    assert ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=starts[numeric.name]).value is None
 
 
 def test_interactions_start_two_blank_rows_below_main_effects(tmp_path):

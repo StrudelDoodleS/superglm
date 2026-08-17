@@ -307,8 +307,21 @@ def _payload(model, X, y, sample_weight, centering: str, continuous_kind: str = 
     )
 
 
-def _block_multiplier(block, X: pd.DataFrame) -> np.ndarray:
-    """The per-row factor one exported block implies, read out of the block alone."""
+def _block_multiplier(
+    block, X: pd.DataFrame, *, per_unit_offsets: dict[str, object] | None = None
+) -> np.ndarray:
+    """The per-row factor one exported block implies, read out of the block alone.
+
+    ``per_unit_offsets`` supplies the per-row value a ``offset_per_unit`` block
+    is multiplied by, keyed by block name.  It is passed in rather than looked
+    up in ``X`` because the block cannot say which column it means: the
+    declared form is named after ``offset_name``, which is a label the caller
+    chose and need not match any column of the frame, and the undeclared form
+    is keyed on the offset multiplier itself, which is not a column at all.
+    Spec section 8 decision A closed auto-detection of the source column, and
+    that closure applies here too -- a harness that guessed would be asserting
+    about its own guess.
+    """
     name = block.name
     table = block.table
     if block.kind == "categorical":
@@ -341,6 +354,18 @@ def _block_multiplier(block, X: pd.DataFrame) -> np.ndarray:
         # consumer already holds, so it is not part of this reconstruction.
         lookup = {str(k): float(v) for k, v in zip(table[name], table["Relativity"])}
         return np.array([lookup[str(value)] for value in X[name]], dtype=np.float64)
+    if block.kind == "offset_per_unit":
+        # Relativity * x, NOT Relativity ** x -- the offset's coefficient is
+        # fixed at 1, so the factor is linear in the column rather than a power
+        # of it.  The two block kinds are the same SHAPE and different
+        # arithmetic, which is exactly why the workbook needs the note.
+        assert list(table.iloc[:, 0]) == ["per_unit"]
+        column = (per_unit_offsets or {}).get(name)
+        assert column is not None, (
+            f"{name!r}: a per-unit offset block is applied to a value the sheet "
+            "does not carry, so the caller has to say what it multiplies"
+        )
+        return float(table["Relativity"].iloc[0]) * np.asarray(column, dtype=np.float64)
     raise AssertionError(f"unhandled exported block kind {block.kind!r}")
 
 
@@ -437,7 +462,11 @@ def _interaction_multiplier(block, X: pd.DataFrame) -> np.ndarray:
 
 
 def _predict_from_payload(
-    payload, X: pd.DataFrame, *, with_interactions: bool = True
+    payload,
+    X: pd.DataFrame,
+    *,
+    with_interactions: bool = True,
+    per_unit_offsets: dict[str, object] | None = None,
 ) -> np.ndarray:
     """The premium the exported workbook implies, read out of the workbook alone.
 
@@ -447,7 +476,9 @@ def _predict_from_payload(
     """
     reconstructed = np.full(len(X), float(payload.base_relativity), dtype=np.float64)
     for block in payload.main_effects:
-        reconstructed = reconstructed * _block_multiplier(block, X)
+        reconstructed = reconstructed * _block_multiplier(
+            block, X, per_unit_offsets=per_unit_offsets
+        )
     if with_interactions:
         for block in payload.interactions:
             reconstructed = reconstructed * _interaction_multiplier(block, X)
@@ -708,12 +739,12 @@ def test_an_offset_model_reconstructs_from_the_offset_lookup_and_the_blocks(cent
     )
 
 
-def test_the_per_unit_offset_block_reproduces_predict_on_every_row():
-    """The claim the block makes, checked the way a consumer would apply it.
+def _fit_per_unit_offset_model():
+    """One fit whose offset is a per-unit relation over a declared column.
 
-    The binned block it replaces mis-rated all 6,000 rows of this fixture, the
-    worst by 1.022e+00 -- more than double.  This asserts the replacement is
-    exact rather than merely better.
+    Shared by the two tests below so they score the SAME export two ways --
+    on the fitted book and off the end of it -- rather than each rebuilding a
+    fixture that has to stay in step by hand.
     """
     rng = np.random.default_rng(4)
     n = 6000
@@ -725,30 +756,63 @@ def test_the_per_unit_offset_block_reproduces_predict_on_every_row():
         family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
     )
     model.fit(X, y, offset=offset)
+    return model, X, y, offset
 
-    payload = build_rating_table_payload(
-        model, X, y, offset=offset, offset_source="sum_insured", offset_name="SumInsured"
+
+def _per_unit_payload(model, X, y, offset, centering: str = "native"):
+    return build_rating_table_payload(
+        model,
+        X,
+        y,
+        offset=offset,
+        offset_source="sum_insured",
+        offset_name="SumInsured",
+        centering=centering,
     )
+
+
+@pytest.mark.parametrize("centering", _CENTERINGS)
+def test_the_per_unit_offset_block_reproduces_predict_on_every_row(centering):
+    """The claim the block makes, checked the way a consumer would apply it.
+
+    The binned block it replaces mis-rated all 6,000 rows of this fixture, the
+    worst by 1.022e+00 -- more than double.  This asserts the replacement is
+    exact rather than merely better.
+
+    Scored through ``_predict_from_payload`` rather than by a product written
+    out here, so the block kind that is now the default for a continuous offset
+    is INSIDE this module's canonical reconstruction instead of beside it: the
+    same evaluator every other block goes through, and the centering sweep with
+    it.  The offset is not a fitted term's relativities, so ``centering=`` must
+    leave it alone and both centerings must land on the same premium -- which
+    is checked here rather than assumed, because a block swept into a total
+    that assumes every exported block was centered is exactly how the shift
+    would go missing.
+
+    What the harness still cannot fold this kind into, stated rather than left
+    as an absence: the module's shared ``_fit`` fixtures and
+    ``_grid_interaction_frame`` are offset-free by construction, so the
+    centering sweeps and the impact-sheet equalities built on them do not see
+    an offset block of any kind.  The last of those is deliberate -- the sweep
+    does not measure the binned offset multiplier (issue #314), which is why
+    ``test_the_sheets_prediction_change_is_the_whole_workbooks_error`` asserts
+    its fixture used no offset at all.  Giving those fixtures an offset would
+    move every number in this module for a reason that has nothing to do with
+    this block, so the coverage is added here instead: the evaluator is shared,
+    and the centering sweep runs over it.
+    """
+    model, X, y, offset = _fit_per_unit_offset_model()
+    payload = _per_unit_payload(model, X, y, offset, centering)
     block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    assert block.centering_shift == 0.0
     scale = float(block.table["Relativity"].iloc[0])
 
     # A consumer multiplies by the column, which is the whole instruction.
     applied = scale * X["sum_insured"].to_numpy(dtype=np.float64)
     np.testing.assert_allclose(applied, np.exp(offset), rtol=1e-13, atol=0.0)
 
-    # And the factor multiplies into the workbook's product like any other, so
-    # the whole tariff -- not just the offset term -- comes back row by row.
-    region = next(b for b in payload.main_effects if b.kind == "categorical")
-    lookup = {
-        str(k): float(v) for k, v in zip(region.table[region.name], region.table["Relativity"])
-    }
-    reconstructed = (
-        float(payload.base_relativity)
-        * np.array([lookup[str(value)] for value in X[region.name]], dtype=np.float64)
-        * applied
-    )
     np.testing.assert_allclose(
-        reconstructed,
+        _predict_from_payload(payload, X, per_unit_offsets={block.name: X["sum_insured"]}),
         model.predict(X, offset=offset),
         rtol=_RECONSTRUCTION_RTOL,
         atol=0.0,
@@ -761,21 +825,13 @@ def test_the_per_unit_offset_is_exact_above_the_largest_fitted_value():
     This is what the binned block could not do: its top bin capped every large
     risk at that bin's average, so a 10m sum insured on a book that saw 2m was
     silently truncated rather than rated.
-    """
-    rng = np.random.default_rng(4)
-    n = 6000
-    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
-    X = pd.DataFrame({"region": rng.choice(["A", "B"], n), "sum_insured": sum_insured})
-    offset = np.log(sum_insured)
-    y = rng.poisson(np.exp(-11.5 + 0.25 * (X["region"] == "B") + offset)).astype(float)
-    model = SuperGLM(
-        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
-    )
-    model.fit(X, y, offset=offset)
 
-    payload = build_rating_table_payload(
-        model, X, y, offset=offset, offset_source="sum_insured", offset_name="SumInsured"
-    )
+    Stated as the whole premium rather than as the offset factor alone: the
+    workbook's product is what a consumer applies, and the claim being made is
+    that it reproduces ``model.predict`` on a risk the book never contained.
+    """
+    model, X, y, offset = _fit_per_unit_offset_model()
+    payload = _per_unit_payload(model, X, y, offset)
     block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
     scale = float(block.table["Relativity"].iloc[0])
 
@@ -783,9 +839,20 @@ def test_the_per_unit_offset_is_exact_above_the_largest_fitted_value():
     # no interval to clip against, which is what makes the next line possible.
     assert block.table[block.name].tolist() == ["per_unit"]
 
-    probe = 10_000_000.0
-    assert probe > 10.0 * float(sum_insured.max()), "the probe must be off the fitted book"
-    assert scale * probe == pytest.approx(probe, rel=1e-13)
+    probe_sum_insured = np.array([10_000_000.0, 50_000_000.0])
+    assert probe_sum_insured.min() > 10.0 * float(X["sum_insured"].max()), (
+        "the probe must be off the fitted book"
+    )
+    assert scale * probe_sum_insured[0] == pytest.approx(probe_sum_insured[0], rel=1e-13)
+
+    probe = pd.DataFrame({"region": ["A", "B"], "sum_insured": probe_sum_insured})
+    probe_offset = np.log(probe_sum_insured)
+    np.testing.assert_allclose(
+        _predict_from_payload(payload, probe, per_unit_offsets={block.name: probe["sum_insured"]}),
+        model.predict(probe, offset=probe_offset),
+        rtol=_RECONSTRUCTION_RTOL,
+        atol=0.0,
+    )
 
 
 # ── The interaction half of the payload's product claim ────────────────────
