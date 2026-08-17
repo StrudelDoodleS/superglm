@@ -4264,29 +4264,40 @@ def test_degenerate_levels_are_scored_not_skipped():
 
 
 @pytest.mark.parametrize(
-    ("low_weight", "beyond_float64"),
+    ("low_weight", "unresolved_dirs"),
     [(1.0, False), (1e-4, False), (1e-12, True)],
 )
-def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight, beyond_float64):
-    """``cond(V_eff) = cond(design)^2``, and the square is what decides.
+def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight, unresolved_dirs):
+    """COUNT the directions the arithmetic cannot resolve; never divide to get there.
 
-    This asserts the REGIME, not a value, and that is deliberate.  Four
-    separate remedies for the dense path's high-edge disagreement have been
-    measured and refused -- porting the arrow path's cut, answering every rung
-    from the pencil, forcing the whitening branch, and the GSVD the LAPACK
-    Users' Guide recommends (absent from SciPy).  They failed for one reason,
-    and it is the reason pinned here: on the starved pair the deciding
-    direction is below float64's own resolution, so each remedy reads a
-    different rounding of information that is not there.  Asserting an ``edf``
-    for such a pair would be asserting this module's threshold, not the data
-    -- the independent stacked-QR evaluation gives 19.000 at a rank cut of
-    1e-14 and 18.275 at 1e-12, with no plateau between them.
+    This asserts the REGIME, not a value.  Four separate remedies for the dense
+    path's high-edge disagreement have been measured and refused -- porting the
+    arrow path's cut, answering every rung from the pencil, forcing the
+    whitening branch, and the GSVD the LAPACK Users' Guide recommends (absent
+    from SciPy).  They failed for one reason, and it is the reason pinned here:
+    on the starved pair a direction the answer depends on lies below the noise
+    floor of the operator it is read from, so each remedy reads a different
+    rounding of information that is not there.  Asserting an ``edf`` for such a
+    pair would assert this module's threshold and not the data -- an
+    independent stacked-QR evaluation gives 19.000 at a rank cut of 1e-14 and
+    18.275 at 1e-12, with no plateau between them.
 
-    Type 1 in this module's own taxonomy: ``1 / eps`` is a property of the
-    arithmetic, not of any dataset, so this cannot be invalidated by a
-    geometry nobody has seen.  It fails closed in the useful direction -- if
-    the moment assembly is ever changed so a starved pair's Gram stays inside
-    float64, the regime moved and the disagreement is worth chasing again.
+    **The count is the assertion because a CONDITION NUMBER here is not
+    measurable.**  The first version of this test divided ``V_eff``'s largest
+    positive eigenvalue by its smallest and compared that to ``1 / eps``.  That
+    ratio's denominator IS the noise, so it is not a property of the pair at
+    all: on one box, pinning nothing but the thread count, ``_thin_level_pair(1.0)``
+    reads 7.24e+06 at one thread and **6.11e+19** at sixteen, and
+    ``_thin_level_pair(1e-4)`` reads 8.456e+07 at one and 1.74e+20 at four.  CI
+    duly failed it on an unpinned runner.  Both counts below were bit-stable
+    across 1, 4 and 16 threads and across Python 3.12 and 3.13 on the same
+    measurements -- they compare a magnitude against ``eps`` times a NORM, which
+    is Type 1 in this module's taxonomy, rather than dividing by a quantity that
+    has no correct digits.
+
+    It fails closed in the useful direction: if the moment assembly is ever
+    changed so the starved pair's operator resolves that direction, the regime
+    moved and the disagreement is worth chasing again.
 
     See the module docstring of :mod:`superglm.screening._score_stat` for the
     measurements and the four refusals.
@@ -4299,31 +4310,26 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     V_eff = V - C.T @ _solve_psd(M, C)
     V_eff = 0.5 * (V_eff + V_eff.T)
 
-    positive = np.linalg.eigvalsh(V_eff)
-    positive = positive[positive > 0.0]
-    condition = float(positive.max() / positive.min())
-    representable = 1.0 / np.finfo(np.float64).eps
+    # ``V_eff``'s own unresolved directions: the Gram is a squared design, so a
+    # starved level lands here first, before any penalty is added.
+    spectrum = np.linalg.eigvalsh(V_eff)
+    bar = V_eff.shape[0] * np.finfo(np.float64).eps * float(np.max(np.abs(spectrum)))
+    at_floor = int(np.sum(np.abs(spectrum) < bar))
+    assert at_floor == (4 if unresolved_dirs else 1), (
+        f"{at_floor} directions of V_eff sit below k*eps*||V_eff||; the documented regime is "
+        "four on the starved pair and one otherwise"
+    )
 
-    if beyond_float64:
-        assert condition > representable, (
-            f"the starved pair's Gram is conditioned at {condition:.3e}, inside float64's "
-            f"{representable:.3e} -- the regime this module documents has moved"
-        )
-    else:
-        assert condition < representable, (
-            f"a pair that is not starved is conditioned at {condition:.3e}, beyond float64's "
-            f"{representable:.3e} -- the moment assembly has lost accuracy it used to have"
-        )
-
-    # The count of directions at the noise floor of ``V_eff + lam S`` is the
-    # count of degrees of freedom the routes are entitled to disagree about.
+    # And at the ladder's high edge, where the disagreement is reported: the
+    # count of directions at the operator's noise floor is the count of degrees
+    # of freedom the routes are entitled to disagree about.
     S = np.asarray(S_ti, dtype=float)
     S = 0.5 * (S + S.T)
     scale = max(float(np.trace(V_eff)), 1e-300) / max(float(np.trace(S)), 1e-300)
     A = V_eff + 1e10 * scale * S
     floor = np.finfo(np.float64).eps * float(np.linalg.norm(A, 2))
     unresolved = int(np.sum(np.abs(np.linalg.eigvalsh(A)) < 10.0 * floor))
-    assert unresolved == (1 if beyond_float64 else 0), (
+    assert unresolved == (1 if unresolved_dirs else 0), (
         f"{unresolved} directions of the high-edge operator sit at its noise floor; "
         "the documented disagreement is one degree of freedom on the starved pair and "
         "none otherwise"

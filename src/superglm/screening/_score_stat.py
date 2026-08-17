@@ -136,28 +136,33 @@ beside the probe.  Worth its own issue rather than this module's guesswork.
 **THE ACCURACY CEILING IS ARCHITECTURAL, NOT ALGORITHMIC.  Read this before
 rearranging the arithmetic below to chase a degree of freedom.**
 
-This module is handed MOMENTS.  ``V_eff`` arrives as a Gram, so
-``cond(V_eff) = cond(design)^2``, and squaring is what decides the whole
-question: on a pair with a starved level the square crosses float64's own
-resolution and the deciding direction has no correct digits left to read.
+This module is handed MOMENTS.  ``V_eff`` arrives as a Gram, so its spectrum is
+the design's SQUARED, and squaring is what decides the whole question: on a
+pair with a starved level the smallest directions fall under the noise floor of
+the operator they are read from, and no correct digits are left in them.
 
-Measured on ``_thin_level_pair`` at three weightings, one thread, at the
-ladder's high edge:
+**Count those directions; do not divide to find them.**  A condition number is
+not measurable here -- its denominator IS the noise, so it is not a property of
+the pair.  ``_thin_level_pair(1.0)``'s largest-over-smallest-positive ratio
+reads 7.24e+06 at one thread and 6.11e+19 at sixteen on one box, changing
+nothing else.  What IS stable, bit-for-bit across 1, 4 and 16 threads and
+across Python 3.12 and 3.13, is a magnitude compared against ``eps`` times a
+norm:
 
-===================  ================  ==========================
-low weight           ``cond(V_eff)``   directions of ``A`` within
-                                       10x ``eps ||A||``
-===================  ================  ==========================
-1.0                  7.24e+06          0
-1e-4                 8.46e+07          0
-1e-12                **2.78e+20**      **1**
-===================  ================  ==========================
+===================  =====================  ==========================
+low weight           directions of          directions of ``A`` within
+                     ``V_eff`` below        10x ``eps ||A||`` at the
+                     ``k eps ||V_eff||``    ladder's high edge
+===================  =====================  ==========================
+1.0                  1                      0
+1e-4                 1                      0
+1e-12                **4**                  **1**
+===================  =====================  ==========================
 
-``1 / eps`` is 4.5e+15.  At 2.78e+20 the starved direction is five orders
-BEYOND representable conditioning, and the single direction sitting at the
-noise floor is exactly the one degree of freedom the routes disagree about.
-They are not disagreeing about an answer; they are each reading a different
-rounding of the same absent information.
+The starved pair carries four directions its own Gram cannot resolve and one
+that survives into the high-edge operator -- exactly the one degree of freedom
+the routes disagree about.  They are not disagreeing about an answer; they are
+each reading a different rounding of the same absent information.
 
 That is why the disagreement is a CONVENTION and not an error, and it is
 measurable as one: sweeping the rank cut of an independent stacked-QR
@@ -193,10 +198,12 @@ is reporting its own threshold.
    recommended method is unavailable, not rejected.
 
 The remedy that WOULD work is the one :mod:`superglm.screening._structured`
-took: read the design factors and never form the Gram, which faces
-``sqrt(cond)`` — 1.67e+10 on the starved pair, comfortably representable,
-against 2.78e+20 for the Gram.  That is a change to what the CALLER hands
-this module, not to anything in it.
+took: read the design factors and never form the Gram.  A factor's spectrum is
+the Gram's square root, so a direction the Gram has pushed under ``eps`` sits
+at its square root in the factor — representable, with about half the digits
+still there.  Measured on the structured side, that took the high-edge error
+from 5.1e-06 to 7.4e-12 against a 60-digit oracle.  It is a change to what the
+CALLER hands this module, not to anything in it.
 
 What this costs in practice is small, and that is measured too rather than
 assumed: on the published twelve-row freMTPL2 screen, one thread against
