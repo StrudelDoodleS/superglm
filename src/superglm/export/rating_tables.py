@@ -1664,31 +1664,53 @@ def build_rating_table_payload(
     does not touch it -- and is tracked as issue #286; until it is fixed, the
     product contract above holds for interactions whose parents are ungrouped.
 
-    The OFFSET multiplier block is the other exception, and it is a binning
-    rather than a rounding.  ``_offset_multiplier_block`` emits one exact row
-    per distinct multiplier only while there are fewer than 20 of them; at 20 or
-    more -- the normal case for a continuous exposure -- it bins them like a
-    continuous block, keying rows on interval STRINGS and reporting the
-    exposure-weighted average multiplier of each bin.  A consumer therefore
-    cannot look its own multiplier up at all, and the factor it does find is a
-    bin average.  Measured on 800 distinct multipliers over ``[0.1, 2.0]`` with
-    ``n_bins=150``: every one of the 800 rows receives a factor that is not its
-    own, by up to 8.86e-02 (median 2.9e-03), and the documented reconstruction
-    misses ``model.predict`` by 8.86e-02 rather than by round-off.  Pass
-    ``offset_source=`` for the exact form: that block is keyed on a raw column
-    of the frame and is a lookup, which is why the equivalence tests reconstruct
-    through it and treat the binned block as the exposure summary it is.
+    The OFFSET multiplier block used to be the other exception to that
+    exactness, and is not any more.  The rule it follows is now ONE rule:
+    ``offset_max_exact_levels`` governs BOTH paths --
+    the declared one reached through ``offset_source=``, and the undeclared one
+    that has nothing but the fitted offset vector.  No more than that many
+    distinct multipliers makes a lookup worth printing; more makes a single
+    per-unit row.  Neither is an approximation, and cardinality is not deciding
+    exactness: an offset is never estimated, so it carries no estimation error
+    for a binning to trade against.
 
-    ``offset_kind`` decides what a declared ``offset_source=`` becomes, and the
-    distinction that matters is not how many values the source takes but what
-    the consumer DOES with the block -- looks a value up, or multiplies by a
-    column.
+    The undeclared row is keyed on the MULTIPLIER itself, because no column was
+    declared and the exporter does not guess one from ``X``.  Its ``Relativity``
+    is therefore exactly ``1.0`` -- the consumer computes ``exp(offset)``, and
+    the block hands that number back unmodified, at every magnitude.  That reads
+    as though it says nothing.  It says exactly as much as the binned block it
+    replaces, and says it correctly: that block was ALSO keyed on the
+    multiplier, so a consumer had to compute the same number before it could
+    look anything up, and then received its bin's exposure-weighted average
+    instead of the value it had just computed.  Measured on 800 distinct
+    multipliers over ``[0.1, 2.0]`` at ``n_bins=150``: every one of the 800 rows
+    received a factor that was not its own, by up to 8.86e-02 (median 2.9e-03),
+    and the documented reconstruction missed ``model.predict`` by 8.86e-02
+    rather than by round-off.  Declaring ``offset_source=`` is still worth doing
+    -- that block names a raw column of the frame, so it is deployable without
+    the consumer computing the offset at all -- but it is no longer what stands
+    between the workbook and an approximation.
+
+    ``offset_kind`` decides what each path emits, and the distinction that
+    matters is not how many values the offset takes but what the consumer DOES
+    with the block -- looks a value up, or multiplies by a column.
 
     * ``"auto"`` (default) emits one row per distinct level while there are no
       more than ``offset_max_exact_levels`` of them, and a single ``"per_unit"``
       row carrying the exact relation above that.
-    * ``"discrete"`` emits levels and refuses above the cap.
+    * ``"discrete"`` emits levels, and a DECLARED source refuses above the cap.
+      The undeclared path does not distinguish it from ``"auto"`` and falls
+      through to the per-unit row above the cap rather than refusing -- an
+      asymmetry between the two paths, stated because it is not a decision
+      anyone would infer from the name.
     * ``"per_unit"`` always emits the relation.
+    * ``"binned"`` is the exposure SUMMARY described below, and reaches the
+      UNDECLARED path only -- a declared ``offset_source=`` rejects it, because
+      a named column has a relation to state rather than a distribution to
+      describe.  It is retained because a banded view of the fitted exposure is
+      a legitimate thing to want in a workbook for review, and it is the only
+      way to obtain a binned offset block at all: nothing bins an offset unless
+      a caller asks for it by name.
 
     A per-unit block is applied by multiplying the named column by the block's
     single ``Relativity``: ``log(Exposure)`` gives exactly ``1.0``,
@@ -1714,8 +1736,8 @@ def build_rating_table_payload(
     rather than approximated, because a block whose whole value is exactness
     must not be written when it is not exact.
 
-    A bin of that block with no exposure reports the MIDPOINT of its own
-    interval, weight zero.  It used to report ``0.0``, which is not a summary
+    A bin of the ``offset_kind="binned"`` summary with no exposure reports the
+    MIDPOINT of its own interval, weight zero.  It used to report ``0.0``, which is not a summary
     of anything -- it is a factor that prices every risk landing in the gap at
     zero while every other number on the sheet stays right (issue #291).  The
     branch is unreachable under the default ``bin_strategy="exposure_quantile"``,
@@ -1730,10 +1752,11 @@ def build_rating_table_payload(
     blocks that were actually built, so the sheet names every one of those
     three and its metrics are joint over them.
 
-    "Fitted terms" is the scope, not "every factor the workbook carries": the
-    binned OFFSET MULTIPLIER block is approximated too, is measured below at
-    8.86e-02, and is not swept, because it is not a fitted term and has no
-    prediction-plan entry.  See the paragraph on issue #314 further down.
+    "Fitted terms" is the scope, not "every factor the workbook carries": an
+    OFFSET MULTIPLIER block requested as ``offset_kind="binned"`` is
+    approximated too, is measured above at 8.86e-02, and is not swept, because
+    it is not a fitted term and has no prediction-plan entry.  See the paragraph
+    on issue #314 further down.
 
     The interaction's share is a SAMPLING rather than a binning, and it is the
     larger of the two differences between the sheet's two row kinds.  A binned
@@ -1767,11 +1790,13 @@ def build_rating_table_payload(
 
     The bound is over the TERMS the sheet lists, not over every factor the
     workbook carries, and three limits on it are tracked rather than fixed
-    here.  The binned OFFSET MULTIPLIER block -- the normal case for a
-    continuous exposure without ``offset_source=``, and measured above at
-    8.86e-02 -- is not swept at all, and the sweep passes the exact offset into
-    every call, so a categorical-only model with a continuous offset gets an
-    empty sheet beside a binned offset block (issue #314).  The sheet's
+    here.  A binned OFFSET MULTIPLIER block -- reachable now only by asking for
+    ``offset_kind="binned"``, and measured above at 8.86e-02 -- is not swept at
+    all, and the sweep passes the exact offset into every call, so a
+    categorical-only model exported that way gets an empty sheet beside a binned
+    offset block (issue #314).  Under the default the empty sheet is CORRECT for
+    the offset: there is no offset approximation left in the workbook to
+    measure.  The sheet's
     discretised prediction goes through ``stabilize_eta`` and the workbook's
     product does not, so an approximation that pushes a row out of the link's
     range is clipped on the sheet and not in the table (issue #313).  And for a

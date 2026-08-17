@@ -126,15 +126,17 @@ Response factor:   3
 ```
 
 When `offset_source` is supplied, the exporter validates that each raw source
-level maps to one offset multiplier. High-cardinality source-aware offsets are
-rejected rather than silently binned; keep truly continuous offset calculations in
-deployment code or provide an explicit discrete source.
+level maps to one offset multiplier. A high-cardinality source is exported as a
+single `per_unit` row carrying the derived scale — `Relativity = scale × Term` —
+rather than being binned, and the proportionality is verified on every row before
+the block is written.
 
-If no `offset_source` is supplied, the backward-compatible `Offset Multiplier`
-fallback remains. It contains exact multiplier levels when the fitted offset has
-fewer than 20 distinct multipliers. If the fitted offset has many distinct values,
-the exporter bins the multiplier into the selected rating-table bin count and
-writes the sample-weighted average multiplier per bin.
+If no `offset_source` is supplied, the `Offset Multiplier` block follows the same
+rule, keyed on the multiplier itself because no column was named: exact levels up
+to `offset_max_exact_levels`, and a single `per_unit` row above that. Neither is
+an approximation. Binning is opt-in — `offset_kind="binned"` writes the
+sample-weighted average multiplier per bin into the selected rating-table bin
+count, as a summary of the fitted exposure rather than something to rate from.
 
 ## Production Framing
 
