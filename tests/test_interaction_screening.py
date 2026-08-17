@@ -1770,6 +1770,16 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32, units=1.0):
     ``dv_j / (lambda s_j)`` as ``v_j -> 0``, and the perturbation this applies
     has size ``eps ||V||_F``.
 
+    ``S = I`` HERE, AND THAT IS WHY ``||S||_2`` IS THE RIGHT DENOMINATOR rather
+    than an approximation to it.  ``s_j`` is the penalty's magnitude in the
+    DECIDING direction, which equals ``||S||_2`` only for an isotropic penalty;
+    on an anisotropic one ``s_j <= ||S||_2``, so the quotient understates the
+    response and the ratio can run above 1.  The identity penalty is chosen so
+    the derivation is exact rather than bounding, which is what lets the cut
+    below be placed against a derived value.  Nothing here claims the
+    normalization is exact for a general ``S``; it is a lower bound there, and
+    the caller's own penalty is a Kronecker tensor.
+
     An earlier revision divided by ``eps / lambda``, dropping both norms.  That
     is DIMENSIONALLY WRONG, not merely loose, and this fixture hid it by
     holding ``sigma_max = 1`` and ``S = I`` so both norms were one.  Rescaling
@@ -1816,7 +1826,8 @@ def _low_edge_answer_set(sigma_min, p=24, reps=32, units=1.0):
 
 # The cut is placed against a DERIVED value, not against observed headroom.
 # First-order perturbation theory puts the width of the answer set AT the
-# response ``eps ||V||_F / (lambda ||S||_2)`` when the deciding direction is
+# response ``eps ||V||_F / (lambda ||S||_2)`` -- exact at the ``S = I`` this
+# test uses, a lower bound on an anisotropic one -- when the direction is
 # unresolved -- ratio 1 -- and the measured 0.5787-0.9863 is that prediction
 # confirmed to within 1.73x rather than a number read off a run.  So the cut is
 # "one order below the derived response", and ``_LOW_EDGE_MARGIN`` is what the
@@ -1858,13 +1869,15 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     ``lambda``: ``edf = sum_j v_j / (v_j + lambda s_j)`` has slope
     ``1 / (lambda s_j)`` at ``v_j = 0``, so an ``eps ||V||_F`` perturbation of
     the operand -- SMALLER than the error already in it -- moves ``edf`` by
-    ``eps ||V||_F / (lambda ||S||_2)``.  That is the ceiling, it is DERIVED
-    rather than fitted, and it is scale-free: rescaling the design or the
-    penalty leaves it and the width alike.
+    ``eps ||V||_F / (lambda s_j)``.  That is the ceiling, it is DERIVED rather
+    than fitted, and it is scale-free: rescaling the design or the penalty
+    leaves it and the width alike.  With the ``S = I`` this test uses, ``s_j``
+    IS ``||S||_2``; on an anisotropic penalty ``s_j <= ||S||_2`` and the
+    computed quotient is a lower bound on the response.
 
     **How big it is in practice is a property of the PAIR, not a constant.**
     ``lambda_lo = 1e-10 tr(V) / tr(S)``, so the ceiling is
-    ``1e10 eps (||V||_F / tr(V)) (tr(S) / ||S||_2)`` -- bounded only by ``p``
+    ``1e10 eps (||V||_F / tr(V)) (tr(S) / s_j)`` -- bounded only by ``p``
     either way.  This test's own geometries span it: the ceiling is 1.6972e-05
     at ``sigma_min = 1e-1``, 2.8778e-05 at 1e-3, 4.3442e-05 at 1e-8 and
     4.8669e-05 at 1e-12 -- a factor of 2.9 from the trace ratio alone.  The
@@ -1969,7 +1982,7 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     # reports its position exactly as an approaching one does.  A cut watched
     # from one side alone goes quiet at the moment it is crossed.
     where = (
-        f"(width {width:.4e}, ceiling eps||V||_F/(lam ||S||_2) {ceiling:.4e}, "
+        f"(width {width:.4e}, ceiling eps||V||_F/(lam ||S||_2), S=I {ceiling:.4e}, "
         f"ratio {ratio:.4e}, cut {_LOW_EDGE_CUT}, separation {separation:.2f}x, "
         f"enforced boundary {boundary:.3g})"
     )
