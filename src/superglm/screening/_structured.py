@@ -1274,8 +1274,22 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     stored -- exact rational LDL certifies exactly ``m`` zero pivots, and the
     ``-1e-15`` an eigensolver reports on it is the eigensolver's own backward
     error -- but the integrated-derivative penalty ``bs`` and ``cr`` margins
-    carry is genuinely not, and ``fl(lambda * S_a)`` leaves the cone even for
-    the exactly-PSD one.
+    carry is not PSD BY CONSTRUCTION, and ``fl(lambda * S_a)`` leaves the cone
+    even for the exactly-PSD one.
+
+    **"NOT PSD BY CONSTRUCTION" IS NOT "NOT PSD AT THE SCALE THIS FUNCTION
+    CUTS", AND THE DIFFERENCE MATTERS NOW THAT THE DROP REFUSES.**  An earlier
+    draft said those penalties are "genuinely not" in the cone, which read
+    literally is the condition the refusal below fires on -- so either every
+    ``bs`` pair refuses or the sentence was overstated.  It was the sentence.
+    Measured over fifteen margin shapes, ``bs``, ``cr`` and ``ps`` at 5, 8, 12,
+    16 and 20 knots, taken through the same route the kernel takes ``S_a``:
+    NONE is dropped, five carry no negative eigenvalue at all, and the worst
+    margin is ``ps(12)`` at 22x INSIDE the bar.  The ``bs`` family -- the one
+    the sentence was about -- runs 37x to 1339x inside, because its
+    ``||S||_2`` is eight to ten orders larger, so its bar is too.  Their
+    departure from the cone is real in exact arithmetic and is not resolvable
+    in float64, which is the only sense in which this function may speak of it.
 
     **A CUT AT THE MODULE'S USUAL ``k eps`` RELATIVE FLOOR IS WRONG HERE, AND
     THE REASON IS MEASURED.**  On the suite's vanishing-mass pair the
@@ -1340,10 +1354,13 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
       reasoned: ``n = 10``, spectrum ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``.
       The bar is 2.220e-15 so the eigenvalue is 4.43x to 4.48x outside it,
       depending on the kernel, and dropped -- ``rootS`` came back with 9 rows
-      of 10 -- while ``clip`` was 9.87e-16 to 1.18e-15 against a threshold of
-      4.441e-14, a factor of 37x to 45x short.  (Swept over seven
+      of 10 -- while ``clip`` was 7.89e-16 to 1.18e-15 against a threshold of
+      4.441e-14, a factor of 37.5x to 56.25x short.  (Swept over seven
       ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads; a single run would not
-      have been evidence for either number.)  On the public ``freMTPL2freq``
+      have been evidence for either number.  ``clip`` here is
+      ``sum(rootS**2)`` against ``tr S``, which is what :func:`_profile`
+      computes -- an earlier draft of this paragraph summed the EIGENVALUES
+      instead and reported a range the code never sees.)  On the public ``freMTPL2freq``
       screen the same ratio measures 85.6x, 157.8x and 160.0x over ten
       structured-route factorizations, matching ``2 n tr(S)/||S||_2`` to four
       figures at ``n = 11`` and ``n = 15``.  A window two orders wide is not a
@@ -1363,6 +1380,21 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     do differently is split them by SIGN, since clause 2 forbids refusing on
     singularity: ``w = 0`` leaves ``rootS`` through ``keep`` and publishes,
     ``w < -bar`` refuses.
+
+    **AND THE PRICE IS PAID IN THE ONE PROPERTY THIS MODULE OTHERWISE CLAIMS
+    OUTRIGHT, SO IT IS STATED RATHER THAN LEFT TO BE FOUND.**  "WHAT IS NOT A
+    TRADE: REPRODUCIBILITY" promises the same ``edf`` whatever the BLAS kernel
+    or thread count.  A cut AT the eigensolver's own resolution cannot promise
+    that about which SIDE it falls on: a penalty within a factor of about one
+    of the bar can refuse on one kernel and publish on another.  What moves
+    there is a ROUTE -- and, at the non-speculative entry, whether the row
+    exists at all -- and not the value of a published number, which is the
+    trade clause 2 makes deliberately: a coin flip over a value that no one can
+    tell is a coin flip is worse than a coin flip over a route.  It is not free,
+    and calling it free would be the same overstatement this docstring has had
+    to withdraw twice.  Nothing measured is anywhere near the cut -- the
+    closest margin shape is 22x inside it -- so the exposure is a property of
+    the boundary and not of any pair the suite or ``freMTPL2freq`` produces.
 
     **THE TRACE WAS ALSO THE WRONG NORM, AND THAT IS A PUBLISHED RESULT
     RATHER THAN A PREFERENCE.**  ``|tr S - ||rootS||_F^2|`` is the TRACE-NORM
@@ -1493,7 +1525,6 @@ class _PairGeometry:
     coupling: NDArray  # (k_a, r)   R_q -> the shared overlap coordinates
     base_gram: NDArray  # (., r)    factor of sum_b Q_b' Q_b, unemitted levels
     root_penalty: NDArray  # (., k_a)  rootS' rootS = the PSD part of S_a
-    penalty_clip: float  # relative mass the PSD projection removed from S_a
     orthonormality: float  # ||sum_q Q_q' Q_q - I_r||_2, the deflation's floor
     overlap_rank: int  # r
     ceiling: float  # L * k_a
@@ -1648,7 +1679,6 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
         coupling=coupling,
         base_gram=base_gram,
         root_penalty=root_penalty,
-        penalty_clip=clip,
         orthonormality=defect,
         overlap_rank=rank,
         ceiling=float(L * k_a),

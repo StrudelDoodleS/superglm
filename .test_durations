@@ -6653,6 +6653,7 @@
     "tests/test_structured_screening.py::test_the_statistic_reads_the_design_and_not_the_pair_s_moments[near-absorbed]": 0.004398077027872205,
     "tests/test_structured_screening.py::test_the_statistic_reads_the_design_and_not_the_pair_s_moments[thin-level]": 0.6650433640461415,
     "tests/test_structured_screening.py::test_the_structured_path_bins_rather_than_allocate_its_own_intermediate": 0.2547907260013744,
+    "tests/test_structured_screening.py::test_the_trace_guard_still_catches_what_the_spectrum_cannot_see": 0.3200981968548149,
     "tests/test_structured_screening.py::test_the_wide_path_never_allocates_the_dense_blocks": 0.808504251006525,
     "tests/test_structured_screening.py::test_the_zero_penalty_family_is_not_refused_wholesale": 0.48976550227962434,
     "tests/test_structured_screening.py::test_the_zero_penalty_rung_on_a_near_rank_pair[band-1e-3-L5]": 0.02583766169846058,
