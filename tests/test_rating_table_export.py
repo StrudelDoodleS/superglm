@@ -13,6 +13,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from superglm import (
     Categorical,
+    Constraint,
     FactorSmooth,
     LambdaPolicy,
     Numeric,
@@ -973,6 +974,69 @@ def test_the_ppform_block_records_the_shift_its_own_curve_carries():
 
     restored = _score_ppform_block(block.table, grid) + block.centering_shift
     assert np.abs(restored - np.asarray(native.log_relativity, dtype=np.float64)).max() < 1e-12
+
+
+def _fit_ppform_refusal_model(seed: int, **spline_kwargs):
+    """One monotone-ish age fit, varied only by the spline option under test.
+
+    The refusals are decided from the SPEC, so what the curve looks like is
+    irrelevant to them; keeping one fixture makes the difference between these
+    tests exactly the option each one is about.
+    """
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(18.0, 80.0, 2000)
+    y = rng.poisson(np.exp(-1.0 + 0.03 * (x - 18.0))).astype(float)
+    X = pd.DataFrame({"age": x})
+    model = SuperGLM(
+        family="poisson",
+        features={"age": Spline(kind="ps", n_knots=8, **spline_kwargs)},
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+def test_an_unknown_continuous_kind_is_refused_by_name():
+    model, X, y, w = _fit_export_model()
+    with pytest.raises(ValueError, match="continuous_kind"):
+        build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="cubic")
+
+
+def test_ppform_refuses_a_postfit_constrained_term():
+    """Unverified, therefore refused rather than assumed.
+
+    The postfit repair path could not be made to fire during design, so no
+    repaired curve was ever produced to check the conversion against.  A
+    refusal that names the term is honest; a silent conversion of a path nobody
+    has measured is not.
+    """
+    model, X, y = _fit_ppform_refusal_model(5, constraint=Constraint.postfit.increasing)
+
+    with pytest.raises(ValueError, match="age"):
+        build_rating_table_payload(model, X, y, continuous_kind="ppform")
+
+
+def test_ppform_refuses_an_unbounded_extrapolation_without_acknowledgement():
+    """extrapolation='extend' exports a tariff with no upper bound.
+
+    Faithful to the model and still a disclosure liability: filing guidance asks
+    specifically about behaviour beyond the range of the training data.  It is
+    exportable, but only when the caller says so in as many words.
+    """
+    model, X, y = _fit_ppform_refusal_model(6, extrapolation="extend")
+
+    with pytest.raises(ValueError, match="extrapolation"):
+        build_rating_table_payload(model, X, y, continuous_kind="ppform")
+
+
+def test_ppform_under_error_extrapolation_emits_no_unbounded_rows():
+    """A value outside the range must match nothing, not be priced silently."""
+    model, X, y = _fit_ppform_refusal_model(7, extrapolation="error")
+
+    payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+
+    assert np.isfinite(block.table["from"]).all()
+    assert np.isfinite(block.table["to"]).all()
 
 
 def test_integer_categorical_block_weights_do_not_warn_on_pandas_integer_keys():
