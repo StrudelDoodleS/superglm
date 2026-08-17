@@ -186,10 +186,18 @@ each reading a different rounding of the same absent information.
 That is why the disagreement is a CONVENTION and not an error, and it is
 measurable as one: sweeping the rank cut of an independent stacked-QR
 evaluation over ``1e-18 .. 1e-6`` gives 19.000 on ``1e-15 .. 1e-13`` and
-18.275 on ``1e-12 .. 1e-7``.  **There is no plateau** — unlike the arrow
-kernel's own rank decision, which has a nine-decade one — so no cut here is
-certified by the data, and any routine that reports a number for such a pair
-is reporting its own threshold.
+18.275 on ``1e-12 .. 1e-7``.  **There is no plateau**: the widest window
+giving one answer is under three decades, so no cut here is certified by the
+data, and any routine that reports a number for such a pair is reporting its
+own threshold.
+
+An earlier draft contrasted this with "the arrow kernel's own nine-decade
+plateau".  **That comparison was stale and is withdrawn** — it described a
+rank cut the structured path no longer has.  Since it moved onto design
+factors it evaluates ``edf`` as a sum of filter factors and takes no rank
+decision at all, which :func:`_edge` says in its own docstring.  The contrast
+that survives is sharper anyway: the other path does not need a plateau
+because it does not need a cut.
 
 **Four remedies have been measured and refused.  Do not re-derive them.**
 
