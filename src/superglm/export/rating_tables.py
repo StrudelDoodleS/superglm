@@ -1625,6 +1625,41 @@ def build_rating_table_payload(
     of the frame and is a lookup, which is why the equivalence tests reconstruct
     through it and treat the binned block as the exposure summary it is.
 
+    ``offset_kind`` decides what a declared ``offset_source=`` becomes, and the
+    distinction that matters is not how many values the source takes but what
+    the consumer DOES with the block -- looks a value up, or multiplies by a
+    column.
+
+    * ``"auto"`` (default) emits one row per distinct level while there are no
+      more than ``offset_max_exact_levels`` of them, and a single ``"per_unit"``
+      row carrying the exact relation above that.
+    * ``"discrete"`` emits levels and refuses above the cap.
+    * ``"per_unit"`` always emits the relation.
+
+    A per-unit block is applied by multiplying the named column by the block's
+    single ``Relativity``: ``log(Exposure)`` gives exactly ``1.0``,
+    ``log(Term/12)`` gives ``1/12``.  It is the shape ``_numeric_block`` already
+    uses, and for the same reason -- an offset is a per-unit factor whose
+    coefficient is fixed at 1, not a banded one.  It was routed to the binned
+    path because it is CONTINUOUS, when what should decide the shape is that it
+    is PER UNIT.
+
+    That block has no bounds and no extrapolation rule, deliberately.  Nothing
+    in it is estimated, so nothing is known only over a training range: the
+    relation holds at a sum insured of 10m on a book that saw 442k for exactly
+    the reason it holds at 10k.  The binned alternative could not do that -- its
+    top bin capped every risk above the fitted range at that bin's average.
+    Measured on a continuous sum-insured offset, 6,000 rows with 5,998 distinct
+    values: binned, all 6,000 rows receive a factor that is not their own and
+    the worst is out by 1.022e+00 -- more than double; per-unit, the worst row
+    is out by 9.99e-16.
+
+    The relation is DERIVED on the log scale and VERIFIED on the multiplier
+    scale against ``offset_mapping_rtol``/``offset_mapping_atol``, on every row.
+    A declared source the offset is not proportional to is refused by name
+    rather than approximated, because a block whose whole value is exactness
+    must not be written when it is not exact.
+
     A bin of that block with no exposure reports the MIDPOINT of its own
     interval, weight zero.  It used to report ``0.0``, which is not a summary
     of anything -- it is a factor that prices every risk landing in the gap at
