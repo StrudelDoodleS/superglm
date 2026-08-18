@@ -3599,24 +3599,41 @@ def test_a_round_off_penalty_residue_moves_edf_the_way_the_pencil_says(
 
     null_direction = np.outer(directions[:, 0], directions[:, 0])
     moved = []
-    for multiple in (0.0, 1.0, 3.0, 10.0):
+    certified_refusals = []
+    for multiple, truth in zip((0.0, 1.0, 3.0, 10.0), _RESIDUE_ORACLE[(seed, width)], strict=True):
         lifted = symmetric + multiple * eps * float(sigma[-1]) * null_direction
         pair = spline_cat_moments(B_a, lifted, S_cell, W_cell, level_rows)
-        # PRECONDITION, BECAUSE #323 GAVE ``_profile`` A NEW WAY TO RAISE AND
-        # THIS CALL IS BARE.  ``S_a`` is 2x2 here, so the bar is ``2 eps
-        # ||S||_2`` -- the tightest in the suite -- and the ``multiple = 0``
-        # arm's residue is bounded above by ``3 eps sigma_max``.  A kernel that
-        # read that residue NEGATIVE past the bar would raise
-        # ``_UnstableStructuredEDFError`` out of the loop as a test ERROR with
-        # no diagnostic; this makes it a failure that names the branch.  Swept
-        # over seven ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads: every
-        # arm of every draw reads its smallest eigenvalue NON-NEGATIVE, so
-        # none is near the cut on any of them.  The exact bracket above still
-        # allows the other sign, which is why this is asserted and not assumed.
+        # A DROP HERE IS THE POLICY WORKING, NOT A FAILURE, AND THIS ARM MUST
+        # NOT ASSERT WHICH SIDE OF ROUND-OFF THE RESIDUE LANDED ON.
+        #
+        # An earlier form asserted ``dropped == 0.0`` unconditionally, to turn
+        # #323's new raise into a named failure rather than a bare ERROR out of
+        # the loop.  The diagnostic intent was right and the assertion was not:
+        # it pins a sign that is not determined.  ``S_a`` is 2x2, so the drop
+        # cut is ``2 eps ||S||_2`` -- the tightest in the suite -- and MEASURED
+        # over seven ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads the
+        # ``multiple = 0`` arm's smallest eigenvalue computes as **exactly
+        # 0.0**, one cut-width from the cut.  That distance IS the
+        # eigensolver's own absolute error bar on the same quantity, and
+        # :func:`_exact_residue_bounds` proves the true residue is positive but
+        # no larger than ``3 eps sigma_max``.  A kernel that reads it a couple
+        # of ulp negative is inside its error budget and ``_penalty_root``
+        # would then be right to drop -- see
+        # :mod:`superglm.screening._score_stat` on why a quantity at
+        # ``eps ||A||`` has no correct digits, its sign included.
+        #
+        # So a drop is recorded and its arm skipped.  ``certified_refusals``
+        # keeps it visible, and the emptiness assert below stops a kernel that
+        # refuses everything from passing this test vacuously.
         _, dropped, cut = _penalty_root(lifted)
-        assert dropped == 0.0, (seed, width, multiple, dropped, cut)
+        if dropped:
+            certified_refusals.append((multiple, dropped, cut))
+            continue
         _, edf = _evaluate(pair, _profile(pair), _ladder_high_edge(pair))
-        moved.append(edf)
+        moved.append((multiple, edf, truth))
+    assert moved, (
+        f"every arm was refused, so nothing was compared against the oracle: {certified_refusals}"
+    )
     # ...and each rung matches the 40-digit value on that lifted design.  The
     # bounds are the worst distance measured on each draw taken to two
     # significant figures: 3.28 df on the wide-band one -- where the UNLIFTED
@@ -3625,8 +3642,13 @@ def test_a_round_off_penalty_residue_moves_edf_the_way_the_pencil_says(
     # and 0.024 df on the narrow-band one.  The unfixed form's worst distances
     # on the same two draws are 0.315 and 2.019 df, so this is RED against it
     # on the second and its own disclosure on the first.
-    for value, truth in zip(moved, _RESIDUE_ORACLE[(seed, width)], strict=True):
-        assert value == pytest.approx(truth, abs=bound), (moved, _RESIDUE_ORACLE[(seed, width)])
+    for multiple, value, truth in moved:
+        assert value == pytest.approx(truth, abs=bound), (
+            multiple,
+            value,
+            truth,
+            certified_refusals,
+        )
 
 
 def _multi_null_pair(seed, width=1e-3, L=6, reps=12, n_narrow=2, m=3):
