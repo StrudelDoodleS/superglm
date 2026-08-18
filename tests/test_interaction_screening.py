@@ -1877,17 +1877,28 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
         )[0]
         return float(rung.edf0)
 
-    step = (c / g_norm) * G
-    # A CENTRED difference, so what is measured is the response and not the
-    # response plus whatever the evaluator does to the base point alone.
-    realised = abs(edf(V + step) - edf(V - step)) / 2.0
+    def response(direction):
+        # A CENTRED difference, so what is measured is the response and not the
+        # response plus whatever the evaluator does to the base point alone.
+        d = direction * (c / float(np.linalg.norm(direction, "fro")))
+        return abs(edf(V + d) - edf(V - d)) / 2.0
+
+    realised = response(G)
+    # THE SAME PROBE IN OTHER DIRECTIONS, for the ordering invariant below.
+    # Seeded, so this is deterministic; eight of them, so a routine that had
+    # stopped maximising would have to win eight coin flips to hide.
+    rng_dirs = np.random.default_rng(90210)
+    rivals = []
+    for _ in range(8):
+        R = rng_dirs.standard_normal(G.shape)
+        rivals.append(response(0.5 * (R + R.T)))
     # ``np.spacing``, not ``eps * |edf|``.  The latter is a RELATIVE scale and
     # runs 1.045x to 1.679x the true adjacent-float distance across these
     # geometries, so a displacement reported as "under one ulp" could be most
     # of two.  That mattered: at the true spacing the ``1e-3`` geometries read
     # 0.72 and 0.94 rather than 0.48 and 0.63, which is what moved them out of
     # the asserted set and into disclosure below.
-    return c * g_norm, realised, float(np.spacing(abs(edf(V))))
+    return c * g_norm, realised, float(np.spacing(abs(edf(V)))), max(rivals)
 
 
 # ONE BOUNDARY, AND IT IS THE ONE THE PROSE STATES: a probe of one rounding
@@ -1924,22 +1935,27 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
 # design factors collapsing the sensitivity by ten orders (#257) -- is caught
 # by the boundary below on its own.
 _LOW_EDGE_ULP = 1.0
-# ...WITH ONE EXCEPTION, AND IT EXISTS BECAUSE REMOVING THE OTHER LEFT A HOLE.
+# ...AND ONE ORDERING INVARIANT, WHICH NEEDS NO CONSTANT AT ALL.
 #
 # ``ceiling`` is computed from this test's own ``A`` and ``G``; the only
-# production quantity left in the boundary is ``edf(V)`` inside ``ulp``.  So an
+# production quantity in the boundary is ``edf(V)`` inside ``ulp``.  So an
 # ``_edge`` that returned an edf INDEPENDENT of ``V`` while still reporting its
-# lambda would keep every row green.  That is a regression this test exists to
-# catch and, after the realization assertion came out, nothing caught it.
+# lambda would keep every row green -- verified, it did.
 #
-# So the production response IS asserted -- but only on the ISOTROPIC
-# unresolved rows, where ``cond(A)`` is ~2e+11 rather than the 5.4e+14 the
-# rotated penalty reaches.  That is the distinction the earlier refusal turned
-# on: bounding a difference of two evaluations at 5.4e+14 asserts backend
-# round-off, while the same check on a three-orders-better-conditioned operand
-# pins the caller path.  The window stays an order either side of the
-# first-order value of 1, against a measured 0.9425-1.0617.
-_LOW_EDGE_RESPONSE = (0.1, 10.0)
+# Two magnitude windows were tried to close that and both were refused, the
+# second correctly even when scoped to ``cond(A) ~ 2e+11``: no conditioning or
+# finite-response bound derives (0.1, 10.0), so another LAPACK could leave it
+# with no regression behind it.  There is no third window worth trying.
+#
+# What IS derived is the ORDERING.  ``E = c G / ||G||_F`` maximises
+# ``<E, G>_F`` over ``||E||_F = c`` -- that is what "maximising" means -- so the
+# response along it must be at least the response along any other direction of
+# the same norm, and it must be nonzero where the sensitivity is above one ulp.
+# Neither statement carries a magnitude.  Eight seeded rivals, so a routine that
+# had stopped maximising would have to win eight coin flips to hide.
+#
+# This closes both: an edf independent of V gives a zero response, and a probe
+# that is no longer the maximiser loses to a rival.
 
 
 @pytest.mark.parametrize(
@@ -2073,7 +2089,9 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     the call.  Handing the module design factors is the fix, and it is a change
     to the CALLER, tracked at #257.
     """
-    ceiling, realised, ulp = _low_edge_sensitivity(sigma_min, units=units, penalty=penalty)
+    ceiling, realised, ulp, best_rival = _low_edge_sensitivity(
+        sigma_min, units=units, penalty=penalty
+    )
     against_ulp = ceiling / ulp
     # BOTH sides are named on EVERY failure, so a geometry crossing the cut
     # reports its position exactly as an approaching one does.  A cut watched
@@ -2086,15 +2104,14 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
         f"ratio {against_ulp:.4e} ulp, boundary {_LOW_EDGE_ULP:.0f} ulp, "
         f"separation {separation:.3e}x)"
     )
-    if not determined and penalty == "I":
-        low, high = _LOW_EDGE_RESPONSE
-        attained = realised / ceiling
-        assert low < attained < high, (
-            f"the production response no longer tracks the analytic gradient: the "
-            f"maximising perturbation moved the ladder's edf by {attained:.4f} of the "
-            f"predicted displacement {where}.  This is the one assertion on the caller "
-            f"path itself, and it is here because the boundary below is computed from "
-            f"this test's own A and G -- an _edge independent of V would otherwise pass."
+    if not determined:
+        assert realised > 0.0 and realised >= best_rival, (
+            f"the maximising direction is no longer maximal on the caller path: it moved "
+            f"the ladder's edf by {realised:.6e} against {best_rival:.6e} for the best of "
+            f"eight seeded rivals of equal norm {where}.  This is the only assertion on "
+            f"the production response, and it carries no magnitude -- the boundary below "
+            f"is computed from this test's own A and G, so an _edge independent of V "
+            f"would otherwise pass."
         )
     assert separation > 1.0, (
         (
