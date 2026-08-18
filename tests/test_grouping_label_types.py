@@ -255,6 +255,139 @@ def test_a_group_label_colliding_with_a_respelled_level_is_refused():
         OrderedCategorical(order=[1, 2, 3, 9], grouping=grouping, basis=Spline(kind="ps", k=5))
 
 
+def _band_frame(seed=7, n=1200):
+    """Ten evenly spaced bands with a curved signal, issue #326's fixture."""
+    levels = [f"Mi{index:03d}" for index in range(10)]
+    rng = np.random.default_rng(seed)
+    band = rng.choice(levels, n)
+    position = {level: index for index, level in enumerate(levels)}
+    y = np.array([0.02 * min(position[b], 4) ** 2 for b in band]) + rng.normal(0.0, 0.05, n)
+    return levels, pd.DataFrame({"band": band}), y
+
+
+def _grouped_fit(levels, X, y, groups, *, values=None):
+    covered = {member for members in groups.values() for member in members}
+    full = dict(groups)
+    for level in levels:
+        if level not in covered:
+            full[level] = [level]
+    grouping = collapse_levels(X["band"].to_numpy(dtype=object), groups=full, order=levels)
+    kwargs = {"values": values} if values is not None else {"order": levels}
+    spec = OrderedCategorical(basis=Spline(kind="cr", n_knots=4), grouping=grouping, **kwargs)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(X, y)
+    return model, spec
+
+
+def test_a_group_named_after_a_member_still_sits_at_the_group_mean():
+    """Issue #326: the group's position is its members' mean, never the label's.
+
+    ``{"Mi001": ["Mi001", "Mi002"]}`` -- "fold Mi002 into Mi001" -- is the
+    natural spelling and keeps the surviving label stable in a rating table.
+    The position map used to short-circuit on ``str(glev) in by_text``, which is
+    a lookup shortcut for the singleton identity groups that make up most of any
+    grouping and is harmless there (a singleton's mean IS its one member). Where
+    the label collided with a member it took that member's own value instead:
+    the fit landed at 0.1111 while ``_collapsed_smooth_curve`` drew the marker
+    at the group mean 0.1667, half a level width apart, silently, on the panel
+    ``model.plot()`` draws by default.
+
+    Ten evenly spaced levels put the pair at 1/9 and 2/9, so the mean is exactly
+    representable-free of choice: 0.5 * (1/9 + 2/9) = 1/6.
+    """
+    levels, X, y = _band_frame()
+    _, spec = _grouped_fit(levels, X, y, {"Mi001": ["Mi001", "Mi002"]})
+
+    declared = np.linspace(0.0, 1.0, len(levels))
+    assert spec._level_to_value["Mi001"] == pytest.approx(
+        float(np.mean(declared[[1, 2]])), abs=1e-15
+    )
+    # and NOT the named member's own value, which is where it used to land
+    assert spec._level_to_value["Mi001"] != pytest.approx(float(declared[1]), abs=1e-9)
+
+
+def test_the_group_label_does_not_move_the_model():
+    """A label names a rating-table row; it may not change what was fitted.
+
+    This is the argument that decides #326's convention rather than merely
+    stating it. ``{"Mi001": [...]}`` and ``{"Mi001+Mi002": [...]}`` declare the
+    SAME partition of the same levels, so they are the same model -- but under
+    the named-member reading the first placed the group at 0.1111 and the second
+    at 0.1667, which is a different point of the spline basis and therefore a
+    different fit. Measured before the fix: every one of the ten reported
+    log-relativities moved, by up to 1.45e-02.
+
+    Exact equality, not a tolerance: the two fits differ only in a dict key, so
+    once the positions agree every float downstream is computed from identical
+    inputs in identical order.
+    """
+    levels, X, y = _band_frame()
+    named, named_spec = _grouped_fit(levels, X, y, {"Mi001": ["Mi001", "Mi002"]})
+    fresh, fresh_spec = _grouped_fit(levels, X, y, {"Mi001+Mi002": ["Mi001", "Mi002"]})
+
+    assert named_spec._level_to_value["Mi001"] == fresh_spec._level_to_value["Mi001+Mi002"]
+    left = named.term_inference("band", with_se=True)
+    right = fresh.term_inference("band", with_se=True)
+    assert [str(level) for level in left.levels] == [str(level) for level in right.levels]
+    for field in ("log_relativity", "relativity", "se_log_relativity"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(left, field), dtype=np.float64),
+            np.asarray(getattr(right, field), dtype=np.float64),
+            err_msg=f"renaming the group moved {field}",
+        )
+
+
+def test_the_marker_lands_on_the_fit_for_a_group_named_after_a_member():
+    """The two halves of #326 now read one definition, so they cannot disagree.
+
+    The spec places the group and ``_collapsed_smooth_curve`` puts the collapsed
+    marker back; both call ``group_axis_position``. This is the case where they
+    used to differ -- and it is the only grouping shape for which the expand ->
+    re-collapse round trip was not the identity.
+    """
+    from superglm.plotting.group_display import project_grouped_term_for_display
+
+    levels, X, y = _band_frame()
+    model, spec = _grouped_fit(levels, X, y, {"Mi001": ["Mi001", "Mi002"]})
+    ti = model.term_inference("band", with_se=True)
+    display = project_grouped_term_for_display(model, ti, "auto")
+
+    assert display.collapsed is True
+    np.testing.assert_array_equal(
+        np.asarray(display.term.smooth_curve.level_x, dtype=np.float64),
+        np.asarray(list(spec._level_to_value.values()), dtype=np.float64),
+    )
+
+
+def test_values_places_a_group_exactly_where_the_caller_asks():
+    """The explicit route to any other position, with no special case anywhere.
+
+    Give the members the position the group should sit at and the mean of equal
+    values is that value exactly -- so a caller who really does want the group
+    at ``Mi001``'s own coordinate says so in ``values=``, and gets it to the last
+    bit rather than as a side effect of what they called the group.
+
+    Not vacuous: the same grouping under the default ``order=`` spacing lands
+    somewhere else, and the marker follows the fit either way.
+    """
+    from superglm.plotting.group_display import project_grouped_term_for_display
+
+    levels, X, y = _band_frame()
+    declared = dict(zip(levels, np.linspace(0.0, 1.0, len(levels)).tolist()))
+    pinned = dict(declared)
+    pinned["Mi002"] = declared["Mi001"]  # both members at Mi001's coordinate
+
+    model, spec = _grouped_fit(levels, X, y, {"Mi001": ["Mi001", "Mi002"]}, values=pinned)
+    assert spec._level_to_value["Mi001"] == declared["Mi001"]
+    # the pinning is what moved it: unpinned, the same grouping sits at the mean
+    _, unpinned = _grouped_fit(levels, X, y, {"Mi001": ["Mi001", "Mi002"]})
+    assert unpinned._level_to_value["Mi001"] != spec._level_to_value["Mi001"]
+    # and the collapsed marker follows the fit to the pinned coordinate
+    ti = model.term_inference("band", with_se=True)
+    display = project_grouped_term_for_display(model, ti, "auto")
+    assert float(np.asarray(display.term.smooth_curve.level_x)[1]) == declared["Mi001"]
+
+
 def test_the_direct_grouping_path_survives_term_inference():
     # The first direct-grouping regression only exercised predict(), so it missed
     # that `_original_level_to_value` was still keyed by the declared objects
