@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
+from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
 CAT_LEVELS = {"f0": 6, "f1": 9, "f2": 4, "f3": 11, "f4": 13, "f5": 11}
 OC_LEVELS = {"f6": 16, "f7": 24}
@@ -55,16 +56,21 @@ def _model(features, p=1.5):
     return SuperGLM(family=families.tweedie(p=p), features=features)
 
 
-@pytest.mark.parametrize("n", [6_000, 4_000])
+@pytest.mark.parametrize("n", [5_000, 4_000])
 def test_bracket_endpoint_without_a_converged_mode_is_routed_around(n):
     """The search must survive a probe power whose penalized mode fails."""
     frame, y, weights, offset, features = _fixture(n)
 
     # Precondition: p=1.95 -- the second point Brent probes -- has no usable
-    # penalized mode under REML. Without this the test proves nothing.
-    with pytest.raises(RuntimeError) as excinfo:
+    # penalized mode under REML. Without this the test proves nothing, so the
+    # sizes are re-derived rather than kept: the mode is now REACHED and
+    # judged on its KKT residual instead of on PIRLS's step-length flag. The
+    # sizes retained here still miss the 1e-9 bar (scores 1.8e-4 at 5000 and
+    # 1.5e-7 at 4000); 6000 no longer fails at all, having failed only
+    # because the step test could not fire at its round-off floor.
+    with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
         _model(features, p=1.95).fit_reml(frame, y, sample_weight=weights, offset=offset)
-    assert "converged penalized coefficient mode" in str(excinfo.value)
+    assert "certify the penalized coefficient mode" in str(excinfo.value)
 
     result = _model(features).estimate_p(
         frame, y, sample_weight=weights, offset=offset, fit_mode="reml"

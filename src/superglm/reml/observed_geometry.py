@@ -704,6 +704,34 @@ def observed_mode_certification_bar() -> float:
     return max(10.0 * OBSERVED_PIRLS_TOL_CEILING, 100.0 * np.finfo(float).eps)
 
 
+def stopped_on_iteration_budget(result: Any) -> bool:
+    """Did PIRLS stop only because it ran out of iterations?
+
+    ``converged`` is a STEP-LENGTH verdict: it fires when
+    ``max|dbeta| / max(1, |beta|)`` drops below the tolerance, which under
+    observed geometry is pinned to ``OBSERVED_PIRLS_TOL_CEILING``. That
+    threshold can sit below the round-off floor of the iteration map -- on a
+    burn-cost-scale Tweedie fit the attainable floor was measured 9x to 646x
+    above it. There the iterate reaches the mode, enters a period-2 round-off
+    limit cycle between two adjacent floating-point states, and the step test
+    can never fire however long it runs; the loop exits on ``max_iter``
+    reporting a mode it is in fact sitting exactly on.
+
+    A step-length test cannot separate convergence from stagnation, so it is
+    the secondary criterion wherever both exist. The authority here is
+    ``observed_penalized_mode_score`` against
+    ``observed_mode_certification_bar()`` -- a KKT residual, which is the
+    primary test and fails closed (a mid-descent mode scores 1e-1 to 1e-4
+    against the 1e-9 bar). So a budget-exhausted iterate is handed to the
+    certificate rather than refused ahead of it.
+
+    Every OTHER termination reason names something the mode score cannot
+    judge -- an infeasible constrained mode, a missing inner-QP KKT
+    certificate, a non-finite deviance -- and keeps its own door.
+    """
+    return result.termination_reason == "max_iter"
+
+
 class ObservedModeNotCertifiedError(RuntimeError):
     """The penalized mode is not accurate enough to differentiate through.
 

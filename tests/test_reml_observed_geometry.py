@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -2582,3 +2583,237 @@ class TestModeCertificationRecovery:
 
         with pytest.raises(RuntimeError, match="p approaches 2"):
             self._model(p=1.7).fit_reml(X, y, sample_weight=weights)
+
+
+class TestModeCertifiesAtTheRoundOffFloor:
+    """PIRLS's step-length flag must not veto a certifiable mode.
+
+    Under observed geometry PIRLS is asked to drive
+    ``max|dbeta| / max(1, |beta|)`` below ``OBSERVED_PIRLS_TOL_CEILING``
+    (1e-10). On a burn-cost-scale Tweedie problem that threshold sits BELOW
+    the attainable round-off floor of the iteration map: the iterate reaches
+    the mode, enters a period-2 round-off limit cycle between two adjacent
+    floating-point states, and the step test can never fire. Measured floors
+    on the fixture below run 9x to 646x above the ceiling, and the pass/fail
+    outcome was decided entirely by whether a given draw's floor happened to
+    land under 1e-10 -- two draws a factor of 1.4 apart in floating-point
+    noise separated a published model from a hard error.
+
+    A step-length test cannot tell convergence from stagnation, which is why
+    it is the secondary criterion everywhere it appears (SAS/IML ships its
+    gradient tests active and its parameter-change tests disabled by
+    default). The authoritative instrument is the KKT residual this module
+    already computes, and it fails closed: a mid-descent mode scores 1e-1 to
+    1e-4 against the 1e-9 bar. So the gate defers to the certificate rather
+    than pre-empting it.
+    """
+
+    @staticmethod
+    def _burn_cost_fixture(n=20_000, k=3, seed=0, phi=150.0, p=1.5):
+        """A small imitation of a burn-cost book, at the scale that matters.
+
+        The round-off floor scales with the magnitude of the weighted sums,
+        so the response scale is load-bearing: shrink ``phi`` and the mean
+        and the floor drops back under the ceiling and the bug vanishes.
+        """
+        import pandas as pd
+
+        from superglm import generate_tweedie_cpg
+
+        rng = np.random.default_rng(seed)
+        level = rng.integers(0, k, size=n)
+        level_effect = rng.normal(0.0, 0.35, size=k)
+        term_months = rng.choice([12.0, 36.0], size=n)
+        offset = np.log(term_months / 12.0)
+        weight = rng.uniform(0.01, 1.0, size=n)
+        eta = np.log(650.0) + level_effect[level] + offset
+        y = generate_tweedie_cpg(
+            n,
+            np.exp(eta),
+            phi / np.maximum(weight, 1e-6),
+            p,
+            rng=np.random.default_rng(seed + 1),
+        )
+        frame = pd.DataFrame({"lvl": [f"L{i:02d}" for i in level]})
+        return frame, y, weight, offset
+
+    @staticmethod
+    def _model(k=3, p=1.5):
+        from superglm import RandomEffect, SuperGLM
+
+        return SuperGLM(
+            family=Tweedie(p=p),
+            link="log",
+            selection_penalty=0.0,
+            features={
+                "lvl": RandomEffect(levels=[f"L{i:02d}" for i in range(k)]),
+            },
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _recording_pirls():
+        """Collect the termination reason of every observed-geometry PIRLS call.
+
+        A fixture that stops stalling stops testing anything, and it can stop
+        silently: the round-off floor moves with the numeric stack, so a draw
+        that exercised the defect on one numpy can certify on the next. The
+        tests below assert the stall was actually reached, so a fixture that
+        goes vacuous fails loudly instead of passing for the wrong reason.
+        """
+        import superglm.reml.direct as direct_module
+
+        reasons: list[str | None] = []
+        original = direct_module.fit_irls_direct
+
+        def recording(*args, **kwargs):
+            output = original(*args, **kwargs)
+            result = output[0] if isinstance(output, tuple) else output
+            if kwargs.get("convergence") == "coefficients":
+                reasons.append(result.termination_reason)
+            return output
+
+        direct_module.fit_irls_direct = recording
+        try:
+            yield reasons
+        finally:
+            direct_module.fit_irls_direct = original
+
+    @pytest.mark.parametrize("seed", range(8))
+    def test_every_draw_fits_not_just_the_lucky_ones(self, seed):
+        """The defining symptom: identical design, outcome decided by the draw.
+
+        Held to a sweep rather than one fixture because any single draw
+        passes most of the time -- which is what made this look stochastic.
+        """
+        frame, y, weight, offset = self._burn_cost_fixture(seed=seed)
+        model = self._model()
+        model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+
+        assert model.reml_diagnostics()["converged"] is True
+        assert np.all(np.isfinite(model.predict(frame, offset=offset)))
+
+    def test_the_sweep_still_reaches_the_stall_it_regresses(self):
+        """Guard against the fixture going vacuous -- see ``_recording_pirls``."""
+        stalled = 0
+        for seed in range(8):
+            frame, y, weight, offset = self._burn_cost_fixture(seed=seed)
+            with self._recording_pirls() as reasons:
+                self._model().fit_reml(
+                    frame, y, sample_weight=weight, offset=offset, max_reml_iter=30
+                )
+            stalled += sum(reason == "max_iter" for reason in reasons)
+        assert stalled, (
+            "no draw exhausted its PIRLS budget, so this fixture no longer "
+            "exercises the round-off floor it exists to regress"
+        )
+
+    def test_the_published_mode_is_certified_not_merely_accepted(self):
+        """Deferring to the certificate must mean the certificate ran and passed."""
+        from superglm.reml.observed_geometry import observed_mode_certification_bar
+
+        frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        model = self._model()
+        model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+
+        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
+        assert residual <= observed_mode_certification_bar()
+
+    def test_an_uncertifiable_mode_is_still_refused(self, monkeypatch):
+        """Fail-closed: the certificate, not the step test, is what guards the gate."""
+        import superglm.reml.direct as direct_module
+        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+
+        frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        monkeypatch.setattr(
+            direct_module,
+            "observed_penalized_mode_score",
+            lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
+        )
+        with pytest.raises(ObservedModeNotCertifiedError):
+            self._model().fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+
+    def test_only_budget_exhaustion_defers_to_the_certificate(self):
+        """Every other termination reason names something the score cannot judge."""
+        from superglm.reml.observed_geometry import stopped_on_iteration_budget
+
+        def ended(reason):
+            return stopped_on_iteration_budget(SimpleNamespace(termination_reason=reason))
+
+        assert ended("max_iter")
+        for reason in (
+            "constraint_infeasible",
+            "constraint_kkt_incomplete",
+            "nonfinite_deviance",
+            "step_rejected",
+            "converged",
+            None,
+        ):
+            assert not ended(reason), reason
+
+    @staticmethod
+    def _factor_smooth_fixture(n=60_000, seed=1, phi=150.0, p=1.5, n_cat=3, cat_levels=6):
+        """A fully penalised ``fs`` factor smooth beside unpenalised factors.
+
+        The second symptom of the same defect. ``fs`` penalises its null space
+        too, so its lambda bootstraps near zero and the candidate solve warm
+        starts already at its own mode -- the first step is at the round-off
+        floor with no descent to cross the ceiling on. ``sz`` keeps an
+        unpenalised null space, its lambda moves, and it never stalls.
+        """
+        import pandas as pd
+
+        from superglm import generate_tweedie_cpg
+
+        rng = np.random.default_rng(seed)
+        x = rng.uniform(0.0, 100.0, size=n)
+        grp = rng.integers(0, 2, size=n)
+        offset = np.log(rng.choice([12.0, 36.0], size=n) / 12.0)
+        weight = rng.uniform(0.01, 1.0, size=n)
+        eta = (
+            np.log(650.0) + 0.010 * x + np.where(grp == 0, 1.0, -1.0) * 0.004 * (x - 50.0) + offset
+        )
+        columns = {"x": x, "grp": pd.Categorical(grp.astype(str))}
+        for j in range(n_cat):
+            level = rng.integers(0, cat_levels, size=n)
+            eta = eta + 0.03 * level
+            columns[f"cat{j}"] = pd.Categorical([f"C{i}" for i in level])
+        y = generate_tweedie_cpg(
+            n,
+            np.exp(eta),
+            phi / np.maximum(weight, 1e-6),
+            p,
+            rng=np.random.default_rng(seed + 1),
+        )
+        return pd.DataFrame(columns), y, weight, offset, n_cat
+
+    @pytest.mark.parametrize("basis", ["fs", "sz"])
+    def test_a_factor_smooth_certifies_on_either_basis(self, basis):
+        """``fs`` failed where ``sz`` fit, on identical data through one gate.
+
+        Reported separately from the RandomEffect symptom; the same predicate
+        closes both, so both are pinned here.
+        """
+        from superglm import Categorical, FactorSmooth, Spline, SuperGLM
+
+        frame, y, weight, offset, n_cat = self._factor_smooth_fixture()
+        features: dict = {"x": Spline(kind="ps", k=10)}
+        for j in range(n_cat):
+            features[f"cat{j}"] = Categorical(base="most_exposed")
+        model = SuperGLM(
+            family=Tweedie(p=1.5),
+            link="log",
+            selection_penalty=0.0,
+            features=features,
+            interactions=[FactorSmooth("x", group="grp", basis=basis, kind="ps", k=6)],
+        )
+        columns = ["x", "grp"] + [f"cat{j}" for j in range(n_cat)]
+
+        with self._recording_pirls() as reasons:
+            model.fit_reml(frame[columns], y, sample_weight=weight, offset=offset)
+
+        assert model.reml_diagnostics()["converged"] is True
+        if basis == "fs":
+            assert "max_iter" in reasons, (
+                "the fs fixture no longer reaches the stall it exists to regress"
+            )

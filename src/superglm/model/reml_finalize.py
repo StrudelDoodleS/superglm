@@ -27,6 +27,7 @@ from superglm.reml.observed_geometry import (
     mode_certification_hint,
     observed_mode_certification_bar,
     observed_penalized_mode_score,
+    stopped_on_iteration_budget,
 )
 from superglm.reml.penalty_algebra import (
     build_penalty_context,
@@ -511,11 +512,15 @@ def finalize_reml_fit(
         terminal_evaluation = terminal_value
         best.objective = terminal_evaluation.value
     if terminal_curvature == "observed" and not qp_passthrough:
-        if not final_pirls.converged:
+        if not final_pirls.converged and not stopped_on_iteration_budget(final_pirls):
             # Typed: to a power search this is one more point with no usable
             # penalized mode. The terminal refit runs at the FINAL lambda,
             # which differs from every trial lambda, so this door is reachable
-            # even for a point whose candidate fits all certified.
+            # even for a point whose candidate fits all certified. It warm
+            # starts at the same 1e-10 step bar, so it is exposed to the same
+            # round-off floor as the candidate gate and defers to the same
+            # certificate below. No draw reaching it has been produced; the
+            # two gates are kept identical rather than left to diverge.
             raise ObservedModeNotConvergedError(
                 "terminal observed REML refit did not converge to a penalized coefficient mode",
                 hint=mode_certification_hint(model._distribution),
