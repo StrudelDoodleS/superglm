@@ -36,6 +36,7 @@ from superglm.reml.objective import (
 )
 from superglm.reml.observed_geometry import (
     OBSERVED_PIRLS_TOL_CEILING,
+    ObservedGeometryInfeasibleError,
     ObservedModeNotCertifiedError,
     ObservedModeNotConvergedError,
     ObservedREMLGeometry,
@@ -504,7 +505,7 @@ def optimize_direct_reml(
                         structured_decision.group_index if use_structured else None
                     ),
                 )
-            except ValueError as exc:
+            except ObservedGeometryInfeasibleError as exc:
                 # A budget-exhausted iterate now reaches this build, and an
                 # iterate still mid-descent can carry observed information the
                 # geometry refuses outright -- non-finite rows, a non-positive
@@ -513,6 +514,14 @@ def optimize_direct_reml(
                 # retype instead. A bare ValueError would escape every
                 # `except ObservedModeNotCertifiedError` and kill a power
                 # search that only needed to score this point infeasible.
+                #
+                # Only that one refusal is retyped. The build's other ValueErrors
+                # report a violated caller contract -- a misshapen design, a bad
+                # derivative_order, a penalty that is not PSD -- and catching
+                # them here told the user PIRLS had reached no penalized mode at
+                # this point, blaming the data's conditioning for a bug in the
+                # call and inviting a power search to route quietly around it.
+                # They now surface as the bugs they are.
                 _t_observed_geometry += _time.perf_counter() - _t0
                 raise ObservedModeNotConvergedError(
                     "observed REML geometry refused the penalized coefficient mode "
@@ -541,13 +550,20 @@ def optimize_direct_reml(
                 _accepted_observed_mode_residual_max,
                 mode_score.relative_max,
             )
-            candidate_mode_stationary = True
             if mode_score.relative_max > observed_mode_tol:
                 raise ObservedModeNotCertifiedError(
                     mode_score.relative_max,
                     observed_mode_tol,
                     hint=mode_certification_hint(distribution),
                 )
+            # Set on the fall-through only, the way the line-search trial below
+            # sets its own flag: the certificate is what makes this mode
+            # stationary, so a mode that missed the bar must not read stationary
+            # on its way past. Setting it above the check was correct only
+            # because the raise leaves the frame -- soften that to a warning, a
+            # scored-infeasible return or a `continue` and this ordering is the
+            # only thing still holding the invariant up.
+            candidate_mode_stationary = True
 
         _t0 = _time.perf_counter()
         objective_evaluation = reml_laml_objective(
@@ -1054,7 +1070,14 @@ def optimize_direct_reml(
                             structured_decision.group_index if use_structured else None
                         ),
                     )
-                except ValueError:
+                except ObservedGeometryInfeasibleError:
+                    # A shorter step is the answer to a trial iterate the
+                    # geometry refuses, so this rejection is a real line-search
+                    # outcome and is counted as one. It is deliberately the only
+                    # refusal handled here: a violated caller contract does not
+                    # improve at half the step, and halving would retry the same
+                    # malformed call until the line search ran out of trials and
+                    # reported the bug as a conditioning failure.
                     _t_observed_geometry += _time.perf_counter() - _t_geometry
                     _observed_mode_rejected_trial_count += 1
                     step *= 0.5

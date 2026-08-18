@@ -103,7 +103,7 @@ def _validate_rows(
         or not np.all(np.isfinite(eta))
         or not np.all(np.isfinite(sample_weight))
     ):
-        raise ValueError("observed-information inputs must be finite")
+        raise ObservedGeometryInfeasibleError("observed-information inputs must be finite")
     if np.any(sample_weight < 0.0):
         raise ValueError("sample_weight must be non-negative")
     return y, mu, eta, sample_weight
@@ -163,8 +163,13 @@ def _deriv4_inverse(link: Any, eta: NDArray) -> NDArray:
             )
         result = protocol(eta)
     result = np.asarray(result, dtype=np.float64)
-    if result.shape != eta.shape or not np.all(np.isfinite(result)):
-        raise ValueError("fourth inverse-link derivatives must be finite and match eta")
+    # Only the custom-protocol branch can hand back the wrong shape -- every
+    # built-in above is elementwise in eta -- so a shape mismatch is a bug in
+    # the caller's link rather than a condition this iterate reached.
+    if result.shape != eta.shape:
+        raise ValueError("link.deriv4_inverse must return an array shaped like eta")
+    if not np.all(np.isfinite(result)):
+        raise ObservedGeometryInfeasibleError("fourth inverse-link derivatives must be finite")
     return result
 
 
@@ -185,8 +190,15 @@ def _variance_third_derivative(distribution: Any, mu: NDArray) -> NDArray:
             )
         result = protocol(mu)
     result = np.asarray(result, dtype=np.float64)
-    if result.shape != mu.shape or not np.all(np.isfinite(result)):
-        raise ValueError("third variance derivatives must be finite and match mu")
+    # Split for the same reason as `_deriv4_inverse`: only a custom
+    # `variance_third_derivative` can return the wrong shape, and that is the
+    # family's protocol broken, not something this mu did.
+    if result.shape != mu.shape:
+        raise ValueError(
+            "distribution.variance_third_derivative must return an array shaped like mu"
+        )
+    if not np.all(np.isfinite(result)):
+        raise ObservedGeometryInfeasibleError("third variance derivatives must be finite")
     return result
 
 
@@ -196,7 +208,7 @@ def _validate_observed_bundle(
     labels = ("weights", "first derivatives", "second derivatives")
     for label, rows in zip(labels, values, strict=True):
         if rows is not None and not np.all(np.isfinite(rows)):
-            raise ValueError(f"observed-information {label} are not finite")
+            raise ObservedGeometryInfeasibleError(f"observed-information {label} are not finite")
     return values
 
 
@@ -745,6 +757,24 @@ def stopped_on_iteration_budget(result: Any) -> bool:
     return result.termination_reason == "max_iter"
 
 
+class ObservedGeometryInfeasibleError(ValueError):
+    """No usable observed geometry exists AT THIS ITERATE.
+
+    Non-finite observed rows, a non-positive intercept curvature, an
+    indefinite penalized Hessian: statements about the coefficients that were
+    handed in, which a shorter step or a different lambda can clear. A caller
+    sweeping many points reads this as "no penalized mode here" and routes
+    around the point instead of failing the fit.
+
+    A caller-contract violation -- a misshapen design, a ``derivative_order``
+    outside 0-2, a penalty that is not PSD -- deliberately stays a bare
+    ``ValueError``. No iterate can clear one, and reporting it as a point the
+    fit could not reach buries the bug that caused it.
+
+    Subclasses ``ValueError`` so existing handlers keep working.
+    """
+
+
 class ObservedModeNotCertifiedError(RuntimeError):
     """The penalized mode is not accurate enough to differentiate through.
 
@@ -1019,10 +1049,16 @@ def build_observed_reml_geometry(
         raise ValueError("derivative_order must be 0, 1, or 2")
 
     beta = np.asarray(result.beta, dtype=np.float64)
-    if beta.shape != (dm.p,) or not np.all(np.isfinite(beta)):
-        raise ValueError("result.beta must be a finite vector matching the design columns")
+    # A beta of the wrong width is a PIRLSResult fitted against some other
+    # design, which no iterate of this one could produce; non-finite entries
+    # are this iterate having diverged. Only the second is a point to route
+    # around.
+    if beta.shape != (dm.p,):
+        raise ValueError("result.beta must match the design columns")
+    if not np.all(np.isfinite(beta)):
+        raise ObservedGeometryInfeasibleError("result.beta must be a finite vector")
     if not np.isfinite(result.intercept):
-        raise ValueError("result.intercept must be finite")
+        raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
     eta = stabilize_eta(dm.matvec(beta) + result.intercept + offset_arr, link)
     mu = clip_mu(link.inverse(eta), distribution)
@@ -1042,7 +1078,9 @@ def build_observed_reml_geometry(
         else _stable_signed_sum(observed_w)
     )
     if not np.isfinite(sum_w) or sum_w <= 0.0:
-        raise ValueError("observed intercept curvature must have a positive finite sum")
+        raise ObservedGeometryInfeasibleError(
+            "observed intercept curvature must have a positive finite sum"
+        )
 
     if structured_group_index is not None:
         if groups is None or lambdas is None or reml_penalties is None:
@@ -1083,10 +1121,29 @@ def build_observed_reml_geometry(
             total=system.sum_w,
             center=mean_x,
         )
-        augmented_factor, _ = build_augmented_structured_factor(system, penalized)
+        # numpy.linalg.LinAlgError subclasses ValueError, and this construction
+        # is where the structured path actually refuses an iterate: the
+        # sum-to-zero and Schur factors reject a level whose local curvature is
+        # negative or non-finite while they are being built, before any factor
+        # object exists to carry a flag. Under a non-canonical link the observed
+        # rows carry a signed residual term, so a mid-line-search beta reaches
+        # that refusal routinely. Same seam and same argument as the dense build
+        # below -- the preamble has already pinned every caller-supplied input
+        # these callees validate, so what is left belongs to the iterate.
+        try:
+            augmented_factor, _ = build_augmented_structured_factor(system, penalized)
+        except ValueError as error:
+            raise ObservedGeometryInfeasibleError(
+                "terminal observed REML coefficient Hessian is indefinite; "
+                "the fitted coefficients do not define a valid Laplace mode"
+            ) from error
         if isinstance(augmented_factor, SumToZeroBlockFactor):
+            # Reached only if a factor that built cleanly still reports itself
+            # indefinite. Nothing sets this False today, so the refusal above is
+            # the live signal on this path; the check is kept as the seam a
+            # future factor would use to fail without raising.
             if not augmented_factor.public_positive_definite:
-                raise ValueError(
+                raise ObservedGeometryInfeasibleError(
                     "terminal observed REML coefficient Hessian is indefinite; "
                     "the fitted coefficients do not define a valid Laplace mode"
                 )
@@ -1096,13 +1153,22 @@ def build_observed_reml_geometry(
                 xtw=xtw,
             )
         else:
-            schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
+            try:
+                schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
+            except np.linalg.LinAlgError as error:
+                # An eigensolver that will not converge on this Schur complement
+                # is a statement about the iterate's curvature, not about the
+                # call, so it scores the point infeasible rather than escaping.
+                raise ObservedGeometryInfeasibleError(
+                    "observed REML Schur complement has no usable eigendecomposition "
+                    "at the fitted coefficients"
+                ) from error
             schur_scale = max(
                 float(np.max(np.abs(schur_eigenvalues), initial=0.0)),
                 1.0,
             )
             if np.any(schur_eigenvalues < -1e-10 * schur_scale):
-                raise ValueError(
+                raise ObservedGeometryInfeasibleError(
                     "terminal observed REML coefficient Hessian is indefinite; "
                     "the fitted coefficients do not define a valid Laplace mode"
                 )
@@ -1144,14 +1210,27 @@ def build_observed_reml_geometry(
     if nonnegative:
         if penalty is None:  # pragma: no cover - dense branch invariant
             raise RuntimeError("Dense observed geometry is missing its penalty.")
-        centered = build_centered_system(
-            dm=dm,
-            W=observed_w,
-            z_off=np.zeros(dm.n, dtype=np.float64),
-            penalty=penalty,
-            tabmat_split=dm.tabmat_centering_split,
-            tabmat_state=tabmat_state,
-        )
+        # Retyping whatever this call refuses is safe only because the preamble
+        # above has already checked every caller-supplied thing it validates --
+        # the row count against `dm.n`, the penalty's shape, its PSD-ness. What
+        # is left for it to reject belongs to the iterate: working weights that
+        # are not finite or not non-negative, or a weight sum that collapses.
+        # The same argument licenses the blanket wrap at the factor
+        # certification below and at the structured factor build above, and
+        # nowhere else in this function.
+        try:
+            centered = build_centered_system(
+                dm=dm,
+                W=observed_w,
+                z_off=np.zeros(dm.n, dtype=np.float64),
+                penalty=penalty,
+                tabmat_split=dm.tabmat_centering_split,
+                tabmat_state=tabmat_state,
+            )
+        except ValueError as error:
+            raise ObservedGeometryInfeasibleError(
+                "observed working weights do not define a centered system at these coefficients"
+            ) from error
         mean_x = centered.mean_x
         data_gram = centered.data_gram
         hessian = centered.hessian
@@ -1159,6 +1238,9 @@ def build_observed_reml_geometry(
         if penalty is None:  # pragma: no cover - dense branch invariant
             raise RuntimeError("Dense observed geometry is missing its penalty.")
         mean_x = _stable_signed_mean(dm, observed_w, sum_w)
+        # No retype seam on this branch: `centered_gram_rhs` validates shapes
+        # only -- two row counts and a column count this function supplies
+        # itself -- so it has nothing iterate-conditioned left to refuse.
         data_gram, _ = centered_gram_rhs(
             dm=dm,
             W=observed_w,
@@ -1170,19 +1252,29 @@ def build_observed_reml_geometry(
     try:
         decomposition = decompose_gram(hessian)
     except ValueError as error:
-        raise ValueError(
+        raise ObservedGeometryInfeasibleError(
             "terminal observed REML coefficient Hessian is indefinite; "
             "the fitted coefficients do not define a valid Laplace mode"
         ) from error
     if nonnegative and needs_factor_certification(decomposition):
-        factor_certified = decompose_factor(
-            grouped_augmented_factor(
-                dm,
-                observed_w,
-                penalty,
-                center=mean_x,
+        # The same licence as the centered-system wrap above: this factor is
+        # assembled from rows and a penalty the preamble has already validated,
+        # so a non-finite factor or a retained basis that will not resolve
+        # describes the weighted geometry at these coefficients.
+        try:
+            factor_certified = decompose_factor(
+                grouped_augmented_factor(
+                    dm,
+                    observed_w,
+                    penalty,
+                    center=mean_x,
+                )
             )
-        )
+        except ValueError as error:
+            raise ObservedGeometryInfeasibleError(
+                "terminal observed REML coefficient factor could not be certified; "
+                "the fitted coefficients do not define a valid Laplace mode"
+            ) from error
         decomposition = factor_certified
 
     return ObservedREMLGeometry(

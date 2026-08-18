@@ -78,6 +78,7 @@ from superglm.solvers.pirls import (
     IterationDiagnostics,
     PIRLSResult,
     REMLGeometrySummary,
+    TerminationReason,
     _extreme_weight_indices,
     _positive_working_weight_stats,
 )
@@ -836,7 +837,7 @@ def _fit_irls_direct_once(
         iteration: int,
         fit_converged: bool,
         convergence_value: float | None,
-        termination_reason: str | None,
+        termination_reason: TerminationReason | None,
     ) -> None:
         if not trace_enabled:
             return
@@ -1333,6 +1334,13 @@ def _fit_irls_direct_once(
     _reported_qp_nonconvergence = False  # transient note once; terminal authority is separate
     # A constrained fit-entry state has not been certified by the inner QP.
     retained_qp_converged = not has_constraints
+    # Declared, not bound: the chain below is the whole set of reasons this
+    # solver can end an iteration on, and declaring it against the shared
+    # vocabulary is what ties the two together. A tenth reason invented here is
+    # a type error on its own assignment until ``TerminationReason`` carries
+    # it, so the consumers that switch on the field cannot be handed a string
+    # they have never been shown.
+    termination_reason: TerminationReason
 
     for it in range(max_iter):
         beta_prev = committed.beta

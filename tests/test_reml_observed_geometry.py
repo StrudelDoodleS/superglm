@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -2189,6 +2190,7 @@ def test_observed_laml_backtracks_after_invalid_trial_geometry(
     import superglm.reml.direct as direct
     from superglm import SuperGLM
     from superglm.features.spline import Spline
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
 
     rng = np.random.default_rng(99)
     n = 400
@@ -2203,7 +2205,11 @@ def test_observed_laml_backtracks_after_invalid_trial_geometry(
         if not kwargs.get("compute_inverse", True):
             objective_only_calls += 1
             if objective_only_calls == 1:
-                raise ValueError("synthetic invalid signed trial geometry")
+                # The refusal a shorter step can answer: this iterate carries no
+                # usable observed geometry. A bare ValueError here would be a
+                # bug in the call, which the trial gate deliberately no longer
+                # backtracks on -- see the companion test below.
+                raise ObservedGeometryInfeasibleError("synthetic invalid signed trial geometry")
         return original(**kwargs)
 
     monkeypatch.setattr(direct, "build_observed_reml_geometry", reject_first_long_trial)
@@ -2218,6 +2224,159 @@ def test_observed_laml_backtracks_after_invalid_trial_geometry(
     assert model._reml_result.converged
     assert objective_only_calls >= 2
     assert model._reml_profile["reml_observed_mode_rejected_trial_count"] >= 1
+
+
+def test_a_contract_bug_in_a_trial_is_not_answered_by_a_shorter_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Halving the step retries the same malformed call, and hides why it failed.
+
+    The line-search half of the narrowing above. A caller-contract violation
+    does not improve at half the step, so backtracking on one burns the trial
+    budget and then reports the bug as a conditioning failure at this point.
+    """
+    import pandas as pd
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+
+    rng = np.random.default_rng(99)
+    n = 400
+    x = rng.uniform(1.0, 10.0, n)
+    mu = np.exp(0.3 + 0.1 * np.sin(x))
+    y = rng.gamma(shape=5.0, scale=mu / 5.0)
+    objective_only_calls = 0
+    original = direct.build_observed_reml_geometry
+
+    def break_the_first_long_trial(**kwargs):
+        nonlocal objective_only_calls
+        if not kwargs.get("compute_inverse", True):
+            objective_only_calls += 1
+            if objective_only_calls == 1:
+                raise ValueError("derivative_order must be 0, 1, or 2")
+        return original(**kwargs)
+
+    monkeypatch.setattr(direct, "build_observed_reml_geometry", break_the_first_long_trial)
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        model.fit_reml(pd.DataFrame({"x": x}), y)
+
+    assert objective_only_calls == 1, "the line search retried the malformed call"
+    assert type(excinfo.value) is ValueError
+    assert "derivative_order" in str(excinfo.value)
+
+
+def test_a_structured_factor_that_refuses_an_iterate_is_scored_not_raised() -> None:
+    """The structured branch refuses during construction, and numpy speaks ValueError.
+
+    ``numpy.linalg.LinAlgError`` subclasses ``ValueError``, so the sum-to-zero
+    and Schur factors' refusal of a level with negative local curvature used to
+    be absorbed by the blanket catch in ``optimize_direct_reml`` along with
+    everything else. Narrowing that catch to ``ObservedGeometryInfeasibleError``
+    would have let it escape ``fit_reml`` raw -- and the structured path has no
+    other indefiniteness signal, because ``public_positive_definite`` is never
+    set False.
+
+    The iterate here is not exotic. Under a non-canonical link the observed
+    weights carry a signed residual term, so a halving line search walks
+    straight through scaled betas like this one on its way back to the mode.
+    """
+    import pandas as pd
+
+    from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    rng = np.random.default_rng(2027)
+    n, n_levels = 360, 6
+    x = rng.uniform(-1.0, 1.0, size=n)
+    z = rng.normal(size=n)
+    codes = rng.integers(0, n_levels, size=n)
+    deviation = rng.normal(scale=0.18, size=(n_levels, 3))
+    deviation -= deviation.mean(axis=0)
+    eta = (
+        -0.25
+        + 0.45 * np.sin(2.1 * x)
+        + 0.17 * z
+        + deviation[codes, 0]
+        + deviation[codes, 1] * x
+        + deviation[codes, 2] * x**2
+    )
+    y = rng.poisson(np.exp(eta)).astype(np.float64)
+    weight = rng.uniform(0.5, 1.8, size=n)
+    offset = rng.normal(scale=0.04, size=n)
+    frame = pd.DataFrame({"x": x, "z": z, "group": [f"level-{c}" for c in codes]})
+
+    model = SuperGLM(
+        family="poisson",
+        features={
+            "x": Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.3)),
+            "z": Numeric(),
+        },
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="group",
+                basis="sz",
+                k=6,
+                lambda_policy={"wiggle": LambdaPolicy.fixed(1.7)},
+            )
+        ],
+        selection_penalty=0.0,
+        discrete=False,
+        direct_solve="structured",
+    ).fit_reml(
+        frame,
+        y,
+        sample_weight=weight,
+        offset=offset,
+        max_reml_iter=2,
+        pirls_tol=1e-10,
+        runtime_validation="skip",
+    )
+    structured_index = next(
+        i
+        for i, matrix in enumerate(model._dm.group_matrices)
+        if getattr(matrix, "factor_basis", None) == "sz"
+    )
+
+    def build_at(scale: float):
+        return build_observed_reml_geometry(
+            dm=model._dm,
+            distribution=Gaussian(),
+            link=LogLink(),
+            y=y,
+            sample_weight=weight,
+            offset_arr=offset,
+            result=replace(
+                model.result,
+                beta=model.result.beta * scale,
+                intercept=model.result.intercept * scale,
+            ),
+            penalty=None,
+            derivative_order=0,
+            groups=model._groups,
+            lambdas=model._reml_lambdas,
+            reml_penalties=model._reml_penalties,
+            structured_group_index=structured_index,
+            compute_inverse=False,
+        )
+
+    # The mode itself still builds, so what follows is a statement about the
+    # iterate rather than a geometry broken for every input.
+    assert build_at(1.0) is not None
+
+    with pytest.raises(ObservedGeometryInfeasibleError) as excinfo:
+        build_at(0.2)
+
+    # Retyped, not replaced: the factor's own diagnostic (which level, what
+    # curvature) still hangs off the cause for anyone reading the traceback.
+    assert isinstance(excinfo.value.__cause__, np.linalg.LinAlgError)
 
 
 @pytest.mark.parametrize(
@@ -2540,6 +2699,63 @@ class TestModeCertificationRecovery:
                 X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
             )
 
+    def test_a_caller_contract_bug_is_not_reported_as_an_unreachable_mode(self, monkeypatch):
+        """Only the geometry's own refusal describes a point worth routing around.
+
+        The gate caught every ValueError the geometry build could raise, so a
+        violated caller contract -- a misshapen design, a penalty that is not
+        PSD -- reached the user as "PIRLS reached no penalized mode at this
+        point": the data's conditioning blamed for a bug in the call, and a
+        power search invited to score the point infeasible and quietly carry on
+        with it.
+        """
+        import superglm.reml.direct as direct_module
+
+        X, y, weights = self._tweedie_fixture()
+        built = []
+
+        def contract_violation(**kwargs):
+            built.append(1)
+            raise ValueError("penalty must be a finite square matrix in slope coordinates")
+
+        monkeypatch.setattr(direct_module, "build_observed_reml_geometry", contract_violation)
+
+        with pytest.raises(ValueError) as excinfo:
+            self._model().fit_reml(X, y, sample_weight=weights)
+
+        assert built, "the gate never reached the geometry build"
+        # ObservedModeNotConvergedError is a RuntimeError, so raises(ValueError)
+        # already fails against the blanket catch. Typed exactly all the same: a
+        # retype into ObservedGeometryInfeasibleError would satisfy ValueError
+        # too, and would report the same wrong thing about the same bug.
+        assert type(excinfo.value) is ValueError
+        assert "slope coordinates" in str(excinfo.value)
+
+    def test_an_infeasible_geometry_is_still_scored_not_raised(self, monkeypatch):
+        """Narrowing the catch must not close the door it exists to hold open."""
+        import superglm.reml.direct as direct_module
+        from superglm.reml.observed_geometry import (
+            ObservedGeometryInfeasibleError,
+            ObservedModeNotConvergedError,
+        )
+
+        X, y, weights = self._tweedie_fixture()
+
+        def infeasible_here(**kwargs):
+            raise ObservedGeometryInfeasibleError(
+                "observed intercept curvature must have a positive finite sum"
+            )
+
+        monkeypatch.setattr(direct_module, "build_observed_reml_geometry", infeasible_here)
+
+        with pytest.raises(ObservedModeNotConvergedError) as excinfo:
+            self._model().fit_reml(X, y, sample_weight=weights)
+
+        # The type every handler in this class routes around, carrying the
+        # refusal it retyped rather than replacing it.
+        assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
+        assert "positive finite sum" in str(excinfo.value)
+
     def test_message_does_not_offer_one_family_s_remedy_to_another(self, monkeypatch):
         """Observed geometry is the default branch, so this reaches many families."""
         import pandas as pd
@@ -2653,31 +2869,50 @@ class TestModeCertifiesAtTheRoundOffFloor:
     @staticmethod
     @contextlib.contextmanager
     def _recording_pirls():
-        """Collect the termination reason of every observed-geometry PIRLS call.
+        """Record ``(gate, termination reason)`` for every observed-geometry PIRLS call.
 
         A fixture that stops stalling stops testing anything, and it can stop
         silently: the round-off floor moves with the numeric stack, so a draw
         that exercised the defect on one numpy can certify on the next. The
         tests below assert the stall was actually reached, so a fixture that
         goes vacuous fails loudly instead of passing for the wrong reason.
+
+        Three gates defer to the certificate and each reads a DIFFERENT
+        module-level ``fit_irls_direct``: ``reml/direct.py`` holds the
+        candidate gate and the line-search trial, and ``model/reml_finalize.py``
+        imported the name for itself and holds the terminal publication refit.
+        Rebinding one module reaches two gates and leaves the third
+        unwatched -- which is how the terminal refit went unrecorded here, with
+        nothing in the guard able to say so. Both bindings are patched, and
+        each record carries the call's own ``trace_purpose`` so a test can name
+        the gate it means rather than a tag invented for the occasion.
         """
+        import superglm.model.reml_finalize as finalize_module
         import superglm.reml.direct as direct_module
 
-        reasons: list[str | None] = []
-        original = direct_module.fit_irls_direct
+        records: list[tuple[str | None, str | None]] = []
+        patched = [
+            (direct_module, direct_module.fit_irls_direct),
+            (finalize_module, finalize_module.fit_irls_direct),
+        ]
 
-        def recording(*args, **kwargs):
-            output = original(*args, **kwargs)
-            result = output[0] if isinstance(output, tuple) else output
-            if kwargs.get("convergence") == "coefficients":
-                reasons.append(result.termination_reason)
-            return output
+        def recorder(original):
+            def recording(*args, **kwargs):
+                output = original(*args, **kwargs)
+                result = output[0] if isinstance(output, tuple) else output
+                if kwargs.get("convergence") == "coefficients":
+                    records.append((kwargs.get("trace_purpose"), result.termination_reason))
+                return output
 
-        direct_module.fit_irls_direct = recording
+            return recording
+
+        for module, original in patched:
+            module.fit_irls_direct = recorder(original)
         try:
-            yield reasons
+            yield records
         finally:
-            direct_module.fit_irls_direct = original
+            for module, original in patched:
+                module.fit_irls_direct = original
 
     @pytest.mark.parametrize("seed", range(8))
     def test_every_draw_fits_not_just_the_lucky_ones(self, seed):
@@ -2694,18 +2929,53 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
 
     def test_the_sweep_still_reaches_the_stall_it_regresses(self):
-        """Guard against the fixture going vacuous -- see ``_recording_pirls``."""
-        stalled = 0
+        """Guard against the fixture going vacuous -- see ``_recording_pirls``.
+
+        Counted per seed and held to a majority. A sum over the whole sweep --
+        over draws, and over every PIRLS call within a draw -- lets one stall
+        anywhere stand in for all eight: seeds 1 and 3 never stall here and
+        both pass against the unfixed code, so two of the eight cases above
+        already regress nothing while a summed count reports the fixture
+        healthy. The threshold is a majority rather than a named set of seeds
+        because WHICH draw stalls is decided by a round-off floor that moves
+        with numpy and the BLAS. Pinning individual seeds would red on a stack
+        where the defect is merely differently distributed; a majority still
+        catches the failure that matters, the fixture going vacuous everywhere.
+        """
+        stalled = []
         for seed in range(8):
             frame, y, weight, offset = self._burn_cost_fixture(seed=seed)
-            with self._recording_pirls() as reasons:
+            with self._recording_pirls() as records:
                 self._model().fit_reml(
                     frame, y, sample_weight=weight, offset=offset, max_reml_iter=30
                 )
-            stalled += sum(reason == "max_iter" for reason in reasons)
-        assert stalled, (
-            "no draw exhausted its PIRLS budget, so this fixture no longer "
-            "exercises the round-off floor it exists to regress"
+            if any(reason == "max_iter" for _, reason in records):
+                stalled.append(seed)
+        assert len(stalled) >= 5, (
+            f"only {len(stalled)} of 8 draws exhausted a PIRLS budget (seeds "
+            f"{stalled}), against the 6 of 8 measured here -- seeds 0, 2, 4, 5, "
+            "6 and 7 stall, 1 and 3 do not -- and a threshold of 5. Below that "
+            "most of the sweep no longer reaches the round-off floor it exists "
+            "to regress, and the cases above are passing on draws that would "
+            "pass against the unfixed gate too."
+        )
+
+    def test_the_recorder_watches_every_gate_that_defers(self):
+        """The terminal publication refit is a gate too, with its own binding.
+
+        A claim about the guard above rather than about the fix: a recorder
+        blind to a gate cannot report that gate going vacuous. Rebinding only
+        ``reml/direct.py`` -- the shape this helper had -- watches the candidate
+        gate and the line-search trial and records no terminal refit at all, on
+        any draw.
+        """
+        frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        with self._recording_pirls() as records:
+            self._model().fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+
+        gates = {purpose for purpose, _ in records}
+        assert gates >= {"reml_candidate", "reml_line_search", "reml_final"}, (
+            f"a gate that defers to the certificate went unwatched; recorded {sorted(gates)}"
         )
 
     def test_the_published_mode_is_certified_not_merely_accepted(self):
@@ -2744,25 +3014,124 @@ class TestModeCertifiesAtTheRoundOffFloor:
     def test_only_budget_exhaustion_defers_to_the_certificate(self):
         """Every other termination reason names something the score cannot judge."""
         from superglm.reml.observed_geometry import stopped_on_iteration_budget
+        from superglm.solvers.pirls import PIRLS_TERMINATION_REASONS
 
         def ended(reason):
             return stopped_on_iteration_budget(SimpleNamespace(termination_reason=reason))
 
+        assert "max_iter" in PIRLS_TERMINATION_REASONS
         assert ended("max_iter")
-        # The full set irls_direct can terminate with, so a reason added there
-        # cannot silently change which door it takes here.
-        for reason in (
-            "constraint_infeasible",
-            "constraint_kkt_incomplete",
-            "curvature_fallback",
-            "curvature_rescue",
-            "nonfinite_deviance",
-            "step_rejected",
-            "converged",
-            "continue",
-            None,
-        ):
+        # Read out of the solver's own exported vocabulary rather than copied
+        # into a tuple here. The copy claimed a reason added to PIRLS could not
+        # silently change which door it takes, and it could: a scratch build
+        # carrying a real new literal left this green. What is pinned is only
+        # that every OTHER declared reason takes the non-deferring door --
+        # that the vocabulary is complete is the solver's own assertion.
+        for reason in (*sorted(PIRLS_TERMINATION_REASONS - {"max_iter"}), None):
             assert not ended(reason), reason
+
+    @staticmethod
+    def _stamped_terminal_refit(monkeypatch, *, converged, termination_reason):
+        """Make the terminal publication refit report a chosen verdict.
+
+        No draw produces a budget-exhausted terminal refit. It warm starts from
+        the accepted candidate's coefficients at the final lambda, so its first
+        step is already under the 1e-10 bar and it returns after one iteration
+        reporting ``converged`` -- measured on every one of 18 draws (n=20k to
+        200k, k=3 to 40, means 650 to 650000) and on the factor-smooth fixture
+        below. A test that waited for the natural case would assert nothing at
+        all. Only the verdict is stamped: the coefficients, the geometry built
+        from them and the certificate that scores them are the real refit's, so
+        the label the relabel publishes is still earned by a real KKT residual.
+
+        Returns the verdicts the refit actually reached, so a caller can say
+        whether the gate ran rather than assume it did.
+        """
+        import superglm.model.reml_finalize as finalize_module
+
+        original = finalize_module.fit_irls_direct
+        reached: list[tuple[bool, str | None]] = []
+
+        def stamping(*args, **kwargs):
+            output = original(*args, **kwargs)
+            if kwargs.get("trace_purpose") != "reml_final":
+                return output
+            result = output[0] if isinstance(output, tuple) else output
+            reached.append((result.converged, result.termination_reason))
+            stamped = replace(result, converged=converged, termination_reason=termination_reason)
+            return (stamped, *output[1:]) if isinstance(output, tuple) else stamped
+
+        monkeypatch.setattr(finalize_module, "fit_irls_direct", stamping)
+        return reached
+
+    @staticmethod
+    def _reported_convergence(summary):
+        """The Converged value as a reader of the rendered summary sees it."""
+        rendered = str(summary)
+        match = re.search(r"Converged:\s*(True|False)", rendered)
+        assert match is not None, f"no Converged row in the rendered summary:\n{rendered}"
+        return match.group(1)
+
+    def test_a_certified_budget_exhausted_publication_reads_converged(self, monkeypatch):
+        """What the certificate admitted, every reader of the fit must report.
+
+        The gate lets a budget-exhausted terminal refit publish, and the
+        published result then carried PIRLS's step-length verdict on a mode the
+        certificate had just passed. ``summary()``, ``metrics().summary()`` and
+        the telemetry payload all read that flag, so a fit admitted on its KKT
+        residual reported itself unconverged while its own REML diagnostics
+        said the opposite.
+        """
+        from superglm.reml.observed_geometry import observed_mode_certification_bar
+
+        frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        reached = self._stamped_terminal_refit(
+            monkeypatch, converged=False, termination_reason="max_iter"
+        )
+        model = self._model()
+        model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+
+        assert reached, "the terminal publication refit never ran, so nothing was relabelled"
+        # Pinned to the certificate, not merely to the branch: the relabelled
+        # claim is defensible only because this residual cleared the fixed bar.
+        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
+        assert residual <= observed_mode_certification_bar()
+
+        assert model.result.converged is True
+        assert model.result.termination_reason == "mode_certified"
+        # A candidate whose public and solver copies disagree on this flag is
+        # refused at fit-state validation, so the relabel has to reach both.
+        assert bool(model._result.converged) is bool(model._solver_result.converged)
+        assert model._result.termination_reason == model._solver_result.termination_reason
+
+        assert model.training_telemetry()["fit"]["converged"] is True
+        metrics = model.metrics(frame, y, sample_weight=weight, offset=offset)
+        # The two summaries reach the flag by different routes -- one through
+        # the REML loop's verdict, one through the published PIRLS result --
+        # which is how they came to print opposite answers for one fit.
+        assert self._reported_convergence(model.summary()) == "True"
+        assert self._reported_convergence(metrics.summary()) == "True"
+
+    def test_a_terminal_refit_that_converged_keeps_its_own_reason(self, monkeypatch):
+        """The relabel is conditioned on the step test having failed, not on the gate.
+
+        ``mode_certified`` names one situation -- a mode the step test never
+        passed, published because the certificate did -- and it stops naming it
+        the moment it is stamped on refits that converged normally. The verdict
+        here is pinned rather than changed: every terminal refit measured on
+        this fixture already reported exactly this, so the stamp only fixes the
+        branch's input on a stack where that stops being true.
+        """
+        frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        reached = self._stamped_terminal_refit(
+            monkeypatch, converged=True, termination_reason="converged"
+        )
+        model = self._model()
+        model.fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+
+        assert reached, "the terminal publication refit never ran"
+        assert model.result.converged is True
+        assert model.result.termination_reason == "converged"
 
     @staticmethod
     def _factor_smooth_fixture(n=60_000, seed=1, phi=150.0, p=1.5, n_cat=3, cat_levels=6):
@@ -2822,11 +3191,11 @@ class TestModeCertifiesAtTheRoundOffFloor:
         )
         columns = ["x", "grp"] + [f"cat{j}" for j in range(n_cat)]
 
-        with self._recording_pirls() as reasons:
+        with self._recording_pirls() as records:
             model.fit_reml(frame[columns], y, sample_weight=weight, offset=offset)
 
         assert model.reml_diagnostics()["converged"] is True
         if basis == "fs":
-            assert "max_iter" in reasons, (
+            assert any(reason == "max_iter" for _, reason in records), (
                 "the fs fixture no longer reaches the stall it exists to regress"
             )

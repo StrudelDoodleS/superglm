@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
-from typing import cast
+from typing import Literal, cast, get_args
 
 import numpy as np
 import scipy.linalg
@@ -179,6 +179,36 @@ class REMLGeometrySummary:
     column_scale: NDArray
 
 
+# Every terminal condition the two IRLS loops can report. The vocabulary lives
+# here because this module declares both fields that carry it, and both loops
+# assign into a local of this type: a tenth reason is then a type error on the
+# line that invents it, rather than a novel string that reaches the consumers
+# switching on the field. ``mode_certified`` is the one member neither loop
+# writes -- the terminal REML refit stamps it when a mode that exhausted its
+# iteration budget clears its KKT certificate anyway. The fitted-state
+# invalidation path stamps a synthetic marker of its own over the field
+# afterwards, through a dynamic ``setattr`` this annotation cannot see; that
+# records a revision rather than a reason a loop stopped, so it is deliberately
+# not a member.
+type TerminationReason = Literal[
+    "curvature_fallback",
+    "curvature_rescue",
+    "constraint_infeasible",
+    "constraint_kkt_incomplete",
+    "step_rejected",
+    "nonfinite_deviance",
+    "converged",
+    "max_iter",
+    "continue",
+    "mode_certified",
+]
+
+# The same vocabulary at runtime, for consumers that enumerate the reasons
+# instead of annotating against them. A PEP 695 alias resolves lazily, so
+# ``get_args`` has to be handed the value rather than the alias object.
+PIRLS_TERMINATION_REASONS: frozenset[str] = frozenset(get_args(TerminationReason.__value__))
+
+
 @dataclass(frozen=True)
 class IterationDiagnostics:
     """Per-iteration IRLS diagnostics for debugging convergence issues."""
@@ -226,7 +256,7 @@ class IterationDiagnostics:
     convergence_criterion: str | None = None
     convergence_value: float | None = None
     convergence_tolerance: float | None = None
-    termination_reason: str | None = None
+    termination_reason: TerminationReason | None = None
 
 
 @dataclass
@@ -257,7 +287,7 @@ class PIRLSResult:
     evaluation_id: int | None = None
     state_space: str = "solver"
     basis_id: int | None = None
-    termination_reason: str | None = None
+    termination_reason: TerminationReason | None = None
     direct_backend: str | None = None
     direct_fallback_reason: str | None = None
     # Terminal SCOP geometry is retained separately because covariance uses
@@ -871,7 +901,7 @@ def _fit_pirls_inner(
         fit_converged: bool,
         convergence_criterion: str | None,
         convergence_value: float | None,
-        termination_reason: str | None,
+        termination_reason: TerminationReason | None,
     ) -> None:
         if not trace_enabled:
             return
@@ -916,6 +946,10 @@ def _fit_pirls_inner(
         objective_prev = np.inf
     converged = False
     max_halving = 20  # max step-halving attempts per outer iteration
+    # Declared, not bound: the loop's reason chain is checked against the shared
+    # vocabulary at each assignment, so a reason this module gains has to be
+    # added to ``TerminationReason`` before it can leave the loop.
+    termination_reason: TerminationReason
     for outer in range(max_iter_outer):
         t_outer_start = time.perf_counter()
 
