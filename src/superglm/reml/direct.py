@@ -716,21 +716,35 @@ def optimize_direct_reml(
         # W(rho) correction
         _t0 = _time.perf_counter()
         if not discrete:
-            w_corr = reml_w_correction(
-                dm,
-                link,
-                groups,
-                pirls_result,
-                reml_inverse,
-                cand_lambdas,
-                penalty_caches=penalty_caches,
-                sample_weight=sample_weight,
-                offset_arr=offset_arr,
-                distribution=distribution,
-                w_correction_order=w_correction_order,
-                reml_penalties=penalties,
-                geometry=geometry,
-            )
+            # The correction is built from this iterate's weight derivatives, so
+            # a LinAlgError out of it says the same thing the geometry seams do:
+            # no usable curvature at this point. `w_derivatives` raises none of
+            # its own and calls no decomposition, so what reaches here is an
+            # operator refusing its blocks -- narrow enough that this cannot
+            # swallow a structural complaint.
+            try:
+                w_corr = reml_w_correction(
+                    dm,
+                    link,
+                    groups,
+                    pirls_result,
+                    reml_inverse,
+                    cand_lambdas,
+                    penalty_caches=penalty_caches,
+                    sample_weight=sample_weight,
+                    offset_arr=offset_arr,
+                    distribution=distribution,
+                    w_correction_order=w_correction_order,
+                    reml_penalties=penalties,
+                    geometry=geometry,
+                )
+            except np.linalg.LinAlgError as error:
+                _t_w_correction += _time.perf_counter() - _t0
+                raise ObservedModeNotConvergedError(
+                    "observed REML W(rho) correction has no usable curvature "
+                    f"at this point: {error}",
+                    hint=mode_certification_hint(distribution),
+                ) from error
         else:
             w_corr = None
         _t_w_correction += _time.perf_counter() - _t0
