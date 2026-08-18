@@ -695,7 +695,8 @@ def _evaluate_scop_reml_mode(
             # ValueError past every `except ObservedModeNotCertifiedError`
             # handler, because that family is RuntimeError-derived.
             raise ObservedModeNotConvergedError(
-                f"SCOP could not score its penalized coefficient mode at this point: {exc}"
+                f"SCOP could not score its penalized coefficient mode at this point: {exc}",
+                infeasible_detail="SCOP mode score refused the penalized mode",
             ) from exc
 
     def terminal_fisher_weights() -> NDArray:
@@ -1081,7 +1082,8 @@ def _fit_scop_reml_mode(
             # ValueError past every `except ObservedModeNotCertifiedError`
             # handler, because that family is RuntimeError-derived.
             raise ObservedModeNotConvergedError(
-                f"SCOP could not score its penalized coefficient mode at this point: {exc}"
+                f"SCOP could not score its penalized coefficient mode at this point: {exc}",
+                infeasible_detail="SCOP mode score refused the penalized mode",
             ) from exc
     else:
         mode_score = SCOPModeScore(

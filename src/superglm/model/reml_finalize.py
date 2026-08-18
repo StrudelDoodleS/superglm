@@ -581,6 +581,7 @@ def finalize_reml_fit(
             raise ObservedModeNotConvergedError(
                 f"terminal observed REML geometry refused the penalized coefficient mode: {exc}",
                 hint=mode_certification_hint(model._distribution),
+                infeasible_detail="terminal observed geometry refused the penalized mode",
             ) from exc
         profile["reml_terminal_observed_geometry_s"] = _time.perf_counter() - geometry_start
         try:
@@ -607,6 +608,7 @@ def finalize_reml_fit(
                 "terminal observed REML refit could not score its penalized "
                 f"coefficient mode: {exc}",
                 hint=mode_certification_hint(model._distribution),
+                infeasible_detail="terminal observed mode score refused the penalized mode",
             ) from exc
         # The same fixed bar the candidate gate uses: a point that certified
         # during the search cannot fail publication because the caller

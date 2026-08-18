@@ -4382,11 +4382,15 @@ class _ProfileContextREML:
                 detail = f"mode score={score:.3e} > {exc.tolerance:.3e}"
             else:
                 # Most raise sites mean PIRLS found no mode, which is what the
-                # default says. The ones that reached a mode and failed later
-                # carry their own phrasing, so this record does not assert a
-                # stage that did not fail.
-                reason = getattr(exc, "infeasible_reason", _NO_MODE_REASON)
-                detail = getattr(exc, "infeasible_detail", _NO_MODE_DETAIL)
+                # defaults say. The ones that reached a mode and failed later
+                # name their stage, so this record does not assert a failure
+                # that did not happen. `or` and not a value comparison: the
+                # stored reason is read for TRUTHINESS by the CI locator, so an
+                # empty override must fall back rather than register as "this
+                # power was fine".
+                staged = getattr(exc, "infeasible_detail", None)
+                reason = staged or _NO_MODE_REASON
+                detail = staged or _NO_MODE_DETAIL
             self._infeasible_powers[key] = reason
             logger.info(f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  INFEASIBLE  {detail}")
             return _INFEASIBLE_PROFILE_NLL

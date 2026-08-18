@@ -527,6 +527,7 @@ def optimize_direct_reml(
                     "observed REML geometry refused the penalized coefficient mode "
                     f"at this point: {exc}",
                     hint=mode_certification_hint(distribution),
+                    infeasible_detail="observed geometry refused the penalized mode",
                 ) from exc
             _t_observed_geometry += _time.perf_counter() - _t0
             if geometry.hessian_inverse is None:  # pragma: no cover - requested above
@@ -563,6 +564,7 @@ def optimize_direct_reml(
                     "observed REML mode score refused the penalized coefficient mode "
                     f"at this point: {exc}",
                     hint=mode_certification_hint(distribution),
+                    infeasible_detail="observed mode score refused the penalized mode",
                 ) from exc
             _accepted_observed_mode_residual_max = max(
                 _accepted_observed_mode_residual_max,
@@ -759,14 +761,10 @@ def optimize_direct_reml(
                 raise ObservedModeNotConvergedError(
                     f"REML W(rho) correction has no usable curvature at this point: {error}",
                     hint=mode_certification_hint(distribution),
-                    # PIRLS reached a mode here; the correction built from it is
-                    # what failed. Without this the profile records "PIRLS found
-                    # no mode to certify" and publishes it.
-                    infeasible_reason=(
-                        "no differentiable REML gradient "
-                        "(W(rho) correction has no usable curvature)"
-                    ),
-                    infeasible_detail="no usable W(rho) curvature",
+                    # PIRLS reached a mode here; the correction built from it
+                    # is what failed, so the published wording must not assert
+                    # a PIRLS failure.
+                    infeasible_detail="the W(rho) correction has no usable curvature",
                 ) from error
         else:
             w_corr = None

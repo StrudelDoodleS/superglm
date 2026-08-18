@@ -822,24 +822,30 @@ _NO_MODE_DETAIL = "no converged penalized mode"
 
 
 class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
-    """There is no penalized mode here, or none that can be differentiated.
+    """No mode score exists here, as opposed to one that missed the bar.
 
-    The sibling condition to certification failure: there is nothing to
-    certify. To a power search the two are one situation -- this point yields
-    no REML objective we are entitled to report -- so this subclasses the
-    certification error and every handler that routes the parent around routes
-    this too. It is NOT a plain ``RuntimeError`` sibling, deliberately:
-    ``optimize_direct_reml`` raises bare ``RuntimeError`` for genuine invariant
-    violations that must propagate, so no caller should ever be tempted into a
-    blanket catch.
+    That is the operational difference from the parent, and it is what both
+    consumers branch on: the parent carries a finite ``relative_max`` (a score
+    was computed and fell short), this pins it non-finite (there is no score to
+    quote). ``profile_ops`` and the Tweedie profile both test
+    ``np.isfinite(relative_max)`` to choose between quoting a number and
+    describing a condition.
 
-    Most raise sites mean the literal thing: PIRLS never reached a mode. A few
-    mean that a mode was reached and a later stage could not be formed from it
-    -- the W(rho) gradient correction, for one. Those pass ``infeasible_reason``
-    so the profile records which stage refused, because the default phrasing
-    asserts PIRLS found no mode and reaches the user through
-    ``_infeasible_powers``. Routing is identical either way; only the published
-    reason differs.
+    To a power search the two are one situation -- this point yields no REML
+    objective we are entitled to report -- so this subclasses the certification
+    error and every handler that routes the parent around routes this too. It
+    is NOT a plain ``RuntimeError`` sibling, deliberately: ``optimize_direct_reml``
+    raises bare ``RuntimeError`` for genuine invariant violations that must
+    propagate, so no caller should ever be tempted into a blanket catch.
+
+    Why there is no score splits two ways, and the split is published. Most
+    raise sites mean PIRLS never reached a mode, which is what the default
+    wording says. The rest reached a mode and could not form something from it
+    -- a geometry build, a mode score, the W(rho) correction. Those pass
+    ``infeasible_detail`` naming the stage that refused, because the default
+    otherwise asserts a PIRLS failure that did not happen, and that assertion
+    reaches the user through ``_publication_mode_failure``. Routing is
+    identical either way; only the published wording differs.
     """
 
     def __init__(
@@ -847,8 +853,7 @@ class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
         message: str = "",
         *,
         hint: str = "",
-        infeasible_reason: str = _NO_MODE_REASON,
-        infeasible_detail: str = _NO_MODE_DETAIL,
+        infeasible_detail: str | None = None,
     ) -> None:
         # No mode exists, so no score was achieved. The attributes exist so
         # parent-typed handlers can format them; non-finite is the signal to
@@ -856,7 +861,10 @@ class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
         self.relative_max = float("inf")
         self.tolerance = float("nan")
         self.hint = hint
-        self.infeasible_reason = infeasible_reason
+        # None, not a default string: readers resolve it with `or`, so "did this
+        # site override?" is structural. A value comparison against the default
+        # would have to be repeated at every reader and would silently split the
+        # two published surfaces if one reader was updated and the other was not.
         self.infeasible_detail = infeasible_detail
         body = message or (
             "observed REML requires a converged penalized coefficient mode "
