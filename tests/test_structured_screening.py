@@ -720,15 +720,21 @@ def test_evaluate_clips_dust_but_signals_a_sum_that_is_not_a_filter_factor_sum(m
     assert 0.0 < band < 1e-13, band
 
     for injected in (1e-300, -1e-300, 0.5 * band, -0.5 * band):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (0.0, _v, 0.0))
+        monkeypatch.setattr(
+            st, "_filter_factor_sum", lambda *a, _v=injected, **k: (0.0, _v, 0.0, np.inf)
+        )
         assert st._evaluate(pair, geometry, 1.0)[1] == 0.0, injected
 
     for injected, expected in ((1.0, 1.0), (0.25, 0.25)):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=injected, **k: (0.0, _v, 0.0))
+        monkeypatch.setattr(
+            st, "_filter_factor_sum", lambda *a, _v=injected, **k: (0.0, _v, 0.0, np.inf)
+        )
         assert st._evaluate(pair, geometry, 1.0)[1] == pytest.approx(expected, abs=1e-12)
 
     for outside in (1.25, -1.25):
-        monkeypatch.setattr(st, "_filter_factor_sum", lambda *a, _v=outside, **k: (0.0, _v, 0.0))
+        monkeypatch.setattr(
+            st, "_filter_factor_sum", lambda *a, _v=outside, **k: (0.0, _v, 0.0, np.inf)
+        )
         with pytest.raises(st._UnstableStructuredEDFError, match="not a filter-factor sum"):
             st._evaluate(pair, geometry, 1.0)
 
@@ -3931,8 +3937,9 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     tr_S = float(np.trace(p.S_a)) * L
     scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
 
-    refused, values = 0, []
+    refused, values, margins = 0, [], []
     for lam in np.geomspace(1e-10 * scale, 1e10 * scale, 200):
+        margins.append(st._filter_factor_sum(p, geometry, float(lam))[3])
         try:
             _, edf = st._evaluate(p, geometry, float(lam))
         except st._UnstableStructuredEDFError:
@@ -3941,15 +3948,40 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
             assert 0.0 <= edf <= L * k_a, (lam, edf)
             values.append(edf)
 
-    assert refused == 0, refused
-    assert len(values) == 200
+    # **THE ZERO THIS USED TO ASSERT IS NOW ONE OR TWO, AND THE KIND OF
+    # REFUSAL CHANGED WITH IT.**  What it was written against is a
+    # cancellation blow-up -- ``local - border`` leaving ``[0, 78]`` at 101 of
+    # these 200 lambdas -- and that is still zero, which is what the range
+    # assertion inside the loop pins.  What refuses now is
+    # ``_ABSORPTION_MARGIN``: at one or two lambdas of 200 a singular value of
+    # the border sits within 1.01x of the absorption floor, so the deflation
+    # count there is not a property of the pair and #329's certify-or-refuse
+    # rule declines it.  Measured across 7 ``OPENBLAS_CORETYPE`` microkernels
+    # x 2 thread settings the count is 1 on four configurations and 2 on ten,
+    # so it is asserted as a range and not as a value -- the number of lambdas
+    # a continuously moving spectrum happens to place inside a fixed band is
+    # not something this suite gets to pin.  The published rungs below are
+    # bit-stable to 6e-12 df over the same fourteen.
+    assert refused <= 2, (refused, min(margins))
+    assert len(values) == 200 - refused
     # Nearly monotone too, which the difference form was not: over the same
-    # bracket its worst step UP is measured in whole degrees of freedom while
-    # this one's is 6.9e-05.  That is disclosure and not a derived bound --
-    # monotonicity would follow from nonnegative per-DIRECTION shares, which
-    # this route does not deliver -- so what is asserted is only that no step
-    # up reaches the ladder's own target tolerance by a factor of 100.
-    assert np.diff(values).max() < 100.0 * st._EDF_TOL, np.diff(values).max()
+    # bracket its worst step UP is measured in whole degrees of freedom.
+    # That is disclosure and not a derived bound -- monotonicity would follow
+    # from nonnegative per-DIRECTION shares, which this route does not deliver.
+    #
+    # **THE DISCLOSED NUMBER MOVED FROM 6.9e-05 TO 4.6e-02 .. 8.0e-02 AND THAT
+    # IS THE PRICE OF #280.**  The absorption floor is a dimensional convention
+    # now rather than ``sqrt`` of a measured residual, which on this pair makes
+    # it 34.7x TIGHTER; it keeps directions the old cut dropped, and inverting
+    # a smaller singular value is what roughens the curve.  The trade is a cut
+    # that is bit-identical on every microkernel against a rougher ``edf``, and
+    # it is stated here rather than left for the next reader to rediscover.
+    #
+    # BOUND SET FROM THE SPREAD AND NOT FROM ONE RUN: over 7
+    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings the worst upward
+    # step runs 4.604e-02 to 7.963e-02, so 0.5 leaves 6.3x on the worst of the
+    # fourteen.
+    assert np.diff(values).max() < 0.5, np.diff(values).max()
 
     # ...and the ladder now scores the pair rather than handing it back.
     rungs = structured_ladder(p, budgets=BUDGETS)
@@ -4694,3 +4726,219 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
         f"the noise cut has lost its separation {margins}; the counts stop being decidable "
         "as this approaches 1, and the regime this test pins has moved"
     )
+
+
+def _issue_280_starved_pair():
+    """#280's fixture: ``ps(5)`` x 8 levels x 3 rows, four inside a 1e-3 band.
+
+    The geometry that issue's ``OPENBLAS_CORETYPE`` sweep is measured on.  Kept
+    here rather than only in the issue so the reproducibility claim has a
+    fixture behind it: reconstruction is confirmed by the low-edge ``edf`` of
+    7.827369 and the high-edge 3.976230 the issue publishes for SKYLAKEX.
+    """
+    rng = np.random.default_rng(3)
+    L, reps, width, n_narrow = 8, 3, 1e-3, 4
+    n = L * reps
+    g = np.repeat([f"L{i}" for i in range(L)], reps)
+    x = rng.uniform(0.05, 0.95, n)
+    for i in range(n_narrow):
+        selected = g == f"L{i}"
+        x[selected] = 0.2 + 0.6 * i / n_narrow + width * rng.uniform(-0.5, 0.5, selected.sum())
+    slope = rng.normal(size=L).repeat(reps)
+    df = pd.DataFrame({"g": g, "x": x})
+    y = slope * x + rng.normal(scale=0.5, size=n)
+    return _capture(
+        df,
+        y,
+        {"g": Categorical(), "x": Spline(kind="ps", n_knots=5)},
+        ("x", "g"),
+        sample_weight=np.ones(n),
+    )
+
+
+def test_the_absorption_floor_reads_dimensions_and_never_a_measured_residual():
+    """Issue #280: the cut must not be a function of the arithmetic.
+
+    **THIS IS THE WHOLE FIX AND IT IS ASSERTED AS AN INVARIANT, NOT AS A
+    VALUE.**  The floor used to be ``sqrt(||sum_q Q_q' Q_q - I_r||_2)``, a
+    measured round-off residual, and on the starved pair below it therefore
+    spanned 9.969e-07 to 1.340e-06 -- a factor of 1.344 -- across seven
+    ``OPENBLAS_CORETYPE`` microkernels, while the singular value it was
+    compared against agreed to ten significant digits.  Five CPUs kept a
+    direction that two dropped, worth 0.047 df against a continuous channel of
+    1.5e-04 df.
+
+    What is checked here is that the floor cannot do that any more, and it is
+    checked the way that survives a refactor: the function has no argument a
+    measured quantity could enter through, and its value is the module's own
+    rank convention on the Gram scale.  A floor that reads any residual fails
+    this whatever its formula.
+    """
+    from superglm.screening._structured import _absorption_floor
+
+    eps = float(np.finfo(np.float64).eps)
+    for n_terms, rank in ((1, 1), (1, 2), (56, 9), (78, 14), (4400, 12)):
+        floor = _absorption_floor(n_terms, rank)
+        assert np.isfinite(floor) and floor > 0.0, (n_terms, rank, floor)
+        assert _absorption_floor(n_terms, rank) == floor
+        d = max(n_terms, rank, 1)
+        assert floor == pytest.approx(np.sqrt(d * eps) + d * eps, rel=1e-15, abs=0.0)
+
+    # RED against the unfixed code, where this reads the pair's own residual
+    # and lands between 9.969e-07 and 1.340e-06 depending on the microkernel.
+    p = spline_cat_moments(*_structured_inputs(_issue_280_starved_pair()))
+    L, k_a = p.dims
+    geometry = _profile(p)
+    assert _absorption_floor(L * k_a, geometry.overlap_rank) == pytest.approx(
+        1.1151007e-07, rel=1e-6, abs=0.0
+    )
+    # The residual that used to set it is still measured, and still varies over
+    # the range below.  This pins that the two are now UNRELATED, not that the
+    # residual is small.
+    assert 9.9e-13 <= geometry.orthonormality <= 1.8e-12, geometry.orthonormality
+
+
+def test_the_closure_residual_refuses_outside_the_bound_its_own_route_allows():
+    """Issue #280: the residual is a diagnostic now, so it has to diagnose.
+
+    ``sum_q Q_q' Q_q = I_r`` is the identity every bound in this module rests
+    on.  Demoting its residual out of the cut would leave nothing checking it,
+    so :func:`_orthonormality_bound` is what it is held to instead.
+
+    **THE BOUND CARRIES A CONDITION NUMBER AND THAT IS THE CLAIM WORTH
+    TESTING.**  Higham's ``O(m rank^(3/2) eps)`` assumes ``Q`` is a product of
+    stored reflectors; these ``Q_q`` are ``R_q V Sigma^-1``, so it does not
+    apply.  Measured over this suite's whole bank x 14 configurations the
+    residual reaches **2077x** the plain form and **0.408x** the conditioned
+    one -- so a plain bound would refuse real pairs and the conditioned one
+    never does.  Both halves are pinned below.
+    """
+    import superglm.screening._structured as st
+
+    p = spline_cat_moments(*_structured_inputs(_starved_bs_pair()))
+    L, k_a = p.dims
+    geometry = _profile(p)
+    n_terms, rank = int(L) * int(k_a), geometry.overlap_rank
+    eps = float(np.finfo(np.float64).eps)
+    bound = st._orthonormality_bound(n_terms, rank, geometry.conditioning)
+
+    # The worst-conditioned geometry in the bank clears the bound it is held
+    # to, and BLOWS the plain one by two orders -- which is the whole argument
+    # for the ``kappa`` factor, as a measurement rather than an appeal.
+    assert geometry.orthonormality <= bound, (geometry.orthonormality, bound)
+    plain = st._ORTHONORMALITY_FACTOR * max(n_terms, rank, 1) * eps
+    assert geometry.orthonormality > 100.0 * plain, (geometry.orthonormality, plain)
+
+    # RED if the refusal is removed: a closure this far out is not roundoff.
+    # The residual is forced past the bound at the one call that measures it,
+    # which is the ``(rank, rank)`` 2-norm inside ``_profile``.
+    real_norm = np.linalg.norm
+
+    def fake_norm(a, *args, **kw):
+        if np.ndim(a) == 2 and np.shape(a) == (rank, rank):
+            return 2.0 * bound
+        return real_norm(a, *args, **kw)
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(np.linalg, "norm", fake_norm)
+        with pytest.raises(st._UnstableStructuredEDFError, match="is not I_r"):
+            st._profile(p)
+    finally:
+        monkey.undo()
+
+
+def test_an_undecided_deflation_count_refuses_rather_than_publishing_a_coin_flip():
+    """Issue #280 / #329: a rank read next to the cut is not an answer.
+
+    Foster & Davis, *ACM TOMS* 40(1), Article 7 (2013), sec. 1: a numerical
+    rank is well defined only where the tolerance "lies between
+    ``sigma_(r+1)`` and ``sigma_r``, and is near neither", and their routines
+    "return a warning" where their bounds cannot confirm one.  Golub & Van
+    Loan, *Matrix Computations*, 4th ed., sec. 5.4.1 states the same as a
+    caution: confidence in a numerical rank "depends on the gap".
+
+    Both directions are pinned, because a guard that only ever passes is not
+    evidence of anything: the margin is reported from
+    :func:`_filter_factor_sum` and is large on a pair with a gap, and
+    :func:`_evaluate` refuses when it is made small.
+    """
+    import superglm.screening._structured as st
+
+    # A pair with a real gap -- one direction at 1e-06 against a floor of
+    # 2.1e-08 -- so the margin is enormous and nothing refuses.
+    p = spline_cat_moments(*_near_absorbed_cells())
+    geometry = _profile(p)
+    margin = st._filter_factor_sum(p, geometry, 1e-16)[3]
+    assert margin > 10.0, margin
+    assert st._evaluate(p, geometry, 1e-16)[1] > 0.0
+
+    # RED if the refusal is removed: the same evaluation with the margin driven
+    # inside the threshold has to raise, and to name the margin.
+    real_sum = st._filter_factor_sum
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(
+            st,
+            "_filter_factor_sum",
+            lambda *a, **k: (*real_sum(*a, **k)[:3], 0.5 * st._ABSORPTION_MARGIN),
+        )
+        with pytest.raises(st._UnstableStructuredEDFError, match="separates the border"):
+            st._evaluate(p, geometry, 1e-16)
+    finally:
+        monkey.undo()
+
+    # And on #280's own pair, whose border spectrum has NO gap -- 4.9e-05,
+    # 3.9e-06, 1.0e-06, 2.7e-07, 1.7e-07, 1.0e-07, 5.5e-08 -- the guard is
+    # live.  Measured 2 of 601 on every one of the 14 configurations swept;
+    # asserted as a range because the count is how many log-spaced samples land
+    # inside a fixed band, which is not a property this suite gets to pin.
+    starved = spline_cat_moments(*_structured_inputs(_issue_280_starved_pair()))
+    starved_geometry = _profile(starved)
+    L, _ = starved.dims
+    tr_S = float(np.trace(starved.S_a)) * L
+    scale = max(starved.profiled_trace, 1e-300) / max(tr_S, 1e-300)
+    refused = 0
+    for lam in np.geomspace(1e-10 * scale, 1e10 * scale, 601):
+        try:
+            st._evaluate(starved, starved_geometry, float(lam))
+        except st._UnstableStructuredEDFError:
+            refused += 1
+    assert 1 <= refused <= 8, refused
+
+
+def test_the_starved_pair_that_flipped_route_across_cpus_now_publishes_on_all_of_them():
+    """Issue #280's caller-visible defect: the path flip, not the value.
+
+    At master this pair refuses on 4 of 7 microkernels -- ``screening_ops``
+    then sets ``allow_dense = True`` and rescores it on the DENSE track, which
+    #257 measures as diverging by up to 3.00 df -- and publishes on 3.  The
+    same pair, the same data, two different algorithms depending on the
+    instruction set.
+
+    Measured after this change over 7 ``OPENBLAS_CORETYPE`` microkernels x 2
+    thread settings: **14 of 14 publish**, and the absorption floor is
+    bit-identical on all fourteen.  What is asserted here is the part one CI
+    run can see -- that the structured route publishes at all -- since a
+    microkernel sweep is not something a test can run.
+
+    **THE RUNG IS NOT ASSERTED TO BE THE SEARCHED ONE, AND THE FIRST VERSION OF
+    THIS TEST WRONGLY WAS.**  Twelve of the fourteen bisect to 4.0 within
+    ``_EDF_TOL``; NEHALEM's ``edf`` at maximum penalty is 4.012322, so on that
+    microkernel the budget falls OUTSIDE the bracket and the ladder clamps to
+    the nearest edge and reports what it achieved -- which is
+    :func:`structured_ladder`'s documented contract and not a failure.  The
+    bound below is therefore set from the spread: ``edf0`` runs 3.999999684 to
+    4.012321787 over the fourteen, a span of 1.2322e-02 df against the 3.858 df
+    this issue was filed on, and 0.05 leaves 4.1x on the worst of them.
+
+    RED against the unfixed code, which returns ``None`` here on this box.
+    """
+    from superglm.screening._structured import structured_ladder
+
+    p = spline_cat_moments(*_structured_inputs(_issue_280_starved_pair()))
+    rungs = structured_ladder(p, budgets=(4.0,))
+    assert rungs is not None, "the structured route refused the pair it now scores"
+    assert len(rungs) == 1
+    assert abs(rungs[0].edf0 - 4.0) <= 0.05, rungs[0]
+    assert np.isfinite(rungs[0].statistic) and rungs[0].lambda0 > 0.0, rungs[0]

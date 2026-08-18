@@ -115,18 +115,33 @@ module is a boundary moving underneath an unstated choice.  It is:
      factor, and the error is a whole degree of freedom per direction rather
      than a rounding.  So the cuts that decide which side a direction is on
      are DOCUMENTED ERROR BOUNDS and not chosen tolerances:
-     :func:`_absorption_floor`, :func:`_penalty_root`,
-     :func:`_psd_clip_allowance`.
-     **THAT LIST IS THE DERIVED ONES AND IT IS NOT ALL OF THEM.**  Three more
-     cuts upstream decide which directions ever reach ``keep``, and they are
+     :func:`_penalty_root`, :func:`_psd_clip_allowance`, and
+     :func:`_orthonormality_bound` -- which is a bound that only ever REFUSES
+     and never cuts, and that distinction is the subject of #280.
+     **THAT LIST IS THE DERIVED ONES AND IT IS NOT ALL OF THEM.**  Four more
+     cuts decide which directions ever reach ``keep``, and they are
      CONVENTIONS rather than bounds: :func:`_profile`'s ``max(shape) eps
      s_max`` (the ``matrix_rank`` convention, which fixes ``r`` and hence the
      size of ``H``), :func:`_block_inverse_factors`' cut at the same
-     convention, and :func:`_representative_projection`'s ``sqrt(k eps)``,
-     which its own docstring describes as carried from the DENSE path for
-     cross-path agreement -- clause 5 in miniature, and the one place this
-     module adopts another route's policy on purpose.  Anyone extending
-     clause 3 has to say which of the two kinds a new cut is.
+     convention, :func:`_absorption_floor`'s ``sqrt(d eps)``, which is that
+     same convention carried onto the Gram scale, and
+     :func:`_representative_projection`'s ``sqrt(k eps)``, which its own
+     docstring describes as carried from the DENSE path for cross-path
+     agreement -- clause 5 in miniature, and the one place this module adopts
+     another route's policy on purpose.  Anyone extending clause 3 has to say
+     which of the two kinds a new cut is.
+     **AND #280 MOVED ONE BETWEEN THE TWO LISTS, WHICH IS WHY THE DISTINCTION
+     EARNS ITS PLACE HERE.**  :func:`_absorption_floor` was in the derived
+     list, on the strength of ``sqrt`` of a MEASURED orthonormality residual.
+     A measured residual is a random variable and not a bound: across seven
+     ``OPENBLAS_CORETYPE`` microkernels it spans 1.81x and the cut built from
+     it 1.344x, and on the starved pair it decided a deflation between
+     singular values that agreed to ten digits.  Replacing it with its own a
+     priori bound was implemented and MEASURED and is worse -- 4e+06x loose on
+     ``_near_absorbed_cells``, where it deflates that pair's only direction --
+     so the cut is a stated convention and the bound refuses instead.  A cut
+     that has to be reproducible across machines is not automatically a cut
+     that can be derived, and this module now says which of the two it has.
   4. **WHERE THE CUT ITSELF IS UNDECIDABLE, SAY SO RATHER THAN PICK.**  A
      penalty residue below ``eigh``'s own error bar has no float64 answer at
      all; :func:`_penalty_root` takes it at its MAGNITUDE, which is the only
@@ -588,6 +603,36 @@ _PSD_CLIP_FACTOR = 8.0
 _EDF_ABSOLUTE_DUST = np.finfo(np.float64).eps ** 2
 _MAX_BISECT = 200
 _TRACE_CHUNK_DOUBLES = 262_144
+
+# Safety factor in :func:`_orthonormality_bound`.  Set from a SWEEP and not
+# from one run: 1382 ``_profile`` calls over this suite's whole fixture bank,
+# repeated across 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings, put
+# the measured residual between 0 and 0.408 of ``n eps kappa``.  2.0 leaves
+# 4.90x of headroom on the worst of the 14 configurations.  The literature's
+# dimensional factor for the ROUTE THIS IS NOT is ``m rank^(3/2)``; folding
+# ``rank^(3/2)`` into this constant is verified over the ranks the bank
+# reaches, 1 to 24, and NOT beyond -- see :func:`_orthonormality_bound`.
+_ORTHONORMALITY_FACTOR = 2.0
+
+# Smallest ratio between a singular value and the absorption floor at which
+# the deflation count is reported as decided.  Inside it the two sides of the
+# cut are not separated and :func:`_evaluate` refuses rather than publishing an
+# ``edf`` that a backward error of its own size would have changed.  Foster &
+# Davis, *ACM TOMS* 40(1), Article 7 (2013), sec. 1: a numerical rank is
+# "well defined" only when the tolerance "lies between ``sigma_(r+1)`` and
+# ``sigma_r``, and is near neither"; sec. 2 is their certify-or-warn shape.
+#
+# **SET FROM A SWEEP AND FROM BOTH DIRECTIONS, NOT FROM ONE RUN.**  It has to
+# clear what the singular values themselves do across machines -- measured at
+# 4.6e-11 relative over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread
+# settings on #280's starved pair -- and it has to stay below what would
+# refuse pairs this module scores today.  1.01 is 2e+08x the first.  Against
+# the second, over the bracket: on that pair it refuses 2 of 601 lambdas and
+# cuts the worst surviving upward step in ``edf`` from 0.597 to 0.057 df, and
+# on ``_starved_bs_pair`` it refuses 0 of 200.  1.5 -- this file's dense-path
+# count margin -- was measured first and refuses 73 of 601 and 34 of 200,
+# which reds three of this module's own publish-don't-refuse fixtures.
+_ABSORPTION_MARGIN = 1.01
 
 # The most steps one rung's bisection can take.  It halves the log of a
 # bracket spanning 1e20 and stops when the two ends are within 1e-12 of each
@@ -1546,7 +1591,8 @@ class _PairGeometry:
     coupling: NDArray  # (k_a, r)   R_q -> the shared overlap coordinates
     base_gram: NDArray  # (., r)    factor of sum_b Q_b' Q_b, unemitted levels
     root_penalty: NDArray  # (., k_a)  rootS' rootS = the PSD part of S_a
-    orthonormality: float  # ||sum_q Q_q' Q_q - I_r||_2, the deflation's floor
+    orthonormality: float  # ||sum_q Q_q' Q_q - I_r||_2, MEASURED; a diagnostic
+    conditioning: float  # s_max / s_min over the RETAINED overlap basis
     overlap_rank: int  # r
     ceiling: float  # L * k_a
 
@@ -1606,8 +1652,19 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
         cut = max(row_factor.shape) * np.finfo(np.float64).eps * float(singular[0])
         rank = int(np.count_nonzero(singular > cut))
         basis = right[:rank].T / singular[:rank]
+        # The RETAINED basis's own conditioning, which is what every downstream
+        # bound on the closure identity is proportional to: ``basis`` divides
+        # column ``j`` by ``singular[j]``, so an ``eps``-sized error in
+        # ``row_factor`` reaches ``Q_q = R_q basis`` amplified by
+        # ``singular[0] / singular[rank - 1]``.  Both ends sit ABOVE the rank
+        # cut by construction, so this is not the ratio of a magnitude to the
+        # noise -- on #280's starved pair the smaller end clears the cut by
+        # 6.7e+08 -- and it is reproducible where the measured residual is not.
+        # See :func:`_orthonormality_bound`.
+        conditioning = float(singular[0] / singular[rank - 1]) if rank else 1.0
     else:
         rank = 0
+        conditioning = 1.0
         basis = np.zeros((width, 0), dtype=np.float64)
 
     # ``U_eff = g - Psi' (Q' zw)``, the score's Frisch-Waugh-Lovell residual on
@@ -1694,6 +1751,28 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
             carried = p.R[start : start + chunk] @ coupling
             closure += np.einsum("lkr,lks->rs", carried, carried, optimize=True)
     defect = float(np.linalg.norm(closure - np.eye(rank), 2)) if rank else 0.0
+    # **THE RESIDUAL IS NOW A DIAGNOSTIC AND NOT A CUT.**  Every bound this
+    # module rests on -- ``Psi N^+ Psi' <= I``, hence ``H >= 0``, hence the
+    # deflation -- is the closure identity in disguise, so the residual is
+    # still worth measuring: what changed with #280 is that the ANSWER no
+    # longer depends on its value, only on whether it stays inside the bound
+    # its own arithmetic predicts.  Outside that, the identity failed by more
+    # than round-off can explain and no floor derived from it means anything.
+    #
+    # This is not a singularity test and does not become one: clause 2 forbids
+    # that, and the bound is proportional to the retained basis's conditioning
+    # precisely so that a badly conditioned -- but correctly assembled -- pair
+    # widens the bar instead of tripping it.  Measured over 1382 profiles x 14
+    # microkernel/thread configurations, the worst observed residual is 0.408
+    # of this bound, so nothing in this suite's bank reaches it.
+    bound = _orthonormality_bound(L * k_a, rank, conditioning)
+    if defect > bound:
+        raise _UnstableStructuredEDFError(
+            f"the overlap basis closes to {defect}, which is outside the "
+            f"{bound} its own round-off allows at a conditioning of {conditioning}: "
+            "sum_q Q_q' Q_q is not I_r, so H is not the Schur complement the "
+            "deflation reads it as"
+        )
 
     return _PairGeometry(
         U_eff=U_eff,
@@ -1701,6 +1780,7 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
         base_gram=base_gram,
         root_penalty=root_penalty,
         orthonormality=defect,
+        conditioning=conditioning,
         overlap_rank=rank,
         ceiling=float(L * k_a),
     )
@@ -1807,45 +1887,138 @@ def _psd_factor(M: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     return Q * np.sqrt(np.where(w > 0.0, w, 0.0))[..., None, :], clipped, top
 
 
-def _absorption_floor(n_terms: int, rank: int, defect: float) -> float:
+def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float:
+    """A priori bound on ``||sum_q Q_q' Q_q - I_r||_2``.
+
+    **THIS EXISTS TO REFUSE, NEVER TO CUT.**  :func:`_absorption_floor` used
+    to be ``sqrt`` of the MEASURED residual, which is what let the CPU decide a
+    published ``edf`` (issue #280).  The fix is not to bound the residual and
+    cut at the bound -- that is measurably worse, see that function -- it is to
+    stop reading the residual in the answer at all.  What is left for the
+    residual to do is the job a round-off quantity can honestly do: say whether
+    the identity every bound in this module rests on held to the accuracy its
+    own arithmetic predicts.  Below the bound, nothing; above it, the closure
+    failed and no deflation reading ``H`` means anything.
+
+    **WHY THE BOUND CARRIES A CONDITION NUMBER, WHICH IS THE PART A READER
+    WILL WANT TO ARGUE WITH.**  Householder QR loses orthogonality at
+    ``O(m rank^(3/2) eps)`` with NO condition-number term -- Higham,
+    *Accuracy and Stability of Numerical Algorithms*, 2nd ed. (SIAM 2002),
+    Lemma 19.3 and eq. (19.13), put into the ``||Q' Q - I||_F`` form by
+    Yamamoto, Nakatsukasa, Yanagisawa & Fukaya, *ETNA* 44:306-326 (2015),
+    sec. 5.1.1.  **That bound assumes ``Q`` is a product of stored reflectors,
+    and these ``Q_q`` are not.**  They are ``R_q V Sigma^-1`` for the overlap
+    basis :func:`_profile` builds, i.e. the ``A R^-1`` route, whose
+    orthogonality error is ``O(eps kappa)`` instead.  Measured over the whole
+    fixture bank, 1382 profiles x 14 configurations:
+
+    * against ``n_terms eps`` -- the form a reader reaching for Higham would
+      write down -- the residual reaches **2077x the bound**;
+    * against ``n_terms eps kappa`` it reaches **0.408x**, and never exceeds it.
+
+    So the plain form is not a bound on this route and the conditioned one is.
+    Confirmed independently rather than only fitted: one Newton step of
+    re-orthonormalization on the basis moves the residual from 431 to 210 to
+    155 ``n_terms eps`` on the worst fixture and STALLS -- it cannot be driven
+    below ``n_terms eps kappa`` because that is the accuracy at which the
+    closure can be evaluated at all, so the measured residual on that pair sits
+    entirely inside its own error bar (measured 80-144 units, bar 8384).
+
+    **WHAT IS DERIVED AND WHAT IS A CONVENTION, SAID PLAINLY.**  The FORM is
+    derived: linear in the stacked row count, linear in ``kappa``.  The
+    CONSTANT is not available from the literature -- Higham writes it as "a
+    small integer constant whose exact value is unimportant" (sec. 3.4,
+    eq. (3.8)) and Yamamoto et al. as "a small positive constant" -- so
+    :data:`_ORTHONORMALITY_FACTOR` is set from the measured population with
+    stated headroom, in the same spirit as LAPACK's ``RCOND`` default and
+    ``numpy.linalg.matrix_rank``'s ``max(shape) eps``, which are conventions
+    and not worst-case theorems.  ``rank^(3/2)`` is folded into it and is
+    verified only over the ranks this bank reaches, 1 to 24.
+
+    What this buys is REPRODUCIBILITY, not correctness: ``conditioning`` is
+    read off singular values that sit far above the rank cut, and over the same
+    14 configurations it varies by at most **1.7e-04 relative** against the
+    measured residual's 1.81x.  It is not bit-identical and this docstring does
+    not claim it is.
+    """
+    eps = float(np.finfo(np.float64).eps)
+    return (
+        _ORTHONORMALITY_FACTOR
+        * max(int(n_terms), int(rank), 1)
+        * eps
+        * max(float(conditioning), 1.0)
+    )
+
+
+def _absorption_floor(n_terms: int, rank: int) -> float:
     """Cut below which a singular value of ``H``'s factor is not resolvable.
 
-    **CLAUSE 3 OF THE SINGULAR-PENCIL POLICY, AND ONE OF ITS DERIVED CUTS.**
-    This is what separates a direction the pencil does not resolve -- where
-    clause 1 contributes zero -- from one it does, where dropping it costs a
-    whole degree of freedom.  Both terms below are dimensions or measured
-    residuals, which is what clause 3 requires of a cut in this position.
+    **CLAUSE 3, AND IT IS A CONVENTION AND NOT A BOUND -- WHICH THAT CLAUSE
+    REQUIRES BE SAID OUT LOUD.**  This is what separates a direction the pencil
+    does not resolve, where clause 1 contributes zero, from one it does, where
+    dropping it costs a whole degree of freedom.  Until #280 it was
+    ``sqrt(measured ||sum_q Q_q' Q_q - I_r||_2)``, which made a published
+    ``edf`` a function of the CPU: measured on that issue's starved pair, all
+    six thread pools pinned and ``OPENBLAS_CORETYPE`` the only variable, the
+    residual spans a factor of **1.81** across seven microkernels and the cut
+    built from it a factor of **1.344**, while the singular value it is
+    compared against agrees to **ten significant digits**.  The quantity was
+    reproducible; the cut was not.  Every term below is now a DIMENSION, so
+    the cut is a function of integers and ``eps`` alone and is bit-identical on
+    all fourteen configurations swept.
 
     ``H = I_r - Psi N^+ Psi'`` is delivered here as ``R_H' R_H`` with ``R_H``
     assembled by orthogonal transformations only, so the quantity being cut is
     a SINGULAR VALUE and not an eigenvalue of a difference.  ``H``'s exact
-    spectrum lies in ``[0, 1]``, so the scale is 1 and the cut is absolute.
+    spectrum lies in ``[0, 1]``, so ``sigma_max(R_H) <= 1`` and an ABSOLUTE cut
+    coincides with the relative one every source states -- LAPACK's
+    ``RCOND * sigma_max`` (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, and
+    ``DGELSD``'s own documentation, where ``RCOND < 0`` means machine
+    precision), and Golub & Van Loan, *Matrix Computations*, 4th ed. (JHU
+    Press 2013), sec. 5.4.1: "the tolerance should be consistent with the
+    machine precision, e.g. ``delta = u ||A||_inf``".  Said because nothing in
+    the literature blesses an absolute cut on its own.
 
-    Two things bound how far float64 can move it, and both are measured:
+    The dimensional factor is the one this module already uses at its other
+    two rank decisions -- ``max(shape) eps``, the ``matrix_rank`` convention
+    of :func:`_profile` and :func:`_block_inverse_factors` -- carried onto the
+    Gram scale: a floor of ``d eps`` on an eigenvalue of ``H`` is a floor of
+    ``sqrt(d eps)`` on a singular value of ``R_H`` (Weyl; Golub & Van Loan
+    4th ed., Cor. 2.4.4 and sec. 8.6.2).  **No new constant is introduced.**
+    The additive ``d eps`` is the TSQR's own term: those blocks DO come from
+    stored Householder reflectors -- ``numpy.linalg.qr`` and
+    :func:`_reduce_row_factors` -- so Higham, *Accuracy and Stability of
+    Numerical Algorithms*, 2nd ed. (SIAM 2002), eq. (19.13) applies to that
+    half with no condition number.
 
-    * ``defect`` is ``||sum_q Q_q' Q_q - I_r||_2``.  ``sum_q X_q' X_q +
-      Gb' Gb`` is ``H`` only because that sum is ``I_r``, so the residual is
-      subtracted from ``H``'s eigenvalues one for one -- and an eigenvalue
-      floor of ``defect`` is a singular-value floor of ``sqrt(defect)``.
-    * the TSQR that assembles ``R_H`` over ``L`` blocks is backward stable
-      with ``||R_H|| <= 1``, so its singular values carry an absolute error of
-      order ``L k_a eps``.
+    **THE HONEST PART: A DERIVED BOUND ON THE CLOSURE WAS TRIED HERE FIRST AND
+    IS NOT WHAT THIS RETURNS.**  The residual's a priori bound is
+    :func:`_orthonormality_bound`, and ``sqrt`` of it is the cut this position
+    would take if the closure's uncertainty were the only consideration.
+    Measured, it is 4e+06x looser than the residual on ``_near_absorbed_cells``
+    and deflates that pair's ONLY direction -- ``edf`` reads 1.0e-12 where a
+    closed form gives 0.0099 and the current code reproduces it to 2.2e-16.
+    A bound that publishes a wrong number is not an improvement on a
+    measurement that publishes a right one, so the bound stays where it can
+    only refuse (:func:`_profile`) and the cut is the convention above.
 
-    Measured, the gap this has to land in is enormous: on the starved fixture
-    at the bracket's low edge ``R_H``'s singular values are ``1.00, 0.849,
-    0.664`` and then ``3.4e-13`` and below -- twelve orders in ``sigma``,
-    twenty-four in ``H`` -- where the SAME quantity taken as ``I_r`` minus a
-    Gram separates only ``0.44`` from ``7e-13``.  Nothing is fitted; both
-    terms are dimensions or measured residuals.
+    **WHAT THIS COSTS, MEASURED RATHER THAN ASSUMED.**  The convention is
+    TIGHTER than the residual it replaces -- 8.9x on #280's starved pair, 34.6x
+    on ``_starved_bs_pair`` -- so it keeps directions the old cut dropped, and
+    inverting a smaller singular value makes ``edf(lambda)`` rougher: over 200
+    log-spaced lambdas the ``bs`` pair's worst upward step goes from 6.9e-05 to
+    **6.3e-02 df**.  That is the trade this change makes, and
+    :data:`_ABSORPTION_MARGIN` is what refuses where it bites.
     """
     eps = float(np.finfo(np.float64).eps)
-    return float(np.sqrt(max(defect, 0.0))) + max(int(n_terms), int(rank), 1) * eps
+    dimension = max(int(n_terms), int(rank), 1)
+    return float(np.sqrt(dimension * eps)) + dimension * eps
 
 
 def _filter_factor_sum(
     p: SplineCatPair, geometry: _PairGeometry, lam: float
-) -> tuple[float, float, float]:
-    """``(T, edf, clip bound)`` at one lambda, both quantities from ONE QR.
+) -> tuple[float, float, float, float]:
+    """``(T, edf, clip bound, cut margin)`` at one lambda, all from ONE QR.
 
     ``T = U_eff' A(lambda)^+ U_eff`` and ``edf = tr(A(lambda)^+ V_eff)`` are
     two readings of the same pseudo-inverse, so they are taken off the same
@@ -2045,7 +2218,24 @@ def _filter_factor_sum(
         # not a constant: dropping a direction the pencil DOES resolve is
         # wrong by a whole degree of freedom.
         singular, right = np.linalg.svd(border)[1:]
-        keep = singular > _absorption_floor(L * k_a, r, geometry.orthonormality)
+        floor = _absorption_floor(L * k_a, r)
+        keep = singular > floor
+        # BOTH SIDES OF THE CUT, REPORTED RATHER THAN ASSUMED.  The count is
+        # only a property of the pair where the tolerance "lies between
+        # ``sigma_(r+1)`` and ``sigma_r``, and is near neither" -- Foster &
+        # Davis, *ACM TOMS* 40(1), Article 7 (2013), sec. 1, whose whole
+        # subject is that a rank read at a tolerance near a singular value
+        # moves when the tolerance or the matrix does.  Golub & Van Loan,
+        # *Matrix Computations*, 4th ed. (JHU Press 2013), sec. 5.4.1 states
+        # the same as a warning: the confidence in a numerical rank "depends
+        # on the gap".  An empty side scores ``inf``, which is the safe
+        # direction; :func:`_evaluate` owns the refusal.
+        resolved_side = singular[keep]
+        absorbed_side = singular[~keep]
+        margin = min(
+            float(resolved_side.min() / floor) if resolved_side.size else np.inf,
+            float(floor / absorbed_side.max()) if absorbed_side.size else np.inf,
+        )
         occupied = singular * singular
         free = (1.0 - singular) * (1.0 + singular)
         safe = np.where(keep, occupied, 1.0)
@@ -2065,6 +2255,7 @@ def _filter_factor_sum(
     else:
         resolved = extended = coupled = np.zeros((0, 0), dtype=np.float64)
         deflation = 1.0
+        margin = np.inf
 
     # ``||H^(+/2) v||^2`` for ``v = Psi N^+ U_eff``, taken through ``H^+``'s
     # own spectral factor so the border's share of the statistic is a squared
@@ -2139,7 +2330,7 @@ def _filter_factor_sum(
         0.0,
     )
     uncertified += float(np.sum(np.square(geometry.base_gram)) * float(excess))
-    return statistic, total + correction, uncertified
+    return statistic, total + correction, uncertified, margin
 
 
 def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[float, float]:
@@ -2161,7 +2352,30 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     two level-sized stacks (``Ginv`` and ``Y``) it held while the filter pass
     was allocating its own.
     """
-    T, edf, uncertified = _filter_factor_sum(p, geometry, lam)
+    T, edf, uncertified, margin = _filter_factor_sum(p, geometry, lam)
+
+    # **THE DEFLATION COUNT IS ONLY AN ANSWER WHERE THE CUT SEPARATES.**  #280
+    # measured a direction sitting 1.00489x above the floor on one microkernel
+    # and 1.018x below it on the other six: the same pair, the same data, and
+    # the count decided by the instruction set.  Making the floor derived
+    # (:func:`_orthonormality_bound`) removes the floor's own variation, but it
+    # cannot move a singular value away from wherever the floor lands, and a
+    # cut this module cannot separate is a cut this module should not publish
+    # through.  Foster & Davis, *ACM TOMS* 40(1), Article 7 (2013) is the
+    # published shape: their routines "estimate upper and lower bounds on
+    # certain singular values to determine whether the numerical ranks ...
+    # appear to be correct", and where the bounds cannot confirm it they return
+    # a warning rather than a rank.  A REFUSAL IS THE RIGHT ANSWER HERE AND NOT
+    # A FAILURE: ``screening_ops`` reads it as the pair-refusal signal and the
+    # dense track scores the pair.  It is also unconditional in lambda -- one
+    # rung of a ladder can refuse while the rest publish, which is exactly the
+    # contract :func:`structured_ladder` already has for an unstable rung.
+    if margin < _ABSORPTION_MARGIN:
+        raise _UnstableStructuredEDFError(
+            f"the absorption floor separates the border's spectrum by only {margin}x "
+            f"at lambda={lam}, inside the {_ABSORPTION_MARGIN}x this module requires "
+            "of a count: the deflated rank is not decided by the pair"
+        )
 
     # Every term of the sum is a filter factor ``a_j / (a_j + lambda s_j)``
     # with both parts nonnegative, so the sum lies in ``[0, L * k_a]`` for
