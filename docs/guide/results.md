@@ -282,7 +282,12 @@ past its last knot is unbounded — 1581× the correct factor twenty-one years p
 real age curve. Under the default `extrapolation="clip"` the block emits a constant leading and a
 constant trailing row, so "match an interval and evaluate it" is correct outside the training range
 too. Under `extrapolation="error"` there are no unbounded rows at all and a value outside the knot
-range matches nothing, which is the answer the model itself gives. `extrapolation="extend"` is
+range matches nothing, which is the answer the model itself gives — with one detail in the key:
+every row reads `[lower, upper)` except the last, which reads `[lower, upper]`. That term declines
+to price *above* the boundary knot, not *at* it, and `model.predict` rates the boundary; since the
+boundary is the observed maximum whenever knots are data-driven, a right-open final key would leave
+a row of the training frame unrateable by a table claiming to be exact. **Read the closing
+bracket.** `extrapolation="extend"` is
 refused unless you pass `allow_unbounded_extrapolation=True`, because it exports a tariff with no
 upper bound; exported with that acknowledgement its tails clip where the model extends, since an
 unbounded interval has no width and the normalised `u` does not exist there.

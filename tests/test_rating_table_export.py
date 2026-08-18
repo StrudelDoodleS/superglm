@@ -41,6 +41,7 @@ from superglm.export.rating_tables import (
     _PPFORM_COLUMNS,
     OffsetRelationError,
     RatingTablePayload,
+    _require_usable_relativities_export,
     build_rating_table_payload,
 )
 from superglm.export.summary import (
@@ -920,13 +921,22 @@ def _interval_bounds(labels) -> tuple[np.ndarray, np.ndarray]:
     already carries both bounds exactly and a separate pair of float columns could
     only ever disagree with it.  Parsing here is therefore not a convenience -- it
     is the operation a consumer performs, so the tests exercise the same path.
+
+    The closing bracket is part of that key: every row is right-open except the
+    last row of an ``extrapolation="error"`` block, which is closed so the
+    boundary knot has a row.  ``_interval_closed`` reads it.
     """
-    parsed = [re.match(r"^\[(.+), (.+)\)$", str(label)) for label in labels]
+    parsed = [re.match(r"^\[(.+), (.+)[)\]]$", str(label)) for label in labels]
     assert all(parsed), f"every ppform key must read back as an interval: {list(labels)}"
     return (
         np.array([float(m.group(1)) for m in parsed], dtype=np.float64),
         np.array([float(m.group(2)) for m in parsed], dtype=np.float64),
     )
+
+
+def _interval_closed(labels) -> np.ndarray:
+    """Which rows include their upper bound, read off the bracket."""
+    return np.array([str(label).endswith("]") for label in labels], dtype=bool)
 
 
 def test_the_ppform_key_carries_its_bounds_back_exactly():
@@ -3305,3 +3315,95 @@ def test_export_weights_are_validated_whether_or_not_anything_is_binned(weight, 
     for kind in ("binned", "ppform"):
         with pytest.raises(ValueError, match=message):
             build_rating_table_payload(model, X, y, sample_weight=weights, continuous_kind=kind)
+
+
+def test_error_mode_ppform_rates_the_boundary_knot_the_model_rates():
+    """A right-open final key leaves the training maximum matching no row.
+
+    extrapolation="error" declines to price ABOVE the boundary knot. It does
+    not decline to price AT it -- model.predict returns a finite factor there --
+    and the boundary knot is the observed maximum whenever knots are
+    data-driven, so it is a row of the training frame. With every key
+    [lower, upper) the block could not rate a value the model rates, which is a
+    table claiming exactness failing on its own fitted data.
+    """
+    rng = np.random.default_rng(7)
+    n = 800
+    age = rng.uniform(18.0, 80.0, n)
+    X = pd.DataFrame({"age": age})
+    y = rng.poisson(np.exp(-1.0 + 0.02 * age))
+    model = SuperGLM(features={"age": Spline(n_knots=6, extrapolation="error")}, family="poisson")
+    model.fit(X, y)
+
+    payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+    lower, upper = _interval_bounds(block.table.iloc[:, 0])
+    closed = _interval_closed(block.table.iloc[:, 0])
+
+    # Exactly one closed key, and it is the last: closing any other would make
+    # two rows match the same value.
+    assert closed.tolist() == [False] * (len(closed) - 1) + [True]
+    assert np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
+
+    boundary = float(upper[-1])
+    assert np.isfinite(model.predict(pd.DataFrame({"age": [boundary]}))[0]), (
+        "the model rates its own boundary knot"
+    )
+    assert int(np.sum(age == boundary)) >= 1, "and a training row sits exactly on it"
+
+    # The consumer's matching rule, run literally.
+    row = int(np.searchsorted(lower, boundary, side="right") - 1)
+    assert row >= 0
+    assert boundary < upper[row] or (closed[row] and boundary <= upper[row]), (
+        "the boundary matches no exported row"
+    )
+    assert row == len(lower) - 1
+
+    # And a value above it still matches nothing, which is the model's answer.
+    above = float(np.nextafter(boundary, np.inf))
+    row_above = int(np.searchsorted(lower, above, side="right") - 1)
+    assert not (above < upper[row_above] or (closed[row_above] and above <= upper[row_above]))
+
+
+def test_a_ppform_interior_extremum_is_checked_by_the_usability_guard():
+    """Relativity is exp(a), the curve at u=0. The consumer evaluates all of it.
+
+    A cubic with ordinary endpoints can still cross exp(+/-500) at an interior
+    extremum, and on rows where another term cancels it the total-predictor
+    gate stays silent too -- the same cancellation argument the per-block guard
+    already makes, one level further down. Validating the printed column alone
+    validates each row's left edge and nothing else.
+
+    Driven through the emitted table rather than through a contrived fit,
+    because the guard's contract is over the NUMBERS the workbook carries: a
+    block whose published coefficients reach an unusable factor must be refused
+    whatever produced it.
+    """
+    model, X, y, w = _fit_export_model()
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+
+    # Untouched, the block is usable -- so the refusal below is caused by the
+    # excursion and not by anything the fixture already carried.
+    _require_usable_relativities_export(payload.main_effects, payload.interactions)
+
+    table = block.table.copy()
+    interior = next(
+        i for i in range(len(table)) if np.isfinite(_interval_bounds(table.iloc[:, 0])[1][i])
+    )
+    # Endpoints stay entirely ordinary: a is untouched, and b + c + d = 0 puts
+    # u = 1 back at exp(a). The excursion lives strictly inside the interval.
+    table.loc[table.index[interior], "b"] = 4000.0
+    table.loc[table.index[interior], "c"] = -4000.0
+    table.loc[table.index[interior], "d"] = 0.0
+
+    a = float(table["a"].iloc[interior])
+    assert abs(a) < 500.0, "the printed Relativity is inside the band"
+    assert abs(a + 4000.0 - 4000.0) < 500.0, "and so is the value at u = 1"
+    peak = a + 4000.0 * 0.5 - 4000.0 * 0.25
+    assert peak > 500.0, "while the interior extremum is not"
+
+    mutated = replace(block, table=table)
+    blocks = [mutated if b is block else b for b in payload.main_effects]
+    with pytest.raises(ValueError, match="cannot multiply by"):
+        _require_usable_relativities_export(blocks, payload.interactions)
