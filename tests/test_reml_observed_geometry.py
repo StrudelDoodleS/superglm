@@ -84,27 +84,70 @@ def test_ordinary_reml_curvature_classifier_requires_exact_proof() -> None:
         classify_reml_curvature(CustomGaussian(), IdentityLink())
 
 
-def test_a_tweedie_power_sweep_crosses_a_canonical_pair_at_one_interior_point() -> None:
+def test_a_tweedie_power_search_reaches_the_canonical_pair_it_cannot_avoid() -> None:
     """Why the W(rho) seam in `optimize_direct_reml` is not gated on curvature.
 
-    The link is fixed across a power search while ``p`` moves, so a PowerLink
-    model passes through the canonical pair at ``p == 1 - power`` -- a single
-    interior grid point where the curvature flips to "fisher" and no observed
-    geometry is built. Gating the seam on ``use_observed_geometry`` would hand
-    that one point a bare ``LinAlgError`` while both of its neighbours score
-    infeasible and route around it.
+    Tweedie + PowerLink is canonical wherever ``power == 1 - p``, and the link
+    is fixed while a search moves ``p``, so the curvature flips to "fisher"
+    there and no observed geometry is built. Gating the seam on
+    ``use_observed_geometry`` would make the same failure routable at one power
+    and fatal at another.
+
+    The bound case is the one that binds. ``_search_brent`` evaluates both
+    ``p_bounds`` outright before the optimiser runs, so a link canonical at a
+    bound is hit on the first evaluation -- not a measure-zero interior
+    coincidence, and worse to gate, because the search dies before evaluating
+    anything. Interior nodes are reachable too, via the grid methods.
     """
     from superglm.distributions import Tweedie
     from superglm.links import PowerLink
     from superglm.reml.observed_geometry import classify_reml_curvature
 
+    # Brent's two unconditional bound evaluations, at the default p_bounds.
+    lower, upper = 1.05, 1.95
+    at_bound = classify_reml_curvature(Tweedie(p=lower), PowerLink(power=1.0 - lower))
+    assert at_bound == "fisher", (
+        "a link canonical at a p_bound is reached on Brent's first evaluation; "
+        "if this flips, re-derive before gating optimize_direct_reml's W(rho) seam"
+    )
+    assert classify_reml_curvature(Tweedie(p=upper), PowerLink(power=1.0 - lower)) == "observed"
+
+    # An interior node, as the grid methods reach it.
     link = PowerLink(power=-0.5)
     curvature = [classify_reml_curvature(Tweedie(p=p), link) for p in (1.4, 1.5, 1.6)]
+    assert curvature == ["observed", "fisher", "observed"]
 
-    assert curvature == ["observed", "fisher", "observed"], (
-        "a fixed-link power sweep must still cross the canonical pair; if this "
-        "flips, the seam at optimize_direct_reml's W(rho) correction can be gated"
+
+def test_a_gradient_stage_refusal_does_not_publish_a_pirls_failure() -> None:
+    """The reason a power search records must name the stage that actually failed.
+
+    ``relative_max`` is pinned non-finite on this class, so the profile takes
+    the "describe the condition" branch and writes the reason straight into
+    ``_infeasible_powers``, where it reaches the user. The default asserts
+    PIRLS found no mode -- true at almost every raise site, false at the W(rho)
+    seam, where PIRLS converged and the correction built from its mode is what
+    refused.
+    """
+    from superglm.reml.observed_geometry import (
+        _NO_MODE_DETAIL,
+        _NO_MODE_REASON,
+        ObservedModeNotConvergedError,
     )
+
+    default = ObservedModeNotConvergedError("no mode")
+    assert default.infeasible_reason == _NO_MODE_REASON
+    assert default.infeasible_detail == _NO_MODE_DETAIL
+
+    staged = ObservedModeNotConvergedError(
+        "W(rho) correction has no usable curvature",
+        infeasible_reason="no differentiable REML gradient (W(rho) correction has no usable curvature)",
+        infeasible_detail="no usable W(rho) curvature",
+    )
+    assert "PIRLS" not in staged.infeasible_reason
+    assert "found no mode" not in staged.infeasible_reason
+    assert "W(rho)" in staged.infeasible_reason
+    # Routing is unchanged: the parent handler still scores the point infeasible.
+    assert not np.isfinite(staged.relative_max)
 
 
 def test_ordinary_reml_curvature_classifier_requires_consistent_custom_protocol() -> None:

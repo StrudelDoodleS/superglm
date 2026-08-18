@@ -11,7 +11,10 @@ import numpy as np
 
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.profiling._reporting import cached_tweedie_profile_ci
-from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.reml.observed_geometry import (
+    _NO_MODE_DETAIL,
+    ObservedModeNotCertifiedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +40,16 @@ def _publication_mode_failure(exc, *, parameter, value, decoupled) -> Publicatio
     point failed or what to do about it.
     """
     score = getattr(exc, "relative_max", float("inf"))
+    # Same reason the profile record carries one: a raise site that reached a
+    # mode and failed at a later stage must not report a PIRLS failure here.
+    # Only a site that supplied its own detail overrides the wording, so every
+    # site that does mean "PIRLS found no mode" keeps saying exactly that.
+    detail = getattr(exc, "infeasible_detail", _NO_MODE_DETAIL)
+    no_mode = "PIRLS found no converged penalized mode"
     achieved = (
         f"relative mode score {score:.3e} against a bar of {exc.tolerance:.3e}"
         if np.isfinite(score)
-        else "PIRLS found no converged penalized mode"
+        else (no_mode if detail == _NO_MODE_DETAIL else detail)
     )
     region = (
         "  The certifiable region is a property of this data; its boundary moves "
