@@ -104,6 +104,14 @@ class BlockSymmetricOperator:
             raise ValueError("small_indices width does not match A.")
         if self.structured_indices.shape != (n_levels, block_size):
             raise ValueError("structured_indices shape does not match C and D.")
+        if not all(np.all(np.isfinite(values)) for values in (self.A, self.C, self.D)):
+            # Above the symmetry check for the reason SumToZeroBlockOperator and
+            # both Schur factors put it there: a NaN fails `np.allclose` against
+            # its own transpose, so without this a NaN local block is refused as
+            # an ASYMMETRIC one -- a structural verdict for a condition the
+            # iterate's weights caused. This is the `fs` operator, and `fs` is
+            # the default basis, so it is the path most likely to reach here.
+            raise np.linalg.LinAlgError("Block operator blocks must be finite.")
         if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):
             raise ValueError("Every local D block must be symmetric.")
         all_indices = np.concatenate([self.small_indices, self.structured_indices.ravel()])

@@ -53,6 +53,33 @@ def _fixture(*, n_levels: int = 5, block_size: int = 3, small_size: int = 4):
     return rng, operator, factor, dense
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_a_non_finite_fs_operator_block_is_refused_as_curvature(bad) -> None:
+    """The `fs` operator is the one the sum-to-zero fix did not reach.
+
+    ``build_block_structured_system`` splits on ``factor_basis == "sz"``;
+    everything else -- including ``fs``, the default, and the basis one of this
+    branch's two original symptoms used -- builds a ``BlockSymmetricOperator``,
+    which had no finiteness guard at all. A NaN local block therefore failed
+    ``np.allclose`` against its own transpose and was refused as an asymmetric
+    one, and the observed-geometry seam around this construction catches only
+    ``LinAlgError``, so that ``ValueError`` left ``fit_reml`` raw instead of
+    scoring the point infeasible.
+    """
+    _, operator, _, _ = _fixture()
+    D = np.array(operator.D, dtype=np.float64)
+    D[1, 0, 0] = bad
+
+    with pytest.raises(np.linalg.LinAlgError, match="must be finite"):
+        BlockSymmetricOperator(
+            A=operator.A,
+            C=operator.C,
+            D=D,
+            small_indices=operator.small_indices,
+            structured_indices=operator.structured_indices,
+        )
+
+
 @pytest.mark.parametrize("block", ["A", "C"])
 def test_a_non_finite_block_schur_ordinary_or_cross_block_is_refused(block) -> None:
     """D was guarded; A and C were not, and nothing else refused them.
