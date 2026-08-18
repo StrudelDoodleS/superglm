@@ -617,13 +617,22 @@ class _UnstableStructuredEDFError(FloatingPointError):
     nearly dependent subspaces landed on.  Where the intersection is
     identified, clause 1 scores it by contributing zero.
 
-    **TWO OF THE THREE RAISE SITES ARE STATEMENTS ABOUT ARITHMETIC; THE THIRD
-    IS NOT, AND THE ASYMMETRY IS THE THING TO UNDERSTAND.**  The range guard
-    and the uncertified-clip guard in :func:`_evaluate` each judge a computed
-    sum against its own derived bound.  :func:`_profile`'s penalty-projection
-    guard does not: it is computed from ``S_a`` ALONE, in the lambda-
-    independent half, before any sum exists, and it fires or does not fire
-    identically at every lambda.  Its condition is a property of an OPERAND.
+    **TWO OF THE FOUR RAISE SITES ARE STATEMENTS ABOUT ARITHMETIC; THE OTHER
+    TWO ARE NOT, AND THE ASYMMETRY IS THE THING TO UNDERSTAND.**  The range
+    guard and the uncertified-clip guard in :func:`_evaluate` each judge a
+    computed sum against its own derived bound.  :func:`_profile`'s two
+    penalty guards do not -- the drop guard and the projection guard alike are
+    computed from ``S_a`` ALONE, in the lambda-independent half, before any sum
+    exists, and each fires or does not fire identically at every lambda.  Their
+    condition is a property of an OPERAND.
+
+    This count read "two of the three" until the drop guard was added beside
+    the projection guard, and the singular naming it carried has been made
+    plural with it.  Recorded rather than silently renumbered because this is
+    the file's only enumeration of its own raise sites, so nothing else
+    contradicts it into visibility -- and because a guard's enumeration has to
+    be stated where a reader will find it for the same reason its scale does,
+    which is the whole argument of the change that added the fourth.
 
     That is admissible where a refusal keyed to singularity is not, and the
     reason is which operand.  ``S_a`` is the CALLER'S SPECIFICATION -- the
