@@ -358,9 +358,10 @@ and 3.03e+10x.  Separately the maximising perturbation attains 0.9425 to 1.0617
 of the predicted displacement against a first-order value of 1 -- and that it
 EXCEEDS 1 is the direct evidence that this quantity is a first-order measure
 rather than an upper bound on the finite response.  That ratio is REPORTED and
-not asserted: bounding it would fit an interval around those observations, on a
-difference of two evaluations at ``cond(A)`` up to 5.4e+14, which is the
-sampled-width objection in another form.
+not asserted.  Two intervals were tried and both refused: bounding it fits a
+window around observations, on a difference of two evaluations at ``cond(A)``
+up to 5.4e+14, which is the sampled-width objection in another form.  So this
+test carries ONE asserted boundary and no fitted constant.
 
 **TWO EARLIER REVISIONS GOT THE BOUNDARY WRONG IN OPPOSITE DIRECTIONS.**  One
 asserted 1e5 ulp while the prose said one -- a midpoint of the two observed

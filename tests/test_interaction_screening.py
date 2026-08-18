@@ -1896,25 +1896,27 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
 # real boundary; what makes 1.59x usable is that the quantity is BIT-IDENTICAL
 # across the sweep on that row, not that the number is comfortable.
 #
-# THE REALIZATION WINDOW IS AN ORDER OF MAGNITUDE, DELIBERATELY.
+# ONE ASSERTED BOUNDARY, AND NO FITTED CONSTANT ANYWHERE.
 #
-# What the algebra gives is that the finite response is DOMINATED by its
-# first-order term, i.e. the ratio is of order 1 -- not that it equals 1, since
-# no second-order remainder is derived here.  So the window is one order either
-# side, which is the coarsest statement that still says "dominated".
+# The realization ratio is REPORTED in the failure message and not asserted.
+# Two intervals were tried around it -- (0.5, 2.0), then (0.1, 10.0) -- and
+# review refused both for the same reason, correctly: the ratio differences two
+# production evaluations on operands whose ``cond(A)`` reaches 5.4e+14, so it
+# can leave any such interval on another LAPACK with no mathematical
+# regression, and widening a fitted window does not derive it.  No second-order
+# remainder or conditioning-based allowance is available here, so there is
+# nothing to assert.
 #
-# An earlier revision used (0.5, 2.0).  Review refused that as fitted around
-# the observed 0.9425-1.0617, and it was: a ratio differencing two production
-# evaluations on operands whose ``cond(A)`` reaches 5.4e+14 could move under
-# another LAPACK with no mathematical regression, which is the sampled-width
-# objection re-entering by a different door.  (0.1, 10.0) sits 9.4x from both
-# observed extremes rather than hugging them, so it is not a fit to this box.
-#
-# Dropping the check entirely was tried first and costs too much: without it,
-# perturbing along a RANDOM direction instead of the maximising one, and
-# shrinking the probe a millionfold, both stop being detected.
+# THAT TRADE COSTS TWO MUTATIONS AND IS TAKEN ANYWAY.  With the interval,
+# perturbing along a RANDOM direction rather than the maximising one reds 6
+# rows and shrinking the probe a millionfold reds 6; without it neither is
+# detected, because both scale the sensitivity and its reference together.
+# Both are edits to this test's own stated parameters rather than regressions
+# in the module, and a bound that reds on a backend change without a defect is
+# worse than one that misses a self-mutation.  The regression that matters --
+# design factors collapsing the sensitivity by ten orders (#257) -- is caught
+# by the boundary below on its own.
 _LOW_EDGE_ULP = 1.0
-_LOW_EDGE_REALISED = (0.1, 10.0)
 
 
 @pytest.mark.parametrize(
@@ -1993,23 +1995,30 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     The alternative -- keeping the assertion and quoting the comfortable
     margin the wrong ulp produced -- is the failure this whole PR is about.
 
-    **THE REALIZATION IS REPORTED, NOT ASSERTED.**  The maximising perturbation
-    attains 0.9425 to 1.0617 of the predicted displacement across the sweep,
-    against a first-order value of 1 -- which both confirms the algebra is live
-    and, by exceeding 1, shows the quantity is a first-order measure rather
-    than a bound on the finite response.  An earlier revision asserted that in
-    ``(0.5, 2.0)``.  **Review refused it and was right**: the interval is
-    fitted around those observations, and the ratio differences two production
-    evaluations on operands whose ``cond(A)`` reaches 5.4e+14, so another
-    LAPACK could move it with no mathematical regression.  That is the same
-    objection that removed the sampled width two rounds earlier, re-entering by
-    a different door.  Deriving a conditioning-dependent allowance is not
-    attempted, so the window is one order either side of 1 -- the coarsest
-    statement that still says "the first-order term dominates" -- which sits
-    9.4x from both observed extremes rather than hugging them.  Dropping the
-    check entirely was tried first and costs too much: without it, a RANDOM
-    perturbation direction and a millionfold-smaller probe both stop being
-    detected.
+    **THE REALIZATION IS REPORTED AND NOT ASSERTED.**  The maximising
+    perturbation attains 0.9425 to 1.0617 of the predicted displacement across
+    the sweep, against a first-order value of 1 -- which confirms the algebra
+    is live and, by exceeding 1, shows the quantity is a first-order measure
+    rather than a bound on the finite response.
+
+    Two intervals were tried around it, ``(0.5, 2.0)`` and then
+    ``(0.1, 10.0)``, and **review refused both for the same reason,
+    correctly**: the ratio differences two production evaluations on operands
+    whose ``cond(A)`` reaches 5.4e+14, so it can leave any such interval under
+    another LAPACK with no mathematical regression, and widening a fitted
+    window does not derive it.  That is the sampled-width objection from an
+    earlier round re-entering by a different door, and just as valid.  No
+    second-order remainder is derived here, so there is nothing left to assert
+    and the number is disclosure.
+
+    **The trade is recorded because it is not free.**  With the interval, a
+    RANDOM perturbation direction reds 6 rows and a millionfold-smaller probe
+    reds 6; without it neither is detected, since both scale the sensitivity
+    and its reference together.  Both are edits to this test's own stated
+    parameters rather than regressions in the module, and a bound that reds on
+    a backend change without a defect is worse than one that misses a
+    self-mutation.  The regression that matters -- design factors collapsing
+    the sensitivity by ten orders, #257 -- is caught by the boundary alone.
 
     **What this says about issue #279.**  Over 21 draws of a 20-level
     spline-by-categorical pair, the same first-order sensitivity spans
@@ -2053,12 +2062,3 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
             "module is no longer being handed a Gram -- see #257"
         )
     )
-    if not determined:
-        low, high = _LOW_EDGE_REALISED
-        attained = realised / ceiling
-        assert low < attained < high, (
-            f"the finite response is no longer dominated by its first-order term: the "
-            f"maximising perturbation attained {attained:.4f} of the prediction {where}. "
-            f"The algebra puts this at order 1 and the sweep measures 0.9425 to 1.0617; "
-            f"the window is an order either side rather than a fit to those."
-        )
