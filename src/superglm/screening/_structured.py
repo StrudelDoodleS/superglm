@@ -610,8 +610,8 @@ _TRACE_CHUNK_DOUBLES = 262_144
 # the measured residual between 0 and 0.408 of ``n eps kappa``.  2.0 leaves
 # 4.90x of headroom on the worst of the 14 configurations.  The literature's
 # dimensional factor for the ROUTE THIS IS NOT is ``m rank^(3/2)``; folding
-# ``rank^(3/2)`` into this constant is verified over the ranks the bank
-# reaches, 1 to 24, and NOT beyond -- see :func:`_orthonormality_bound`.
+# ``rank^(3/2)`` into this constant is checked past the ranks the bank reaches
+# -- see :func:`_orthonormality_bound`.
 _ORTHONORMALITY_FACTOR = 2.0
 
 # Smallest ratio between a singular value and the absorption floor at which
@@ -1938,8 +1938,16 @@ def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float
     :data:`_ORTHONORMALITY_FACTOR` is set from the measured population with
     stated headroom, in the same spirit as LAPACK's ``RCOND`` default and
     ``numpy.linalg.matrix_rank``'s ``max(shape) eps``, which are conventions
-    and not worst-case theorems.  ``rank^(3/2)`` is folded into it and is
-    verified only over the ranks this bank reaches, 1 to 24.
+    and not worst-case theorems.  ``rank^(3/2)`` is folded into it, which is
+    the part that would decay with size if it decayed at all, so it is checked
+    PAST the ranks this bank reaches: 60 profiles over ``ps`` bases from 5 to
+    50 knots and 8 to 40 levels, overlap ranks **9 to 54**, ``conditioning``
+    to 6.7e+11, put the worst residual at **0.0108** of this bound -- 93x of
+    headroom, wider than the bank's own 4.90x, because ``kappa`` grows with
+    the basis faster than the residual does.  Nothing refuses anywhere in that
+    range.  That check is one microkernel and one thread setting, not the
+    fourteen the bank is swept over, so it establishes the size scaling and
+    not the cross-machine spread.
 
     What this buys is REPRODUCIBILITY, not correctness: ``conditioning`` is
     read off singular values that sit far above the rank cut, and over the same
