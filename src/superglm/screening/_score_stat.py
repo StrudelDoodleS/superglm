@@ -254,7 +254,9 @@ still there.  Measured on the structured side, that took the high-edge error
 from 5.1e-06 to 7.4e-12 against a 60-digit oracle.  It is a change to what the
 CALLER hands this module, not to anything in it.
 
-**THE LOW EDGE HAS ITS OWN CEILING AND IT IS ``eps ||V_eff||_F ||G||_F``.**
+**THE LOW EDGE HAS ITS OWN LIMIT AND IT IS A FIRST-ORDER SENSITIVITY,
+``eps ||V_eff||_F ||G||_F``.**  (Not a ceiling: finite realizations exceed it,
+measured at up to 1.0617x below.)
 The section above is about the ladder's HIGH edge, and it left the impression
 -- recorded in issue #279 and in the sweep that opened it -- that the low edge
 was the good end.  It is not; it fails differently, and the two must not be
@@ -412,7 +414,7 @@ to 7.9e-16 relative.  The ladder is driven anyway, because one extra call
 removes an argument.
 
 **No arrangement of the arithmetic below narrows this.**  It is the same
-architectural ceiling as the high edge, reached by a different route, and it
+architectural limit as the high edge, reached by a different route, and it
 has the same remedy and the same tracking issue -- design factors, #257.  What
 is genuinely different is that at the low edge there is nothing to COUNT, so
 the high edge's probe reports a clean bill on exactly the draws that miss.

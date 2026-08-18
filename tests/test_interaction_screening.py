@@ -1757,10 +1757,17 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     ``edf = tr(A^-1 V)`` with ``A = V + lambda S`` is exactly
     ``p - lambda tr(A^-1 S)``, so for a perturbation ``E`` of the operand::
 
-        d edf = <E, G>_F ,     G := lambda A^-1 S A^-1
+        d edf = <E, G>_F ,
+        G := lambda A^-1 S A^-1 + alpha (d edf / d lambda) I
 
     and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
-    exactly ``c ||G||_F``.
+    exactly ``c ||G||_F``.  The second term is the BRACKET's own response, from
+    ``lambda = alpha tr(V)`` with ``alpha = 1e-10 / tr(S)``; it is displayed
+    because the code carries it, and an earlier revision showed only the first
+    term here while asserting on both.  **The identity needs a nonsingular
+    ``A``** and so does not cover a pencil whose ``V`` and ``S`` share a null
+    space -- that case is answered elsewhere through ``pinv`` and is not what
+    this measures.
 
     **THE RADIUS IS A STATED PROBE AND NOTHING MORE.**  ``c = eps ||V||_F`` is
     ONE ROUNDING of the operand's norm -- a definition.  Two revisions have now
