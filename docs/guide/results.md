@@ -337,11 +337,14 @@ worst is out by **1.022e+00**, more than double; per-unit, the worst row is out 
 
 The relation is derived on the log scale and verified on the multiplier scale against
 `offset_mapping_rtol`, relative to the block's own scale, on every row. Relative and not also
-absolute: a multiplier is scale-free, so `offset_mapping_atol` would act as a tolerance of
-`atol/scale` and loosen without limit as the scale shrinks — on `log(SumInsured/1e6)` the `1e-12`
-default would admit a 1e-6 departure. `offset_mapping_atol` governs the discrete path instead, whose
-comparison is between one level's multipliers rather than against a scale. A column the offset is
-not proportional to is refused by name rather than approximated.
+absolute: a multiplier is scale-free, so an absolute tolerance acts as a relative one of
+`atol/scale` and loosens without limit as the scale shrinks — on `log(SumInsured/1e6)` the `1e-12`
+default would admit a 1e-6 departure. The discrete path is relative for the same reason: multipliers
+of 1e-13 and 2e-13 in one level sit within the `1e-12` absolute default of their geometric mean, so
+the level would publish as exact while mis-rating its rows by 41.4% and 29.3%. Both offset paths
+are therefore relative only, and the `offset_mapping_atol` keyword has been **removed** rather than
+left in place doing nothing — passing it is now a `TypeError`. A column the offset is not
+proportional to is refused by name rather than approximated.
 
 Low cardinality is left alone: `Term ∈ {12, 36}` still exports as the two-row lookup `12 → 1`,
 `36 → 3`, because for a handful of levels a lookup already *is* the exact answer and asks nothing

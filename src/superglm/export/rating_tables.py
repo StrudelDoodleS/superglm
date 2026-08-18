@@ -1197,7 +1197,6 @@ def _offset_per_unit_block(
     sample_weight: NDArray | None,
     *,
     offset_mapping_rtol: float,
-    offset_mapping_atol: float,
 ) -> RatingTableBlock:
     """A continuous offset as the one relation it is, not as a sample of it.
 
@@ -1254,8 +1253,8 @@ def _offset_per_unit_block(
     # is exactness.  Measured: the same 1e-8 departure is refused on
     # ``log(SumInsured)`` and accepted on ``log(SumInsured/1e6)``.  This is the
     # argument ``_significant_digits`` already makes for rounding (issue #303).
-    # ``offset_mapping_atol`` still governs the discrete path, where the
-    # comparison is between multipliers rather than against a scale.
+    # The discrete path is relative for the same reason, so no absolute
+    # tolerance survives anywhere in the offset checks.
     worst = float(np.max(np.abs(np.exp(log_ratio) / scale - 1.0)))
     if not np.isfinite(worst) or worst > offset_mapping_rtol:
         raise OffsetRelationError(
@@ -1284,7 +1283,6 @@ def _offset_source_block(
     offset_kind: str,
     offset_max_exact_levels: int,
     offset_mapping_rtol: float,
-    offset_mapping_atol: float,
 ) -> RatingTableBlock:
     if offset_kind not in {"auto", "discrete", "per_unit"}:
         raise ValueError("offset_kind must be 'auto', 'discrete' or 'per_unit'.")
@@ -1299,7 +1297,6 @@ def _offset_source_block(
             source_name,
             sample_weight,
             offset_mapping_rtol=offset_mapping_rtol,
-            offset_mapping_atol=offset_mapping_atol,
         )
 
     if n_unique > offset_max_exact_levels:
@@ -1337,15 +1334,23 @@ def _offset_source_block(
             representative = float(np.exp(np.average(offset_values, weights=group_weights)))
         else:
             representative = float(multipliers[0])
-        if not np.allclose(
-            multipliers,
-            representative,
-            rtol=offset_mapping_rtol,
-            atol=offset_mapping_atol,
-        ):
+        # Purely RELATIVE to the level's own representative, for the same
+        # reason ``_offset_per_unit_block`` is: ``np.allclose`` tolerates
+        # ``atol + rtol*representative``, and an absolute floor on a scale-free
+        # quantity IS a relative tolerance of ``atol/representative``.  At a
+        # multiplier near the old ``1e-12`` absolute default the floor
+        # dominated entirely -- multipliers of 1e-13 and 2e-13 sat within it of
+        # their geometric mean, so the level published as exact while
+        # mis-rating its rows by 41.4% and 29.3%.  A lookup whose whole claim
+        # is that it is exact must not be certified by a tolerance that
+        # loosens as the quantity shrinks.
+        worst = float(np.max(np.abs(multipliers / representative - 1.0)))
+        if not np.isfinite(worst) or worst > offset_mapping_rtol:
             raise ValueError(
                 f"Offset source {source_name!r} is not a valid discrete lookup: "
-                f"level {level!r} maps to multiple offset multipliers. Pass a more "
+                f"level {level!r} maps to multiple offset multipliers, the worst "
+                f"deviating by {worst:.3e} relative from the level's representative, "
+                f"outside offset_mapping_rtol={offset_mapping_rtol:g}. Pass a more "
                 "granular offset_source, or keep the offset calculation outside the "
                 "rating table."
             )
@@ -1645,7 +1650,6 @@ def build_rating_table_payload(
     offset_kind: str = "auto",
     offset_max_exact_levels: int = 20,
     offset_mapping_rtol: float = 1e-10,
-    offset_mapping_atol: float = 1e-12,
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
@@ -1801,12 +1805,13 @@ def build_rating_table_payload(
 
     The relation is DERIVED on the log scale and VERIFIED on the multiplier
     scale against ``offset_mapping_rtol`` alone, RELATIVE to the block's own
-    scale, on every row.  Not against an absolute floor as well: a multiplier
-    is scale-free, so ``offset_mapping_atol`` would be a relative tolerance of
-    ``atol/scale`` and would loosen without limit as the scale shrinks -- at
-    ``log(SumInsured/1e6)`` the ``1e-12`` default admits a 1e-6 departure.
-    ``offset_mapping_atol`` governs the DISCRETE path, whose comparison is
-    between one level's multipliers rather than against a scale.  A declared
+    scale, on every row.  Never against an absolute floor as well: a multiplier
+    is scale-free, so an absolute tolerance IS a relative one of ``atol/scale``
+    and loosens without limit as the scale shrinks -- at ``log(SumInsured/1e6)``
+    a ``1e-12`` floor admits a 1e-6 departure, and on one level's multipliers
+    1e-13 and 2e-13 it admits a factor of two.  Both offset paths are therefore
+    relative only, and ``offset_mapping_atol`` was removed rather than left as a
+    keyword that does nothing.  A declared
     source the offset is not proportional to is refused by name rather than
     approximated, because a block whose whole value is exactness must not be
     written when it is not exact.
@@ -2270,7 +2275,6 @@ def build_rating_table_payload(
                 offset_kind=offset_kind,
                 offset_max_exact_levels=offset_max_exact_levels,
                 offset_mapping_rtol=offset_mapping_rtol,
-                offset_mapping_atol=offset_mapping_atol,
             )
         main_effects.append(offset_block)
 
@@ -2337,7 +2341,6 @@ def export_rating_tables(
     offset_kind: str = "auto",
     offset_max_exact_levels: int = 20,
     offset_mapping_rtol: float = 1e-10,
-    offset_mapping_atol: float = 1e-12,
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
@@ -2444,7 +2447,6 @@ def export_rating_tables(
         offset_kind=offset_kind,
         offset_max_exact_levels=offset_max_exact_levels,
         offset_mapping_rtol=offset_mapping_rtol,
-        offset_mapping_atol=offset_mapping_atol,
         n_bins=n_bins,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
