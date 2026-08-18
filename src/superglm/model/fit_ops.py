@@ -208,54 +208,103 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
 
 
 def _reject_structured_fit_constraints(model) -> None:
-    """Reject constrained REML geometry that compact penalties do not define.
+    """Refuse the one structured/constrained pairing that does not reach a mode.
 
-    Selects on the DECLARATION, not on the spec's type. The type test this
-    replaced (``isinstance(spec, _SplineBase)``) ran before the declaration was
-    read, so a constraint declared on a spline inside a wrapper such as
-    ``OrderedCategorical`` slipped past the very guard whose whole purpose is to
-    refuse it, and the model fitted down a path this refusal exists to say is
-    undefined. A spec that declares no constraint still answers ``None`` and is
-    skipped exactly as before.
+    This used to refuse every fit-time shape constraint that shared a model with
+    a ``RandomEffect`` or a ``FactorSmooth``. That was scope containment from the
+    release which introduced both terms, not a derived result, and it was far
+    wider than the algebra requires. A variance component and a smoothing
+    parameter are the same object to the extended Fellner-Schall update (Wood &
+    Fasiolo, 2017, Biometrics 73(4):1071-1081), whose founding case in Fellner
+    (1986) is a penalty assembled from identity blocks -- exactly what a random
+    effect contributes. Shape-constrained additive *mixed* models are the
+    documented, supported combination in the reference implementation (Pya
+    Arnqvist, 2024, arXiv:2403.09438 section 3).
+
+    What the refusal was really standing in for was a plumbing defect: the EFS
+    lambda step read ``PenaltyComponent.omega_ssp`` directly, which is ``None``
+    for an identity penalty, so a random effect arrived at a matmul as a 0-d
+    operand. That is fixed at the read (see ``scop_efs._component_penalty_matrix``).
+
+    What survives is one specification, not one pair of term types: a SCOP
+    smooth of ``v`` beside a ``basis="fs"`` factor smooth *of the same ``v``*.
+    An ``fs`` factor smooth carries its own main effect, so that model states the
+    effect of ``v`` twice -- once confined to a shape cone and once free. The
+    free copy absorbs whatever the constrained copy is forbidden to do, the two
+    compensate for each other, and no coefficient mode is reached (measured 0/7
+    across seed, rows, level count and basis size).
+
+    Everything adjacent to it converges (7/7 each): ``basis="sz"`` on the same
+    variable, which excludes the main effect and so states it once; an ``fs``
+    factor smooth of a *different* variable; and the constraint sitting on a
+    different variable from the factor smooth. The unconstrained version of the
+    duplicated model converges too, which is what localises this to constrained
+    duplication rather than to duplication or to SCOP-with-FactorSmooth.
+
+    Selection stays on the DECLARATION rather than the spec's type, which is what
+    lets a constraint declared on a spline inside a wrapper such as
+    ``OrderedCategorical`` be seen at all.
     """
+    from superglm.features._spline_build import (
+        _uses_fit_time_scop_constraints,
+        _uses_fit_time_shape_constraints,
+    )
     from superglm.features.factor_smooth import FactorSmooth
-    from superglm.features.random_effect import RandomEffect
+    from superglm.features.ordered_categorical import OrderedCategorical
 
-    constrained_splines = [
+    def _engine_spec(spec):
+        """The spec that answers the engine question, not merely the declaration.
+
+        ``OrderedCategorical`` delegates its build to an inner spline, and it is
+        the inner basis that picks the engine: ``ps`` routes through SCOP. The
+        wrapper defines ``_build_monotone_constraints_raw`` unconditionally --
+        deliberately, so the builder can find raw geometry through it -- and
+        defines no SCOP method, so asking the wrapper reports QP for every basis
+        including the SCOP ones. Resolve to the inner spline before asking.
+
+        Read directly rather than through ``getattr(..., default)``: the
+        property's ``AttributeError`` on a pre-0.24 step pickle must not be
+        swallowed. Such a spec cannot answer ``constraint_kind`` either, so it is
+        filtered out by the declaration test above and never arrives here.
+        """
+        return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
+
+    # SCOP wins engine precedence in the build path, so classify it first.
+    scop_constrained = [
         name
         for name, spec in model._specs.items()
-        if getattr(spec, "constraint_kind", getattr(spec, "monotone", None)) is not None
-        and getattr(
-            spec,
-            "constraint_mode",
-            getattr(spec, "monotone_mode", "postfit"),
-        )
-        == "fit"
+        if _uses_fit_time_shape_constraints(spec)
+        and _uses_fit_time_scop_constraints(_engine_spec(spec))
     ]
-    if not constrained_splines:
+    if not scop_constrained:
         return
 
-    random_effects = [name for name, spec in model._specs.items() if isinstance(spec, RandomEffect)]
-    factor_smooths = [
-        name for name, spec in model._interaction_specs.items() if isinstance(spec, FactorSmooth)
+    # Only a main-effect-carrying factor smooth OF A CONSTRAINED VARIABLE
+    # duplicates that variable's effect. ``sz`` excludes the main effect, and a
+    # factor smooth of any other variable states nothing twice.
+    constrained_set = set(scop_constrained)
+    duplicated = [
+        (spec.variable, name)
+        for name, spec in model._interaction_specs.items()
+        if isinstance(spec, FactorSmooth)
+        and spec.basis == "fs"
+        and spec.variable in constrained_set
     ]
-    if not random_effects and not factor_smooths:
+    if not duplicated:
         return
 
-    structured_terms = []
-    if random_effects:
-        structured_terms.append(
-            "RandomEffect term(s) " + ", ".join(repr(name) for name in random_effects)
-        )
-    if factor_smooths:
-        structured_terms.append(
-            "FactorSmooth term(s) " + ", ".join(repr(name) for name in factor_smooths)
-        )
-    constrained = ", ".join(repr(name) for name in constrained_splines)
+    joined = ", ".join(
+        f"{iname!r} (of {var!r}, which is shape-constrained)" for var, iname in duplicated
+    )
     raise NotImplementedError(
-        f"fit-time shape constraints on spline term(s) {constrained} are not "
-        f"supported with {' and '.join(structured_terms)}; use separate models "
-        "or a post-fit shape constraint."
+        f"fit-time SCOP shape constraints are not supported with FactorSmooth "
+        f"term(s) {joined}; a basis='fs' factor smooth carries its own main "
+        "effect, so the constrained variable's effect is stated twice -- once "
+        "confined to the shape cone and once free -- and no coefficient mode is "
+        "reached. Use basis='sz', which excludes the main effect, or a QP-engine "
+        "spline (BSplineSmooth or CubicRegressionSpline), or a post-fit shape "
+        "constraint. A factor smooth of any other variable is unaffected, and a "
+        "RandomEffect carries no such restriction."
     )
 
 

@@ -151,6 +151,38 @@ model.fit_reml(df, y)
 
 Fixed-lambda shape-constrained REML works for both SCOP and QP paths.
 
+### With a random effect
+
+A shape constraint and a `RandomEffect` can share a model on either engine:
+
+```python
+from superglm import Constraint, PSpline, RandomEffect, SuperGLM
+
+model = SuperGLM(
+    family="gaussian",
+    features={
+        "x": PSpline(n_knots=10, constraint=Constraint.fit.increasing),
+        "region": RandomEffect(),
+    },
+)
+model.fit_reml(df, y)
+```
+
+Nothing special is being done here. To the extended Fellner–Schall update a
+variance component and a smoothing parameter are the same object — Fellner's
+original 1986 case was a penalty assembled from identity blocks, which is what
+a random effect contributes — so the credibility shrinkage is estimated by the
+same iteration that picks the smoothing parameters. This is a shape-constrained
+additive *mixed* model in the sense of Pya Arnqvist (2024), §3.
+
+Two properties worth knowing. On a truth that already obeys the constraint the
+constrained fit reproduces the unconstrained one, variance component included:
+a shape constraint that does not bind does not perturb the credibility
+estimate. And when it does bind, the constraint is honoured on the term itself,
+not on predictions — `predict()` adds the level effect, so predicted values are
+not monotone in `x` and are not supposed to be. Read the term's own curve via
+`plot_data()` to check the shape.
+
 ## Current Guard Rails
 
 These combinations are intentionally guarded:
@@ -158,6 +190,15 @@ These combinations are intentionally guarded:
 - fit-time shape constraints with `selection_penalty > 0`
 - fit-time shape constraints with `select=True`
 - mixed SCOP and QP constrained engines in the same model
+- a **SCOP** fit-time constraint on a variable that also carries a
+  `basis="fs"` `FactorSmooth`. An `fs` factor smooth includes its own main
+  effect, so such a model states that variable's effect twice — once confined
+  to the shape cone and once free — and reaches no coefficient mode. Use
+  `basis="sz"`, which excludes the main effect, or a QP-engine spline. Nothing
+  adjacent is restricted: a factor smooth of a *different* variable is fine,
+  and so is a `RandomEffect` on either engine. Note that an
+  `OrderedCategorical` is classified by its inner basis, so
+  `basis=Spline(kind="ps")` is a SCOP term and `kind="cr"`/`"bs"` are QP ones
 - `kind="ns"` fit-time shape constraints
 - `Constraint.fit.convex` or `Constraint.fit.concave` on a `PSpline` or
   `BSplineSmooth` with `degree > 3`

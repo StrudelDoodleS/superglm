@@ -34,6 +34,7 @@ from superglm.reml.observed_geometry import (
 from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     compute_logdet_s_derivatives,
+    penalty_component_dense_matrix,
 )
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import prepare_gamma_reml_scale_data
@@ -415,6 +416,26 @@ def _merge_scop_penalty_components(
     return ordinary + scop_components
 
 
+def _component_penalty_matrix(pc: PenaltyComponent) -> NDArray:
+    """Return one component's penalty over the full width of its coefficient block.
+
+    Only ``dense`` components keep their penalty in ``omega_ssp``.  The
+    structured kinds carry their geometry in ``penalty_kind`` instead: an
+    ``identity`` component (a random effect) stores no matrix at all, and a
+    ``repeated`` or ``sum_to_zero`` component stores one small local block that
+    has to be expanded across its repeats.  Reading ``omega_ssp`` directly is
+    therefore wrong for every structured term -- it yields ``None`` for a random
+    effect, which is how one used to reach a matmul as a 0-d operand, and a
+    single local block for a factor smooth, which is the wrong shape.
+    """
+    if pc.penalty_kind != "dense":
+        return penalty_component_dense_matrix(pc)
+    omega = pc.omega_ssp
+    if omega is None:
+        omega = pc.omega_raw
+    return omega
+
+
 def compute_scop_aware_penalty_quad(
     result_beta: NDArray,
     S: NDArray,
@@ -459,9 +480,7 @@ def compute_scop_aware_penalty_quad(
         )
         if matching:
             for component in matching:
-                omega = component.omega_ssp
-                if omega is None:
-                    omega = component.omega_raw
+                omega = _component_penalty_matrix(component)
                 pq += lambdas[component.name] * float(beta_eff @ omega @ beta_eff)
         else:
             lam = lambdas.get(st["group_name"], 0.0)
@@ -1486,7 +1505,7 @@ def scop_efs_lambda_update(
         This function uses the old fixed-point formula and is kept only for
         backward compatibility.
     """
-    omega_g = pc.omega_ssp
+    omega_g = _component_penalty_matrix(pc)
     sl = pc.group_sl
 
     scop_st = _is_scop_component(pc, scop_states)
@@ -1645,7 +1664,7 @@ def _joint_efs_lambda_step(
         if pc.name not in estimated_names:
             continue
 
-        omega_g = pc.omega_ssp
+        omega_g = _component_penalty_matrix(pc)
         sl = pc.group_sl
 
         scop_st = _is_scop_component(pc, scop_states)
