@@ -1071,6 +1071,26 @@ def _require_usable_offset_multipliers(multiplier: NDArray) -> None:
     ``inf``.  The workbook published.  That is the same cancellation argument
     ``_require_usable_relativities_export`` makes for checking per block rather
     than on the product, applied to the one block whose values it cannot see.
+
+    PER ROW, and unweighted -- which is stricter than the guard it borrows its
+    band from, not merely differently placed.  That one reads what a block
+    EMITS, and every other offset shape emits an aggregate: a level's
+    representative multiplier, or a bin's weighted average.  A per-unit row
+    emits no aggregate at all, because the consumer rates each row from its own
+    column value, so the vector is the only honest thing to check.  The
+    consequence is that ``offset_kind`` now selects strictness as well as
+    shape: one pathological row, even at zero weight, is invisible to
+    ``"binned"`` and ``"discrete"`` and fatal here.  That is the intended
+    reading -- the consumer really does rate that row -- but it is a second
+    axis, and it should not have to be re-derived from the code.
+
+    The endpoints are inclusive because the band is shared, and NOT because the
+    rationale for inclusivity transfers.  There, ``exp(+/-500)`` is a
+    ``_safe_exp`` clip stand-in, so a value sitting exactly on the endpoint is
+    the stand-in being refused.  ``exp(offset)`` is a plain ``np.exp`` and is
+    never a stand-in, so exactly ``exp(+/-500)`` is refused here only because
+    one band with one comparison is worth more than a boundary case argued two
+    ways.  Deliberate, not inherited by accident.
     """
     from superglm.inference._term_types import _MAX_LOG_REL
 
@@ -1087,8 +1107,7 @@ def _require_usable_offset_multipliers(multiplier: NDArray) -> None:
         "than the factors, so these values never reach the workbook's relativity "
         "guard and would first fail in the consumer. The total predictor can stay "
         "healthy while they do not, because other terms cancel them. Rescale the "
-        "offset, drop the rows whose exposure is zero, or keep the offset "
-        "calculation outside the rating table."
+        "offset, or keep the offset calculation outside the rating table."
     )
 
 

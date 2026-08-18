@@ -127,9 +127,11 @@ Response factor:   3
 
 When `offset_source` is supplied, the exporter validates that each raw source
 level maps to one offset multiplier. A high-cardinality source is exported as a
-single `per_unit` row carrying the derived scale — `Relativity = scale × Term` —
-rather than being binned, and the proportionality is verified on every row before
-the block is written.
+single `per_unit` row carrying the derived scale — **`Relativity` *is* the scale,
+and the factor is `Term × Relativity`** — rather than being binned, and the
+proportionality is verified on every row before the block is written. Read that
+equation carefully: taking `Relativity` to be `scale × Term` and then applying
+the documented multiply rule computes `scale × Term²`.
 
 If no `offset_source` is supplied, the `Offset Multiplier` block follows the same
 rule, keyed on the multiplier itself because no column was named: exact levels up
@@ -137,6 +139,52 @@ to `offset_max_exact_levels`, and a single `per_unit` row above that. Neither is
 an approximation. Binning is opt-in — `offset_kind="binned"` writes the
 sample-weighted average multiplier per bin into the selected rating-table bin
 count, as a summary of the fitted exposure rather than something to rate from.
+
+### Exact Smooth Terms: `continuous_kind="ppform"`
+
+A binned smooth term is the one part of the workbook that is an approximation by
+construction — a spline has no keys, so the exporter invents them by binning.
+`continuous_kind="ppform"` exports the fitted curve as the exact piecewise cubic
+it already is. On a real motor book the worst row of a binned `DrivAge` block was
+out by a factor of **0.600**; the same term as a ppform block is out by
+**2.4e-15**, in 13 rows rather than 61.
+
+The block is a **superset** of the ordinary three-column shape, so a loader that
+has not been upgraded still finds it by the same header signature, slices the
+same three columns, and scores it as the step function it scores today:
+
+```
+DrivAge                     Relativity   Weight     a          b          c          d
+[-inf, 18.0)                  3.312618      0.00    1.197739   0          0          0
+[18.0, 25.363636363636363)    3.312618   2896.43    1.197739  -0.401915  -1.095004   0.570373
+...
+[99.0, inf)                   2.783720      8.65    1.023788   0          0          0
+```
+
+Two rules a loader must implement, and one it must not assume:
+
+1. **Bounded rows are evaluated.** Read both bounds out of the interval key —
+   they round-trip exactly, which is why no `from`/`to` columns exist — and
+   compute `factor = exp(a + u*(b + u*(c + u*d)))` with
+   `u = (x - lower) / (upper - lower)`. `u` is normalised onto `[0, 1]`; a raw
+   `x - lower` on a covariate ranging to 1e5 loses enough precision in a
+   fixed-scale `DECIMAL` column to produce a 3.3× relativity error.
+2. **Unbounded rows are read, not evaluated.** The leading and trailing rows are
+   constant pieces and their factor is `Relativity`. Do **not** put them through
+   the formula: `u` on an infinite width is `inf/inf`, which is `NaN`, and the
+   zero higher coefficients do not absorb it because `0 * NaN` is `NaN`. You
+   would get `NaN` on exactly the rows that price the extremes of the book. The
+   branch costs nothing — `-inf` does not cast to `DECIMAL`, so an unbounded key
+   has to be recognised before it can be parsed at all.
+3. **Read the closing bracket.** Rows are `[lower, upper)` — except the last row
+   under `extrapolation="error"`, which is `[lower, upper]` so that the boundary
+   knot, which the model rates, has a row. Under `"clip"` the trailing unbounded
+   row covers it and every key is right-open.
+
+If you fingerprint staged rows with a content digest over an allow-list of
+columns, **include the coefficients**. Two models differing only in `a b c d`
+otherwise fingerprint identically, and the second is silently deduplicated into
+the first.
 
 ## Production Framing
 
