@@ -211,13 +211,21 @@ def test_profiled_reml_retains_compact_structured_reports(
 
 @pytest.mark.parametrize("term_kind", ["re", "fs", "sz"])
 @pytest.mark.parametrize("constrained_mode", ["fixed", "estimated"])
-def test_constrained_reml_rejects_structured_terms_before_constraint_route(
+def test_constrained_reml_reaches_the_route_with_structured_terms(
     monkeypatch: pytest.MonkeyPatch,
     term_kind: str,
     constrained_mode: str,
 ) -> None:
+    """Structured terms travel the constrained route instead of being refused.
+
+    All three were refused here once. The shape constraint in this fixture sits
+    on its own feature, so no factor smooth duplicates a constrained variable
+    and nothing in this file meets the one specification still refused --
+    ``tests/test_shape_reml.py`` owns that case, where the constraint and the
+    ``fs`` factor smooth share a variable.
+    """
     X, y = _profile_data()
-    model, _term_name = _profile_model(
+    model, term_name = _profile_model(
         family_name="gaussian",
         term_kind=term_kind,
         direct_solve="auto",
@@ -232,61 +240,12 @@ def test_constrained_reml_rejects_structured_terms_before_constraint_route(
         return real_route(*args, **kwargs)
 
     monkeypatch.setattr(fit_ops_module, route_name, record_route)
+    model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
 
-    with pytest.raises(
-        NotImplementedError,
-        match=r"fit-time shape constraints.*(?:RandomEffect|FactorSmooth)",
-    ):
-        model.fit_reml(X, y, max_reml_iter=2, runtime_validation="skip")
-
-    assert route_calls == []
-    with pytest.raises(RuntimeError, match="Not fitted"):
-        _ = model.result
-
-
-@pytest.mark.parametrize(
-    ("family_name", "constrained_mode", "term_kind"),
-    [
-        ("nb", "fixed", "re"),
-        ("tweedie", "estimated", "sz"),
-    ],
-)
-def test_profiled_constrained_reml_rejects_structured_terms(
-    monkeypatch: pytest.MonkeyPatch,
-    family_name: str,
-    constrained_mode: str,
-    term_kind: str,
-) -> None:
-    X, y = _profile_data()
-    model, _term_name = _profile_model(
-        family_name=family_name,
-        term_kind=term_kind,
-        direct_solve="auto",
-        constrained_mode=constrained_mode,
-    )
-    _install_deterministic_profile(monkeypatch, family_name)
-    route_name = "run_fixed_monotone_reml" if constrained_mode == "fixed" else "run_scop_efs_reml"
-    real_route = getattr(fit_ops_module, route_name)
-    route_calls = []
-
-    def record_route(*args, **kwargs):
-        route_calls.append(True)
-        return real_route(*args, **kwargs)
-
-    monkeypatch.setattr(fit_ops_module, route_name, record_route)
-
-    with pytest.raises(
-        NotImplementedError,
-        match=r"fit-time shape constraints.*(?:RandomEffect|FactorSmooth)",
-    ):
-        if family_name == "nb":
-            model.estimate_theta(X, y, fit_mode="reml")
-        else:
-            model.estimate_p(X, y, fit_mode="reml", phi_method="mle")
-
-    assert route_calls == []
-    with pytest.raises(RuntimeError, match="Not fitted"):
-        _ = model.result
+    assert route_calls, "the constrained route was never entered"
+    assert model.result.converged
+    if term_kind == "re":
+        assert model.random_effects(term_name).variance_component > 0.0
 
 
 def test_reporting_failure_preserves_installed_revision(

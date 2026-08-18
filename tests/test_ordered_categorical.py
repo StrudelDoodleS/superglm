@@ -958,29 +958,66 @@ class TestOrderedCategoricalShapeDispatch:
         assert np.all(steps >= -_monotone_slack(after)), f"not increasing: {steps}"
         assert "band" in model._shape_repairs
 
-    def test_structured_rejection_sees_the_wrapped_fit_constraint(self, dipping_ordinal_data):
-        """``_reject_structured_fit_constraints`` exists because a fit-time
-        shape constraint and a RandomEffect do not jointly define the compact
-        REML geometry. A bare ``Spline`` is refused; the same request wrapped
-        must be refused identically, not fitted by an undefined path."""
-        from superglm import RandomEffect
+    def test_structured_guard_resolves_the_engine_through_the_wrapper(self, dipping_ordinal_data):
+        """The wrapper must not change which engine the guard thinks it holds.
+
+        ``OrderedCategorical`` delegates its build to an inner spline, so the
+        inner basis picks the engine -- ``ps`` routes through SCOP -- while the
+        wrapper defines ``_build_monotone_constraints_raw`` unconditionally, so
+        that the builder can find raw geometry through it, and defines no SCOP
+        method at all. Asking the WRAPPER therefore reads QP for every basis,
+        including the SCOP ones.
+
+        The observable consequence is the exception a same-variable factor
+        smooth produces. ``ps`` resolves to SCOP, so the shape guard claims it
+        first; ``cr`` resolves to QP, so the guard passes and the request falls
+        through to ``FactorSmooth``'s own numeric-variable check. Asserting the
+        two differ is asserting the resolution happened.
+
+        Note what this does NOT show. An ordinal feature's column is
+        categorical, so a factor smooth of it is never buildable either way --
+        that is what the ``cr`` arm's ``TypeError`` says. This pins
+        classification, not a live modelling path.
+
+        This test formerly asserted that a wrapped constraint beside a
+        ``RandomEffect`` was refused. That refusal was withdrawn: a variance
+        component and a smoothing parameter are one object to the extended
+        Fellner-Schall update (Wood & Fasiolo, 2017).
+        """
+        from superglm import FactorSmooth, RandomEffect
         from superglm.features.spline import Spline
 
         X, y, levels, _ = dipping_ordinal_data
         X = X.copy()
         X["grp"] = np.array([f"g{i % 6}" for i in range(len(X))], dtype=object)
-        model = SuperGLM(
-            family="gaussian",
-            features={
-                "band": OrderedCategorical(
-                    order=levels,
-                    basis=Spline(kind="cr", n_knots=6, constraint=Constraint.fit.increasing),
-                ),
-                "grp": RandomEffect(),
-            },
-        )
-        with pytest.raises(NotImplementedError, match="fit-time shape constraints"):
+
+        def band(kind):
+            return OrderedCategorical(
+                order=levels,
+                basis=Spline(kind=kind, n_knots=6, constraint=Constraint.fit.increasing),
+            )
+
+        def fit_with_same_variable_factor_smooth(kind):
+            model = SuperGLM(
+                family="gaussian",
+                features={"band": band(kind)},
+                interactions=[FactorSmooth("band", group="grp", basis="fs", k=5)],
+            )
             model.fit_reml(X, y)
+
+        with pytest.raises(NotImplementedError, match="stated twice"):
+            fit_with_same_variable_factor_smooth("ps")
+        with pytest.raises(TypeError, match="must be numeric"):
+            fit_with_same_variable_factor_smooth("cr")
+
+        # Either engine pairs with a random effect, and neither is refused.
+        for kind in ("ps", "cr"):
+            model = SuperGLM(
+                family="gaussian",
+                features={"band": band(kind), "grp": RandomEffect()},
+            )
+            model.fit_reml(X, y)
+            assert model.result.converged
 
     @pytest.mark.parametrize("basis", ["piecewise", "polynomial"])
     def test_postfit_repair_refuses_a_basis_with_no_curve_geometry(self, basis):

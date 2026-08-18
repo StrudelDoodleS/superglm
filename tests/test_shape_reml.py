@@ -249,57 +249,76 @@ def test_cr_clustered_quantile_large_response_completes_kkt_certificate(
     assert shape_constraint_is_roundoff_feasible(spec, beta, kind)
 
 
-@pytest.mark.parametrize(
-    ("structured_kind", "expected_name"),
-    [
-        pytest.param("re", "RandomEffect", id="random-effect"),
-        pytest.param("fs", "FactorSmooth", id="factor-smooth"),
-        pytest.param("sz", "FactorSmooth", id="sum-to-zero"),
-    ],
-)
-def test_structured_terms_reject_fit_time_shape_constraints_early(
-    structured_kind: str,
-    expected_name: str,
-) -> None:
-    x = np.linspace(0.0, 1.0, 160)
-    codes = np.arange(len(x)) % 40
-    X = pd.DataFrame(
+def _scop_factor_smooth_frame():
+    x = np.linspace(0.0, 1.0, 400)
+    rng = np.random.default_rng(19)
+    codes = np.arange(len(x)) % 20
+    return pd.DataFrame(
         {
             "x": x,
-            "group": np.array([f"g{code}" for code in codes], dtype=object),
+            "z": rng.uniform(0.0, 1.0, len(x)),
+            "group": np.array([f"g{code:02d}" for code in codes], dtype=object),
         }
-    )
-    y = 0.3 + 0.7 * x
-    features = {
-        "x": PSpline(
-            n_knots=7,
-            constraint=Constraint.fit.increasing,
-        )
-    }
-    interactions = []
-    if structured_kind == "re":
-        features["group"] = RandomEffect()
-    else:
-        interactions.append(
-            FactorSmooth(
-                "x",
-                group="group",
-                basis=structured_kind,
-                k=5,
-            )
-        )
+    ), 0.3 + 0.7 * x + 0.2 * rng.normal(size=len(x))
+
+
+def test_scop_constraint_rejects_a_main_effect_factor_smooth_of_the_same_variable() -> None:
+    """The one specification with no converging path -- and it is a spec, not a pair.
+
+    A ``basis="fs"`` factor smooth carries its own main effect. Put one on a
+    variable that also has a SCOP shape constraint and the model states that
+    variable's effect twice: once confined to the shape cone, once free. The
+    free copy absorbs what the constrained copy may not do, the two compensate,
+    and no coefficient mode is reached -- measured 0/7 across seed, rows, level
+    count and basis size, where every adjacent specification is 7/7.
+
+    An earlier form of this refusal covered ``basis="sz"`` and factor smooths of
+    other variables as well. That was generalised from a sweep which varied the
+    data but never the specification, so all of its cases were this one.
+    """
+    X, y = _scop_factor_smooth_frame()
     model = SuperGLM(
         family="gaussian",
-        features=features,
-        interactions=interactions,
+        features={"x": PSpline(n_knots=7, constraint=Constraint.fit.increasing)},
+        interactions=[FactorSmooth("x", group="group", basis="fs", k=5)],
         direct_solve="auto",
     )
 
-    with pytest.raises(
-        NotImplementedError,
-        match=rf"fit-time shape constraints.*{expected_name}",
-    ):
+    with pytest.raises(NotImplementedError, match=r"stated twice"):
         model.fit_reml(X, y)
+
+
+@pytest.mark.parametrize(
+    ("features_for", "interaction_for", "case"),
+    [
+        pytest.param("x", "x", "sz", id="sum-to-zero-same-variable"),
+        pytest.param("x", "z", "fs", id="main-effect-basis-other-variable"),
+        pytest.param("z", "x", "fs", id="constraint-on-the-other-variable"),
+    ],
+)
+def test_scop_constraints_fit_beside_a_non_duplicating_factor_smooth(
+    features_for: str,
+    interaction_for: str,
+    case: str,
+) -> None:
+    """Everything adjacent to the duplicated specification converges.
+
+    ``sz`` excludes the main effect, so it states the constrained variable once.
+    A factor smooth of any other variable states nothing twice. These are the
+    cases the wider refusal was taking with it.
+    """
+    X, y = _scop_factor_smooth_frame()
+    features = {features_for: PSpline(n_knots=7, constraint=Constraint.fit.increasing)}
+    if interaction_for != features_for:
+        features[interaction_for] = PSpline(n_knots=7)
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=[FactorSmooth(interaction_for, group="group", basis=case, k=5)],
+        direct_solve="auto",
+    )
+    model.fit_reml(X, y)
+    assert model.result.converged
 
 
 def test_structured_fit_constraint_preflight_runs_before_nb_theta_profile(
@@ -323,8 +342,8 @@ def test_structured_fit_constraint_preflight_runs_before_nb_theta_profile(
                 n_knots=7,
                 constraint=Constraint.fit.increasing,
             ),
-            "group": RandomEffect(),
         },
+        interactions=[FactorSmooth("x", group="group", k=5)],
     )
 
     def unexpected_theta_profile(*_args, **_kwargs):
@@ -334,6 +353,83 @@ def test_structured_fit_constraint_preflight_runs_before_nb_theta_profile(
 
     with pytest.raises(
         NotImplementedError,
-        match=r"fit-time shape constraints.*RandomEffect",
+        match=r"fit-time SCOP shape constraints.*FactorSmooth",
     ):
         model.fit_reml(X, y)
+
+
+def test_scop_constraints_fit_alongside_a_random_effect() -> None:
+    """A shape constraint and a variance component estimate together.
+
+    To the extended Fellner-Schall update these are one kind of object: it
+    estimates smoothing parameters and variance components by a single formula
+    (Wood & Fasiolo, 2017, Biometrics 73(4):1071-1081), and the founding case in
+    Fellner (1986) is a penalty assembled from identity blocks -- precisely what
+    a ``RandomEffect`` contributes. Shape-constrained additive *mixed* models
+    are the documented combination in the reference implementation (Pya
+    Arnqvist, 2024, arXiv:2403.09438 section 3).
+
+    This raised ``NotImplementedError`` until the EFS lambda step stopped
+    reading ``PenaltyComponent.omega_ssp`` directly, which is ``None`` for an
+    identity penalty and so reached a matmul as a 0-d operand.
+    """
+    rng = np.random.default_rng(11)
+    n, n_levels = 900, 18
+    x = np.sort(rng.uniform(0.0, 1.0, n))
+    codes = rng.integers(0, n_levels, n)
+    level_effects = rng.normal(0.0, 0.5, n_levels)
+    # Non-monotone truth, so an honoured constraint has to visibly bite.
+    y = np.sin(3.2 * x) + level_effects[codes] + rng.normal(0.0, 0.25, n)
+    X = pd.DataFrame({"x": x, "group": [f"g{code:02d}" for code in codes]})
+
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "x": PSpline(n_knots=8, constraint=Constraint.fit.increasing),
+            "group": RandomEffect(),
+        },
+    )
+    model.fit_reml(X, y)
+
+    curve = model.plot_data("x")["terms"][0]["effect"].sort_values("x")
+    steps = np.diff(curve["log_relativity"].to_numpy(dtype=float))
+    assert np.all(steps >= -1e-9), f"constraint not honoured: worst step {steps.min():.3e}"
+    assert steps.max() > 1e-3, "constrained curve is flat, so nothing was actually fitted"
+
+    random_effect = model.random_effects("group")
+    assert random_effect.variance_component > 0.0
+    assert np.isfinite(random_effect.smoothing_lambda)
+
+
+def test_scop_constraint_with_random_effect_is_slack_when_truth_is_monotone() -> None:
+    """Equivalence control: a non-binding constraint must change nothing.
+
+    A fit that merely runs proves little. On a monotone truth the increasing
+    constraint is inactive, so the constrained fit has to reproduce the
+    unconstrained one -- including the variance component, which is the
+    quantity a shape constraint has no business perturbing.
+    """
+    rng = np.random.default_rng(5)
+    n, n_levels = 1200, 20
+    x = np.sort(rng.uniform(0.0, 1.0, n))
+    codes = rng.integers(0, n_levels, n)
+    level_effects = rng.normal(0.0, 0.5, n_levels)
+    y = 2.5 * x + level_effects[codes] + rng.normal(0.0, 0.25, n)
+    X = pd.DataFrame({"x": x, "group": [f"g{code:02d}" for code in codes]})
+
+    def fit(constraint):
+        kwargs = {"constraint": constraint} if constraint is not None else {}
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": PSpline(n_knots=10, **kwargs), "group": RandomEffect()},
+        )
+        model.fit_reml(X, y)
+        return model
+
+    free = fit(None)
+    constrained = fit(Constraint.fit.increasing)
+
+    free_re = free.random_effects("group")
+    constrained_re = constrained.random_effects("group")
+    assert constrained_re.variance_component == pytest.approx(free_re.variance_component, rel=5e-2)
+    assert constrained.result.deviance == pytest.approx(free.result.deviance, rel=5e-2)
