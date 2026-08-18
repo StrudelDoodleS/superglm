@@ -6676,6 +6676,7 @@
     "tests/test_structured_screening.py::test_the_absorption_floor_reads_dimensions_and_never_a_measured_residual": 0.045279859099537134,
     "tests/test_structured_screening.py::test_the_block_rank_is_the_one_a_dense_rank_call_reports": 0.17859265799052082,
     "tests/test_structured_screening.py::test_the_closure_residual_refuses_outside_the_bound_its_own_route_allows": 0.038842108100652695,
+    "tests/test_structured_screening.py::test_the_cut_margin_survives_an_exactly_absorbed_border_under_raising_errstate": 0.002011604141443968,
     "tests/test_structured_screening.py::test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic[0.0001-False]": 0.36055632890202105,
     "tests/test_structured_screening.py::test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic[1.0-False]": 0.5454373171087354,
     "tests/test_structured_screening.py::test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic[1e-12-True]": 0.47082083695568144,

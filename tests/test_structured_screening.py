@@ -4890,9 +4890,15 @@ def test_an_undecided_deflation_count_refuses_rather_than_publishing_a_coin_flip
 
     # And on #280's own pair, whose border spectrum has NO gap -- 4.9e-05,
     # 3.9e-06, 1.0e-06, 2.7e-07, 1.7e-07, 1.0e-07, 5.5e-08 -- the guard is
-    # live.  Measured 2 of 601 on every one of the 14 configurations swept;
-    # asserted as a range because the count is how many log-spaced samples land
-    # inside a fixed band, which is not a property this suite gets to pin.
+    # live: measured 2 of 601 on every one of the 14 configurations swept.
+    #
+    # ONLY THE UPPER HALF IS ASSERTED.  How many log-spaced samples land inside
+    # a fixed band is not a property this suite gets to pin, and a ``>= 1``
+    # would be asserting that this pair keeps landing inside it on every future
+    # machine and LAPACK.  That the guard fires at all is established by the
+    # mutation check above, which does not depend on a spectrum.  The bound
+    # below is the one worth keeping: the guard must not start refusing the
+    # bracket wholesale.
     starved = spline_cat_moments(*_structured_inputs(_issue_280_starved_pair()))
     starved_geometry = _profile(starved)
     L, _ = starved.dims
@@ -4904,7 +4910,7 @@ def test_an_undecided_deflation_count_refuses_rather_than_publishing_a_coin_flip
             st._evaluate(starved, starved_geometry, float(lam))
         except st._UnstableStructuredEDFError:
             refused += 1
-    assert 1 <= refused <= 8, refused
+    assert refused <= 8, refused
 
 
 def test_the_starved_pair_that_flipped_route_across_cpus_now_publishes_on_all_of_them():
@@ -4942,3 +4948,42 @@ def test_the_starved_pair_that_flipped_route_across_cpus_now_publishes_on_all_of
     assert len(rungs) == 1
     assert abs(rungs[0].edf0 - 4.0) <= 0.05, rungs[0]
     assert np.isfinite(rungs[0].statistic) and rungs[0].lambda0 > 0.0, rungs[0]
+
+
+def test_the_cut_margin_survives_an_exactly_absorbed_border_under_raising_errstate():
+    """An exactly-zero border must score ``inf``, not divide to get there.
+
+    ``singular`` is sorted descending, so the absorbed side's ``max()`` is the
+    LARGEST dropped value and is exactly ``0.0`` when the border is exactly
+    rank deficient.  That is reachable rather than defensive: at ``lam = 0`` on
+    an UNPENALIZED pair whose base level carries no mass, every trailing block
+    is exactly zero and so is ``base_gram``, so the whole border is.
+
+    The margin's value is not what is at risk -- ``inf`` is the right answer
+    for a cleanly absorbed border, and ``1 / 0.0`` produces it too.  What is at
+    risk is the ROUTE: :class:`_UnstableStructuredEDFError` subclasses
+    ``FloatingPointError``, so a bare one raised under
+    ``np.errstate(divide="raise")`` is not caught by the ladder's own except
+    clause and aborts the sweep instead of handing the pair to the dense
+    track -- the same hazard, and the same reasoning, as the reciprocal
+    guarded thirty lines further down.
+
+    RED against an unguarded reciprocal, which raises here rather than
+    returning a rung -- ``ZeroDivisionError`` if the denominator has been
+    narrowed to a Python float, ``FloatingPointError`` from the numpy one under
+    the ``errstate`` below.  Neither is :class:`_UnstableStructuredEDFError`,
+    so neither is caught, which is the point.
+    """
+    import superglm.screening._structured as st
+
+    B_a, _S_a, S_cell, W_cell, level_rows = _near_absorbed_cells(0.0)
+    p = spline_cat_moments(B_a, None, S_cell, W_cell, level_rows)
+    geometry = _profile(p)
+
+    with np.errstate(divide="raise", invalid="raise"):
+        margin = st._filter_factor_sum(p, geometry, 0.0)[3]
+        assert margin == np.inf, margin
+        rungs = st.structured_ladder(p, budgets=(0.5,))
+
+    assert rungs is not None and len(rungs) == 1
+    assert np.isfinite([rungs[0].statistic, rungs[0].edf0, rungs[0].lambda0]).all()
