@@ -1129,13 +1129,23 @@ def build_observed_reml_geometry(
             raise ObservedGeometryInfeasibleError(
                 "structured observed intercept curvature must have a positive finite sum"
             )
-        penalized = build_penalized_structured_operator(
-            system,
-            list(dm.group_matrices),
-            groups,
-            lambdas,
-            reml_penalties=reml_penalties,
-        )
+        # The penalized operator is built from the same block types, so it
+        # carries the same split and needs the same seam. Reaching it takes more
+        # than the raw build does -- the penalized D is D + lambda*S, so the
+        # penalty term has to go non-finite too -- but it is the same one line.
+        try:
+            penalized = build_penalized_structured_operator(
+                system,
+                list(dm.group_matrices),
+                groups,
+                lambdas,
+                reml_penalties=reml_penalties,
+            )
+        except np.linalg.LinAlgError as error:
+            raise ObservedGeometryInfeasibleError(
+                "penalized structured observed geometry has no usable blocks "
+                "at the fitted coefficients"
+            ) from error
         xtw = np.empty(dm.p, dtype=np.float64)
         xtw[system.operator.small_indices] = system.xtw_small
         xtw[system.operator.structured_indices] = system.xtw_structured
@@ -1162,13 +1172,11 @@ def build_observed_reml_geometry(
         # Those factors speak two dialects, and only one of them is about this
         # iterate. LinAlgError is what they raise for what the numbers did, and
         # they raise it ahead of the structural checks a non-finite block would
-        # otherwise trip: the finiteness guard sits above "A must be symmetric"
-        # in the sum-to-zero factor, and the local-block guards run before the
-        # symmetry and partition checks in the Schur ones. The one seam that
-        # ordering leaves is a NaN in a sum-to-zero LOCAL block, tested for
-        # finiteness only after a symmetry check a NaN fails first; reaching it
-        # needs the block moments themselves to overflow, and closing it belongs
-        # to that factor's own check order rather than to a wider catch here.
+        # otherwise trip. That ordering is load-bearing and it is now uniform:
+        # every operator and factor on this branch -- sum-to-zero and block
+        # alike, raw and penalized -- tests its blocks for finiteness before it
+        # tests them for symmetry, because a NaN fails `np.allclose` against its
+        # own transpose and would otherwise be reported as an asymmetric block.
         #
         # Their plain ValueErrors say something else entirely: partitions that
         # disagree, a C of the wrong shape, level labels that do not match K.
