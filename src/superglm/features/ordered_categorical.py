@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import warnings
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -169,6 +170,45 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
         return matched
 
     return match
+
+
+def group_axis_position(member_values: Sequence[float]) -> float:
+    """Where a merged group sits on the numeric level axis: the MEAN of its members.
+
+    THE one definition of that convention.  It is read by the spec, which uses
+    it to place the group on the axis the basis is evaluated on, and by the
+    display collapse in ``plotting/group_display.py``, which uses it to put a
+    collapsed marker back where the fit is.  Those two agreed everywhere except
+    the case below, and a marker half a level width from its own fitted value is
+    not something either half can detect on its own, so they now share this.
+
+    Why the mean, and not the value of the member the group happens to be NAMED
+    after (issue #326).  The named-member reading was never a convention; it was
+    a lookup shortcut for the singleton identity groups that make up most of any
+    grouping, where the member's value and the group's mean are the same number.
+    It only ever diverged when the label collided with a member -- and there it
+    made the FIT depend on a LABEL.  Measured on ten evenly spaced levels
+    merging one interior pair: ``{"Mi001": [...]}`` and ``{"Mi001+Mi002": [...]}``
+    declare the same partition, yet placed the group at 0.1111 against 0.1667
+    and moved every reported relativity, by up to 1.45e-02 in log-relativity.
+    A group label is metadata -- it names a row in a rating table -- so renaming
+    a group must not move the model.  The mean is label-invariant, is what a
+    singleton group already resolved to, and is what the display half has
+    documented all along.
+
+    To place a group somewhere else, say it: declare ``values=`` so that the
+    members share the position the group should sit at.  The mean of equal
+    values is that value exactly, so ``values={"Mi001": 0.1, "Mi002": 0.1, ...}``
+    with ``{"Mi001": ["Mi001", "Mi002"]}`` puts the group at 0.1 with no
+    special case anywhere.  That is the explicit route, and it is exact.
+
+    Not used for a ``Piecewise``/``Polynomial`` inner basis, whose axis is level
+    POSITIONS ``0..L-1``: there a group IS one band with one coordinate, and
+    every member maps to it (``_install_position_axis``).  The two agree anyway
+    -- the mean of a group's member positions is that single shared position --
+    so the display collapse below needs no branch for it.
+    """
+    return float(np.mean(np.asarray(member_values, dtype=np.float64)))
 
 
 def _regroup_to_declared(grouping: Any, declared_levels: list[Any]):
@@ -592,11 +632,11 @@ class OrderedCategorical:
             )
             orig_ltv = {str(_match(k)): v for k, v in self._level_to_value.items()}
             self._original_level_to_value = orig_ltv
-            # Build level_to_value for grouped levels.
-            # When values= was used, orig_ltv keys are original level names
-            # so we average them per group. When order= was used, orig_ltv
-            # keys are already the grouped level names — use them directly
-            # if the group name matches, otherwise average originals.
+            # Build level_to_value for grouped levels: one position per group,
+            # always ``group_axis_position`` over the group's MEMBERS, never the
+            # label's own value. See that function for why (issue #326) -- in
+            # short, the label shortcut this replaced made the fit depend on
+            # what the group was CALLED.
             # A LevelGrouping is string-keyed by construction, while `values=`/
             # `order=` keys are the declared objects (ints, floats). Join on text
             # so `order=[1, 2, 3]` meets a grouping spelling them "1", "2", "3";
@@ -605,13 +645,14 @@ class OrderedCategorical:
             by_text = {str(k): v for k, v in orig_ltv.items()}
             grouped_ltv = {}
             for glev in grouping.grouped_levels:
-                if str(glev) in by_text:
-                    grouped_ltv[glev] = by_text[str(glev)]
-                else:
-                    originals = grouping.group_to_originals[glev]
-                    vals = [by_text[str(o)] for o in originals if str(o) in by_text]
-                    if vals:
-                        grouped_ltv[glev] = float(np.mean(vals))
+                # ``.get``, not ``[]``: ``LevelGrouping`` is a public dataclass a
+                # caller can build by hand, and a label missing from
+                # ``group_to_originals`` should reach the named error below
+                # rather than a bare KeyError from inside a comprehension.
+                originals = grouping.group_to_originals.get(glev, [glev])
+                vals = [by_text[str(o)] for o in originals if str(o) in by_text]
+                if vals:
+                    grouped_ltv[glev] = group_axis_position(vals)
             # Specials are exempt by construction: a free level never receives a
             # coordinate on the spline's axis, so having no numeric position is
             # correct for them and only for them.

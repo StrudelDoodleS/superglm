@@ -10,7 +10,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame
-from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.ordered_categorical import OrderedCategorical, group_axis_position
 from superglm.inference.term import SmoothCurve, TermInference
 
 
@@ -176,11 +176,19 @@ def _collapsed_smooth_curve(
     ti: TermInference,
     groups: list[list[int]],
 ) -> SmoothCurve | None:
-    """Keep the fitted curve and move each marker to its group's mean position.
+    """Keep the fitted curve and move each marker to its group's own position.
 
     The curve itself is never rebuilt: collapsing levels is a display
     operation, and re-interpolating through the collapsed markers would
     draw a shape the model never fitted.
+
+    Where a group sits is ``group_axis_position`` -- the ONE definition of that
+    convention, shared with the spec that placed the group there in the first
+    place (``features/ordered_categorical.py``).  This half used to spell the
+    mean out itself, which agreed with the spec on every grouping but one and
+    left issue #326's marker half a level width from its own fitted value.
+    Sharing the function is what makes the collapse the exact inverse of the
+    expansion rather than a second implementation that happens to match.
 
     ``level_x`` covers the smoothed levels only, so an all-special group has no
     position on the curve's axis and is dropped here rather than indexed into
@@ -210,5 +218,5 @@ def _collapsed_smooth_curve(
         smooth_idx = idx[~special[idx]]
         if smooth_idx.size == 0:
             continue  # an all-free group has no place on the fitted curve
-        collapsed.append(float(np.mean(level_x[smooth_pos[smooth_idx]])))
+        collapsed.append(group_axis_position(level_x[smooth_pos[smooth_idx]]))
     return replace(curve, level_x=np.asarray(collapsed, dtype=np.float64))
