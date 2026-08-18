@@ -92,6 +92,29 @@ def _unit_level_centered_operator(width: int) -> CenteredBlockOperator:
     return operator
 
 
+@pytest.mark.parametrize("part", ["basis", "core"])
+def test_a_non_finite_low_rank_part_is_refused_as_curvature(part) -> None:
+    """At its one call site a symmetry complaint could only ever mean this.
+
+    ``reml_w_correction`` builds the core as ``[[0, -sum_w], [-sum_w, 0]]``,
+    symmetric by construction, so the symmetry check below it cannot fail there
+    for a structural reason -- only for a non-finite ``sum_w``, which NaN turns
+    into an ``allclose`` failure. Every "core must be symmetric" that site could
+    produce was really a non-finite iterate wearing the wrong name, and it left
+    ``fit_reml`` as a bare ValueError because nothing on that chain caught it.
+    """
+    rng = np.random.default_rng(4)
+    basis = rng.normal(size=(7, 2))
+    core = np.array([[0.0, -1.5], [-1.5, 0.0]])
+    if part == "basis":
+        basis[0, 0] = np.nan
+    else:
+        core = np.array([[0.0, np.nan], [np.nan, 0.0]])
+
+    with pytest.raises(np.linalg.LinAlgError, match="must be finite"):
+        LowRankSymmetricOperator(basis=basis, core=core)
+
+
 @pytest.mark.parametrize("block", ["A", "C"])
 def test_a_non_finite_scalar_schur_block_is_refused_rather_than_absorbed(block) -> None:
     """An inf in A or C used to build a factor carrying a nan scale.

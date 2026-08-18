@@ -315,6 +315,14 @@ class LowRankSymmetricOperator:
         core = np.array(self.core, dtype=np.float64, copy=True)
         if basis.ndim != 2 or core.shape != (basis.shape[1], basis.shape[1]):
             raise ValueError("Low-rank operator basis and core shapes are inconsistent.")
+        if not np.all(np.isfinite(basis)) or not np.all(np.isfinite(core)):
+            # Above the symmetry check, as everywhere else here. It matters more
+            # at this class's one construction site than at most: the core built
+            # in `reml_w_correction` is [[0, -sum_w], [-sum_w, 0]], symmetric by
+            # construction, so the only way the check below can fail there is a
+            # non-finite sum_w -- i.e. every symmetry complaint that site could
+            # ever produce was really this one, misnamed.
+            raise np.linalg.LinAlgError("Low-rank operator basis and core must be finite.")
         if not np.allclose(core, core.T, rtol=0.0, atol=1e-14):
             raise ValueError("Low-rank operator core must be symmetric.")
         basis.setflags(write=False)
