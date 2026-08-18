@@ -336,8 +336,13 @@ carry the derivation.
 
 The seed the fixture happens to run has a sensitivity of 2.6282e-04 like its
 nine siblings, and reports an error of 1.37e-10, so it clears the suite's bound by
-193x on a draw whose answer is uncertain in the fourth decimal.  A draw is not
-evidence about the family here, and neither is a passing bound.
+193x on a draw whose answer MOVES in the fourth decimal under a one-rounding
+probe.  That is mobility, not uncertainty: the probe establishes no lower bound
+on the Gram's actual error, so nothing here says seed 3's 1.37e-10 is anything
+but accurate.  What it says is that the same geometry admits answers 2.6e-04
+apart under perturbations of the size the arithmetic works in, so a tolerance
+placed at 1e-5 is being decided by the draw.  A draw is not evidence about the
+family here, and neither is a passing bound.
 
 Which draws are bad is decided in the DESIGN, before this module is called: the
 bad ones are those where a level's rows put the constant vector in the span of
@@ -352,7 +357,10 @@ best asserted-unresolved 3.0293e+10 ulp, so the boundary clears by 2.44e+07x
 and 3.03e+10x.  Separately the maximising perturbation attains 0.9425 to 1.0617
 of the predicted displacement against a first-order value of 1 -- and that it
 EXCEEDS 1 is the direct evidence that this quantity is a first-order measure
-rather than an upper bound on the finite response.
+rather than an upper bound on the finite response.  That ratio is REPORTED and
+not asserted: bounding it would fit an interval around those observations, on a
+difference of two evaluations at ``cond(A)`` up to 5.4e+14, which is the
+sampled-width objection in another form.
 
 **TWO EARLIER REVISIONS GOT THE BOUNDARY WRONG IN OPPOSITE DIRECTIONS.**  One
 asserted 1e5 ulp while the prose said one -- a midpoint of the two observed
@@ -371,8 +379,13 @@ with both of its own arbitrary constants: 0.2548 at 4 draws against 0.8653 at
 deterministic norm has neither axis.
 
 **THE PROBE ALSO DRIVES THE LADDER RATHER THAN ``_edge`` AT A PINNED LAMBDA**,
-because the bracket is ``1e-10 tr(V_eff) / tr(S)`` and ``G`` is PSD, so a probe
-along it moves ``lambda`` too.  Review is right that the omitted term can
+because the bracket is ``1e-10 tr(V_eff) / tr(S)``, so a probe with nonzero
+trace moves ``lambda`` too.  (An earlier revision justified that trace by
+calling ``G`` PSD.  **It is not**, once the bracket term is in it: scale
+invariance of the ladder gives ``<G, V_eff>_F = 0``, which no nonzero PSD
+matrix can satisfy against a positive definite ``V_eff``.  The claim is
+withdrawn; the term is carried because it belongs in the gradient, not because
+of any sign property.)  Review is right that the omitted term can
 cancel the response outright -- in ONE dimension ``edf = V / (V + 1e-10 V)`` is
 constant in ``V`` while a fixed-lambda calculation reports a move.  It does not
 cancel here, because the response is carried by the near-null direction at

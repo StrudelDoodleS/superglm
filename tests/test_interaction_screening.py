@@ -1850,9 +1850,12 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
 
     def edf(operand):
         # THE REAL CALLER PATH, not ``_edge`` at a pinned lambda.  The bracket
-        # is ``1e-10 tr(V) / tr(S)``, so a perturbation with nonzero trace --
-        # and ``G`` is PSD, so this one has -- moves lambda too, and holding it
-        # fixed would measure only the partial derivative.  Review is right
+        # is ``1e-10 tr(V) / tr(S)``, so a perturbation with nonzero trace
+        # moves lambda too, and holding it fixed would measure only the partial
+        # derivative.  (An earlier revision argued the probe has nonzero trace
+        # because ``G`` is PSD.  It is NOT, once the bracket term is included:
+        # the ladder's scale invariance gives ``<G, V>_F = 0``, impossible for
+        # a nonzero PSD ``G`` against positive definite ``V``.  Withdrawn.)  Review is right
         # that the omitted term can cancel the response outright: in ONE
         # dimension ``edf = V / (V + 1e-10 V)`` is constant in ``V`` while the
         # fixed-lambda calculation reports a nonzero move.  It does not cancel
@@ -1893,11 +1896,25 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
 # real boundary; what makes 1.59x usable is that the quantity is BIT-IDENTICAL
 # across the sweep on that row, not that the number is comfortable.
 #
-# The realization bound is placed around 1, which is what the algebra predicts
-# the maximising perturbation attains, so it checks the theory is live rather
-# than merely stated.
+# THE REALIZATION WINDOW IS AN ORDER OF MAGNITUDE, DELIBERATELY.
+#
+# What the algebra gives is that the finite response is DOMINATED by its
+# first-order term, i.e. the ratio is of order 1 -- not that it equals 1, since
+# no second-order remainder is derived here.  So the window is one order either
+# side, which is the coarsest statement that still says "dominated".
+#
+# An earlier revision used (0.5, 2.0).  Review refused that as fitted around
+# the observed 0.9425-1.0617, and it was: a ratio differencing two production
+# evaluations on operands whose ``cond(A)`` reaches 5.4e+14 could move under
+# another LAPACK with no mathematical regression, which is the sampled-width
+# objection re-entering by a different door.  (0.1, 10.0) sits 9.4x from both
+# observed extremes rather than hugging them, so it is not a fit to this box.
+#
+# Dropping the check entirely was tried first and costs too much: without it,
+# perturbing along a RANDOM direction instead of the maximising one, and
+# shrinking the probe a millionfold, both stop being detected.
 _LOW_EDGE_ULP = 1.0
-_LOW_EDGE_REALISED = (0.5, 2.0)
+_LOW_EDGE_REALISED = (0.1, 10.0)
 
 
 @pytest.mark.parametrize(
@@ -1976,14 +1993,23 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     The alternative -- keeping the assertion and quoting the comfortable
     margin the wrong ulp produced -- is the failure this whole PR is about.
 
-    **THE REALIZATION.**  The maximising perturbation attains 0.9425 to 1.0617
-    of the predicted displacement across all 14 configurations, both penalties
-    and all three unit scales, against a first-order value of 1.  So the bound
-    of (0.5, 2.0) clears by 1.88x on each side.  Note that it exceeds 1 --
-    which is the direct evidence that this quantity is a first-order measure
-    and not an upper bound on the finite response, and it is checked only where
-    the sensitivity is above one ulp, since below that the displacement is the
-    evaluator's rounding and not the response.
+    **THE REALIZATION IS REPORTED, NOT ASSERTED.**  The maximising perturbation
+    attains 0.9425 to 1.0617 of the predicted displacement across the sweep,
+    against a first-order value of 1 -- which both confirms the algebra is live
+    and, by exceeding 1, shows the quantity is a first-order measure rather
+    than a bound on the finite response.  An earlier revision asserted that in
+    ``(0.5, 2.0)``.  **Review refused it and was right**: the interval is
+    fitted around those observations, and the ratio differences two production
+    evaluations on operands whose ``cond(A)`` reaches 5.4e+14, so another
+    LAPACK could move it with no mathematical regression.  That is the same
+    objection that removed the sampled width two rounds earlier, re-entering by
+    a different door.  Deriving a conditioning-dependent allowance is not
+    attempted, so the window is one order either side of 1 -- the coarsest
+    statement that still says "the first-order term dominates" -- which sits
+    9.4x from both observed extremes rather than hugging them.  Dropping the
+    check entirely was tried first and costs too much: without it, a RANDOM
+    perturbation direction and a millionfold-smaller probe both stop being
+    detected.
 
     **What this says about issue #279.**  Over 21 draws of a 20-level
     spline-by-categorical pair, the same first-order sensitivity spans
@@ -2007,7 +2033,9 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     # from one side alone goes quiet at the moment it is crossed.
     separation = (_LOW_EDGE_ULP / against_ulp) if determined else (against_ulp / _LOW_EDGE_ULP)
     where = (
-        f"(ceiling eps||V||_F ||G||_F {ceiling:.4e}, one ulp of edf {ulp:.4e}, "
+        f"(sensitivity eps||V||_F ||G||_F {ceiling:.4e}, realised/predicted "
+        f"{(realised / ceiling if ceiling else float('nan')):.4f} (reported, not asserted), "
+        f"one ulp of edf {ulp:.4e}, "
         f"ratio {against_ulp:.4e} ulp, boundary {_LOW_EDGE_ULP:.0f} ulp, "
         f"separation {separation:.3e}x)"
     )
@@ -2021,7 +2049,7 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
         else (
             f"a design the Gram CANNOT resolve left the low-edge edf determined {where}; "
             "the same one-rounding probe must move it by MORE than one ulp, and the sweep "
-            "puts the smallest such geometry at 2.8991e+10; a collapse here means this "
+            "puts the smallest such geometry at 3.0293e+10; a collapse here means this "
             "module is no longer being handed a Gram -- see #257"
         )
     )
@@ -2029,8 +2057,8 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
         low, high = _LOW_EDGE_REALISED
         attained = realised / ceiling
         assert low < attained < high, (
-            f"the maximising perturbation attained {attained:.4f} of the certified "
-            f"first-order displacement {where}; the algebra predicts 1 and the sweep "
-            f"measures 0.9425 to 1.0617, so a departure means the response this test "
-            f"documents is not the one the evaluator exhibits"
+            f"the finite response is no longer dominated by its first-order term: the "
+            f"maximising perturbation attained {attained:.4f} of the prediction {where}. "
+            f"The algebra puts this at order 1 and the sweep measures 0.9425 to 1.0617; "
+            f"the window is an order either side rather than a fit to those."
         )
