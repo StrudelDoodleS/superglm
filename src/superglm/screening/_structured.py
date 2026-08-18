@@ -629,9 +629,14 @@ _ORTHONORMALITY_FACTOR = 2.0
 # refuse pairs this module scores today.  1.01 is 2e+08x the first.  Against
 # the second, over the bracket: on that pair it refuses 2 of 601 lambdas and
 # cuts the worst surviving upward step in ``edf`` from 0.597 to 0.057 df, and
-# on ``_starved_bs_pair`` it refuses 0 of 200.  1.5 -- this file's dense-path
-# count margin -- was measured first and refuses 73 of 601 and 34 of 200,
-# which reds three of this module's own publish-don't-refuse fixtures.
+# on ``_starved_bs_pair`` it refuses **1 of 200 on four of the fourteen
+# configurations and 2 on the other ten** -- which is what the test that pins
+# it records, and what this comment said was zero until review caught the
+# disagreement.  IT IS NOT FREE ON THE FIXTURE THE FLOOR CHANGE MOVES MOST,
+# and quoting a zero here would have let the next reader conclude it was.
+# 1.5 -- this file's dense-path count margin -- was measured first and refuses
+# 73 of 601 and 34 of 200, which reds three of this module's own
+# publish-don't-refuse fixtures.
 _ABSORPTION_MARGIN = 1.01
 
 # The most steps one rung's bisection can take.  It halves the log of a
@@ -1940,14 +1945,41 @@ def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float
     ``numpy.linalg.matrix_rank``'s ``max(shape) eps``, which are conventions
     and not worst-case theorems.  ``rank^(3/2)`` is folded into it, which is
     the part that would decay with size if it decayed at all, so it is checked
-    PAST the ranks this bank reaches: 60 profiles over ``ps`` bases from 5 to
-    50 knots and 8 to 40 levels, overlap ranks **9 to 54**, ``conditioning``
-    to 6.7e+11, put the worst residual at **0.0108** of this bound -- 93x of
-    headroom, wider than the bank's own 4.90x, because ``kappa`` grows with
-    the basis faster than the residual does.  Nothing refuses anywhere in that
-    range.  That check is one microkernel and one thread setting, not the
-    fourteen the bank is swept over, so it establishes the size scaling and
-    not the cross-machine spread.
+    PAST the ranks this bank reaches -- with the caveats below, which are the
+    reason this paragraph is longer than its result:
+
+    * **``ps``, 60 profiles**, 5 to 50 knots x 8 to 40 levels, overlap ranks
+      **9 to 54**, ``conditioning`` 15 to 6.7e+11: worst residual **0.0108** of
+      this bound.
+    * **``bs`` STARVED, 22 profiles**, the family that binds -- 3 or 4 rows per
+      level against a 13 to 43 column margin, 7 to 60 levels, ranks **14 to
+      44**, ``conditioning`` 22 to 1.4e+05: worst **0.0047**.  Extending only
+      ``ps`` would have grown the size of the family that is already easy and
+      left the hard one at its original 7 levels.
+
+    Nothing refuses anywhere in either.  **WHAT THIS DOES AND DOES NOT
+    ESTABLISH.**  ``kappa`` is in the denominator of every ratio above, and
+    rank and ``kappa`` largely rose together, so these numbers cannot isolate
+    the ``rank^(3/2)`` fold from the ``kappa`` growth beside it -- the case
+    that would break the fold is high rank at LOW ``kappa``, where the bound is
+    smallest.  The sweeps do reach it: rank 34 at ``kappa`` 65 reads 0.0015,
+    rank 44 at ``kappa`` 94 reads 0.0010, and the worst ratio in the starved
+    sweep is at its LOWEST rank and lowest ``kappa`` (15, 22), not its highest.
+    So the ratio falls as rank grows here rather than rising, which is the
+    opposite of a fold running out -- but that is an observation over two
+    families and not a derivation, and the honest statement of it is "nothing
+    in either family refuses at these sizes", not "the fold is verified".
+    Neither sweep reaches the bank's own worst of 0.204 of this bound, which
+    comes from a different member than either family's largest.  Both are one
+    microkernel and one thread setting, so they say nothing about the
+    cross-machine spread the bank's fourteen configurations establish.
+
+    Ratios in the two bullets above and in this paragraph are against the bound
+    this function RETURNS, i.e. with :data:`_ORTHONORMALITY_FACTOR` included;
+    the 2077x and 0.408x further up are against the unfactored
+    ``n_terms eps`` and ``n_terms eps kappa``.  The two conventions differ by
+    exactly that factor and both appear here, so the denominator is named at
+    every figure rather than left to be inferred.
 
     What this buys is REPRODUCIBILITY, not correctness: ``conditioning`` is
     read off singular values that sit far above the rank cut, and over the same
@@ -1997,12 +2029,17 @@ def _absorption_floor(n_terms: int, rank: int) -> float:
     lies in ``[0, 1]``, so ``sigma_max(R_H) <= 1`` and this cut is never
     LOOSER than the relative one -- it can only over-deflate, never
     under-deflate.  The two coincide only where ``sigma_max(R_H)`` is near 1,
-    and that is not everywhere: on ``_near_absorbed_cells`` the whole border is
-    absorbed and ``sigma_max(R_H)`` is about 1e-06, where the relative
-    convention would cut at 1e-20 and this one cuts at 2.1e-08 -- twelve orders
-    more aggressive.  That fixture survives with 48x of clearance, so nothing
-    in the bank is red, but the price of the absolute cut is over-deflation on
-    a mostly-absorbed border and it is bounded by nothing here.
+    and that is not everywhere: on ``_near_absorbed_cells`` the border is
+    NEARLY absorbed -- one direction survives, which is the only reason this
+    paragraph has a counterexample at all -- and ``sigma_max(R_H)`` is about
+    1e-06 against a cut of 2.1e-08, so that one surviving direction clears the
+    absolute cut by just 48x.  The relative convention would put the cut at
+    ``max(shape) eps sigma_max``, and ``max(shape)`` is 2 here (which is what
+    pins the floor at 2.1e-08), so it would cut at about 4.4e-22 -- roughly
+    FOURTEEN orders looser, not the twelve an earlier draft of this paragraph
+    stated.  Nothing in the bank is red, but the price of the absolute cut is
+    over-deflation on a mostly-absorbed border and it is bounded by nothing
+    here.
     :data:`_ABSORPTION_MARGIN` does NOT catch it: that guard measures
     separation from the floor and never whether the floor is sensible against
     ``sigma_max``, so ``singular = [3e-07, 1e-09]`` publishes at a margin of
@@ -2430,24 +2467,56 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     # published shape: their routines "estimate upper and lower bounds on
     # certain singular values to determine whether the numerical ranks ...
     # appear to be correct", and where the bounds cannot confirm it they return
-    # a warning rather than a rank.  A REFUSAL IS THE RIGHT ANSWER HERE AND NOT
-    # A FAILURE: ``screening_ops`` reads it as the pair-refusal signal and the
-    # dense track scores the pair.  It is also unconditional in lambda -- one
-    # rung of a ladder can refuse while the rest publish, which is exactly the
-    # contract :func:`structured_ladder` already has for an unstable rung.
+    # a warning rather than a rank.  A refusal is the right ANSWER here and not
+    # a failure, and it is unconditional in lambda -- one rung of a ladder can
+    # refuse while the rest publish, which is exactly the contract
+    # :func:`structured_ladder` already has for an unstable rung.
     #
-    # **BUT NOT AT A BRACKET EDGE, WHERE IT WOULD REFUSE THE PAIR AND NOT A
-    # RUNG.**  :func:`structured_ladder` evaluates ``lo`` and ``hi`` before
-    # anything else, so a refusal there costs the whole pair its route -- the
-    # same CLASS of outcome this change exists to remove, reached from the
-    # spectrum instead of from the microkernel.  Measured rather than argued:
-    # over the whole fixture bank x 7 ``OPENBLAS_CORETYPE`` microkernels x 2
-    # thread settings, 2786 bracket-edge evaluations, the tightest edge margin
-    # anywhere is **1.0350** and NOTHING falls inside 1.01.  What fires is the
-    # interior -- 2 of 601 lambdas on #280's own pair -- and that costs a rung.
-    # Headroom on the binding edge is 3.5x in the excess over 1, thinner than
-    # the interior figures, and it is the number to re-measure if
-    # :data:`_ABSORPTION_MARGIN` is ever raised.
+    # **WHAT A REFUSAL COSTS IS THREE DIFFERENT THINGS AND ONLY ONE OF THEM IS
+    # "THE DENSE TRACK SCORES IT INSTEAD".**  This comment said that flatly
+    # until review traced the caller, and on the route that carries the pairs
+    # this module exists for it is false:
+    #
+    # 1. **Speculative handoff -> the dense track.**  ``screening_ops`` sets
+    #    ``arrow_lookahead`` when it is about to compress a spline margin, and
+    #    a ``None`` there flips ``allow_dense`` back on and rescores the pair
+    #    densely.  This is the case the sentence used to describe.
+    # 2. **Ordinary structured route -> a NaN ROW, i.e. the pair leaves the
+    #    screen.**  A pair reaches the structured route because the DENSE gates
+    #    already refused it -- too many cells, or a cubic budget it blows.
+    #    ``arrow_lookahead`` is False there, so a ``None`` is appended as
+    #    ``nan`` and the pair is not scored at all.  ``screening_ops``' own
+    #    comment says so: "Reaching here means the dense track was already
+    #    exhausted."  There is no other algorithm to fall back to, because the
+    #    budget is what ruled it out.
+    # 3. **A one-rung ladder -> the pair, from an INTERIOR refusal.**  ``edf0``
+    #    accepts a scalar, and with one rung the bisection's break returns
+    #    ``None`` for the pair.  So "an interior refusal costs a rung" holds
+    #    for the default four-rung ladder and not for a scalar budget.
+    #
+    # None of the three is new machinery -- an unaffordable dense block already
+    # produced the NaN row -- but this guard adds new ways to reach them, and
+    # the price on (2) is a missing pair rather than a differently scored one.
+    #
+    # **SO WHERE THE GUARD FIRES MATTERS, AND IT WAS MEASURED RATHER THAN
+    # ARGUED.**  Over the whole fixture bank x 7 ``OPENBLAS_CORETYPE``
+    # microkernels x 2 thread settings, 2786 bracket-edge evaluations: the
+    # tightest edge margin anywhere is **1.0350** and NOTHING falls inside
+    # 1.01.  What fires is the interior -- 2 of 601 lambdas on #280's own pair,
+    # 1 or 2 of 200 on ``_starved_bs_pair``.  Headroom on the binding edge is
+    # 3.5x in the excess over 1, thinner than the interior figures, and it is
+    # the number to re-measure if :data:`_ABSORPTION_MARGIN` is ever raised.
+    #
+    # The zero-penalty branch of :func:`structured_ladder` is a FOURTH site and
+    # is neither interior nor a bracket edge: it evaluates ``lam = 0`` once, so
+    # every refusal there costs the pair.  That is also the family most exposed
+    # to this guard, since a near-rank pair at ``lam = 0`` is where a direction
+    # sits closest to the cut -- ``test_the_zero_penalty_rung_on_a_near_rank_pair``
+    # records CI landing on different sides of it on different revisions.  Those
+    # evaluations are NOT among the 2786, so they were measured separately: the
+    # four near-rank fixtures and the control give margins 2.945, 3.491, 13.96,
+    # 22.47 and 4.7e+05, all publishing, the tightest at **194x** the excess
+    # over 1 that 1.01 asks for.  One microkernel, one thread setting.
     if margin < _ABSORPTION_MARGIN:
         raise _UnstableStructuredEDFError(
             f"the absorption floor separates the border's spectrum by only {margin}x "
