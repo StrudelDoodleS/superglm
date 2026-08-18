@@ -1935,27 +1935,22 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
 # design factors collapsing the sensitivity by ten orders (#257) -- is caught
 # by the boundary below on its own.
 _LOW_EDGE_ULP = 1.0
-# ...AND ONE ORDERING INVARIANT, WHICH NEEDS NO CONSTANT AT ALL.
+# THE CALLER PATH IS PINNED ELSEWHERE, BY A CLOSED FORM.
 #
-# ``ceiling`` is computed from this test's own ``A`` and ``G``; the only
-# production quantity in the boundary is ``edf(V)`` inside ``ulp``.  So an
-# ``_edge`` that returned an edf INDEPENDENT of ``V`` while still reporting its
-# lambda would keep every row green -- verified, it did.
+# ``ceiling`` is computed from this test's own ``A`` and ``G``, so the only
+# production quantity in the boundary is ``edf(V)`` inside ``ulp``: an ``_edge``
+# returning an edf INDEPENDENT of ``V`` would keep every row green.  Three
+# attempts to close that here were refused in turn, and each refusal was right:
+# two magnitude windows around the realized response ((0.5, 2.0), then
+# (0.1, 10.0) scoped to ``cond(A) ~ 2e+11``) fit an interval nothing derives,
+# and the ordering invariant that replaced them is exact for the DIFFERENTIAL
+# while comparing FINITE centred differences, so curvature or solve error at
+# ``cond(A)`` up to 5.4e+14 could legitimately let a rival win.
 #
-# Two magnitude windows were tried to close that and both were refused, the
-# second correctly even when scoped to ``cond(A) ~ 2e+11``: no conditioning or
-# finite-response bound derives (0.1, 10.0), so another LAPACK could leave it
-# with no regression behind it.  There is no third window worth trying.
-#
-# What IS derived is the ORDERING.  ``E = c G / ||G||_F`` maximises
-# ``<E, G>_F`` over ``||E||_F = c`` -- that is what "maximising" means -- so the
-# response along it must be at least the response along any other direction of
-# the same norm, and it must be nonzero where the sensitivity is above one ulp.
-# Neither statement carries a magnitude.  Eight seeded rivals, so a routine that
-# had stopped maximising would have to win eight coin flips to hide.
-#
-# This closes both: an edf independent of V gives a zero response, and a probe
-# that is no longer the maximiser loses to a rival.
+# So the caller path is pinned where it can be pinned exactly instead:
+# :func:`test_the_clamped_low_edge_reproduces_the_isotropic_closed_form`, on a
+# ``cond(A) = 1`` fixture with an analytic answer.  The realized response and
+# its rivals stay in the failure message as disclosure.
 
 
 @pytest.mark.parametrize(
@@ -2104,15 +2099,6 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
         f"ratio {against_ulp:.4e} ulp, boundary {_LOW_EDGE_ULP:.0f} ulp, "
         f"separation {separation:.3e}x)"
     )
-    if not determined:
-        assert realised > 0.0 and realised >= best_rival, (
-            f"the maximising direction is no longer maximal on the caller path: it moved "
-            f"the ladder's edf by {realised:.6e} against {best_rival:.6e} for the best of "
-            f"eight seeded rivals of equal norm {where}.  This is the only assertion on "
-            f"the production response, and it carries no magnitude -- the boundary below "
-            f"is computed from this test's own A and G, so an _edge independent of V "
-            f"would otherwise pass."
-        )
     assert separation > 1.0, (
         (
             f"a design the Gram RESOLVES left the low-edge edf sensitive {where}; "
@@ -2126,4 +2112,53 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
             "puts the smallest such geometry at 3.0293e+10; a collapse here means this "
             "module is no longer being handed a Gram -- see #257"
         )
+    )
+
+
+@pytest.mark.parametrize("p", [24, 40])
+@pytest.mark.parametrize("scale", [1e-3, 1.0, 1e5])
+def test_the_clamped_low_edge_reproduces_the_isotropic_closed_form(p, scale):
+    """The clamped low-edge rung, against an answer that is known exactly.
+
+    With ``V = a I`` and ``S = I`` the bracket is ``lambda = 1e-10 a`` and
+    ``A = (a + lambda) I``, so::
+
+        edf = tr(A^-1 V) = p a / (a + lambda) = p / (1 + 1e-10)
+
+    exactly, for every ``a`` and at ``cond(A) = 1``.  Nothing here is measured
+    or fitted: the value is arithmetic and the tolerance is dimensional.
+
+    **THIS EXISTS TO PIN THE CALLER PATH**, which
+    ``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``
+    cannot: that test's boundary is computed from its own ``A`` and ``G``, so an
+    ``_edge`` returning an edf independent of ``V`` would leave every row of it
+    green -- verified, it did.  Three attempts to close that inside it were
+    refused in review and each refusal was right, because each asserted a
+    magnitude or an ordering of FINITE responses that no remainder bound
+    covers.  Here there is nothing to bound: the answer is closed form.
+
+    **THE TOLERANCE IS ``p eps``-DERIVED, NOT OBSERVED.**  ``edf`` is a trace of
+    ``p`` terms from a solve against a diagonal matrix, so its relative error is
+    ``O(p eps)`` -- 5.3e-15 at ``p = 24`` (Higham, *Accuracy and Stability of
+    Numerical Algorithms*, 2nd ed., Ch. 3, for the ``gamma_p`` of a length-``p``
+    sum).  ``rel=1e-13`` sits 19x above that floor.  For disclosure and never to
+    set the bound, the observed relative error over the six parametrizations is
+    0.0 to 2.961e-16, so the bound clears it by 338x; it is placed against the
+    derived floor rather than that headroom.
+
+    The scale rows are not decoration: ``a`` cancels out of the closed form
+    entirely, so a routine whose low edge drifted with the units of the
+    curvature would break these and nothing else here.
+    """
+    V = scale * np.eye(p)
+    S = np.eye(p)
+    rung = penalized_score_statistic_ladder(np.ones(p), V, S_ti=S, budgets=(4.0 * p,))[0]
+
+    assert rung.lambda0 == pytest.approx(1e-10 * scale, rel=1e-13), (
+        f"the bracket's low edge is 1e-10 tr(V)/tr(S) = {1e-10 * scale:.6e} on this "
+        f"fixture and the ladder clamped at {rung.lambda0:.6e}"
+    )
+    assert rung.edf0 == pytest.approx(p / (1.0 + 1e-10), rel=1e-13), (
+        f"the clamped low-edge edf of a I against I is p/(1 + 1e-10) = "
+        f"{p / (1.0 + 1e-10):.15f} exactly; the ladder returned {rung.edf0:.15f}"
     )
