@@ -1592,7 +1592,13 @@ class _PairGeometry:
     base_gram: NDArray  # (., r)    factor of sum_b Q_b' Q_b, unemitted levels
     root_penalty: NDArray  # (., k_a)  rootS' rootS = the PSD part of S_a
     orthonormality: float  # ||sum_q Q_q' Q_q - I_r||_2, MEASURED; a diagnostic
-    conditioning: float  # s_max / s_min over the RETAINED overlap basis
+    # ``s_max / s_min`` over the RETAINED overlap basis.  Unlike every other
+    # field here this one is NOT load-bearing: :func:`_profile` spends it on
+    # :func:`_orthonormality_bound` before returning and nothing downstream
+    # reads it.  It is carried so the bound a pair was admitted under can be
+    # recomputed from the geometry alone, by a test or by a caller diagnosing
+    # a refusal, rather than only from inside the function that raised.
+    conditioning: float
     overlap_rank: int  # r
     ceiling: float  # L * k_a
 
@@ -1969,15 +1975,32 @@ def _absorption_floor(n_terms: int, rank: int) -> float:
 
     ``H = I_r - Psi N^+ Psi'`` is delivered here as ``R_H' R_H`` with ``R_H``
     assembled by orthogonal transformations only, so the quantity being cut is
-    a SINGULAR VALUE and not an eigenvalue of a difference.  ``H``'s exact
-    spectrum lies in ``[0, 1]``, so ``sigma_max(R_H) <= 1`` and an ABSOLUTE cut
-    coincides with the relative one every source states -- LAPACK's
+    a SINGULAR VALUE and not an eigenvalue of a difference.  The cut is
+    ABSOLUTE, and every source states a RELATIVE one -- LAPACK's
     ``RCOND * sigma_max`` (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, and
     ``DGELSD``'s own documentation, where ``RCOND < 0`` means machine
     precision), and Golub & Van Loan, *Matrix Computations*, 4th ed. (JHU
     Press 2013), sec. 5.4.1: "the tolerance should be consistent with the
-    machine precision, e.g. ``delta = u ||A||_inf``".  Said because nothing in
-    the literature blesses an absolute cut on its own.
+    machine precision, e.g. ``delta = u ||A||_inf``".  Nothing in the
+    literature blesses an absolute cut on its own, so what connects them is
+    stated here rather than assumed.
+
+    **AND IT IS AN INEQUALITY, NOT AN EQUIVALENCE.**  ``H``'s exact spectrum
+    lies in ``[0, 1]``, so ``sigma_max(R_H) <= 1`` and this cut is never
+    LOOSER than the relative one -- it can only over-deflate, never
+    under-deflate.  The two coincide only where ``sigma_max(R_H)`` is near 1,
+    and that is not everywhere: on ``_near_absorbed_cells`` the whole border is
+    absorbed and ``sigma_max(R_H)`` is about 1e-06, where the relative
+    convention would cut at 1e-20 and this one cuts at 2.1e-08 -- twelve orders
+    more aggressive.  That fixture survives with 48x of clearance, so nothing
+    in the bank is red, but the price of the absolute cut is over-deflation on
+    a mostly-absorbed border and it is bounded by nothing here.
+    :data:`_ABSORPTION_MARGIN` does NOT catch it: that guard measures
+    separation from the floor and never whether the floor is sensible against
+    ``sigma_max``, so ``singular = [3e-07, 1e-09]`` publishes at a margin of
+    2.7 having deflated a direction of relative magnitude 3e-03.  A cut
+    relative to ``sigma_max(R_H)`` would be data-dependent again, which is what
+    #280 exists to remove, so this is a known gap and not an oversight.
 
     The dimensional factor is the one this module already uses at its other
     two rank decisions -- ``max(shape) eps``, the ``matrix_rank`` convention
@@ -2003,12 +2026,21 @@ def _absorption_floor(n_terms: int, rank: int) -> float:
     only refuse (:func:`_profile`) and the cut is the convention above.
 
     **WHAT THIS COSTS, MEASURED RATHER THAN ASSUMED.**  The convention is
-    TIGHTER than the residual it replaces -- 8.9x on #280's starved pair, 34.6x
+    TIGHTER than the residual it replaces -- 8.9x on #280's starved pair, 34.7x
     on ``_starved_bs_pair`` -- so it keeps directions the old cut dropped, and
     inverting a smaller singular value makes ``edf(lambda)`` rougher: over 200
     log-spaced lambdas the ``bs`` pair's worst upward step goes from 6.9e-05 to
-    **6.3e-02 df**.  That is the trade this change makes, and
+    **4.604e-02 .. 7.963e-02 df**, that range being the spread over 7
+    ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings rather than one
+    run's reading.  That is the trade this change makes, and
     :data:`_ABSORPTION_MARGIN` is what refuses where it bites.
+
+    The additive ``d eps`` is INERT at every ``d`` this module reaches: it is
+    ``sqrt(d eps)`` of the leading term, 1.1e-07 relative at ``d = 56``, seven
+    orders inside :data:`_ABSORPTION_MARGIN`'s own 1.01, so it can never decide
+    a ``keep``.  It is kept because the derivation has two terms and dropping
+    one would misstate which bound is doing the work, not because it moves an
+    answer.
     """
     eps = float(np.finfo(np.float64).eps)
     dimension = max(int(n_terms), int(rank), 1)
@@ -2230,11 +2262,25 @@ def _filter_factor_sum(
         # the same as a warning: the confidence in a numerical rank "depends
         # on the gap".  An empty side scores ``inf``, which is the safe
         # direction; :func:`_evaluate` owns the refusal.
+        #
+        # THE ABSORBED SIDE'S RECIPROCAL IS GUARDED THE WAY ``safe`` IS BELOW,
+        # AND FOR THE SAME REASON.  ``singular`` is sorted descending, so
+        # ``absorbed_side.max()`` is the LARGEST dropped value -- exactly
+        # ``0.0`` whenever the border is exactly rank deficient, which is
+        # reachable at ``lam = 0`` on an unpenalized pair whose base level
+        # carries no mass, the case the comment forty lines below already
+        # names.  ``inf`` is the right answer there (a border that is exactly
+        # zero is cleanly absorbed, not undecided); what has to be avoided is
+        # producing it by dividing, because ``_UnstableStructuredEDFError``
+        # subclasses ``FloatingPointError`` and a BARE one raised under
+        # ``np.errstate(divide="raise")`` would escape the ladder's own except
+        # clause and abort the sweep instead of handing the pair back.
         resolved_side = singular[keep]
         absorbed_side = singular[~keep]
+        largest_absorbed = float(absorbed_side.max()) if absorbed_side.size else 0.0
         margin = min(
             float(resolved_side.min() / floor) if resolved_side.size else np.inf,
-            float(floor / absorbed_side.max()) if absorbed_side.size else np.inf,
+            float(floor / largest_absorbed) if largest_absorbed > 0.0 else np.inf,
         )
         occupied = singular * singular
         free = (1.0 - singular) * (1.0 + singular)
@@ -2307,6 +2353,17 @@ def _filter_factor_sum(
         # products that build it can cancel, and a bound taken on the result
         # of a cancellation is not a bound on the cancellation.
         scale = np.maximum(top, deflation * np.square(1.0 + np.linalg.norm(Y, axis=(1, 2))))
+        # ``deflation`` IS ``max(1 / sigma^2)`` OVER KEPT DIRECTIONS, SO A
+        # TIGHTER ABSORPTION FLOOR LOOSENS THIS ALLOWANCE QUADRATICALLY.  That
+        # coupling is real and #280's floor change is exactly the kind that
+        # exercises it, so it was re-measured rather than reasoned about: over
+        # 200 lambdas each on ``_starved_bs_pair`` and #280's starved pair --
+        # the two the floor change moves most -- ``uncertified`` is EXACTLY 0.0
+        # at all 400.  Every PSD clip on both is inside its own allowance, so
+        # the guard's numerator is zero and no headroom was spent.  What the
+        # looser allowance would cost is therefore not measurable here, and
+        # this comment records that it was looked for rather than that it is
+        # absent in general.
         allowance = _psd_clip_allowance(width, scale, geometry.orthonormality * deflation)
         excess = np.maximum(negative - allowance, 0.0)
         uncertified += float(np.sum(np.sum(np.square(rows), axis=(1, 2)) * excess))
@@ -2370,6 +2427,19 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     # dense track scores the pair.  It is also unconditional in lambda -- one
     # rung of a ladder can refuse while the rest publish, which is exactly the
     # contract :func:`structured_ladder` already has for an unstable rung.
+    #
+    # **BUT NOT AT A BRACKET EDGE, WHERE IT WOULD REFUSE THE PAIR AND NOT A
+    # RUNG.**  :func:`structured_ladder` evaluates ``lo`` and ``hi`` before
+    # anything else, so a refusal there costs the whole pair its route -- the
+    # same CLASS of outcome this change exists to remove, reached from the
+    # spectrum instead of from the microkernel.  Measured rather than argued:
+    # over the whole fixture bank x 7 ``OPENBLAS_CORETYPE`` microkernels x 2
+    # thread settings, 2786 bracket-edge evaluations, the tightest edge margin
+    # anywhere is **1.0350** and NOTHING falls inside 1.01.  What fires is the
+    # interior -- 2 of 601 lambdas on #280's own pair -- and that costs a rung.
+    # Headroom on the binding edge is 3.5x in the excess over 1, thinner than
+    # the interior figures, and it is the number to re-measure if
+    # :data:`_ABSORPTION_MARGIN` is ever raised.
     if margin < _ABSORPTION_MARGIN:
         raise _UnstableStructuredEDFError(
             f"the absorption floor separates the border's spectrum by only {margin}x "
