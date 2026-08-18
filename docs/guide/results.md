@@ -250,6 +250,14 @@ replaces — in usually an order of magnitude fewer rows. `u` is **normalised** 
 `x - lower` on a covariate ranging to 1e5 loses enough precision in a fixed-scale decimal column to
 produce a 3.3× relativity error, which is worse than the binning it replaces.
 
+That formula is for **bounded rows**. The leading and trailing rows are unbounded and are *read*
+rather than evaluated: their factor is the `Relativity` beside them. `u` on an infinite width is
+`inf/inf`, which is `nan`, and the zero higher coefficients do not absorb it — `0 * nan` is `nan` —
+so a consumer applying the formula uniformly gets `nan` on exactly the rows that price the extremes
+of the book. The branch costs nothing, because a bound printed `-inf` has to be recognised before it
+can be parsed at all, and what it selects is the plain lookup the first three columns already
+provide. The workbook states this in a note beside every such block.
+
 The bounds are not repeated as their own columns. The key already holds them *exactly*: it is
 printed through `repr`, the shortest string that reads back as the same binary64, so parsing it
 recovers both bounds bit for bit and each row's upper bound is identically the next row's lower
@@ -282,8 +290,9 @@ unbounded interval has no width and the normalised `u` does not exist there.
 The tail rows read `[-inf, 18.0)` and `[99.0, inf)` in the key, and every numeric cell in the block
 is a real number. A spreadsheet cell cannot hold an infinity, so keeping the bounds in the key —
 which is text — is what lets those rows survive the workbook at all. Their coefficients are
-`b = c = d = 0`, so a consumer that recognises an infinite bound and skips `u` there and one that
-clamps `u` to `[0, 1]` arrive at the same factor.
+`b = c = d = 0` and their `a` is the boundary value, so `Relativity` on a tail row is `exp(a)`
+exactly: the row a consumer reads and the row it would like to evaluate carry the same number, and
+only the reading of it is defined.
 
 Two term kinds are not converted. Terms carrying a `Constraint.postfit` repair are refused by name,
 because that path's repaired curve has never been verified to be piecewise polynomial on the term's

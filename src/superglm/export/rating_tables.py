@@ -280,10 +280,22 @@ def _continuous_block(name: str, table: pd.DataFrame, centering_shift: float) ->
 _PPFORM_COLUMNS = ("a", "b", "c", "d")
 
 # The tail rows are CONSTANT pieces, so their higher coefficients are exactly
-# zero and the local variable never matters.  That is deliberate: a consumer
-# that computes ``u`` unconditionally on an unbounded row would divide by an
-# infinite width, and a consumer that clamps would not -- with b = c = d = 0
-# both arrive at the same number.
+# zero.  That does NOT make the polynomial formula evaluate on them, and it is
+# worth being exact about why, because the plausible reading is wrong: on the
+# leading row ``u = (x - -inf) / (18.0 - -inf)`` is ``inf/inf``, which is
+# ``nan``, and IEEE arithmetic propagates it through ``0 * u`` -- so
+# ``a + u*(b + u*(c + u*d))`` returns ``nan`` rather than ``a``, however many
+# of the coefficients are zero.  Verified by evaluation, not by inspection.
+#
+# The rule an unbounded row therefore carries is: READ ``Relativity`` AND STOP.
+# It is not an extra burden on the consumer.  Those bounds are printed
+# ``-inf`` and ``inf``, which no numeric cast accepts, so a consumer already
+# has to recognise an unbounded key before it can parse one -- and the branch
+# it takes then is the plain lookup the block's first three columns exist for.
+# ``Relativity`` on a tail row is ``exp(a)`` exactly, so the two readings agree.
+# Stated on the sheet by ``_ppform_evaluation_note``, in the docstrings below,
+# and in the guide, because a rule that lives only in a test helper is a rule
+# the consumer does not have.
 _PPFORM_TAIL_COEFFICIENTS = (0.0, 0.0, 0.0)
 
 
@@ -325,8 +337,16 @@ def _continuous_ppform_block(
     its last knot is not merely wrong but unbounded -- measured at 1581x the
     correct factor twenty-one years past the boundary of a real age curve -- and no
     note reliably prevents a consumer from doing it.  With the tails emitted,
-    the only operation a consumer performs is "match an interval, evaluate it",
-    and that operation is correct everywhere.
+    there is no code path that reaches the blow-up.
+
+    An unbounded row is READ, not evaluated: its factor is ``Relativity``.
+    The polynomial formula does not apply to it and cannot -- ``u`` on an
+    infinite width is ``nan``, which the zero coefficients do not absorb (see
+    ``_PPFORM_TAIL_COEFFICIENTS``).  So the consumer contract is two lines
+    rather than one: match the row, and evaluate the polynomial if the row is
+    bounded, else take ``Relativity``.  The second line costs nothing, because
+    an ``-inf`` bound already has to be recognised before it can be parsed, and
+    the branch it selects is the lookup the first three columns already serve.
 
     Except under ``extrapolation="error"``, where the tails are omitted and the
     block covers the knot range alone.  That term declines to price outside its
@@ -407,17 +427,32 @@ def _continuous_ppform_block(
     )
 
 
-def _export_weights(X: EagerFrame, sample_weight: NDArray | None) -> NDArray:
-    """The per-row exposure a weight column sums, with the unweighted default.
+def _export_weights(model: SuperGLM, n_rows: int, sample_weight: NDArray | None) -> NDArray:
+    """The per-row exposure a weight column sums, VALIDATED, with the unweighted default.
 
     An unweighted fit still gets a ``Weight`` column, carrying counts -- the
     same convention ``_weights_by_level`` uses for a categorical block, so the
     two block kinds report the same quantity rather than one reporting counts
     and the other nothing.
+
+    Through ``discretization_impact``'s own validator, and called at the payload
+    boundary rather than beside the block that happens to need it.  The export
+    used to inherit this check by accident: every continuous term went through
+    ``discretization_impact``, which validates before it bins.  Under
+    ``continuous_kind="ppform"`` a spline never reaches it, and if every
+    continuous term is a spline the call is skipped altogether, so the check
+    disappeared exactly where a new code path started consuming the weights
+    directly.  Measured on that path: a NaN weight produced NaN segment
+    exposures in the workbook, a negative weight was accepted where the binned
+    block refuses it, and a column-shaped array reached ``np.bincount`` and came
+    back with numpy's "object too deep for desired array" instead of the named
+    error the binned path gives.  A guarantee that holds only when some other
+    routine happens to be called is not a guarantee.
     """
-    if sample_weight is None:
-        return np.ones(len(X), dtype=np.float64)
-    return np.asarray(sample_weight, dtype=np.float64)
+    from superglm.diagnostics.discretize import _validated_discretization_weights
+
+    weights, _ = _validated_discretization_weights(model, sample_weight, n_rows)
+    return weights
 
 
 def _ppform_row_weights(lo: NDArray, values: NDArray, weights: NDArray) -> NDArray:
@@ -931,6 +966,46 @@ def _require_usable_relativities_export(
         )
 
 
+def _require_usable_offset_multipliers(multiplier: NDArray) -> None:
+    """The factors a per-unit offset row asks for, checked before it hides them.
+
+    Every other offset shape emits its multipliers AS relativities, so
+    ``_require_usable_relativities_export`` inspects the exact numbers a
+    consumer will multiply by.  A per-unit row does not: it emits the RELATION
+    -- ``Relativity`` 1.0, or the per-unit rate -- and leaves the consumer to
+    compute ``exp(offset)`` itself.  The values that guard exists to refuse are
+    then never in the workbook to be refused, so they have to be checked here,
+    on the vector, before this block replaces it with one row.
+
+    The saturation gate does not cover it either.  It reads the TOTAL
+    predictor, and cancellation is exactly what a big offset invites: measured
+    on a two-factor fit whose levels absorb 400 each, the predictor stayed
+    inside 0.47 to 0.80, the base relativity was healthy, both categorical
+    blocks sat inside the band -- and 182 of 800 rows still needed a factor of
+    ``inf``.  The workbook published.  That is the same cancellation argument
+    ``_require_usable_relativities_export`` makes for checking per block rather
+    than on the product, applied to the one block whose values it cannot see.
+    """
+    from superglm.inference._term_types import _MAX_LOG_REL
+
+    ceiling = float(np.exp(_MAX_LOG_REL))
+    floor = float(np.exp(-_MAX_LOG_REL))
+    bad = ~np.isfinite(multiplier) | (multiplier >= ceiling) | (multiplier <= floor)
+    if not np.any(bad):
+        return
+    raise ValueError(
+        f"A per-unit offset row would hide {int(np.count_nonzero(bad))} offset "
+        "multiplier(s) that a consumer cannot multiply by: exp(offset) outside "
+        f"(exp(-{_MAX_LOG_REL:g}), exp({_MAX_LOG_REL:g})) = ({floor:.4g}, "
+        f"{ceiling:.4g}), or not finite. A per-unit row emits the RELATION rather "
+        "than the factors, so these values never reach the workbook's relativity "
+        "guard and would first fail in the consumer. The total predictor can stay "
+        "healthy while they do not, because other terms cancel them. Rescale the "
+        "offset, drop the rows whose exposure is zero, or keep the offset "
+        "calculation outside the rating table."
+    )
+
+
 def _resolve_export_offset(
     offset,
     model: SuperGLM,
@@ -1069,6 +1144,7 @@ def _offset_per_unit_block_from_multiplier(
     unmodified, at every magnitude, including above the largest multiplier the
     book happened to contain.
     """
+    _require_usable_offset_multipliers(multiplier)
     weights = _weights_array(len(multiplier), sample_weight)
     return RatingTableBlock(
         name="Offset Multiplier",
@@ -1108,7 +1184,12 @@ def _offset_multiplier_block(
         raise ValueError("offset must have the same length as X.")
 
     weights = _weights_array(n_rows, sample_weight)
-    multiplier = np.exp(offset_arr)
+    # Overflow is a state this routine HANDLES rather than one it avoids: the
+    # per-unit branch refuses on it by name, and the lookup branch emits it as a
+    # relativity for the workbook's own guard to refuse.  Warning here would
+    # only be noise in front of the error that follows.
+    with np.errstate(over="ignore", under="ignore"):
+        multiplier = np.exp(offset_arr)
     # The rounding exists to stop the float noise of ``exp(log(x))`` splitting
     # one tariff level into thousands, which would push a genuine lookup onto
     # the per-unit row.  It is relative rather than absolute, so it stays
@@ -1218,6 +1299,10 @@ def _offset_per_unit_block(
     not be written.
     """
     offset_arr = np.asarray(offset, dtype=np.float64).ravel()
+    # Before the relation is derived, because a multiplier this block cannot
+    # publish is not made publishable by being proportional to something.
+    with np.errstate(over="ignore", under="ignore"):
+        _require_usable_offset_multipliers(np.exp(offset_arr))
     try:
         column = np.asarray(source, dtype=np.float64).ravel()
     except (TypeError, ValueError) as exc:
@@ -1964,6 +2049,14 @@ def build_rating_table_payload(
     column to produce a 3.3x relativity error, which would be worse than the
     binning it replaces.
 
+    The leading and trailing rows are UNBOUNDED, and a consumer READS them
+    rather than evaluating them: their factor is ``Relativity``.  The formula
+    above is for bounded rows only and cannot be applied to a tail -- ``u`` on
+    an infinite width is ``nan``, and zero higher coefficients do not absorb it,
+    because ``0 * nan`` is ``nan``.  The branch costs nothing: a bound printed
+    ``-inf`` has to be recognised before it can be parsed at all, and what it
+    selects is the plain lookup the first three columns already provide.
+
     The bounds are not repeated as their own columns.  The key already holds
     them exactly -- it is printed through ``repr``, the shortest string that
     reads back as the same binary64, so each row's upper bound is identically
@@ -2179,6 +2272,11 @@ def build_rating_table_payload(
     # only once there is data to answer it about.
     _require_unsaturated_predictor_export(model, frame, export_offset)
 
+    # Unconditionally, and before any block is built.  Every other consumer of
+    # these weights validates them on the way past; this is the one call that
+    # does not depend on which block kinds the model happens to contain.
+    export_weights = _export_weights(model, len(frame), sample_weight)
+
     # Only the terms that will actually be BINNED, so the tables are built for
     # the blocks that need them.  Under ``"ppform"`` a spline is exported from
     # its own coefficients and never reads a bin average, so sweeping it here
@@ -2237,7 +2335,7 @@ def build_rating_table_payload(
                     model,
                     name,
                     centering,
-                    _export_weights(frame, sample_weight),
+                    export_weights,
                     np.asarray(frame.column_array(name), dtype=np.float64),
                 )
             )
@@ -2392,6 +2490,11 @@ def export_rating_tables(
     reproduces the fitted model to machine precision -- 2.4e-15 against 6.0e-01
     for the block it replaces -- in usually an order of magnitude fewer rows,
     and costs a consumer that can evaluate a polynomial.
+
+    Its first and last rows are unbounded and are READ rather than evaluated:
+    the factor is ``Relativity``, because ``u`` on an infinite width is ``nan``
+    and zero coefficients do not absorb it.  The workbook states this beside
+    each such block.
 
     On the sheet that block is SEVEN columns rather than three, and a superset
     rather than a new shape: ``<feature>``, ``Relativity`` and ``Weight`` stay
