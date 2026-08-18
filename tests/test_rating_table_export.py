@@ -3155,3 +3155,153 @@ def test_a_discrete_offset_level_is_certified_relative_to_its_own_multiplier():
             offset_name="Lvl",
             offset_kind="discrete",
         )
+
+
+def test_the_documented_formula_is_nan_on_an_unbounded_row():
+    """Zero higher coefficients do NOT make a tail row evaluable.
+
+    The plausible reading -- b = c = d = 0, so u cannot matter -- is wrong, and
+    it was written into this module's own comments before it was measured. On
+    the leading row u = (x - -inf) / (lower - -inf) is inf/inf, which is nan,
+    and IEEE arithmetic carries nan straight through 0 * u. A consumer applying
+    the polynomial uniformly gets nan on exactly the rows that price the
+    extremes of the book.
+
+    Pinned as arithmetic rather than as prose so the note, the guide and the
+    docstrings cannot drift back to the comfortable claim: the branch is load
+    bearing, and this is the measurement that says so.
+    """
+    model, X, y, w = _fit_export_model()
+
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+    lower, upper = _interval_bounds(block.table[block.name])
+
+    tails = ~np.isfinite(lower) | ~np.isfinite(upper)
+    assert tails.sum() == 2, "clip extrapolation emits exactly one leading and one trailing row"
+    for row in np.flatnonzero(tails):
+        a, b, c, d = (float(block.table[col].iloc[row]) for col in _PPFORM_COLUMNS)
+        assert (b, c, d) == (0.0, 0.0, 0.0), "a tail row is a constant piece"
+
+        # Precisely what a consumer following the formula alone computes.
+        x = 30.0 if np.isinf(lower[row]) else float(upper[row]) + 1.0
+        with np.errstate(invalid="ignore"):
+            u = (x - lower[row]) / (upper[row] - lower[row])
+            naive = np.exp(a + u * (b + u * (c + u * d)))
+        assert np.isnan(u), "the local variable on an infinite width is not a number"
+        assert np.isnan(naive), "and the zero coefficients do not absorb it"
+
+        # The published rule instead: read Relativity, which is exp(a) exactly.
+        assert float(block.table["Relativity"].iloc[row]) == float(np.exp(a))
+
+
+def test_a_ppform_block_states_its_evaluation_rule_in_the_workbook(tmp_path):
+    """A consumer holding only the sheet has to be told about the tail rows.
+
+    RatingTableBlock.kind is never written to the workbook, so the note row is
+    the only place the arithmetic can be stated -- and here getting it wrong
+    does not return a wrong factor, it returns nan.
+    """
+    model, X, y, w = _fit_export_model()
+
+    payload = build_rating_table_payload(model, X, y, sample_weight=w, continuous_kind="ppform")
+    output = tmp_path / "ppform_note.xlsx"
+    export_rating_tables(model, output, X, y, sample_weight=w, continuous_kind="ppform")
+    ws = load_workbook(output, data_only=True)["Rating Tables"]
+
+    starts = dict(
+        zip(
+            [b.name for b in payload.main_effects], _main_effect_start_columns(payload.main_effects)
+        )
+    )
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+    note = ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=starts[block.name]).value
+
+    assert note is not None, "the ppform block carries no evaluation note at all"
+    assert block.name in note
+    assert "EXP(a + u*(b + u*(c + u*d)))" in note, "the formula itself, not a reference to it"
+    assert "unbounded" in note.lower(), "the exception is the half a consumer cannot infer"
+    assert "relativity" in note.lower(), "and what to read instead"
+
+    # A block taking the ordinary lookup rule carries no note, because the note
+    # is what a consumer routes on: one beside every block would say nothing.
+    plain = next(b for b in payload.main_effects if b.kind == "categorical")
+    assert ws.cell(row=_MAIN_EFFECT_NOTE_ROW, column=starts[plain.name]).value is None
+
+
+def test_a_per_unit_offset_row_may_not_hide_a_factor_a_consumer_cannot_apply():
+    """Every other offset shape emits its multipliers as relativities. This one hides them.
+
+    A per-unit row emits the RELATION and leaves exp(offset) to the consumer, so
+    the values _require_usable_relativities_export exists to refuse never reach
+    the workbook to be refused. The saturation gate does not cover it either,
+    because cancellation is what a large offset invites.
+
+    Measured, and this is the case that published before the guard: two
+    categorical levels absorbing 400 each, a linear predictor inside 0.47 to
+    0.80, a healthy base, both blocks inside the relativity band -- and 182 of
+    800 rows needing a factor of inf.
+    """
+    rng = np.random.default_rng(0)
+    n = 800
+    a = rng.integers(0, 2, n)
+    b = rng.integers(0, 2, n)
+    # The reference level is the one carrying no offset, so the cancellation
+    # lands in the level coefficients rather than in the base.
+    offset = 400.0 * (1 - a) + 400.0 * (1 - b) + rng.normal(0.0, 0.05, n)
+    X = pd.DataFrame({"a": pd.Categorical(a), "b": pd.Categorical(b)})
+    y = rng.poisson(np.full(n, 2.0))
+
+    model = SuperGLM(features={"a": Categorical(), "b": Categorical()}, family="poisson")
+    model.fit(X, y, offset=offset)
+
+    # Every gate that already existed is silent on this frame.
+    eta = np.log(model.predict(X, offset=offset))
+    assert float(np.max(np.abs(eta))) < 1.0, "the total predictor is entirely ordinary"
+    with np.errstate(over="ignore"):
+        multiplier = np.exp(offset)
+    assert int(np.sum(~np.isfinite(multiplier))) > 0, "and the factors it needs are not"
+
+    for kind in ("auto", "per_unit"):
+        with pytest.raises(ValueError, match="per-unit offset row would hide"):
+            build_rating_table_payload(model, X, y, offset=offset, offset_kind=kind)
+
+
+@pytest.mark.parametrize(
+    ("weight", "message"),
+    [
+        ("nan", "sample_weight must contain only finite values"),
+        ("negative", "sample_weight must be nonnegative"),
+        ("column", "sample_weight must be one-dimensional"),
+    ],
+)
+def test_export_weights_are_validated_whether_or_not_anything_is_binned(weight, message):
+    """The check used to be inherited from discretization_impact, which ppform skips.
+
+    Under continuous_kind='ppform' a spline never reaches that call, and when
+    every continuous term is a spline the call is not made at all -- so the
+    validation disappeared exactly where a new path started consuming the
+    weights directly. Measured on that path before the fix: a NaN weight put
+    NaN segment exposures in the workbook, a negative weight was accepted where
+    the binned block refuses it, and a column-shaped array reached np.bincount
+    and came back with numpy's 'object too deep for desired array' rather than
+    a named error.
+
+    Both kinds are swept together because the point is that they agree.
+    """
+    rng = np.random.default_rng(0)
+    n = 500
+    X = pd.DataFrame({"age": rng.uniform(18.0, 80.0, n)})
+    y = rng.poisson(np.exp(-1.0 + 0.02 * X["age"].to_numpy()))
+    model = SuperGLM(features={"age": Spline(n_knots=6)}, family="poisson")
+    model.fit(X, y)
+
+    weights = {
+        "nan": np.where(np.arange(n) == 3, np.nan, 1.0),
+        "negative": np.where(np.arange(n) == 3, -5.0, 1.0),
+        "column": np.ones((n, 1)),
+    }[weight]
+
+    for kind in ("binned", "ppform"):
+        with pytest.raises(ValueError, match=message):
+            build_rating_table_payload(model, X, y, sample_weight=weights, continuous_kind=kind)

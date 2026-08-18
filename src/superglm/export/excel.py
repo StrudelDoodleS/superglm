@@ -473,6 +473,63 @@ def _per_unit_offset_note(name: str) -> str:
     )
 
 
+def _ppform_evaluation_note(name: str, extrapolation: str | None) -> str:
+    """How to score one ppform block, stated on the sheet the consumer holds.
+
+    Two sentences and not one, because the block has two kinds of row and the
+    formula only applies to one of them.  A bounded row is evaluated.  An
+    UNBOUNDED row -- the leading and trailing constant pieces -- is read: its
+    factor is the ``Relativity`` beside it.  The distinction is not stylistic.
+    ``u = (x - lower) / (upper - lower)`` with an infinite bound is ``inf/inf``,
+    which is ``nan``, and the zero higher coefficients do not rescue it because
+    ``0 * nan`` is ``nan``; a consumer applying the formula uniformly gets
+    ``nan`` on precisely the rows that price the extremes of the book.
+
+    Under ``extrapolation="error"`` there are no unbounded rows and the second
+    sentence would describe nothing, so it is not written.  A term that declines
+    to price outside its knot range emits no tails at all, and a value matching
+    no row is that term's own answer.
+
+    Written into the same otherwise-unused note row the piecewise and per-unit
+    blocks use, so no layout changes to carry it.
+    """
+    formula = (
+        f"Evaluate this block: u = ({name} - lower) / (upper - lower) from the "
+        "interval key, then factor = EXP(a + u*(b + u*(c + u*d)))."
+    )
+    if extrapolation == "error":
+        return formula + (
+            " Every row is bounded -- this term declines to price outside its "
+            f"fitted range, so a {name} matching no row has no factor here."
+        )
+    return formula + (
+        " EXCEPT on the first and last rows, whose interval is unbounded (-inf "
+        "or inf): those are CONSTANT pieces, so read Relativity and stop. Do "
+        "not apply the formula to them -- u is not a number on an infinite "
+        "width, and the zero coefficients do not make it one."
+    )
+
+
+def _annotate_ppform_blocks(ws, main_effects) -> None:
+    """Write each ppform block's evaluation rule into its note row.
+
+    Beside ``_annotate_per_unit_offset_blocks`` and for the same reason: the
+    sheet does not carry ``RatingTableBlock.kind``, so a consumer holding only
+    the workbook has to be told which arithmetic a block takes. Here the
+    consequence of guessing is sharper than a wrong factor -- applying the
+    polynomial to an unbounded row returns ``nan``.
+    """
+    starts = _main_effect_start_columns(main_effects)
+    for idx, block in enumerate(main_effects):
+        if block.kind != "continuous_ppform":
+            continue
+        ws.cell(
+            row=_MAIN_EFFECT_NOTE_ROW,
+            column=starts[idx],
+            value=_ppform_evaluation_note(block.name, block.extrapolation),
+        )
+
+
 def _annotate_per_unit_offset_blocks(ws, main_effects) -> None:
     """Write each per-unit offset block's multiply rule into its note row.
 
@@ -564,6 +621,7 @@ def write_rating_table_workbook(
     ws[_BASE_RELATIVITY_CELL].number_format = _BASE_RELATIVITY_NUMBER_FORMAT
     _annotate_piecewise_blocks(ws, payload.main_effects)
     _annotate_per_unit_offset_blocks(ws, payload.main_effects)
+    _annotate_ppform_blocks(ws, payload.main_effects)
 
     interaction_row = max_main_row + 3
     for block in payload.interactions:
