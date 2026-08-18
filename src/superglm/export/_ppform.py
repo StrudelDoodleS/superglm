@@ -147,7 +147,26 @@ def extract_ppform(
     x_fit, f_fit = x_grid[inside], f_grid[inside]
 
     basis = BSpline.design_matrix(x_fit, knots, degree, extrapolate=False).toarray()
-    coef, *_ = np.linalg.lstsq(basis, f_fit, rcond=None)
+    coef, _residuals, rank, _singular = np.linalg.lstsq(basis, f_fit, rcond=None)
+    if rank != basis.shape[1]:
+        # ``lstsq`` ANSWERS a rank-deficient system rather than refusing one: it
+        # returns the minimum-norm solution, which reproduces the sampled points
+        # exactly.  So the residual below stays at round-off and certifies
+        # nothing about the curve BETWEEN those points, where the coefficients
+        # are unconstrained.  Measured on an 8-knot ``ps`` fit read at 5 points:
+        # rank 5 of 12 columns, residual 2.2e-16, and the recovered pieces
+        # mis-rate the fitted curve by up to 2.41x.  A knot interval holding no
+        # grid point is the same failure by a subtler route, which is why the
+        # guard is on the rank and not on ``n_points``.
+        raise PpformNotExactError(
+            f"Term {name!r} has an underdetermined piecewise-polynomial solve: its "
+            f"B-spline basis has {basis.shape[1]} columns but the {len(x_fit)} curve "
+            f"samples give rank {int(rank)}, so the recovered coefficients are the "
+            "minimum-norm solution rather than the term's own and are unconstrained "
+            "between the sampled points. Read the curve at more points, and check "
+            "the term's knots for an interval no sample falls in. Its rating block "
+            "cannot be exported as ppform."
+        )
     residual = float(np.abs(basis @ coef - f_fit).max())
     if not np.isfinite(residual) or residual > _EXACTNESS_TOLERANCE:
         raise PpformNotExactError(

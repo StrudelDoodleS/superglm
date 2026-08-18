@@ -39,6 +39,7 @@ from superglm.export.excel import (
 )
 from superglm.export.rating_tables import (
     _PPFORM_COLUMNS,
+    OffsetRelationError,
     RatingTablePayload,
     build_rating_table_payload,
 )
@@ -1614,6 +1615,70 @@ def test_the_offset_documentation_states_the_one_rule_for_both_paths():
     assert "Undeclared offsets — no `offset_source=` — are unchanged and still bin." not in guide
 
 
+def _fit_banded_offset_model():
+    """A source with many levels whose offset takes few distinct multipliers.
+
+    25 sum-insured levels banded into 3 multipliers is the shape that
+    separates the two paths' countings: 25 is above the default
+    ``offset_max_exact_levels=20`` and 3 is below it, so the same offset is
+    refused by one path and published by the other.
+    """
+    rng = np.random.default_rng(11)
+    n = 2000
+    levels = np.arange(1, 26) * 10_000.0
+    sum_insured = rng.choice(levels, n)
+    band = np.digitize(sum_insured, [100_000.0, 180_000.0])
+    offset = np.log(np.array([1.0, 2.0, 4.0])[band])
+    X = pd.DataFrame({"sum_insured": sum_insured})
+    y = rng.poisson(np.exp(-0.5 + offset)).astype(float)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={})
+    model.fit(X, y, offset=offset)
+    return model, X, y, offset
+
+
+def test_the_offset_cap_says_what_it_counts_on_each_path():
+    """One parameter, two countings, and the docstring has to name both.
+
+    "Governs BOTH paths" reads as one rule applied twice.  It is not: the
+    declared path counts the SOURCE column's distinct values, the undeclared
+    one counts distinct 12-significant-digit MULTIPLIERS.  Measured here on one
+    offset -- 25 source levels collapsing to 3 multipliers -- the declared path
+    refuses it and the undeclared path publishes a 3-row lookup.  A caller who
+    read the cap as one rule cannot predict either answer.
+    """
+    model, X, y, offset = _fit_banded_offset_model()
+
+    assert X["sum_insured"].nunique() == 25
+    assert len(np.unique(np.exp(offset))) == 3
+
+    # Declared: counts the source's 25 levels, so the cap refuses.
+    with pytest.raises(ValueError, match="exceeding offset_max_exact_levels=20"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            offset=offset,
+            offset_source="sum_insured",
+            offset_name="SumInsured",
+            offset_kind="discrete",
+        )
+
+    # Undeclared: counts the 3 multipliers, so the same cap publishes a lookup.
+    undeclared = build_rating_table_payload(model, X, y, offset=offset, offset_kind="discrete")
+    block = next(b for b in undeclared.main_effects if "offset" in b.kind)
+    assert block.kind == "offset"
+    assert len(block.table) == 3
+
+    doc = _flat(build_rating_table_payload.__doc__ or "")
+    for claim in (
+        "``offset_max_exact_levels`` governs BOTH paths",
+        "the two paths COUNT DIFFERENT THINGS",
+        "distinct values of the SOURCE column",
+        "distinct MULTIPLIERS",
+    ):
+        assert claim in doc, claim
+
+
 def test_fit_offset_exports_binned_multiplier_block_when_support_is_large():
     """Binning is now a requested summary of the fitted exposure, not the default.
 
@@ -1824,6 +1889,70 @@ def test_a_per_unit_offset_refuses_a_column_it_is_not_proportional_to():
     with pytest.raises(ValueError, match="not proportional"):
         build_rating_table_payload(
             model, X, y, offset=offset, offset_source="mileage", offset_name="Mileage"
+        )
+
+
+def _fit_scaled_offset_model(divisor: float, *, bump: float):
+    """A per-unit offset at a chosen SCALE, with one row off the relation.
+
+    ``offset = log(sum_insured / divisor)`` puts the block's single
+    ``Relativity`` at ``1 / divisor``, which is the only thing the two arms of
+    the test change.  ``bump`` is a purely RELATIVE departure from the
+    relation, so it means the same thing at either scale.
+    """
+    rng = np.random.default_rng(4)
+    n = 3000
+    sum_insured = np.round(rng.lognormal(11.0, 0.6, n), 2)
+    X = pd.DataFrame({"sum_insured": sum_insured})
+    offset = np.log(sum_insured / divisor)
+    offset[0] += np.log1p(bump)
+    y = rng.poisson(np.exp(-0.5 + offset - offset.mean())).astype(float)
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={})
+    model.fit(X, y, offset=offset)
+    return model, X, y, offset
+
+
+@pytest.mark.parametrize("divisor, scale", [(1.0, 1.0), (1_000_000.0, 1e-6)])
+def test_the_per_unit_relation_check_is_relative_at_every_scale(divisor, scale):
+    """A scale-free claim needs a scale-free tolerance.
+
+    ``np.allclose(exp(log_ratio), scale, rtol, atol)`` admits
+    ``atol + rtol*scale``.  At ``scale = 1e-6`` the ``1e-12`` default atol is
+    ``1e-6`` RELATIVE -- four orders looser than the ``1e-10`` rtol asked for --
+    and it keeps loosening in proportion below that, on the one block whose
+    entire claim is that it is exact.  Measured: the SAME 1e-8 departure is
+    refused on ``log(SumInsured)`` and silently exported on
+    ``log(SumInsured/1e6)``.  This is the argument ``_significant_digits``
+    already makes for rounding (issue #303), applied to the check.
+    """
+    clean_model, clean_X, clean_y, clean_offset = _fit_scaled_offset_model(divisor, bump=0.0)
+
+    payload = build_rating_table_payload(
+        clean_model,
+        clean_X,
+        clean_y,
+        offset=clean_offset,
+        offset_source="sum_insured",
+        offset_name="SumInsured",
+        offset_kind="per_unit",
+    )
+
+    # The arm's scale is measured, not assumed: this is the number the check's
+    # tolerance is anchored on, and it is the only difference between the arms.
+    block = next(b for b in payload.main_effects if b.kind == "offset_per_unit")
+    assert block.table["Relativity"].iloc[0] == pytest.approx(scale, rel=1e-12)
+
+    model, X, y, offset = _fit_scaled_offset_model(divisor, bump=1e-8)
+
+    with pytest.raises(OffsetRelationError, match="not proportional"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            offset=offset,
+            offset_source="sum_insured",
+            offset_name="SumInsured",
+            offset_kind="per_unit",
         )
 
 

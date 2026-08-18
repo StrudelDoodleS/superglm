@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
-from superglm.export._ppform import PpformSegments, extract_ppform
+from superglm.export._ppform import PpformNotExactError, PpformSegments, extract_ppform
 from superglm.features import Spline
 from superglm.features.constraint import Constraint
 
@@ -86,3 +86,23 @@ def test_the_segments_reproduce_predict_not_just_the_plotted_curve():
     # nothing else.
     shift = np.mean(log_predict - evaluated)
     assert np.abs((log_predict - shift) - evaluated).max() < 1e-12
+
+
+def test_an_underdetermined_solve_is_refused_rather_than_answered():
+    """``lstsq`` ANSWERS a rank-deficient system; it does not refuse one.
+
+    With fewer curve samples than basis columns it returns the minimum-norm
+    solution, which reproduces the sampled points exactly -- so ``residual``
+    stays at round-off and the exactness check certifies nothing about the
+    curve BETWEEN those points.  Measured on this 8-knot ``ps`` fit read at 5
+    points: rank 5 of 12 columns, residual 2.2e-16, and the recovered pieces
+    mis-rate the fitted curve by up to 2.41x.  A knot interval holding no grid
+    point is the same failure arriving by a subtler route, which is why the
+    guard is on the rank rather than on ``n_points``.
+    """
+    model, _X = _fit("ps")
+
+    with pytest.raises(PpformNotExactError, match="'age'") as excinfo:
+        extract_ppform(model, "age", n_points=5)
+
+    assert "rank" in str(excinfo.value)
