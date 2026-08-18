@@ -353,10 +353,56 @@ def test_the_marker_lands_on_the_fit_for_a_group_named_after_a_member():
     display = project_grouped_term_for_display(model, ti, "auto")
 
     assert display.collapsed is True
+    # Stated against the DECLARATION, not against `_level_to_value.values()`:
+    # that would pass only while dict insertion order happens to agree with
+    # `_source_groups`' first-appearance order, which is a second claim this
+    # test is not making.
+    declared = dict(zip(levels, np.linspace(0.0, 1.0, len(levels)).tolist()))
+    expected = [declared["Mi000"], np.mean([declared["Mi001"], declared["Mi002"]])]
+    expected += [declared[lev] for lev in levels[3:]]
     np.testing.assert_array_equal(
         np.asarray(display.term.smooth_curve.level_x, dtype=np.float64),
-        np.asarray(list(spec._level_to_value.values()), dtype=np.float64),
+        np.asarray(expected, dtype=np.float64),
     )
+    assert display.term.levels[1] == "Mi001"
+
+
+def test_a_partly_declared_group_is_refused_rather_than_averaged():
+    """A group is at its members' mean only if every member HAS a coordinate.
+
+    The position map filters members it cannot resolve, so a group holding one
+    declared and one undeclared level used to take the mean of the declared
+    SUBSET -- a coordinate the declared partition never asks for -- and fit
+    there. The existing guard could not see it: it fires only when a group
+    resolves to NO position at all.
+
+    Measured before the guard, on ``order=["A","B","C","D"]`` against a column
+    that also holds ``"E"``, grouped ``{"CDE": ["C","D","E"]}``: the group
+    landed at ``mean(v_C, v_D) = 0.8333``, the model fitted, and the mistake
+    surfaced two modules away as a bare ``KeyError: 'E'`` out of
+    ``_expand_grouped_term`` -- a message naming neither the grouping nor the
+    level. Now it refuses at construction, naming both.
+    """
+    order = ["A", "B", "C", "D"]
+    data = np.array(["A", "B", "C", "D", "E"] * 40, dtype=object)
+    grouping = collapse_levels(data, groups={"CDE": ["C", "D", "E"]}, order=order + ["E"])
+    with pytest.raises(ValueError, match="undeclared level"):
+        OrderedCategorical(order=order, basis=Spline(kind="cr", n_knots=2), grouping=grouping)
+
+
+def test_a_fully_declared_group_is_still_accepted():
+    """The guard above must not refuse the ordinary case it sits next to.
+
+    Same shape, but ``"E"`` declared: every member of ``CDE`` has a coordinate,
+    so the group takes their mean and the spec builds. Without this the guard
+    could be inverted and the suite would not notice.
+    """
+    order = ["A", "B", "C", "D", "E"]
+    data = np.array(order * 40, dtype=object)
+    grouping = collapse_levels(data, groups={"CDE": ["C", "D", "E"]}, order=order)
+    spec = OrderedCategorical(order=order, basis=Spline(kind="cr", n_knots=2), grouping=grouping)
+    declared = np.linspace(0.0, 1.0, len(order))
+    assert spec._level_to_value["CDE"] == pytest.approx(float(np.mean(declared[2:5])), abs=1e-15)
 
 
 def test_values_places_a_group_exactly_where_the_caller_asks():
