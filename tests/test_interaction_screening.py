@@ -1957,17 +1957,32 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     first-order worst case ``eps ||V||_F ||G||_F`` with ``G = lambda A^-1 S
     A^-1``, which needs no directional penalty scale and no sampling.
 
-    **Why a SENSITIVITY and not an error.**  There is no value to assert.
-    Every operand perturbed here is as faithful to the design as the one the
-    caller passed, so each answer is as correct as any other -- asserting one
-    would assert this module's rounding rather than the data, which is the same
-    refusal :mod:`superglm.screening._structured` records at the high edge.
-    What IS a property of the pair is how far the answer can move.
+    **Why a SENSITIVITY and not an error, and what the probes are NOT.**  There
+    is no value to assert.  An earlier revision justified that by calling every
+    perturbed operand "as faithful to the design as the one the caller passed";
+    **that is withdrawn**.  ``eps ||V||_F`` is an arbitrary probe radius, the
+    maximising direction is indefinite once the bracket term is in it, so
+    ``V - step`` can leave the PSD cone, and no ``X`` is exhibited whose
+    rounding produces either operand -- indeed for an exactly representable
+    product the caller's Gram can carry zero formation error while these probes
+    are nonzero.  They are CONDITION PROBES.  What they measure is how far the
+    answer moves under perturbations the size of the arithmetic's own, which is
+    a property of the map and not a claim about admissible inputs.
 
     **THE REGIME.**  Against one ulp of ``edf`` -- ``np.spacing``, the actual
     adjacent-float distance -- the first-order sensitivity separates by
     eighteen orders, and it is bit-identical across the sweep on every row but
-    the two hardest::
+    the two hardest.
+
+    **The comparison is of the DIFFERENTIAL against one ulp, not of the finite
+    probe's move.**  No remainder over the probe radius is derived here, so
+    strictly this classifies ``c ||G||_F`` and not ``|edf(V + E) - edf(V)|``.
+    What makes that safe is the margin rather than an argument: the asserted
+    rows clear the boundary by 2.44e+07x and 3.03e+10x, so a remainder would
+    have to exceed the differential by seven orders to move a row across, where
+    the measured realizations sit within 6% of it.  A geometry close enough to
+    the boundary for that gap to matter is exactly what the ``1e-3`` rows are,
+    and they are disclosed rather than classified::
 
         penalty  sigma_min  units   sensitivity / ulp over the 14   asserted
         I        1e-1       1       3.2839e-08                      resolved
