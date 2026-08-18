@@ -500,7 +500,9 @@ def _ppform_evaluation_note(name: str, extrapolation: str | None) -> str:
     if extrapolation == "error":
         return formula + (
             " Every row is bounded -- this term declines to price outside its "
-            f"fitted range, so a {name} matching no row has no factor here."
+            f"fitted range, so a {name} matching no row has no factor here. "
+            "Read the closing bracket: rows are [lower, upper) except the last, "
+            "which is [lower, upper] so that the boundary itself has a row."
         )
     return formula + (
         " EXCEPT on the first and last rows, whose interval is unbounded (-inf "

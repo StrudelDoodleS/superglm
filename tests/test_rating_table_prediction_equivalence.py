@@ -396,15 +396,23 @@ def _ppform_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     # them: ``_format_number`` prints via ``repr``, so the string is the exact
     # pair of floats and no separate bound columns exist to disagree with it.
     # Parsing here is what a consumer does, so this evaluator does it too.
-    parsed = [re.match(r"^\[(.+), (.+)\)$", str(label)) for label in table.iloc[:, 0]]
+    parsed = [re.match(r"^\[(.+), (.+)([)\]])$", str(label)) for label in table.iloc[:, 0]]
     assert all(parsed), f"{name!r}: every ppform key must read back as an interval"
     lo = np.array([float(m.group(1)) for m in parsed], dtype=np.float64)
     hi = np.array([float(m.group(2)) for m in parsed], dtype=np.float64)
     coefficients = table[["a", "b", "c", "d"]].to_numpy(dtype=np.float64)
     x = X[name].to_numpy(dtype=np.float64)
 
+    # The closing bracket is part of the key and the consumer reads it: every
+    # row is right-open except the last row of an ``extrapolation="error"``
+    # block, which is closed so the boundary knot -- which ``predict`` rates,
+    # and which is the observed maximum whenever knots are data-driven -- has a
+    # row to match.
+    closed = np.array([m.group(3) == "]" for m in parsed], dtype=bool)
     row = np.searchsorted(lo, x, side="right") - 1
-    matched = (row >= 0) & (x < hi[np.clip(row, 0, len(lo) - 1)])
+    safe = np.clip(row, 0, len(lo) - 1)
+    within = (x < hi[safe]) | (closed[safe] & (x <= hi[safe]))
+    matched = (row >= 0) & within
     assert matched.all(), f"{name!r}: {int((~matched).sum())} rows match no interval"
 
     width = hi[row] - lo[row]
