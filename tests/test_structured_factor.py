@@ -92,6 +92,36 @@ def _unit_level_centered_operator(width: int) -> CenteredBlockOperator:
     return operator
 
 
+@pytest.mark.parametrize("block", ["A", "C"])
+def test_a_non_finite_scalar_schur_block_is_refused_rather_than_absorbed(block) -> None:
+    """An inf in A or C used to build a factor carrying a nan scale.
+
+    Only ``d`` was guarded. ``np.linalg.norm(..., ord=2)`` returns nan for an
+    inf rather than raising, so nothing downstream refused either -- the factor
+    was constructed and the nan travelled into the REML criterion as a logdet.
+    That is worse than a refusal of the wrong class: a wrong class still stops
+    something, while a nan logdet quietly distorts smoothing-parameter
+    selection with every accuracy metric left looking healthy.
+    """
+    A, C, d, _, _, _ = _spd_scalar_blocks()
+    if block == "A":
+        A = A.copy()
+        A[0, 0] = np.inf
+    else:
+        C = C.copy()
+        C[0, 0] = np.inf
+
+    with pytest.raises(np.linalg.LinAlgError, match="non-finite"):
+        ScalarSchurFactor(
+            A=A,
+            C=C,
+            d=d,
+            small_indices=np.arange(3, dtype=np.intp),
+            structured_indices=np.arange(3, 7, dtype=np.intp),
+            term_name="broker",
+        )
+
+
 def _contiguous_scalar_factor():
     A, C, d, _, _, _ = _spd_scalar_blocks()
     small_indices = np.arange(3, dtype=np.intp)

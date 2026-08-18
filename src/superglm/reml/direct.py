@@ -534,18 +534,36 @@ def optimize_direct_reml(
             reml_inverse = geometry.hessian_inverse
             objective_logdet = geometry.log_det_H
             objective_hessian_rank = geometry.hessian_rank
-            mode_score = observed_penalized_mode_score(
-                dm=dm,
-                distribution=distribution,
-                link=link,
-                y=y,
-                sample_weight=sample_weight,
-                result=pirls_result,
-                penalty=S_cand,
-                geometry=geometry,
-                lambdas=cand_lambdas if use_structured else None,
-                reml_penalties=penalties if use_structured else None,
-            )
+            try:
+                mode_score = observed_penalized_mode_score(
+                    dm=dm,
+                    distribution=distribution,
+                    link=link,
+                    y=y,
+                    sample_weight=sample_weight,
+                    result=pirls_result,
+                    penalty=S_cand,
+                    geometry=geometry,
+                    lambdas=cand_lambdas if use_structured else None,
+                    reml_penalties=penalties if use_structured else None,
+                )
+            except ObservedGeometryInfeasibleError as exc:
+                # An unusable score is the same kind of statement as the
+                # unusable geometry just above: this iterate has no penalized
+                # mode worth differentiating through. The answer is a shorter
+                # step or a point scored infeasible, never a failed fit, and
+                # there being no step to halve here it gets the same retype --
+                # a bare ValueError would walk past every
+                # `except ObservedModeNotCertifiedError` and kill a power search
+                # that only needed to route around this point. The score's other
+                # ValueErrors stay bare for the same reason the build's do: rows
+                # that do not match the design or a penalty in the wrong
+                # coordinates are bugs in the call, not conditioning.
+                raise ObservedModeNotConvergedError(
+                    "observed REML mode score refused the penalized coefficient mode "
+                    f"at this point: {exc}",
+                    hint=mode_certification_hint(distribution),
+                ) from exc
             _accepted_observed_mode_residual_max = max(
                 _accepted_observed_mode_residual_max,
                 mode_score.relative_max,
@@ -1085,18 +1103,36 @@ def optimize_direct_reml(
                 _t_observed_geometry += _time.perf_counter() - _t_geometry
                 trial_logdet = trial_geometry.log_det_H
                 trial_hessian_rank = trial_geometry.hessian_rank
-                trial_mode_score = observed_penalized_mode_score(
-                    dm=dm,
-                    distribution=distribution,
-                    link=link,
-                    y=y,
-                    sample_weight=sample_weight,
-                    result=trial_result,
-                    penalty=S_trial,
-                    geometry=trial_geometry,
-                    lambdas=trial_lambdas if use_structured else None,
-                    reml_penalties=penalties if use_structured else None,
-                )
+                try:
+                    trial_mode_score = observed_penalized_mode_score(
+                        dm=dm,
+                        distribution=distribution,
+                        link=link,
+                        y=y,
+                        sample_weight=sample_weight,
+                        result=trial_result,
+                        penalty=S_trial,
+                        geometry=trial_geometry,
+                        lambdas=trial_lambdas if use_structured else None,
+                        reml_penalties=penalties if use_structured else None,
+                    )
+                except ObservedGeometryInfeasibleError:
+                    # A score this trial iterate makes unusable says exactly
+                    # what the refused geometry above says: there is no
+                    # penalized mode here worth differentiating through. Both
+                    # are answered by a shorter step, never by failing the fit,
+                    # so this takes the same door and is counted as the
+                    # line-search rejection it is. Nothing is recorded in
+                    # `_rejected_trial_observed_mode_residual_max`: the score
+                    # refused before producing a residual, exactly as the
+                    # geometry refusal above has none to record. And as there,
+                    # only that one refusal backtracks -- the score's other
+                    # ValueErrors report rows that do not match the design or a
+                    # penalty in the wrong coordinates, which no shorter step
+                    # improves.
+                    _observed_mode_rejected_trial_count += 1
+                    step *= 0.5
+                    continue
                 trial_mode_residual = trial_mode_score.relative_max
                 if trial_mode_score.relative_max > observed_mode_tol:
                     _observed_mode_rejected_trial_count += 1

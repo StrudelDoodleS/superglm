@@ -1824,6 +1824,48 @@ class TestSCOPEFSOuterLoop:
             abs=1e-7,
         )
 
+    def test_an_unscoreable_scop_mode_is_infeasible_not_fatal(self, monkeypatch):
+        """A SCOP score refusal must reach a power search as an infeasible point.
+
+        ``scop_penalized_mode_score`` refuses a non-finite row score, and that
+        quotient -- a residual times a derivative over a floored variance -- is
+        not bounded by anything an accepted geometry certifies. It used to be a
+        bare ``ValueError``, which sails past every
+        ``except ObservedModeNotCertifiedError`` handler because that family is
+        RuntimeError-derived, so it killed the fit rather than costing it one
+        point. Both call sites now retype it.
+        """
+        import superglm.reml.scop_efs as scop_efs_module
+        from superglm.reml.observed_geometry import (
+            ObservedGeometryInfeasibleError,
+            ObservedModeNotConvergedError,
+        )
+
+        def refuse(**kwargs):
+            raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
+
+        monkeypatch.setattr(scop_efs_module, "scop_penalized_mode_score", refuse)
+
+        rng = np.random.default_rng(20260818)
+        n = 100
+        x = np.sort(rng.uniform(0.0, 1.0, size=n))
+        z = rng.normal(size=n)
+        y = 0.2 + 0.6 * z + x + rng.normal(scale=0.04, size=n)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            discrete=True,
+            features={
+                "z": Numeric(),
+                "x": PSpline(n_knots=6, constraint=Constraint.fit.increasing),
+            },
+        )
+
+        with pytest.raises(ObservedModeNotConvergedError) as excinfo:
+            model.fit_reml(pd.DataFrame({"z": z, "x": x}), y, max_reml_iter=2, max_pirls_iter=100)
+
+        assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
+
     def test_candidate_guard_backtracks_past_uphill_full_and_half_steps(self, monkeypatch):
         """A fresh converged mode is required at every log-scale trial."""
         current = SimpleNamespace(

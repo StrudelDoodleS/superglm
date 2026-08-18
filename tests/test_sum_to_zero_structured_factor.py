@@ -542,6 +542,65 @@ def test_sum_to_zero_factor_names_globally_unidentifiable_levels() -> None:
         )
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_a_non_finite_sz_operator_block_is_refused_as_curvature(bad) -> None:
+    """The operator refuses one step before the factor does, and needs the same class.
+
+    ``SumToZeroBlockOperator`` is built inside ``build_structured_system``, which
+    the observed-geometry build calls before it assembles any factor. That
+    refusal is iterate-conditioned for the same reason the factor's is -- these
+    blocks are this iterate's weighted moments -- so it carries the same class,
+    and the build wraps that call in the seam that scores the point infeasible.
+    A plain ValueError there would escape the fit instead.
+    """
+    n_levels, block_size = 3, 2
+    D = np.tile(np.diag([2.0, 3.0]), (n_levels, 1, 1))
+    D[1, 0, 0] = bad
+
+    with pytest.raises(np.linalg.LinAlgError, match="must be finite"):
+        SumToZeroBlockOperator(
+            A=np.empty((0, 0)),
+            C=np.empty((n_levels, block_size, 0)),
+            D=D,
+            small_indices=np.empty(0, dtype=np.intp),
+            structured_indices=np.arange((n_levels - 1) * block_size, dtype=np.intp).reshape(
+                n_levels - 1, block_size
+            ),
+        )
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_a_non_finite_local_block_is_refused_as_curvature_not_as_asymmetry(bad) -> None:
+    """A NaN local block used to be reported as an asymmetric one.
+
+    The two refusals are not interchangeable to callers. Observed-geometry REML
+    separates them by type: a ``LinAlgError`` says this iterate has no usable
+    penalized mode, so a line search halves its step and a power search scores
+    the point infeasible, while a plain ``ValueError`` says the call itself is
+    malformed and stops the fit. A NaN fails ``np.allclose`` against its own
+    transpose, so before the finiteness guard covered ``D`` it was refused as
+    "Every local D block must be symmetric" -- the structural verdict, for a
+    condition the iterate caused.
+
+    An ``inf`` never had the problem, because matching infs compare equal and it
+    reached the curvature check. Both are parametrized here so the asymmetry
+    that caused this cannot quietly return.
+    """
+    D = np.tile(np.diag([2.0, 3.0]), (3, 1, 1))
+    D[1, 0, 0] = bad
+
+    with pytest.raises(np.linalg.LinAlgError):
+        SumToZeroBlockFactor(
+            A=np.empty((0, 0)),
+            C=np.empty((3, 2, 0)),
+            D=D,
+            small_indices=np.array([], dtype=np.intp),
+            structured_indices=np.arange(4, dtype=np.intp).reshape(2, 2),
+            term_name="x:g:sz",
+            level_labels=("a", "b", "c"),
+        )
+
+
 def test_sum_to_zero_factor_is_invariant_to_which_level_is_reconstructed() -> None:
     D = np.array(
         [

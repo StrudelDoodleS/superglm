@@ -909,8 +909,15 @@ def observed_penalized_mode_score(
     dmu_deta = np.asarray(link.deriv_inverse(geometry.eta), dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         row_score = sample_weight * (y - geometry.mu) * dmu_deta / variance
+    # Nothing an accepted geometry certifies bounds this quotient. The build
+    # checks the observed rows, beta, and the weight sum -- different
+    # expressions over the same iterate -- while `stabilize_eta` leaves a sqrt
+    # eta as large as 6.7e153 and `clip_mu` hands Gaussian means back uncapped.
+    # A Gaussian/sqrt iterate at eta near 1e150 therefore keeps every observed
+    # row finite and still overflows this residual times a derivative. That is
+    # this point having no usable penalized mode, not a malformed call.
     if not np.all(np.isfinite(row_score)):
-        raise ValueError("penalized mode score is not finite")
+        raise ObservedGeometryInfeasibleError("penalized mode score is not finite")
 
     intercept_score = float(np.sum(row_score, dtype=np.float64))
     centered_diagonal = (
@@ -1090,14 +1097,38 @@ def build_observed_reml_geometry(
             groups,
             dominant_group_index=structured_group_index,
         )
-        system = build_structured_system(
-            list(dm.group_matrices),
-            groups,
-            observed_w,
-            np.zeros(dm.n, dtype=np.float64),
-            dominant_group_index=structured_group_index,
-            layout=structured_layout,
-        )
+        # Same split as the factor build below, one step earlier: the structured
+        # operators refuse non-finite blocks with a LinAlgError, and everything
+        # else they check -- slice widths, partitions, penalty geometry -- is a
+        # ValueError no iterate can cause and must stay bare.
+        try:
+            system = build_structured_system(
+                list(dm.group_matrices),
+                groups,
+                observed_w,
+                np.zeros(dm.n, dtype=np.float64),
+                dominant_group_index=structured_group_index,
+                layout=structured_layout,
+            )
+        except np.linalg.LinAlgError as error:
+            raise ObservedGeometryInfeasibleError(
+                "structured observed geometry has no usable blocks at the fitted coefficients"
+            ) from error
+        # The `sum_w` certified above is an fsum over scaled rows; the structured
+        # moments carry their own plain `np.sum` of the same rows, which is a
+        # different number. This branch is entered before the non-negative
+        # split, so signed observed rows under a non-canonical link can leave
+        # the two disagreeing in sign at the knife edge -- and it is this one
+        # that the centering divides by below and that the three profiled
+        # factors reject as a bare ValueError. So the quantity is tested where
+        # it is born rather than by retyping their refusal: their remaining
+        # checks (the augmented width, where the intercept sits) are invariants
+        # of the construction immediately below, and catching those would report
+        # an assembly bug here as a point the fit could not reach.
+        if not np.isfinite(system.sum_w) or system.sum_w <= 0.0:
+            raise ObservedGeometryInfeasibleError(
+                "structured observed intercept curvature must have a positive finite sum"
+            )
         penalized = build_penalized_structured_operator(
             system,
             list(dm.group_matrices),
@@ -1121,18 +1152,34 @@ def build_observed_reml_geometry(
             total=system.sum_w,
             center=mean_x,
         )
-        # numpy.linalg.LinAlgError subclasses ValueError, and this construction
-        # is where the structured path actually refuses an iterate: the
-        # sum-to-zero and Schur factors reject a level whose local curvature is
-        # negative or non-finite while they are being built, before any factor
-        # object exists to carry a flag. Under a non-canonical link the observed
-        # rows carry a signed residual term, so a mid-line-search beta reaches
-        # that refusal routinely. Same seam and same argument as the dense build
-        # below -- the preamble has already pinned every caller-supplied input
-        # these callees validate, so what is left belongs to the iterate.
+        # This construction is where the structured path actually refuses an
+        # iterate: the sum-to-zero and Schur factors reject a level whose local
+        # curvature is negative or non-finite while they are being built, before
+        # any factor object exists to carry a flag. Under a non-canonical link
+        # the observed rows carry a signed residual term, so a mid-line-search
+        # beta reaches that refusal routinely.
+        #
+        # Those factors speak two dialects, and only one of them is about this
+        # iterate. LinAlgError is what they raise for what the numbers did, and
+        # they raise it ahead of the structural checks a non-finite block would
+        # otherwise trip: the finiteness guard sits above "A must be symmetric"
+        # in the sum-to-zero factor, and the local-block guards run before the
+        # symmetry and partition checks in the Schur ones. The one seam that
+        # ordering leaves is a NaN in a sum-to-zero LOCAL block, tested for
+        # finiteness only after a symmetry check a NaN fails first; reaching it
+        # needs the block moments themselves to overflow, and closing it belongs
+        # to that factor's own check order rather than to a wider catch here.
+        #
+        # Their plain ValueErrors say something else entirely: partitions that
+        # disagree, a C of the wrong shape, level labels that do not match K.
+        # Unlike the dense build below this branch runs with `penalty is None`,
+        # where the preamble has checked only that the compact inputs are
+        # PRESENT and nothing about their shapes, so catching ValueError here
+        # (LinAlgError subclasses it) would relabel a misassembled operator as a
+        # point the fit could not reach and bury it.
         try:
             augmented_factor, _ = build_augmented_structured_factor(system, penalized)
-        except ValueError as error:
+        except np.linalg.LinAlgError as error:
             raise ObservedGeometryInfeasibleError(
                 "terminal observed REML coefficient Hessian is indefinite; "
                 "the fitted coefficients do not define a valid Laplace mode"
@@ -1153,6 +1200,16 @@ def build_observed_reml_geometry(
                 xtw=xtw,
             )
         else:
+            # The eigencheck below reads `_Q`, which only the two Schur factors
+            # carry, so the unsupported-geometry guard has to run ahead of it.
+            # Dispatching afterwards would let an unrecognised factor die on an
+            # AttributeError about a private attribute instead of reaching the
+            # TypeError that exists to name what came back.
+            if not isinstance(  # pragma: no cover - structured dispatch invariant
+                augmented_factor,
+                BlockSchurFactor | ScalarSchurFactor,
+            ):
+                raise TypeError("Unsupported structured observed factor geometry.")
             try:
                 schur_eigenvalues = np.linalg.eigvalsh(augmented_factor._Q)
             except np.linalg.LinAlgError as error:
@@ -1178,14 +1235,12 @@ def build_observed_reml_geometry(
                     sum_w=system.sum_w,
                     xtw=xtw,
                 )
-            elif isinstance(augmented_factor, ScalarSchurFactor):
+            else:
                 profiled_factor = ProfiledScalarSchurFactor(
                     augmented_factor=augmented_factor,
                     sum_w=system.sum_w,
                     xtw=xtw,
                 )
-            else:  # pragma: no cover - structured dispatch invariant
-                raise TypeError("Unsupported structured observed factor geometry.")
         return ObservedREMLGeometry(
             eta=_readonly(eta),
             mu=_readonly(mu),
@@ -1216,8 +1271,9 @@ def build_observed_reml_geometry(
         # is left for it to reject belongs to the iterate: working weights that
         # are not finite or not non-negative, or a weight sum that collapses.
         # The same argument licenses the blanket wrap at the factor
-        # certification below and at the structured factor build above, and
-        # nowhere else in this function.
+        # certification below, and nowhere else in this function -- the
+        # structured build above catches only LinAlgError precisely because no
+        # such preamble stands behind it.
         try:
             centered = build_centered_system(
                 dm=dm,

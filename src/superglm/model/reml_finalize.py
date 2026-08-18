@@ -20,6 +20,7 @@ from superglm.model.reml_setup import restore_qp_constraints
 from superglm.model.reml_state import update_reml_r_inv
 from superglm.reml.objective import REMLObjectiveEvaluation, reml_laml_objective
 from superglm.reml.observed_geometry import (
+    ObservedGeometryInfeasibleError,
     ObservedModeNotCertifiedError,
     ObservedModeNotConvergedError,
     build_observed_reml_geometry,
@@ -537,39 +538,76 @@ def finalize_reml_fit(
             )
         )
         geometry_start = _time.perf_counter()
-        terminal_geometry = build_observed_reml_geometry(
-            dm=model._dm,
-            distribution=model._distribution,
-            link=model._link,
-            y=y,
-            sample_weight=sample_weight,
-            offset_arr=offset_arr,
-            result=final_pirls,
-            penalty=S_final,
-            derivative_order=0,
-            compute_inverse=False,
-            groups=model._groups if structured_linear_state is not None else None,
-            lambdas=lambdas if structured_linear_state is not None else None,
-            reml_penalties=reml_penalties if structured_linear_state is not None else None,
-            structured_group_index=(
-                structured_linear_state.system.dominant_group_index
-                if structured_linear_state is not None
-                else None
-            ),
-        )
+        try:
+            terminal_geometry = build_observed_reml_geometry(
+                dm=model._dm,
+                distribution=model._distribution,
+                link=model._link,
+                y=y,
+                sample_weight=sample_weight,
+                offset_arr=offset_arr,
+                result=final_pirls,
+                penalty=S_final,
+                derivative_order=0,
+                compute_inverse=False,
+                groups=model._groups if structured_linear_state is not None else None,
+                lambdas=lambdas if structured_linear_state is not None else None,
+                reml_penalties=reml_penalties if structured_linear_state is not None else None,
+                structured_group_index=(
+                    structured_linear_state.system.dominant_group_index
+                    if structured_linear_state is not None
+                    else None
+                ),
+            )
+        except ObservedGeometryInfeasibleError as exc:
+            # The same retype the candidate gate in optimize_direct_reml makes,
+            # for the same reason. The convergence gate above now admits a
+            # budget-exhausted iterate, and an iterate still mid-descent can
+            # carry observed information the geometry refuses outright -- a
+            # non-finite row, a non-positive intercept curvature. The line
+            # search answers that refusal by halving its step; here there is no
+            # step left to halve, so retyping is the only routing available.
+            # Left bare this is a ValueError, and it would sail past every
+            # `except ObservedModeNotCertifiedError` that guards this call --
+            # the power search in profiling/tweedie.py, which names the
+            # terminal refit as a place it expects this family from, and the
+            # two publication handlers in model/profile_ops.py -- killing a
+            # search that only needed to score this point infeasible.
+            #
+            # Only that one refusal is retyped. The build's other ValueErrors
+            # report a violated caller contract -- a misshapen design, a bad
+            # derivative_order, a penalty that is not PSD -- which no iterate
+            # can clear, so they must keep surfacing as the bugs they are.
+            raise ObservedModeNotConvergedError(
+                f"terminal observed REML geometry refused the penalized coefficient mode: {exc}",
+                hint=mode_certification_hint(model._distribution),
+            ) from exc
         profile["reml_terminal_observed_geometry_s"] = _time.perf_counter() - geometry_start
-        mode_score = observed_penalized_mode_score(
-            dm=model._dm,
-            distribution=model._distribution,
-            link=model._link,
-            y=y,
-            sample_weight=sample_weight,
-            result=final_pirls,
-            penalty=S_final,
-            geometry=terminal_geometry,
-            lambdas=lambdas if structured_linear_state is not None else None,
-            reml_penalties=reml_penalties if structured_linear_state is not None else None,
-        )
+        try:
+            mode_score = observed_penalized_mode_score(
+                dm=model._dm,
+                distribution=model._distribution,
+                link=model._link,
+                y=y,
+                sample_weight=sample_weight,
+                result=final_pirls,
+                penalty=S_final,
+                geometry=terminal_geometry,
+                lambdas=lambdas if structured_linear_state is not None else None,
+                reml_penalties=reml_penalties if structured_linear_state is not None else None,
+            )
+        except ObservedGeometryInfeasibleError as exc:
+            # The score carries the same exposure as the build above: a score
+            # that evaluates non-finite describes these coefficients, so it has
+            # to reach a power search as one more point with no usable
+            # penalized mode rather than as a bare ValueError nothing on that
+            # path catches. Its argument-shape refusals stay bare, for the
+            # reason the build's do.
+            raise ObservedModeNotConvergedError(
+                "terminal observed REML refit could not score its penalized "
+                f"coefficient mode: {exc}",
+                hint=mode_certification_hint(model._distribution),
+            ) from exc
         # The same fixed bar the candidate gate uses: a point that certified
         # during the search cannot fail publication because the caller
         # tightened pirls_tol below the observed-geometry ceiling.

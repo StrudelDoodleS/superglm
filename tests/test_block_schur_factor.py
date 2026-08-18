@@ -53,6 +53,33 @@ def _fixture(*, n_levels: int = 5, block_size: int = 3, small_size: int = 4):
     return rng, operator, factor, dense
 
 
+@pytest.mark.parametrize("block", ["A", "C"])
+def test_a_non_finite_block_schur_ordinary_or_cross_block_is_refused(block) -> None:
+    """D was guarded; A and C were not, and nothing else refused them.
+
+    The sibling of the ScalarSchurFactor case: an inf in either block passed
+    every remaining check and only surfaced later as a nan logdet in the REML
+    criterion. Both are typed LinAlgError so the observed-geometry build scores
+    the point infeasible instead of stopping the fit.
+    """
+    _, _, factor, _ = _fixture()
+    A, C, D = factor.A.copy(), factor.C.copy(), factor.D
+    if block == "A":
+        A[0, 0] = np.inf
+    else:
+        C[0, 0, 0] = np.inf
+
+    with pytest.raises(np.linalg.LinAlgError, match="non-finite"):
+        BlockSchurFactor(
+            A=A,
+            C=C,
+            D=D,
+            small_indices=factor.small_indices,
+            structured_indices=factor.structured_indices,
+            term_name="x:group:fs",
+        )
+
+
 def _components(factor: BlockSchurFactor) -> tuple[PenaltyComponent, PenaltyComponent]:
     start = int(factor.structured_indices.min())
     stop = int(factor.structured_indices.max()) + 1

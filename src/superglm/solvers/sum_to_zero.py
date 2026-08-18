@@ -339,9 +339,21 @@ class SumToZeroBlockFactor:
             raise ValueError("small_indices width does not match A.")
         if self.structured_indices.shape != (self.n_levels - 1, self.block_size):
             raise ValueError("structured_indices must have shape (K - 1, k).")
-        if not np.all(np.isfinite(self.A)) or not np.all(np.isfinite(self.C)):
+        if (
+            not np.all(np.isfinite(self.A))
+            or not np.all(np.isfinite(self.C))
+            or not np.all(np.isfinite(self.D))
+        ):
+            # D belongs here, above the symmetry checks, for the reason
+            # BlockSchurFactor already tests its own blocks first: a NaN fails
+            # `np.allclose` against its own transpose, so without this it would
+            # be refused as an asymmetric block -- a structural complaint about
+            # a condition the iterate caused. Callers separate the two by type,
+            # so the wrong class sends a recoverable point down the fatal path.
+            # An inf never had that problem: matching infs compare equal, so it
+            # already reached the curvature check below.
             raise np.linalg.LinAlgError(
-                f"Structured SZ term {term_name!r} has non-finite ordinary or cross blocks."
+                f"Structured SZ term {term_name!r} has non-finite ordinary, cross, or local blocks."
             )
         if not np.allclose(self.A, self.A.T, rtol=0.0, atol=1e-13):
             raise ValueError("A must be symmetric.")
