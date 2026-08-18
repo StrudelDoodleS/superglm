@@ -589,6 +589,24 @@ def finalize_reml_fit(
             log_det_H=terminal_geometry.log_det_H,
             reml_hessian_rank=terminal_geometry.hessian_rank,
         )
+        if not final_pirls.converged:
+            # Reachable only because the certificate above declined to raise:
+            # this mode's KKT residual cleared observed_mode_certification_bar(),
+            # a fixed constant no caller tolerance can move. Relabelling it
+            # converged strengthens the published claim over the step-length
+            # verdict the flag normally carries, so every reader of the
+            # published result now agrees with the certificate that admitted
+            # the fit. The distinct reason is load-bearing -- nothing may read
+            # this as the step test having fired -- and the guard keeps that
+            # name off a refit that did converge by step length. fit_state.py
+            # rewrites the same pair under its own synthetic reason when a
+            # coefficient revision invalidates a mode; the two copies published
+            # below are this same object, so public and solver stay consistent.
+            final_pirls = replace(
+                final_pirls,
+                converged=True,
+                termination_reason="mode_certified",
+            )
         terminal_value = reml_laml_objective(
             model._dm,
             model._distribution,
