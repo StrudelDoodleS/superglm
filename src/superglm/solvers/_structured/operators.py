@@ -316,12 +316,15 @@ class LowRankSymmetricOperator:
         if basis.ndim != 2 or core.shape != (basis.shape[1], basis.shape[1]):
             raise ValueError("Low-rank operator basis and core shapes are inconsistent.")
         if not np.all(np.isfinite(basis)) or not np.all(np.isfinite(core)):
-            # Above the symmetry check, as everywhere else here. It matters more
-            # at this class's one construction site than at most: the core built
-            # in `reml_w_correction` is [[0, -sum_w], [-sum_w, 0]], symmetric by
-            # construction, so the only way the check below can fail there is a
-            # non-finite sum_w -- i.e. every symmetry complaint that site could
-            # ever produce was really this one, misnamed.
+            # Above the symmetry check, as everywhere else here, and the basis
+            # is the half that carries it. At this class's one construction site
+            # (`reml_w_correction`) the basis is column_stack(dmean_i, dmean_j)
+            # and had no check of any kind -- not finiteness, not symmetry. The
+            # core there is [[0, -sum_w], [-sum_w, 0]], symmetric by
+            # construction and built from a sum_w already certified finite and
+            # positive upstream, so it is close to unreachable; a NaN in it
+            # would have failed the check below under the wrong name, and an inf
+            # would have passed it and been accepted outright.
             raise np.linalg.LinAlgError("Low-rank operator basis and core must be finite.")
         if not np.allclose(core, core.T, rtol=0.0, atol=1e-14):
             raise ValueError("Low-rank operator core must be symmetric.")
@@ -653,7 +656,18 @@ def _block_operator_bdlr(operator: BlockSymmetricOperator) -> _BlockDiagonalLowR
 def _sum_to_zero_operator_bdlr(
     operator: SumToZeroBlockOperator,
 ) -> _BlockDiagonalLowRank:
-    """Convert raw constrained blocks to public block-diagonal-plus-low-rank form."""
+    """Convert raw constrained blocks to public block-diagonal-plus-low-rank form.
+
+    This constructs a fresh ``BlockSymmetricOperator``, so its finiteness guard
+    can raise from here -- lazily, on a path (``_operator_bdlr`` ->
+    ``trace_inverse_operator``) that no seam covers. It is a backstop rather
+    than a live refusal: ``operator`` passed its own finiteness guard at
+    construction, ``D[:-1]`` is a slice of already-finite blocks, and
+    ``C[:-1] - C[-1:]`` is a difference of finite quantities, so reaching it
+    needs that subtraction to overflow. Written down rather than seamed,
+    because a speculative catch around the Hessian assembly would be wide
+    enough to swallow the structural refusals that path is supposed to surface.
+    """
     base = BlockSymmetricOperator(
         A=operator.A,
         C=operator.C[:-1] - operator.C[-1:],

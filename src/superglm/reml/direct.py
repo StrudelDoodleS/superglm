@@ -718,10 +718,22 @@ def optimize_direct_reml(
         if not discrete:
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
-            # no usable curvature at this point. `w_derivatives` raises none of
-            # its own and calls no decomposition, so what reaches here is an
-            # operator refusing its blocks -- narrow enough that this cannot
-            # swallow a structural complaint.
+            # no usable curvature at this point. The only LinAlgError reachable
+            # from here is a compact operator refusing its blocks -- naming the
+            # reachable set rather than `w_derivatives`' current habits, because
+            # it is the reachable set that makes this narrow enough not to
+            # swallow a structural complaint. Structural refusals on this path
+            # are ValueError/TypeError and still propagate bare.
+            #
+            # Deliberately NOT gated on `use_observed_geometry`. The correction
+            # runs on the Fisher path too, and a Tweedie power search with a
+            # fixed PowerLink crosses a canonical (p, link) pair at p = 1 - power
+            # -- one interior grid point where the curvature flips to "fisher".
+            # Gating here would hand that single point a bare LinAlgError while
+            # its neighbours score infeasible and route around, which is the
+            # failure this whole seam exists to remove. The message stays
+            # curvature-neutral for the same reason: it is reached with
+            # `geometry is None`.
             try:
                 w_corr = reml_w_correction(
                     dm,
@@ -739,10 +751,8 @@ def optimize_direct_reml(
                     geometry=geometry,
                 )
             except np.linalg.LinAlgError as error:
-                _t_w_correction += _time.perf_counter() - _t0
                 raise ObservedModeNotConvergedError(
-                    "observed REML W(rho) correction has no usable curvature "
-                    f"at this point: {error}",
+                    f"REML W(rho) correction has no usable curvature at this point: {error}",
                     hint=mode_certification_hint(distribution),
                 ) from error
         else:
