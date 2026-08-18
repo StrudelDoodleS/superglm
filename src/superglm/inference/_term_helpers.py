@@ -267,42 +267,72 @@ def _expand_grouped_term(
 ) -> TermInference:
     """Expand a grouped TermInference back to all original levels.
 
-    Each original level gets the relativity/SE/CI of its group.
-    For OrderedCategorical smooth_curve, level_x positions use the original
-    level numeric values so each level gets its own x-position on the plot.
+    Each original level gets the relativity/SE/CI of its group.  The display
+    curve is NEVER rebuilt: every fitted field it carries -- ``x``,
+    ``log_relativity``, ``relativity``, ``se_log_relativity``, ``ci_lower``,
+    ``ci_upper`` -- survives this function untouched, and only ``level_x``
+    moves, to give each original level its own marker position.  ``level_x`` is
+    marker metadata ("numeric x positions of the K smooth levels"), so it can
+    move without making any statement about the curve's values.
 
-    The display curve is REDRAWN only where the collapse moved the display
-    axis.  A ``Piecewise`` or ``Polynomial`` inner basis lives on level
-    positions ``0..L-1`` and every original level sits at its group's position,
-    so the expanded positions are the fitted curve's own ``level_x`` and there
-    is nothing to reconcile: the fitted curve is kept and only the markers
-    move.  Where the axis genuinely moves -- a spline's ``order=`` linspace or
-    ``values=`` spacing, whose grouped curve sits on group MEANS -- the fitted
-    curve cannot be drawn against the expanded markers, so a PCHIP is
-    interpolated through them and exported with NO band, because the fitted
-    curve's standard errors describe the fitted curve and PCHIP's slope limiter
-    is not a linear functional of beta.  Per-level SEs are unaffected either
-    way.
+    That is the whole of the change for issue #282.  This function used to
+    interpolate a fresh 200-point PCHIP through the expanded markers wherever
+    the collapse moved the display axis -- a spline's ``order=`` linspace or
+    ``values=`` spacing, whose grouped curve sits on group means -- and export
+    it with no band, because the fitted curve's standard errors describe the
+    fitted curve and PCHIP's slope limiter is not a linear functional of beta.
+    Both halves of that were damage.  The DEFAULT panel does not draw the
+    expanded axis at all: ``resolve_grouped_level_display("auto", ...)`` returns
+    ``"collapsed"`` for every grouped ``OrderedCategorical``, and the collapse
+    is the exact inverse of this expansion -- ``group_axis_position`` places a
+    group at the mean of its members' positions and the collapse recomputes the
+    same mean over the same members, bit for bit (``np.array_equal``, atol 0, on
+    ``level_x`` and on the per-level SEs; verified on 2-member, 3-member,
+    two-simultaneous-merge and irregular ``values=`` groupings).  So the markers
+    and the SEs went out and came back exactly, and the ONLY thing the round
+    trip could not put back was the curve, because this function had already
+    overwritten it.  Measured on ``Spline(kind="cr", n_knots=4)`` over ten
+    levels merging one interior pair: the default panel drew a shape running
+    0.0474 in log-relativity -- 4.86% in relativity -- from the function that
+    was actually fitted, with no band, purely as collateral damage from a
+    rebuild the renderer immediately undid on every other axis.
 
-    Literature, because the rule above turns on a documented property of the
-    interpolant rather than on a tolerance.  SciPy's ``PchipInterpolator`` runs
-    the local slope formula of Fritsch & Butland, *SIAM J. Sci. Stat. Comput.*
-    5(2):300-304 (1984), doi:10.1137/0905021, within the monotone piecewise
-    cubic family of Fritsch & Carlson, *SIAM J. Numer. Anal.* 17(2):238-246
-    (1980).  That formula sets the slope to ZERO wherever consecutive secants
-    have opposite signs or either is zero (Moler, *Numerical Computing with
-    MATLAB*, SIAM 2004, §3.4), so a stated break -- which is exactly such a
-    point -- is not rounded but actively flattened; and PCHIP is C1 by
-    construction ("the spline has two continuous derivatives, while pchip has
-    only one", Moler §3.7), so a C0 corner is undrawable at any sampling
-    density.  Evaluating the fitted function on a grid instead is the ordinary
-    practice -- gratia (MIT), pyGAM (Apache-2.0), and Fox, *J. Stat. Soft.*
-    8(15) (2003) all do it -- and breaking a drawn curve at known non-smooth
-    points is standard outside statistics too.  What no source covers is
-    substituting a C1 interpolant for a fitted C0 term, because penalised
-    regression splines are C1 or better by construction and never meet the
-    case.  The inline comment on the branch below carries the measurements and
-    the full citations.
+    What is drawn instead is the ordinary object: the fitted function evaluated
+    on a grid over ITS OWN range, with its own pointwise band.  gratia
+    (MIT; Simpson, arXiv:2406.19082, §4) evaluates a smooth "at a grid ... of
+    values over the range of the covariates" and adds a Bayesian credible
+    interval; pyGAM (Apache-2.0) computes term functions on a generated grid;
+    Fox, *J. Stat. Soft.* 8(15) (2003) computes fitted values over a grid.  The
+    band's coverage semantics for a penalised spline are Nychka, *JASA*
+    83(404):1134-1143 (1988) and Marra & Wood, *Scand. J. Statist.*
+    39(1):53-74 (2012), doi:10.1111/j.1467-9469.2011.00760.x.
+
+    The one visible consequence is confined to ``expanded`` mode, where the
+    curve now spans the FITTED range (group means) while the markers span the
+    declared one, so a leading or trailing merge leaves the curve short of the
+    outermost markers.  That is the established default, not a defect:
+    ggplot2's ``geom_smooth()`` documents ``fullrange`` -- "If TRUE, the
+    smoothing line gets expanded to the range of the plot, potentially beyond
+    the data" -- with default ``FALSE``.  Both renderers already union the
+    marker padding with the curve's own extent when setting x-limits, and both
+    already draw per-marker error bars from the per-level CIs, which are the
+    quantities a rate filing is read on (NAIC/CASTF *Regulatory Review of
+    Predictive Models*, information element C.7.b: "analyze a graph of each
+    risk characteristic's ... possible relativities.  Look for significant
+    variation between adjacent relativities").  Those are per-marker
+    quantities; a monotone interpolant degraded them by turning the step
+    between adjacent relativities into a ramp, worst right beside the merge.
+
+    Cattaneo, Crump, Farrell & Feng, *On Binscatter*, AER 114(5):1488-1514
+    (2024) settle the estimator question: pointwise intervals at masspoints
+    "can be used directly to assess uncertainty about the mean for a masspoint
+    of x_i ... but cannot be used to assess functional features of the
+    regression function as a whole", and a line through bin-level estimates is
+    a different object from the estimate -- "although the binned scatter plot
+    invites the viewer to 'connect the dots' smoothly, the actual estimator is
+    piecewise constant".  Propagating a band through the interpolant was
+    therefore never available, and with the interpolant gone the question
+    lapses.
     """
     if ti.levels is None:
         raise ValueError("Grouped term expansion requires categorical levels.")
@@ -329,11 +359,10 @@ def _expand_grouped_term(
     if ci_hi is not None:
         ci_hi = np.asarray(ci_hi)[indices]
 
-    # Expand smooth_curve: give each original level its own x-position and,
-    # WHERE THE COLLAPSE MOVED THE DISPLAY AXIS, rebuild the display curve via
-    # PCHIP interpolation through the expanded (level_x, relativity) pairs so it
-    # passes through every marker.  level_x covers the SMOOTHED levels only, so
-    # specials are held out of the rebuild and keep their detached marker rows.
+    # Expand smooth_curve: give each original level its own MARKER x-position
+    # and leave every other field of the curve exactly as fitted.  level_x
+    # covers the SMOOTHED levels only, so specials are held out here and keep
+    # their detached marker rows.
     expanded_special = (
         None
         if ti.level_is_special is None
@@ -347,7 +376,6 @@ def _expand_grouped_term(
             else ~expanded_special
         )
         smooth_levels = [lev for lev, keep in zip(expanded_levels, smooth_mask) if keep]
-        smooth_log_rel = log_rel[smooth_mask]
 
         if original_level_values is not None:
             expanded_level_x = np.array([original_level_values[lev] for lev in smooth_levels])
@@ -360,153 +388,59 @@ def _expand_grouped_term(
                 else grouped_lx[np.asarray(indices, dtype=np.intp)[smooth_mask]]
             )
 
-        # Rebuild display curve through expanded level positions
-        # Deduplicate x-positions (grouped levels share the same relativity
-        # but may have different x — keep first occurrence for interpolation)
-        seen_x = {}
-        for xi, yi in zip(expanded_level_x, smooth_log_rel):
-            if xi not in seen_x:
-                seen_x[xi] = yi
-        uniq_x = np.array(sorted(seen_x.keys()))
-        uniq_log_y = np.array([seen_x[x] for x in uniq_x])
-
-        # A collapse that leaves the display axis WHERE IT WAS has nothing to
-        # reconcile, and re-interpolating there replaces the fitted curve with a
-        # smooth read of its own samples.  A Piecewise or Polynomial inner basis
-        # lives on level POSITIONS 0..L-1 and every original level sits AT its
-        # group's position, so the expanded positions are the fitted curve's own
-        # ``level_x`` exactly -- the rebuild then draws a different function
-        # through points that already lie on the fitted one.  Measured on a
-        # hosted ``Piecewise`` with one stated break, one grouped pair and a
-        # V-shaped signal: the PCHIP rendered the C0 corner 6.3x too shallow
-        # (slope jump +0.0743 against the fitted +0.4703) and ran 0.0393 in
-        # log-relativity -- 4.0% in relativity -- away from the fitted shape one
-        # band before the break.
+        # The curve is NOT rebuilt.  ``x``, ``log_relativity``, ``relativity``
+        # and the band are the fitted ones and stay that way; only the markers
+        # move.  ``replace``, not a hand-listed constructor, so a field added to
+        # ``SmoothCurve`` later keeps the value this curve carries instead of
+        # silently taking its default -- and so the line states the intent the
+        # docstring argues for, which is that ONE field changes.
         #
-        # That flattening is the interpolant's CONSTRUCTION, not a resolution
-        # artefact, and the literature names it exactly.  SciPy's
-        # ``PchipInterpolator`` implements the local slope formula of Fritsch &
-        # Butland, "A method for constructing local monotone piecewise cubic
-        # interpolants", SIAM J. Sci. Stat. Comput. 5(2):300-304 (1984)
-        # (doi:10.1137/0905021) -- the monotone piecewise cubic FAMILY is
-        # Fritsch & Carlson, SIAM J. Numer. Anal. 17(2):238-246 (1980), which
-        # SciPy does not cite.  (SciPy's own reference list renders the 1984
-        # journal as "SIAM J. Sci. Comput.", the name it took after a later
-        # rename; in 1984 it was the Journal on Scientific and STATISTICAL
-        # Computing, which is what SIAM and Crossref both record.)  Moler,
-        # *Numerical Computing with MATLAB* (SIAM 2004) sets out the rule in
-        # section 3.4: "If delta_k and delta_{k-1} have opposite signs or if
-        # either of them is zero, then x_k is a discrete local minimum or
-        # maximum, so we set d_k = 0."  A stated break is precisely a sign
-        # change, so the vertex is assigned slope ZERO by rule.  Measured
-        # against the installed SciPy: a V-shaped break whose fitted secants
-        # jump by +0.60 is drawn with derivative exactly 0.0 at the vertex, and
-        # a same-sign break -0.5 -> -0.05 is drawn at -0.0909 -- the
-        # Fritsch-Butland weighted harmonic mean, within a factor of two of the
-        # SHALLOWER secant rather than anywhere near the steeper one.
+        # This used to fork on ``np.array_equal(curve.level_x, uniq_x)`` -- was
+        # the display axis where it was? -- keeping the fitted curve when it was
+        # and interpolating a PCHIP through the expanded markers when it was
+        # not.  Both arms now agree, so there is no fork.  What the interpolating
+        # arm cost, measured on ten evenly spaced levels with
+        # ``Spline(kind="cr", n_knots=4)``: merging the interior pair
+        # ``Mi001+Mi002`` drew a curve up to 0.0474 in log-relativity (4.86% in
+        # relativity) from the fitted one, and the three-member merge
+        # ``Mi003+Mi004+Mi005`` reached 0.0898 (9.39%).  Against the fitted
+        # curve's own 95% band -- half-width at most 0.00587 and 0.00666
+        # respectively, i.e. 1.96x a maximum standard error of 0.00300 and
+        # 0.00340 -- that is 61 and 81 of the 200 drawn points lying strictly
+        # outside the band computed for the curve they replaced.  (The "max band
+        # half-width = 0.00302" quoted in issues #277 and #282 is the maximum
+        # STANDARD ERROR, not a half-width; 1.96x it is the 95% half-width.  The
+        # conclusion is unchanged -- the ratio is what carries it.)
         #
-        # And the corner is undrawable rather than merely mis-drawn: PCHIP is C1
-        # by construction ("the first derivatives are guaranteed to be
-        # continuous, but the second derivatives may jump" -- SciPy docs; "the
-        # spline has two continuous derivatives, while pchip has only one" --
-        # Moler section 3.7), while a stated break is a C0 kink.  No sampling
-        # density recovers it.
+        # That last measurement is also why #277's rule LAPSES rather than being
+        # overruled.  #277 dropped the band because a band is a statement about
+        # the curve it is drawn around and the drawn curve's VALUES had been
+        # replaced; on an interior merge the fitted and rebuilt grids were the
+        # same 200-point linspace, so the fitted band zipped against
+        # interpolated values and was exported around a line nobody drew.
+        # Nothing here replaces any value now, so the band's centre and the
+        # drawn curve are the same array and that failure mode is unreachable --
+        # 0 of 200 points outside, by identity rather than by tolerance.
+        # ``test_a_grouped_display_band_is_centred_on_the_curve_it_ships_with``
+        # measures exactly #277's quantity on exactly #277's fixture.
         #
-        # That contradicts the term's headline feature at the very break it
-        # states, so the fitted curve is kept and only the markers move.  The
-        # test is the geometry itself, not the basis name: any expansion that
-        # genuinely re-spreads the levels (a spline's ``order=`` linspace or
-        # ``values=`` spacing, where the grouped curve sits on group MEANS)
-        # fails it and rebuilds.
-        #
-        # Evaluating the fitted function on a grid is the ordinary practice, not
-        # a local invention: gratia (MIT) evaluates a smooth at evenly spaced
-        # values over the covariate's range, pyGAM (Apache-2.0) computes term
-        # functions on a generated grid, and Fox, "Effect Displays in R for
-        # Generalised Linear Models", J. Stat. Soft. 8(15) (2003) computes
-        # fitted values over a grid.  Breaking the drawn curve at known
-        # non-smooth points is equally standard outside statistics: Wolfram's
-        # ``Plot`` "breaks curves at discontinuities and singularities it
-        # detects" under its default ``Exclusions -> Automatic`` and joins
-        # across them only under ``Exclusions -> None``, and Remacle,
-        # Chevaugeon, Marchandise & Geuzaine, "Efficient visualization of
-        # high-order finite elements", Int. J. Numer. Meth. Engng.
-        # 69(4):750-771 (2007) build the display grid by per-element "error
-        # estimation and h-refinement" -- their words -- because the field is
-        # smooth within an element and not across its boundary.  (Some indexes
-        # date that paper 2006, from its online-first posting; the issue is
-        # January 2007.)  What no source warns about is
-        # substituting a C1 interpolant for a fitted C0 term -- and the reason
-        # is structural: penalised regression splines are C1 or better by
-        # construction, so the display routines above never meet this case.
-        # This one is ours.
-        #
-        # Exact equality is deliberate, and it is exact BY CONSTRUCTION on both
-        # sides rather than approximately equal by luck: a position axis is
-        # ``float(position)`` for an integer position, and a singleton group's
-        # mean is its one element returned unchanged.  Anything that starts
-        # generating positions arithmetically -- normalising them through a
-        # linspace, say -- should fall back to the rebuild rather than compare
-        # equal to within a tolerance, which is what this spelling gets.
-        axis_unmoved = np.array_equal(
-            np.asarray(curve.level_x, dtype=np.float64), uniq_x.astype(np.float64)
-        )
-
-        if axis_unmoved:
-            # Only the markers move.  The bands ride along untouched because the
-            # grid they were computed on is the grid still being drawn.
-            curve = replace(curve, level_x=expanded_level_x)
-        elif len(uniq_x) >= 2:
-            from scipy.interpolate import PchipInterpolator
-
-            pchip = PchipInterpolator(uniq_x, uniq_log_y)
-            new_x = np.linspace(float(uniq_x[0]), float(uniq_x[-1]), 200)
-            new_log_rel = pchip(new_x)
-
-            # A band is a statement about the curve it is drawn around, so it
-            # cannot outlive a change to that curve's VALUES.  The rebuilt curve
-            # is a PCHIP through the markers; the fitted curve's
-            # ``se_log_relativity`` / ``ci_*`` were computed from the design at
-            # the fitted x, and PCHIP's slope limiter is not a linear functional
-            # of beta, so there is no band for the drawn line to inherit.
-            #
-            # The former test was whether the two GRIDS lined up, which is a
-            # weaker question -- it asks whether the arrays zip, not whether they
-            # describe the same function -- and for the common ``order=`` spline
-            # both grids ARE the same 200-point linspace, so the fitted bands
-            # were exported around interpolated values.  Measured on a grouped
-            # ``Spline(kind="cr", n_knots=4)`` merging one interior pair: the
-            # drawn curve ran up to 0.0477 in log-relativity (4.65% in
-            # relativity) from the fitted one against a band half-width of at
-            # most 0.00302, i.e. 68.8 standard errors, and 61 of the 200 drawn
-            # points fell strictly outside their own exported band.  The band
-            # centre was the FITTED curve to 1.1e-16 -- a ribbon around a line
-            # nobody drew.  Merging a mid-range pair gave 0.0558 (5.74%), 59.2
-            # standard errors and 60 of 200.
-            #
-            # Per-level SEs -- the rated quantities -- are expanded above and
-            # stay; it is only the display band that goes.
-            # ``replace``, not a hand-listed constructor, for the same reason as
-            # the two kept-curve branches and the return below: a field added to
-            # ``SmoothCurve`` later would silently take its DEFAULT here instead
-            # of the value this curve carries.  It also states the intent the
-            # comment above argues for -- keep everything, null the bands --
-            # rather than restating the whole type to change four fields.
-            curve = replace(
-                curve,
-                x=new_x,
-                log_relativity=new_log_rel,
-                relativity=np.exp(new_log_rel),
-                level_x=expanded_level_x,
-                se_log_relativity=None,
-                ci_lower=None,
-                ci_upper=None,
-            )
-        else:
-            # Fewer than two distinct smoothed positions: there is nothing to
-            # interpolate through, so the curve's own values are kept unchanged
-            # and its bands still describe exactly the line being drawn.
-            curve = replace(curve, level_x=expanded_level_x)
+        # The interpolant's own pathology is recorded because it is what made
+        # the loss localise where a reviewer looks rather than average out:
+        # SciPy's ``PchipInterpolator`` runs the local slope formula of Fritsch
+        # & Butland, *SIAM J. Sci. Stat. Comput.* 5(2):300-304 (1984),
+        # doi:10.1137/0905021, within the monotone piecewise cubic family of
+        # Fritsch & Carlson, *SIAM J. Numer. Anal.* 17(2):238-246 (1980).  That
+        # formula sets the slope to ZERO wherever consecutive secants have
+        # opposite signs or either is zero (Moler, *Numerical Computing with
+        # MATLAB*, SIAM 2004, section 3.4).  A merged group is flat, so its
+        # secant is zero, so the rule fired at the merge's own edges and the
+        # largest drawn-vs-fitted gap sat about 0.18 level widths past them.
+        # And PCHIP is C1 by construction ("the spline has two continuous
+        # derivatives, while pchip has only one", Moler section 3.7), so a
+        # ``Piecewise`` term's stated C0 corner was undrawable at any sampling
+        # density -- which is why the fork existed at all, and why dropping the
+        # interpolation drops the need for it.
+        curve = replace(curve, level_x=expanded_level_x)
 
     # dataclasses.replace, not a hand-listed rebuild: every field this function
     # does not touch — including level_is_special's siblings — survives by

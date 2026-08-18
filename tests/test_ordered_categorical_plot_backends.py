@@ -197,9 +197,17 @@ def test_collapsed_display_keeps_the_fitted_curve(collapsed_ordered_spline_model
 
 
 def test_collapsed_panel_x_limits_hold_the_whole_curve(collapsed_ordered_spline_model):
-    # Markers sit at group means (31, 57, 72) but the curve still spans the
-    # original level range (21 .. 72), so limits derived from the markers alone
-    # cut the leading 2.5 units of the fitted curve off-canvas.
+    # The whole curve is on canvas, and since issue #282 that is no longer a
+    # near miss: the expansion stopped rebuilding the curve, so the drawn curve
+    # is the FITTED one and spans the fitted axis (group means, 31 .. 72) --
+    # which is exactly the collapsed markers' own range. The limits then hold it
+    # with the marker padding to spare on both sides.
+    #
+    # Before, the expansion interpolated a PCHIP across the original level range
+    # (21 .. 72) and the collapse passed that through, so the curve overhung the
+    # markers by 10 units and the left limit had to be the curve's own start.
+    # The union in ``_plot_ordered_spline_panel`` still guards that direction --
+    # it is what keeps this an inequality rather than an assumption.
     import matplotlib
 
     matplotlib.use("Agg")
@@ -213,12 +221,13 @@ def test_collapsed_panel_x_limits_hold_the_whole_curve(collapsed_ordered_spline_
     x_pos = np.asarray(ax.get_xticks(), dtype=np.float64)
 
     np.testing.assert_allclose(x_pos, [np.mean([21.0, 30.0, 42.0]), 57.0, 72.0])
-    # The left edge is the curve's own start, below the marker padding.
-    assert lo == pytest.approx(float(curve_x.min()))
-    assert lo < float(x_pos.min())
-    # The right edge still keeps the marker padding, which reaches past the curve.
-    assert hi >= float(curve_x.max())
-    assert hi > float(x_pos.max())
+    # The fitted curve starts at the first marker and ends at the last: the
+    # collapse is the exact inverse of the expansion on the level positions.
+    assert float(curve_x.min()) == pytest.approx(float(x_pos.min()))
+    assert float(curve_x.max()) == pytest.approx(float(x_pos.max()))
+    # Both edges keep the marker padding, so the whole curve is inside them.
+    assert lo < float(curve_x.min())
+    assert hi > float(curve_x.max())
 
     drawn_x, _ = _matplotlib_curve(ax, len(curve_x))
     assert float(drawn_x.min()) >= lo and float(drawn_x.max()) <= hi
@@ -226,8 +235,17 @@ def test_collapsed_panel_x_limits_hold_the_whole_curve(collapsed_ordered_spline_
 
 def test_single_group_collapse_still_shows_the_whole_curve(single_group_collapsed_model):
     # Degenerate display: every level lands in one group, so there is one marker
-    # and no spacing to derive.  The panel must still show all of the curve
-    # rather than a 1-unit window around the single marker.
+    # and no spacing to derive.  The panel must still show all of the curve.
+    #
+    # Since issue #282 that curve is the fitted one, and one group is ONE
+    # parameter -- so the fitted function is a single number at a single
+    # coordinate (the mean of the five level values, 44.4) and the curve is 200
+    # samples of it there.  The panel shows exactly that.  It used to show a
+    # PCHIP drawn from 21 to 72 through five markers that all carry the same
+    # value, which is a line across a range the model no longer distinguishes:
+    # Cattaneo, Crump, Farrell & Feng, *On Binscatter*, AER 114(5):1488-1514
+    # (2024) -- "although the binned scatter plot invites the viewer to 'connect
+    # the dots' smoothly, the actual estimator is piecewise constant".
     import matplotlib
 
     matplotlib.use("Agg")
@@ -239,12 +257,18 @@ def test_single_group_collapse_still_shows_the_whole_curve(single_group_collapse
     assert len(display.term.levels) == 1
 
     curve_x = np.asarray(ti.smooth_curve.x, dtype=np.float64)
+    marker = float(np.mean(list(AGE_VALUES.values())))
+    assert float(curve_x.min()) == pytest.approx(marker)
+    assert float(curve_x.max()) == pytest.approx(marker)
+
     ax = single.plot("age_band", X=X, sample_weight=sample_weight).axes[0]
     lo, hi = ax.get_xlim()
 
-    assert np.asarray(ax.get_xticks()).size == 1
-    assert lo == pytest.approx(float(curve_x.min()))
-    assert hi == pytest.approx(float(curve_x.max()))
+    x_pos = np.asarray(ax.get_xticks(), dtype=np.float64)
+    assert x_pos.size == 1
+    assert float(x_pos[0]) == pytest.approx(marker)
+    # a degenerate curve still has to be on canvas, with a window around it
+    assert lo < float(curve_x.min()) and hi > float(curve_x.max())
 
 
 def test_collapsed_curve_is_dropped_when_it_has_no_level_positions(ordered_spline_model):
