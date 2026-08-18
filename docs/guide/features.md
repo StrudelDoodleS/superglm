@@ -513,6 +513,12 @@ else: `term_inference()` and `plot_data()` carry the fitted curve with its own
 `se_log_relativity` / `ci_lower` / `ci_upper`, and the rated values are the band
 markers themselves, with their own standard errors.
 
+`plot_data()` is the exception: it always exports the **expanded** axis and takes
+no `grouped_level_display=`. For a merged group that puts the payload's two
+pieces on different axes — `effect["x_position"]` on the declared level values,
+`smooth_curve["x"]` on the fitted (group-mean) axis — so join them through the
+level table rather than on x.
+
 By default a grouped `OrderedCategorical` panel is drawn **collapsed** — one
 marker per group, at the group's position — which is exactly where the fit is.
 Ask for `grouped_level_display="expanded"` and you get one marker per original

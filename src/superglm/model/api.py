@@ -1576,6 +1576,20 @@ class SuperGLM:
         Pass ``centering="mean"`` for a reporting view where the
         geometric mean of relativities = 1.
 
+        A grouped ``OrderedCategorical`` is always exported on the **expanded**
+        axis — one row per original level — where :meth:`plot` defaults to the
+        collapsed view and takes ``grouped_level_display=``, which this method
+        does not. That matters for a merged group, because the two payload
+        pieces then live on different axes: ``effect["x_position"]`` holds the
+        declared level values, while ``smooth_curve["x"]`` spans the axis the
+        smooth was FITTED on, which for a merged group is its members' mean
+        position. A merge at either end of the ordering therefore leaves the
+        exported curve short of the outermost exported markers, and a merged
+        group's two markers sit off the curve's own band — correctly, since they
+        are one parameter reported at two coordinates, but it reads like a
+        coverage failure if you do not expect it. Join the two on the level
+        table, not on x.
+
         Examples
         --------
         >>> payload = model.plot_data("DrivAge", X=X_train, sample_weight=w, show_knots=True)

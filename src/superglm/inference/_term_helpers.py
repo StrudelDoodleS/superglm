@@ -284,14 +284,28 @@ def _expand_grouped_term(
     Both halves of that were damage.  The DEFAULT panel does not draw the
     expanded axis at all: ``resolve_grouped_level_display("auto", ...)`` returns
     ``"collapsed"`` for every grouped ``OrderedCategorical``, and the collapse
-    is the exact inverse of this expansion -- ``group_axis_position`` places a
-    group at the mean of its members' positions and the collapse recomputes the
-    same mean over the same members, bit for bit (``np.array_equal``, atol 0, on
-    ``level_x`` and on the per-level SEs; verified on 2-member, 3-member,
-    two-simultaneous-merge and irregular ``values=`` groupings).  So the markers
-    and the SEs went out and came back exactly, and the ONLY thing the round
-    trip could not put back was the curve, because this function had already
-    overwritten it.  Measured on ``Spline(kind="cr", n_knots=4)`` over ten
+    is the exact inverse of this expansion on the level positions:
+    ``group_axis_position`` places a group at the mean of its members'
+    positions and the collapse recomputes the same mean over the same members,
+    in the same order -- ``_source_groups`` and the spec both iterate
+    ``grouping.group_to_originals[label]`` -- so ``level_x`` returns bit for
+    bit (``np.array_equal``, atol 0) by CONSTRUCTION rather than by luck.
+    Reordering either iteration would break that silently.  Verified on
+    2-member, 3-member, two-simultaneous-merge and irregular ``values=``
+    groupings.
+
+    The per-level quantities come back to within one rounding, not bitwise, and
+    the difference matters only to whoever writes the next regression test.
+    ``_collapse_array`` averages k identical doubles, which is exact when k is a
+    power of two and not in general otherwise -- ``np.mean([0.1, 0.1, 0.1])`` is
+    ``0.10000000000000002``.  Measured: 17421 of 20000 random doubles survive a
+    3-member collapse unchanged, all of them a 2- or 4-member one.  An ulp on a
+    standard error is nothing and it does not touch the argument here; assert it
+    with a derived tolerance rather than with equality.
+
+    Either way the markers and the SEs went out and came back, and the ONLY
+    thing the round trip could not put back was the curve, because this function
+    had already overwritten it.  Measured on ``Spline(kind="cr", n_knots=4)`` over ten
     levels merging one interior pair: the default panel drew a shape running
     0.0474 in log-relativity -- 4.86% in relativity -- from the function that
     was actually fitted, with no band, purely as collateral damage from a
@@ -388,6 +402,16 @@ def _expand_grouped_term(
         if original_level_values is not None:
             expanded_level_x = np.array([original_level_values[lev] for lev in smooth_levels])
         else:
+            # The one place left in this function that INVENTS a position: an
+            # even spread between the grouped extremes, which is a display axis
+            # nobody fitted.  It reads against the docstring's thesis, and it
+            # stays only because it is unreachable in-package -- both OC call
+            # sites pass ``spec._original_level_to_value``, which is non-None
+            # whenever ``_grouping`` is, and the third passes a Categorical
+            # term whose ``smooth_curve`` is None.  What it still covers is a
+            # direct call, including from an old pickle whose spec predates
+            # that attribute.  A caller that ever means it wants the positions
+            # derived, not spread.
             grouped_lx = np.asarray(curve.level_x)
             n_expanded = len(smooth_levels)
             expanded_level_x = (
