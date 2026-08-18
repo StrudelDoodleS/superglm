@@ -254,87 +254,87 @@ still there.  Measured on the structured side, that took the high-edge error
 from 5.1e-06 to 7.4e-12 against a 60-digit oracle.  It is a change to what the
 CALLER hands this module, not to anything in it.
 
-**THE LOW EDGE HAS ITS OWN CEILING AND IT IS ``eps / lambda``.**  The section
-above is about the ladder's HIGH edge, and it left the impression -- recorded
-in issue #279 and in the sweep that opened it -- that the low edge was the good
-end.  It is not; it fails differently, and the two must not be conflated.
+**THE LOW EDGE HAS ITS OWN CEILING AND IT IS ``eps ||V_eff||_F ||G||_F``.**
+The section above is about the ladder's HIGH edge, and it left the impression
+-- recorded in issue #279 and in the sweep that opened it -- that the low edge
+was the good end.  It is not; it fails differently, and the two must not be
+conflated.
 
 At the low edge nothing is unresolved in the sense counted above.  Over 21
 draws of the 20-level spline-by-categorical geometry, the operator
 ``V_eff + lambda_lo S`` has ZERO directions within ``10x eps ||A||`` on every
 one, the nearest clearing that cut by at least 1879x.  The mechanism is the
-derivative instead of the noise floor::
+derivative instead of the noise floor: ``edf = tr(A^-1 V_eff)`` with
+``A = V_eff + lambda S`` is exactly ``k - lambda tr(A^-1 S)``, so for any
+perturbation ``E`` of the operand::
 
-    edf(lambda) = sum_j v_j / (v_j + lambda s_j),
-    d edf / d v_j -> 1 / (lambda s_j)   as v_j -> 0
+    d edf = <E, G>_F ,      G := lambda A^-1 S A^-1
 
-so a perturbation of the operand at the level float64 cannot see -- ``eps
-||V_eff||_F``, SMALLER than the error already committed in forming it from the
-moments -- moves ``edf`` by ``eps ||V_eff||_F / (lambda ||S||_2)``.  Measured
-over ten orders of ``lambda`` on a design whose smallest singular value is 1e-8
-of its largest, the width of the answer set over that response reads 0.647 at
-``lambda = 5.22e-12``, 0.939 at 1.00e-08 and 0.939 at 9.39e-02 -- within 1.45x
-of each other.  It is the quotient, not the rung.
+and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
+exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- SMALLER than the error
+already committed in forming ``V_eff`` from the moments, so the perturbed
+operand is an equally faithful reading of the same design -- and the low edge's
+certified worst case is ``eps ||V_eff||_F ||G||_F``.
 
-**``||S||_2`` IS AN UPPER BOUND ON THE PENALTY THAT ACTUALLY DIVIDES.**  The
-``s_j`` in ``1 / (lambda s_j)`` is the penalty's magnitude IN THE DECIDING
-DIRECTION, and only an isotropic ``S`` makes that ``||S||_2``.  This pair's
-penalty is a Kronecker tensor and is not isotropic, so ``s_j <= ||S||_2`` and
-the figures below are a LOWER bound on the response -- which is the safe
-direction for every claim made from them: the floor is at least this, so a
-bound sitting under it sits under it a fortiori.  Recovering ``s_j`` itself
-would mean diagonalizing the pencil, which is the cost the clamped rung exists
-to avoid, and would divide by a quantity read off the unresolved direction --
-the thing this module refuses to do.
+**THAT FORM IS LOAD-BEARING AND TWO WEAKER ONES WERE REFUSED IN REVIEW.**
 
-**BOTH NORMS BELONG THERE.**  An earlier revision of this section wrote the
-response as ``eps / lambda``, which is dimensionally wrong rather than merely
-loose: rescaling the design leaves ``edf`` and the width alike -- ``V``, the
-perturbation and the bracket's ``lambda`` all move together -- while
-``eps / lambda`` moves inversely.  Measured on one geometry scaled by 1, 1e3
-and 1e-3, and with the PENALTY scaled by 1e4, the dropped-norm quotient reads
-6.47e-01, 6.38e+05, 8.47e-07 and 6.47e-05: twelve orders from a change of
-units alone.  The form above is invariant under both.
+* ``eps / lambda``, which drops both norms, is dimensionally wrong rather than
+  merely loose: rescaling the design leaves ``edf`` and its uncertainty alike,
+  since ``V``, the perturbation and the bracket's ``lambda`` all move together,
+  while ``eps / lambda`` moves inversely.  Measured on one geometry at design
+  scales 1, 1e3 and 1e-3 and with the PENALTY scaled by 1e4, it reads
+  6.47e-01, 6.38e+05, 8.47e-07 and 6.47e-05 -- twelve orders from a change of
+  units alone.
+* ``eps ||V_eff||_F / (lambda ||S||_2)`` fixes the units but substitutes the
+  LARGEST penalty eigenvalue for the one in the deciding direction.  On a
+  rotated ``S`` with eight orders of spectrum that understates the response by
+  up to four orders: where the theory says 1 it reads 55.6 to 126.9 and 5924 to
+  11124.  ``G`` carries ``S`` in the right place and needs no such proxy.
 
-Since ``lambda_lo = 1e-10 tr(V_eff) / tr(S)``, the response is
-``1e10 eps (||V_eff||_F / tr(V_eff)) (tr(S) / ||S||_2)`` -- a property of the
-PAIR, bounded only by ``k`` in either direction, and NOT a constant.  On this
-family it is **at least 1.7079e-05 to 1.7472e-05** across all 21 draws -- a
-2.3% band, because their trace ratio barely moves, and a lower bound because of
-the ``||S||_2`` caveat above.
+``G`` costs only solves against ``A``, which ``lambda`` REGULARISES -- the
+bracket sets ``cond(A) ~ 1e10`` by construction rather than letting the data's
+null direction set it -- so nothing here divides by an unresolved quantity.
 
-**So the ``abs=1e-5`` the suite asserts at that edge sits 0.58x of the floor
-the Gram imposes on it**, and that is the whole of issue #279: a bound BELOW
-the family's own information floor is exceeded by some draw eventually, and
-the worst of the 21 is at 0.73x the response and 1.26x the bound.  Nothing was
-mis-tuned; the number was placed against errors rather than against the floor,
-because the floor had not been derived.  A family with a tenth of the
-curvature beside its penalty would need ``1e-4``, so do not carry the number
-to another fixture -- carry the derivation.
-The seed the fixture happens to run clears it by 193x only because its
-round-off cancels: perturbing that same pair's Gram at the same level opens an
-answer set 6.87e-06 wide -- FIFTY THOUSAND times its own reported error of
-1.37e-10, and 0.708 of ``eps / lambda`` like every other draw.  Two
-well-conditioned draws of the same family give 3.07e-11 and 1.95e-11, five
-orders below.  A draw is not evidence about the family here, and neither is a
-passing bound.
+**WHAT THE FLOOR IS ON THIS FAMILY, PER DRAW RATHER THAN AS A CONSTANT.**
+Over the 21 draws it spans **1.6298e-15 to 4.9265e-04** -- twelve orders,
+tracking the residualized design's smallest singular value, and NOT the tidy
+2% band the ``||S||_2`` form reported before it was corrected.  All ten draws
+whose design is rank deficient sit at ~2.6e-04; the well-conditioned ones sit
+at 1e-15 to 3e-09.
+
+**So the ``abs=1e-5`` the suite asserts at that edge sits ~26x BELOW the floor
+on exactly the draws that can fail it**, and that is the whole of issue #279: a
+bound under a family's own information floor is exceeded by some draw
+eventually.  Seed 1's 1.2574e-05 is 0.049x its own floor of 2.5688e-04 --
+comfortably inside it, and 1.26x the bound.  Nothing was mis-tuned; the number
+was placed against observed errors rather than against a floor, because the
+floor had not been derived.  Do not carry the number to another fixture --
+carry the derivation.
+
+The seed the fixture happens to run has a floor of 2.6282e-04 like its nine
+siblings, and reports an error of 1.37e-10, so it clears the suite's bound by
+193x on a draw whose answer is uncertain in the fourth decimal.  A draw is not
+evidence about the family here, and neither is a passing bound.
 
 Which draws are bad is decided in the DESIGN, before this module is called: the
-dense arm's low-edge error tracks the residualized design's smallest singular
-value, and the bad draws are the ones where a level's rows put the constant
-vector in the span of that level's own spline columns.  Squaring sends such a
-direction under ``eps``; ``1 / lambda`` then multiplies whatever round-off is
-left there by 4.4e+10.  A perturbation experiment separates the regimes
-cleanly and is pinned in
-``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``.
-Over 7 microkernels x 2 thread counts x 3 unit scales the width over the
-first-order response is 6.28e-10 to 2.11e-06 at ``sigma_min / sigma_max`` of
-1e-1 and 1e-3, and 0.579 to 0.986 at 1e-8 and 1e-12 -- five orders apart, and
-the unresolved figure is the DERIVED value of 1 confirmed to within 1.73x
-rather than a number read off a run.  Evaluated through :func:`_edge`, which is
-what answers a CLAMPED rung; the pencil is built only when some budget
-genuinely has to search, so measuring it instead would test a route this rung
-does not take.
+bad ones are those where a level's rows put the constant vector in the span of
+that level's own spline columns.  Squaring sends such a direction under
+``eps``; ``1 / lambda`` then multiplies whatever round-off is left there.
+Pinned in
+``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``,
+which asserts the certified ceiling against ONE ULP of the answer -- worst
+resolved 0.63 ulp against best unresolved 2.90e+10 ulp, ten orders apart, and
+bit-identical across 7 microkernels x 2 thread counts on every row but the two
+hardest -- and separately that the maximising perturbation attains 0.9425 to
+1.0617 of the predicted displacement against a derived value of 1.
+
+**A SAMPLED WIDTH WAS TRIED FIRST AND IS NOT SOUND**, which is worth recording
+because it looks convincing.  Taking ``max - min`` of ``edf`` over 32 random
+perturbations and requiring it to be LARGE asserts a lower bound on a sample
+range, where the theory supplies only an upper bound on sensitivity.  It moves
+with both of its own arbitrary constants: 0.2548 at 4 draws against 0.8653 at
+128, and 0.5063 to 0.8085 over 24 perturbation seeds at one configuration.  A
+deterministic norm has neither axis.
 
 **No arrangement of the arithmetic below narrows this.**  It is the same
 architectural ceiling as the high edge, reached by a different route, and it
