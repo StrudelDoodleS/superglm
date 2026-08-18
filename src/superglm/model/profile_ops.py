@@ -43,9 +43,7 @@ def _publication_mode_failure(exc, *, parameter, value, decoupled) -> Publicatio
         # A raise site that reached a mode and failed at a later stage names
         # that stage; every site that does mean "PIRLS found no mode" leaves it
         # unset and keeps this wording verbatim.
-        else (
-            getattr(exc, "infeasible_detail", None) or "PIRLS found no converged penalized mode"
-        )
+        else (getattr(exc, "infeasible_detail", None) or "PIRLS found no converged penalized mode")
     )
     region = (
         "  The certifiable region is a property of this data; its boundary moves "
