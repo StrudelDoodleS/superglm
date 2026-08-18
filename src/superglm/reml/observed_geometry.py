@@ -815,25 +815,49 @@ class ObservedModeNotCertifiedError(RuntimeError):
         super().__init__(message)
 
 
+#: What a power search records when this error carries no more specific reason:
+#: PIRLS itself never reached a mode. Most raise sites mean exactly this.
+_NO_MODE_REASON = "no converged penalized mode (PIRLS found no mode to certify)"
+_NO_MODE_DETAIL = "no converged penalized mode"
+
+
 class ObservedModeNotConvergedError(ObservedModeNotCertifiedError):
-    """PIRLS reached no penalized mode at all at this point.
+    """There is no penalized mode here, or none that can be differentiated.
 
     The sibling condition to certification failure: there is nothing to
-    certify. To a power search the two are one situation -- this point has no
-    usable penalized mode -- so this subclasses the certification error and
-    every handler that routes the parent around routes this too. It is NOT a
-    plain ``RuntimeError`` sibling, deliberately: ``optimize_direct_reml``
-    raises bare ``RuntimeError`` for genuine invariant violations that must
-    propagate, so no caller should ever be tempted into a blanket catch.
+    certify. To a power search the two are one situation -- this point yields
+    no REML objective we are entitled to report -- so this subclasses the
+    certification error and every handler that routes the parent around routes
+    this too. It is NOT a plain ``RuntimeError`` sibling, deliberately:
+    ``optimize_direct_reml`` raises bare ``RuntimeError`` for genuine invariant
+    violations that must propagate, so no caller should ever be tempted into a
+    blanket catch.
+
+    Most raise sites mean the literal thing: PIRLS never reached a mode. A few
+    mean that a mode was reached and a later stage could not be formed from it
+    -- the W(rho) gradient correction, for one. Those pass ``infeasible_reason``
+    so the profile records which stage refused, because the default phrasing
+    asserts PIRLS found no mode and reaches the user through
+    ``_infeasible_powers``. Routing is identical either way; only the published
+    reason differs.
     """
 
-    def __init__(self, message: str = "", *, hint: str = "") -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        hint: str = "",
+        infeasible_reason: str = _NO_MODE_REASON,
+        infeasible_detail: str = _NO_MODE_DETAIL,
+    ) -> None:
         # No mode exists, so no score was achieved. The attributes exist so
         # parent-typed handlers can format them; non-finite is the signal to
         # describe the condition rather than quote a score.
         self.relative_max = float("inf")
         self.tolerance = float("nan")
         self.hint = hint
+        self.infeasible_reason = infeasible_reason
+        self.infeasible_detail = infeasible_detail
         body = message or (
             "observed REML requires a converged penalized coefficient mode "
             "and PIRLS did not reach one at this point."

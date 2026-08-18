@@ -726,14 +726,19 @@ def optimize_direct_reml(
             # are ValueError/TypeError and still propagate bare.
             #
             # Deliberately NOT gated on `use_observed_geometry`. The correction
-            # runs on the Fisher path too, and a Tweedie power search with a
-            # fixed PowerLink crosses a canonical (p, link) pair at p = 1 - power
-            # -- one interior grid point where the curvature flips to "fisher".
-            # Gating here would hand that single point a bare LinAlgError while
-            # its neighbours score infeasible and route around, which is the
-            # failure this whole seam exists to remove. The message stays
-            # curvature-neutral for the same reason: it is reached with
-            # `geometry is None`.
+            # runs on the Fisher path too, and Tweedie + PowerLink is canonical
+            # wherever power == 1 - p, so the curvature flips to "fisher" there
+            # and no observed geometry is built. That point is not exotic and
+            # not rare: `_search_brent` evaluates both `p_bounds` outright
+            # before the optimiser runs, so PowerLink(-0.05) against the default
+            # (1.05, 1.95) crosses on the FIRST evaluation; the grid methods
+            # cross at any node equal to 1 - power; and a plain fit_reml at
+            # Tweedie(p=1.5) + PowerLink(-0.5) -- the canonical parameterisation
+            # -- crosses with no search at all. Gating here would make the same
+            # failure routable at one power and fatal at its neighbour, and at a
+            # bound would kill the search before it evaluated anything. The
+            # message stays curvature-neutral for the same reason: it is
+            # reached with `geometry is None`.
             try:
                 w_corr = reml_w_correction(
                     dm,
@@ -754,6 +759,14 @@ def optimize_direct_reml(
                 raise ObservedModeNotConvergedError(
                     f"REML W(rho) correction has no usable curvature at this point: {error}",
                     hint=mode_certification_hint(distribution),
+                    # PIRLS reached a mode here; the correction built from it is
+                    # what failed. Without this the profile records "PIRLS found
+                    # no mode to certify" and publishes it.
+                    infeasible_reason=(
+                        "no differentiable REML gradient "
+                        "(W(rho) correction has no usable curvature)"
+                    ),
+                    infeasible_detail="no usable W(rho) curvature",
                 ) from error
         else:
             w_corr = None

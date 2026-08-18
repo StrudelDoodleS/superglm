@@ -52,7 +52,11 @@ from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 from superglm.penalties.base import penalty_has_targets
-from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.reml.observed_geometry import (
+    _NO_MODE_DETAIL,
+    _NO_MODE_REASON,
+    ObservedModeNotCertifiedError,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 
@@ -4377,8 +4381,12 @@ class _ProfileContextREML:
                 )
                 detail = f"mode score={score:.3e} > {exc.tolerance:.3e}"
             else:
-                reason = "no converged penalized mode (PIRLS found no mode to certify)"
-                detail = "no converged penalized mode"
+                # Most raise sites mean PIRLS found no mode, which is what the
+                # default says. The ones that reached a mode and failed later
+                # carry their own phrasing, so this record does not assert a
+                # stage that did not fail.
+                reason = getattr(exc, "infeasible_reason", _NO_MODE_REASON)
+                detail = getattr(exc, "infeasible_detail", _NO_MODE_DETAIL)
             self._infeasible_powers[key] = reason
             logger.info(f"  estimate_p eval={self.n_evals:2d}  p={p:.4f}  INFEASIBLE  {detail}")
             return _INFEASIBLE_PROFILE_NLL
