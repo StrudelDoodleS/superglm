@@ -13,7 +13,7 @@ import pytest
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
 from superglm.screening import pair_cell_moments, pair_score_curvature, working_score
-from superglm.screening._score_stat import _edge, penalized_score_statistic_ladder
+from superglm.screening._score_stat import penalized_score_statistic_ladder
 
 
 def _pair_case(seed, n=4000, n_a=17, n_b=13, k_a=4, k_b=3, signed=False):
@@ -1752,10 +1752,21 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
         d edf = <E, G>_F ,     G := lambda A^-1 S A^-1
 
     and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
-    exactly ``c ||G||_F``.  With ``c = eps ||V||_F`` -- a perturbation SMALLER
-    than the error already committed in forming ``V`` from the moments, so the
-    perturbed operand is an equally faithful reading of the same design --
-    ``eps ||V||_F ||G||_F`` is the exact first-order worst case.
+    exactly ``c ||G||_F``.
+
+    **THE RADIUS IS A STATED PROBE, AND IT IS DELIBERATELY CONSERVATIVE.**
+    ``c = eps ||V||_F`` is ONE ROUNDING of the operand's norm -- a definition,
+    not a backward-error claim, and an earlier revision wrongly called it "the
+    error already committed in forming the Gram".  What that error actually is
+    follows from Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd
+    ed., Ch. 3: ``fl(X'X) = X'X + D`` with ``|D| <= gamma_n |X|'|X|``
+    COMPONENTWISE, ``n`` the contraction dimension and
+    ``gamma_n = n u / (1 - n u)``.  Measured on these geometries that bound is
+    **98.6x to 204.7x** the probe radius, so the true perturbation the operand
+    already carries is two orders LARGER and the ceiling below is a lower bound
+    on the information floor rather than an estimate of it.  Conservative is
+    the safe direction for every claim made from it, and it buys the clean
+    boundary the test asserts: one rounding against one ulp.
 
     **THIS IS A DETERMINISTIC NORM, NOT A SAMPLED WIDTH, AND THAT IS THE
     POINT.**  It replaces a ``max - min`` over 32 fixed random perturbations,
@@ -1771,13 +1782,23 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     * over the perturbation SEED, an axis the microkernel sweep does not
       explore at all, 24 seeds at one configuration spread 0.5063 to 0.8085.
 
-    ``G`` needs only solves against ``A``, which ``lambda`` REGULARISES: the
-    bracket sets ``cond(A) ~ 1e10`` by construction rather than letting the
-    data's null direction set it, so nothing here divides by an unresolved
-    quantity.  It also removes the ``||S||_2`` proxy a second finding refused,
-    since ``G`` carries ``S`` in the right place -- there is no directional
-    penalty scale left to substitute for.  ``penalty="rot"`` exercises exactly
-    that: a rotated ``S`` with eight orders between its largest and smallest
+    ``G`` needs only solves against ``A = V + lambda S``.  An earlier revision
+    claimed ``lambda`` bounds ``cond(A)`` at about 1e10 "by construction";
+    **that is false for an anisotropic penalty and is withdrawn.**  The only
+    bound available is ``||A||_2 / (lambda lambda_min(S))``, which the rotated
+    penalty makes vacuous (1.6e+18) and a singular ``S`` makes unavailable
+    outright.  Measured instead, ``cond(A)`` over the asserted rows is 1.0e+02
+    and 1.0e+06 on the resolved geometries, 1.9e+11 and 2.2e+11 on the
+    isotropic unresolved ones, and 5.8e+12 and **5.4e+14** on the rotated ones
+    -- so at the hardest row the solve for ``G`` keeps about one digit in its
+    smallest direction.  That is disclosure, not derivation: what makes it
+    usable is measured stability rather than a bound, and the sweep is where
+    that is checked.
+
+    It does remove the ``||S||_2`` proxy a second finding refused, since ``G``
+    carries ``S`` in the right place -- there is no directional penalty scale
+    left to substitute for.  ``penalty="rot"`` exercises exactly that: a
+    rotated ``S`` with eight orders between its largest and smallest
     eigenvalue, in a basis unrelated to the design's.
 
     Returns the certified ceiling, the displacement the maximising
@@ -1808,10 +1829,23 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     c = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
 
     def edf(operand):
-        # The SHIPPED evaluator, and the one this rung actually reaches -- the
-        # pencil is built only when some budget has to search.  Rewriting the
-        # edf inline would keep passing if the module's arithmetic moved away.
-        return _edge(0.5 * (operand + operand.T), S, lam)[0]
+        # THE REAL CALLER PATH, not ``_edge`` at a pinned lambda.  The bracket
+        # is ``1e-10 tr(V) / tr(S)``, so a perturbation with nonzero trace --
+        # and ``G`` is PSD, so this one has -- moves lambda too, and holding it
+        # fixed would measure only the partial derivative.  Review is right
+        # that the omitted term can cancel the response outright: in ONE
+        # dimension ``edf = V / (V + 1e-10 V)`` is constant in ``V`` while the
+        # fixed-lambda calculation reports a nonzero move.  It does not cancel
+        # here, because the response is carried by the near-null direction at
+        # ``1 / (lambda s)`` while the bracket shifts with the TOTAL trace,
+        # which the saturated directions dominate -- measured, the ladder's
+        # displacement equals the fixed-lambda one to 1.000 on all eight
+        # geometries, with lambda itself moving 0 to 7.9e-16 relative.  Driving
+        # the ladder anyway costs one call and removes the argument.
+        rung = penalized_score_statistic_ladder(
+            U, 0.5 * (operand + operand.T), S_ti=S, budgets=(4.0 * p,)
+        )[0]
+        return float(rung.edf0)
 
     step = (c / g_norm) * G
     # A CENTRED difference, so what is measured is the response and not the
@@ -1820,17 +1854,23 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     return c * g_norm, realised, np.finfo(np.float64).eps * abs(edf(V))
 
 
-# BOTH CUTS ARE PLACED AGAINST DERIVED VALUES, and the sweep only confirms them.
+# ONE BOUNDARY, AND IT IS THE ONE THE PROSE STATES: a probe of one rounding
+# moves the answer by less than one ulp of itself, or it does not.  That is a
+# representability statement, derived, with no fitted constant in it.
 #
-# The regime cut compares the certified worst-case displacement against ONE ULP
-# of the answer -- the point at which the operand's unobservable uncertainty
-# stops being representable in the result at all.  That reference is ``eps``
-# times a computed quantity, not a fitted constant.
+# An earlier revision asserted 1e5 ulp while the comment beside it said one --
+# an "empirically placed separator", as review named it, sitting at the midpoint
+# of 0.63 and 2.9e10.  It would have passed a resolved case amplified by five
+# orders.  The boundary is now 1 on both sides, so the margins are what they
+# are and are reported rather than engineered: 1.59x on the resolved side and
+# 2.90e+10x on the unresolved one.  The thin side is thin because it is the
+# real boundary; what makes 1.59x usable is that the quantity is BIT-IDENTICAL
+# across the sweep on that row, not that the number is comfortable.
 #
-# The realization bound is placed around 1, which is what the algebra above
-# predicts the maximising perturbation attains, so it checks that the theory is
-# live rather than merely stated.
-_LOW_EDGE_ULP_CUT = 1e5
+# The realization bound is placed around 1, which is what the algebra predicts
+# the maximising perturbation attains, so it checks the theory is live rather
+# than merely stated.
+_LOW_EDGE_ULP = 1.0
 _LOW_EDGE_REALISED = (0.5, 2.0)
 
 
@@ -1928,24 +1968,24 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     # BOTH sides are named on EVERY failure, so a geometry crossing the cut
     # reports its position exactly as an approaching one does.  A cut watched
     # from one side alone goes quiet at the moment it is crossed.
-    separation = (
-        (_LOW_EDGE_ULP_CUT / against_ulp) if determined else (against_ulp / _LOW_EDGE_ULP_CUT)
-    )
+    separation = (_LOW_EDGE_ULP / against_ulp) if determined else (against_ulp / _LOW_EDGE_ULP)
     where = (
         f"(ceiling eps||V||_F ||G||_F {ceiling:.4e}, one ulp of edf {ulp:.4e}, "
-        f"ratio {against_ulp:.4e}, cut {_LOW_EDGE_ULP_CUT:.0e}, separation {separation:.3e}x)"
+        f"ratio {against_ulp:.4e} ulp, boundary {_LOW_EDGE_ULP:.0f} ulp, "
+        f"separation {separation:.3e}x)"
     )
     assert separation > 1.0, (
         (
             f"a design the Gram RESOLVES left the low-edge edf sensitive {where}; "
-            "the documented regime is at or below 0.63 ulp once sigma_min/sigma_max "
-            "is 1e-3 or above"
+            "a one-rounding probe of a resolved operand must stay UNDER one ulp of the "
+            "answer; the sweep puts the worst such geometry at 0.6283"
         )
         if determined
         else (
             f"a design the Gram CANNOT resolve left the low-edge edf determined {where}; "
-            "the documented regime is 2.9e+10 ulp or more, and if it has collapsed then "
-            "this module is no longer being handed a Gram -- see #257"
+            "the same one-rounding probe must move it by MORE than one ulp, and the sweep "
+            "puts the smallest such geometry at 2.8991e+10; a collapse here means this "
+            "module is no longer being handed a Gram -- see #257"
         )
     )
     if not determined:
