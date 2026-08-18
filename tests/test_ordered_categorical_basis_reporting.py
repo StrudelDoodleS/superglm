@@ -255,42 +255,154 @@ def _grouped_curve(X, y, basis, groups: dict[str, list[str]]):
     return inference
 
 
-def test_grouped_display_curve_drops_bands_when_it_redraws_the_curve() -> None:
-    """A REBUILT grouped display curve never carries the fitted curve's bands.
+def _reference_curve(X, y, basis, groups: dict[str, list[str]]):
+    """The same fit stated WITHOUT a grouping: one level per group, at its position.
 
-    A collapse that moves the display axis leaves the fitted curve undrawable
-    against the expanded markers, so that expansion interpolates a fresh curve
-    through them -- and a band is a statement about the curve it is drawn
-    around, so it cannot outlive a change to that curve's VALUES.
+    An independent reference for what the grouped term's curve should be. The
+    data is relabelled to group labels and the group positions are declared
+    directly through ``values=``, so no grouping code runs at all -- if the
+    expansion touches a single value of the curve, this stops matching.
+    """
+    grouping = _grouping(X, groups)
+    declared = dict(zip(LEVELS, np.linspace(0.0, 1.0, len(LEVELS)).tolist()))
+    values = {
+        label: float(np.mean([declared[str(member)] for member in members]))
+        for label, members in grouping.group_to_originals.items()
+    }
+    relabelled = pd.DataFrame({"band": [grouping.original_to_group[b] for b in X["band"]]})
+    spec = OrderedCategorical(values=values, basis=basis)
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": spec})
+    model.fit(relabelled, y)
+    return model.term_inference("band", with_se=True).smooth_curve
 
-    The former rule tested the GRIDS, which is the weaker question: it asks
-    whether the arrays zip, not whether they describe the same function. For
-    the common ``order=`` spline both grids ARE the same 200-point linspace,
-    so an INTERIOR merge kept bands that had been computed for the fitted
-    curve and exported them around interpolated values. Measured here on
-    ``Spline(kind="cr", n_knots=4)`` merging ``Mi001+Mi002``: the drawn curve
-    ran up to 0.0477 in log-relativity (4.65% in relativity) from the fitted
-    one against a band half-width of at most 0.00302 -- 68.8 standard errors
-    -- and 61 of the 200 drawn points fell strictly outside their own exported
-    band, while the band centre reproduced the FITTED curve to 1.1e-16.
-    Merging ``Mi003+Mi004`` gave 0.0558 (5.74%), 59.2 standard errors and 60
-    of 200. Per-level SEs -- the rated quantities -- stay expanded either way.
 
-    A hosted Piecewise no longer appears here: its level axis is positions
-    0..L-1 and a collapse does not move it, so nothing is rebuilt and the
-    fitted bands stay on their own fitted curve. That case is pinned by
-    ``test_grouped_display_curve_keeps_the_stated_c0_corner`` below.
+def test_a_grouped_display_curve_is_the_fitted_curve_bit_for_bit() -> None:
+    """The expansion moves the markers and touches nothing else (issue #282).
+
+    It used to interpolate a fresh 200-point PCHIP through the expanded markers
+    wherever the collapse moved the display axis, and export it with no band.
+    Both halves were damage. ``resolve_grouped_level_display("auto", ...)``
+    returns ``"collapsed"`` for every grouped ``OrderedCategorical``, so the
+    DEFAULT panel re-collapses the markers straight back onto the fitted
+    positions -- exactly, because both halves compute a group's position with
+    ``group_axis_position`` over the same members. The markers and the per-level
+    SEs therefore made the round trip intact and the curve was the only casualty:
+    on ``Spline(kind="cr", n_knots=4)`` over ten levels merging ``Mi001+Mi002``
+    the default panel drew a shape up to 0.0474 in log-relativity -- 4.86% in
+    relativity -- from the function that had been fitted, with no band.
+
+    Stated against an INDEPENDENT reference rather than against itself: the same
+    model declared with no grouping at all, one level per group at the group's
+    position. Equality is exact on all six curve fields, which is the strongest
+    form of "the curve is the fitted curve" available here -- and it is not a
+    tolerance that a re-exported band or a slightly different interpolant could
+    slip through.
     """
     X, y = _frame()
 
     for merge in ({"Mi000+Mi001": ["Mi000", "Mi001"]}, {"Mi001+Mi002": ["Mi001", "Mi002"]}):
-        ti = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), merge)
-        assert ti.smooth_curve.se_log_relativity is None, merge
-        assert ti.smooth_curve.ci_lower is None, merge
-        assert ti.smooth_curve.ci_upper is None, merge
+        basis = Spline(kind="cr", n_knots=4)
+        ti = _grouped_curve(X, y, basis, merge)
+        reference = _reference_curve(X, y, Spline(kind="cr", n_knots=4), merge)
+        for field in ("x", "log_relativity", "relativity", "se_log_relativity", "ci_lower"):
+            ours = getattr(ti.smooth_curve, field)
+            theirs = getattr(reference, field)
+            assert (ours is None) == (theirs is None), (merge, field)
+            np.testing.assert_array_equal(
+                np.asarray(ours, dtype=np.float64),
+                np.asarray(theirs, dtype=np.float64),
+                err_msg=f"{merge}: the expansion changed {field}",
+            )
+        # not an equality of two Nones: the band is real and rides along
+        assert ti.smooth_curve.se_log_relativity is not None, merge
+        assert ti.smooth_curve.ci_lower is not None and ti.smooth_curve.ci_upper is not None
         # the rated quantities are untouched by any of this
         assert ti.se_log_relativity is not None
         assert len(ti.se_log_relativity) == len(ti.levels)
+
+
+def test_a_grouped_display_curve_does_not_interpolate_its_markers() -> None:
+    """The mechanism check, not just the values: no marker is a knot of the curve.
+
+    A PCHIP through the expanded markers passes through every one of them by
+    construction, so ``curve(level_x[i]) == log_relativity[i]`` held to machine
+    precision for all i. A fitted spline does not: a merged pair is one
+    parameter reported at two marker positions, and the curve cannot be at both
+    values. This separates "the curve is fitted" from "the curve happens to
+    agree numerically", and it is the assertion a future re-interpolation would
+    trip on even if it reproduced the band.
+
+    A leading merge also puts the first marker OUTSIDE the fitted curve's own
+    domain -- the group sits at the mean of its members, so the fitted axis
+    starts inside the declared one. That is the ggplot2 ``fullrange=FALSE``
+    default (the smoothing line is not expanded to the range of the plot), and
+    the renderers already union the two extents when setting x-limits.
+    """
+    X, y = _frame()
+    merge = {"Mi000+Mi001": ["Mi000", "Mi001"]}
+    ti = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), merge)
+    curve = ti.smooth_curve
+
+    curve_x = np.asarray(curve.x, dtype=np.float64)
+    curve_y = np.asarray(curve.log_relativity, dtype=np.float64)
+    level_x = np.asarray(curve.level_x, dtype=np.float64)
+    level_y = np.asarray(ti.log_relativity, dtype=np.float64)
+
+    # the leading merge leaves the first declared marker off the fitted domain
+    outside = level_x < curve_x.min()
+    assert outside.sum() == 1, level_x
+    inside = ~outside
+    gap = np.abs(np.interp(level_x[inside], curve_x, curve_y) - level_y[inside]).max()
+    # A 200-point grid over [0.0556, 1] steps 0.00474, so linear interpolation
+    # of a curve whose second derivative is order 1 here carries at most ~1e-5
+    # of its own error -- three orders below the 0.022 measured separation, and
+    # five above the ~1e-16 an interpolant through the markers would give.
+    assert gap > 1e-3, f"the curve still passes through its markers (max gap {gap:.3e})"
+
+
+def test_a_grouped_display_band_is_centred_on_the_curve_it_ships_with() -> None:
+    """#277's own measurement, on #277's own fixture, now zero.
+
+    #277 removed the band because it was a statement about a curve that had been
+    replaced: on an interior merge the fitted and rebuilt grids were the same
+    200-point linspace, so the fitted band zipped against interpolated values.
+    Measured then: 61 of 200 drawn points strictly outside their own exported
+    band, with the band centre reproducing the FITTED curve to 1.1e-16 -- a
+    ribbon around a line nobody drew.
+
+    That reason lapses rather than being overruled. Nothing replaces any value
+    now, so the band's centre and the drawn curve are the same array. This test
+    is the guard that keeps it that way: it recomputes exactly #277's two
+    numbers and requires 0 and machine zero.
+
+    Tolerance is derived, not observed: ``ci_lower``/``ci_upper`` are
+    ``exp(log_relativity -/+ z*se)``, so recovering the centre costs one ``exp``
+    and one ``log`` per edge and a halved sum -- at most a handful of ulp of
+    ``|log_relativity|``. 8 ulp bounds it. The failure it separates is 0.0474,
+    fourteen orders away.
+
+    Also corrects a label carried from #277 into #282: the "max band half-width
+    = 0.00302" quoted there is the maximum STANDARD ERROR. The 95% half-width is
+    1.96x it, 0.00587.
+    """
+    X, y = _frame()
+    merge = {"Mi001+Mi002": ["Mi001", "Mi002"]}
+    curve = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), merge).smooth_curve
+
+    log_rel = np.asarray(curve.log_relativity, dtype=np.float64)
+    se = np.asarray(curve.se_log_relativity, dtype=np.float64)
+    lo = np.log(np.asarray(curve.ci_lower, dtype=np.float64))
+    hi = np.log(np.asarray(curve.ci_upper, dtype=np.float64))
+
+    outside = int(np.count_nonzero((log_rel < lo) | (log_rel > hi)))
+    assert outside == 0, f"{outside}/{len(log_rel)} drawn points outside their own band"
+
+    tolerance = 8 * np.finfo(np.float64).eps * float(np.abs(log_rel).max())
+    assert np.abs(0.5 * (lo + hi) - log_rel).max() <= tolerance
+
+    # the band is real and the mislabelled figure is the SE, not a half-width
+    assert se.max() == pytest.approx(0.0030, abs=5e-4)
+    assert (hi - log_rel).max() == pytest.approx(1.96 * se.max(), rel=1e-3)
 
 
 def test_a_grouped_display_band_brackets_the_curve_it_is_drawn_around() -> None:
@@ -331,8 +443,10 @@ def test_a_grouped_display_band_brackets_the_curve_it_is_drawn_around() -> None:
         slack = 8 * np.finfo(np.float64).eps * np.maximum(np.abs(rel), np.abs(hi))
         outside = int(np.count_nonzero((rel < lo - slack) | (rel > hi + slack)))
         assert outside == 0, f"{label}: {outside}/{len(rel)} drawn points outside their own band"
-    # not vacuous: at least the two kept-curve cases must still export bands
-    assert banded >= 2, f"no grouped case exported a band; the check ran on nothing ({banded})"
+    # Not vacuous, and no longer partly vacuous: EVERY case exports a band now.
+    # Two of these four are the spline merges #277 stripped, which the expansion
+    # no longer rebuilds (issue #282), so the check runs on all of them.
+    assert banded == len(cases), f"only {banded} of {len(cases)} grouped cases exported a band"
 
 
 def test_a_grouping_that_merges_nothing_leaves_the_spline_curve_alone() -> None:
