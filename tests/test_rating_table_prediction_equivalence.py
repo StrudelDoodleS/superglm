@@ -2466,3 +2466,46 @@ def test_an_unknown_centering_is_rejected_even_with_no_centerable_term():
 
     with pytest.raises(ValueError, match="centering must be one of"):
         _payload(model, X, y, sample_weight, "Mean")
+
+
+def test_error_mode_ppform_scores_the_boundary_through_the_consumer():
+    """The block's own canonical consumer is what catches a right-open final key.
+
+    ``_ppform_multiplier`` asserts every row matches an interval, so a boundary
+    value with no row fires that assert -- but nothing drove an
+    ``extrapolation="error"`` payload through it, so the assert never ran on the
+    one mode where the gap exists.  Under ``"clip"`` the trailing unbounded row
+    closes it, which is exactly why this needs its own test rather than being
+    covered by the general equivalence sweep.
+
+    Scored against ``model.predict`` rather than only matched, because matching
+    a row and scoring it correctly are separate claims and the closed bracket
+    changes only the first.
+    """
+    rng = np.random.default_rng(7)
+    n = 800
+    age = rng.uniform(18.0, 80.0, n)
+    X = pd.DataFrame({"age": age})
+    y = rng.poisson(np.exp(-1.0 + 0.02 * age))
+    model = SuperGLM(features={"age": Spline(n_knots=6, extrapolation="error")}, family="poisson")
+    model.fit(X, y)
+
+    payload = build_rating_table_payload(model, X, y, continuous_kind="ppform")
+    block = next(b for b in payload.main_effects if b.kind == "continuous_ppform")
+
+    # The boundary knot: the largest bound any row carries, and an observed
+    # value of the frame whenever knots are data-driven.
+    boundary = max(
+        float(re.match(r"^\[(.+), (.+)[)\]]$", str(label)).group(2))
+        for label in block.table.iloc[:, 0]
+    )
+    assert float(age.max()) == boundary, "the boundary knot is an observed value here"
+
+    frame = pd.DataFrame({"age": [boundary]})
+    # Fires the ``assert matched.all()`` inside ``_ppform_multiplier`` if the
+    # final key is right-open, which is what this exists to prevent.
+    scored = _predict_from_payload(payload, frame)
+    expected = model.predict(frame)
+    assert np.allclose(scored, expected, rtol=1e-12), (
+        f"the boundary scores {scored[0]!r} against predict's {expected[0]!r}"
+    )
