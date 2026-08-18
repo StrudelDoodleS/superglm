@@ -1880,7 +1880,18 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     def response(direction):
         # A CENTRED difference, so what is measured is the response and not the
         # response plus whatever the evaluator does to the base point alone.
-        d = direction * (c / float(np.linalg.norm(direction, "fro")))
+        #
+        # A ZERO-NORM DIRECTION SCORES ZERO RATHER THAN RAISING.  A gradient
+        # that vanishes is the best possible resolved input, not an invalid
+        # one -- the one-dimensional trace-scaled case has an exactly zero total
+        # derivative, and at some scales the float64 gradient rounds to zero
+        # too.  This is the second time on this branch that the strongest
+        # confirmation of the claim reached a division; the first raised
+        # ZeroDivisionError on a zero answer-set width.
+        norm = float(np.linalg.norm(direction, "fro"))
+        if norm == 0.0:
+            return 0.0
+        d = direction * (c / norm)
         return abs(edf(V + d) - edf(V - d)) / 2.0
 
     realised = response(G)
@@ -2140,13 +2151,15 @@ def test_the_clamped_low_edge_reproduces_the_isotropic_closed_form(p, scale):
     covers.  Here there is nothing to bound: the answer is closed form.
 
     **THE TOLERANCE IS ``p eps``-DERIVED, NOT OBSERVED.**  ``edf`` is a trace of
-    ``p`` terms from a solve against a diagonal matrix, so its relative error is
-    ``O(p eps)`` -- 5.3e-15 at ``p = 24`` (Higham, *Accuracy and Stability of
-    Numerical Algorithms*, 2nd ed., Ch. 3, for the ``gamma_p`` of a length-``p``
-    sum).  ``rel=1e-13`` sits 19x above that floor.  For disclosure and never to
-    set the bound, the observed relative error over the six parametrizations is
-    0.0 to 2.961e-16, so the bound clears it by 338x; it is placed against the
-    derived floor rather than that headroom.
+    ``p`` terms from a solve against a diagonal matrix, so ``gamma_p ~ p eps``
+    bounds its relative error from ABOVE -- 5.3e-15 at ``p = 24`` (Higham,
+    *Accuracy and Stability of Numerical Algorithms*, 2nd ed., Ch. 3).  It is an
+    ALLOWANCE, not a floor: the incurred error may be anywhere below it, and two
+    of the six parametrizations here return the closed form exactly.  Calling it
+    a floor would reverse the inequality, which is the upper-bound-as-floor
+    inference this branch withdrew elsewhere and had no business reintroducing.
+    ``rel=1e-13`` sits 19x above the allowance.  For disclosure and never to set
+    the bound, the observed relative error is 0.0 to 2.961e-16.
 
     The scale rows are not decoration: ``a`` cancels out of the closed form
     entirely, so a routine whose low edge drifted with the units of the
