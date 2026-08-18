@@ -1987,9 +1987,11 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     ``sigma^2`` in the Gram, and once that is under ``eps`` the Gram carries
     round-off there and nothing else.  The low edge then divides by ``lambda``:
     ``edf = sum_j v_j / (v_j + lambda s_j)`` has slope ``1 / (lambda s_j)`` at
-    ``v_j = 0``.  :func:`_low_edge_sensitivity` turns that into the exact
-    first-order worst case ``eps ||V||_F ||G||_F`` with ``G = lambda A^-1 S
-    A^-1``, which needs no directional penalty scale and no sampling.
+    ``v_j = 0``.  :func:`_low_edge_sensitivity` turns that into the first-order
+    sensitivity ``eps ||V||_F ||G||_F`` with ``G`` the TOTAL gradient,
+    ``lambda A^-1 S A^-1 + alpha (d edf / d lambda) I`` -- the second term being
+    the bracket's own response -- which needs no directional penalty scale and
+    no sampling.
 
     **Why a SENSITIVITY and not an error, and what the probes are NOT.**  There
     is no value to assert.  An earlier revision justified that by calling every
@@ -2154,11 +2156,17 @@ def test_the_clamped_low_edge_reproduces_the_isotropic_closed_form(p, scale):
     S = np.eye(p)
     rung = penalized_score_statistic_ladder(np.ones(p), V, S_ti=S, budgets=(4.0 * p,))[0]
 
-    assert rung.lambda0 == pytest.approx(1e-10 * scale, rel=1e-13), (
+    # ``abs=0.0`` IS WHAT MAKES THIS A PIN.  ``pytest.approx`` keeps a default
+    # absolute tolerance of 1e-12 whenever only ``rel`` is given, and the lambda
+    # here is 1e-13 at the smallest scale -- so without this the assertion
+    # accepts ANY value on two of the three scale rows, ``rel`` and all.  The
+    # same defect is recorded against the lambda pins in the structured suite;
+    # it reappeared here because a new assertion was written without it.
+    assert rung.lambda0 == pytest.approx(1e-10 * scale, rel=1e-13, abs=0.0), (
         f"the bracket's low edge is 1e-10 tr(V)/tr(S) = {1e-10 * scale:.6e} on this "
         f"fixture and the ladder clamped at {rung.lambda0:.6e}"
     )
-    assert rung.edf0 == pytest.approx(p / (1.0 + 1e-10), rel=1e-13), (
+    assert rung.edf0 == pytest.approx(p / (1.0 + 1e-10), rel=1e-13, abs=0.0), (
         f"the clamped low-edge edf of a I against I is p/(1 + 1e-10) = "
         f"{p / (1.0 + 1e-10):.15f} exactly; the ladder returned {rung.edf0:.15f}"
     )
