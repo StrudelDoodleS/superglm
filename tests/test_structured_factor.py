@@ -93,23 +93,26 @@ def _unit_level_centered_operator(width: int) -> CenteredBlockOperator:
 
 
 @pytest.mark.parametrize("part", ["basis", "core"])
-def test_a_non_finite_low_rank_part_is_refused_as_curvature(part) -> None:
-    """At its one call site a symmetry complaint could only ever mean this.
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_a_non_finite_low_rank_part_is_refused_as_curvature(part, bad) -> None:
+    """Both parts and both values, because the two values failed differently.
 
-    ``reml_w_correction`` builds the core as ``[[0, -sum_w], [-sum_w, 0]]``,
-    symmetric by construction, so the symmetry check below it cannot fail there
-    for a structural reason -- only for a non-finite ``sum_w``, which NaN turns
-    into an ``allclose`` failure. Every "core must be symmetric" that site could
-    produce was really a non-finite iterate wearing the wrong name, and it left
-    ``fit_reml`` as a bare ValueError because nothing on that chain caught it.
+    ``reml_w_correction`` builds the basis as ``column_stack(dmean_i, dmean_j)``
+    with no check of any kind, and the core as ``[[0, -sum_w], [-sum_w, 0]]``.
+    Before the guard a NaN core failed ``allclose`` against its own transpose
+    and was refused as *asymmetric* -- the right refusal under the wrong name --
+    while an inf core passed it (matching infs compare equal) and was accepted
+    outright, carrying a non-finite low-rank update into ``_operator_dlr``. The
+    NaN arm alone would pin only the ordering, leaving the silent-acceptance
+    case free to come back.
     """
     rng = np.random.default_rng(4)
     basis = rng.normal(size=(7, 2))
     core = np.array([[0.0, -1.5], [-1.5, 0.0]])
     if part == "basis":
-        basis[0, 0] = np.nan
+        basis[0, 0] = bad
     else:
-        core = np.array([[0.0, np.nan], [np.nan, 0.0]])
+        core = np.array([[0.0, bad], [bad, 0.0]])
 
     with pytest.raises(np.linalg.LinAlgError, match="must be finite"):
         LowRankSymmetricOperator(basis=basis, core=core)

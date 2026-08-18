@@ -84,6 +84,29 @@ def test_ordinary_reml_curvature_classifier_requires_exact_proof() -> None:
         classify_reml_curvature(CustomGaussian(), IdentityLink())
 
 
+def test_a_tweedie_power_sweep_crosses_a_canonical_pair_at_one_interior_point() -> None:
+    """Why the W(rho) seam in `optimize_direct_reml` is not gated on curvature.
+
+    The link is fixed across a power search while ``p`` moves, so a PowerLink
+    model passes through the canonical pair at ``p == 1 - power`` -- a single
+    interior grid point where the curvature flips to "fisher" and no observed
+    geometry is built. Gating the seam on ``use_observed_geometry`` would hand
+    that one point a bare ``LinAlgError`` while both of its neighbours score
+    infeasible and route around it.
+    """
+    from superglm.distributions import Tweedie
+    from superglm.links import PowerLink
+    from superglm.reml.observed_geometry import classify_reml_curvature
+
+    link = PowerLink(power=-0.5)
+    curvature = [classify_reml_curvature(Tweedie(p=p), link) for p in (1.4, 1.5, 1.6)]
+
+    assert curvature == ["observed", "fisher", "observed"], (
+        "a fixed-link power sweep must still cross the canonical pair; if this "
+        "flips, the seam at optimize_direct_reml's W(rho) correction can be gated"
+    )
+
+
 def test_ordinary_reml_curvature_classifier_requires_consistent_custom_protocol() -> None:
     from superglm.reml.observed_geometry import classify_reml_curvature
 
