@@ -44,6 +44,7 @@ from superglm.reml.observed_geometry import (
     mode_certification_hint,
     observed_mode_certification_bar,
     observed_penalized_mode_score,
+    stopped_on_iteration_budget,
     validate_observed_derivative_capability,
 )
 from superglm.reml.penalty_algebra import (
@@ -468,10 +469,13 @@ def optimize_direct_reml(
         objective_logdet = pirls_result.log_det_H
         objective_hessian_rank: int | None = None
         if use_observed_geometry:
-            if not pirls_result.converged:
+            if not pirls_result.converged and not stopped_on_iteration_budget(pirls_result):
                 # Typed so a power search can score this point infeasible and
                 # route around it, exactly as it does the certification
-                # failure below -- same physical condition, earlier door.
+                # failure below. Every reason that still lands here names a
+                # structural failure the mode score cannot speak to -- an
+                # infeasible constrained mode, a missing inner-QP certificate,
+                # a non-finite deviance. Budget exhaustion alone does not.
                 raise ObservedModeNotConvergedError(hint=mode_certification_hint(distribution))
             _t0 = _time.perf_counter()
             geometry = build_observed_reml_geometry(
