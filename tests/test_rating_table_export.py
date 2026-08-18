@@ -25,6 +25,7 @@ from superglm import (
     Spline,
     SuperGLM,
     export_rating_tables,
+    families,
 )
 from superglm.editor import EditorSession
 from superglm.export.excel import (
@@ -3407,3 +3408,44 @@ def test_a_ppform_interior_extremum_is_checked_by_the_usability_guard():
     blocks = [mutated if b is block else b for b in payload.main_effects]
     with pytest.raises(ValueError, match="cannot multiply by"):
         _require_usable_relativities_export(blocks, payload.interactions)
+
+
+@pytest.mark.parametrize("continuous_kind", ["binned", "ppform"])
+def test_a_zero_export_weight_is_refused_under_tweedie_and_accepted_otherwise(continuous_kind):
+    """The Tweedie arm is the one with a DIFFERENT rule, so it is the one to pin.
+
+    ``_validated_discretization_weights`` splits on the family: Tweedie weights
+    are prior precision and go through ``_validate_strict_prior_weights``, which
+    refuses a weight of exactly 0.0, while every other family treats them as
+    frequency mass and accepts it. That split now runs at the export's payload
+    boundary rather than inside ``discretization_impact``, and the guard's whole
+    justification is that a check inherited from a call that may not happen is
+    not a guarantee -- so the arm with the stricter rule needs a test that says
+    so, in both continuous kinds.
+    """
+    rng = np.random.default_rng(4)
+    n = 600
+    age = rng.uniform(18.0, 80.0, n)
+    X = pd.DataFrame({"age": age})
+    weights = np.ones(n)
+    weights[7] = 0.0
+
+    poisson_y = rng.poisson(np.exp(-1.0 + 0.02 * age))
+    poisson = SuperGLM(features={"age": Spline(n_knots=6)}, family="poisson")
+    poisson.fit(X, poisson_y, sample_weight=weights)
+    payload = build_rating_table_payload(
+        poisson, X, poisson_y, sample_weight=weights, continuous_kind=continuous_kind
+    )
+    block = next(b for b in payload.main_effects if b.name == "age")
+    assert np.isclose(block.table["Weight"].sum(), weights.sum()), (
+        "the zero-weight row is carried, not dropped"
+    )
+
+    tweedie_y = rng.gamma(2.0, 0.5, n) * (rng.random(n) > 0.3)
+    tweedie = SuperGLM(features={"age": Spline(n_knots=6)}, family=families.tweedie(p=1.5))
+    positive = np.ones(n)
+    tweedie.fit(X, tweedie_y, sample_weight=positive)
+    with pytest.raises(ValueError, match="(?i)strictly positive|positive"):
+        build_rating_table_payload(
+            tweedie, X, tweedie_y, sample_weight=weights, continuous_kind=continuous_kind
+        )
