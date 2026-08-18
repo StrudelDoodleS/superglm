@@ -468,6 +468,13 @@ def optimize_direct_reml(
         reml_inverse = XtWX_S_inv
         objective_logdet = pirls_result.log_det_H
         objective_hessian_rank: int | None = None
+        # What proves this mode stationary. On the Fisher path the step-length
+        # flag is the only evidence available. Under observed geometry the KKT
+        # certificate below is the authority and is strictly stronger, so a
+        # budget-exhausted candidate that certifies counts as stationary --
+        # otherwise the convergence exits re-ask a question the certificate has
+        # already answered, and answer it wrong at the round-off floor.
+        candidate_mode_stationary = bool(pirls_result.converged)
         if use_observed_geometry:
             if not pirls_result.converged and not stopped_on_iteration_budget(pirls_result):
                 # Typed so a power search can score this point infeasible and
@@ -478,24 +485,40 @@ def optimize_direct_reml(
                 # a non-finite deviance. Budget exhaustion alone does not.
                 raise ObservedModeNotConvergedError(hint=mode_certification_hint(distribution))
             _t0 = _time.perf_counter()
-            geometry = build_observed_reml_geometry(
-                dm=dm,
-                distribution=distribution,
-                link=link,
-                y=y,
-                sample_weight=sample_weight,
-                offset_arr=offset_arr,
-                result=pirls_result,
-                penalty=S_cand,
-                tabmat_state=observed_tabmat_state,
-                derivative_order=w_correction_order,
-                groups=groups if use_structured else None,
-                lambdas=cand_lambdas if use_structured else None,
-                reml_penalties=penalties if use_structured else None,
-                structured_group_index=(
-                    structured_decision.group_index if use_structured else None
-                ),
-            )
+            try:
+                geometry = build_observed_reml_geometry(
+                    dm=dm,
+                    distribution=distribution,
+                    link=link,
+                    y=y,
+                    sample_weight=sample_weight,
+                    offset_arr=offset_arr,
+                    result=pirls_result,
+                    penalty=S_cand,
+                    tabmat_state=observed_tabmat_state,
+                    derivative_order=w_correction_order,
+                    groups=groups if use_structured else None,
+                    lambdas=cand_lambdas if use_structured else None,
+                    reml_penalties=penalties if use_structured else None,
+                    structured_group_index=(
+                        structured_decision.group_index if use_structured else None
+                    ),
+                )
+            except ValueError as exc:
+                # A budget-exhausted iterate now reaches this build, and an
+                # iterate still mid-descent can carry observed information the
+                # geometry refuses outright -- non-finite rows, a non-positive
+                # intercept curvature. The line search already guards the same
+                # call (it halves its step); here there is no step to halve, so
+                # retype instead. A bare ValueError would escape every
+                # `except ObservedModeNotCertifiedError` and kill a power
+                # search that only needed to score this point infeasible.
+                _t_observed_geometry += _time.perf_counter() - _t0
+                raise ObservedModeNotConvergedError(
+                    "observed REML geometry refused the penalized coefficient mode "
+                    f"at this point: {exc}",
+                    hint=mode_certification_hint(distribution),
+                ) from exc
             _t_observed_geometry += _time.perf_counter() - _t0
             if geometry.hessian_inverse is None:  # pragma: no cover - requested above
                 raise RuntimeError("observed REML geometry omitted its slope inverse")
@@ -518,6 +541,7 @@ def optimize_direct_reml(
                 _accepted_observed_mode_residual_max,
                 mode_score.relative_max,
             )
+            candidate_mode_stationary = True
             if mode_score.relative_max > observed_mode_tol:
                 raise ObservedModeNotCertifiedError(
                     mode_score.relative_max,
@@ -735,7 +759,7 @@ def optimize_direct_reml(
         # settles, and the exit fires once the mode certifies (measured:
         # one extra outer iteration on the starved fixture, landing
         # 7e-4 -> 8e-7 off the reference lambdas).
-        mode_certified = trial_counts_as_precision_evidence(pirls_result.converged, obj)
+        mode_certified = trial_counts_as_precision_evidence(candidate_mode_stationary, obj)
         if candidate_convergence.converged and mode_certified:
             # The stop mask is iteration k-1's freeze decision intersected
             # with the current gradient arm -- which cannot see a
@@ -886,7 +910,7 @@ def optimize_direct_reml(
                 # two-evaluation convergence contract.
                 continue
             if not (
-                trial_counts_as_precision_evidence(pirls_result.converged, obj)
+                trial_counts_as_precision_evidence(candidate_mode_stationary, obj)
                 and obj_change < _tol * score_scale
             ):
                 # The Fisher path admits a PIRLS-exhausted candidate, so an
@@ -1003,8 +1027,11 @@ def optimize_direct_reml(
             trial_logdet = trial_result.log_det_H
             trial_hessian_rank: int | None = None
             trial_mode_residual: float | None = None
+            # Same standard as the candidate above: the certificate, where one
+            # runs, is what establishes stationarity.
+            trial_mode_stationary = bool(trial_result.converged)
             if use_observed_geometry:
-                if not trial_result.converged:
+                if not trial_result.converged and not stopped_on_iteration_budget(trial_result):
                     step *= 0.5
                     continue
                 _t_geometry = _time.perf_counter()
@@ -1056,6 +1083,7 @@ def optimize_direct_reml(
                     )
                     step *= 0.5
                     continue
+                trial_mode_stationary = True
 
             trial_evaluation = reml_laml_objective(
                 dm,
@@ -1082,7 +1110,7 @@ def optimize_direct_reml(
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)
                 else float(trial_evaluation)
             )
-            if trial_counts_as_precision_evidence(trial_result.converged, trial_obj):
+            if trial_counts_as_precision_evidence(trial_mode_stationary, trial_obj):
                 evaluated_feasible_trial = True
 
             armijo_bound = obj + armijo_c * step * descent
@@ -1135,11 +1163,13 @@ def optimize_direct_reml(
                 # candidate lambdas, and the candidate refit at the top of the
                 # loop solves the identical penalised system. Carry the
                 # converged state forward instead of recomputing it — but only
-                # a CONVERGED state: an Armijo-accepted trial that exhausted
-                # max_pirls_iter is nonstationary, and reusing it would put
-                # the next gradient/Hessian at the wrong coefficients instead
-                # of warm-start refitting them.
-                if trial_result.converged:
+                # a STATIONARY state: on the Fisher path an Armijo-accepted
+                # trial that exhausted max_pirls_iter is nonstationary, and
+                # reusing it would put the next gradient/Hessian at the wrong
+                # coefficients instead of warm-start refitting them. Under
+                # observed geometry the trial cleared the certificate above,
+                # which proves the stationarity the step flag cannot.
+                if trial_mode_stationary:
                     _carry_forward = (
                         trial_lambdas.copy(),
                         trial_result,
@@ -1190,7 +1220,7 @@ def optimize_direct_reml(
                 objective=obj,
                 tolerance=_tol,
                 evaluated_trial=evaluated_feasible_trial
-                and trial_counts_as_precision_evidence(pirls_result.converged, obj),
+                and trial_counts_as_precision_evidence(candidate_mode_stationary, obj),
             )
             converged = termination_reason == "converged_at_precision"
             break

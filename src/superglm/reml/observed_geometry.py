@@ -727,7 +727,20 @@ def stopped_on_iteration_budget(result: Any) -> bool:
 
     Every OTHER termination reason names something the mode score cannot
     judge -- an infeasible constrained mode, a missing inner-QP KKT
-    certificate, a non-finite deviance -- and keeps its own door.
+    certificate, a non-finite deviance, a rejected step, a curvature
+    switch -- and keeps its own door.
+
+    ``reml/scop_efs.py`` runs the same ceiling under the same criterion but
+    deliberately does NOT defer: item 2c retired the rule that specially
+    accepted a non-converged inner fit there, because PR #176 removed its cause
+    instead of working around it. That gate is left standing, on measurement --
+    922 SCOP inner fits at this tolerance, none exhausted. The likely reason is
+    structural rather than lucky: the stall needs a FULLY penalised block, whose
+    lambda bootstraps near zero so the candidate warm starts already at its own
+    mode with no descent phase, and a shape constraint keeps an unpenalised null
+    space (which is also why ``sz`` never stalled where ``fs`` did). Its refusal
+    now names the floor so a floor-limited rejection is not read as a fit that
+    would not settle.
     """
     return result.termination_reason == "max_iter"
 

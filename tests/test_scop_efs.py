@@ -4,6 +4,7 @@ Part 1: Tests for SCOP state returned from fit_irls_direct.
 Part 2: Tests for build_scop_penalty_components.
 """
 
+import logging
 from types import SimpleNamespace
 
 import numpy as np
@@ -2485,16 +2486,41 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
         )
 
     @staticmethod
-    def _stub(n_iter):
+    def _stub(n_iter, termination_reason="max_iter"):
         """A non-converged solver result that exhausted its budget."""
         return SimpleNamespace(
             converged=False,
-            termination_reason="max_iter",
+            termination_reason=termination_reason,
             beta=np.array([0.0]),
             intercept=0.0,
             rank_info=None,
             n_iter=n_iter,
         )
+
+    def test_a_budget_exhausted_rejection_names_the_round_off_floor(self, monkeypatch, caplog):
+        """The refusal stands, and says which kind of refusal it is.
+
+        Under observed curvature the inner tolerance is a FIXED 1e-10 ceiling,
+        not scaled to the problem, so a step-length test cannot fire when the
+        iteration's round-off floor sits above it -- the ordinary REML path was
+        measured missing that same ceiling by 9x to 646x with the mode in fact
+        reached. No shape-constrained fit reaching it has been produced (922
+        inner fits at this tolerance, none exhausted), so the gate above is
+        deliberately unchanged. But a floor-limited refusal and a fit that
+        genuinely will not settle are indistinguishable from the message alone,
+        which is what this pins: the distinction is stated, not left to be
+        rediscovered.
+        """
+        with caplog.at_level(logging.WARNING, logger="superglm.reml.scop_efs"):
+            assert self._run_gate(monkeypatch, self._stub(self.LONG_RUN)) is None
+        assert "round-off floor" in caplog.text
+        assert "step-length test" in caplog.text
+
+    def test_only_budget_exhaustion_gets_that_note(self, monkeypatch, caplog):
+        """A rejected step is a different failure and must not borrow the wording."""
+        with caplog.at_level(logging.WARNING, logger="superglm.reml.scop_efs"):
+            assert self._run_gate(monkeypatch, self._stub(self.SHORT_RUN, "step_rejected")) is None
+        assert "round-off floor" not in caplog.text
 
     def test_a_stagnant_candidate_is_no_longer_specially_accepted(self, monkeypatch):
         """A boundary-stagnant fit is a non-convergence like any other.

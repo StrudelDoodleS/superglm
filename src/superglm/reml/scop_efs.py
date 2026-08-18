@@ -12,6 +12,7 @@ Biometrics 73(4), 1071-1081.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -117,6 +118,9 @@ _SCOP_EFS_PLATEAU_REMAINING_MOVEMENT = 0.05
 # stall vocabulary BY MEASUREMENT; in that band the plateau's
 # remaining-movement cap is the guarantee, not the detector.
 _SCOP_EFS_PLATEAU_EXPANSION_GROWTH = 1.25
+
+
+logger = logging.getLogger(__name__)
 
 
 def _scop_plateau_remaining_movement_bounded(max_change: float, contraction_ratio: float) -> bool:
@@ -936,6 +940,12 @@ def _fit_scop_reml_mode(
         "fixed": "reml_fixed",
     }.get(phase, f"reml_{phase}")
     working_cache: dict[str, Any] = {}
+    inner_tol = (
+        min(context.pirls_tol, 1.0e-10)
+        if any(group.monotone_engine == "scop" for group in context.groups)
+        and classify_scop_reml_curvature(context.distribution, context.link) == "observed"
+        else context.pirls_tol
+    )
     irls_out: Any = fit_irls_direct(
         X=context.dm,
         y=context.y,
@@ -947,12 +957,7 @@ def _fit_scop_reml_mode(
         offset=context.offset_arr,
         beta_init=beta_init,
         intercept_init=intercept_init,
-        tol=(
-            min(context.pirls_tol, 1.0e-10)
-            if any(group.monotone_engine == "scop" for group in context.groups)
-            and classify_scop_reml_curvature(context.distribution, context.link) == "observed"
-            else context.pirls_tol
-        ),
+        tol=inner_tol,
         max_iter=context.max_pirls_iter,
         return_xtwx=True,
         return_scop_state=True,
@@ -982,6 +987,31 @@ def _fit_scop_reml_mode(
         scop_states = {}
 
     if require_converged and not result.converged:
+        # getattr, unlike the load-bearing predicate in observed_geometry: this is
+        # a best-effort note on a path that is already failing, and it must not
+        # be the thing that raises.
+        if getattr(result, "termination_reason", None) == "max_iter":
+            # Budget exhaustion is refused here by design: item 2c retired the
+            # rule that specially accepted a non-converged inner fit, because
+            # PR #176 removed its cause rather than working around it. But under
+            # observed curvature ``inner_tol`` is a FIXED ceiling, not scaled to
+            # the problem, and a step-length test cannot fire when the
+            # iteration's round-off floor sits above it -- the ordinary REML
+            # path was measured failing exactly that way, 9x to 646x above the
+            # same ceiling. No shape-constrained fit reaching it has been
+            # produced (measured: 922 inner fits at this tolerance, none
+            # exhausted), so the gate stands. Say so on the way out rather than
+            # let a floor-limited fit read as a fit that would not settle.
+            logger.warning(
+                "SCOP inner fit exhausted %d PIRLS iterations at tol=%.1e without "
+                "meeting its step-length test, and is refused. If that tolerance "
+                "sits below this problem's round-off floor then the mode may in "
+                "fact have been reached and the test simply cannot fire; compare "
+                "the achieved coefficient step against the tolerance before "
+                "reading this as a fit that would not settle.",
+                int(getattr(result, "n_iter", -1)),
+                inner_tol,
+            )
         return None
     rank_info = result.rank_info
     cached_mean_x = working_cache.get("mean_x")
